@@ -143,20 +143,14 @@ def incident_budget():
     return value if value > 0 else 3
 
 
-def live_sessions():
-    """Every session the heartbeat store lists, or None when the probe failed.
+def _live_rows():
+    """The probe's parsed rows, or None when the read could not run.
 
-    ⚠️ **`None` is NOT an empty set, and the caller fails OPEN on it.** A store
+    ⚠️ **`None` is NOT an empty list, and every caller fails OPEN on it.** A store
     that cannot be reached must never read as "every session is dead": suppressing
     the whole incident class on an outage is the false-empty this ledger refuses one
     store over (`read_drive_ledger` refuses a corrupt file for exactly this reason).
     So an outage keeps the current behaviour and says so, rather than going quiet.
-
-    ⚠️ A session ABSENT from this set is GONE, not silent. `session-liveness.py`
-    separates absent from unknown precisely so a reader can tell them apart, and the
-    distinction is the whole point: a stall is a running session that is not moving,
-    while a session that no longer exists has nothing to investigate and no card the
-    operator could act on.
     """
     try:
         result = subprocess.run(
@@ -193,27 +187,161 @@ def live_sessions():
         return None
     if not isinstance(rows, list):
         return None
-    # ⚠️ **BOTH key spaces, because the two sides do not agree on one.** `--list`
-    # returns full registry UUIDs, while the drive ledger keys its entries on the
-    # 8-char display handle the sweep digest carries (`agents/fleet-drive.md:44`,
-    # `scripts/drive-ledger.py:108`) — every other consumer is prefix-tolerant
-    # (`--check`, `--pane-for`, `transcript_for`'s `session_id[:8]`), which is what
-    # made the mismatch invisible. Returning only the full id would match no
-    # production row at all: every eligible session would read as gone, the incident
-    # class would be silently disabled, and each round would print a plausible skip
-    # line per row. Lower-cased on both sides for the same reason the rest of the
-    # fleet compares ids case-insensitively.
+    return rows
+
+
+def _id_keys(session_id):
+    """Both key forms one id answers to, lower-cased; empty for a malformed id.
+
+    ⚠️ **BOTH key spaces, because the two sides do not agree on one.** `--list`
+    returns full registry UUIDs, while the drive ledger keys its entries on the
+    8-char display handle the sweep digest carries (`agents/fleet-drive.md:44`,
+    `scripts/drive-ledger.py:108`) — every other consumer is prefix-tolerant
+    (`--check`, `--pane-for`, `transcript_for`'s `session_id[:8]`), which is what
+    made the mismatch invisible. Returning only the full id would match no
+    production row at all: every eligible session would read as gone, the incident
+    class would be silently disabled, and each round would print a plausible skip
+    line per row. Lower-cased on both sides for the same reason the rest of the
+    fleet compares ids case-insensitively.
+
+    ⚠️ A non-string payload returns `()`, which callers read as "cannot judge"
+    rather than as "absent" — a malformed id is not evidence its session is gone.
+    """
+    if not isinstance(session_id, str) or not session_id:
+        return ()
+    session_id = session_id.lower()
+    return (session_id, session_id[:8])
+
+
+def live_sessions():
+    """Every session the heartbeat store lists, or None when the probe failed.
+
+    ⚠️ A session ABSENT from this set is GONE, not silent. `session-liveness.py`
+    separates absent from unknown precisely so a reader can tell them apart, and the
+    distinction is the whole point: a stall is a running session that is not moving,
+    while a session that no longer exists has nothing to investigate and no card the
+    operator could act on.
+    """
+    rows = _live_rows()
+    if rows is None:
+        return None
     live = set()
+    for row in rows:
+        if isinstance(row, dict):
+            live.update(_id_keys(row.get("sessionId")))
+    return live
+
+
+def live_states():
+    """`{id: (status, state)}` over both key forms, or None when the probe failed.
+
+    The same probe as `live_sessions()`, carrying the two readings that set throws
+    away. They come from different producers and disagree in the ordinary case:
+
+    * `status` is the session registry's view (`~/.claude/sessions/*.json`):
+      `idle` / `busy` / `waiting` / `shell`.
+    * `state` is the heartbeat store's event-driven activity, written by the
+      `Notification` / `UserPromptSubmit` / `Stop` hooks: `busy` / `idle` /
+      `waiting-on-operator`. ⚠️ `unstamped` and `live` are NOT hook values — the
+      producer substitutes them when it finds no row (`session-liveness.py:858`,
+      `:876`), so a fixture must expect them.
+
+    ⚠️ Returns `None`, never `{}`, on a failed probe: an empty mapping would make
+    every session read as absent, which the gate reads as "gone" — the same
+    silent-off `live_sessions()` refuses one function up.
+    """
+    rows = _live_rows()
+    if rows is None:
+        return None
+    states = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
-        session_id = row.get("sessionId")
-        if not session_id:
+        keys = _id_keys(row.get("sessionId"))
+        if not keys:
             continue
-        session_id = session_id.lower()
-        live.add(session_id)
-        live.add(session_id[:8])
-    return live
+        reading = (
+            str(row.get("status") or "").lower(),
+            str(row.get("state") or "").lower(),
+        )
+        for key in keys:
+            states[key] = reading
+    return states
+
+
+#: Registry statuses that mean the session is running, so no prompt can be blocking
+#: it. The fleet board already draws this line — `running` is `busy` or `shell`, and
+#: everything else carries the transcript age (`65 Runbooks/Fleet Manager Session.md`).
+MID_COMMAND_STATUSES = ("busy", "shell")
+
+#: The heartbeat activity that means a prompt or question is open right now.
+PARKED_STATE = "waiting-on-operator"
+
+#: The registry status that means the same thing from the registry's own side.
+PARKED_STATUS = "waiting"
+
+
+def _absent(session_id, states):
+    """Whether the store does not list this session at all.
+
+    ⚠️ **Distinct from `parked_on_a_human`'s "not parked" on purpose.** The two
+    produce different outcomes in `cmd_escalate`: a gone session's incident is
+    RETIRED (terminal — it can never be answered), while a mid-command session's is
+    left PENDING (it may answer next round). Collapsing them into one predicate
+    would either retire a live worker's blocker or keep re-judging a dead one.
+
+    ⚠️ A malformed id is NOT absent — it cannot prove the session is gone, so it
+    falls through to the fail-open path.
+    """
+    if states is None:
+        return False
+    keys = _id_keys(session_id)
+    return bool(keys) and not any(key in states for key in keys)
+
+
+def parked_on_a_human(session_id, states):
+    """Whether an answer could still reach a session that is waiting for one.
+
+    ⚠️ **This is the question `escalate` needs, and membership in a set cannot
+    answer it.** `live_sessions()` says only *present*; a session that is present
+    but mid-command passes that test and gets a card for a blocker it has already
+    moved past. Measured 2026-10-29 over 38 rows: `status` busy 13 / idle 12 /
+    shell 12 / empty 1 — roughly two thirds of a live fleet is mid-command at any
+    moment.
+
+    First match wins:
+
+      * `states is None`                        -> parked (the probe failed; an
+                                                    outage is not evidence that
+                                                    anyone is mid-command)
+      * a malformed id                          -> parked (cannot judge; fail open)
+      * absent from `states`                    -> not parked (gone; nothing answers)
+      * heartbeat `waiting-on-operator`         -> parked (the Notification hook saw
+                                                    an open prompt; beats a registry
+                                                    that has moved on)
+      * registry `waiting`                      -> parked (the registry's own
+                                                    "blocked on input"; precedes the
+                                                    mid-command row)
+      * `shell` / `busy` status, or `busy` state -> not parked (the turn is running,
+                                                    so no prompt can be blocking it)
+      * anything else                           -> parked (FAIL OPEN: an unrecognised
+                                                    reading must not read as "nobody
+                                                    is blocked")
+    """
+    if states is None:
+        return True
+    keys = _id_keys(session_id)
+    if not keys:
+        return True
+    reading = next((states[key] for key in keys if key in states), None)
+    if reading is None:
+        return False
+    status, state = reading
+    if state == PARKED_STATE or status == PARKED_STATUS:
+        return True
+    if status in MID_COMMAND_STATUSES or state == "busy":
+        return False
+    return True
 
 
 def caller_id():
@@ -492,7 +620,7 @@ def cmd_escalate(args):
         and past_deadline(incident, at)
         for incident in read_ledger()["incidents"]
     )
-    live = live_sessions() if pending_due_stall else None
+    states = live_states() if pending_due_stall else None
     with Locked():
         data = read_ledger()
         due = [
@@ -505,19 +633,32 @@ def cmd_escalate(args):
             return 0
         stamp = "round:%s" % args.round_id if args.round_id else "manual:%s" % caller_id()
         gone = []
+        working = []
         for incident in due:
             # ⚠️ A stall incident for a session that is GONE must not become a card:
             # the card can only say "no verified resume" for a session that no longer
             # exists, which is nothing the operator can act on. Gating only `stall`,
             # because a permission or question incident belongs to a live producer
             # that posted it and is polling for the answer.
-            if (
-                live is not None
-                and incident.get("kind") == "stall"
-                and (incident.get("session_id") or "").lower() not in live
-            ):
-                gone.append(incident["dedup_key"])
-                continue
+            #
+            # ⚠️ **PRESENCE IS NOT THE WHOLE TEST.** `live_sessions()` answers only
+            # "is the session listed", so a session that is present but MID-COMMAND
+            # passed it and got a card for a blocker it had already moved past
+            # (measured 2026-10-29: roughly two thirds of a live fleet reads `shell`
+            # or `busy` at any moment). `parked_on_a_human` asks the question that
+            # actually decides whether a card is owed.
+            #
+            # ⚠️ The two suppressions are SEPARATE branches, never one: a gone
+            # session's incident can never be answered, so it is terminal; a
+            # mid-command session's may answer next round, so it stays PENDING and is
+            # re-judged. Collapsing them would drop a live worker's blocker for good.
+            if states is not None and incident.get("kind") == "stall":
+                if _absent(incident.get("session_id"), states):
+                    gone.append(incident["dedup_key"])
+                    continue
+                if not parked_on_a_human(incident.get("session_id"), states):
+                    working.append(incident["dedup_key"])
+                    continue
             if args.dry_run:
                 print("would escalate %s (stamp %s)" % (incident["dedup_key"], stamp))
                 continue
@@ -534,6 +675,16 @@ def cmd_escalate(args):
             print(
                 "skipped %d stall incident(s) for gone sessions: %s"
                 % (len(gone), ", ".join(gone))
+            )
+        if working:
+            # ⚠️ Same shape as the gone line, different reason and a different
+            # consequence: these sessions still EXIST, so their incidents stay
+            # PENDING and are re-judged next round rather than retired. A skip that
+            # only counted would be indistinguishable from a threshold that stopped
+            # firing, which is why the keys are named.
+            print(
+                "skipped %d stall incident(s) for sessions mid-command: %s"
+                % (len(working), ", ".join(working))
             )
         if not args.dry_run:
             write_ledger(data)

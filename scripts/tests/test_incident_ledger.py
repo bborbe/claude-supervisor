@@ -764,6 +764,38 @@ class TestLiveSessions(Base):
         self.stub_run("", stderr="rows=0 registry_live=0 degraded=0\n")
         self.assertIsNone(il.live_sessions())
 
+    def test_live_states_carries_both_readings_over_both_key_forms(self):
+        """The projection `cmd_escalate` reads, over the same dual key space.
+
+        ⚠️ Both forms, for the same reason `live_sessions()` returns both: an
+        incident keyed on the 8-char handle must still join to its row.
+        """
+        self.stub_run(
+            '[{"sessionId": "%s", "status": "shell", "state": "busy"}]' % SESSION
+        )
+        self.assertEqual(
+            il.live_states(),
+            {
+                SESSION: ("shell", "busy"),
+                SESSION[:8]: ("shell", "busy"),
+            },
+        )
+
+    def test_live_states_defaults_a_missing_reading_to_empty(self):
+        # The producer substitutes `unstamped` / `live` itself, but an absent key
+        # must still yield a comparable pair rather than raising.
+        self.stub_run('[{"sessionId": "a"}]')
+        self.assertEqual(il.live_states(), {"a": ("", "")})
+
+    def test_live_states_is_none_on_a_failed_probe(self):
+        """Never `{}`: an empty mapping reads as "every session is gone"."""
+        self.stub_run("[]", returncode=1)
+        self.assertIsNone(il.live_states())
+
+    def test_live_states_drops_a_row_without_a_session_id(self):
+        self.stub_run('[{"sessionId": "a", "status": "idle"}, {"nope": 1}]')
+        self.assertEqual(il.live_states(), {"a": ("idle", "")})
+
 
 class TestIncidentBudget(Base):
     """`incident_budget()`'s env parsing.
@@ -803,12 +835,15 @@ class TestEscalateSkipsGoneStallIncidents(Base):
 
     def setUp(self):
         super().setUp()
-        self._live_sessions = il.live_sessions
-        self.live = set()
-        il.live_sessions = lambda: self.live
+        self._live_states = il.live_states
+        # ⚠️ A MAPPING now, not a set: `cmd_escalate` reads the per-row (status,
+        # state) pair, so a set stub would be inert and the leg would fall through
+        # to the host's real fleet. Empty means "every session absent".
+        self.live = {}
+        il.live_states = lambda: self.live
 
     def tearDown(self):
-        il.live_sessions = self._live_sessions
+        il.live_states = self._live_states
         super().tearDown()
 
     def test_a_gone_stall_incident_posts_no_card(self):
@@ -823,13 +858,137 @@ class TestEscalateSkipsGoneStallIncidents(Base):
 
     def test_a_live_stall_incident_still_escalates(self):
         """Negative control: the gate must not disable escalation generally."""
-        self.live = {SESSION, SESSION[:8]}
+        self.live = {
+            SESSION: ("idle", "idle"),
+            SESSION[:8]: ("idle", "idle"),
+        }
         self.open_incident(kind="stall", deadline_seconds=0)
         rc, out = self.run_cli("escalate", "--round-id", "r1")
         self.assertEqual(rc, 0)
         self.assertIn("escalated", out)
         self.assertEqual(len(self.posted), 1)
         self.assertEqual(self.records()[0]["outcome"], il.TIMED_OUT)
+
+
+class TestEscalateMidCommandPredicate(Base):
+    """A session that is PRESENT is not necessarily a session PARKED on a human.
+
+    `live_sessions()` answers only "is the session listed", so a session that is
+    present but mid-command passed the gone-gate and got a card for a blocker it had
+    already moved past — measured 2026-10-29, roughly two thirds of a live fleet
+    reads `shell` or `busy` at any moment.
+
+    ⚠️ **The `H` and `I` rows are the reason this suite exists.** They make the
+    registry `status` and the heartbeat `state` disagree in BOTH directions, so no
+    single-field predicate satisfies the set: a status-only reading suppresses `H`,
+    a state-only reading suppresses `E`. Without them the heartbeat half of the
+    predicate could ship untested and every other case would still pass.
+    """
+
+    A = "aaaa0000-1111-2222-3333-444444444444"
+    B = "bbbb0000-1111-2222-3333-444444444444"
+    C = "cccc0000-1111-2222-3333-444444444444"
+    D = "dddd0000-1111-2222-3333-444444444444"
+    E = "eeee0000-1111-2222-3333-444444444444"
+    F = "ffff0000-1111-2222-3333-444444444444"
+    G = "99990000-1111-2222-3333-444444444444"
+    H = "88880000-1111-2222-3333-444444444444"
+    I = "77770000-1111-2222-3333-444444444444"
+
+    def setUp(self):
+        super().setUp()
+        self._live_states = il.live_states
+        self.states = {}
+        il.live_states = lambda: self.states
+
+    def tearDown(self):
+        il.live_states = self._live_states
+        super().tearDown()
+
+    def due_stall(self, sessions):
+        for sid in sessions:
+            self.open_incident(session=sid, kind="stall", deadline_seconds=0)
+
+    def escalated(self):
+        """The round's escalated set, as session ids — the criterion's observable."""
+        return sorted(key.split(":")[1] for key in self.posted)
+
+    def run_round(self):
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        return out
+
+    def test_a_mid_command_session_is_not_escalated_but_a_parked_one_is(self):
+        """SC1: `shell` suppressed, absent suppressed, `waiting-on-operator` escalated."""
+        self.due_stall([self.A, self.B, self.C])
+        self.states = {
+            self.A: ("shell", "busy"),           # mid-command
+            # self.B absent from the store entirely
+            self.C: ("", "waiting-on-operator"),  # parked via the heartbeat
+        }
+        self.run_round()
+        self.assertEqual(self.escalated(), [self.C])
+
+    def test_the_disposition_follows_the_reading_not_the_incidents_age(self):
+        """SC2: same incident, same registry status, only `state` changes.
+
+        ⚠️ The registry status stays `shell` in BOTH rounds on purpose. A fixture
+        that rewrote the whole row would be satisfied by an implementation that reads
+        only the registry; this one is not.
+        """
+        self.due_stall([self.A])
+        self.states = {self.A: ("shell", "busy")}
+        self.run_round()
+        self.assertEqual(self.escalated(), [], "mid-command must not escalate")
+
+        self.posted.clear()
+        self.states = {self.A: ("shell", "waiting-on-operator")}
+        self.run_round()
+        self.assertEqual(self.escalated(), [self.A], "the same row, now parked")
+
+    def test_busy_does_not_fall_through_and_every_parked_reading_escalates(self):
+        """SC3: the two-field precedence, which no single-field predicate satisfies."""
+        self.due_stall([self.D, self.E, self.F, self.G, self.H, self.I])
+        self.states = {
+            self.D: ("busy", "busy"),                  # mid-command
+            self.E: ("", "unstamped"),                 # no reading -> fail OPEN
+            self.F: ("waiting", ""),                   # registry parked, no state
+            self.G: ("", "waiting-on-operator"),       # heartbeat parked, no status
+            self.H: ("busy", "waiting-on-operator"),   # heartbeat BEATS a busy status
+            self.I: ("waiting", "busy"),               # parked status BEATS a busy state
+        }
+        self.run_round()
+        self.assertEqual(
+            self.escalated(),
+            sorted([self.E, self.F, self.G, self.H, self.I]),
+            "only the mid-command row is suppressed",
+        )
+
+    def test_a_failed_probe_escalates_unfiltered(self):
+        """An unreadable store is not evidence that anyone is mid-command.
+
+        ⚠️ This is the pin for the `None` contract: coercing a failed probe to `{}`
+        would make every session read as absent, and absent reads as "gone" — the
+        silent-off `live_sessions()` refuses one function up.
+        """
+        il.live_states = lambda: None
+        self.due_stall([self.A])
+        self.run_round()
+        self.assertEqual(self.escalated(), [self.A])
+
+    def test_a_mid_command_incident_stays_pending_for_rejudgement(self):
+        """The suppression is a skip, not a retirement.
+
+        A mid-command session still exists, so its incident must be re-judged next
+        round. Retiring it (the gone-session outcome) would drop a live worker's
+        blocker permanently.
+        """
+        self.due_stall([self.A])
+        self.states = {self.A: ("shell", "busy")}
+        out = self.run_round()
+        self.assertIn("mid-command", out)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+        self.assertIsNone(self.records()[0]["escalated_by"])
 
 
 class TestResume(Base):
