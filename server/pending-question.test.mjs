@@ -68,3 +68,28 @@ test('the status surface never reads the wrapper once per worker', () => {
     'a per-agent wrapper read would be N round-trips in front of every manager sweep',
   )
 })
+
+// ── the answer half, which had no wiring pin at all ─────────────────────────────────────────
+// The suite above pins the read surface; nothing pinned that `answer_permission` actually
+// reaches the wrapper. A revert to the SDK-only path would leave every test here green while
+// the whole feature was unreachable, which is the failure this pin exists to catch.
+test('supervisor.mjs routes answer_permission through answerWrapperPark', () => {
+  const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  assert.match(src, /const viaWrapper = await answerWrapperPark\(args\.request_id, args\.behavior\)/)
+  // ⚠️ `sources_consulted` must be COMPUTED, never the constant it used to be: a constant made
+  // a wrapper outage and a foreign park print the same sentence.
+  assert.ok(
+    !/sources_consulted: \['pending', 'wrapper'\],\n\s+\}\)/.test(src),
+    'sources_consulted must not be a constant on the refusal path',
+  )
+  assert.match(src, /const consulted = viaWrapper\.consulted === false \? \['pending'\] : \['pending', 'wrapper'\]/)
+  // The outage arm must exist and must not be reported as a foreign park.
+  assert.match(src, /if \(viaWrapper\.unreadable\) \{/)
+})
+
+// The spawn must reap a wrapper child whose opening turn was refused, or the failed spawn
+// leaves an idle process holding stdin that looks exactly like a thinking worker.
+test('a refused opening turn reaps the wrapper session', () => {
+  const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  assert.match(src, /await sendWrappedSession\(\{ baseUrl: config\.wrapperUrl, sessionId: wrapperSession\.id, text: prompt \}\)\n\s+\} catch \(error\) \{\n\s+await stopWrappedSession\(/)
+})

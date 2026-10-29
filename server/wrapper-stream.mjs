@@ -59,11 +59,12 @@ function baseOf(baseUrl) {
  * @param {Function} [args.fetchImpl]
  * @returns {Promise<object>} the wrapper's session record
  */
-export async function spawnWrappedSession({ baseUrl, options = {}, fetchImpl = fetch }) {
+export async function spawnWrappedSession({ baseUrl, options = {}, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   const resp = await fetchImpl(`${baseOf(baseUrl)}/api/1.0/sessions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(options),
+    signal: AbortSignal.timeout(timeoutMs),
   })
   if (!resp.ok) {
     throw new WrapperError(`wrapper spawn failed: HTTP ${resp.status}`, resp.status)
@@ -78,11 +79,12 @@ export async function spawnWrappedSession({ baseUrl, options = {}, fetchImpl = f
  * vocabulary is `allow` / `deny`, and a caller that maps it here keeps one translation
  * point instead of one per call site.
  */
-export async function answerWrappedSession({ baseUrl, sessionId, requestId, behavior = 'allow', fetchImpl = fetch }) {
+export async function answerWrappedSession({ baseUrl, sessionId, requestId, behavior = 'allow', fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   const resp = await fetchImpl(`${baseOf(baseUrl)}/api/1.0/sessions/${encodeURIComponent(sessionId)}/answer`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ request_id: requestId, behavior }),
+    signal: AbortSignal.timeout(timeoutMs),
   })
   if (!resp.ok) {
     // 409 answered-already / no open question, 410 child exited, 503 child unreachable,
@@ -102,11 +104,12 @@ export async function answerWrappedSession({ baseUrl, sessionId, requestId, beha
  * starts, initialises and sits idle forever. A failed send is never a no-op for that
  * reason: the idle child looks exactly like one that is thinking.
  */
-export async function sendWrappedSession({ baseUrl, sessionId, text, fetchImpl = fetch }) {
+export async function sendWrappedSession({ baseUrl, sessionId, text, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   const resp = await fetchImpl(`${baseOf(baseUrl)}/api/1.0/sessions/${encodeURIComponent(sessionId)}/message`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ text }),
+    signal: AbortSignal.timeout(timeoutMs),
   })
   if (!resp.ok) {
     // 400 (empty text), 404 (unknown session), 410 (child exited) all mean the opening
@@ -139,6 +142,27 @@ export function pendingQuestionOf(sessions, wrapperSessionId) {
 }
 
 /**
+ * Stop a wrapped child, so a session that will never produce a turn stops holding stdin.
+ *
+ * ⚠️ This is the teardown for a spawn that FAILED between creating the child and delivering
+ * its opening turn. The child is live by then — it holds stdin and emits nothing — so a
+ * caller that just throws leaves an idle process behind that looks exactly like a thinking
+ * worker. `204` is the success shape; `404` means it was already gone, which is the state
+ * this call exists to reach, so it is not reported as a failure.
+ */
+export async function stopWrappedSession({ baseUrl, sessionId, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+  const resp = await fetchImpl(`${baseOf(baseUrl)}/api/1.0/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+  if (resp.status === 404) return { stopped: false, already_gone: true }
+  if (!resp.ok) {
+    throw new WrapperError(`wrapper stop failed: HTTP ${resp.status}`, resp.status)
+  }
+  return { stopped: true }
+}
+
+/**
  * Read EVERY child's current record in one call.
  *
  * ⚠️ One read for the whole roster, never one per worker. The status surface fans this out
@@ -147,8 +171,11 @@ export function pendingQuestionOf(sessions, wrapperSessionId) {
  * beside `fetchOpenCards`. The wrapper's list handler returns `snapshot()` per session, the
  * identical record `readWrappedSession` returns for one, so nothing is lost by batching.
  */
-export async function listWrappedSessions({ baseUrl, fetchImpl = fetch }) {
-  const resp = await fetchImpl(`${baseOf(baseUrl)}/api/1.0/sessions`, { method: 'GET' })
+export async function listWrappedSessions({ baseUrl, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+  const resp = await fetchImpl(`${baseOf(baseUrl)}/api/1.0/sessions`, {
+    method: 'GET',
+    signal: AbortSignal.timeout(timeoutMs),
+  })
   if (!resp.ok) {
     throw new WrapperError(`wrapper list failed: HTTP ${resp.status}`, resp.status)
   }
@@ -156,9 +183,10 @@ export async function listWrappedSessions({ baseUrl, fetchImpl = fetch }) {
 }
 
 /** Read one child's current record. Used only to classify an end, never to poll state. */
-export async function readWrappedSession({ baseUrl, sessionId, fetchImpl = fetch }) {
+export async function readWrappedSession({ baseUrl, sessionId, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   const resp = await fetchImpl(`${baseOf(baseUrl)}/api/1.0/sessions/${encodeURIComponent(sessionId)}`, {
     method: 'GET',
+    signal: AbortSignal.timeout(timeoutMs),
   })
   if (!resp.ok) {
     throw new WrapperError(`wrapper read failed: HTTP ${resp.status}`, resp.status)

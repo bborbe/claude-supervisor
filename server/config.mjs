@@ -141,6 +141,38 @@ function collectPrefixed(env, prefix) {
   return out
 }
 
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
+
+// Resolve the wrapper origin, refusing anything that is not loopback.
+//
+// The wrapper's API is unauthenticated by design — it is a local control plane — and a spawn
+// sends it the whole inherited environment, credentials included. So the one thing that must
+// not be configurable is pointing it off this machine: that would make the fleet's credential
+// -bearing spawn traffic reach an endpoint anyone on that host can call. Fails loudly at load
+// rather than at the first spawn, because a mistyped host is otherwise discovered only by the
+// leak it causes.
+export function wrapperUrlFrom(raw) {
+  const value = typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : 'http://localhost:18090'
+  let url
+  try {
+    url = new URL(value)
+  } catch {
+    throw new Error(`SUPERVISOR_WRAPPER_URL is not a URL: ${value}`)
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`SUPERVISOR_WRAPPER_URL must be http(s): ${value}`)
+  }
+  // `localhost` and the literal loopback addresses only. A 127.x.y.z outside .0.1 is still
+  // loopback, so the whole /8 is accepted rather than the single well-known address.
+  const loopback = LOOPBACK.has(url.hostname) || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(url.hostname)
+  if (!loopback) {
+    throw new Error(
+      `SUPERVISOR_WRAPPER_URL must point at loopback: the wrapper API is unauthenticated and a spawn posts the inherited environment to it. Got: ${value}`,
+    )
+  }
+  return value.replace(/\/+$/, '')
+}
+
 export const config = Object.freeze({
   // stderr is the transport-safe log channel — stdout carries MCP frames — so a file
   // log is opt-in and nothing depends on a machine-local path by default.
@@ -360,7 +392,14 @@ export const config = Object.freeze({
   // than in this process, because a permission park belongs to whoever holds the child's
   // stdin — and a park held here is answerable only by this server, then dies with it.
   // Same default as the wrapper's own `--listen`, so an unconfigured machine works.
-  wrapperUrl: ENV.SUPERVISOR_WRAPPER_URL || 'http://localhost:18090',
+  //
+  // ⚠️ LOOPBACK ONLY, and the check is not decoration. A spawn posts the whole inherited
+  // environment — `baseEnv` below, including `ANTHROPIC_BASE_URL` and any credential riding
+  // in it — to this URL, in cleartext, on every spawn; and no wrapper call sends an auth
+  // header. A non-loopback value therefore turns the spawn/message/answer control plane into
+  // an unauthenticated endpoint that receives the fleet's credentials. Refused at load rather
+  // than documented as a hazard, because a comment cannot stop a mistyped host.
+  wrapperUrl: wrapperUrlFrom(ENV.SUPERVISOR_WRAPPER_URL),
 
   // The process environment, handed wholesale to a spawned worker so it inherits the
   // launcher's env — PATH, HOME and ANTHROPIC_BASE_URL among it. Here rather than read at

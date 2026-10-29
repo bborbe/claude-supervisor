@@ -90,9 +90,14 @@ test('an empty request id never matches a row that also has none', () => {
 // import and cannot be imported here.
 test('supervisor.mjs routes a missed request through the refusal, not a bare id', () => {
   const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  // ⚠️ The window widened from 700 to 1400 when the wrapper answer path landed, and the
+  // reason is structural rather than cosmetic: `answer_permission` now has a SECOND refusal
+  // arm between this case label and the foreign-park call (a wrapper that could not be read
+  // reports an outage, not a foreign park). The bound still exists to catch the refusal being
+  // reached from somewhere unrelated — it was never a proximity proof.
   assert.match(
     src,
-    /case 'answer_permission': \{[\s\S]{0,700}?error: await foreignParkRefusal\(\{ requestId: args\.request_id, readLedger: readSessionLedger \}\)/,
+    /case 'answer_permission': \{[\s\S]{0,1400}?error: await foreignParkRefusal\(\{ requestId: args\.request_id, readLedger: readSessionLedger \}\)/,
   )
   assert.ok(
     !/no pending permission \$\{args\.request_id\} \(already answered, or expired\)/.test(src),

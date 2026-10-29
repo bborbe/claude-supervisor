@@ -17,7 +17,7 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
-import { answerWrappedSession, listWrappedSessions, pendingQuestionOf, readWrappedSession, sendWrappedSession, spawnWrappedSession, streamWrappedSession } from './wrapper-stream.mjs'
+import { answerWrappedSession, listWrappedSessions, pendingQuestionOf, sendWrappedSession, spawnWrappedSession, stopWrappedSession, streamWrappedSession } from './wrapper-stream.mjs'
 import { HEARTBEAT_INTERVAL_MS, a2aStamp, clearStamp, heartbeatDir, selfStampRefusal, stampRecord, startSelfStamp } from './heartbeat.mjs'
 import { workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
@@ -54,7 +54,7 @@ import { answerPathRefusal } from './answer-path.mjs'
 import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
 import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
 import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
-import { SHIPPING_PERMISSION_MODE, launcherHonoursModeEnv, shippingSettings, shippingSupportError, shippingTabEnv } from './shipping-settings.mjs'
+import { SHIPPING_PERMISSION_MODE, launcherHonoursModeEnv, shippingSupportError, shippingTabEnv } from './shipping-settings.mjs'
 import { liveSessionIds, rehydratableAgents, unionRoster } from './registry-rehydrate.mjs'
 import { patchSessionLedgerRow, postSessionLedger, readSessionLedger, readSessionLedgerRow, recordToWire } from './session-ledger.mjs'
 
@@ -710,26 +710,37 @@ function makeCanUseTool(agent) {
     })
 }
 
-// Answer a park the WRAPPER holds, for a wrapper-backed worker. Returns the reply, or null
-// when no wrapper-backed worker is parked on this request id.
+// Answer a park the WRAPPER holds, for a wrapper-backed worker.
 //
 // ⚠️ The id is authoritative and the record is read LIVE, never from a cache. A worker can
 // unpark and re-park between a status read and this call, so answering by agent would answer
 // a question the caller never saw; naming the request id means a stale call gets the
 // wrapper's own 409 and changes nothing. That asymmetry is the whole reason this shape was
 // chosen over an `agent_id` argument.
+//
+// ⚠️ FOUR outcomes, and the caller must keep them apart. Folding `unreadable` into `not_found`
+// is what made a wrapper that was down indistinguishable from a request id that never
+// existed — the conflation the refusal text used to claim it had already fixed:
+//   {answered, behavior, agent_id, via} — released
+//   {error}                             — a wrapper-backed worker held the id and the answer was refused
+//   {unreadable: true, error}           — a wrapper-backed worker exists but the wrapper could
+//                                         not be read, so "no park" is NOT a fact here
+//   {not_found: true}                   — the wrapper was read and nothing is parked on this id
 async function answerWrapperPark(requestId, behavior) {
   const wanted = behavior === 'allow' ? 'allow' : 'deny'
-  for (const agent of agents.values()) {
-    if (!agent.wrapperSessionId) continue
-    let session
-    try {
-      session = await readWrappedSession({ baseUrl: config.wrapperUrl, sessionId: agent.wrapperSessionId })
-    } catch {
-      // An unreachable wrapper is NOT "no such park" — the caller's refusal reports which
-      // sources were consulted, so this reads as the outage it is rather than a foreign park.
-      continue
-    }
+  const backed = [...agents.values()].filter((a) => a.wrapperSessionId)
+  if (backed.length === 0) return { consulted: false }
+  let sessions
+  try {
+    // ONE read for every wrapper-backed worker. The per-agent loop this replaces cost N
+    // sequential round-trips on the miss path, which is the common path.
+    sessions = await listWrappedSessions({ baseUrl: config.wrapperUrl })
+    if (!Array.isArray(sessions)) throw new Error('wrapper session list was not an array')
+  } catch (error) {
+    return { unreadable: true, error: `wrapper session list unreadable: ${error.message}` }
+  }
+  for (const agent of backed) {
+    const session = sessions.find((s) => s?.id === agent.wrapperSessionId)
     if (session?.question?.request_id !== requestId) continue
     try {
       await answerWrappedSession({
@@ -745,7 +756,7 @@ async function answerWrapperPark(requestId, behavior) {
     log(`permission ${requestId} ${wanted.toUpperCase()} by manager (wrapper-backed worker ${agent.id})`)
     return { answered: requestId, behavior: wanted, agent_id: agent.id, via: 'wrapper' }
   }
-  return null
+  return { not_found: true }
 }
 
 // One wrapper read for the whole roster, or null when it cannot be read or was not needed.
@@ -2853,7 +2864,18 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // the session; the wrapper takes turns as messages, so a spawn that only streams leaves a
   // child that initialises and sits idle — indistinguishable from one that is thinking.
   if (prompt) {
-    await sendWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id, text: prompt })
+    // ⚠️ A refused opening turn is not a no-op: the child exists, holds stdin and streams
+    // nothing, so it looks exactly like one that is thinking. Reap it here rather than
+    // returning an agent id for a worker that will never produce a turn — and reap it on
+    // ANY throw, because the wrapper session is already live by this line.
+    try {
+      await sendWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id, text: prompt })
+    } catch (error) {
+      await stopWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id }).catch((reapError) => {
+        log(`WARNING: could not reap wrapper session ${wrapperSession.id} after a refused opening turn: ${reapError.message}`)
+      })
+      throw error
+    }
   }
 
   const q = streamWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id })
@@ -3659,15 +3681,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const record = pending.get(args.request_id)
       if (!record) {
         const viaWrapper = await answerWrapperPark(args.request_id, args.behavior)
-        if (viaWrapper) return reply(viaWrapper)
-        // Two sources — `pending` above, wrapper records in answerWrapperPark — so
-        // `sources_consulted` below keeps an outage from reading as a foreign park.
-        // ⚠️ Never the bare `no pending permission <id>`: the commonest reason this misses is
-        // that the park belongs to ANOTHER manager's server, and that caller can act on the
-        // store route. See `park-refusal.mjs`.
+        // Computed, never constant — see `answerWrapperPark`'s four outcomes.
+        const consulted = viaWrapper.consulted === false ? ['pending'] : ['pending', 'wrapper']
+        if (viaWrapper.answered || viaWrapper.error) return reply({ ...viaWrapper, sources_consulted: consulted })
+        if (viaWrapper.unreadable) {
+          // An outage is not a foreign park: the id may still be live.
+          return reply({
+            error: `${viaWrapper.error} — a wrapper-backed worker may still be parked on ${args.request_id}; this is an outage, not a foreign park`,
+            sources_consulted: consulted,
+          })
+        }
+        // Both sources were read and neither holds the id.
         return reply({
           error: await foreignParkRefusal({ requestId: args.request_id, readLedger: readSessionLedger }),
-          sources_consulted: ['pending', 'wrapper'],
+          sources_consulted: consulted,
         })
       }
       // Record the manager's verdict too: a key the manager allows over and over
