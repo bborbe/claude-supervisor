@@ -576,6 +576,32 @@ class TestDigestMirror(unittest.TestCase):
         self.assertIn("UNVERIFIABLE — second", body)
         self.assertNotIn("UNVERIFIABLE — first", body)
 
+    def test_a_two_pair_digest_collapses_to_one(self):
+        """A digest that already carries two mirrors must end with exactly one.
+
+        `strip_mirror` removing only the FIRST pair kept the stale one; the gate reads the
+        first pair, so every later round would compare a stale digest block against a fresh
+        `.drive` and fail permanently. Found in review on PR #544.
+        """
+        with open(self.digest, "w", encoding="utf-8") as handle:
+            handle.write(
+                "DIGEST x\n"
+                + drive_unverifiable.DIGEST_BEGIN
+                + "\nUNVERIFIABLE — stale one\n  (none)\n"
+                + drive_unverifiable.DIGEST_END
+                + "\n"
+                + drive_unverifiable.DIGEST_BEGIN
+                + "\nUNVERIFIABLE — stale two\n  (none)\n"
+                + drive_unverifiable.DIGEST_END
+                + "\n"
+            )
+        self.assertTrue(drive_unverifiable.write_digest(self.digest, "UNVERIFIABLE — fresh\n  (none)"))
+        with open(self.digest, encoding="utf-8") as handle:
+            body = handle.read()
+        self.assertEqual(body.count(drive_unverifiable.DIGEST_BEGIN), 1)
+        self.assertIn("UNVERIFIABLE — fresh", body)
+        self.assertNotIn("stale", body)
+
     def test_a_missing_digest_is_reported_but_is_not_an_error(self):
         missing = os.path.join(self.tmp, "absent.digest")
         buf = io.StringIO()

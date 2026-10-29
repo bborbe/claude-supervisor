@@ -523,17 +523,26 @@ def digest_render(block):
 
 
 def strip_mirror(body):
-    """`body` with any earlier mirror removed, markers included.
+    """`body` with EVERY earlier mirror removed, markers included.
 
     Split rather than regex: the block carries markdown and `·`, and a pattern built from
     the marker strings would have to escape `<!--` correctly to be readable. The markers are
     constants, so a plain partition cannot drift from them.
+
+    ALL pairs, not the first: a digest that already carries two (a hand-merge, or a writer
+    from before this fix) would otherwise keep the stale first pair, and the gate reads the
+    first pair -- so every later round would compare a stale digest block against a fresh
+    `.drive` and fail permanently. Removing every pair makes the normal path and the
+    tampered path converge on one.
     """
-    head, sep, rest = body.partition(DIGEST_BEGIN)
-    if not sep:
-        return body
-    _, _, tail = rest.partition(DIGEST_END)
-    return head.rstrip("\n") + "\n" + tail.lstrip("\n")
+    while DIGEST_BEGIN in body:
+        head, _, rest = body.partition(DIGEST_BEGIN)
+        _, end, tail = rest.partition(DIGEST_END)
+        if not end:
+            # An unterminated mirror: drop everything from the marker on.
+            return head.rstrip("\n") + "\n"
+        body = head.rstrip("\n") + "\n" + tail.lstrip("\n")
+    return body
 
 
 def write_digest(path, block):

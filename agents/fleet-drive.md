@@ -124,7 +124,7 @@ PARKED — one line per row whose parking verdict or probe changed this round
 ESCALATION — grouped by cause
   <cause>
     <name> [<sid8>] · pane <id|—> · <link|no pane — <reason>> — <probe> → <result>   (mark unverified causes "unverified")
-UNVERIFIABLE — `drive-unverifiable.py handle`'s block, pasted verbatim (step 6b)
+UNVERIFIABLE BLOCK — replace with handle's output, verbatim (step 6b)
 REAPS
   TO: <exact roster name> | <evidence message text>
 NUDGES

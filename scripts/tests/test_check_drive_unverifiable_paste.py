@@ -119,7 +119,9 @@ class StaticOnABrokenCopy(unittest.TestCase):
         self.assertIn("--digest", line)
         self.edit(check.AGENT, line, line.replace(" --digest <payload= path>", ""))
         failures = check.static_failures()
-        self.assertTrue(any("no longer passes `--digest`" in f for f in failures), failures)
+        self.assertTrue(
+            any("no longer passes" in f and "--digest" in f for f in failures), failures
+        )
 
     def test_a_round_that_stops_printing_the_block_fails(self):
         self.edit(check.ROUND, "`UNVERIFIABLE` block", "escalation groups")
@@ -186,6 +188,42 @@ class Artifacts(unittest.TestCase):
     def test_both_paths_are_required(self):
         drive = self.write("round.drive", DRIVE_WITH_BLOCK)
         self.assertEqual(run_main(["--drive", str(drive)]), 1)
+
+    def test_a_valueless_flag_is_an_error_not_a_static_only_pass(self):
+        """A trailing flag with no value must fail, never downgrade to the static run.
+
+        `main(['--digest'])` used to yield digest_path=None, which is indistinguishable from
+        "no artifacts requested" -- so a round that forgot `--drive` got a green gate over an
+        unchecked pair. Found in review on PR #544.
+        """
+        self.assertEqual(run_main(["--digest"]), 1)
+        self.assertEqual(run_main(["--drive"]), 1)
+        self.assertEqual(run_main(["--digest", "--drive"]), 1)
+
+    def test_the_equals_form_is_accepted(self):
+        block = check.drive_block(DRIVE_WITH_BLOCK)
+        digest = self.digest_with(block)
+        drive = self.write("round.drive", DRIVE_WITH_BLOCK)
+        self.assertEqual(
+            run_main(["--digest=%s" % digest, "--drive=%s" % drive]), 0
+        )
+
+    def test_a_payload_keeping_an_old_placeholder_heading_still_passes(self):
+        """An agent that kept the old template line above the pasted block must still pass.
+
+        The old placeholder started with `UNVERIFIABLE —`, the block's own prefix, so
+        `drive_block()` began there and the exact comparison false-failed a correct round.
+        The shipped template no longer collides; this pins the guard that also rescues a
+        payload rendered from the old one.
+        """
+        block = check.drive_block(DRIVE_WITH_BLOCK)
+        digest = self.digest_with(block)
+        placeholder = (
+            "UNVERIFIABLE — `drive-unverifiable.py handle`'s block, pasted verbatim (step 6b)\n"
+        )
+        body = DRIVE_WITH_BLOCK.replace("UNVERIFIABLE — a session", placeholder + "UNVERIFIABLE — a session", 1)
+        drive = self.write("round.drive", body)
+        self.assertEqual(check.artifact_failures(digest, drive), [])
 
 
 if __name__ == "__main__":

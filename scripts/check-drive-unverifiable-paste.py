@@ -42,10 +42,12 @@ SCRIPT = REPO / "scripts" / "drive-unverifiable.py"
 BLOCK_HEADING = "UNVERIFIABLE —"
 BLOCK_NAME = "`UNVERIFIABLE` block"
 
-#: The template's own section line. Anchored on the whole sentence, not on `UNVERIFIABLE —`
-#: alone: the template's row placeholder also carries that prefix, so a heading check would
-#: stay green with the section itself deleted.
-TEMPLATE_ANCHOR = "UNVERIFIABLE — `drive-unverifiable.py handle`'s block, pasted verbatim"
+#: The template's own section line. Deliberately NOT a `UNVERIFIABLE —` heading: a placeholder
+#: that carried the block's own prefix made `drive_block()` start at the placeholder when an
+#: agent kept the template line and pasted below it, so a CORRECT round failed the exact
+#: comparison against the digest mirror (found in review on PR #544). The word `BLOCK` between
+#: the name and the dash keeps it out of `BLOCK_HEADING`.
+TEMPLATE_ANCHOR = "UNVERIFIABLE BLOCK — replace with handle's output, verbatim"
 
 #: The step that invokes the producer. Anchored on `--entries`, which only the step-6b
 #: invocation carries -- the write-surface rule names the same command with `--digest` and
@@ -53,10 +55,11 @@ TEMPLATE_ANCHOR = "UNVERIFIABLE — `drive-unverifiable.py handle`'s block, past
 #: the step itself lost the flag.
 PRODUCER_CALL = "drive-unverifiable.py handle --entries"
 
-#: The flag as the invocation spells it, in position. A prose mention of `--digest` on the
-#: same line (step 6b explains the mirror in its own words) must not satisfy the check, so
-#: this is the argument pair, not the flag token.
-PRODUCER_FLAG = "--json-out /tmp/drive-round.json --digest"
+#: The flags the invoking line must pass, matched INDEPENDENTLY. Pinning them as one
+#: contiguous span (`--json-out … --digest`) made a legitimate reorder turn `make precommit`
+#: red for a reason unrelated to the contract; requiring each flag on the call line keeps the
+#: same guarantee without freezing argument order.
+PRODUCER_FLAGS = ("--json-out", "--digest")
 
 #: The producer line `render()` builds the escalation half around.
 PRODUCER_LINE = "UNVERIFIABLE ESCALATIONS —"
@@ -74,11 +77,27 @@ DIGEST_BEGIN = "<!-- drive-unverifiable:begin -->"
 DIGEST_END = "<!-- drive-unverifiable:end -->"
 
 
+#: A line that is a paste instruction rather than the block itself. An older template carried
+#: one starting with `UNVERIFIABLE —`, and an agent that kept it above the pasted block made
+#: `drive_block()` start there -- a false FAIL on a correct round. The shipped template no
+#: longer collides, and this guard also rescues a payload rendered from the old one.
+PLACEHOLDER = ("pasted verbatim", "replace with handle")
+
+
+def _is_placeholder(line):
+    return any(token in line for token in PLACEHOLDER)
+
+
 def drive_block(text):
     """The payload's `UNVERIFIABLE` section, or "" when the payload has none."""
     lines = text.splitlines()
     start = next(
-        (i for i, line in enumerate(lines) if line.startswith(BLOCK_HEADING)), None
+        (
+            i
+            for i, line in enumerate(lines)
+            if line.startswith(BLOCK_HEADING) and not _is_placeholder(line)
+        ),
+        None,
     )
     if start is None:
         return ""
@@ -145,10 +164,13 @@ def static_failures():
         failures.append(
             "%s no longer invokes `%s` at all" % (_label(AGENT), PRODUCER_CALL)
         )
-    elif not any(PRODUCER_FLAG in line for line in call_lines):
+    elif not any(
+        all(flag in line for flag in PRODUCER_FLAGS) for line in call_lines
+    ):
         failures.append(
-            "%s step 6b no longer passes `--digest` to drive-unverifiable.py -- the round's "
-            "digest stops carrying the block, and only the .drive does" % _label(AGENT)
+            "%s step 6b no longer passes %s to drive-unverifiable.py -- the round's "
+            "digest stops carrying the block, and only the .drive does"
+            % (_label(AGENT), " and ".join(PRODUCER_FLAGS))
         )
 
     # (c) the round prints the block and names this gate.
@@ -206,19 +228,49 @@ def artifact_failures(digest_path, drive_path):
     return failures
 
 
+#: The two artifact flags, in the spellings accepted. A flag with no value is a malformed
+#: invocation, NOT "no artifacts": treating it as absent made a round that forgot `--drive`
+#: (a hand-run typo) fall through to the static-only path and exit 0 -- a green gate over an
+#: unchecked pair, which is the failure this check exists to prevent.
+ARTIFACT_FLAGS = ("--digest", "--drive")
+
+
+def _parse(argv):
+    """(digest, drive, error). Accepts `--flag <path>` and `--flag=<path>`.
+
+    A flag present with no value, or followed by another flag, is an error rather than an
+    absence. No flag at all is the Makefile/CI static run and is legal.
+    """
+    values = {"--digest": None, "--drive": None}
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        name, eq, inline = token.partition("=")
+        if name not in values:
+            i += 1
+            continue
+        if eq:
+            value = inline
+            i += 1
+        elif i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+            value = argv[i + 1]
+            i += 2
+        else:
+            return None, None, "%s given with no value" % name
+        if not value:
+            return None, None, "%s given with an empty value" % name
+        values[name] = value
+    return values["--digest"], values["--drive"], None
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    digest_path = None
-    drive_path = None
-    if "--digest" in argv:
-        i = argv.index("--digest")
-        digest_path = argv[i + 1] if i + 1 < len(argv) else None
-    if "--drive" in argv:
-        i = argv.index("--drive")
-        drive_path = argv[i + 1] if i + 1 < len(argv) else None
+    digest_path, drive_path, parse_error = _parse(argv)
 
     failures = static_failures()
-    if bool(digest_path) != bool(drive_path):
+    if parse_error:
+        failures.append(parse_error)
+    elif bool(digest_path) != bool(drive_path):
         failures.append(
             "--digest and --drive must be given together: this check verifies the round's "
             "PAIR, and a single file cannot show that both agree"
