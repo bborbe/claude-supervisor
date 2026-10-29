@@ -312,8 +312,8 @@ class TestRealDigestFormat(unittest.TestCase):
         `18:04Z`, `stall 2` and `0.3h` are age cells too. A `\\d+[smhdw]`-only test dropped
         two real **stalled** rows on round `19-39-16Z`; the decimal form alone dropped
         **13** stalled/parked rows on 2026-10-28. The position is therefore decided by the
-        structural rule in `class_index` (a class cell is never a task basename), not by
-        matching the age.
+        structural rule in `class_in_cells` (the class is one of the three cells after the
+        sid, and a class cell is never a task basename), not by matching the age.
         """
         path = os.path.join(self.tmp, "aged.digest")
         with open(path, "w", encoding="utf-8") as handle:
@@ -363,6 +363,76 @@ class TestRealDigestFormat(unittest.TestCase):
         )
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["class"], "parked")
+
+
+COMPACT_DIGEST = """\
+DIGEST 2026-10-29T06-01-14Z · 5 sessions · snapshot written: 2026-10-29T06:04:25Z
+CLASSIFICATION  5 classified · parked=2 · lapsed=1 · progressing=1 · unclassified=1
+  Agents Spawn and Finish Withou [c328d8e3] waiting 6h lapsed — b— http://127.0.0.1:1337/jump?pane=12 || Operator Oversees only Manager [4046cac2] shell 8m parked — b— http://127.0.0.1:1337/jump?pane=187
+  Parked Ideas Migrate [79c6d892] shell 4h parked Parked Ideas.md b4 http://127.0.0.1:1337/jump?pane=143 || Moving Along [33333333] busy 2m progressing Task Three.md b1 http://127.0.0.1:1337/jump?pane=3
+  No Class Here [99999999] shell 1h somethingelse Task Nine.md b1 http://127.0.0.1:1337/jump?pane=9
+BLOCKED (feed, raised — not verified open)
+  (none)
+"""
+
+
+class TestCompactRender(unittest.TestCase):
+    """The compact render drops `·` entirely -- a second axis of the same silent zero.
+
+    Measured 2026-10-29 across two consecutive live rounds (`05-29-16Z`, `06-01-14Z`):
+    rows carry a truncated name, space-separated cells, and ` || ` between rows on one
+    line. The `·`-only split produced one part per line, skipped every row as too short,
+    and returned **0 rows with 0 unparsed** -- so the share printed a denominator missing
+    exactly the 13 digest-only parked rows, and nothing said so.
+
+    A fixture cannot catch this by mirroring the parser: it must mirror the render. This
+    one does, and the row count is the assertion.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.path = os.path.join(self.tmp, "compact.digest")
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write(COMPACT_DIGEST)
+
+    def test_every_row_is_read(self):
+        rows, unparsed = drive_share.digest_rows(self.path)
+        self.assertEqual(unparsed, 1)
+        self.assertEqual(
+            [(row[1], row[2]) for row in rows],
+            [
+                ("c328d8e3", "lapsed"),
+                ("4046cac2", "parked"),
+                ("79c6d892", "parked"),
+                ("33333333", "progressing"),
+            ],
+        )
+
+    def test_rows_joined_by_a_double_bar_are_split(self):
+        """One line carries several rows; parsing it as one row loses the rest silently."""
+        rows = drive_share.digest_classes(self.path)
+        self.assertIn("4046cac2", {row[1] for row in rows})
+
+    def test_parked_rows_reach_the_denominator(self):
+        rows = drive_share.measure(
+            drive_share.digest_classes(self.path),
+            [],
+            START,
+            lambda sid: None,
+            lambda path: None,
+        )
+        self.assertEqual({row["sid"] for row in rows}, {"4046cac2", "79c6d892"})
+
+    def test_task_basename_is_not_the_class(self):
+        """`Parked Ideas.md` sits in the task column; the class is `parked` one cell earlier."""
+        rows = drive_share.digest_classes(self.path)
+        self.assertEqual(dict((row[1], row[2]) for row in rows)["79c6d892"], "parked")
+
+    def test_an_unreadable_row_is_counted_not_swallowed(self):
+        rows, unparsed = drive_share.digest_rows(self.path)
+        self.assertNotIn("99999999", {row[1] for row in rows})
+        self.assertEqual(unparsed, 1)
 
 
 class TestSentSet(Fixture):
