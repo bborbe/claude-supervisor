@@ -388,3 +388,21 @@ test('a refused URL leaves the module importable', () => {
   assert.equal(typeof out.refusal, 'string')
   assert.ok(config !== undefined)
 })
+
+// ⚠️ A path, query or fragment passed the host check and was then returned VERBATIM, so
+// `baseOf()` built `/base/api/1.0/...` and every wrapper call 404'd silently. The origin is
+// the only shape the guard claims to enforce.
+test('a path, query or fragment is dropped to the origin', () => {
+  for (const raw of ['http://localhost:18090/base', 'http://localhost:18090/?x=1', 'http://localhost:18090/#frag']) {
+    assert.deepEqual(resolveWrapperUrl(raw), { url: 'http://localhost:18090', refusal: null }, raw)
+  }
+})
+
+// The refusal text reaches the spawn reply and the log, so a credential must never ride in it.
+test('a refusal never echoes userinfo or the raw value', () => {
+  const out = resolveWrapperUrl('http://user:s3cret@evil.example.com:18090')
+  assert.ok(out.refusal)
+  assert.ok(!out.refusal.includes('s3cret'), 'the password must not reach the refusal text')
+  assert.ok(!out.refusal.includes('user:'), 'the userinfo must not reach the refusal text')
+  assert.ok(out.refusal.includes('evil.example.com'), 'the host is what a caller needs')
+})

@@ -172,20 +172,27 @@ export function resolveWrapperUrl(raw) {
   try {
     url = new URL(value)
   } catch {
-    return { url: fallback, refusal: `SUPERVISOR_WRAPPER_URL is not a URL: ${value}` }
+    // ⚠️ Never echo the raw value: a malformed URL can carry userinfo, and this string reaches
+    // the spawn reply and the log.
+    return { url: fallback, refusal: 'SUPERVISOR_WRAPPER_URL is not a URL' }
   }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    return { url: fallback, refusal: `SUPERVISOR_WRAPPER_URL must be http(s): ${value}` }
+    return { url: fallback, refusal: `SUPERVISOR_WRAPPER_URL must be http(s), got ${url.protocol}` }
   }
   if (!LOOPBACK.has(url.hostname) && !isLoopbackV4(url.hostname)) {
     return {
       url: fallback,
       refusal:
         `SUPERVISOR_WRAPPER_URL must point at loopback: the wrapper API is unauthenticated ` +
-        `and a spawn sends the inherited environment to it. Got: ${value}`,
+        `and a spawn sends the inherited environment to it. Got host ${url.hostname}`,
     }
   }
-  return { url: value.replace(/\/+$/, ''), refusal: null }
+  // ⚠️ The ORIGIN, not the trimmed string. A value carrying a path, query or fragment
+  // (`http://localhost:18090/base`) passed the host check and was then returned verbatim, so
+  // `baseOf()` concatenated `/base/api/1.0/...` and every wrapper call silently 404'd. The
+  // origin is the only thing the comment above claims to enforce, and `url.origin` also drops
+  // any userinfo, which is what kept a credential out of the reply and the log.
+  return { url: url.origin, refusal: null }
 }
 
 const wrapperResolution = resolveWrapperUrl(ENV.SUPERVISOR_WRAPPER_URL)
