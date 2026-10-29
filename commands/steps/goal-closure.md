@@ -20,13 +20,28 @@ The rule and its rationale have one home — `commands/goal-loop.md` § Manager 
 
 For each tracked goal (and, when the topic branch is running, each declared topic):
 
-1. **Read both checkbox sections from the file**, never from a status field:
+1. **Read both checkbox sections from the file, each counted on its own**, never from a status
+   field and never with a whole-page count:
    ```bash
-   grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]' "<page>"
+   python3 - "<page>" <<'PY'
+   import re,sys
+   txt=open(sys.argv[1],encoding="utf-8").read()
+   def tally(name):
+       m=re.search(rf"^# {re.escape(name)}\s*$(.*?)(?=^# |\Z)", txt, re.S|re.M)
+       if not m: return None
+       b=m.group(1)
+       return (len(re.findall(r"^\s*-\s*\[x\]", b, re.M)),
+               len(re.findall(r"^\s*-\s*\[[ /]\]", b, re.M)))
+   for n in ("Success Criteria","Definition of Done"):
+       t=tally(n)
+       print(f"{n}: MISSING" if t is None else f"{n}: {t[0]} done, {t[1]} open")
+   PY
    ```
-   Count across **both** `# Success Criteria` and `# Definition of Done`. **Zero open boxes in
-   both sections is the only qualifying state.** A page with open boxes is not a closure
-   candidate — report its count and move on.
+   ⚠️ **A whole-page `grep -c` is not this check.** It counts the `# Tasks` boxes too, so it can
+   neither report the SC/DoD split the Reporting block below prints nor tell a page whose DoD
+   section is absent from one whose DoD section is empty — and the second is the failure this
+   rule exists to refuse. **Both sections must be present, and both must show 0 open.** An
+   absent section is **unmeasurable**, not complete: report it as a gap and close nothing.
 
 2. **Run the tier's own verb and quote it verbatim:**
    ```bash
