@@ -926,6 +926,64 @@ def closer_from_transcript(rec):
     return normalize_closer(you[-1].split(":", 1)[1]) if you else ""
 
 
+#: The four shapes a session's turn can end on, as the digest's `CLOSERS` class
+#: token. Only `ask` is a question for the operator; the other three exist so a
+#: consumer can tell "this session asked nothing" from "nothing was captured".
+#: `agents/fleet-drive.md` step 4a fail-closes a candidate with no `CLOSERS` row to
+#: `unverifiable`, and without these classes a routine turn end is indistinguishable
+#: from an uncaptured one.
+CLOSER_CLASSES = ("ask", "routine", "parked-wait", "none")
+
+#: The destructive verbs the routine-continue table's test 3 blacklists, applied to a
+#: `routine` row as well. A `nothing …` closer is never promoted to a `BLOCKED` row
+#: (`reclassify_idle` leaves it `idle`, and `is_open_gate` needs kind
+#: permission/question), so step 4a test 4 can never fire on one and test 3 would
+#: otherwise be skipped entirely — `nothing — approve: deploy prod` would reach
+#: `revive` with no text test at all. Substring matching over-matches on purpose
+#: (`produce` trips `prod`); the direction is fail-closed, an over-match is `ask`.
+_DESTRUCTIVE = ("push", "merge", "deploy", "release", "tag", "apply", "buca",
+                "kubectl", "delete", "rm ", "trade", "session-close", "prod")
+
+
+def closer_class(rec):
+    """What this session's last turn ended on — `ask` | `routine` | `parked-wait` | `none`.
+
+    Deliberately a SECOND question from `is_open_gate()`, never a replacement for it.
+    `is_open_gate` answers "is the operator being asked something" — the feed's
+    question, and the one that keeps a routine closer out of `Needs you`. This answers
+    "what did the turn end on" — the digest's question, and the one `CLOSERS` needs in
+    order to be read at all. Measured 2026-10-29 on round `2026-10-29T08-28-15Z`: 7
+    parked rows, 4 `CLOSERS` rows, and the three uncaptured parked rows split across
+    every class this function names — `nothing — I continue …` (routine), `later (on …)`
+    (parked-wait), and no closer line at all (none) — so a consumer reading only
+    "row present / row absent" could not tell a routine turn end from a lost capture.
+
+    The split reuses the two filters `reclassify_idle()` already applies rather than
+    re-deriving them: `startswith("nothing")` and `is_parked_verb()` are exactly the
+    classes the digest must never nudge, and a second copy of the test here would let
+    the two drift apart.
+
+    ⚠️ **`ask` is a catch-all, not a verb list.** It is every closer that is neither a
+    routine turn end nor a clock-bound park — including a plain status line
+    (`👤 You: done — all green`, `waiting for CI`), which is not a question at all.
+    That is deliberate and it is the safe direction: an unrecognised closer reaches the
+    drive leg as `blocked`, never as `revivable`, and step 4a's routine-continue table
+    is what re-admits the ones that only look like asks. Narrowing this to the
+    documented verbs would make every unlisted closer `revivable`, which is the
+    fail-open direction the `CLOSERS` fail-closed rule exists to prevent.
+    """
+    ask = closer_from_transcript(rec)
+    if not ask:
+        return "none"
+    if is_parked_verb(ask):
+        return "parked-wait"
+    if ask.startswith("nothing"):
+        # A `nothing …` closer that still names a destructive verb is self-
+        # contradictory, and no later test can catch it — see `_DESTRUCTIVE`.
+        return "ask" if any(v in ask.lower() for v in _DESTRUCTIVE) else "routine"
+    return "ask"
+
+
 def current_closer(rec):
     """The session's live closer text — re-derived from the transcript, not cached.
 
@@ -1957,14 +2015,16 @@ def pane_for(session_id):
     return 1
 
 
-# The six sections this feed renders, in render order. `--section` names them;
-# a manager's attention watcher arms on `needs-you` alone.
+# The seven sections this feed can render, in render order. `--section` names them;
+# a manager's attention watcher arms on `needs-you` alone. The first six are the
+# default render; `last-closers` is opt-in and never prints without `--section`.
 #
 # `board-missing` is its own section rather than a member of `needs-you`
 # deliberately -- see `board_missing_gates()`: those rows have NOT had their
 # liveness decided by the store, so counting them as blocks would put a
 # re-judged row into the number a manager triages by.
-SECTIONS = ("needs-you", "board-missing", "rendered-panels", "stuck", "reapable", "idle")
+SECTIONS = ("needs-you", "board-missing", "rendered-panels", "stuck", "reapable",
+            "idle", "last-closers")
 
 
 def section_filter(names):
@@ -2089,10 +2149,11 @@ def main():
         "--section",
         action="append",
         choices=SECTIONS,
-        help="render only this section (repeatable); the default renders all five. "
-        "A manager's attention watcher arms on `--section needs-you`: the other four "
-        "are not gates, and an unscoped feed makes that watcher fire on every peer's "
-        "rendered closer.",
+        help="render only this section (repeatable); the default renders the feed's "
+        "six and never `last-closers`, which is opt-in because its rows are not "
+        "gates and no watcher should arm on them. A manager's attention watcher arms "
+        "on `--section needs-you`: the others are not gates either, and an unscoped "
+        "feed makes that watcher fire on every peer's rendered closer.",
     )
     ap.add_argument(
         "--resolve-owners",
@@ -2187,11 +2248,27 @@ def main():
                        and is_reapable(r, task_status_from_closer)], key=lambda r: r["ts"])
     stuck = sorted([r for r in tools if time.time() - r["ts"] > a.stuck_min * 60], key=lambda r: r["ts"])
     idle = sorted([r for r in needs if r["kind"] == "idle" and not answered(r)], key=lambda r: r["ts"])
+    # Every live record's last-turn closer, WITH its class. This is the digest's input,
+    # not the feed's: `panels` answers "is the operator being asked something" and
+    # therefore carries real asks only, while `CLOSERS` in the sweep digest has to say
+    # what each parked session's turn ended on — `agents/fleet-drive.md` step 4a
+    # fail-closes a candidate with no row to `unverifiable`, so a class-less absence
+    # reads the same whether the turn ended on `nothing` or was never captured.
+    # Rendered only on request (see below); the six default sections are read by the
+    # manager's watchers and a row here is not a gate.
+    # One row per SESSION, not per open item. `needs` holds one record per open item,
+    # so a session carrying both a permission prompt and a question would otherwise
+    # render twice and spend the digest's 40-line payload cap on a duplicate. The
+    # newest record per session wins, since the sort is oldest-first.
+    _by_session = {}
+    for r in sorted([r for r in needs if not answered(r)], key=lambda r: r["ts"]):
+        _by_session[r.get("session_id") or id(r)] = r
+    last_closers = list(_by_session.values())
 
     # Say which source answered, once, before any row. A silent fallback would
     # be indistinguishable from a healthy store — which is the whole failure
     # this note exists to prevent.
-    # `--section` scopes the render to the named sections; with no flag all five
+    # `--section` scopes the render to the named sections; with no flag all six
     # render, byte-for-byte as before. The scoping exists because the consumer,
     # `gate-owner-filter.py`'s `panes_from_feed`, matches `[<pane>]` on ANY line
     # regardless of the section header above it — so a whole-feed arm fires on every
@@ -2231,6 +2308,15 @@ def main():
         print(f"\nRendered panels ({len(panels)})  — a closer line, not a parked gate")
         for r in panels:
             print(row(r, pmap, r["detail"], registry))
+    # Opt-in only: `a.section` is required, so the no-flag render keeps its six
+    # sections byte-for-byte. A consumer that asks for it gets every live session's
+    # last-turn closer and its class — the digest's `CLOSERS` source.
+    if a.section and wanted("last-closers"):
+        print(f"\nLast closers ({len(last_closers)})"
+              f"  — last-turn closer and class (ask | routine | parked-wait | none)")
+        for r in last_closers:
+            print(row(r, pmap, f"{closer_class(r)}: "
+                               f"{closer_from_transcript(r) or 'no closer line'}", registry))
     if wanted("stuck"):
         print(f"\nProbably stuck > {a.stuck_min}m ({len(stuck)})")
         for r in stuck:

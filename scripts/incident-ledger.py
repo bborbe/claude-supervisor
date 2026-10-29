@@ -188,24 +188,6 @@ def warn_liveness_unavailable(verb):
     )
 
 
-def _degraded_count(stderr):
-    """`degraded=` from the producer's stderr header.
-
-    Returns an int, `0` when the header is absent, or **`None` when it is present but
-    unreadable**. A `degraded=` nobody can parse is a producer bug, and reading it as
-    a clean `0` would be the same false green this whole gate exists to remove -- so
-    the caller fails open on `None` exactly as it does on a non-zero count.
-    """
-    for line in (stderr or "").splitlines():
-        for token in line.split():
-            if token.startswith("degraded="):
-                try:
-                    return int(token.split("=", 1)[1])
-                except (IndexError, ValueError):
-                    return None
-    return 0
-
-
 def _live_rows():
     """The probe's parsed rows, or None when the read could not run.
 
@@ -231,14 +213,21 @@ def _live_rows():
         return None
     if result.returncode != 0:
         return None
-    # ⚠️ **A DEGRADED measurement is not a live set.** `degraded=` counts the rows the
-    # producer could not resolve against a live heartbeat, so a session missing from a
-    # degraded read may be unknown rather than absent — and reading it as absent would
-    # retire a live session's incident on an outage. The header rides stderr
-    # (`rows=… registry_live=… degraded=…`), so it is read from there.
-    degraded = _degraded_count(result.stderr)
-    if degraded is None or degraded > 0:
-        return None
+    # ⚠️ **`degraded=` is NOT a veto, and treating it as one disables the gate.** The
+    # producer marks a row `degraded` when the session IS in the identity registry but
+    # the endpoint holds NO live heartbeat row for it (`degraded: not row` on the
+    # registry loop, `False` on the endpoint-only loop, `session-liveness.py`
+    # `_list_payload`). The row is therefore PRESENT and its session is live, merely
+    # uncorroborated — so the count says nothing about a session MISSING from the set.
+    # Measured 2026-10-29 on a healthy fleet: `rows=45 registry_live=43 degraded=7` —
+    # 7 of the 43 registry rows lack a heartbeat and 2 rows are endpoint-only, so
+    # `degraded > 0` is the NORMAL state. A `degraded > 0 → None` rule would return
+    # "unavailable" every round, warn every round, and never retire anything — the same
+    # silent-off this gate exists to prevent, reached from the third side.
+    #
+    # The read is unusable in exactly TWO cases, both below: an EMPTY list, and a
+    # non-empty list the endpoint corroborated nothing in (partial rollout). Everything
+    # else is a usable absent-set.
     # ⚠️ **The `rows=… registry_live=… degraded=…` header goes to STDERR, not stdout**
     # (measured 2026-10-22: with stderr discarded, stdout begins at `[`). The
     # tolerance below is therefore not the shape this reads today — it is a guard for
@@ -258,18 +247,54 @@ def _live_rows():
         return None
     if not isinstance(rows, list):
         return None
-    # ⚠️ **An EMPTY successful probe is "no measurement", not "every session is
-    # gone".** `--list --json` exits 0 with `[]` when neither the registry nor the
-    # endpoint holds a live row, and returning an empty result would make every
-    # eligible row read as gone: the whole stall class goes quiet behind a plausible
-    # skip line. That is the same silent-off the fail-open rule above exists to
-    # prevent, reached from the fail-closed side. `degraded=` cannot separate the two
-    # cases when it is 0 and the list is empty, so the empty case fails open and says
-    # so. ⚠️ The test is on the DERIVED ids, not on `rows` being empty — a row without
-    # a `sessionId` yields no key either way, so both projections see the same answer.
-    if not any(
-        _id_keys(row.get("sessionId")) for row in rows if isinstance(row, dict)
-    ):
+    # ⚠️ **A read is unusable in exactly TWO cases, both below: an EMPTY list, and a
+    # non-empty list the endpoint corroborated nothing in.** Everything else is a
+    # usable absent-set. ⚠️ `degraded=` is NOT a veto — the producer marks a row
+    # `degraded` when the session is in the identity registry but the endpoint holds
+    # no live heartbeat row for it, so the row is PRESENT and merely uncorroborated.
+    # Measured 2026-10-29 on a healthy fleet: `rows=45 registry_live=43 degraded=7` —
+    # `degraded > 0` is the NORMAL state, and treating it as an outage returns
+    # "unavailable" every round and retires nothing.
+    listed = 0
+    corroborated = False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if not _id_keys(row.get("sessionId")):
+            continue
+        listed += 1
+        # ⚠️ A row the endpoint corroborates carries `degraded: false`; a registry row
+        # with no live heartbeat row carries `degraded: true`. Tracked per row, from
+        # the PAYLOAD — never from the `degraded=` stderr header, which counts the same
+        # thing but is a display line this function does not parse.
+        if not row.get("degraded"):
+            corroborated = True
+    if not listed:
+        # ⚠️ **An EMPTY successful probe is "no measurement", not "every session is
+        # gone".** `--list --json` exits 0 with `[]` when neither the registry nor the
+        # endpoint holds a live row, and returning it would make every eligible row read
+        # as gone: the whole stall class goes quiet behind a plausible skip line. An
+        # empty read is never trusted as a fleet reading — the only direction that
+        # cannot suppress a live blocker.
+        return None
+    if not corroborated:
+        # ⚠️ **A non-empty payload the endpoint corroborated NOTHING in is not a fleet
+        # reading either.** During a partial rollout the endpoint holds no `live: true`
+        # row while the registry still lists sessions, so every row comes back
+        # `degraded: true` — and a cluster/a2a worker lives ONLY in the endpoint, so it
+        # would read as absent and its stall incident would be retired `skipped-gone`,
+        # terminally, for a session that is alive. At least one corroborated row means
+        # the endpoint answered, which is all the absent-set needs.
+        #
+        # ⚠️ **Says WHICH fail-open fired**, because the callers' shared
+        # `warn_liveness_unavailable` is one line for every unavailable read: without
+        # this an operator cannot tell a partial rollout from an empty probe, and a
+        # fail-open nobody can attribute is the silent-off this gate exists to remove.
+        sys.stderr.write(
+            "note: the liveness probe listed %d session(s) and the endpoint "
+            "corroborated none of them; reading the fleet as unmeasured rather than "
+            "as absent\n" % listed
+        )
         return None
     return rows
 
@@ -310,6 +335,8 @@ def live_sessions():
     if rows is None:
         return None
     live = set()
+    corroborated = False
+    listed = 0
     for row in rows:
         if isinstance(row, dict):
             live.update(_id_keys(row.get("sessionId")))

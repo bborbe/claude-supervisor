@@ -978,19 +978,61 @@ class TestLiveSessions(Base):
         self.stub_run("[]\n", stderr="rows=0 registry_live=0 degraded=0\n")
         self.assertIsNone(il.live_sessions())
 
-    def test_a_degraded_probe_is_unavailable(self):
-        """A partial measurement cannot prove a missing session is gone."""
-        self.stub_run(
-            '[{"sessionId": "a"}]', stderr="rows=1 registry_live=0 degraded=1\n"
-        )
-        self.assertIsNone(il.live_sessions())
+    def test_a_degraded_but_non_empty_probe_is_still_usable(self):
+        """`degraded=` marks uncorroborated rows, not missing ones — so it cannot veto.
 
-    def test_an_unreadable_degraded_header_is_unavailable(self):
-        """A `degraded=` nobody can parse must not read as a clean zero."""
+        Measured 2026-10-29 on a healthy fleet: `rows=45 registry_live=43 degraded=7`.
+        Treating `degraded > 0` as "unavailable" therefore returned None every round,
+        warned every round, and never retired anything — the gone gate was silently
+        off in the leg that posts the cards. A session ABSENT from a non-empty set is
+        still absent; only an EMPTY set is unusable.
+
+        The header is the shape the producer can actually emit: `degraded` is set only
+        on REGISTRY rows, so `registry_live >= degraded` always holds. `rows=1
+        registry_live=0 degraded=1` is impossible and would pin a synthetic case.
+        """
+        self.stub_run(
+            '[{"sessionId": "a"}]', stderr="rows=1 registry_live=1 degraded=1\n"
+        )
+        self.assertEqual(il.live_sessions(), {"a"})
+
+    def test_an_all_degraded_probe_is_unavailable(self):
+        """No corroborated row means the set may be registry-only, so it cannot decide.
+
+        The producer names this state: during a partial rollout the endpoint holds no
+        `live: true` row while the registry still lists sessions. A cluster/a2a worker
+        lives ONLY in the endpoint, so it would read as absent and its stall incident
+        would be retired `skipped-gone` — terminally — for a session that is alive.
+        """
+        self.stub_run(
+            '[{"sessionId": "a", "degraded": true}, '
+            '{"sessionId": "b", "degraded": true}]',
+            stderr="rows=2 registry_live=2 degraded=2\n",
+        )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertIsNone(il.live_sessions())
+        # The branch must say WHICH fail-open fired: the callers' shared warning is
+        # one line for every unavailable read, so a partial rollout would otherwise
+        # be indistinguishable from an empty probe or a subprocess failure.
+        self.assertIn("corroborated none of them", err.getvalue())
+        self.assertIn("2 session(s)", err.getvalue())
+
+    def test_one_corroborated_row_makes_the_probe_usable(self):
+        """The negative control: a single endpoint-corroborated row restores the gate."""
+        self.stub_run(
+            '[{"sessionId": "a", "degraded": true}, '
+            '{"sessionId": "b", "degraded": false}]',
+            stderr="rows=2 registry_live=1 degraded=1\n",
+        )
+        self.assertEqual(il.live_sessions(), {"a", "b"})
+
+    def test_an_unreadable_degraded_header_does_not_change_the_verdict(self):
+        """A header this reader cannot parse is ignored, not read as a veto."""
         self.stub_run(
             '[{"sessionId": "a"}]', stderr="rows=1 registry_live=1 degraded=many\n"
         )
-        self.assertIsNone(il.live_sessions())
+        self.assertEqual(il.live_sessions(), {"a"})
 
     def test_a_row_with_a_non_string_session_id_is_dropped(self):
         self.stub_run('[{"sessionId": "a"}, {"sessionId": 42}]')
