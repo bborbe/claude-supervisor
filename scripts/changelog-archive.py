@@ -87,7 +87,13 @@ def merge_archive(existing, archived):
         if RELEASED.match(head) and head not in seen:
             kept.append(block)
             seen.add(head)
-    return archived + "".join(kept)
+    if not kept:
+        return archived
+    # Every section in the archive is separated by exactly one blank line; a bare
+    # concatenation puts the next heading straight after the last bullet of the previous
+    # section, which renders (ATX headings interrupt paragraphs) but breaks the file's
+    # uniform spacing. Measured 2026-10-29 by review on CHANGELOG-archive.md:521.
+    return archived.rstrip("\n") + "\n\n" + "".join(kept).lstrip("\n")
 
 
 def main(argv):

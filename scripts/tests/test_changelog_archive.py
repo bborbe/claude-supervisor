@@ -149,6 +149,32 @@ class ChangelogArchiveTest(unittest.TestCase):
         heads = re.findall(r"^## v\d+\.\d+\.\d+$", archive_now, re.M)
         self.assertEqual(len(heads), len(set(heads)), "a release was duplicated in the archive")
 
+    def test_the_merge_junction_is_separated_by_a_blank_line(self):
+        """Every section in the archive is preceded by exactly one blank line, junction included.
+
+        ⚠️ A bare `archived + kept` concatenation still renders — ATX headings interrupt
+        paragraphs — so nothing else in this suite catches it. Observed 2026-10-29 by review:
+        the last newly-archived bullet ran straight into the pre-existing heading.
+        """
+        self.write(BIG)
+        self.run_script()
+        first = self.read("CHANGELOG-archive.md")
+
+        newer = [PREAMBLE.rstrip("\n"), "", "## Unreleased", "", "- fix: second batch"]
+        for i in range(800, 400, -1):
+            newer += ["", f"## v0.{i}.0", "", "- feat: " + "x" * 2000]
+        self.write("\n".join(newer) + "\n")
+        self.run_script()
+
+        archive_now = self.read("CHANGELOG-archive.md")
+        orphans = [
+            m.group(0)
+            for m in re.finditer(r"^## v\d+\.\d+\.\d+$", archive_now, re.M)
+            if not archive_now[: m.start()].endswith("\n\n")
+        ]
+        self.assertEqual(orphans, [], f"heading(s) with no blank line before them: {orphans}")
+        self.assertNotEqual(archive_now, first)
+
     def test_a_small_changelog_is_left_alone(self):
         source = changelog(3)
         self.write(source)
