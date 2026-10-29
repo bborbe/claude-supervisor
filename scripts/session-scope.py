@@ -57,7 +57,7 @@ falls back to probing every vault directory under `VAULTS_ROOT` (widening, never
 before it reports a reason.
 
 ⚠️ **`owner-unknown` is the one exclusion that names nobody**, and it is still an exclusion by
-contract (SC3 of the 2026-10-29 task): a task that declares no goal is nobody's tracked work,
+contract: a task that declares no goal is nobody's tracked work,
 so no manager is its owner and this watcher has no channel to answer it either. It leaves
 THIS manager's feed and is still carried in `--explain --json` — never dropped from the row
 set, because a row that disappears from a sweep is indistinguishable from a row that got
@@ -94,6 +94,7 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 
 #: Vault folder names that hold tasks and goals. Both generations are listed so a vault left
 #: on the pre-2026-09-13 names (`24 Tasks` / `23 Goals`) still resolves, exactly as
@@ -256,29 +257,34 @@ def _probe_root(reason):
     return out, ""
 
 
+@dataclass(slots=True)
 class Entry:
-    """One page a session id is stamped on."""
+    """One page a session id is stamped on.
 
-    __slots__ = ("title", "kind", "goals")
+    A value record, not a service: `kind` is `"task"` or `"goal"`, and `goals` is the page's
+    own `goals:` list (a goal page carries its own title).
+    """
 
-    def __init__(self, title, kind, goals):
-        self.title = title
-        self.kind = kind          # "task" | "goal"
-        self.goals = goals        # task: its `goals:`; goal: [its own title]
-
-    def __repr__(self):  # pragma: no cover - diagnostics only
-        return f"Entry({self.title!r}, {self.kind!r}, {self.goals!r})"
+    title: str
+    kind: str
+    goals: list
 
 
+@dataclass
 class Scope:
-    """The asking manager's tracked set, and what a session's page says about it."""
+    """The asking manager's tracked set, and what a session's page says about it.
 
-    def __init__(self, sessions, goals, own_titles, self_goals, reason):
-        self.sessions = sessions          # {session_id: [Entry, ...]}
-        self.goals = goals                # {goal title: set(task titles)}
-        self.own_titles = own_titles      # titles in this manager's scope
-        self.self_goals = self_goals      # the asking session's goals, [] when a task
-        self.reason = reason              # "" when scoped; else why not
+    `sessions` is `{session_id: [Entry, ...]}`, `goals` is `{goal title: set(task titles)}`,
+    `own_titles` is every title in this manager's scope, `self_goals` is the asking session's
+    goals (empty when it resolves to a task), and `reason` is `""` when scoped and otherwise
+    says why not.
+    """
+
+    sessions: dict
+    goals: dict
+    own_titles: set
+    self_goals: list
+    reason: str
 
     @property
     def resolved(self):

@@ -1800,7 +1800,7 @@ class ForeignGoalFixture(unittest.TestCase):
         self.assertIn("emit: 1", stderr)
 
     def test_without_the_scope_input_every_row_is_emitted(self):
-        """SC2's before-reading, pinned in-tree: the same fixture, the pre-fix path."""
+        """The before-reading, pinned in-tree: the same fixture, the pre-fix path."""
         self.assertEqual(
             self.unscoped["feed"].stdout.split(),
             list(self.replay.FOREIGN) + [self.replay.CONTROL],

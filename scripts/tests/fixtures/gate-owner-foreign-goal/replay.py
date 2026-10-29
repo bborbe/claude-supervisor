@@ -2,7 +2,7 @@
 """Replay the five measured foreign-gate firings through `gate-owner-filter.py`.
 
 This is the executable half of the fixture: `feed.txt`, `state/`, `registry/`, `claims.json`
-and `ledger.json` are the stubs SC2 names, and this starts the `--endpoint` stub, then runs
+and `ledger.json` are the stubs, and this starts the `--endpoint` stub, then runs
 the filter twice — once for the bare feed (what would wake the manager) and once for
 `--explain --json` (what it can still see, with the owner named).
 

@@ -26,8 +26,7 @@ lists panes 278 and 279 as "none declared" and 269 as belonging to *A Wrapper-Sp
 Is Drivable Without a Human Keystroke*. The frontmatter says otherwise: `695c311f` stamps
 *SC7 Has No Scorer* (`PR Reviews…`), `0b7d28a7` stamps *Give the Board-Drain Template*
 (`Every Recurring Task…`), and `51e78933` stamps *Port weekly-strategy-rep* which declares no
-goal. That is why three cases carry a goal and **two** are `owner-unknown` — the count SC3
-states.
+goal. That is why three cases carry a goal and **two** are `owner-unknown`.
 
 ## What the stubs reproduce
 
