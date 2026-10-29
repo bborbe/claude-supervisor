@@ -38,8 +38,8 @@ this is a third store.
 
 ⚠️ A STALL IS A DURATION, NOT AN EVENT, AND IT ISSUES NO ATTENTION CARD. Its
 `detected_by` is the drive verdict that named it (`drive:<verdict>@<round>`), and
-`card_id` stays empty for that kind -- empty at detection, that is: its deadline
-escalation still posts one, and that card is identified by `dedup_key`. Do not
+`card_id` is empty at DETECTION. Its deadline escalation does post one, and that
+card's store item id is what `escalate` records on the row -- see `post_card`. Do not
 fabricate a card id to fill the field: a fabricated id is a join that never resolves
 and it reads as provenance.
 
@@ -665,8 +665,55 @@ def past_deadline(incident, at):
     return deadline is not None and at >= deadline
 
 
+#: A store item id is 32 lowercase hex characters, minted over 16 random bytes
+#: (`attention-controller` pkg/item-id-generator.go), and `attention-ask.py post`
+#: prints it on its `ITEM_ID:` line -- the only place a pollable id comes from.
+#:
+#: Repeated from `attention-ask.py`'s own `is_store_item_id` rather than imported:
+#: these scripts are run by path and are deliberately not a package, so an import
+#: would couple two entry points at load time for a three-line shape check.
+STORE_ITEM_ID_LEN = 32
+_HEX_DIGITS = frozenset("0123456789abcdef")
+
+
+def store_item_id(stdout):
+    """The store item id from `attention-ask.py post`'s own `ITEM_ID:` line, or "".
+
+    ⚠️ **This is the capture that did not exist.** `post_card` ran the poster with
+    `capture_output=True` and read NOTHING out of stdout -- the only consultation was
+    on the failure path, inside the warning -- so every escalated incident was written
+    with `card_id: ""` and no record could be joined to its card. Measured 2026-10-29:
+    `card_id` empty on 1 044 of 1 044 incidents in the live ledger, 1 028 of them
+    `timed-out`, and the join was recovered only by hand -- the store's `closed_at`
+    burst matched against the ledger's counts.
+
+    Shape-checked, for the reason `attention-ask.py` gives one store over: the store
+    mints 32 hex characters, and anything else on that line -- a truncated id, an
+    `open-items` display id -- resolves to a 404 that reads as "the card is gone".
+    A line that does not parse yields "", which the caller records honestly rather
+    than filling the field with something that only looks like a join.
+    """
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("ITEM_ID:"):
+            continue
+        candidate = line[len("ITEM_ID:"):].strip()
+        if len(candidate) == STORE_ITEM_ID_LEN and all(
+            char in _HEX_DIGITS for char in candidate
+        ):
+            return candidate
+    return ""
+
+
 def post_card(incident):
-    """Post the escalation card, keyed on the incident so a re-run cannot duplicate it."""
+    """Post the escalation card, keyed on the incident so a re-run cannot duplicate it.
+
+    Returns the store's item id, `""` when the card posted but no id could be read
+    from the poster, and `None` when nothing was posted at all. The three cases are
+    kept apart on purpose: `escalate` must stamp a posted card and must not stamp an
+    unposted one, and collapsing "posted, id unread" into either would lose a real
+    escalation or record one that never reached the board.
+    """
     payload = (
         "Blocker on session %s (%s) passed its deadline with no verified resume. "
         "Owner: %s. Opened %s, deadline %s, detected by %s."
@@ -703,8 +750,18 @@ def post_card(incident):
             "warning: could not post escalation for %s: %s\n"
             % (incident["dedup_key"], (result.stderr or result.stdout).strip())
         )
-        return False
-    return True
+        return None
+    card_id = store_item_id(result.stdout)
+    if not card_id:
+        # Posted, but the poster printed nothing this can trust as an id. The
+        # escalation happened, so the caller still stamps it; the empty `card_id` is
+        # recorded and named here rather than filled with something that only looks
+        # like a join.
+        sys.stderr.write(
+            "warning: escalation for %s posted but printed no ITEM_ID, so the "
+            "record cannot be joined to its card\n" % incident["dedup_key"]
+        )
+    return card_id
 
 
 def cmd_escalate(args):
@@ -840,10 +897,31 @@ def cmd_escalate(args):
             if args.dry_run:
                 print("would escalate %s (stamp %s)" % (incident["dedup_key"], stamp))
                 continue
-            if not post_card(incident):
+            card_id = post_card(incident)
+            if card_id is None:
                 # Leave the incident pending: it is still un-escalated, and stamping
                 # it would record an escalation that never reached the board.
                 continue
+            # ⚠️ Recorded BEFORE the outcome stamp, and taken from the poster's own
+            # line: `card_id` is the join this row never carried, and a value captured
+            # here and not written would be the same defect one layer up.
+            #
+            # Only when an id was actually read. An empty capture leaves whatever the
+            # row already had -- `open --card-id` supplies a handle for the BLOCKER
+            # card, and blanking it would destroy a real join to record nothing.
+            if card_id:
+                if incident.get("card_id") and incident["card_id"] != card_id:
+                    # The row already carried a different handle, and the two cards
+                    # are not the same one. A `timed-out` row must join on the
+                    # ESCALATION's id -- its `dedup_key` is the incident's own, which
+                    # is what makes the join checkable -- so the field moves to it,
+                    # and the replacement is named rather than silent.
+                    sys.stderr.write(
+                        "warning: %s carried card id %s, replaced by the "
+                        "escalation's %s\n"
+                        % (incident["dedup_key"], incident["card_id"], card_id)
+                    )
+                incident["card_id"] = card_id
             incident["outcome"] = TIMED_OUT
             incident["escalated_by"] = stamp
             print("escalated %s (stamp %s)" % (incident["dedup_key"], stamp))
