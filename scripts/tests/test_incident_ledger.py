@@ -274,6 +274,18 @@ class TestClose(Base):
         )
         self.assertEqual(self.records()[0]["outcome"], "self-cleared")
 
+    def test_close_refuses_skipped_gone(self):
+        """`skipped-gone` is the ledger's own retirement, not a verified resume."""
+        self.open_incident()
+        with self.assertRaises(SystemExit) as caught:
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.run_cli(
+                    "close", "--session", SESSION, "--kind", "permission",
+                    "--outcome", il.SKIPPED_GONE, "--resume-evidence", "tool call",
+                )
+        self.assertEqual(caught.exception.code, il.REFUSED)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+
     def test_close_of_an_absent_incident_is_a_no_op(self):
         rc, out = self.run_cli(
             "close", "--session", OTHER_SESSION, "--kind", "question",
@@ -487,6 +499,37 @@ class TestEscalate(Base):
         self.assertIn("total: 0", out)
         self.assertIn("retired 1 gone-session incident(s)", out)
 
+    def test_a_dry_run_says_would_retire(self):
+        """A dry run must not claim a state change it did not make.
+
+        `would escalate` and `would close` already follow this rule; `retired` on a
+        run that never calls `write_ledger` would be indistinguishable from a real
+        one in its own output — the false signal this ledger exists to remove.
+        """
+        self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
+        self.make_overdue_stall()
+        rc, out = self.run_cli("escalate", "--round-id", "r1", "--dry-run")
+        self.assertEqual(rc, 0)
+        self.assertIn("would retire 1", out)
+        self.assertNotIn("retired 1", out)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+
+    def test_a_retired_incident_carries_the_probe_time(self):
+        """The record names WHEN the judgement was made, not just that it was made."""
+        self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
+        self.make_overdue_stall()
+        self.run_cli("escalate", "--round-id", "r1")
+        evidence = self.records()[0]["resume_evidence"]
+        self.assertIn("liveness probe taken at", evidence)
+        self.assertIn("round:r1", evidence)
+
+    def test_bounded_names_at_exactly_the_limit_has_no_remainder(self):
+        """The no-remainder branch: five names, no `(+N more)` tail."""
+        self.assertEqual(il.bounded_names(["a", "b", "c", "d", "e"]), "a, b, c, d, e")
+        self.assertEqual(
+            il.bounded_names(["a", "b", "c", "d", "e", "f"]), "a, b, c, d, e, … (+1 more)"
+        )
+
     def test_the_skip_line_is_bounded(self):
         """SC4: 120 gone rows must not render as 120 names on one line."""
         self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
@@ -562,6 +605,21 @@ class TestPrune(Base):
             "--outcome", "manager", "--resume-evidence", "tool call",
         )
         data = self.ledger()
+        data["incidents"][0]["closed_at"] = iso(datetime.timedelta(days=-90))
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        self.run_cli("prune", "--max-age-hours", "1")
+        self.assertEqual(self.records(), [])
+
+    def test_a_skipped_gone_incident_is_pruned_on_the_same_clock(self):
+        """SC2: the retirement is TERMINAL, so `prune` drops it like any other.
+
+        `cmd_prune` keeps only `PENDING`, so this works by construction — the test is
+        here because the docstring now claims it and nothing pinned it.
+        """
+        self.open_incident(kind="stall", deadline_seconds=0)
+        data = self.ledger()
+        data["incidents"][0]["outcome"] = il.SKIPPED_GONE
         data["incidents"][0]["closed_at"] = iso(datetime.timedelta(days=-90))
         with open(il.LEDGER, "w", encoding="utf-8") as handle:
             json.dump(data, handle)

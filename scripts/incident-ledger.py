@@ -618,8 +618,13 @@ def cmd_escalate(args):
                     if not args.dry_run:
                         incident["outcome"] = SKIPPED_GONE
                         incident["closed_at"] = now()
+                        # The PROBE's own timestamp, not the write's: the judgement is
+                        # about the fleet as it stood when `live_sessions()` ran, and a
+                        # session that (re)started between the probe and this write is
+                        # the one case the record has to be able to explain.
                         incident["resume_evidence"] = (
-                            "session absent from the liveness probe at %s" % stamp
+                            "session absent from the liveness probe taken at %s (%s)"
+                            % (at.strftime(TS_FORMAT), stamp)
                         )
                     gone.append(incident["dedup_key"])
                     continue
@@ -642,9 +647,18 @@ def cmd_escalate(args):
             # `skipped-gone`, never `timed-out`: a `timed-out` stamp would claim an
             # escalation that never happened, and the record is terminal so a later
             # round neither re-lists it nor pays the probe for it again.
+            #
+            # ⚠️ `would retire` under `--dry-run`, matching `would escalate` above and
+            # `would close` in `cmd_resume`: a dry run that printed `retired` would be
+            # indistinguishable from a real one in its own output, which is the false
+            # signal this ledger exists to remove.
             print(
-                "retired %d stall incident(s) for gone sessions: %s"
-                % (len(gone), bounded_names(gone))
+                "%s %d stall incident(s) for gone sessions: %s"
+                % (
+                    "would retire" if args.dry_run else "retired",
+                    len(gone),
+                    bounded_names(gone),
+                )
             )
         if not args.dry_run:
             write_ledger(data)
@@ -995,6 +1009,12 @@ def cmd_share(args):
     print("resolved-by-manager: %d" % resolved)
     print("share: %.1f%%" % percent)
     for outcome in ALL_OUTCOMES:
+        # `skipped-gone` is EXCLUDED from `counts` by construction (see above), so
+        # printing its row here would always read `skipped-gone 0` directly above the
+        # `retired N` paragraph that reports the same incidents. The paragraph is the
+        # honest home for them; a zero row beside it reads as a contradiction.
+        if outcome == SKIPPED_GONE:
+            continue
         print("  %-12s %d" % (outcome, counts.get(outcome, 0)))
     if retired:
         print(
