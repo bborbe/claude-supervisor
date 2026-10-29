@@ -967,14 +967,18 @@ class TestEscalateMidCommandPredicate(Base):
     def test_a_failed_probe_escalates_unfiltered(self):
         """An unreadable store is not evidence that anyone is mid-command.
 
-        ⚠️ This is the pin for the `None` contract: coercing a failed probe to `{}`
-        would make every session read as absent, and absent reads as "gone" — the
-        silent-off `live_sessions()` refuses one function up.
+        ⚠️ **EVERY due incident escalates, including the absent one.** During an
+        outage the gate cannot tell a gone session from a working one, so it does
+        not judge at all — the same fail-open `live_sessions()` holds one function
+        up. That is also why this leg is a stronger discriminator than "the
+        mid-command row is escalated": an implementation that coerced `None` to `{}`
+        would escalate `A` and `C` but suppress `B`, and one that treated `None` as
+        "everything absent" would suppress all three.
         """
         il.live_states = lambda: None
-        self.due_stall([self.A])
+        self.due_stall([self.A, self.B, self.C])
         self.run_round()
-        self.assertEqual(self.escalated(), [self.A])
+        self.assertEqual(self.escalated(), sorted([self.A, self.B, self.C]))
 
     def test_a_mid_command_incident_stays_pending_for_rejudgement(self):
         """The suppression is a skip, not a retirement.
