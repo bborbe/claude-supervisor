@@ -80,8 +80,14 @@ KINDS = ("permission", "question", "stall")
 #: incident that timed out has no verified resume, so it never reaches `close`.
 PENDING = "pending"
 TIMED_OUT = "timed-out"
+#: A stall incident whose session is GONE is RETIRED, not escalated and not closed:
+#: the session no longer exists, so there is nothing to resume and no card the
+#: operator could act on. Terminal, so `prune` may drop it; and excluded from
+#: `share`'s denominator, because it is an incident with NO POSSIBLE resolution and
+#: counting it would depress the one number this ledger exists to report, for good.
+SKIPPED_GONE = "skipped-gone"
 CLOSE_OUTCOMES = ("manager", "operator", "self-cleared")
-ALL_OUTCOMES = (PENDING,) + CLOSE_OUTCOMES + (TIMED_OUT,)
+ALL_OUTCOMES = (PENDING,) + CLOSE_OUTCOMES + (TIMED_OUT, SKIPPED_GONE)
 
 #: The only outcome that counts as "resolved by the owning manager" in `share`.
 RESOLVED_BY_MANAGER = "manager"
@@ -143,6 +149,63 @@ def incident_budget():
     return value if value > 0 else 3
 
 
+def as_session_id(value):
+    """A session id as a comparable lowercase string, or "" when it is not one.
+
+    ⚠️ **Guarded, not coerced.** A malformed producer payload (an int, a dict, a
+    list) raises `AttributeError` on `.lower()`, which turns one bad row into a dead
+    round -- the same silent-off this file refuses one store over. `""` is the
+    "cannot judge" answer, and every caller fails OPEN on it rather than reading it
+    as gone: an unreadable id is not evidence that its session is absent.
+    """
+    return value.lower() if isinstance(value, str) else ""
+
+
+def bounded_names(names, limit=5):
+    """A bounded rendering of a name list: the first `limit`, then a remainder count.
+
+    ⚠️ **The list is unbounded in production.** The drive ledger keeps a row for
+    every session that was ever unverifiable, so a `", ".join(names)` line grows with
+    that graveyard -- measured 2026-10-29: 120 gone rows in one line. The prefix
+    stays (a skip that only counted would be indistinguishable from a threshold that
+    stopped firing); the tail does not.
+    """
+    shown = ", ".join(names[:limit])
+    if len(names) > limit:
+        shown += ", … (+%d more)" % (len(names) - limit)
+    return shown
+
+
+def warn_liveness_unavailable(verb):
+    """The ONE warning both legs emit when the probe returns `None`.
+
+    Shared rather than copied: `escalate` must say exactly what `stall` says, and a
+    duplicated string is a line that diverges the first time either is edited.
+    """
+    sys.stderr.write(
+        "warning: session liveness unavailable, so a gone session cannot be "
+        "told from a stalled one; %s without that filter\n" % verb
+    )
+
+
+def _degraded_count(stderr):
+    """`degraded=` from the producer's stderr header.
+
+    Returns an int, `0` when the header is absent, or **`None` when it is present but
+    unreadable**. A `degraded=` nobody can parse is a producer bug, and reading it as
+    a clean `0` would be the same false green this whole gate exists to remove -- so
+    the caller fails open on `None` exactly as it does on a non-zero count.
+    """
+    for line in (stderr or "").splitlines():
+        for token in line.split():
+            if token.startswith("degraded="):
+                try:
+                    return int(token.split("=", 1)[1])
+                except (IndexError, ValueError):
+                    return None
+    return 0
+
+
 def _live_rows():
     """The probe's parsed rows, or None when the read could not run.
 
@@ -168,6 +231,14 @@ def _live_rows():
         return None
     if result.returncode != 0:
         return None
+    # ⚠️ **A DEGRADED measurement is not a live set.** `degraded=` counts the rows the
+    # producer could not resolve against a live heartbeat, so a session missing from a
+    # degraded read may be unknown rather than absent — and reading it as absent would
+    # retire a live session's incident on an outage. The header rides stderr
+    # (`rows=… registry_live=… degraded=…`), so it is read from there.
+    degraded = _degraded_count(result.stderr)
+    if degraded is None or degraded > 0:
+        return None
     # ⚠️ **The `rows=… registry_live=… degraded=…` header goes to STDERR, not stdout**
     # (measured 2026-10-22: with stderr discarded, stdout begins at `[`). The
     # tolerance below is therefore not the shape this reads today — it is a guard for
@@ -186,6 +257,19 @@ def _live_rows():
     except ValueError:
         return None
     if not isinstance(rows, list):
+        return None
+    # ⚠️ **An EMPTY successful probe is "no measurement", not "every session is
+    # gone".** `--list --json` exits 0 with `[]` when neither the registry nor the
+    # endpoint holds a live row, and returning an empty result would make every
+    # eligible row read as gone: the whole stall class goes quiet behind a plausible
+    # skip line. That is the same silent-off the fail-open rule above exists to
+    # prevent, reached from the fail-closed side. `degraded=` cannot separate the two
+    # cases when it is 0 and the list is empty, so the empty case fails open and says
+    # so. ⚠️ The test is on the DERIVED ids, not on `rows` being empty — a row without
+    # a `sessionId` yields no key either way, so both projections see the same answer.
+    if not any(
+        _id_keys(row.get("sessionId")) for row in rows if isinstance(row, dict)
+    ):
         return None
     return rows
 
@@ -279,24 +363,6 @@ PARKED_STATE = "waiting-on-operator"
 
 #: The registry status that means the same thing from the registry's own side.
 PARKED_STATUS = "waiting"
-
-
-def _absent(session_id, states):
-    """Whether the store does not list this session at all.
-
-    ⚠️ **Distinct from `parked_on_a_human`'s "not parked" on purpose.** The two
-    produce different outcomes in `cmd_escalate`: a gone session's incident is
-    RETIRED (terminal — it can never be answered), while a mid-command session's is
-    left PENDING (it may answer next round). Collapsing them into one predicate
-    would either retire a live worker's blocker or keep re-judging a dead one.
-
-    ⚠️ A malformed id is NOT absent — it cannot prove the session is gone, so it
-    falls through to the fail-open path.
-    """
-    if states is None:
-        return False
-    keys = _id_keys(session_id)
-    return bool(keys) and not any(key in states for key in keys)
 
 
 def parked_on_a_human(session_id, states):
@@ -515,6 +581,12 @@ def cmd_close(args):
             "`timed-out` is an escalation, not a close. Use `escalate`; a timed-out\n"
             "      incident has no verified resume, so it never reaches close."
         )
+    if args.outcome == SKIPPED_GONE:
+        _refuse(
+            "`skipped-gone` is the ledger's own gone-session retirement, not a verified\n"
+            "      resume. `escalate` writes it when the session is absent from the\n"
+            "      liveness probe; there is no evidence for a caller to supply."
+        )
     evidence = " ".join((args.resume_evidence or "").split())
     if not evidence:
         _refuse(
@@ -621,6 +693,11 @@ def cmd_escalate(args):
         for incident in read_ledger()["incidents"]
     )
     states = live_states() if pending_due_stall else None
+    if pending_due_stall and states is None:
+        # ⚠️ The SAME warning `cmd_stall` emits, because the same silent-off applies:
+        # an outage must never read as "every session is gone". The difference is
+        # which leg is left unguarded, and this is the leg that posts the cards.
+        warn_liveness_unavailable("escalating")
     with Locked():
         data = read_ledger()
         due = [
@@ -634,6 +711,7 @@ def cmd_escalate(args):
         stamp = "round:%s" % args.round_id if args.round_id else "manual:%s" % caller_id()
         gone = []
         working = []
+        malformed = 0
         for incident in due:
             # ⚠️ A stall incident for a session that is GONE must not become a card:
             # the card can only say "no verified resume" for a session that no longer
@@ -641,22 +719,45 @@ def cmd_escalate(args):
             # because a permission or question incident belongs to a live producer
             # that posted it and is polling for the answer.
             #
-            # ⚠️ **PRESENCE IS NOT THE WHOLE TEST.** `live_sessions()` answers only
-            # "is the session listed", so a session that is present but MID-COMMAND
-            # passed it and got a card for a blocker it had already moved past
-            # (measured 2026-10-29: roughly two thirds of a live fleet reads `shell`
-            # or `busy` at any moment). `parked_on_a_human` asks the question that
-            # actually decides whether a card is owed.
+            # ⚠️ **PRESENCE IS NOT THE WHOLE TEST.** `live_states()` answers whether a
+            # session is listed; a session that is present but MID-COMMAND passes that
+            # test and would get a card for a blocker it had already moved past
+            # (measured 2026-10-29: roughly two thirds of a live fleet reads `shell` or
+            # `busy` at any moment). `parked_on_a_human` asks the question that actually
+            # decides whether a card is owed.
             #
             # ⚠️ The two suppressions are SEPARATE branches, never one: a gone
             # session's incident can never be answered, so it is terminal; a
             # mid-command session's may answer next round, so it stays PENDING and is
             # re-judged. Collapsing them would drop a live worker's blocker for good.
-            if states is not None and incident.get("kind") == "stall":
-                if _absent(incident.get("session_id"), states):
+            session_id = as_session_id(incident.get("session_id"))
+            if incident.get("kind") == "stall" and states is not None:
+                if not session_id:
+                    # ⚠️ A malformed id cannot PROVE the session is gone, so the gate
+                    # fails OPEN and the incident escalates: suppressing a live
+                    # worker's card is the worse of the two errors, and the guard in
+                    # `as_session_id` already kept the round from dying on it.
+                    malformed += 1
+                elif session_id not in states:
+                    # RETIRED, not left pending: a skip is not an escalation, and a
+                    # pending record re-lists, re-probes and re-enters `share`'s
+                    # denominator every round with no possible resolution.
+                    if not args.dry_run:
+                        incident["outcome"] = SKIPPED_GONE
+                        incident["closed_at"] = now()
+                        # The PROBE's own timestamp, not the write's: the judgement is
+                        # about the fleet as it stood when the probe ran, and a
+                        # session that (re)started between the probe and this write is
+                        # the one case the record has to be able to explain.
+                        incident["resume_evidence"] = (
+                            "session absent from the liveness probe taken at %s (%s)"
+                            % (at.strftime(TS_FORMAT), stamp)
+                        )
                     gone.append(incident["dedup_key"])
                     continue
-                if not parked_on_a_human(incident.get("session_id"), states):
+                elif not parked_on_a_human(session_id, states):
+                    # NOT retired: this session still exists and may answer next
+                    # round, so its incident stays PENDING and is re-judged.
                     working.append(incident["dedup_key"])
                     continue
             if args.dry_run:
@@ -669,12 +770,27 @@ def cmd_escalate(args):
             incident["outcome"] = TIMED_OUT
             incident["escalated_by"] = stamp
             print("escalated %s (stamp %s)" % (incident["dedup_key"], stamp))
+        if malformed:
+            sys.stderr.write(
+                "warning: %d stall incident(s) carry a malformed session_id, so the "
+                "gone gate cannot judge them; escalating unfiltered\n" % malformed
+            )
         if gone:
-            # Left PENDING on purpose: retention is a separate question, and a
-            # `timed-out` stamp would claim an escalation that never happened.
+            # `skipped-gone`, never `timed-out`: a `timed-out` stamp would claim an
+            # escalation that never happened, and the record is terminal so a later
+            # round neither re-lists it nor pays the probe for it again.
+            #
+            # ⚠️ `would retire` under `--dry-run`, matching `would escalate` above and
+            # `would close` in `cmd_resume`: a dry run that printed `retired` would be
+            # indistinguishable from a real one in its own output, which is the false
+            # signal this ledger exists to remove.
             print(
-                "skipped %d stall incident(s) for gone sessions: %s"
-                % (len(gone), ", ".join(gone))
+                "%s %d stall incident(s) for gone sessions: %s"
+                % (
+                    "would retire" if args.dry_run else "retired",
+                    len(gone),
+                    bounded_names(gone),
+                )
             )
         if working:
             # ⚠️ Same shape as the gone line, different reason and a different
@@ -727,12 +843,15 @@ def read_drive_ledger(path):
 
     observed = {}
     for row in data.get("entries") or []:
-        if isinstance(row, dict) and row.get("session_id"):
-            observed[row["session_id"]] = (row.get("verdict"), streak_of(row))
+        if not isinstance(row, dict):
+            continue
+        sid = as_session_id(row.get("session_id"))
+        if sid:
+            observed[sid] = (row.get("verdict"), streak_of(row))
     for key, row in data.items():
         if key == "entries" or not isinstance(row, dict):
             continue
-        sid = row.get("sid") or row.get("session_id") or key
+        sid = as_session_id(row.get("sid") or row.get("session_id") or key)
         if sid and sid not in observed:
             observed[sid] = (row.get("verdict"), streak_of(row))
     return observed
@@ -774,30 +893,28 @@ def cmd_stall(args):
         return 0
     live = live_sessions()
     if live is None:
-        sys.stderr.write(
-            "warning: session liveness unavailable, so a gone session cannot be "
-            "told from a stalled one; opening without that filter\n"
-        )
+        warn_liveness_unavailable("opening")
     eligible = []
     gone = []
     for sid in sorted(observed):
         verdict, streak = observed[sid]
         if verdict != "unverifiable" or streak < required:
             continue
-        if live is not None and sid.lower() not in live:
+        if live is not None and sid not in live:
             gone.append((sid, streak))
             continue
         eligible.append((sid, streak))
     if gone:
         # One line, not one per row: the drive ledger keeps a row for every session
         # that has ever been unverifiable, so a per-row line grows without bound as
-        # that graveyard does. The names stay, because a skip that only counted
-        # would be indistinguishable from a threshold that stopped firing.
+        # that graveyard does -- hence the bounded prefix. The names stay, because a
+        # skip that only counted would be indistinguishable from a threshold that
+        # stopped firing.
         print(
             "skipped %d gone session(s) past the threshold: %s"
             % (
                 len(gone),
-                ", ".join("%s(%d)" % (sid, streak) for sid, streak in gone),
+                bounded_names(["%s(%d)" % (sid, streak) for sid, streak in gone]),
             )
         )
     # Longest streak first, then session id — the drive leg's own order, so a backlog
@@ -1001,9 +1118,26 @@ def cmd_share(args):
     `pending` never counts as resolved -- that is the whole point. An incident that
     was answered and never resumed sits in the denominator and in no numerator, and
     an empty window prints `0 / 0 / 0%` rather than a vacuous 100%.
+
+    ⚠️ **A `skipped-gone` incident is EXCLUDED from the denominator**, and reported
+    beside it instead. Its session no longer exists, so it can never be answered and
+    never resumed: counting it would put an incident with no possible numerator into
+    the denominator of every all-time reading, permanently depressing the one number
+    this ledger exists to report. That is not a resolution that did not happen; it is
+    an incident that could not be resolved at all.
     """
     data = read_ledger()
     incidents = window_incidents(data["incidents"], args.days)
+    retired = [
+        incident
+        for incident in incidents
+        if (incident.get("outcome") or PENDING) == SKIPPED_GONE
+    ]
+    incidents = [
+        incident
+        for incident in incidents
+        if (incident.get("outcome") or PENDING) != SKIPPED_GONE
+    ]
     total = len(incidents)
     counts = {}
     for incident in incidents:
@@ -1017,8 +1151,19 @@ def cmd_share(args):
     print("resolved-by-manager: %d" % resolved)
     print("share: %.1f%%" % percent)
     for outcome in ALL_OUTCOMES:
+        # `skipped-gone` is EXCLUDED from `counts` by construction (see above), so
+        # printing its row here would always read `skipped-gone 0` directly above the
+        # `retired N` paragraph that reports the same incidents. The paragraph is the
+        # honest home for them; a zero row beside it reads as a contradiction.
+        if outcome == SKIPPED_GONE:
+            continue
         print("  %-12s %d" % (outcome, counts.get(outcome, 0)))
-    if total == 0:
+    if retired:
+        print(
+            "\nretired %d gone-session incident(s), excluded from the share -- their "
+            "session no longer exists, so no resolution was possible." % len(retired)
+        )
+    if total == 0 and not retired:
         print(
             "\n⚠️ no incidents in this window -- 0 / 0 / 0% is an empty population, "
             "not a 0% resolution rate."
@@ -1057,6 +1202,11 @@ def cmd_prune(args):
 
     Open incidents are never pruned: an incident with no resolution is the one record
     a reader most needs, and age is not a resolution.
+
+    ⚠️ **`skipped-gone` IS terminal, and this is what retires it from the file.** It
+    carries a `closed_at` like any other terminal outcome, so it is pruned on the
+    same clock -- without that, a gone session's record would sit in the ledger
+    forever, re-listed by `list` and re-counted by nothing else.
     """
     cutoff = parse_ts(now()) - datetime.timedelta(hours=args.max_age_hours)
     with Locked():
