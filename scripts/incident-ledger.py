@@ -220,13 +220,17 @@ def live_sessions():
     if result.returncode != 0:
         return None
     # ⚠️ **`degraded=` is NOT a veto, and treating it as one disables the gate.** The
-    # producer marks a row `degraded` when it is listed on the heartbeat endpoint but
-    # has no registry entry — the row is PRESENT and its session is live, merely
-    # uncorroborated. Measured 2026-10-29 on a healthy fleet: `rows=45
-    # registry_live=43 degraded=7`, i.e. `degraded > 0` is the NORMAL state, so a
-    # `degraded > 0 → None` rule would return "unavailable" every round, warn every
-    # round, and never retire anything — the same silent-off this gate exists to
-    # prevent, reached from the third side. Only an EMPTY list is unusable (below).
+    # producer marks a row `degraded` when the session IS in the identity registry but
+    # the endpoint holds NO live heartbeat row for it (`degraded: not row` on the
+    # registry loop, `False` on the endpoint-only loop, `session-liveness.py`
+    # `_list_payload`). The row is therefore PRESENT and its session is live, merely
+    # uncorroborated — so the count says nothing about a session MISSING from the set.
+    # Measured 2026-10-29 on a healthy fleet: `rows=45 registry_live=43 degraded=7` —
+    # 7 of the 43 registry rows lack a heartbeat and 2 rows are endpoint-only, so
+    # `degraded > 0` is the NORMAL state. A `degraded > 0 → None` rule would return
+    # "unavailable" every round, warn every round, and never retire anything — the same
+    # silent-off this gate exists to prevent, reached from the third side. Only an
+    # EMPTY list is unusable (below).
     # ⚠️ **The `rows=… registry_live=… degraded=…` header goes to STDERR, not stdout**
     # (measured 2026-10-22: with stderr discarded, stdout begins at `[`). The
     # tolerance below is therefore not the shape this reads today — it is a guard for
@@ -271,9 +275,12 @@ def live_sessions():
         # endpoint holds a live row, and returning an empty set would make every
         # eligible row read as gone: the whole stall class goes quiet behind a
         # plausible skip line. That is the same silent-off the fail-open rule above
-        # exists to prevent, reached from the fail-closed side. `degraded=` cannot
-        # separate the two cases when it is 0 and the list is empty, so the empty case
-        # fails open and says so.
+        # exists to prevent, reached from the fail-closed side.
+        # ⚠️ **Nothing here separates "empty fleet" from "empty measurement"** — the
+        # producer's `degraded=` counts rows it could not corroborate, not rows it
+        # could not see, so an empty payload carries `degraded=0` in both cases. An
+        # empty read is therefore never trusted as a fleet reading: it fails open and
+        # says so, which is the only direction that cannot suppress a live blocker.
         return None
     return live
 
