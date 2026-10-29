@@ -384,12 +384,11 @@ def plan(entries, ledger, round_tag, pane_for_fn, pane_text_fn, link_fn, max_act
             (before.get("unverifiable_observation") or "") if unverifiable else ""
         )
         # `>=`, not `==`: a row held back by the cap keeps advancing, so an equality test
-        # would never match it again. The two markers are what stop a repeat.
-        if (
-            streak >= THRESHOLD
-            and not entry["unverifiable_action"]
-            and not entry["unverifiable_observation"]
-        ):
+        # would never match it again. The ACTION marker is what stops a repeat action; the
+        # observation marker is deliberately NOT part of this test, because an observation
+        # took no action -- a row observed while pane-less that later resolves a pane must
+        # still get its one action.
+        if streak >= THRESHOLD and not entry["unverifiable_action"]:
             candidates.append((entry, sid))
     # Resolve the pane BEFORE the cap slice. The cap bounds how many rows ACT, and a row
     # with no pane has nothing to act on -- charging it a slot would spend the round's
@@ -402,7 +401,9 @@ def plan(entries, ledger, round_tag, pane_for_fn, pane_text_fn, link_fn, max_act
         pane = pane_for_fn(sid)
         if pane:
             resolving.append((entry, sid, pane))
-        else:
+        elif not entry["unverifiable_observation"]:
+            # The observation marker stops a REPEAT observation, nothing else: a gone
+            # session is named once, not every round.
             paneless.append((entry, sid))
 
     def longest_first(pair):

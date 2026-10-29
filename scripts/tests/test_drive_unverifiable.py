@@ -309,6 +309,28 @@ class TestActionChoice(Replay):
             "the streak keeps advancing behind the observation",
         )
 
+    def test_an_observed_row_still_acts_once_its_pane_resolves(self):
+        """An observation took no action, so it must not spend the row's one action.
+
+        The observation marker stops a REPEAT observation only. A row that was pane-less
+        and later resolves a pane is a session the manager can finally read, so it gets its
+        nudge -- the action marker, not the observation marker, is what bounds that to once.
+        """
+        sids = ("ffffffff",)
+        self.round("2026-10-22T10-00-00Z", [entry(s, "unverifiable") for s in sids])
+        acted, _ = self.round("2026-10-22T10-15-00Z", [entry(s, "unverifiable") for s in sids])
+        self.assertEqual([d["action"] for _, d in acted], ["observation"])
+        self.assertEqual(self.pane_reads, [])
+
+        # The pane now resolves: the row acts.
+        self.pane_for = lambda sid: "705" if sid == "ffffffff" else ""
+        acted, _ = self.round("2026-10-22T10-30-00Z", [entry(s, "unverifiable") for s in sids])
+        self.assertEqual([d["action"] for _, d in acted], ["nudge"])
+        self.assertEqual(self.pane_reads, ["705"], "exactly one text read, on the acting round")
+        self.assertEqual(
+            self.ledger_entries()["ffffffff"]["unverifiable_action"], "nudge"
+        )
+
 
 class TestCloserExtraction(unittest.TestCase):
     def test_last_closer_wins_and_a_mid_line_quote_does_not_match(self):
