@@ -90,9 +90,18 @@ test('an empty request id never matches a row that also has none', () => {
 // import and cannot be imported here.
 test('supervisor.mjs routes a missed request through the refusal, not a bare id', () => {
   const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  // ⚠️ Anchored on the ARM THAT PRECEDES IT, not on a byte window. A window cannot tell
+  // "reached from the not-found arm" from "reached from somewhere else in the same function",
+  // and the wrapper answer path added a second refusal arm inside the old 700-byte span. The
+  // foreign park must follow the answered/error arm and nothing else may sit between them.
   assert.match(
     src,
-    /case 'answer_permission': \{[\s\S]{0,700}?error: await foreignParkRefusal\(\{ requestId: args\.request_id, readLedger: readSessionLedger \}\)/,
+    /if \(viaWrapper\.answered \|\| viaWrapper\.error\) return reply\([\s\S]{0,400}?error: await foreignParkRefusal\(\{ requestId: args\.request_id, readLedger: readSessionLedger \}\)/,
+  )
+  // And the outage arm must still be tested BEFORE it, or it is dead code.
+  assert.match(
+    src,
+    /case 'answer_permission': \{[\s\S]{0,900}?if \(viaWrapper\.unreadable\) \{[\s\S]{0,400}?if \(viaWrapper\.answered \|\| viaWrapper\.error\)/,
   )
   assert.ok(
     !/no pending permission \$\{args\.request_id\} \(already answered, or expired\)/.test(src),
