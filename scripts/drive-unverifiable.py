@@ -9,12 +9,27 @@ from the task file, and nothing ever reads the session itself. Measured 2026-10-
 drive leg marked 99 of 101 candidates unverifiable and did nothing.
 
 So a session unverifiable for **two consecutive rounds** has its pane read, and gets one
-of two actions:
+of three outcomes:
 
   * **nudge** -- the pane renders a closer line, so the line is quoted back to the session
     verbatim. Read-only context: it authorises nothing, and it says so.
-  * **escalation** -- the pane resolves no closer (gone, unreadable, or rendering none),
-    so the manager cannot see what the session waits on and an attention card says so.
+  * **escalation** -- the pane RESOLVES but no closer can be read from it (unreadable, or
+    rendering none), so the manager cannot see what the session waits on and an attention
+    card says so.
+  * **observation** -- no pane resolves at all. Measured 2026-10-22: 102 of 114 unverifiable
+    rows resolved no pane. Such a session is not silent, it is GONE: there is nothing to
+    read and nothing the operator can do about it, which is the test every card has to
+    pass. It is recorded in the `UNVERIFIABLE` block as an observation, produces no card,
+    and -- because nothing was sent -- consumes no per-round cap slot.
+
+WHY THE OBSERVATION IS A THIRD MARKER, NOT A THIRD ACTION. `drive-share.py` counts any
+non-empty `unverifiable_action` as an action taken, because for a nudge or a card that is
+what it means. An observation took no action, so writing it there would inflate the
+detected->verified numerator by one on every pane-less row -- the metric this rule exists
+to keep honest. It therefore lives in its own `unverifiable_observation` field, which
+`drive-share.py` does not read, and it is cleared with the streak exactly as the action
+marker is. The two markers are independent, so a row observed while pane-less that later
+gains a pane still gets its one action.
 
 WHY THE PANE READ IS HERE AND NOT IN THE AGENT. `agents/fleet-drive.md` forbids the agent
 looking for a pane itself, and the one place it may not look is exactly where the answer
@@ -30,7 +45,7 @@ the per-round cap keeps advancing its streak, so the round that finally admits i
 never 2, and it would be acted on never. The marker also carries the ordinary case — a
 session silent for six rounds gets one action, not five, which is the nag the ledger's
 suppression rule exists to prevent. A verdict that is not `unverifiable` clears both the
-streak and the marker, so a session that recovers and later goes silent is acted on again.
+streak and BOTH markers, so a session that recovers and later goes silent is acted on again.
 The streak is consecutive only when its round tag equals the ledger's own `round`, so a
 gap resets the count without anything having to notice it.
 
@@ -41,7 +56,8 @@ field was new and every retained row started from nothing -- so the next round w
 opened up to 112 pane reads and emitted up to 112 nudges or attention cards in one tick.
 Most were rows with no task file or long-dead sessions, whose only possible action is a
 card saying "no pane resolves": nothing the operator can DO, which is the test every
-card has to pass. The cap orders by LONGEST streak first, then session id, so a backlog
+card has to pass. Those rows are now OBSERVATIONS and never reach the cap at all (see the
+observation bullet above), so the cap spends its slots only on rows that resolve a pane. The cap orders by LONGEST streak first, then session id, so a backlog
 drains oldest-first and nothing starves; a held-back row keeps its streak and its empty
 action marker, so it stays eligible, and `render()` names the rows held back so a backlog
 is visible rather than silently dropped. A cap that reported nothing would be
@@ -201,13 +217,18 @@ def advance(entry, prior, ledger_round, round_tag):
     return 1, round_tag
 
 
-def decide(sid, entry, pane_for_fn, pane_text_fn, link_fn):
+def decide(sid, entry, pane_for_fn, pane_text_fn, link_fn, resolved_pane=None):
     """One row's action at the threshold. This is the seam the test stubs.
 
     Returns {"action", "pane", "link", "closer", "pane_line", "why", "text"}. `action` is
-    `nudge` when the pane renders a closer line and `escalation` otherwise -- including
-    when the pane is gone or unreadable, because those are the cases where the manager
-    most needs to know the session could not be read at all.
+    `nudge` when the pane renders a closer line, `observation` when no pane resolves at all
+    (nothing to read, nothing the operator could do), and `escalation` when the pane
+    RESOLVES but no closer can be read from it -- unreadable, or rendering none. Those two
+    are the cases where the manager most needs to know the session could not be read.
+
+    `resolved_pane` lets `plan()` resolve the pane ONCE, before the cap slice, so a
+    pane-less row never consumes a cap slot; when it is given, `pane_for_fn` is not called
+    again. `""` is a real value (no pane) and `None` means "not resolved yet".
     """
     name = entry.get("name") or "?"
     task_file = (entry.get("task_file") or "").strip()
@@ -216,16 +237,16 @@ def decide(sid, entry, pane_for_fn, pane_text_fn, link_fn):
     # 3, 4, … and telling it "unverifiable for 2 consecutive rounds" understates how long it
     # waited -- on the one line a peer reads to decide whether to act.
     streak = entry.get("unverifiable_streak") or THRESHOLD
-    pane = pane_for_fn(sid)
+    pane = resolved_pane if resolved_pane is not None else pane_for_fn(sid)
     if not pane:
         return {
-            "action": "escalation",
+            "action": "observation",
             "pane": "",
             "link": "",
             "closer": "",
             "pane_line": "%s → no pane resolved" % PANE_COMMAND,
             "why": "no pane resolves for the session",
-            "text": escalation_text(name, sid, task_file, probe, "no pane resolves", streak),
+            "text": "",
         }
     text = pane_text_fn(pane)
     if text is None:
@@ -306,7 +327,9 @@ def plan(entries, ledger, round_tag, pane_for_fn, pane_text_fn, link_fn, max_act
     through two rounds against a tmp ledger without a WezTerm or a session registry. It
     mutates the entries it is given (they ARE the merge payload) and returns
     `(acted, held)`: the rows acted on, and the rows that reached the threshold but were
-    held back by the cap this round.
+    held back by the cap this round. A row whose pane does not resolve is returned in
+    `acted` with action `observation` and is NEVER counted against `max_actions` -- the cap
+    is spent only on rows that resolve a pane and therefore have something to act on.
 
     ⚠️ **The cap is applied AFTER every streak is advanced, never before.** A held-back
     row must still have its `unverifiable_streak` written this round, or its count resets
@@ -351,23 +374,51 @@ def plan(entries, ledger, round_tag, pane_for_fn, pane_text_fn, link_fn, max_act
         streak, streak_round = advance(entry, before, ledger_round, round_tag)
         entry["unverifiable_streak"] = streak
         entry["unverifiable_round"] = streak_round
-        # A verdict that is not `unverifiable` clears the action marker with the streak, so
-        # a session that recovers and later goes silent again can be acted on a second time.
+        # A verdict that is not `unverifiable` clears BOTH markers with the streak, so a
+        # session that recovers and later goes silent again can be acted on a second time.
+        unverifiable = (entry.get("verdict") or "") == "unverifiable"
         entry["unverifiable_action"] = (
-            (before.get("unverifiable_action") or "")
-            if (entry.get("verdict") or "") == "unverifiable"
-            else ""
+            (before.get("unverifiable_action") or "") if unverifiable else ""
+        )
+        entry["unverifiable_observation"] = (
+            (before.get("unverifiable_observation") or "") if unverifiable else ""
         )
         # `>=`, not `==`: a row held back by the cap keeps advancing, so an equality test
-        # would never match it again. The action marker is what stops a second action.
-        if streak >= THRESHOLD and not entry["unverifiable_action"]:
+        # would never match it again. The two markers are what stop a repeat.
+        if (
+            streak >= THRESHOLD
+            and not entry["unverifiable_action"]
+            and not entry["unverifiable_observation"]
+        ):
             candidates.append((entry, sid))
-    candidates.sort(key=lambda pair: (-(pair[0].get("unverifiable_streak") or 0), pair[1]))
-    chosen = candidates[: max(0, max_actions)]
-    held = candidates[max(0, max_actions) :]
+    # Resolve the pane BEFORE the cap slice. The cap bounds how many rows ACT, and a row
+    # with no pane has nothing to act on -- charging it a slot would spend the round's
+    # budget on a row nobody can do anything about, which is exactly the 102-of-114 case
+    # this rule exists to remove. `pane_for_fn` is the cheap lookup; the expensive text
+    # read stays inside `decide()`, so a held-back row still costs no read.
+    paneless = []
+    resolving = []
+    for entry, sid in candidates:
+        pane = pane_for_fn(sid)
+        if pane:
+            resolving.append((entry, sid, pane))
+        else:
+            paneless.append((entry, sid))
+
+    def longest_first(pair):
+        return (-(pair[0].get("unverifiable_streak") or 0), pair[1])
+
+    resolving.sort(key=longest_first)
+    paneless.sort(key=longest_first)
+    chosen = resolving[: max(0, max_actions)]
+    held = [(entry, sid) for entry, sid, _ in resolving[max(0, max_actions) :]]
     acted = []
-    for entry, sid in chosen:
-        decision = decide(sid, entry, pane_for_fn, pane_text_fn, link_fn)
+    for entry, sid in paneless:
+        decision = decide(sid, entry, pane_for_fn, pane_text_fn, link_fn, resolved_pane="")
+        entry["unverifiable_observation"] = decision["action"]
+        acted.append((entry, decision))
+    for entry, sid, pane in chosen:
+        decision = decide(sid, entry, pane_for_fn, pane_text_fn, link_fn, resolved_pane=pane)
         entry["unverifiable_action"] = decision["action"]
         acted.append((entry, decision))
     return acted, held
@@ -388,8 +439,8 @@ def render(acted, held=(), max_actions=MAX_ACTIONS):
     what will be sent this round.
     """
     lines = [
-        "UNVERIFIABLE — a session unverifiable %d+ consecutive rounds, its pane read, and the "
-        "action taken" % THRESHOLD
+        "UNVERIFIABLE — a session unverifiable %d+ consecutive rounds, what its pane read "
+        "returned, and the outcome (observation = no pane resolved, not actioned)" % THRESHOLD
     ]
     for entry, decision in acted:
         lines.append(
@@ -403,7 +454,9 @@ def render(acted, held=(), max_actions=MAX_ACTIONS):
             )
         )
         lines.append("      pane: %s" % decision["pane_line"])
-        if decision["closer"]:
+        if decision["action"] == "observation":
+            lines.append("      not actioned: no card, no cap slot")
+        elif decision["closer"]:
             lines.append("      closer: %s" % decision["closer"])
         else:
             lines.append("      why: %s" % decision["why"])
