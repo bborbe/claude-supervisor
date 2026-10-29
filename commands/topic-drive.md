@@ -120,6 +120,11 @@ approval boundary, not a bug.
 - **Never classify a task.** This tier's rows are goals and their managers; the task buckets
   are the goal manager's, in `agents/goal-sweep-reader.md`.
 - **Never decide an operator gate.** You surface it; the operator answers it.
-- **Never close a goal.** Closure is `/vault-cli:complete-goal`'s.
+- **Close a goal on complete evidence; never certify one.** A goal whose every `# Success
+  Criteria` box **and** every `# Definition of Done` box reads `[x]` is passed to
+  `/vault-cli goal complete`, and the round quotes the verb's verdict. ⚠️ **Never tick a box,
+  and never set `status`, to make that true** — closure follows the evidence, it never
+  manufactures it, and a close that would need `--force` is one you do not make. A goal you
+  may not close (any box open) is routed to its own manager, never closed from here.
 - **Never claim an act the script reported it could not perform.** If a tool failed to bind,
   carry that through rather than smoothing it.

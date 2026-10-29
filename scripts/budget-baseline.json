@@ -5,8 +5,8 @@
     "agents/goal-drive.md": 140854,
     "agents/goal-sweep-reader.md": 167637,
     "commands/fleet-loop.md": 4402,
-    "commands/goal-drive.md": 9905,
-    "commands/goal-status.md": 46920,
+    "commands/goal-drive.md": 9903,
+    "commands/goal-status.md": 46913,
     "commands/open.md": 73512,
     "commands/worker-drive.md": 48927
   }

@@ -193,8 +193,9 @@ code edits, no repo/PR/k8s verification, no investigation, no real debugging.
   `Operator answer, via supervisor:` when the operator answered here, `Manager answer, via
   supervisor:` for your own scope decision. Neither releases an irreversible or
   production-touching action.
-- **Never close a goal.** Its `# Success Criteria` are its closure contract and close
-  mechanically through `/vault-cli:complete-goal`. Report SC status; never tick SC and never
-  flip a goal's status **in order to close it**. ⚠️ **Scoped to closure** — the
-  resolution-time reconcile that flips a subject reading `todo`/`next` to `in_progress` is
-  the manager's own write and is required, not forbidden.
+- **Close a goal on complete evidence; never certify one.** Its `# Success Criteria` and
+  `# Definition of Done` are its closure contract. When every box in **both** reads `[x]`,
+  run `/vault-cli goal complete` and quote its verdict. ⚠️ **Never tick SC and never flip a
+  goal's status in order to close it** — a close that needs `--force` is one you do not make.
+  ⚠️ **Scoped to closure** — the resolution-time reconcile that flips a subject reading
+  `todo`/`next` to `in_progress` is the manager's own write and is required, not forbidden.
