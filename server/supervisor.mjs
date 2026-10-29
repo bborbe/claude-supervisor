@@ -17,7 +17,7 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
-import { answerWrappedSession, sendWrappedSession, spawnWrappedSession, streamWrappedSession } from './wrapper-stream.mjs'
+import { answerWrappedSession, readWrappedSession, sendWrappedSession, spawnWrappedSession, streamWrappedSession } from './wrapper-stream.mjs'
 import { HEARTBEAT_INTERVAL_MS, a2aStamp, clearStamp, heartbeatDir, selfStampRefusal, stampRecord, startSelfStamp } from './heartbeat.mjs'
 import { workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
@@ -708,6 +708,44 @@ function makeCanUseTool(agent) {
       log(`permission requested by ${agent.id}: ${toolName} (${requestId})`)
       for (const waiter of [...waiters]) waiter(publicPerm(record))
     })
+}
+
+// Answer a park the WRAPPER holds, for a wrapper-backed worker. Returns the reply, or null
+// when no wrapper-backed worker is parked on this request id.
+//
+// ⚠️ The id is authoritative and the record is read LIVE, never from a cache. A worker can
+// unpark and re-park between a status read and this call, so answering by agent would answer
+// a question the caller never saw; naming the request id means a stale call gets the
+// wrapper's own 409 and changes nothing. That asymmetry is the whole reason this shape was
+// chosen over an `agent_id` argument.
+async function answerWrapperPark(requestId, behavior) {
+  const wanted = behavior === 'allow' ? 'allow' : 'deny'
+  for (const agent of agents.values()) {
+    if (!agent.wrapperSessionId) continue
+    let session
+    try {
+      session = await readWrappedSession({ baseUrl: config.wrapperUrl, sessionId: agent.wrapperSessionId })
+    } catch {
+      // An unreachable wrapper is NOT "no such park" — the caller's refusal reports which
+      // sources were consulted, so this reads as the outage it is rather than a foreign park.
+      continue
+    }
+    if (session?.question?.request_id !== requestId) continue
+    try {
+      await answerWrappedSession({
+        baseUrl: config.wrapperUrl,
+        sessionId: agent.wrapperSessionId,
+        requestId,
+        behavior: wanted,
+      })
+    } catch (error) {
+      return { error: `wrapper answer for ${agent.id} failed: ${error.message}` }
+    }
+    if (agent.status === 'blocked-on-permission') agent.status = 'running'
+    log(`permission ${requestId} ${wanted.toUpperCase()} by manager (wrapper-backed worker ${agent.id})`)
+    return { answered: requestId, behavior: wanted, agent_id: agent.id, via: 'wrapper' }
+  }
+  return null
 }
 
 function waitForPermission(timeoutMs) {
@@ -3584,11 +3622,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case 'answer_permission': {
       const record = pending.get(args.request_id)
       if (!record) {
+        const viaWrapper = await answerWrapperPark(args.request_id, args.behavior)
+        if (viaWrapper) return reply(viaWrapper)
+        // Two sources — `pending` above, wrapper records in answerWrapperPark — so
+        // `sources_consulted` below keeps an outage from reading as a foreign park.
         // ⚠️ Never the bare `no pending permission <id>`: the commonest reason this misses is
         // that the park belongs to ANOTHER manager's server, and that caller can act on the
         // store route. See `park-refusal.mjs`.
         return reply({
           error: await foreignParkRefusal({ requestId: args.request_id, readLedger: readSessionLedger }),
+          sources_consulted: ['pending', 'wrapper'],
         })
       }
       // Record the manager's verdict too: a key the manager allows over and over
