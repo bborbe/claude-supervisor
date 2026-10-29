@@ -947,9 +947,13 @@ class TestLiveSessions(Base):
         warned every round, and never retired anything — the gone gate was silently
         off in the leg that posts the cards. A session ABSENT from a non-empty set is
         still absent; only an EMPTY set is unusable.
+
+        The header is the shape the producer can actually emit: `degraded` is set only
+        on REGISTRY rows, so `registry_live >= degraded` always holds. `rows=1
+        registry_live=0 degraded=1` is impossible and would pin a synthetic case.
         """
         self.stub_run(
-            '[{"sessionId": "a"}]', stderr="rows=1 registry_live=0 degraded=1\n"
+            '[{"sessionId": "a"}]', stderr="rows=1 registry_live=1 degraded=1\n"
         )
         self.assertEqual(il.live_sessions(), {"a"})
 
