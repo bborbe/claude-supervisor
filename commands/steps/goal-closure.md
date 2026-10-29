@@ -13,8 +13,8 @@ Applies to the round's own subject and to every page in its tracked set, when ev
 
 **A page whose evidence is complete closes itself. Nobody certifies it.**
 
-The rule and its rationale have one home — `commands/goal-loop.md` § Manager contract
-(*"You may close a goal; you may never certify one"*). This step owns only the execution.
+The rule and its rationale have one home — `commands/goal-loop.md` § Resolution, the bullet
+*"You may close a goal; you may never certify one"* (line 136). This step owns only the execution.
 
 ## What to do
 
@@ -51,6 +51,10 @@ For the subject, then each page of the tracked set:
    ⚠️ **`--vault` is not optional** — without it the write targets the default vault, so a
    subject in any other vault lands on the wrong page or nowhere at all. It is the same
    explicit-`--vault` contract `commands/steps/goal-resolve.md` carries for the manager's write.
+
+   ⚠️ **Escape the names before interpolating them into a shell line**, exactly as
+   `commands/open.md:499` mandates for its own write — a page title containing `"` closes the
+   inner quoting, and one containing `$(…)` executes. This line runs unattended every tick.
 
    The verb re-checks its own gate. **Its verdict is the authority, never this step's read** —
    when the two disagree, the verb wins and the disagreement is reported, not resolved by hand.

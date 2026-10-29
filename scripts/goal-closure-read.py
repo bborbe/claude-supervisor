@@ -44,6 +44,10 @@ TERMINAL_STATUSES = {"completed", "aborted"}
 _BOX = re.compile(r"^[ \t]*[-*+][ \t]*\[(.)\]", re.M)
 _DONE = {"x", "X"}
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+# A checkbox inside a fenced block is an EXAMPLE, not a box. It fails open in the
+# dangerous direction: a section with no real box but a fenced `- [x]` reads (1, 0)
+# instead of (0, 0), so it stops being UNMEASURABLE and can contribute to a CLOSE.
+_FENCE = re.compile(r"^[ \t]*(```|~~~).*?^[ \t]*\1[^\n]*$", re.S | re.M)
 
 
 def read_status(text):
@@ -67,7 +71,7 @@ def read_section(text, name):
     if not m:
         return None
     done = open_ = 0
-    for marker in _BOX.findall(m.group(1)):
+    for marker in _BOX.findall(_FENCE.sub("", m.group(1))):
         if marker in _DONE:
             done += 1
         else:

@@ -77,6 +77,16 @@ class VerdictTest(unittest.TestCase):
     def test_unrecognised_marker_is_open(self):
         self.assertEqual(self._verdict(_page("- [x] a", "- [-] c")), "OPEN")
 
+    def test_fenced_example_does_not_make_a_section_measurable(self):
+        # A fenced `- [x]` in an otherwise empty section is an EXAMPLE. Counting it
+        # would turn (0, 0) into (1, 0) and let the page reach the close verb.
+        page = _page("- [x] a", "```\n- [x] example only\n```")
+        self.assertEqual(self._verdict(page), "UNMEASURABLE")
+
+    def test_fenced_example_does_not_block_a_real_close(self):
+        page = _page("- [x] a\n\n```\n- [ ] example only\n```", "- [x] c")
+        self.assertEqual(self._verdict(page), "CLOSE")
+
     def test_completed_page_is_terminal(self):
         self.assertEqual(self._verdict(_page("- [x] a", "- [x] c", status="completed")), "TERMINAL")
 
@@ -119,6 +129,12 @@ class CliTest(unittest.TestCase):
 
     def test_open_exits_one(self):
         self.assertEqual(self._run(_page("- [ ] a", "- [x] c")), 1)
+
+    def test_terminal_exits_one(self):
+        # The step says the reader "exits 0 only on CLOSE", and it distinguishes
+        # TERMINAL from CLOSE by the printed verdict. A regression returning 0 here
+        # would still pass every verdict_of assertion above.
+        self.assertEqual(self._run(_page("- [x] a", "- [x] c", status="completed")), 1)
 
     def test_unreadable_page_exits_two(self):
         self.assertEqual(closure.main(["goal-closure-read.py", "/nonexistent/page.md"]), 2)

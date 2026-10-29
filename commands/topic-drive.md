@@ -75,7 +75,16 @@ arm or the step file — do not act from memory of a previous round.
 
 ## Keep alive — inline, because it runs every tick
 
-For **each goal this topic declares**, one call decides:
+⚠️ **First, drop every goal whose page reads a terminal `status` (`completed`/`aborted`).**
+Row 4c has already run this tick and may have just closed one, and `topic-keepalive.py` decides
+`jump`/`resume`/`restart` from `manager_session_id` liveness and the armed-loop state only — it
+never reads `status`, and `/supervisor:open --goal` gates on `phase`, not on `status`. So a goal
+closed at 4c whose manager is `ABSENT` reaches the `resume` arm below in the same tick, and
+`/supervisor:open --goal` re-opens a finished goal. That is the *"finished goal silently restarts"*
+failure this round exists to prevent, and it is the round's job to skip the row — the keep-alive
+probe cannot see it.
+
+For **each remaining goal this topic declares**, one call decides:
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/topic-keepalive.py \
