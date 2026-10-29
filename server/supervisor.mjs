@@ -9,7 +9,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { query, resolveSettings } from '@anthropic-ai/claude-agent-sdk'
+import { resolveSettings } from '@anthropic-ai/claude-agent-sdk'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { isAbsolute, join } from 'path'
@@ -17,6 +17,7 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
+import { answerWrappedSession, sendWrappedSession, spawnWrappedSession, streamWrappedSession } from './wrapper-stream.mjs'
 import { HEARTBEAT_INTERVAL_MS, a2aStamp, clearStamp, heartbeatDir, selfStampRefusal, stampRecord, startSelfStamp } from './heartbeat.mjs'
 import { workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
@@ -1050,6 +1051,48 @@ function launcherPreservesModeEnv(scriptPath) {
 // CLI flag, not as settings, so settingSources cannot reach them: an SDK worker with
 // settings loaded still saw 7 fewer servers than its tab twin. Handing the same file
 // to query()'s mcpServers is what makes the two modes functionally identical.
+// The launcher's own `--mcp-config <file>` path, for the wrapper-backed path.
+//
+// resolveMcpServers parses that file and returns the SERVERS, which is what the SDK's
+// `mcpServers` option takes. The wrapper takes a FILE, so the same regex is used here to
+// return the path itself — one source of truth for "where the launcher keeps its config",
+// two shapes because the two spawn mechanisms disagree about what they want.
+function launcherMcpConfigFile(claudeCmd) {
+  if (config.mcpConfig) return config.mcpConfig
+  if (!claudeCmd) return null
+  try {
+    const match = readFileSync(claudeCmd, 'utf8').match(/--mcp-config\s+["']?(~?[^"'\s\\]+)/)
+    if (!match) return null
+    return match[1].replace(/^~/, homedir())
+  } catch {
+    return null
+  }
+}
+
+// What a wrapper-backed worker does NOT get, named field by field.
+//
+// ⚠️ A summary ("policy unavailable") is not enough: a reader has to know WHICH parts went
+// quiet, because they differ in consequence. The 15-minute deny changes behaviour most — a
+// prompt that used to die now parks indefinitely — and `decide()` is the one whose absence
+// turns every policy-allowed prompt into a human wait. Named individually so an operator
+// reading a spawn response can decide what to depend on, and so an answered park in a
+// wrapper-backed run is attributable to the wrapper's hook rather than to a policy tier
+// that never ran.
+function wrapperPolicyGap({ shipping }) {
+  return {
+    // Why: the wrapper spends the child's single --permission-prompt-tool on its own MCP
+    // tool, and the supervisor sees the child only as an event stream.
+    reason: 'wrapper owns the permission hook',
+    not_run: ['decide()', 'manager allowlist', 'carried decision', '15-minute deny'],
+    // The shipping tier is a SEPARATE loss, not a restatement: permission_mode survives,
+    // the flag-tier `settings` object does not, so a wrapper-backed shipping worker hits
+    // the permission channel for the edits and git verbs its flag tier was meant to skip.
+    shipping_settings: shipping === true ? 'not applied — no wrapper counterpart for the settings tier' : 'n/a',
+    // What IS still true, so the field is not read as "nothing works".
+    answerable_via: 'POST /api/1.0/sessions/{id}/answer',
+  }
+}
+
 function resolveMcpServers(claudeCmd) {
   let path = config.mcpConfig
   if (!path) {
@@ -2525,6 +2568,10 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // recoverable is a separate change (persist it, then read it back in `toAgentRecord`).
     shipping: shipping === true,
     sessionId: null,
+    // The WRAPPER's handle for this child, set on the wrapper-backed headless path only.
+    // Every wrapper route keys off it, and it is the only thing that can reach a park the
+    // wrapper holds. Null for a tab or cluster worker, which have no wrapper session.
+    wrapperSessionId: null,
     // Which conversation this one continues, when it is an adoption rather than a
     // fresh start. `sessionId` alone cannot say: on resume the SDK reports the SAME
     // id, so the two fields together are what tell the operator which conversation
@@ -2699,44 +2746,59 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // the headless path each resolved the launcher separately and could disagree about the
   // same spawn.
 
-  const q = query({
-    prompt,
+  // ⚠️ **The headless child is started by claude-wrapper, not by this process.** A
+  // permission park belongs to whoever holds the child's stdin: `canUseTool` parked into
+  // THIS process's `pending` Map, so a prompt raised here was answerable only by this
+  // server and died with it after 15 minutes. With the wrapper holding stdin,
+  // `POST /api/1.0/sessions/{id}/answer` releases the park from any manager.
+  //
+  // ⚠️ **What the seam costs, named rather than implied.** The wrapper spends the child's
+  // single `--permission-prompt-tool` on its own MCP tool, so this server never sees a
+  // prompt and none of its policy machinery can run. `wrapperPolicyGap` carries that on the
+  // agent record AND the spawn response, because a reader who has to infer which parts went
+  // quiet will infer wrong in the direction that matters — the 15-minute deny changes
+  // behaviour most. It is also what makes SC2 falsifiable: an answered park in such a run
+  // was answered by the wrapper's hook, never by `decide()`.
+  const wrapperSession = await spawnWrappedSession({
+    baseUrl: config.wrapperUrl,
     options: {
       cwd: agent.cwd,
-      // Hand the worker the mode this server already resolved, so it never has to infer
-      // its own from a config file that describes the fleet rather than this worker. The
-      // SDK's `env` REPLACES the subprocess environment instead of merging with it, which
-      // is why workerEnvFor spreads the inherited env — without that spread the worker
-      // loses PATH, HOME and ANTHROPIC_BASE_URL, and the last of those silently stops it
-      // routing through the router. That base env comes from config.mjs rather than being
-      // read here, because this module owns no environment reads at all.
-      // `overrides` is the caller's per-call `env`. It sits above the inherited environment
-      // and below the mode handover — see workerEnvFor for why that order is the only
-      // correct one.
+      // The mode and environment this server already resolved, handed to the child
+      // directly. The wrapper MERGES `env` over its own environment, which is why the whole
+      // inherited environment rides along: a hand-picked subset would drop PATH, HOME and
+      // ANTHROPIC_BASE_URL, and losing the last silently stops the worker routing through
+      // the router while looking like nothing at all.
       env: workerEnvFor({ mode: spawnMode.mode, source: spawnMode.source, env: config.baseEnv, overrides: envOverrides }),
-      // Load the same settings an interactive session gets. Without this the SDK
-      // starts from nothing — no plugin skills, no settings.json permissions, no
-      // user MCP servers — and a worker missing its normal tooling is not a cheaper
-      // worker, it is one that fails in unfamiliar ways.
-      settingSources: SETTING_SOURCES,
-      // Same reason as settingSources: parity with a tab worker. Spawning is rare, so
-      // the per-spawn launcher lookup is not a hot path.
-      mcpServers: resolveMcpServers(agent.launcher),
-      // Continuing an existing conversation. Because THIS call creates the session,
-      // canUseTool applies to it — which is the whole point: a session you did not
-      // create cannot be supervised, but one you resume you do create.
+      // A shipping worker runs under `acceptEdits`, so its edits and its three git verbs
+      // never depend on the permission channel. ⚠️ Only the MODE survives the wrapper: the
+      // flag-tier `settings` object has no wrapper counterpart, which `wrapperPolicyGap`
+      // records separately — a wrapper-backed shipping worker is not faithfully wrapped.
+      permission_mode: shipping === true ? SHIPPING_PERMISSION_MODE : PERMISSION_MODE,
+      // The launcher's own config FILE. It arrives as a CLI flag, so no setting source can
+      // reach it, and without it this worker's server list is measurably shorter than a tab
+      // worker's — the gap `resolveMcpServers` was written to close on the SDK path.
+      ...(launcherMcpConfigFile(agent.launcher) ? { mcp_configs: [launcherMcpConfigFile(agent.launcher)] } : {}),
+      // Continuing a conversation: the wrapper emits `--resume` INSTEAD of minting an id,
+      // so the child's claude id is the resumed one and arrives on `system`/`init` exactly
+      // as it did through `query()`.
       ...(resume ? { resume } : {}),
-      // Resolved and validated once at module load — never read env in the hot path.
-      // A shipping worker runs under `acceptEdits` instead, so its edits and its three git
-      // verbs never depend on the permission channel; see shipping-settings.mjs for why
-      // that mode and not a wider one. The option and the flag-tier `settings` say the
-      // same thing on purpose: either alone leaves a reader to wonder which one won.
-      permissionMode: shipping === true ? SHIPPING_PERMISSION_MODE : PERMISSION_MODE,
-      ...(shipping === true ? { settings: shippingSettings(true) } : {}),
-      canUseTool: makeCanUseTool(agent),
-      hooks: { PermissionRequest: [{ hooks: [makePermissionHook(agent)] }] },
     },
   })
+  if (!wrapperSession || !wrapperSession.id) {
+    throw new Error(`wrapper spawn for ${id} returned no session id — nothing can answer its prompts`)
+  }
+  // The WRAPPER's handle, never the child's claude id: every wrapper route keys off it, and
+  // it is the only thing `answer_permission` can use to reach a park.
+  agent.wrapperSessionId = wrapperSession.id
+
+  // ⚠️ The opening turn is a SEPARATE call. `query({ prompt })` delivered it while creating
+  // the session; the wrapper takes turns as messages, so a spawn that only streams leaves a
+  // child that initialises and sits idle — indistinguishable from one that is thinking.
+  if (prompt) {
+    await sendWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id, text: prompt })
+  }
+
+  const q = streamWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id })
   agent.query = q
 
   // Fire-and-forget on purpose: a spawn must return its agent id without waiting for
@@ -2770,6 +2832,11 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // inferring it from the absence of an error.
     policy: agent.policyPath,
     shipping: agent.shipping === true,
+    // ⚠️ Reported, never omitted. A caller that needs `decide()` or the 15-minute deny must
+    // be able to refuse to depend on them HERE, rather than discover their absence when a
+    // prompt parks forever. Named field by field — see wrapperPolicyGap.
+    policy_gap: wrapperPolicyGap({ shipping: agent.shipping }),
+    wrapper_session_id: agent.wrapperSessionId,
     // Same field as the tab path, and here too it is not redundant: this is the half a
     // headless-only implementation would leave unexercised, so a caller reading it back is
     // how "both paths carry it" stops being a claim about the diff. Keys only — see envReport.

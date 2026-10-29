@@ -93,6 +93,29 @@ export async function answerWrappedSession({ baseUrl, sessionId, requestId, beha
   return resp.json()
 }
 
+/**
+ * Deliver one turn to a wrapped child.
+ *
+ * ⚠️ This exists because the wrapper has no `prompt` field on spawn — a turn arrives as a
+ * message. `query({ prompt })` delivered the opening turn as part of creating the session,
+ * so a caller that spawns through the wrapper and then only streams gets a child that
+ * starts, initialises and sits idle forever. A failed send is never a no-op for that
+ * reason: the idle child looks exactly like one that is thinking.
+ */
+export async function sendWrappedSession({ baseUrl, sessionId, text, fetchImpl = fetch }) {
+  const resp = await fetchImpl(`${baseOf(baseUrl)}/api/1.0/sessions/${encodeURIComponent(sessionId)}/message`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text }),
+  })
+  if (!resp.ok) {
+    // 400 (empty text), 404 (unknown session), 410 (child exited) all mean the opening
+    // turn did not land.
+    throw new WrapperError(`wrapper message failed: HTTP ${resp.status}`, resp.status)
+  }
+  return resp.json()
+}
+
 /** Read one child's current record. Used only to classify an end, never to poll state. */
 export async function readWrappedSession({ baseUrl, sessionId, fetchImpl = fetch }) {
   const resp = await fetchImpl(`${baseOf(baseUrl)}/api/1.0/sessions/${encodeURIComponent(sessionId)}`, {

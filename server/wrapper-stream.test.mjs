@@ -18,6 +18,7 @@ import {
   answerWrappedSession,
   parseSSE,
   readParkedQuestion,
+  sendWrappedSession,
   spawnWrappedSession,
   streamWrappedSession,
 } from './wrapper-stream.mjs'
@@ -144,6 +145,29 @@ test('spawnWrappedSession posts the options and returns the session', async () =
   assert.equal(session.id, SESSION)
   assert.equal(sent.url, 'http://w/api/1.0/sessions')
   assert.deepEqual(sent.body, { cwd: '/tmp/x' })
+})
+
+test('sendWrappedSession posts the turn as a message', async () => {
+  let sent
+  const fetchImpl = async (url, init) => {
+    sent = { url, method: init.method, body: JSON.parse(init.body) }
+    return jsonResponse({ status: 'sent' })
+  }
+  const out = await sendWrappedSession({ baseUrl: 'http://w', sessionId: SESSION, text: 'Reply with ok', fetchImpl })
+  assert.equal(out.status, 'sent')
+  assert.equal(sent.url, `http://w/api/1.0/sessions/${SESSION}/message`)
+  assert.equal(sent.method, 'POST')
+  assert.deepEqual(sent.body, { text: 'Reply with ok' })
+})
+
+// A refused send is the failure that looks like success: the child exists, streams, and
+// never starts a turn.
+test('sendWrappedSession reports a refusal instead of returning quietly', async () => {
+  const fetchImpl = async () => ({ ok: false, status: 400 })
+  await assert.rejects(
+    sendWrappedSession({ baseUrl: 'http://w', sessionId: SESSION, text: '', fetchImpl }),
+    (err) => err instanceof WrapperError && err.status === 400,
+  )
 })
 
 test('answerWrappedSession treats 409 as a failure, not a released gate', async () => {

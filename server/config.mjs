@@ -356,6 +356,12 @@ export const config = Object.freeze({
   claudeCmd: ENV.SUPERVISOR_CLAUDE_CMD || null,
   mcpConfig: ENV.SUPERVISOR_MCP_CONFIG || null,
 
+  // Where claude-wrapper listens. The headless spawn path starts its children THERE rather
+  // than in this process, because a permission park belongs to whoever holds the child's
+  // stdin — and a park held here is answerable only by this server, then dies with it.
+  // Same default as the wrapper's own `--listen`, so an unconfigured machine works.
+  wrapperUrl: ENV.SUPERVISOR_WRAPPER_URL || 'http://localhost:18090',
+
   // The process environment, handed wholesale to a spawned worker so it inherits the
   // launcher's env — PATH, HOME and ANTHROPIC_BASE_URL among it. Here rather than read at
   // the spawn site because this module owns every environment read (see the header), and
