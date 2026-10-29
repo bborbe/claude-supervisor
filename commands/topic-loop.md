@@ -193,12 +193,14 @@ code edits, no repo/PR/k8s verification, no investigation, no real debugging.
   `Operator answer, via supervisor:` when the operator answered here, `Manager answer, via
   supervisor:` for your own scope decision. Neither releases an irreversible or
   production-touching action.
-- **Close on complete evidence; never certify one.** A goal's, a task's and this topic's own
+- **Close on complete evidence; never certify one.** A member goal's and this topic's own
   `# Success Criteria` and `# Definition of Done` are their closure contract. When every box in
-  **both** reads `[x]`, the round runs the tier's verb — `vault-cli goal|task|topic complete
-  "<page>" --vault "<vault>"` — and quotes its verdict; the execution, the terminal guard and
-  the `--vault` contract live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` and are
-  not restated here. ⚠️ **Never tick SC and never flip a page's status in order to close it** —
-  a close that needs `--force` is one you do not make.
+  **both** reads `[x]`, the round runs the tier's verb — `vault-cli goal complete "<goal>" --vault
+  "<vault>"` or `vault-cli topic complete "<topic>" --vault "<vault>"` — and quotes its verdict;
+  the execution, the terminal guard and the `--vault` contract live in
+  `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` and are not restated here. ⚠️ **Never
+  tick SC and never flip a page's status in order to close it** — a close that needs `--force`
+  is one you do not make. ⚠️ **Tasks are not this tier's** — a task closes under its goal's
+  manager, and this tier never reads a task file (`agents/topic-sweep-reader.md`).
   ⚠️ **Scoped to closure** — the resolution-time reconcile that flips a subject reading
   `todo`/`next` to `in_progress` is the manager's own write and is required, not forbidden.

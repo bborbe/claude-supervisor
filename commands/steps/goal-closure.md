@@ -6,7 +6,7 @@ user-invocable: false
 
 # Closure
 
-When: every tick, after the classify
+When: every tick, after the sweep
 
 Applies to the round's own subject and to every page in its tracked set, when every
 `# Success Criteria` box **and** every `# Definition of Done` box reads `[x]`.

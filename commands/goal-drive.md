@@ -58,7 +58,7 @@ Rationale and incident history: the Manager Session runbook § Command rationale
 | 3 | Sweep | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-sweep.md` |
 | 4 | Classify the rows | every tick, after the sweep | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-classify.md` |
 | 4b | Coverage | every tick, before the drive leg | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-coverage.md` |
-| 4c | Closure | every tick, after the classify | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` |
+| 4c | Closure | every tick, after the sweep | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` |
 | 5 | Drive | every tick, after the table renders | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-drive.md` |
 | 5b | Parked workers — one lever row each | every tick, after the drive leg returns | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-parked.md` |
 | 6 | Spawn on the handover | the drive leg returned `To open` / `To resume` rows | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-spawn.md` |

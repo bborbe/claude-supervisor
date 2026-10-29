@@ -44,15 +44,57 @@ TERMINAL_STATUSES = {"completed", "aborted"}
 _BOX = re.compile(r"^[ \t]*[-*+][ \t]*\[(.)\]", re.M)
 _DONE = {"x", "X"}
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
-# A checkbox inside a fenced block is an EXAMPLE, not a box. It fails open in the
-# dangerous direction: a section with no real box but a fenced `- [x]` reads (1, 0)
-# instead of (0, 0), so it stops being UNMEASURABLE and can contribute to a CLOSE.
-_FENCE = re.compile(r"^[ \t]*(```|~~~).*?^[ \t]*\1[^\n]*$", re.S | re.M)
+
+
+def normalise(text):
+    """Fold CRLF/CR to LF.
+
+    Universal-newlines mode already does this for a file read with `open(..., encoding=...)`,
+    but the reader is also called on strings a caller built, and a CRLF page that reaches the
+    delimiter unmatched loses the `status:` line entirely — which silently disables the
+    TERMINAL guard and re-closes a finished page on every tick. `docs/subject-resolution.md:137`
+    records the same trap for the shell path; this is the Python half of it.
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def strip_fences(text):
+    """Remove fenced code blocks, or return None when a fence is never closed.
+
+    A checkbox inside a fence is an EXAMPLE, not a box, and it fails open in the dangerous
+    direction: a section with no real box but a fenced `- [x]` reads (1, 0) instead of (0, 0),
+    so it stops being UNMEASURABLE and can contribute to a CLOSE.
+
+    Stripping happens over the WHOLE document, before the section is located — otherwise a
+    line beginning `# ` inside a fence (a shell comment in a verification example) truncates
+    the section, and every box after it goes uncounted. That direction loses an OPEN box and
+    reports CLOSE.
+
+    ⚠️ An UNTERMINATED fence returns None, which the caller reads as unmeasurable. Leaving its
+    content in place is the failure this function exists to prevent, so the refusal is the fix.
+
+    ⚠️ Known limit: a 4-space-indented code block is not stripped. Counting its boxes is the
+    fail-safe direction in general (an example `- [ ]` blocks a close), but an indented
+    `- [x]` in an otherwise empty section still reads as measurable. Stripping it properly
+    needs list context this reader does not carry.
+    """
+    out, in_fence, marker = [], False, ""
+    for line in normalise(text).splitlines(keepends=True):
+        stripped = line.lstrip()
+        if in_fence:
+            if stripped.startswith(marker):
+                in_fence = False
+            continue
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence, marker = True, stripped[:3]
+            continue
+        out.append(line)
+    return None if in_fence else "".join(out)
 
 
 def read_status(text):
     """The page's frontmatter `status:`, or None when the field is absent."""
-    m = _FRONTMATTER.match(text)
+    m = _FRONTMATTER.match(normalise(text))
     if not m:
         return None
     for line in m.group(1).splitlines():
@@ -67,11 +109,14 @@ def read_section(text, name):
     Returns (0, 0) for a section that is present but carries no box — the caller
     must treat that as unmeasurable, not as complete.
     """
-    m = re.search(rf"^# {re.escape(name)}\s*$(.*?)(?=^# |\Z)", text, re.S | re.M)
+    body = strip_fences(text)
+    if body is None:
+        return None
+    m = re.search(rf"^# {re.escape(name)}\s*$(.*?)(?=^# |\Z)", body, re.S | re.M)
     if not m:
         return None
     done = open_ = 0
-    for marker in _BOX.findall(_FENCE.sub("", m.group(1))):
+    for marker in _BOX.findall(m.group(1)):
         if marker in _DONE:
             done += 1
         else:
@@ -103,14 +148,18 @@ def main(argv):
         print(f"cannot read {argv[1]}: {exc}", file=sys.stderr)
         return 2
 
+    text = normalise(text)
     status = read_status(text)
+    fenced_ok = strip_fences(text) is not None
     sections = {name: read_section(text, name) for name in ("Success Criteria", "Definition of Done")}
     verdict = verdict_of(status, sections)
 
     print(f"status: {status or 'ABSENT'}")
+    if not fenced_ok:
+        print("fences: UNTERMINATED — the section bodies cannot be measured")
     for name, tally in sections.items():
         if tally is None:
-            print(f"{name}: MISSING")
+            print(f"{name}: MISSING" if fenced_ok else f"{name}: UNREADABLE")
         elif tally[0] + tally[1] == 0:
             print(f"{name}: 0 boxes — unmeasurable")
         else:

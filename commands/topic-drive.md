@@ -53,7 +53,7 @@ tiers). A worker row is reported downward.
 | 2 | Take the round's readings | every tick, **before** the sweep dispatch | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-readings.md` |
 | 2b | Quiet check | every tick, after the readings | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-quiet.md` |
 | 3 | Sweep — the goal rows and their manager state | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/topic-sweep.md` |
-| 4c | Closure — close what the evidence already finished | every tick, after the classify | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` |
+| 4c | Closure — close what the evidence already finished | every tick, after the sweep | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` |
 | 5 | Keep alive — resume, restart or leave, per goal | every tick, after the sweep | *inline — § Keep alive below* |
 | 6 | Start — the ranking, then `topic-spawn` | the keep-alive left a slot free and a startable goal is held | *inline — § Start below* |
 | 12 | Tail — `noop` and re-arm | end of every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-tail.md` |
@@ -130,8 +130,9 @@ approval boundary, not a bug.
 - **Never classify a task.** This tier's rows are goals and their managers; the task buckets
   are the goal manager's, in `agents/goal-sweep-reader.md`.
 - **Never decide an operator gate.** You surface it; the operator answers it.
-- **Close on complete evidence; never certify one.** This tier closes a goal, a member task
-  and the topic page itself — through `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md`,
+- **Close on complete evidence; never certify one.** This tier closes a member goal and the
+  topic page itself — never a task, which belongs to its goal's manager and which this tier
+  never reads — through `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md`,
   which is the rule's only execution home and carries the verbs, the `--vault` contract and
   the terminal guard. ⚠️ **Never tick a box, and never set `status`, to make a close possible**
   — closure follows the evidence, it never manufactures it, and a close that would need

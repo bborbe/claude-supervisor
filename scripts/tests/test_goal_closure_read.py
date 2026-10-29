@@ -87,6 +87,24 @@ class VerdictTest(unittest.TestCase):
         page = _page("- [x] a\n\n```\n- [ ] example only\n```", "- [x] c")
         self.assertEqual(self._verdict(page), "CLOSE")
 
+    def test_heading_inside_a_fence_does_not_truncate_the_section(self):
+        # The section used to be bounded on RAW text, so a `# ` line inside a fenced
+        # example ended it early and every later box went uncounted — losing an OPEN
+        # box and reporting CLOSE.
+        page = _page("- [x] a\n\n```\n# shell comment\n```\n\n- [ ] b", "- [x] c")
+        self.assertEqual(self._verdict(page), "OPEN")
+
+    def test_unterminated_fence_is_unmeasurable(self):
+        # A fence that never closes leaves its content in place, so a fenced `- [x]`
+        # in an empty section would read (1, 0) and stop being UNMEASURABLE.
+        page = _page("- [x] a", "```\n- [x] example only\n")
+        self.assertEqual(self._verdict(page), "UNMEASURABLE")
+
+    def test_crlf_page_keeps_the_terminal_guard(self):
+        # A CRLF page that loses its frontmatter re-closes a finished page every tick.
+        page = _page("- [x] a", "- [x] c", status="completed").replace("\n", "\r\n")
+        self.assertEqual(self._verdict(page), "TERMINAL")
+
     def test_completed_page_is_terminal(self):
         self.assertEqual(self._verdict(_page("- [x] a", "- [x] c", status="completed")), "TERMINAL")
 
