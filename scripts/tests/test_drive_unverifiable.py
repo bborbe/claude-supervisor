@@ -77,7 +77,13 @@ class Replay(unittest.TestCase):
         self.pane_reads = []
 
         def pane_for(sid):
-            return {"aaaaaaaa": "700", "bbbbbbbb": "701", "cccccccc": "702"}.get(sid, "")
+            return {
+                "aaaaaaaa": "700",
+                "bbbbbbbb": "701",
+                "cccccccc": "702",
+                "dddddddd": "703",
+                "eeeeeeee": "704",
+            }.get(sid, "")
 
         def pane_text(pane):
             self.pane_reads.append(pane)
@@ -216,7 +222,15 @@ class TestActionChoice(Replay):
         self.assertEqual(acted[0][1]["action"], "escalation")
         self.assertIn("no closer line", acted[0][1]["pane_line"])
 
-    def test_no_pane_resolves_escalates(self):
+    def test_no_pane_resolves_is_an_observation_not_a_card(self):
+        """A session with no pane is gone, not silent: name it, card nobody, charge nobody.
+
+        Measured 2026-10-22: 102 of 114 unverifiable rows resolved no pane, so a card for
+        each was a card the operator could not act on. The row is still REPORTED -- the
+        block names it -- but it is not an escalation, and its marker goes to
+        `unverifiable_observation`, never `unverifiable_action` (which `drive-share.py`
+        counts as an action taken and would put in the numerator).
+        """
         self.round("2026-10-22T10-00-00Z", [entry("aaaaaaaa", "unverifiable")])
         ledger, _ = drive_unverifiable.read_ledger()
         payload = {"round": "2026-10-22T10-15-00Z", "entries": [entry("aaaaaaaa", "unverifiable")]}
@@ -228,9 +242,94 @@ class TestActionChoice(Replay):
             self.pane_text,
             lambda pane: "",
         )
-        self.assertEqual(acted[0][1]["action"], "escalation")
+        self.merge(payload)
+        self.assertEqual(len(acted), 1)
+        self.assertEqual(acted[0][1]["action"], "observation")
+        self.assertEqual(acted[0][1]["text"], "", "an observation carries no card payload")
+        self.assertEqual(self.pane_reads, [], "no pane means no text read")
+
+        out = drive_unverifiable.render(acted)
+        self.assertIn("not actioned: no card, no cap slot", out)
+        self.assertIn("(none)", out.split("UNVERIFIABLE NUDGES", 1)[1])
+        self.assertIn("(none)", out.split("UNVERIFIABLE ESCALATIONS", 1)[1])
+
+        row = self.ledger_entries()["aaaaaaaa"]
+        self.assertEqual(row["unverifiable_observation"], "observation")
+        self.assertEqual(row["unverifiable_action"], "", "an observation is not an action")
+
+    def test_a_pane_less_row_does_not_consume_a_cap_slot(self):
+        """The cap binds, and the pane-less row is not inside it.
+
+        SC1's anti-vacuity guard: the cap is set BELOW the number of candidates, so a
+        build that charges the pane-less row would leave a resolving row held back. With
+        two pane-less and three resolving rows at streak 2 and a cap of 2, both pane-less
+        rows are observed, both cap slots go to resolving rows, and exactly one resolving
+        row is held.
+        """
+        sids = ("aaaaaaaa", "bbbbbbbb", "cccccccc", "ffffffff", "99999999")
+        self.round("2026-10-22T10-00-00Z", [entry(s, "unverifiable") for s in sids])
+        acted, out = self.round(
+            "2026-10-22T10-15-00Z",
+            [entry(s, "unverifiable") for s in sids],
+            max_actions=2,
+        )
+        by_action = {}
+        for row_entry, decision in acted:
+            by_action.setdefault(decision["action"], []).append(row_entry["session_id"])
+        self.assertEqual(
+            sorted(by_action.get("observation", [])),
+            ["99999999", "ffffffff"],
+            "both pane-less rows are observed",
+        )
+        self.assertEqual(
+            len(by_action.get("nudge", [])),
+            2,
+            "the cap is fully spent on pane-resolving rows",
+        )
+        self.assertEqual(len(self.pane_reads), 2, "one text read per acted resolving row")
+
+        tail = out.split("UNVERIFIABLE HELD BACK", 1)
+        self.assertEqual(len(tail), 2, "one resolving row is held back")
+        held_lines = [line for line in tail[1].splitlines() if line.startswith("  ")]
+        self.assertEqual(len(held_lines), 1)
+        self.assertNotIn("99999999", tail[1], "an observation is never held back")
+        self.assertNotIn("ffffffff", tail[1], "an observation is never held back")
+
+    def test_an_observed_row_is_not_observed_again_next_round(self):
+        """The observation marker suppresses the repeat, like the action marker does."""
+        sids = ("ffffffff",)
+        self.round("2026-10-22T10-00-00Z", [entry(s, "unverifiable") for s in sids])
+        acted, _ = self.round("2026-10-22T10-15-00Z", [entry(s, "unverifiable") for s in sids])
+        self.assertEqual([d["action"] for _, d in acted], ["observation"])
+        acted, _ = self.round("2026-10-22T10-30-00Z", [entry(s, "unverifiable") for s in sids])
+        self.assertEqual(acted, [], "the second round must not re-observe")
+        self.assertEqual(
+            self.ledger_entries()["ffffffff"]["unverifiable_streak"],
+            3,
+            "the streak keeps advancing behind the observation",
+        )
+
+    def test_an_observed_row_still_acts_once_its_pane_resolves(self):
+        """An observation took no action, so it must not spend the row's one action.
+
+        The observation marker stops a REPEAT observation only. A row that was pane-less
+        and later resolves a pane is a session the manager can finally read, so it gets its
+        nudge -- the action marker, not the observation marker, is what bounds that to once.
+        """
+        sids = ("ffffffff",)
+        self.round("2026-10-22T10-00-00Z", [entry(s, "unverifiable") for s in sids])
+        acted, _ = self.round("2026-10-22T10-15-00Z", [entry(s, "unverifiable") for s in sids])
+        self.assertEqual([d["action"] for _, d in acted], ["observation"])
         self.assertEqual(self.pane_reads, [])
-        self.assertIn("no pane — no jump target rendered", drive_unverifiable.render(acted))
+
+        # The pane now resolves: the row acts.
+        self.pane_for = lambda sid: "705" if sid == "ffffffff" else ""
+        acted, _ = self.round("2026-10-22T10-30-00Z", [entry(s, "unverifiable") for s in sids])
+        self.assertEqual([d["action"] for _, d in acted], ["nudge"])
+        self.assertEqual(self.pane_reads, ["705"], "exactly one text read, on the acting round")
+        self.assertEqual(
+            self.ledger_entries()["ffffffff"]["unverifiable_action"], "nudge"
+        )
 
 
 class TestCloserExtraction(unittest.TestCase):
