@@ -143,12 +143,17 @@ function collectPrefixed(env, prefix) {
 
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
 
-// A dotted-quad in 127/8. Each octet is range-checked: WHATWG normalisation collapses the
-// decimal and hex spellings (`2130706433`, `0x7f000001`, `127.1`) onto `127.0.0.1`, but it
-// leaves an out-of-range octet alone, so `127.0.0.256` reaches here as a literal string. It
-// would fail closed at connect, but accepting it would make the guard claim a host it never
-// checked.
-function isLoopbackV4(host) {
+// A dotted-quad in 127/8. WHATWG normalisation collapses the decimal and hex spellings
+// (`2130706433`, `0x7f000001`, `127.1`) onto `127.0.0.1` before `url.hostname` is read, so
+// this only ever sees dotted-decimal.
+//
+// ⚠️ The octet range check is DEFENCE IN DEPTH, not the live guard: Node's URL parser rejects
+// an out-of-range octet outright (`new URL('http://127.0.0.256:1')` throws ERR_INVALID_URL),
+// so such an input is refused by the `catch` above and never reaches this function. The check
+// stays because a parser that instead fell back to domain parsing would hand `127.0.0.256`
+// here as an opaque host, and then only this line would stop it. Exported so the check is
+// exercised directly rather than only through a path that cannot reach it.
+export function isLoopbackV4(host) {
   const m = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
   return m !== null && [m[1], m[2], m[3]].every((o) => Number(o) <= 255)
 }

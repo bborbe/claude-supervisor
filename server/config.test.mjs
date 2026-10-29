@@ -15,7 +15,7 @@ import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { config, resolveWrapperUrl } from './config.mjs'
+import { config, isLoopbackV4, resolveWrapperUrl } from './config.mjs'
 
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url))
 
@@ -405,4 +405,17 @@ test('a refusal never echoes userinfo or the raw value', () => {
   assert.ok(!out.refusal.includes('s3cret'), 'the password must not reach the refusal text')
   assert.ok(!out.refusal.includes('user:'), 'the userinfo must not reach the refusal text')
   assert.ok(out.refusal.includes('evil.example.com'), 'the host is what a caller needs')
+})
+
+// ⚠️ Exercised DIRECTLY, because the public path cannot reach it: Node's URL parser rejects an
+// out-of-range octet and `resolveWrapperUrl` refuses it in the `catch`, so a test through the
+// public entry point pins the throw path, not this check. It stays as defence in depth for a
+// parser that fell back to domain parsing instead of failing.
+test('isLoopbackV4 rejects an out-of-range octet and a non-127 range', () => {
+  assert.equal(isLoopbackV4('127.0.0.1'), true)
+  assert.equal(isLoopbackV4('127.1.2.3'), true)
+  assert.equal(isLoopbackV4('127.0.0.256'), false)
+  assert.equal(isLoopbackV4('128.0.0.1'), false)
+  assert.equal(isLoopbackV4('localhost'), false)
+  assert.equal(isLoopbackV4('127.0.0'), false)
 })
