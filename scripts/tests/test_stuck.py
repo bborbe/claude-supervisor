@@ -21,6 +21,11 @@ works while being wrong:
   - **`🔴 BLOCKED` matches as a line PREFIX.** The phrase also occurs mid-line in a
     worker's own prose about it; a substring match fires on a worker that is merely
     discussing a block.
+  - **A `🔴 BLOCKED` closer is a stall only when it is VERBLESS.** The discriminator
+    is the closer's own `👤 You:` verb: a worker that named an answerable verb told
+    the operator where to answer, so it is parked, and filing it as a stall routes a
+    settled state into the one incident kind with no answer path and no close path.
+    `👤 You: nothing` is the negative control — no verb, no card, nobody told.
   - **A missing heartbeat is not a dead one.** Every session on a host without the
     store produces no stamp, and the registry half already covers those.
 """
@@ -267,6 +272,82 @@ class StuckReasonTest(unittest.TestCase):
 
     def test_a_clean_transcript_is_not_stuck(self):
         self.assertIsNone(watch.stuck_reason("👤 You: nothing", ""))
+
+
+BLOCKED_LINE = "🔴 BLOCKED · nothing running · needs intervention"
+
+
+class BlockedCloserParkTest(unittest.TestCase):
+    """A `🔴 BLOCKED` closer is a stall ONLY when nobody was told.
+
+    The discriminator is the closer's own `👤 You:` verb, not the state line: a
+    worker that reached its closer and named an answerable verb has told the
+    operator where to answer, so it is PARKED and must not be filed as a stall —
+    the one incident kind with no answer path and therefore no close path. The
+    verbless closer is the negative control, because it is exactly the shape that
+    mints no card: no verb, nobody told, still stuck.
+    """
+
+    ASK = BLOCKED_LINE + "\n👤 You: approve: merge the PR"
+    NOTHING = BLOCKED_LINE + "\n👤 You: nothing"
+
+    def test_a_verb_carrying_closer_is_not_a_stuck_reason(self):
+        self.assertIsNone(watch.stuck_reason(self.ASK, ""))
+
+    def test_a_verb_carrying_closer_reaches_a_park_reason_not_a_stall(self):
+        # Both destinations ENUMERATED — a `waiting` tab worker and an `idle` one —
+        # because "every reason it returns" is vacuously true if it returns none.
+        # Asserted on `incident_kind`, never on the reason's spelling: the reason is
+        # an internal name, the kind is the record the ledger writes.
+        body = watch.closer_body(self.ASK)
+        stuck = watch.stuck_reason(self.ASK, "")
+        for status, want in (("waiting", "registry:waiting"),
+                             ("idle", "idle+closer")):
+            gated, reason = watch.is_gated(status, body, stuck=stuck)
+            self.assertIs(gated, True, status)
+            self.assertEqual(reason, want, status)
+            self.assertNotEqual(watch.incident_kind(reason), "stall", status)
+
+    def test_a_verb_carrying_closer_on_a_frozen_modal_is_also_a_park(self):
+        # The THIRD destination, and the one the narrowing moves too: the modal limb
+        # sits ahead of the closer read and never consults it, but `stuck` is
+        # checked even earlier — so before the fix this same tail read
+        # `stuck-tab:blocked-closer`, and now it reads a park.
+        stuck = watch.stuck_reason(self.ASK, "")
+        gated, reason = watch.is_gated(
+            "busy", watch.closer_body(self.ASK), stuck=stuck,
+            pending="AskUserQuestion", frozen=True)
+        self.assertIs(gated, True)
+        self.assertEqual(reason, "busy+parked-modal")
+        self.assertEqual(watch.incident_kind(reason), "permission")
+
+    def test_a_verbless_closer_is_still_stuck_and_still_a_stall(self):
+        # The existing `test_blocked_closer_matches_as_a_line_prefix` tail, taken
+        # through to the kind: the cause survives, and it still escalates.
+        self.assertEqual(watch.stuck_reason(self.NOTHING, ""), "blocked-closer")
+        _, reason = watch.is_gated("waiting", watch.closer_body(self.NOTHING),
+                                   stuck=watch.stuck_reason(self.NOTHING, ""))
+        self.assertEqual(reason, "stuck-tab:blocked-closer")
+        self.assertEqual(watch.incident_kind(reason), "stall")
+
+    def test_a_blocked_line_with_no_closer_at_all_is_still_stuck(self):
+        # No `👤 You:` line means no verb either — nothing was said to anyone.
+        self.assertEqual(watch.stuck_reason(BLOCKED_LINE, ""), "blocked-closer")
+
+    def test_a_verb_carrying_closer_on_a_permission_failure_run_is_still_stuck(self):
+        # `permission-failures` is checked AFTER the closer limb, so the narrowing
+        # cannot swallow an exhausted retry run that happens to end on a park panel.
+        other = "Tool permission request failed: Request timed out"
+        tail = "\n".join(json.dumps(result(other, True)) for _ in range(3))
+        self.assertEqual(watch.stuck_reason(self.ASK, tail), "permission-failures")
+        self.assertEqual(watch.incident_kind("stuck-tab:permission-failures"),
+                         "stall")
+
+    def test_stream_closed_is_still_a_stall(self):
+        # Checked BEFORE the closer limb, and unaffected by it.
+        tail = "\n".join(json.dumps(result(STREAM_CLOSED, True)) for _ in range(4))
+        self.assertEqual(watch.stuck_reason(self.ASK, tail), "stream-closed")
+        self.assertEqual(watch.incident_kind("stuck-tab:stream-closed"), "stall")
 
 
 class HeartbeatLiveTest(unittest.TestCase):
