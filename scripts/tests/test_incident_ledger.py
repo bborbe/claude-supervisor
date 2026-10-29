@@ -939,19 +939,26 @@ class TestLiveSessions(Base):
         self.stub_run("[]\n", stderr="rows=0 registry_live=0 degraded=0\n")
         self.assertIsNone(il.live_sessions())
 
-    def test_a_degraded_probe_is_unavailable(self):
-        """A partial measurement cannot prove a missing session is gone."""
+    def test_a_degraded_but_non_empty_probe_is_still_usable(self):
+        """`degraded=` marks uncorroborated rows, not missing ones — so it cannot veto.
+
+        Measured 2026-10-29 on a healthy fleet: `rows=45 registry_live=43 degraded=7`.
+        Treating `degraded > 0` as "unavailable" therefore returned None every round,
+        warned every round, and never retired anything — the gone gate was silently
+        off in the leg that posts the cards. A session ABSENT from a non-empty set is
+        still absent; only an EMPTY set is unusable.
+        """
         self.stub_run(
             '[{"sessionId": "a"}]', stderr="rows=1 registry_live=0 degraded=1\n"
         )
-        self.assertIsNone(il.live_sessions())
+        self.assertEqual(il.live_sessions(), {"a"})
 
-    def test_an_unreadable_degraded_header_is_unavailable(self):
-        """A `degraded=` nobody can parse must not read as a clean zero."""
+    def test_an_unreadable_degraded_header_does_not_change_the_verdict(self):
+        """A header this reader cannot parse is ignored, not read as a veto."""
         self.stub_run(
             '[{"sessionId": "a"}]', stderr="rows=1 registry_live=1 degraded=many\n"
         )
-        self.assertIsNone(il.live_sessions())
+        self.assertEqual(il.live_sessions(), {"a"})
 
     def test_a_row_with_a_non_string_session_id_is_dropped(self):
         self.stub_run('[{"sessionId": "a"}, {"sessionId": 42}]')

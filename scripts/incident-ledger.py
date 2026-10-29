@@ -188,24 +188,6 @@ def warn_liveness_unavailable(verb):
     )
 
 
-def _degraded_count(stderr):
-    """`degraded=` from the producer's stderr header.
-
-    Returns an int, `0` when the header is absent, or **`None` when it is present but
-    unreadable**. A `degraded=` nobody can parse is a producer bug, and reading it as
-    a clean `0` would be the same false green this whole gate exists to remove -- so
-    the caller fails open on `None` exactly as it does on a non-zero count.
-    """
-    for line in (stderr or "").splitlines():
-        for token in line.split():
-            if token.startswith("degraded="):
-                try:
-                    return int(token.split("=", 1)[1])
-                except (IndexError, ValueError):
-                    return None
-    return 0
-
-
 def live_sessions():
     """Every session the heartbeat store lists, or None when the probe failed.
 
@@ -237,14 +219,14 @@ def live_sessions():
         return None
     if result.returncode != 0:
         return None
-    # ⚠️ **A DEGRADED measurement is not a live set.** `degraded=` counts the rows the
-    # producer could not resolve against a live heartbeat, so a session missing from a
-    # degraded read may be unknown rather than absent — and reading it as absent would
-    # retire a live session's incident on an outage. The header rides stderr
-    # (`rows=… registry_live=… degraded=…`), so it is read from there.
-    degraded = _degraded_count(result.stderr)
-    if degraded is None or degraded > 0:
-        return None
+    # ⚠️ **`degraded=` is NOT a veto, and treating it as one disables the gate.** The
+    # producer marks a row `degraded` when it is listed on the heartbeat endpoint but
+    # has no registry entry — the row is PRESENT and its session is live, merely
+    # uncorroborated. Measured 2026-10-29 on a healthy fleet: `rows=45
+    # registry_live=43 degraded=7`, i.e. `degraded > 0` is the NORMAL state, so a
+    # `degraded > 0 → None` rule would return "unavailable" every round, warn every
+    # round, and never retire anything — the same silent-off this gate exists to
+    # prevent, reached from the third side. Only an EMPTY list is unusable (below).
     # ⚠️ **The `rows=… registry_live=… degraded=…` header goes to STDERR, not stdout**
     # (measured 2026-10-22: with stderr discarded, stdout begins at `[`). The
     # tolerance below is therefore not the shape this reads today — it is a guard for
