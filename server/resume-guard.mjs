@@ -63,6 +63,12 @@ export function resumeRefusal({ agentRecords, sessionId, live }) {
     return `session ${sessionId} is still running (worker ${holder.id} is mid-turn in the supervisor process that spawned it) — close it before resuming, or you will have two writers on one conversation`
   }
   // The one release. `live === false` only — never `null`, never a headless row.
+  //
+  // ⚠️ Why this cannot release a LIVE tab: a tab row's `sessionId` is only ever set from
+  // the registry — `spawnInteractiveAgent` polls until the session appears and the caller
+  // assigns what it found — so a row carrying an `interactive` status has already proved
+  // it was registry-visible. If the registry now cannot see it, the process is gone. The
+  // guard was adding nothing to that case but permanence.
   if (holder.status === 'interactive' && live === false) return null
   return `session ${sessionId} is still running (worker ${holder.id} is mid-turn in this server) — close it before resuming, or you will have two writers on one conversation`
 }
