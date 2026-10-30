@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.217.1
 
 - fix: **the drive round's `UNVERIFIABLE` block reaches both of the round's artifacts, and a round that loses it fails loudly instead of reading as quiet.** Measured 2026-10-29 on round `T1358`: `grep -c UNVERIFIABLE` was 0 in both the `.digest` and the `.drive` while `scripts/drive-unverifiable.py` had produced rows — the agent pasted the nudge and escalation lines, but the block had no home: neither the payload template (`agents/fleet-drive.md`) nor the round's print step (`commands/steps/drive.md`) named one. The template now carries an `UNVERIFIABLE` section, the round prints it first (always, including `(none)`), and `handle --digest` mirrors the same marker-delimited block into the round's `.digest`, so a reader of either artifact can tell "nothing found" from "the block never arrived". `scripts/check-drive-unverifiable-paste.py` is the gate — static assertions plus a `--digest`/`--drive` pair check the round runs, so a lost paste is reported in that round. Change set: `scripts/drive-unverifiable.py`, `scripts/check-drive-unverifiable-paste.py`, both new tests, `agents/fleet-drive.md`, `commands/steps/drive.md`, `Makefile`.
 
