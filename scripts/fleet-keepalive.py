@@ -22,7 +22,7 @@ Verdicts (first line of stdout):
   stale     the round has not completed within its limit — resume it
   unknown   the ledger is missing or unreadable — cannot tell, never "fine"
 
-Exit 0 for `ok`, 10 for `stale` (the code `fleet-digest-notify.py --check` already uses for
+Exit 0 for `ok`, 10 for `stale` (the code `scripts/fleet-digest.py --check` already uses for
 a lapsed round), 2 for `unknown`.
 """
 
@@ -39,6 +39,27 @@ AGE = re.compile(r"\bage=(\d+)s\b")
 LIMIT = re.compile(r"\blimit=(\d+)s\b")
 DIGEST = re.compile(r"\bdigest=(\S+)")
 
+TAIL_BYTES = 256 * 1024
+
+
+def _tail_lines(path: str, window: int = TAIL_BYTES) -> list[str]:
+    """The file's last `window` bytes as lines, with the first (partial) line dropped.
+
+    ⚠️ **Bounded on purpose.** The ledger is append-only and grows one line a minute
+    forever, so a whole-file read costs more every day for a reading that only ever needs
+    the tail. `manager-menu-guard.py` and `who-needs-me.py` use the same 256 KB seek for
+    the same shape. 256 KB is ~1700 lines, roughly 28 hours at one line a minute.
+    """
+    try:
+        size = os.path.getsize(path)
+        with open(path, encoding="utf-8") as fh:
+            if size > window:
+                fh.seek(size - window)
+                fh.readline()      # discard the partial line the seek landed inside
+            return fh.read().splitlines()
+    except OSError:
+        return []
+
 
 def last_reading(ledger: str) -> tuple[int, int, str] | None:
     """`(age, limit, digest)` from the ledger's last line, or None when it carries neither.
@@ -47,11 +68,7 @@ def last_reading(ledger: str) -> tuple[int, int, str] | None:
     one line a minute, so the tail is the current reading even when the digest itself is
     hours old — that staleness is exactly what this reads.
     """
-    try:
-        with open(ledger, encoding="utf-8") as fh:
-            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
-    except OSError:
-        return None
+    lines = [ln for ln in _tail_lines(ledger) if ln.strip()]
     if not lines:
         return None
     last = lines[-1]

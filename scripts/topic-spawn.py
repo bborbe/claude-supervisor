@@ -545,9 +545,10 @@ def main(argv: list[str]) -> int:
     if not flagged(goal_fm):
         return refuse(
             REFUSE_UNFLAGGED,
-            f"<{a.goal}> is not flagged by the operator. Opening a goal manager is the "
-            f"operator's act: set `flag: true` with `flag_set_by: operator` to admit it. "
-            f"Its workers are opened by the fleet round's open leg regardless.",
+            f"<{a.goal}> is not flagged. Opening a goal manager is an open, and this tier "
+            f"only opens what carries the flag — set `flag: true` on the goal page. Whoever "
+            f"sets it is not read. Its workers are opened by the fleet round's open leg "
+            f"regardless.",
         )
 
     # (5) Startability — the operator's approval, read from disk.

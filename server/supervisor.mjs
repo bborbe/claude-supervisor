@@ -48,7 +48,7 @@ import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, ledgerWriteRoute, mergeRecord, parentSessionId, stoppedPatch, UNOBSERVED_STATUS, unobservedPatch } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 import { findLiveHolder } from './resume-guard.mjs'
-import { readContextStats, resumeContextRefusal } from './context-guard.mjs'
+import { resumeAdmission } from './context-guard.mjs'
 import { fetchAttentionItems, fetchOpenCards, openCardsOf } from './open-cards.mjs'
 import { foreignParkRefusal } from './park-refusal.mjs'
 import { answerPathRefusal } from './answer-path.mjs'
@@ -2598,12 +2598,17 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // The transcript is resolved by SESSION ID, never from a cwd: a `cc-*` launcher `cd`s into
     // its own vault, so the spawn's recorded cwd is not where the transcript was written
     // (CLAUDE.md § "transcript_dir on a tab worker is unreliable").
-    const contextStats = readContextStats(transcriptPathFor(resume), { readFile: readFileSync })
-    const contextRefusal = resumeContextRefusal({ stats: contextStats })
-    if (contextRefusal) {
-      log(`refusing to resume ${resume}: ${contextRefusal}`)
-      return { error: contextRefusal }
+    // ⚠️ ONE CALL, AND THE REFUSAL RETURNS BEFORE ANY SPAWN WORK — the `return` on the very next
+    // line is the whole "no worker is created" guarantee, and `context-guard.test.mjs` drives
+    // this same function with fixture transcripts so the gate is exercised end to end rather
+    // than only its arithmetic. Do not inline these three steps again: a test can reach a named
+    // function, and it cannot reach a block.
+    const admission = resumeAdmission({ transcriptPath: transcriptPathFor(resume), readFile: readFileSync })
+    if (!admission.admit) {
+      log(`refusing to resume ${resume}: ${admission.error}`)
+      return { error: admission.error }
     }
+    const contextStats = admission.stats
     // Reported even when it allows, because "the guard looked and found nothing" and "the guard
     // could not look" are different facts about this resume, and only one of them is reassuring.
     log(

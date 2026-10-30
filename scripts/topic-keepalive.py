@@ -60,6 +60,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIRS = {"goal": "24 Goals", "topic": "23 Topics"}
 RESUME_CAP = 3
 RESUME_WINDOW = 30 * 60  # seconds
+PROBE_TIMEOUT = 30  # seconds; a hung liveness probe must not wedge the tick
 
 
 def frontmatter(text: str) -> str:
@@ -128,16 +129,37 @@ def record(path: str, stamps: list[float], now: float) -> None:
     os.replace(tmp, path)
 
 
+#: `scripts/session-liveness.py`'s documented contract is the EXIT CODE, not the text:
+#: `LIVE` (0) / `ABSENT` (1) / `UNKNOWN` (2) / `AMBIGUOUS` (3) / `MALFORMED` (4). Only `LIVE`
+#: prints to stdout — every other verdict goes to stderr — so parsing stdout collapsed them
+#: all to `UNKNOWN`.
+VERDICT_BY_EXIT = {0: "LIVE", 1: "ABSENT", 2: "UNKNOWN", 3: "AMBIGUOUS", 4: "MALFORMED"}
+
+
 def session_verdict(sid: str) -> str:
-    """`LIVE` / `ABSENT` / `UNKNOWN` / `AMBIGUOUS` / `MALFORMED`, from the instrument."""
-    probe = subprocess.run(
-        [sys.executable, os.path.join(REPO, "scripts", "session-liveness.py"), "--check", sid],
-        capture_output=True, text=True,
-    )
-    for word in ("LIVE", "ABSENT", "UNKNOWN", "AMBIGUOUS", "MALFORMED"):
-        if probe.stdout.startswith(word):
-            return word
-    return "UNKNOWN"  # an unparseable answer is cannot-tell, never death
+    """`LIVE` / `ABSENT` / `UNKNOWN` / `AMBIGUOUS` / `MALFORMED`, from the instrument.
+
+    ⚠️ **Read the exit code, never the text.** This function used to scan `stdout` for the
+    verdict word, which made `ABSENT` unreachable: the instrument prints `ABSENT` to **stderr**
+    and exits 1, so every non-`LIVE` answer fell through to `UNKNOWN`. `ABSENT` is the only
+    verdict that licenses a resume, so the entire keep-alive — the goal tier that had shipped
+    for months, the topic tier and the worker tier — could never resume anything. Measured
+    2026-10-30 on a killed manager: stdout `''`, stderr `'ABSENT — <id>'`, rc 1.
+
+    An exit code outside the documented set is `UNKNOWN` — cannot-tell is never death.
+    ⚠️ **An unrunnable or hung probe is `UNKNOWN` too.** Without the guard a missing
+    interpreter or a stuck child raises out of this function and aborts the whole tick with a
+    traceback, instead of answering `cannot-tell` for the one subject being read. Same shape as
+    `scripts/crashed-managers.py`'s `session_state()`.
+    """
+    try:
+        probe = subprocess.run(
+            [sys.executable, os.path.join(REPO, "scripts", "session-liveness.py"), "--check", sid],
+            capture_output=True, text=True, timeout=PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "UNKNOWN"
+    return VERDICT_BY_EXIT.get(probe.returncode, "UNKNOWN")
 
 
 def cadence(subject: str, branch: str = "goal") -> str:
@@ -216,10 +238,10 @@ def main(argv: list[str]) -> int:
                   f'start one with /supervisor:open {opener} "{a.subject}"')
         else:
             print("open-unflagged")
-            print(f"{a.subject} has no manager_session_id and is not flagged by the operator "
-                  f"(`flag: true` with `flag_set_by: operator|legacy`) — rule 4 forbids "
-                  f"opening a manager for it; the fleet round's open leg still opens its "
-                  f"workers, so the work moves without one")
+            print(f"{a.subject} has no manager_session_id and does not carry the flag "
+                  f"(`flag: true`, whoever set it) — rule 4 forbids opening a manager for "
+                  f"it; the fleet round's open leg still opens its workers, so the work "
+                  f"moves without one")
         return 0
 
     live = session_verdict(sid)

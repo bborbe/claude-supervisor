@@ -518,17 +518,6 @@ The goal branch **resolves the goal's manager and delegates**; it reimplements n
 
 0. **Approval gate — before resolving anything.** `vault-cli topic get "<topic>" phase`. A topic at `phase: todo` is in the operator's approval inbox and is NOT approved for management: print `⌛ waiting-approval — <topic> is at phase: todo; approve it with vault-cli topic approve "<topic>"` and STOP — spawn nothing, jump nowhere. An absent `phase` is **exempt**, as is every other value; `todo` alone is gated.
 
-0b. **Flag gate.** A topic manager is opened only for a FLAGGED topic; the cap is the only
-   other bound. Run the gate, do not read the page:
-
-   `topic-spawn.py --vault "<vault-root>" --topic "<topic>" --topic-open`
-
-   First line is the verdict: `open-ok: <topic>` (0) → item 1; `topic-unflagged` (1) → print
-   `⏸ held — no flag` and STOP, never set the flag yourself; `manager-cap` (1) → the second
-   line names the bound, start nothing this tick. ⚠️ **Provenance is not read** (operator
-   ruling 2026-10-30: *"it should not matter how set the flag"*), so the cap is the only bound
-   after the flag. **Restart is not open:** resuming a recorded id is untouched by this.
-
 1. Resolve the topic's manager from the **session registry**, not from `ListAgents` — but read it through its single reader rather than opening the directory here. `session-liveness.py --list --json` returns one record per live session carrying `sessionId`, a live `status`, the current `name`, **`formerNames`** (the names it has held since it started) and `cwd`:
 
    ```bash
@@ -552,7 +541,7 @@ The goal branch **resolves the goal's manager and delegates**; it reimplements n
 ⚠️ **The ban this replaces was right about the hazard and wrong about the remedy.** ⚠️ **The order by which an owner is resolved is stated once, in `docs/fleet-surface.md` § *Which manager owns a subject* — not restated here.**
 2. **Live → JUMP** to it, same `/supervisor:jump pane:<pane-id>` + window-id reporting as Step 2A — this covers both a registry hit and a page-field `LIVE`.
 3. **`ABSENT` → RESUME it by id.** The conversation is what is durable, not the process, so an `ABSENT` id is a resume, never a reason to spawn. ⚠️ **Do not reach item 4 on an `ABSENT` verdict** — a second manager on a live topic is precisely the outcome this step exists to prevent, and it is the failure the superseded ban above was trying to avoid by refusing the field altogether.
-4. **None, `UNKNOWN` or `AMBIGUOUS` → spawn a manager** on `<MGR>` from `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-launcher.py" "<manager_launcher>" "<topic page>" --default-source manager-default` (prints `<MGR>\t<source>`; non-zero → stop; rule: `docs/fleet-surface.md`). `<manager_launcher>` is the vault's configured value **as the absolute path `config list` emits** — a bare name fails the script's file check — and `--default-source manager-default` tells it the value came from config rather than from `claude_script`. The script applies the subject page's override and reports `manager-default` or `subject`:
+4. **None, `UNKNOWN` or `AMBIGUOUS` → the flag gate, then spawn a manager.** ⚠️ **This is the branch's only OPEN site, so the flag is read here and nowhere earlier** — items 2 (JUMP) and 3 (RESUME) are not opens and are never gated: **restart is not open.** Run `topic-spawn.py --vault "<vault-root>" --topic "<topic>" --topic-open`; the first line is the verdict — `topic-unflagged` (1) → print `⏸ held — no flag` and STOP, never set the flag yourself; `manager-cap` (1) → the second line names the bound, start nothing this tick. ⚠️ **Provenance is not read** (operator ruling 2026-10-30: *"it should not matter how set the flag"*), so the cap is the only bound after the flag. On `open-ok: <topic>` (0), spawn on `<MGR>` from `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-launcher.py" "<manager_launcher>" "<topic page>" --default-source manager-default` (prints `<MGR>\t<source>`; non-zero → stop; rule: `docs/fleet-surface.md`). `<manager_launcher>` is the vault's configured value **as the absolute path `config list` emits** — a bare name fails the script's file check — and `--default-source manager-default` tells it the value came from config rather than from `claude_script`. The script applies the subject page's override and reports `manager-default` or `subject`:
 
    ```bash
    wezterm cli spawn -- env SESSION_EXIT_RECORD="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-exit-record.py" bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; _sx() { rc=$?; "$SESSION_EXIT_RECORD" append --pid $$ --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn --pid $$ || true; "$SESSION_EXIT_RECORD" observe --pid $$ || true; trap _sx EXIT; "<MGR>" -n "<topic> Manager" "/color orange"'

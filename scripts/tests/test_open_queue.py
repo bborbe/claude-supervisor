@@ -120,7 +120,7 @@ class OpenQueueTest(unittest.TestCase):
 
     # -- the operator flag ------------------------------------------------
 
-    def test_operator_flagged_outranks_unflagged_of_equal_priority(self):
+    def test_flagged_outranks_unflagged_of_equal_priority(self):
         """SC3: two rows, one free slot, the flagged one opens.
 
         Falsified by the unflagged row opening, or by neither opening.
@@ -141,14 +141,39 @@ class OpenQueueTest(unittest.TestCase):
         task_file(self.tasks, "plain", "status: in_progress\npriority: 1\n")
         rows, _ = self.collect(["bare", "plain"])
 
-        self.assertTrue([r for r in rows if r["name"] == "bare"][0]["operator_flagged"])
+        self.assertTrue([r for r in rows if r["name"] == "bare"][0]["flagged"])
 
     def test_an_agent_set_flag_ranks_first_too(self):
         """Same ruling: the setter is a note, not a gate."""
         task_file(self.tasks, "agent", "status: in_progress\nflag: true\nflag_set_by: agent\n")
         rows, _ = self.collect(["agent"])
 
-        self.assertTrue(rows[0]["operator_flagged"])
+        self.assertTrue(rows[0]["flagged"])
+
+    def test_every_truthy_spelling_ranks_first(self):
+        """`is_flagged()` accepts `true`/`yes`/`on`, matching `FLAG_TRUTHY` in
+        `topic-spawn.py` and `topic-keepalive.py`. Pinning only `true` would let the
+        widening regress silently, and a goal flagged `flag: yes` is exactly the row the
+        sibling gates were already taught to read."""
+        for spelling in ("true", "yes", "on"):
+            with self.subTest(spelling=spelling):
+                # A subdirectory per spelling keeps each case isolated: `collect()` reads
+                # every `.md` under the directory it is given, so a leftover row from the
+                # previous spelling would satisfy the assertion without being read.
+                sub = os.path.join(self.tasks, spelling)
+                os.makedirs(sub, exist_ok=True)
+                task_file(sub, spelling, "status: in_progress\nflag: %s\n" % spelling)
+                rows, _, err = oq.collect(sub, TODAY, approved_json=approved([spelling]))
+                self.assertIsNone(err)
+                self.assertEqual(1, len(rows), "%r was dropped" % spelling)
+                self.assertTrue(rows[0]["flagged"], "%r did not rank" % spelling)
+
+    def test_a_false_flag_does_not_rank(self):
+        """The control: the widening must not admit every row. Without it a predicate that
+        returned True unconditionally would pass every test above."""
+        task_file(self.tasks, "off", "status: in_progress\nflag: false\n")
+        rows, _ = self.collect(["off"])
+        self.assertFalse(rows[0]["flagged"])
 
     # -- the guards, each with a control row ------------------------------
 

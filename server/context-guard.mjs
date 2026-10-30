@@ -34,7 +34,25 @@
 //
 // Measured across the four sessions on 2026-10-29: ceilings 180 k–262 k, restored payloads
 // 158 k–399 k, and `21c0b4ff` — the one that died on its first turn — sitting 22 k below its own
-// ceiling. The rule below is that comparison and nothing else.
+// ceiling — but that comparison is necessary and not sufficient (see `DEFAULT_THRASH_COMPACTIONS`).
+//
+// ⚠️ **PROXIMITY TO A COMPACTION IS NOT ITSELF A FAILURE.** `preTokens` is where the harness
+// compacted, not where it ran out of window; a session 10 k from that point compacts and carries
+// on, which is the harness working as designed. Measured 2026-10-30 over 3 653 tracked sessions,
+// a rule that refused on proximity alone fired on **258** of them, nearly all healthy. Gating the
+// refusal on the thrash count — the five recorded failures all compacted 3+ times — took that to
+// **41** while still refusing every recorded failure. That is the difference between a guard a
+// manager trusts and one it learns to route around.
+//
+// ⚠️ **THE CEILING IS MEASURED PER MODEL (2026-10-30).** The first cut took one global maximum
+// over every boundary in the session, and that mixed windows whenever the router switched models
+// mid-conversation: `7231d34d` compacted at 274 k under `deepseek-v4-flash-max`, then ran its
+// last 315 turns on `claude-opus-5-5` at 690 k, so a 274 k ceiling called it −416 k of room and
+// refused a healthy resume. Over-refusing is not harmless here — it hits exactly the long-lived
+// sessions this guard exists for, which are the ones whose resume matters most. So a boundary is
+// attributed to the model in force when it fired, and only boundaries under the session's LAST
+// model can bind. A session that never compacted under the model it ended on has no measured
+// ceiling for that window, and is allowed rather than judged by another model's number.
 //
 // The DECISION reads no filesystem, environment or clock: `contextStatsFrom` takes parsed
 // records, so it is unit-testable without a server or a transcript on disk. `readContextStats`
@@ -72,40 +90,68 @@ function promptTokens(record) {
 // boundary (never compacted) or, in principle, the reverse.
 export function contextStatsFrom(records) {
   let compactCount = 0
-  let ceiling = null
   let droppedTokens = 0
   let restored = null
   let model = null
+  // ⚠️ THE CEILING IS KEPT PER MODEL, and that is the whole point of this shape. A session can
+  // run under more than one model — the router switches them mid-conversation — and the
+  // auto-compact trigger fires at a fraction of whichever window is in force. Taking one global
+  // maximum mixes the two: measured 2026-10-29, `7231d34d` compacted at 274 k under
+  // `deepseek-v4-flash-max` and then ran its last 315 turns on `claude-opus-5-5` at 690 k. A
+  // single ceiling of 274 k called that a −416 k "room" and refused a perfectly healthy resume.
+  // The ceiling that binds a resume is the one recorded under the model the resume will run in.
+  const byModel = new Map()
 
   for (const record of records ?? []) {
+    // The model is read BEFORE the boundary on the same record so a boundary is attributed to
+    // the turns that produced it. `<synthetic>` records carry no model and never overwrite one.
+    const named = record?.message?.model
+    if (typeof named === 'string' && named !== '<synthetic>') model = named
+
     const meta = record?.compactMetadata
     const pre = Number(meta?.preTokens)
     if (Number.isFinite(pre)) {
       compactCount += 1
-      ceiling = ceiling === null ? pre : Math.max(ceiling, pre)
+      const key = model ?? null
+      const entry = byModel.get(key) ?? { ceiling: 0, count: 0 }
+      entry.ceiling = Math.max(entry.ceiling, pre)
+      entry.count += 1
+      byModel.set(key, entry)
       const dropped = Number(meta.cumulativeDroppedTokens)
       if (Number.isFinite(dropped)) droppedTokens = Math.max(droppedTokens, dropped)
     }
     const tokens = promptTokens(record)
-    if (tokens > 0) {
-      restored = tokens
-      const named = record?.message?.model
-      if (typeof named === 'string' && named !== '<synthetic>') model = named
-    }
+    if (tokens > 0) restored = tokens
   }
 
   if (compactCount === 0 && restored === null) return null
-  return { compactCount, ceiling, restored, droppedTokens, model }
+  // `null` when this session never compacted under the model it last ran — "not measured for
+  // this window". The decision does not simply allow that case; see `resumeContextRefusal`.
+  const own = byModel.get(model ?? null) ?? null
+  let globalCeiling = null
+  for (const entry of byModel.values()) {
+    globalCeiling = globalCeiling === null ? entry.ceiling : Math.max(globalCeiling, entry.ceiling)
+  }
+  return {
+    compactCount,
+    ceiling: own ? own.ceiling : null,
+    ceilingCount: own ? own.count : 0,
+    globalCeiling,
+    restored,
+    droppedTokens,
+    model,
+  }
 }
 
 // The stats for one transcript file, or `null` when there is no file or nothing to read.
 //
 // ⚠️ READS THE WHOLE FILE, unlike the bounded tail `tab-read.mjs` uses for `agent_status`, and
-// the difference is not an oversight. The ceiling is the MAXIMUM `preTokens` over every
-// boundary in the session, so a tail window can miss the largest one and under-report the
-// ceiling — which fails toward "resume it", the direction this guard exists to prevent. A
-// resume happens once per orphaned worker, so the cost of the full read is paid rarely, and
-// correctness on this path is worth more than the bytes.
+// the difference is not an oversight. The ceiling is the MAXIMUM `preTokens` over the boundaries
+// recorded under the session's last model, and a tail window can miss the largest one — which
+// fails toward "resume it", the direction this guard exists to prevent. It also has to see the
+// assistant turns that name the model, and those are scattered through the file. A resume
+// happens once per orphaned worker, so the cost of the full read is paid rarely, and correctness
+// on this path is worth more than the bytes.
 //
 // A torn final line is normal — the file is appended to while a session runs — so an
 // unparseable line is skipped rather than failing the read. A file that cannot be read at all
@@ -140,21 +186,77 @@ export function readContextStats(path, { readFile } = {}) {
 // harm this guard exists to prevent. So it refuses only on a measurement that positively shows
 // too little room, and the unmeasured cases are reported by the caller rather than treated as
 // safe.
+// The compaction count at which a session that never compacted under its final model is still
+// refused. ⚠️ **A FITTED THRESHOLD, and its weakness is stated rather than hidden.** The five
+// recorded failures compacted 35, 24, 10, 3 and 3 times; the healthy session the per-model
+// ceiling exists to rescue (`7231d34d`) compacted **twice**. So the only evidence separating
+// them is a 2-versus-3 gap, which is thin. It is used only in the one case where no same-model
+// ceiling exists — everywhere else the measured comparison decides, and this constant never
+// runs. A session that switches model once and is genuinely near the new window's limit can
+// still be refused by it; that false positive is preferred to letting a thrashing session
+// through, because the second is the harm this guard exists to stop and the first costs a
+// fresh spawn.
+export const DEFAULT_THRASH_COMPACTIONS = 3
+
 export function resumeContextRefusal({ stats, reserveTokens = DEFAULT_RESERVE_TOKENS } = {}) {
   if (!stats) return null
-  if (stats.ceiling === null || stats.restored === null) return null
+  if (stats.restored === null) return null
+
+  // No boundary under the model the session ended on: the window it will resume into is not
+  // measured. Fall back to the thrash signature rather than to another model's ceiling.
+  if (stats.ceiling === null) {
+    if (stats.compactCount < DEFAULT_THRASH_COMPACTIONS) return null
+    if (stats.globalCeiling === null) return null
+    const room = stats.globalCeiling - stats.restored
+    return refusal(stats, room, reserveTokens, stats.globalCeiling, stats.compactCount, 'another model')
+  }
 
   const room = stats.ceiling - stats.restored
   if (room >= reserveTokens) return null
+  // ⚠️ PROXIMITY ALONE IS NOT A FAILURE. `preTokens` is where the harness COMPACTED, not where
+  // it ran out of window — a session 10 k from that point simply compacts and carries on, which
+  // is the harness working as designed. What kills a session is doing that repeatedly, so the
+  // thrash count gates the refusal on both paths. Measured 2026-10-30: without this gate the
+  // rule refused 258 of 3 653 tracked sessions, most of them healthy; the five recorded failures
+  // all compacted 3+ times.
+  if (stats.compactCount < DEFAULT_THRASH_COMPACTIONS) return null
+  return refusal(stats, room, reserveTokens, stats.ceiling, stats.ceilingCount, stats.model ?? 'an unnamed model')
+}
 
+// One refusal string, so the two paths cannot drift in wording or in what they disclose.
+//
+// `under` names the model whose boundary produced `ceiling` — or `'another model'` on the
+// thrash fallback, which is the reader's signal that this session never compacted under the
+// model it ended on and is being judged by a count rather than by its own window.
+function refusal(stats, room, reserveTokens, ceiling, count, under) {
   const num = (n) => n.toLocaleString('en-US')
   return (
     `session's restored context leaves ${num(room)} tokens of room, below the ${num(reserveTokens)} one ` +
     `working set needs — refusing to resume it, because it would compact on its first turn or die with ` +
     `"Prompt is too long" rather than do any work. Measured from the transcript: the last turn ran at ` +
-    `${num(stats.restored)} tokens and this session's harness compacted at ${num(stats.ceiling)} ` +
-    `(${stats.compactCount} compaction${stats.compactCount === 1 ? '' : 's'}, ${num(stats.droppedTokens)} ` +
+    `${num(stats.restored)} tokens and this session's harness compacted at ${num(ceiling)} under ` +
+    `${under} (${count} compaction${count === 1 ? '' : 's'} on that model, ${num(stats.droppedTokens)} ` +
     `tokens dropped in total). Open a FRESH worker on the same task with a handover prompt instead of ` +
     `resuming — the task keeps its state, the conversation does not need to.`
   )
+}
+
+// The whole resume gate, as ONE call: resolve the transcript, read it, decide.
+//
+// ⚠️ THIS EXISTS SO THE TEST CAN DRIVE THE BRANCH, NOT A STEP INSIDE IT. `spawnAgent`'s resume
+// arm used to do three things inline — `transcriptPathFor`, `readContextStats`, then
+// `resumeContextRefusal` — and a test could only reach the last of them. Extracting the three
+// into one function means the test exercises the same call the spawn path makes, with the
+// transcript read included: a fixture that feeds bytes through `readFile` goes all the way to
+// the verdict, and a regression in how the path is resolved or how a torn line is parsed is
+// caught here rather than only at spawn time.
+//
+// `admit: false` is the ONLY thing the caller has to act on, and the caller acts on it with a
+// single `return { error }` placed before any spawn work. That is what makes "no spawn_agent
+// call is made" a property of one reviewable line rather than of an untested code path — see
+// `supervisor.mjs`'s resume arm.
+export function resumeAdmission({ transcriptPath, readFile, reserveTokens } = {}) {
+  const stats = readContextStats(transcriptPath, { readFile })
+  const error = resumeContextRefusal({ stats, reserveTokens })
+  return { admit: error === null, error, stats }
 }

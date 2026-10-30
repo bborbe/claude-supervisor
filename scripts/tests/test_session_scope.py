@@ -14,6 +14,7 @@ import importlib.util
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "session-scope.py")
@@ -270,6 +271,101 @@ class Unresolved(unittest.TestCase):
         scope = ss.load(None, [self.vault.root])
         self.assertFalse(scope.resolved)
         self.assertIn("no --self", scope.reason)
+
+
+class DuplicateGoalBasename(unittest.TestCase):
+    """Two vaults carrying a goal page with the same basename must not fight.
+
+    `goals` is keyed by page basename, and the `private-*` / `seibert-*` families routinely
+    reuse one (`24 Goals/…` appears in every vault). Overwriting made the LAST vault's
+    `# Tasks` the only input `own_titles` was built from, so an own task linked only from
+    the first vault's page was EXCLUDEd as foreign -- the fleet-silence direction the
+    module names as the dangerous one.
+    """
+
+    def setUp(self):
+        self.first = Vault()
+        self.second = Vault()
+
+    def tearDown(self):
+        self.first.close()
+        self.second.close()
+
+    def test_a_second_page_with_the_same_basename_merges_rather_than_replaces(self):
+        self.first.goal(SELF_GOAL, f"manager_session_id: {ME}\n", ["Own Task"])
+        self.first.task("Own Task", f"claude_session_id: {OWN_TASK_SESSION}\n")
+        self.second.goal(SELF_GOAL, "", ["Some Other Task"])
+
+        scope = ss.load(ME, [self.first.root, self.second.root])
+
+        # Asserted as the UNION so the pin does not depend on which vault the walk reads
+        # first: a replace fails this in either order.
+        self.assertEqual(scope.goals[SELF_GOAL], {"Own Task", "Some Other Task"})
+        self.assertEqual(scope.exclusion(OWN_TASK_SESSION, ME), (False, ""))
+
+    def test_an_empty_second_page_does_not_wipe_the_first(self):
+        """A duplicate-basename page with no `# Tasks` heading is an empty set, not an eraser."""
+        self.first.goal(SELF_GOAL, f"manager_session_id: {ME}\n", ["Own Task"])
+        self.first.task("Own Task", f"claude_session_id: {OWN_TASK_SESSION}\n")
+        self.second.goal(SELF_GOAL, "", [])
+
+        scope = ss.load(ME, [self.first.root, self.second.root])
+
+        self.assertEqual(scope.goals[SELF_GOAL], {"Own Task"})
+        self.assertEqual(scope.exclusion(OWN_TASK_SESSION, ME), (False, ""))
+
+
+class VaultDirs(unittest.TestCase):
+    """The `vault-cli config list` failure branches and the `_probe_root` fallback.
+
+    These are the fail-open paths the module's docstring promises: a broken instrument must
+    WIDEN the search, never narrow it, or it reads as "nothing is mine" and silences a
+    manager's own gates. Every `ss.load(...)` elsewhere in this file passes an explicit vault
+    list, so `_vault_dirs` only ever took its explicit branch and none of this was covered.
+    """
+
+    def setUp(self):
+        self.root = tempfile.TemporaryDirectory()
+        self.addCleanup(self.root.cleanup)
+        patcher = mock.patch.object(ss, "VAULTS_ROOT", self.root.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def stub(self, returncode=0, stdout=""):
+        """Replace `vault-cli config list` with a canned result."""
+        return mock.patch.object(
+            ss.subprocess,
+            "run",
+            return_value=mock.Mock(returncode=returncode, stdout=stdout),
+        )
+
+    def test_a_non_zero_exit_reports_its_own_reason(self):
+        with self.stub(returncode=3):
+            dirs, reason = ss._vault_dirs()
+        self.assertEqual(dirs, [])
+        self.assertIn("exited 3", reason)
+
+    def test_unparseable_json_reports_its_own_reason(self):
+        with self.stub(stdout="{not json"):
+            dirs, reason = ss._vault_dirs()
+        self.assertEqual(dirs, [])
+        self.assertIn("unparseable JSON", reason)
+
+    def test_a_non_list_payload_reports_its_own_reason(self):
+        with self.stub(stdout='{"vaults": []}'):
+            dirs, reason = ss._vault_dirs()
+        self.assertEqual(dirs, [])
+        self.assertIn("something other than a list", reason)
+
+    def test_the_probe_root_widens_to_a_stub_vault_tree(self):
+        """A broken config must find MORE vaults, never none — "nothing is mine" is the bug."""
+        os.makedirs(os.path.join(self.root.name, "stub-vault", "25 Tasks"))
+        os.makedirs(os.path.join(self.root.name, "stub-vault", "24 Goals"))
+        with self.stub(returncode=1):
+            dirs, reason = ss._vault_dirs()
+        self.assertEqual(reason, "")
+        self.assertEqual(len(dirs), 1)
+        self.assertTrue(dirs[0][0][0].endswith("25 Tasks"), dirs[0][0])
 
 
 class Cli(unittest.TestCase):

@@ -18,9 +18,11 @@ import io
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from contextlib import redirect_stdout
 
@@ -127,7 +129,7 @@ class KeepAliveTest(unittest.TestCase):
         rc, out = self.run_keepalive(live="LIVE")
         self.assertEqual(0, rc)
         self.assertEqual("open-unflagged", out[0])
-        self.assertIn("not flagged by the operator", out[1])
+        self.assertIn("does not carry the flag", out[1])
 
     def test_no_recorded_id_with_an_operator_flag_opens(self):
         self.page(sid="", extra="flag: true\nflag_set_by: operator\n")
@@ -278,6 +280,99 @@ class KeepAliveTest(unittest.TestCase):
         rc, out = self.run_keepalive(live="ABSENT")
         self.assertEqual(0, rc)
         self.assertEqual("resume", out[0])
+
+
+class SessionVerdictTest(unittest.TestCase):
+    """`session_verdict` must read the instrument's EXIT CODE, not its text.
+
+    The instrument prints only `LIVE` to stdout; every other verdict goes to stderr. A
+    stdout-scanning implementation therefore reports `UNKNOWN` for a dead session, which makes
+    the resume branch unreachable — the whole keep-alive inert. These tests pin the contract
+    the instrument actually documents.
+    """
+
+    def setUp(self):
+        self.k = load()
+        self._orig = self.k.subprocess
+        self.calls = []
+
+    def tearDown(self):
+        self.k.subprocess = self._orig
+
+    def _namespace(self, run):
+        # ⚠️ Replace the module's `subprocess` REFERENCE, never `subprocess.run` on the stdlib
+        # module itself: `import subprocess` binds one shared object, so patching its attribute
+        # reaches every other test in the process. The exception types ride along because
+        # `session_verdict`'s `except` clause names `subprocess.SubprocessError`, which Python
+        # resolves on this very attribute at raise time.
+        return types.SimpleNamespace(
+            run=run,
+            SubprocessError=subprocess.SubprocessError,
+            TimeoutExpired=subprocess.TimeoutExpired,
+        )
+
+    def _stub(self, rc, stdout="", stderr=""):
+        calls = self.calls
+
+        class R:
+            returncode = rc
+
+        R.stdout, R.stderr = stdout, stderr
+
+        def run(argv, *a, **kw):
+            calls.append(argv)
+            return R()
+
+        self.k.subprocess = self._namespace(run)
+
+    def _stub_raising(self, exc):
+        def run(*a, **kw):
+            raise exc
+
+        self.k.subprocess = self._namespace(run)
+
+    def test_absent_is_read_from_exit_1_even_though_nothing_reaches_stdout(self):
+        # The measured shape: stdout empty, the verdict on stderr, exit 1.
+        self._stub(1, stdout="", stderr="ABSENT — sid-1\n")
+        self.assertEqual("ABSENT", self.k.session_verdict("sid-1"))
+
+    def test_live_is_read_from_exit_0(self):
+        self._stub(0, stdout="LIVE — sid-1\n")
+        self.assertEqual("LIVE", self.k.session_verdict("sid-1"))
+
+    def test_the_exit_code_wins_over_a_contradictory_stdout(self):
+        # The regression this change removes, pinned directly: the old implementation read
+        # stdout, so rc 1 with `LIVE` on stdout answered LIVE — a dead session read as alive,
+        # the one direction that spawns a second manager on a live one.
+        self._stub(1, stdout="LIVE — sid-1\n")
+        self.assertEqual("ABSENT", self.k.session_verdict("sid-1"))
+
+    def test_the_probe_is_invoked_with_check_and_the_id(self):
+        # A stub that ignores argv cannot tell a correct invocation from a broken one.
+        self._stub(0)
+        self.k.session_verdict("sid-1")
+        self.assertEqual(1, len(self.calls))
+        self.assertEqual(sys.executable, self.calls[0][0])
+        self.assertEqual(["--check", "sid-1"], self.calls[0][-2:])
+
+    def test_an_unrunnable_probe_is_cannot_tell(self):
+        # A missing interpreter or script raises OSError; it must not abort the tick.
+        self._stub_raising(OSError("no interpreter"))
+        self.assertEqual("UNKNOWN", self.k.session_verdict("sid-1"))
+
+    def test_a_hung_probe_is_cannot_tell(self):
+        self._stub_raising(subprocess.TimeoutExpired("probe", 30))
+        self.assertEqual("UNKNOWN", self.k.session_verdict("sid-1"))
+
+    def test_every_documented_code_maps(self):
+        for rc, want in ((0, "LIVE"), (1, "ABSENT"), (2, "UNKNOWN"),
+                         (3, "AMBIGUOUS"), (4, "MALFORMED")):
+            self._stub(rc)
+            self.assertEqual(want, self.k.session_verdict("sid-1"), rc)
+
+    def test_an_undocumented_exit_is_cannot_tell(self):
+        self._stub(7)
+        self.assertEqual("UNKNOWN", self.k.session_verdict("sid-1"))
 
 
 if __name__ == "__main__":

@@ -84,6 +84,19 @@ class FleetKeepAliveTest(unittest.TestCase):
         self.assertEqual(10, rc)
         self.assertEqual("stale", out[0])
 
+    def test_a_ledger_larger_than_the_tail_window_still_reads_the_last_line(self):
+        """The ledger is append-only and grows one line a minute forever, so the read is
+        bounded to a 256 KB tail. A stale line INSIDE the window must still win over the
+        thousands of fresh-looking ones before it — a bounded read that fell back to the
+        window's first line would report `ok` here."""
+        self.write(*([self.line(60, 1080, digest="2026-10-30T01:00:00Z")] * 4000),
+                   self.line(9030, 1080))
+        self.assertGreater(self.ledger.stat().st_size, fk.TAIL_BYTES)
+        rc, out = self.run_check()
+        self.assertEqual(10, rc)
+        self.assertEqual("stale", out[0])
+        self.assertIn("2026-10-30T11:38:21Z", out[1])
+
     def test_the_stale_message_names_the_digest_and_forbids_a_liveness_probe(self):
         self.write(self.line(9030, 1080))
         rc, out = self.run_check()

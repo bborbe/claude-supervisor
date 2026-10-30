@@ -52,10 +52,15 @@ nothing new, while opening one decides who supervises. Four rules follow:
    should not matter how set the flag … if flag, should be open if claude session limit allow
    it"* — so `flag_set_by` is a note, not a gate, and the only bound after the flag is
    capacity. ⚠️ **The consequence is deliberate:** an agent may flag its own page and get
-   something opened for it, limited only by the cap. ⚠️ **Scope: three legs, and they move
-   together** — `/supervisor:open --flagged` (tasks), `topic-spawn.py --goal` (goal managers),
-   and `topic-spawn.py --topic-open` (topic managers). A flag on a page no leg reads is inert,
-   which is the defect `--topic-open` was added to remove.
+   something opened for it, limited only by the cap. ⚠️ **Scope: three legs, and the boundary
+   is the WRITE, not the tier** — `topic-spawn.py --goal` (goal managers),
+   `topic-spawn.py --topic-open` (topic managers) and `open-queue.py` (the fleet round's open
+   leg, for tasks) read the flag alone. ⚠️ **`/supervisor:open --flagged` is the exception and
+   keeps its provenance gate**, because that batch does not merely open: its first move is
+   `vault-cli task approve`, which writes `approved_by: operator` onto the row. Reading the
+   flag alone there would let an agent mint an operator approval, so `flag_set_by` still
+   bounds it to `operator`/`legacy`. A flag on a page no leg reads is inert, which is the
+   defect `--topic-open` was added to remove.
 3. **An approved worker is opened automatically**, up to `spawn.maxConcurrent`.
 4. **A manager is never opened fresh on the operator's behalf** — not by a loop, not by a
    round, not to fill a gap. Only restarted, or opened because it was flagged.
