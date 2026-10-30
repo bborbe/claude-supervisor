@@ -33,6 +33,10 @@ Verdict tokens, first line of stdout:
 
   resume          ABSENT, open work, under the cap -- resume the recorded id
   capped          the cap is spent; surface the row to the operator, do not resume again
+  blocked         a refusal was already recorded for this id; never retried
+  live            the session is LIVE -- NOT a reopen candidate, and NOT `not-open-work`:
+                  step 1 runs this on every parked row, and dropping a live row whose
+                  closer is an ask/review/pick would discard a live operator gate
   not-open-work   the task is terminal, has no open boxes, or records no session id
   cannot-tell     a probe could not run, or the task file could not be read
 
@@ -83,7 +87,7 @@ TERMINAL = {"completed", "aborted"}
 FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 OPEN_BOX = re.compile(r"^[ \t]*-[ \t]*\[[ /]\]", re.MULTILINE)
 
-EXIT = {"resume": 0, "recorded": 0, "refusal-recorded": 0, "capped": 1, "blocked": 1, "not-open-work": 1, "not-recorded": 1, "cannot-tell": 2}
+EXIT = {"resume": 0, "recorded": 0, "refusal-recorded": 0, "capped": 1, "blocked": 1, "live": 1, "not-open-work": 1, "not-recorded": 1, "cannot-tell": 2}
 
 
 def frontmatter(text):
@@ -236,8 +240,12 @@ def decide(task_path, session_override):
         ]
 
     verdict, detail = liveness(session_id)
+    # ⚠️ A LIVE session is its own token, never `not-open-work`. Step 1 runs this script
+    # on every parked row too, and a parked row IS a live idle session with open boxes —
+    # so folding it into `not-open-work` would let a caller drop a live row whose closer
+    # is an ask/review/pick, which is exactly the operator gate step 4 exists to protect.
     if verdict == "LIVE":
-        return "not-open-work", [f"session {session_id[:8]} is LIVE -- it holds its own gate"]
+        return "live", [f"session {session_id[:8]} is LIVE -- step 4's own probes decide this row"]
     if verdict != "ABSENT":
         return "cannot-tell", [f"liveness: {detail} -- only ABSENT licenses a resume"]
 

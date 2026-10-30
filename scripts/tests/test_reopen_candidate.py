@@ -142,10 +142,14 @@ class TestVerdict(Harness):
         self.assertEqual(out[0], "resume")
         self.assertEqual(code, 0)
 
-    def test_live_session_is_not_open_work(self):
-        """A live session holds its own gate -- the 2026-09-23 case must never fire."""
+    def test_live_session_is_its_own_token(self):
+        """A live session holds its own gate -- the 2026-09-23 case must never fire.
+
+        It is `live`, not `not-open-work`: step 1 runs this on every parked row, and a
+        live row whose closer is an ask/pick must stay on step 4's path.
+        """
         code, out = self.run_script(liveness={SID: "LIVE"})
-        self.assertEqual(out[0], "not-open-work")
+        self.assertEqual(out[0], "live")
         self.assertEqual(code, 1)
 
     def test_terminal_task_is_not_open_work(self):
@@ -207,10 +211,11 @@ class TestVerdict(Harness):
         code, out = self.run_script("--session", other, liveness={other: "ABSENT"})
         self.assertEqual(out[0], "resume")
 
-    def test_session_override_live_blocks_the_resume(self):
+    def test_session_override_live_is_live(self):
         other = "aaaaaaaa-0000-4000-8000-000000000002"
+        self.write_task(sid="")
         code, out = self.run_script("--session", other, liveness={other: "LIVE"})
-        self.assertEqual(out[0], "not-open-work")
+        self.assertEqual(out[0], "live")
 
     def test_session_override_must_be_the_recorded_owner(self):
         """A foreign override must not return resume -- record() would refuse it, so the cap never arms."""
