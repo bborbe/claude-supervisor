@@ -14,9 +14,15 @@ on it without parsing prose, and the exit code is non-zero for every one of them
                            Start` § Out of Scope keeps the unphased goals on
                            today's behavior, and the topic tier is the only
                            start path they have.
-  goal-terminal          the goal's `status` is terminal (`completed`/`aborted`/`hold`).
-                           Closure leaves `phase` untouched, so a phase-only gate keeps
-                           offering a goal the same tick has just closed.
+  goal-terminal          the goal's `status` is `completed` or `aborted`. Closure leaves
+                           `phase` untouched, so a phase-only gate keeps offering a goal
+                           the same tick has just closed.
+                           ⚠️ **`hold` is NOT in `TERMINAL_STATUSES`.** A held goal in a
+                           startable phase therefore still passes this gate — a pause is
+                           not a closure, and whether a held goal should be openable is an
+                           open question this gate does not decide. Stated here because a
+                           docstring that claimed `hold` was terminal would describe
+                           behaviour the code does not implement.
   goal-unflagged         the goal is not flagged by the operator — it needs `flag: true`
                            with `flag_set_by: operator` or `legacy`. Opening a manager is
                            the operator's act, so an unflagged goal is reported with its

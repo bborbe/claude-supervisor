@@ -124,6 +124,11 @@ Crash-loop: <goal> — 3 resumes in 30 min; escalate once
 ```
 </output_format>
 
+⚠️ **`To open` subsumes `To start` for the same goal.** A goal with no recorded manager and an
+operator flag yields the keep-alive verdict `open` *and* ranks `start`, so both templates match
+it. Emit **one** line — the `To open` one — because the success criterion below is one line per
+declared goal, and the two resolve to the same `/supervisor:open --goal` command.
+
 <success_criteria>
 - Every declared goal has exactly one line.
 - No worker was nudged, messaged or reaped.
