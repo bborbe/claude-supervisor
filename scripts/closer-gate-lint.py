@@ -123,6 +123,16 @@ PROSE_ALIASES = (
     ("coding-local-review", re.compile(r"\blocal review\b", re.IGNORECASE)),
 )
 
+# The precondition each allow-listed verb carries in the rules, named in the message.
+# ⚠️ The hook cannot verify any of these — it is verb-based by construction — so the
+# message says what to check rather than implying the check already happened. An entry
+# absent here carries no precondition the rules attach.
+WHEN = {
+    "gh-pr-merge": "the PR is bot-approved and its CI is green (§ After Opening a PR § Merge on Green)",
+    "gh-pr-ready": "the local review loop is clean, CI is green and origin/master is merged",
+    "vault-cli-session-close": "the task is terminal on disk (§ Async State Closer)",
+}
+
 
 def state_dir():
     """The record's directory, read at call time so a test can redirect it."""
@@ -266,14 +276,26 @@ def evaluate(payload, environ=None):
 def _message(reason, verb, matched):
     if reason != "allow-listed":
         return ""
-    return (
+    # ⚠️ The message must not assert the step is reversible. `gh pr merge` is
+    # irreversible, so the old "reversible, in-scope, non-production … keep the line if
+    # the action is irreversible" pair contradicted itself on the exact closer the
+    # allow-list now releases, and a careful model resolved it by keeping the gate —
+    # reinstating the cost the entry exists to remove. Name the precondition instead:
+    # it is the thing the rules actually attach, and the thing this hook cannot check.
+    lines = [
         f"closer-gate-lint: `{verb}:` names {matched}, which the global rules already "
-        "authorise for a reversible, in-scope, non-production step "
-        "(CLAUDE.md § Execution Phase No Re-Ask; § After Opening a PR).\n"
-        "Do not end the turn on an operator gate — perform the step now and continue. "
-        "Keep the `approve:`/`review:` line only if the action is production-touching, "
-        "irreversible, or outside this task's declared scope.\n"
-    )
+        "authorise for this step (CLAUDE.md § Execution Phase No Re-Ask; § After Opening "
+        "a PR; § Async State Closer).",
+    ]
+    when = WHEN.get(matched)
+    if when:
+        lines.append(
+            f"Precondition those rules attach, which this hook cannot check: {when}.")
+    lines.append(
+        "Verify the precondition, then perform the step now and continue — do not end the "
+        "turn on an operator gate. Keep the `approve:`/`review:` line only if the "
+        "precondition does not hold, or the action is outside this task's declared scope.")
+    return "\n".join(lines) + "\n"
 
 
 def _bare_record(reason):

@@ -143,6 +143,18 @@ class CloserGateLintTest(unittest.TestCase):
                 self.assertEqual(0, code)
                 self.assertEqual("not-allow-listed", record["reason"])
 
+    def test_the_message_never_calls_the_step_reversible(self):
+        # ⚠️ A merge is irreversible. The old text said "authorise for a reversible,
+        # in-scope, non-production step" AND "keep the line if the action is
+        # irreversible" — self-contradictory on the exact closer the allow-list now
+        # releases, so a careful model kept the gate and the operator still paid it.
+        _code, text, _record = self.mod.evaluate(
+            self.payload("09-gh-pr-merge.jsonl"), environ={})
+        self.assertNotIn("reversible", text.lower())
+        # The precondition replaces the escape hatch, and it names the merge's own rule.
+        self.assertIn("bot-approved", text)
+        self.assertIn("CI is green", text)
+
     def test_prod_deploy_stays_the_operators(self):
         _code, _text, record = self.mod.evaluate(
             self.payload("08-prod-buca.jsonl"), environ={})
