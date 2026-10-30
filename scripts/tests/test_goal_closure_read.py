@@ -20,7 +20,9 @@ Four properties, each of which has been wrong in this tree in some form:
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
+import io
 import os
 import tempfile
 import unittest
@@ -39,17 +41,29 @@ def _load(name, filename):
 closure = _load("goal_closure_read", "goal-closure-read.py")
 
 
-def _page(sc_boxes, dod_boxes, status="in_progress"):
+def _page(sc_boxes, dod_boxes, status="in_progress", created=None):
     front = "---\n" if status is None else f"---\nstatus: {status}\n"
+    if created is not None:
+        front += f'created: "{created}"\n'
     body = f"{front}---\n\n# Success Criteria\n\n{sc_boxes}\n\n# Definition of Done\n\n{dod_boxes}\n"
     return body
 
 
+def _page_no_dod(sc_boxes, status="in_progress", created=None):
+    """A page with Success Criteria only — no `# Definition of Done` heading at all."""
+    front = "---\n" if status is None else f"---\nstatus: {status}\n"
+    if created is not None:
+        front += f'created: "{created}"\n'
+    return f"{front}---\n\n# Success Criteria\n\n{sc_boxes}\n"
+
+
 class VerdictTest(unittest.TestCase):
-    def _verdict(self, page):
+    def _verdict(self, page, kind="goal"):
+        names = [n for n, _ in closure.SECTIONS[kind]]
         return closure.verdict_of(
             closure.read_status(page),
-            {n: closure.read_section(page, n) for n in ("Success Criteria", "Definition of Done")},
+            {n: closure.read_section(page, n) for n in names},
+            closure.dod_exempt(kind, closure.read_created(page)),
         )
 
     def test_all_boxes_ticked_closes(self):
@@ -65,8 +79,41 @@ class VerdictTest(unittest.TestCase):
         self.assertEqual(self._verdict(_page("- [x] a", "")), "UNMEASURABLE")
 
     def test_missing_section_is_unmeasurable(self):
-        page = "---\nstatus: in_progress\n---\n\n# Success Criteria\n\n- [x] a\n"
+        # Post-cutoff: the DoD is required, so its absence still refuses the close.
+        page = _page_no_dod("- [x] a", created="2026-10-19")
         self.assertEqual(self._verdict(page), "UNMEASURABLE")
+
+    def test_grandfathered_goal_without_a_dod_closes(self):
+        # The vault's grandfathering decision: a goal created before
+        # DOD_REQUIRED_AS_OF carries no DoD and is not in violation. Refusing to close
+        # it made every grandfathered goal permanently unclosable — closable by every
+        # other reader in the vault, unclosable by the one that actually closes it.
+        page = _page_no_dod("- [x] a\n- [x] b", created="2026-01-15")
+        self.assertEqual(self._verdict(page), "CLOSE")
+
+    def test_goal_without_a_created_date_is_grandfathered(self):
+        # Absent metadata is grandfathered too: the rule trusts the document's own
+        # `created`, never the filesystem.
+        page = _page_no_dod("- [x] a")
+        self.assertEqual(self._verdict(page), "CLOSE")
+
+    def test_post_cutoff_goal_without_a_dod_is_unmeasurable(self):
+        # The negative control: the cutoff widens nothing for new goals.
+        page = _page_no_dod("- [x] a\n- [x] b", created="2026-07-01")
+        self.assertEqual(self._verdict(page), "UNMEASURABLE")
+
+    def test_created_on_the_cutoff_date_is_not_grandfathered(self):
+        page = _page_no_dod("- [x] a", created="2026-06-26")
+        self.assertEqual(self._verdict(page), "UNMEASURABLE")
+
+    def test_grandfathered_goal_with_an_empty_dod_is_unmeasurable(self):
+        # Grandfathering covers ABSENCE, never an empty section.
+        page = _page("- [x] a", "", created="2026-01-15")
+        self.assertEqual(self._verdict(page), "UNMEASURABLE")
+
+    def test_grandfathered_goal_with_open_criteria_never_closes(self):
+        page = _page_no_dod("- [x] a\n- [ ] b", created="2026-01-15")
+        self.assertEqual(self._verdict(page), "OPEN")
 
     def test_star_and_plus_bullets_are_counted(self):
         self.assertEqual(self._verdict(_page("* [x] a\n+ [x] b", "* [x] c")), "CLOSE")
@@ -125,7 +172,15 @@ class TopicKindTest(unittest.TestCase):
     def _verdict(self, page):
         body = closure.strip_fences(page)
         sections = {n: closure.section_of(body, n, strict) for n, strict in closure.SECTIONS["topic"]}
-        return closure.verdict_of(closure.read_status(page), sections)
+        return closure.verdict_of(
+            closure.read_status(page), sections, closure.dod_exempt("topic", closure.read_created(page))
+        )
+
+    def test_grandfathered_topic_without_a_gate_is_still_unmeasurable(self):
+        # The grandfathering decision names goals. A topic closes on its
+        # `# Completion Gate`, which has no cutoff at any age.
+        page = '---\nstatus: in_progress\ncreated: "2020-01-01"\n---\n\n# Success Criteria\n\n- [x] a\n'
+        self.assertEqual(self._verdict(page), "UNMEASURABLE")
 
     def test_topic_closes_on_sc_plus_gate(self):
         self.assertEqual(self._verdict(_topic_page("- [x] a", "- [x] G1\n- [x] G2")), "CLOSE")
@@ -147,6 +202,77 @@ class TopicKindTest(unittest.TestCase):
         # A topic page carrying a DoD must not be closed on it.
         page = _topic_page("- [x] a", "- [x] G1") + "\n# Definition of Done\n\n- [ ] never\n"
         self.assertEqual(self._verdict(page), "CLOSE")
+
+
+class TaskKindTest(unittest.TestCase):
+    def test_task_without_a_dod_is_unmeasurable_at_every_cutoff(self):
+        # A task's DoD requirement is not part of the grandfathering decision, so an
+        # ancient task with no DoD still refuses the close.
+        page = '---\nstatus: in_progress\ncreated: "2020-01-01"\n---\n\n# Success Criteria\n\n- [x] a\n'
+        body = closure.strip_fences(page)
+        sections = {n: closure.section_of(body, n, s) for n, s in closure.SECTIONS["task"]}
+        self.assertEqual(
+            closure.verdict_of(
+                closure.read_status(page), sections, closure.dod_exempt("task", closure.read_created(page))
+            ),
+            "UNMEASURABLE",
+        )
+
+
+class CreatedFieldTest(unittest.TestCase):
+    """`created` is read as a raw scalar, and the cutoff compares it lexicographically."""
+
+    def test_quoted_date(self):
+        self.assertEqual(closure.read_created('---\ncreated: "2026-01-15"\n---\n'), "2026-01-15")
+
+    def test_unquoted_date(self):
+        self.assertEqual(closure.read_created("---\ncreated: 2026-01-15\n---\n"), "2026-01-15")
+
+    def test_timestamp_suffix(self):
+        self.assertEqual(
+            closure.read_created("---\ncreated: 2026-09-20T00:00:00Z\n---\n"), "2026-09-20T00:00:00Z"
+        )
+
+    def test_absent_is_none(self):
+        self.assertIsNone(closure.read_created("---\nstatus: in_progress\n---\n"))
+
+    def test_created_date_key_is_not_created(self):
+        # Tasks carry `created_date:`; that key must not satisfy the `created` read.
+        self.assertIsNone(closure.read_created('---\ncreated_date: "2026-01-15"\n---\n'))
+
+    def test_a_non_padded_date_fails_closed(self):
+        # Lexicographic comparison is exact only for zero-padded ISO-8601. A
+        # non-padded value is refused rather than compared — the strict direction,
+        # which can refuse a close but can never permit one.
+        self.assertFalse(
+            closure.dod_exempt("goal", closure.read_created("---\ncreated: 2026-6-1\n---\n"))
+        )
+
+    def test_a_non_iso_date_fails_closed(self):
+        # `15.01.2026` and a bare `2026` both sort BELOW the cutoff lexicographically,
+        # so an unguarded comparison would exempt them — a false CLOSE, the expensive
+        # direction. The shape guard refuses them instead.
+        for raw in ("15.01.2026", "2026", "01/15/2026", "Jan 2026", ""):
+            self.assertFalse(closure.dod_exempt("goal", raw), raw)
+
+    def test_a_well_shaped_but_invalid_or_trailing_date_fails_closed(self):
+        # The guard must match its own contract: an anchored, range-checked ISO date.
+        # `2026-00-00` sorts below the cutoff, and `2026-01-15garbage` is not a date at
+        # all — both would exempt a malformed page if the shape went unchecked.
+        for raw in ("2026-00-00", "2026-13-01", "2026-01-32", "2026-01-15garbage", "2026-01-15 note"):
+            self.assertFalse(closure.dod_exempt("goal", raw), raw)
+
+    def test_a_time_suffix_still_parses(self):
+        for raw in ("2026-01-15T00:00:00Z", "2026-01-15 12:30", "2026-01-15"):
+            self.assertTrue(closure.dod_exempt("goal", raw), raw)
+
+    def test_the_cutoff_boundary_is_exact_to_the_day(self):
+        # The lexicographic claim the whole cutoff rests on: a timestamp on the day
+        # BEFORE the cutoff is grandfathered, and one ON the cutoff date is not.
+        self.assertTrue(closure.dod_exempt("goal", "2026-06-25T23:59:59Z"))
+        self.assertFalse(closure.dod_exempt("goal", "2026-06-26T00:00:00Z"))
+        self.assertTrue(closure.dod_exempt("goal", "2026-06-25"))
+        self.assertFalse(closure.dod_exempt("goal", "2026-06-26"))
 
 
 class SectionTest(unittest.TestCase):
@@ -195,13 +321,171 @@ class AbsentStatusTest(unittest.TestCase):
 
 class CliTest(unittest.TestCase):
     def _run(self, page):
+        return self._run_capture(page)[0]
+
+    def _run_capture(self, page):
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as handle:
             handle.write(page)
             path = handle.name
+        buf = io.StringIO()
         try:
-            return closure.main(["goal-closure-read.py", path])
+            with contextlib.redirect_stdout(buf):
+                code = closure.main(["goal-closure-read.py", path])
         finally:
             os.unlink(path)
+        return code, buf.getvalue()
+
+    def test_grandfathered_goal_prints_the_absent_line(self):
+        # The line shape is load-bearing: it separates a close the rule now PERMITS
+        # from a section the reader failed to find. Collapsing the two — or dropping
+        # the exemption branch in main — leaves every verdict test above green.
+        page = _page_no_dod("- [x] a", created="2026-01-15")
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 0)
+        self.assertIn("ABSENT — grandfathered", out)
+        self.assertNotIn("MISSING", out)
+        self.assertIn("VERDICT: CLOSE", out)
+
+    def test_post_cutoff_goal_prints_missing(self):
+        page = _page_no_dod("- [x] a", created="2026-10-19")
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 1)
+        self.assertIn("MISSING", out)
+        self.assertNotIn("grandfathered", out)
+        self.assertIn("VERDICT: UNMEASURABLE", out)
+
+    def test_an_absent_created_prints_the_absent_arm(self):
+        # The `created or 'absent'` arm is the line a page with no `created` actually
+        # prints; without this it is covered only at the verdict_of level.
+        page = _page_no_dod("- [x] a")
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 0)
+        self.assertIn("created absent", out)
+
+    def test_a_page_with_unreadable_frontmatter_is_not_grandfathered(self):
+        # `read_created` returns None for an absent field AND for a page whose
+        # frontmatter never parsed. Without the parse guard the second reads as
+        # "no created" and closes a page the reader could not read at all.
+        page = "\n# Success Criteria\n\n- [x] a\n"
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 1)
+        self.assertIn("VERDICT: UNMEASURABLE", out)
+
+    def test_a_bom_page_is_read_and_still_honours_the_cutoff(self):
+        page = "﻿" + _page_no_dod("- [x] a", created="2026-01-15")
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 0)
+        self.assertIn("VERDICT: CLOSE", out)
+
+    def test_an_h2_dod_heading_is_not_grandfathered(self):
+        # The section reader wants an exact H1. An h2 DoD holding an OPEN box must not
+        # become a CLOSE merely because the heading shape was not recognised.
+        page = (
+            '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+            "# Success Criteria\n\n- [x] a\n\n## Definition of Done\n\n- [ ] never\n"
+        )
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 1)
+        self.assertIn("VERDICT: UNMEASURABLE", out)
+
+    def test_a_suffixed_dod_heading_is_not_grandfathered(self):
+        page = (
+            '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+            "# Success Criteria\n\n- [x] a\n\n# Definition of Done (optional)\n\n- [ ] never\n"
+        )
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 1)
+        self.assertIn("VERDICT: UNMEASURABLE", out)
+
+    def test_an_indented_atx_dod_heading_is_not_grandfathered(self):
+        # CommonMark/Obsidian render an ATX heading indented by up to three spaces.
+        page = (
+            '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+            "# Success Criteria\n\n- [x] a\n\n  # Definition of Done\n\n- [ ] never\n"
+        )
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 1)
+        self.assertIn("VERDICT: UNMEASURABLE", out)
+
+    def test_a_setext_dod_heading_is_not_grandfathered(self):
+        # A setext heading is a heading to Obsidian and invisible to `section_of`.
+        page = (
+            '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+            "# Success Criteria\n\n- [x] a\n\nDefinition of Done\n------------------\n\n- [ ] never\n"
+        )
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 1)
+        self.assertIn("VERDICT: UNMEASURABLE", out)
+
+    def test_a_suffixed_setext_dod_after_tasks_is_not_grandfathered(self):
+        # The layout that slipped through every earlier guard: the DoD sits AFTER
+        # `# Tasks`, so its boxes are not absorbed into the SC tally, and its heading is
+        # a suffixed setext — invisible to `section_of` and to a heading regex.
+        page = (
+            '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+            "# Success Criteria\n\n- [x] a\n\n# Tasks\n\n- [x] b\n\n"
+            "Definition of Done (optional)\n-----------------------------\n\n- [ ] never\n"
+        )
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 1)
+        self.assertNotIn("grandfathered", out)
+
+    def test_a_blockquoted_or_bold_dod_heading_is_not_grandfathered(self):
+        for heading in ("> # Definition of Done", "# **Definition of Done**", "Definition of Done"):
+            page = (
+                '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+                f"# Success Criteria\n\n- [x] a\n\n# Tasks\n\n- [x] b\n\n{heading}\n\n- [ ] never\n"
+            )
+            code, out = self._run_capture(page)
+            self.assertEqual(code, 1, heading)
+            self.assertNotIn("grandfathered", out, heading)
+
+    def test_a_whitespace_variant_dod_heading_is_not_grandfathered(self):
+        # `# Definition  of  Done` and a non-breaking space are the same heading to a
+        # renderer, and `section_of` treats the line as a boundary either way.
+        for heading in ("# Definition  of  Done", "# Definition of Done"):
+            page = (
+                '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+                f"# Success Criteria\n\n- [x] a\n\n# Tasks\n\n- [x] b\n\n{heading}\n\n- [ ] never\n"
+            )
+            code, out = self._run_capture(page)
+            self.assertEqual(code, 1, heading)
+            self.assertNotIn("grandfathered", out, heading)
+
+    def test_a_list_marker_dod_heading_is_not_grandfathered(self):
+        # A bulleted or numbered DoD label is one more spelling of the heading.
+        for heading in ("- Definition of Done", "1. Definition of Done", "- **Definition of Done**"):
+            page = (
+                '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+                f"# Success Criteria\n\n- [x] a\n\n# Tasks\n\n- [x] b\n\n{heading}\n\n- [ ] never\n"
+            )
+            code, out = self._run_capture(page)
+            self.assertEqual(code, 1, heading)
+            self.assertNotIn("grandfathered", out, heading)
+
+    def test_a_grandfathered_goal_with_an_unterminated_fence_is_unmeasurable(self):
+        # The absence guard is vacuous when the body cannot be read, so this path must
+        # fail closed on the Success Criteria section alone — and never print the
+        # grandfathered line for a page whose fences are broken.
+        page = (
+            '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+            "# Success Criteria\n\n- [x] a\n\n```\n- [x] example\n"
+        )
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 1)
+        self.assertIn("VERDICT: UNMEASURABLE", out)
+        self.assertNotIn("grandfathered", out)
+
+    def test_a_prose_mention_of_the_section_does_not_block_a_grandfathered_close(self):
+        # The guard matches a line that BEGINS with the section name, so a sentence
+        # about it does not over-refuse a goal that genuinely has no DoD.
+        page = (
+            '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+            "# Success Criteria\n\n- [x] a\n\nThis goal predates the Definition of Done requirement.\n"
+        )
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 0)
+        self.assertIn("VERDICT: CLOSE", out)
 
     def test_close_exits_zero(self):
         self.assertEqual(self._run(_page("- [x] a", "- [x] c")), 0)
@@ -220,6 +504,18 @@ class CliTest(unittest.TestCase):
 
     def test_wrong_arity_exits_two(self):
         self.assertEqual(closure.main(["goal-closure-read.py"]), 2)
+
+
+class CutoffDocumentationTest(unittest.TestCase):
+    def test_the_closure_step_restates_the_cutoff_date(self):
+        # DOD_REQUIRED_AS_OF is deliberately restated in the step doc. Nothing else
+        # enforces the agreement, and a partial edit silently re-breaks closure —
+        # the exact failure this change repairs.
+        step = os.path.join(os.path.dirname(_SCRIPTS), "commands", "steps", "goal-closure.md")
+        with open(step, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn("DOD_REQUIRED_AS_OF", text)
+        self.assertIn(closure.DOD_REQUIRED_AS_OF, text)
 
 
 if __name__ == "__main__":
