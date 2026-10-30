@@ -506,6 +506,54 @@ class CliTest(unittest.TestCase):
         self.assertEqual(closure.main(["goal-closure-read.py"]), 2)
 
 
+class TaskVerbGateTest(unittest.TestCase):
+    """A task's CLOSE must predict `vault-cli task complete`, which refuses page-wide."""
+
+    def _run(self, page, kind):
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as handle:
+            handle.write(page)
+            path = handle.name
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                code = closure.main(["goal-closure-read.py", "--kind", kind, path])
+        finally:
+            os.unlink(path)
+        return code, buf.getvalue()
+
+    def test_open_tasks_box_keeps_a_task_open(self):
+        # The 2026-10-30 case: SC + DoD all ticked, one open `# Tasks` box. The verb
+        # refuses it, so the reader must not offer it.
+        page = _page("- [x] a", "- [x] b") + "\n# Tasks\n\n- [ ] e2e round\n"
+        code, out = self._run(page, "task")
+        self.assertEqual(code, 1)
+        self.assertIn("Whole page (task complete's gate): 1 open", out)
+        self.assertIn("VERDICT: OPEN", out)
+
+    def test_in_progress_box_anywhere_keeps_a_task_open(self):
+        page = _page("- [x] a", "- [x] b") + "\n# Tasks\n\n- [/] half done\n"
+        self.assertIn("VERDICT: OPEN", self._run(page, "task")[1])
+
+    def test_fully_ticked_task_still_closes(self):
+        page = _page("- [x] a", "- [x] b") + "\n# Tasks\n\n- [x] done\n"
+        code, out = self._run(page, "task")
+        self.assertEqual(code, 0)
+        self.assertIn("Whole page (task complete's gate): 0 open", out)
+        self.assertIn("VERDICT: CLOSE", out)
+
+    def test_fenced_open_box_blocks_a_task_because_the_verb_counts_it(self):
+        # The verb strips no fences, so neither may the mirror of its gate.
+        page = _page("- [x] a", "- [x] b") + "\n# Notes\n\n```\n- [ ] example\n```\n"
+        self.assertIn("VERDICT: OPEN", self._run(page, "task")[1])
+
+    def test_goal_ignores_the_tasks_section(self):
+        # `vault-cli goal complete` checks linked task status, never boxes.
+        page = _page("- [x] a", "- [x] b") + "\n# Tasks\n\n- [ ] [[Some Task]]\n"
+        code, out = self._run(page, "goal")
+        self.assertEqual(code, 0)
+        self.assertNotIn("Whole page", out)
+
+
 class CutoffDocumentationTest(unittest.TestCase):
     def test_the_closure_step_restates_the_cutoff_date(self):
         # DOD_REQUIRED_AS_OF is deliberately restated in the step doc. Nothing else
