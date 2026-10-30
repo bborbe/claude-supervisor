@@ -29,6 +29,8 @@ NO_GOAL_SESSION = "cccccccc-3333-4333-8333-333333333333"
 METRICS_SESSION = "dddddddd-4444-4444-8444-444444444444"
 SECOND_PAGE_SESSION = "eeeeeeee-5555-4555-8555-555555555555"
 PROSE_SESSION = "ffffffff-6666-4666-8666-666666666666"
+LAST_KEY_FOREIGN = "12121212-1212-4212-8212-121212121212"
+LAST_KEY_OWN = "13131313-1313-4313-8313-131313131313"
 
 SELF_GOAL = "Managers Unblock Their Own Workers and Approve Routine Permissions Within Policy"
 
@@ -49,6 +51,17 @@ class Vault:
     def task(self, name, front, body="\n# Impact\n\nstub\n"):
         with open(os.path.join(self.root, "25 Tasks", name + ".md"), "w", encoding="utf-8") as handle:
             handle.write(_page(front, body))
+        return self
+
+    def task_ending_at(self, name, front, body="\n# Impact\n\nstub\n"):
+        """A task whose frontmatter ENDS at `front` — no `page_type:` trailer.
+
+        `task()` appends `page_type: task`, so a `goals:` block written through it is never
+        the LAST key in the frontmatter. That trailer is exactly what hid the last-key bug:
+        every page it builds has a key after the block under test. This writer removes it.
+        """
+        with open(os.path.join(self.root, "25 Tasks", name + ".md"), "w", encoding="utf-8") as handle:
+            handle.write("---\n" + front + "\n---\nTags: [[Task]]\n\n---\n" + body)
         return self
 
     def goal(self, name, front, links):
@@ -147,6 +160,69 @@ class Scope(unittest.TestCase):
         )
         scope = ss.load(ME, [self.vault.root])
         self.assertEqual(scope.exclusion(PROSE_SESSION, ME), (False, ""))
+
+
+class GoalsBlockAsLastFrontmatterKey(unittest.TestCase):
+    """A `goals:` block that is the LAST key in the frontmatter.
+
+    `_frontmatter()` returns `text[3:end]`, so a block that ends the frontmatter has no
+    trailing newline. `_GOALS_BLOCK` required every list item to end `\\n`, so such a block
+    matched ZERO items — silently, with no error — and `_goals()` returned `[]`.
+
+    Two faces, and the second is the dangerous one:
+
+    - a foreign page loses its owner, so the exclusion names nobody (`owner-unknown`) instead
+      of the goal it actually belongs to — the "it can never name the owner" defect this
+      whole change exists to remove, restored for that page shape;
+    - the asking manager's own goal stops widening its scope, so its own workers' gates are
+      excluded from the feed it exists to see — the fleet-silence direction the module says
+      it fails open to avoid.
+
+    Every earlier case missed both because `Vault.task()` appends `page_type: task`, which
+    always puts a key AFTER the block under test.
+    """
+
+    def test_goals_reads_a_block_with_no_key_after_it(self):
+        """The mechanism, pinned at the line the defect lives on."""
+        front = "\nclaude_session_id: %s\ngoals:\n    - '[[Some Other Goal]]'" % ME
+        self.assertEqual(ss._goals(front), ["Some Other Goal"])
+
+    def test_a_foreign_page_whose_goals_block_is_last_still_names_its_goal(self):
+        vault = Vault()
+        try:
+            vault.goal(SELF_GOAL, f"manager_session_id: {ME}\n", ["Own Task"])
+            vault.task("Own Task", f"claude_session_id: {OWN_TASK_SESSION}\n")
+            vault.task_ending_at(
+                "Last Key Foreign",
+                f"claude_session_id: {LAST_KEY_FOREIGN}\ngoals:\n    - '[[Some Other Goal]]'",
+            )
+            scope = ss.load(ME, [vault.root])
+            self.assertEqual(
+                scope.exclusion(LAST_KEY_FOREIGN, ME),
+                (True, "foreign-goal:Some Other Goal"),
+            )
+        finally:
+            vault.close()
+
+    def test_a_task_page_manager_whose_goals_block_is_last_still_scopes_its_goal(self):
+        """The dangerous direction: an own gate excluded because the goal never widened."""
+        vault = Vault()
+        try:
+            vault.goal(
+                "Some Goal",
+                "manager_session_id: 12341234-1234-4123-8123-123412341234\n",
+                ["Manager Task", "Own Task"],
+            )
+            vault.task_ending_at(
+                "Manager Task",
+                f"claude_session_id: {ME}\ngoals:\n    - '[[Some Goal]]'",
+            )
+            vault.task("Own Task", f"claude_session_id: {LAST_KEY_OWN}\n")
+            scope = ss.load(ME, [vault.root])
+            self.assertEqual(scope.self_goals, ["Some Goal"])
+            self.assertEqual(scope.exclusion(LAST_KEY_OWN, ME), (False, ""))
+        finally:
+            vault.close()
 
 
 class Unresolved(unittest.TestCase):

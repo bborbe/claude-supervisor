@@ -113,7 +113,15 @@ _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _CLAUDE_STAMP = re.compile(r'^claude_session_id:\s*["\']?(' + _UUID + r')', re.M)
 _MANAGER_STAMP = re.compile(r'^manager_session_id:\s*["\']?(' + _UUID + r')', re.M)
 _SESSION_ENTRY = re.compile(r'^\s*-\s+session_id:\s*["\']?(' + _UUID + r')', re.M)
-_GOALS_BLOCK = re.compile(r"^goals:\s*\n((?:[ \t]+-[^\n]*\n)*)", re.M)
+#: ⚠️ **The trailing newline is OPTIONAL, and that is load-bearing.** `_frontmatter()` returns
+#: `text[3:end]`, which drops the closing delimiter's newline — so a `goals:` block that is the
+#: LAST frontmatter key ends mid-line. Requiring `\n` made that block match ZERO items and
+#: `_goals()` return `[]` with no error at all: a foreign page then named no owner
+#: (`owner-unknown` instead of `foreign-goal:<goal>`), and a manager whose own task declares the
+#: goal never widened its scope, so its own workers' gates were excluded from the feed it exists
+#: to see. Only the last-key shape regressed — any page carrying a key after the block matched
+#: exactly as before, which is why every page in the vault's own frontmatter ordering missed it.
+_GOALS_BLOCK = re.compile(r"^goals:\s*\n((?:[ \t]+-[^\n]*\n?)*)", re.M)
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)")
 _TASKS_HEADING = re.compile(r"^# Tasks\s*$", re.M)
 _NEXT_HEADING = re.compile(r"^# ", re.M)
