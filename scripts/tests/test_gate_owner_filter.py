@@ -1669,5 +1669,74 @@ class FeedStateSurvivesTheReArm(unittest.TestCase):
         self.assertFalse(os.path.exists(self.feed_state), os.listdir(self.dir))
 
 
+class _FakeScope:
+    """The narrowest stand-in for `session-scope.Scope`: one answer per session id."""
+
+    def __init__(self, answers):
+        self.answers = answers
+
+    def exclusion(self, session_id, self_id):
+        return self.answers.get(session_id, (False, ""))
+
+
+class ScopeExclusion(unittest.TestCase):
+    """The third verdict, branch by branch. It may only turn an EMIT into an EXCLUDE."""
+
+    LEDGER = {"worker-1": {"session_id": "worker-1", "parent_session": "manager-x"}}
+    LIVE = {"worker-1", "manager-x", "manager-y"}
+
+    def call(self, session_id, spawner, scope, ledger=_UNSET, live=_UNSET):
+        return gf.verdict(
+            session_id,
+            spawner,
+            self.LEDGER if ledger is _UNSET else ledger,
+            self.LIVE if live is _UNSET else live,
+            ME,
+            None,
+            scope,
+        )
+
+    def test_a_foreign_session_is_excluded_and_names_its_goal(self):
+        scope = _FakeScope({"w": (True, "foreign-goal:Some Other Goal")})
+        self.assertEqual(self.call("w", "nobody", scope),
+                         (gf.EXCLUDE, "foreign-goal:Some Other Goal"))
+
+    def test_an_owner_unknown_session_is_excluded_too(self):
+        scope = _FakeScope({"w": (True, "owner-unknown")})
+        self.assertEqual(self.call("w", "nobody", scope), (gf.EXCLUDE, "owner-unknown"))
+
+    def test_a_scoped_own_session_falls_through_to_the_spawner_path(self):
+        """Own is not a verdict — it leaves every existing rule exactly as it was.
+
+        Asserted against the UNSCOPED answer for the same inputs, so the pin is the property
+        rather than a ledger row this test happens to carry.
+        """
+        scope = _FakeScope({})
+        for session_id, spawner in (("w", "manager-y"), ("worker-1", "manager-x"), ("w", None)):
+            self.assertEqual(
+                self.call(session_id, spawner, scope),
+                self.call(session_id, spawner, None),
+                (session_id, spawner),
+            )
+
+    def test_no_scope_changes_nothing(self):
+        self.assertEqual(self.call("w", "manager-y", None), (gf.DROP, "peer-manager"))
+
+    def test_a_pane_this_watcher_spawned_is_never_excluded(self):
+        """`own-worker` returns above the scope check: these are the panes it EXISTS to see."""
+        scope = _FakeScope({"w": (True, "foreign-goal:Some Other Goal")})
+        self.assertEqual(self.call("w", ME, scope), (gf.EMIT, "own-worker"))
+
+    def test_the_asking_session_is_never_excluded(self):
+        scope = _FakeScope({ME: (True, "foreign-goal:Some Other Goal")})
+        self.assertEqual(self.call(ME, "manager-y", scope), (gf.EMIT, "self"))
+
+    def test_the_scope_outranks_a_spawn_edge_drop_for_a_foreign_pane(self):
+        """The durable answer wins, and it is the only one that names the real owner."""
+        scope = _FakeScope({"w": (True, "foreign-goal:Some Other Goal")})
+        self.assertEqual(self.call("w", "manager-y", scope),
+                         (gf.EXCLUDE, "foreign-goal:Some Other Goal"))
+
+
 if __name__ == "__main__":
     unittest.main()
