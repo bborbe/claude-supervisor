@@ -228,8 +228,17 @@ output — the fleet table.
   § Session roles attaches to the worker-side prohibition, so do not go hunting for an
   enforcement that does not exist.
 - **A topic manager starts a goal manager with `/supervisor:open --goal "<goal>"`**, and only
-  for a goal its own `## Goals` list declares **and that the operator flagged**. `commands/topic-spawn.md`
+  for a goal its own `## Goals` list declares **and that carries the flag** (whoever set it). `commands/topic-spawn.md`
   owns the five refusals (`goal-not-in-scope`, `goal-not-startable`, `goal-terminal`,
   `goal-unflagged`, `manager-cap`), the ranking that picks which goals get one of the N slots, and
-  the keep-alive contract. ⚠️ **Rule 4 — restart is not open:** an unflagged goal is reported and
-  held, never opened, however free the slots are. It holds no `spawn_agent` tool.
+  the keep-alive contract. It holds no `spawn_agent` tool.
+  ⚠️ **The flag gates the OPEN, never the RESTART.** A goal with **no recorded
+  `manager_session_id`** is an open: an unflagged one is reported (`open-unflagged`) and
+  held, however free the slots are — that is rule 4, and `topic-spawn.py`'s `goal-unflagged`
+  refusal is its executable gate. A goal that **already carries a recorded id** and whose
+  session is `ABSENT`, or whose loop is `STALE`, is a **restart**: rule 1 restarts it
+  automatically and **the flag is not consulted**, because `/supervisor:open --goal` resumes
+  the same session and decides nothing about who supervises.
+  ⚠️ **Reading this bullet as "an unflagged goal is held", without that split, is what makes
+  rule 1 inert on the topic tier** — the round then reports dead managers as *"resume held …
+  unflagged"* and restarts none of them, which is the state measured on 2026-10-30.

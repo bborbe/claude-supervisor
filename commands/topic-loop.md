@@ -176,9 +176,14 @@ code edits, no repo/PR/k8s verification, no investigation, no real debugging.
 - **No goal manager → start one, under the ranking, and only for a FLAGGED goal
   (whoever set the flag).** `/supervisor:topic-spawn` is the only route; it holds no spawn tool and
   delegates to `/supervisor:open --goal`. ⚠️ **Rule 4 — restart is not open:** a goal
-  carrying no flag is **reported and held**, never opened, however free the slots
-  are. `commands/topic-drive.md` § Start states the same rule and this line must not drift
-  from it; the executable gate is `scripts/topic-spawn.py`'s `goal-unflagged` refusal.
+  carrying no flag **and no recorded `manager_session_id`** is **reported and
+  held**, never opened, however free the slots are. `commands/topic-drive.md` § Start states
+  the same rule and this line must not drift from it; the executable gate is
+  `scripts/topic-spawn.py`'s `goal-unflagged` refusal.
+  ⚠️ **That gate is the OPEN's and must never be applied to a resume.** A goal with a
+  recorded id whose session is `ABSENT`, or whose loop is `STALE`, is a **restart** — rule 1
+  restarts it automatically and the flag is not consulted. Holding those as "unflagged"
+  makes the goal tier's automatic restart inert for every unflagged goal.
 - **Anchored, always.** No work is delegated or spawned without a goal anchoring it.
   Read-only manager business (sweep, table, TTS) needs no anchor.
 
