@@ -55,6 +55,9 @@ EXPECTED = {
     "12-truncated.jsonl": 0,
     "13-vault-cli-session-close.jsonl": 2,
     "14-gh-pr-merge-admin.jsonl": 0,
+    "15-session-close-with-admin-merge.jsonl": 0,
+    "16-compact-stays-gated.jsonl": 0,
+    "17-worktree-remove-stays-gated.jsonl": 0,
 }
 
 
@@ -119,6 +122,26 @@ class CloserGateLintTest(unittest.TestCase):
             self.payload("13-vault-cli-session-close.jsonl"), environ={})
         self.assertEqual("vault-cli-session-close", record["matched"])
         self.assertIn("vault-cli-session-close", text)
+
+    def test_admin_deny_survives_a_co_occurring_allow_entry(self):
+        # ⚠️ The bypass the per-pattern lookahead could not close. `match_allow` returns
+        # the FIRST match, so a body naming both session-close and an --admin merge was
+        # released by the session-close entry. The deny is global for exactly this case.
+        code, _text, record = self.mod.evaluate(
+            self.payload("15-session-close-with-admin-merge.jsonl"), environ={})
+        self.assertEqual(0, code)
+        self.assertIsNone(record["matched"])
+        self.assertEqual("not-allow-listed", record["reason"])
+
+    def test_the_dropped_classes_stay_gated(self):
+        # The other half of the 2026-10-30 decision: compaction and `git worktree remove`
+        # were measured and deliberately left out, so each must still block nothing and
+        # let the operator's gate stand.
+        for name in ("16-compact-stays-gated.jsonl", "17-worktree-remove-stays-gated.jsonl"):
+            with self.subTest(fixture=name):
+                code, _text, record = self.mod.evaluate(self.payload(name), environ={})
+                self.assertEqual(0, code)
+                self.assertEqual("not-allow-listed", record["reason"])
 
     def test_prod_deploy_stays_the_operators(self):
         _code, _text, record = self.mod.evaluate(

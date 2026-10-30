@@ -27,9 +27,12 @@ closer class and recorded on the vault task that measured the class.
 § After Opening a PR § Merge on Green says in terms to "merge without asking", which makes
 the plain merge no-ask in its own right; the earlier text here read § Execution Phase
 No Re-Ask's do-not-weaken list as keeping every merge gated, and the two rules were left
-contradicting each other. `--admin` stays gated — it bypasses branch protection — and the
-matcher enforces that with a negative lookahead, pinned by
-`fixtures/closer-gate-lint/14-gh-pr-merge-admin.jsonl`. Compaction and
+contradicting each other. `--admin` stays gated — it bypasses branch protection — and that
+exclusion lives in `DENY`, checked before `ALLOW` is walked, because `match_allow` returns
+the first match: a per-pattern lookahead would let a body naming both `--admin` and
+another allow-listed verb through on the other entry. Pinned by
+`fixtures/closer-gate-lint/14-gh-pr-merge-admin.jsonl` and
+`15-session-close-with-admin-merge.jsonl`. Compaction and
 `git worktree remove` were measured in the same decision and deliberately left gated:
 neither has a no-ask basis in CLAUDE.md, so allow-listing either would mean writing a new
 rule first, not editing this list.
@@ -100,10 +103,17 @@ ALLOW = (
     ("dark-factory-prompt-approve", re.compile(r"\bdark-factory\s+prompt\s+approve\b", re.IGNORECASE)),
     ("dark-factory-spec-approve", re.compile(r"\bdark-factory\s+spec\s+approve\b", re.IGNORECASE)),
     ("vault-cli-session-close", re.compile(r"/vault-cli:session-close\b", re.IGNORECASE)),
-    # ⚠️ The negative lookahead is load-bearing, not decoration. `--admin` bypasses
-    # branch protection, so the admin form must keep its gate; a bare `gh.*pr merge`
-    # pattern would swallow it. Pinned by 14-gh-pr-merge-admin.jsonl.
-    ("gh-pr-merge", re.compile(r"^(?!.*--admin\b).*\bgh\b.*\bpr\s+merge\b", re.IGNORECASE)),
+    ("gh-pr-merge", re.compile(r"\bgh\b.*\bpr\s+merge\b", re.IGNORECASE)),
+)
+
+# ⚠️ A GLOBAL deny, deliberately not a lookahead inside one ALLOW entry. `match_allow`
+# returns the FIRST match, so a body naming both `--admin` and another allow-listed verb
+# is released by the other entry and the admin bypass slips through — measured on
+# `approve: /vault-cli:session-close then gh pr merge 60 --merge --admin`, where the
+# session-close entry matched first. Checking here makes the exclusion independent of
+# ALLOW's order and of which verb the closer happens to name first.
+DENY = (
+    re.compile(r"--admin\b", re.IGNORECASE),
 )
 
 # ⚠️ The one prose alias, and it is measured rather than guessed: the observed pane-832
@@ -197,6 +207,9 @@ def match_allow(body):
     observed `/github-pr-watch` closer spells the verb as `` `watch` `` and names the
     command later in the same line.
     """
+    for pattern in DENY:
+        if pattern.search(body):
+            return None
     for name, pattern in ALLOW:
         if pattern.search(body):
             return name
