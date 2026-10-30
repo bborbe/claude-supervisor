@@ -411,6 +411,12 @@ test('supervisor.mjs actually adopts the roster and guards the rehydrated rows',
   // path still prunes first, still hands over EVERY row unfiltered, and now also passes `live`
   // (the one fact that separates a dead tab from a live headless worker). The release itself and
   // the safety property that must survive it are asserted in `resume-guard.test.mjs`.
+  //
+  // ⚠️ This pins the CALL'S TEXT, which is the price of a seam that cannot be imported: it can
+  // prove a variable named `live` is passed, not that the variable is the one `checkLiveness`
+  // produced. Renaming that binding breaks this test without a behaviour change, and the fix is
+  // to update the regex — not to loosen it, since the whole point is that the argument cannot
+  // silently become a literal or a different binding.
   assert.match(src, /pruneRehydratedAgents\(\)\n(?:\s*\/\/[^\n]*\n)*\s+const refusal = resumeRefusal\(\{ agentRecords: agents\.values\(\), sessionId: resume, live \}\)/)
   assert.ok(!/findLiveHolder\(\[\.\.\.agents\.values\(\)\]\.filter/.test(src), 'the rehydrated filter must not come back')
   assert.ok(!/agentRecords: \[\.\.\.agents\.values\(\)\]\.filter/.test(src), 'the rehydrated filter must not come back')

@@ -135,11 +135,34 @@ test('the refusal names the holder, so the operator knows what to close', () => 
   assert.match(refusalFor(records, false), /worker agent_42 is mid-turn in this server/)
 })
 
-test('narrowing the holder lookup to rehydrated rows fails these tests', () => {
-  // The removal mode this suite must catch, stated as an assertion rather than a comment:
-  // a `findLiveHolder` filtered to `rehydrated` rows returns null for the LOCAL rows above,
-  // so every `assert.notEqual(..., null)` in this block goes red. Deletion fails harder —
-  // the module would not load. Both modes are covered by the same assertions.
-  const local = [{ id: 'agent_9', sessionId: 's1', status: 'running', mode: 'headless' }]
-  assert.notEqual(findLiveHolder(local, 's1'), null, 'a local headless row must be findable')
+test('a stale tab row cannot mask the live worker a resume created', () => {
+  // ⚠️ THE BLOCKING CASE. Releasing a dead tab is what makes its session resumable, and a
+  // resume mints a NEW row (`agent_N`) while the old `interactive` row is never deleted —
+  // `agents` is keyed by `id`, so both survive for one sessionId, stale-first by insertion
+  // order. Deciding on the first holder alone would see the dead tab, release, and miss the
+  // live writer: two writers on one conversation.
+  const records = [
+    { id: 'agent_3', sessionId: 's1', status: 'interactive' },
+    { id: 'agent_44', sessionId: 's1', status: 'running', mode: 'headless' },
+  ]
+  const refusal = refusalFor(records, false)
+  assert.notEqual(refusal, null, 'a live headless holder must not be released by a stale tab row')
+  assert.match(refusal, /worker agent_44/, 'the refusal must name the live holder, not the stale row')
+})
+
+test('several dead tab rows for one session all release together', () => {
+  // The release is "every holder is a dead tab", so it must not require exactly one.
+  const records = [
+    { id: 'agent_3', sessionId: 's1', status: 'interactive' },
+    { id: 'agent_5', sessionId: 's1', status: 'interactive' },
+  ]
+  assert.equal(refusalFor(records, false), null)
+})
+
+test('a rehydrated row blocks even beside a dead tab', () => {
+  const records = [
+    { id: 'agent_3', sessionId: 's1', status: 'interactive' },
+    { id: 'agent_7', sessionId: 's1', status: 'interactive', rehydrated: true },
+  ]
+  assert.match(refusalFor(records, false), /in the supervisor process that spawned it/)
 })

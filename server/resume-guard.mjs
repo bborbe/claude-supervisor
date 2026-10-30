@@ -29,12 +29,19 @@ export const TERMINAL_STATUSES = new Set(['done', 'error'])
 
 export const isFinished = (status) => TERMINAL_STATUSES.has(status)
 
-// The agent record holding `sessionId` that has not finished, or null.
+// EVERY record holding `sessionId` that has not finished. Usually one; more than one is
+// possible, and the release below depends on seeing all of them (see its ⚠️).
 //
 // `agentRecords` is any iterable of records carrying `sessionId` and `status` — the
 // caller passes `agents.values()`.
+export function findLiveHolders(agentRecords, sessionId) {
+  return [...agentRecords].filter((a) => a.sessionId === sessionId && !isFinished(a.status))
+}
+
+// The first such record, or null. Kept because callers that only ask "is anything
+// holding this session" do not need the set.
 export function findLiveHolder(agentRecords, sessionId) {
-  return [...agentRecords].find((a) => a.sessionId === sessionId && !isFinished(a.status)) ?? null
+  return findLiveHolders(agentRecords, sessionId)[0] ?? null
 }
 
 // The refusal a resume of `sessionId` should carry, or `null` when nothing holds it.
@@ -53,22 +60,40 @@ export function findLiveHolder(agentRecords, sessionId) {
 // `live: null` means neither probe could be read. That is not evidence of death, so it
 // never releases a row here; the caller refuses on it separately, fail-closed.
 export function resumeRefusal({ agentRecords, sessionId, live }) {
-  const holder = findLiveHolder(agentRecords, sessionId)
-  if (!holder) return null
+  const holders = findLiveHolders(agentRecords, sessionId)
+  if (holders.length === 0) return null
+
+  const refusal = (holder, where) =>
+    `session ${sessionId} is still running (worker ${holder.id} is mid-turn ${where}) — close it before resuming, or you will have two writers on one conversation`
+
   // A rehydrated row's worker lives in the supervisor process that SPAWNED it, not in
   // this one (`registry-rehydrate.mjs` — adoption crosses processes), so naming "this
   // server" would send the operator to close the wrong thing. It is never released
   // here either: this process cannot see that worker at all.
-  if (holder.rehydrated) {
-    return `session ${sessionId} is still running (worker ${holder.id} is mid-turn in the supervisor process that spawned it) — close it before resuming, or you will have two writers on one conversation`
-  }
-  // The one release. `live === false` only — never `null`, never a headless row.
+  const foreign = holders.find((h) => h.rehydrated)
+  if (foreign) return refusal(foreign, 'in the supervisor process that spawned it')
+
+  // The one release. `live === false` only — never `null` — and only when EVERY holder
+  // for this session is a tab row.
+  //
+  // ⚠️ **EVERY holder, not the first one.** This is not defensive: releasing a dead tab
+  // is what lets the session be resumed, and a resume mints a NEW row under a new
+  // `agent_N` while the old `interactive` row is never deleted (`agents` is keyed by
+  // `id`, and nothing removes the stale one). The Map therefore ends up holding
+  // `[interactive (stale), running (live)]` for one sessionId, stale-first by insertion
+  // order. Deciding on `holders[0]` alone would find the dead tab, release, and miss the
+  // live writer the previous resume created — two writers on one conversation, the exact
+  // corruption this module exists to prevent.
   //
   // ⚠️ Why this cannot release a LIVE tab: a tab row's `sessionId` is only ever set from
   // the registry — `spawnInteractiveAgent` polls until the session appears and the caller
   // assigns what it found — so a row carrying an `interactive` status has already proved
   // it was registry-visible. If the registry now cannot see it, the process is gone. The
   // guard was adding nothing to that case but permanence.
-  if (holder.status === 'interactive' && live === false) return null
-  return `session ${sessionId} is still running (worker ${holder.id} is mid-turn in this server) — close it before resuming, or you will have two writers on one conversation`
+  if (live === false && holders.every((h) => h.status === 'interactive')) return null
+
+  // Something is not a dead tab — name it, preferring a non-interactive holder so the
+  // operator is pointed at the live writer rather than the stale row beside it.
+  const blocker = holders.find((h) => h.status !== 'interactive') ?? holders[0]
+  return refusal(blocker, 'in this server')
 }
