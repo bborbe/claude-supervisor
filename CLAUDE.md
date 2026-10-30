@@ -148,7 +148,7 @@ commands/attention-next.md + scripts/attention-answer.py  answer an attention it
 commands/{fleet-loop,fleet-status}.md            fleet surface — many sessions; the loop's arm and its read-only snapshot
 commands/fleet-drive.md                          fleet surface — the loop's round, dispatched on every wakeup and runnable by hand
 commands/{topic-loop,topic-status}.md    one TOPIC — the loop's arm and its read-only goal snapshot
-commands/topic-drive.md                  one TOPIC — the loop's round: keep goal managers alive, start what the ranking admits
+commands/topic-drive.md                  one TOPIC — the loop's round: keep goal managers alive, start only goals the operator flagged
 commands/topic-spawn.md                  one TOPIC — start ONE goal manager; holds no spawn tool, delegates to /supervisor:open --goal
 commands/topic-verify.md                 topic manager — verify one topic, suggest fixes
 commands/{goal-loop,goal-status}.md      one GOAL — the loop's arm and its read-only task snapshot

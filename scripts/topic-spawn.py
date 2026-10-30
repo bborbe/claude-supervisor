@@ -14,6 +14,20 @@ on it without parsing prose, and the exit code is non-zero for every one of them
                            Start` § Out of Scope keeps the unphased goals on
                            today's behavior, and the topic tier is the only
                            start path they have.
+  goal-terminal          the goal's `status` is `completed` or `aborted`. Closure leaves
+                           `phase` untouched, so a phase-only gate keeps offering a goal
+                           the same tick has just closed.
+                           ⚠️ **`hold` is NOT in `TERMINAL_STATUSES`.** A held goal in a
+                           startable phase therefore still passes this gate — a pause is
+                           not a closure, and whether a held goal should be openable is an
+                           open question this gate does not decide. Stated here because a
+                           docstring that claimed `hold` was terminal would describe
+                           behaviour the code does not implement.
+  goal-unflagged         the goal is not flagged by the operator — it needs `flag: true`
+                           with `flag_set_by: operator` or `legacy`. Opening a manager is
+                           the operator's act, so an unflagged goal is reported with its
+                           rank and never started; its WORKERS are still opened by the
+                           fleet round's open leg.
   manager-cap            a bound is reached; the SECOND line names which:
                            goal-cap      — this topic already runs N goal managers
                            manager-cap   — the fleet-wide manager ceiling is reached
@@ -64,9 +78,19 @@ REFUSE_TERMINAL = "goal-terminal"
 REFUSE_UNFLAGGED = "goal-unflagged"
 REFUSE_CAP = "manager-cap"
 
-# The only `flag_set_by` values that count as the operator's own mark. `legacy` covers the
-# 193 rows flagged before the field was written. An absent value is REFUSED — a writer that
-# set the flag without naming itself is not evidence the operator asked for it.
+# The only `flag_set_by` values that count as the operator's own mark. `legacy` covers rows
+# flagged before the field was written. An absent value is REFUSED — a writer that set the
+# flag without naming itself is not evidence the operator asked for it.
+#
+# ⚠️ **The evidence behind this gate is TASK-scoped, and its effect on GOALS is measured,
+# not assumed.** `bborbe/vault-cli` `docs/task-writing.md` § The approval flag and
+# `commands/open.md` § Step 0.5 both describe tasks, and no repo artifact shows a goal page
+# carrying the pair. Measured 2026-10-30 in the primary vault: **0 of 355 goal pages carry
+# `flag: true`, and 0 carry `flag_set_by` at all.** So the live effect is total — the topic
+# tier opens no goal manager until an operator flags one. That is the ruling ("we dont want
+# to auto open topic-manager, goal-manager ... but flag are fine") working as stated rather
+# than a gap in it: an unmanaged goal still gets its workers opened by the fleet round's
+# open leg, so the work moves without a manager.
 FLAG_SETTERS = ("operator", "legacy")
 
 # YAML spells a boolean three ways. `operator_pin` below already accepts `yes`, so taking
