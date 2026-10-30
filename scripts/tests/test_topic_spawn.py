@@ -403,7 +403,8 @@ class TopicSpawnTest(unittest.TestCase):
         agent renders — a slot the report cannot show is a row the operator never sees."""
         self.goal("Delta", "execution", 4, flag="false")
         rc, out = self.run_gate("--rank")
-        line = next(l for l in out[1:] if "Delta" in l)
+        line = next((l for l in out[1:] if "Delta" in l), None)
+        self.assertIsNotNone(line, f"no Delta row in the ranking output: {out}")
         self.assertIn("unflagged", line)
 
     def test_a_yes_flag_is_ranked(self):

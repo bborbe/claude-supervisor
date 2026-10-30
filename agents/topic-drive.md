@@ -81,14 +81,15 @@ a `SendMessage`. A worker row is reported downward to the goal manager that owns
      --vault "<vault-root>" --topic "<topic>" --rank
    ```
 
-   Return the `start` rows whose goal has no live manager, in rank order, one per line:
-   `To start: <goal> — rank <i>, <pin|ready work|priority>`. Return the rest as
-   `Held: <goal> — rank <i>, N slots full`, `Held: <goal> — phase todo`, or — the
-   `unflagged` slot `rank()` emits — `Held: <goal> — rank <i>, no operator flag`.
+   **Emit no rows of your own.** Step 1's verdict line is the goal's line; Step 2 only
+   annotates it. Read the ranking and append `· rank <i>, <slot>` to the line for each goal the
+   ranking lists, where `<slot>` is `start`, `held` or `unflagged`. A goal the ranking omits —
+   terminal, or a phase that is not `planning`/`execution` — carries no suffix at all.
 
-   ⚠️ **`unflagged` is not `N slots full`.** An unflagged goal never competes for a slot, so
-   reporting it as a full slot names a lever the operator cannot pull: the row waits on their
-   flag, not on another manager finishing.
+   ⚠️ **The suffix is the only place the cap and the flag show.** `held` means flagged but
+   beyond the N slots; `unflagged` means it never competed for one. Calling an `unflagged` goal
+   `held` would name a lever the operator cannot pull — the row waits on their flag, not on
+   another manager finishing.
 
    ⚠️ **The ranking is the script's, never yours.** Re-sorting by feel is the drift the
    script exists to prevent.
@@ -110,35 +111,23 @@ a `SendMessage`. A worker row is reported downward to the goal manager that owns
 <output_format>
 ```text
 Slots: <n>/3 filled · <m> free
-Live: <goal> [<sid8>] — loop OK
-To open: <goal> — /supervisor:open --goal "<goal>"
-Held: <goal> — no manager and no operator flag; report it, open nothing
-To resume: <goal> — /supervisor:open --goal "<goal>"
-To restart: <goal> [<sid8>] — /supervisor:restart <sid>
-To start: <goal> — rank 1, ready work 4
-Held: <goal> — rank 4, N slots full
-Held: <goal> — rank 4, no operator flag
-Stopped: <goal> — deliberate stand-down, no action
-Unverified: <goal> — <reason>
-Crash-loop: <goal> — 3 resumes in 30 min; escalate once
+Live: <goal> [<sid8>] — loop OK · rank 1, start
+To open: <goal> — /supervisor:open --goal "<goal>" · rank 2, start
+To resume: <goal> — /supervisor:open --goal "<goal>" · rank 3, start
+To restart: <goal> [<sid8>] — /supervisor:restart <sid> · rank 4, held
+Held: <goal> — no manager and no operator flag · rank 5, unflagged
+Stopped: <goal> — deliberate stand-down, no action · rank 6, held
+Unverified: <goal> — <reason> · rank 7, held
+Crash-loop: <goal> — 3 resumes in 30 min; escalate once · rank 8, held
 ```
 </output_format>
 
-⚠️ **One line per declared goal, and where two templates match the same goal the more specific
-wins.** Step 1's keep-alive verdict names the manager's state, so it beats Step 2's rank row:
-
-- **`To open` beats `To start`.** A manager-less goal with an operator flag yields the verdict
-  `open` *and* ranks `start`; both resolve to the same `/supervisor:open --goal`.
-- **`Held: … no manager and no operator flag` beats `Held: … rank <i>, no operator flag`.** Same
-  goal, same reason — the keep-alive row just says it first. Append the rank if you want it:
-  `Held: <goal> — no manager and no operator flag, rank <i>; report it, open nothing`.
-- **`To resume` and `To restart` beat `To start`** for the same goal: the manager exists, so
-  reviving it is the act, not ranking a fresh one.
-
-⚠️ **Those three pairs are the whole of the dedupe.** Step 2's `To start` and `Held: … N slots
-full` rows are NOT subsumed — Step 1 lines every declared goal, so a blanket "Step 1 wins" rule
-would make them unreachable and silently drop the over-cap signal a `held` row carries. Scope the
-precedence to the three pairs above and nothing more.
+⚠️ **"Exactly one line" is structural here, not a precedence list.** Step 2 never writes a line
+of its own — it appends a suffix to the line Step 1 already produced. A precedence list was tried
+instead of this, and each review round found another overlapping pair (`To open` against
+`Held: … N slots full`, `Live` against `Held: … no operator flag`), because two independent
+passes over the same goals will always overlap somewhere. One template per verdict plus one
+annotation cannot.
 
 <success_criteria>
 - Every declared goal has exactly one line.
