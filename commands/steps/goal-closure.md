@@ -47,7 +47,7 @@ For the subject, then each page of the tracked set:
    |---|---|---|
    | `TERMINAL` | the page already reads `completed`/`aborted` | **skip it** — nothing to close |
    | `UNMEASURABLE` | a section is absent, or carries no recognised box | report the gap, close nothing |
-   | `OPEN` | at least one box is open | report which, close nothing |
+   | `OPEN` | at least one box is open — for `--kind task`, anywhere on the page (`Whole page` line), since `vault-cli task complete` refuses on any open box | report which, close nothing |
    | `CLOSE` | both sections present, every box `[x]` — or an absent DoD on a grandfathered goal (see below) | step 2 |
 
    ⚠️ **`TERMINAL` is what stops a page being re-closed every tick.** The verb writes

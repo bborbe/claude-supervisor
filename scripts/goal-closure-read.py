@@ -313,6 +313,26 @@ def verdict_of(status, sections, dod_may_be_absent=False):
     return "CLOSE"
 
 
+# `vault-cli task complete`'s own gate, mirrored byte for byte: `storage.CheckboxRegex`
+# (`pkg/storage/base.go`) counted over the WHOLE page by `countCheckboxStates`
+# (`pkg/ops/complete.go`), refusing on any `[ ]` or `[/]`. It strips no fences and reads
+# every section, `# Tasks` included.
+_VERB_BOX = re.compile(r"^(\s*)[-*] \[([ x/])\] (.+)$", re.M)
+
+
+def verb_open_boxes(text):
+    """Boxes the task close verb would refuse on — its gate, not this reader's.
+
+    ⚠️ **A task's CLOSE must predict the verb, or the refusal recurs every tick.** The
+    SC/DoD split is the closure RULE, but `vault-cli task complete` refuses on any open
+    box anywhere on the page. Measured 2026-10-30: a task read CLOSE on SC + DoD, the verb
+    refused with `incomplete subtasks: 1 pending, 0 in-progress` (an open `# Tasks` box),
+    and the next round would have read CLOSE and been refused again. Goals are not
+    affected — `vault-cli goal complete` checks linked task status, never boxes.
+    """
+    return sum(1 for _, state, _ in _VERB_BOX.findall(text) if state in (" ", "/"))
+
+
 def main(argv):
     args, kind = [], "goal"
     rest = list(argv[1:])
@@ -350,6 +370,9 @@ def main(argv):
     # it by handing `verdict_of` a bare flag (see that function's docstring).
     exempt = exemption_for(kind, text, body)
     verdict = verdict_of(status, sections, exempt)
+    verb_open = verb_open_boxes(text) if kind == "task" else 0
+    if verdict == "CLOSE" and verb_open:
+        verdict = "OPEN"
 
     print(f"status: {status or 'ABSENT'}")
     if not fenced_ok:
@@ -364,6 +387,8 @@ def main(argv):
             print(f"{name}: 0 boxes — unmeasurable")
         else:
             print(f"{name}: {tally[0]} done, {tally[1]} open")
+    if kind == "task":
+        print(f"Whole page (task complete's gate): {verb_open} open")
     print(f"VERDICT: {verdict}")
     return 0 if verdict == "CLOSE" else 1
 
