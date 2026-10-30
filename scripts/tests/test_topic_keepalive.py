@@ -21,6 +21,7 @@ import pathlib
 import sys
 import tempfile
 import time
+import types
 import unittest
 from contextlib import redirect_stdout
 
@@ -291,15 +292,18 @@ class SessionVerdictTest(unittest.TestCase):
 
     def setUp(self):
         self.k = load()
-        self._orig = self.k.subprocess.run
+        self._orig = self.k.subprocess
 
     def tearDown(self):
-        self.k.subprocess.run = self._orig
+        self.k.subprocess = self._orig
 
     def _stub(self, rc, stdout="", stderr=""):
+        # ⚠️ Replace the module's `subprocess` REFERENCE, never `subprocess.run` on the stdlib
+        # module itself: `import subprocess` binds one shared object, so patching its attribute
+        # reaches every other test in the process.
         class R:
             returncode = rc
-        self.k.subprocess.run = lambda *a, **kw: R()
+        self.k.subprocess = types.SimpleNamespace(run=lambda *a, **kw: R())
 
     def test_absent_is_read_from_exit_1_even_though_nothing_reaches_stdout(self):
         # The measured shape: stdout empty, the verdict on stderr, exit 1.
