@@ -222,7 +222,8 @@ output — the fleet table.
   § Session roles attaches to the worker-side prohibition, so do not go hunting for an
   enforcement that does not exist.
 - **A topic manager starts a goal manager with `/supervisor:open --goal "<goal>"`**, and only
-  for a goal its own `## Goals` list declares. `commands/topic-spawn.md` owns the three
-  refusals (`goal-not-in-scope`, `goal-not-startable`, `manager-cap`), the ranking that picks
-  which goals get one of the N slots, and the keep-alive contract. It holds no `spawn_agent`
-  tool.
+  for a goal its own `## Goals` list declares **and that the operator flagged**. `commands/topic-spawn.md`
+  owns the five refusals (`goal-not-in-scope`, `goal-not-startable`, `goal-terminal`,
+  `goal-unflagged`, `manager-cap`), the ranking that picks which goals get one of the N slots, and
+  the keep-alive contract. ⚠️ **Rule 4 — restart is not open:** an unflagged goal is reported and
+  held, never opened, however free the slots are. It holds no `spawn_agent` tool.
