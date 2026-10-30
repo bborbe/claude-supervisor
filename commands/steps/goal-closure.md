@@ -70,7 +70,10 @@ For the subject, then each page of the tracked set:
    still `UNMEASURABLE` at every cutoff — and **goals only**: a task's DoD requirement is
    not part of that decision, and a topic closes on its `# Completion Gate`, which has no
    cutoff. The date is the same constant `agents/goal-auditor.md` § 12 carries; it lives in
-   two places because a plugin script cannot import from a vault agent.
+   two places because a plugin script cannot import from a vault agent. On such a goal the
+   reader prints `Definition of Done: ABSENT — grandfathered (created <date> < 2026-06-26)`
+   where it would otherwise print `MISSING`, so a close it now permits is never mistaken for
+   a section it failed to find.
 
 2. **Run the tier's own verb, `--vault` passed explicitly, and quote it verbatim:**
    ```bash
