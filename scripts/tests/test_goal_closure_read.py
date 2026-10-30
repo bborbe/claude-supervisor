@@ -566,6 +566,12 @@ class DivergenceClassTest(unittest.TestCase):
     The classes are derived from the two literals rather than hand-picked: `_BOX` takes
     `[-*+]` with `[ \\t]*` before the box and any marker char, and needs no text after it;
     `_VERB_BOX` takes `[-*]` with exactly one space and `[ x/]`, and requires `(.+)`.
+
+    The box sits under `# Tasks`, outside SC/DoD, on purpose. `_VERB_BOX`'s shapes are a
+    strict subset of `_BOX`'s, so the reader is always at least as strict as the verb and
+    can never report CLOSE for a page the verb refuses — the divergence is one-directional
+    and safe. What these tests pin is therefore the two *regexes*, not a verdict flip; a
+    fixture asserting a verdict would only re-state that subset property.
     """
 
     @staticmethod

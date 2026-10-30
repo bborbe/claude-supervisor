@@ -2,7 +2,7 @@
 """Tests for `scripts/check-checkbox-regex-drift.py`.
 
 The guard's whole argument is that an untested copy drifts silently — so the guard
-itself must not be the one piece of it with no test. Four outcomes are pinned here,
+itself must not be the one piece of it with no test. Six outcomes are pinned here,
 and the fetch is injected rather than performed: `fetch(url)` is module-level, so the
 suite runs offline and never depends on GitHub being reachable.
 
@@ -15,6 +15,10 @@ suite runs offline and never depends on GitHub being reachable.
    when it can prove nothing.
 4. **An upstream page carrying no literal exits 1.** The extraction moving or being
    renamed must not read as agreement.
+5. **A reader file carrying no mirror exits 1.** The same, for the local side.
+6. **A differently-named assignment does not satisfy the extraction.** Unanchored,
+   `MY_VERB_BOX = …` matches on the `_VERB_BOX` substring and the guard reports `ok`
+   for a line that is not the mirror at all.
 
 Run: python3 -m unittest discover -s scripts/tests -v
 """

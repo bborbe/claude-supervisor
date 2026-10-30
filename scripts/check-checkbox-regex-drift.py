@@ -27,6 +27,12 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 READER = REPO / "scripts" / "goal-closure-read.py"
+# Deliberately `master`, not a tag. A pinned tag would compare against a released vault-cli
+# the installed binary may not be — a guaranteed stale comparison, which is the drift this
+# check exists to catch. `master` is the right source for "does the copy still match
+# upstream", and a branch rename fails closed with the fetch error named rather than
+# passing. What it cannot prove is that the *installed* vault-cli carries the same regex;
+# that is a different question, and a tag pin would not answer it either.
 UPSTREAM = "https://raw.githubusercontent.com/bborbe/vault-cli/master/pkg/storage/base.go"
 TIMEOUT_SECONDS = 10
 
@@ -47,10 +53,12 @@ def fetch(url: str) -> str:
 
     `--proto`/`--proto-redir` pin both the request and any redirect to HTTPS: `-L` alone
     would follow an HTTPS→HTTP downgrade, and the check trusts the fetched bytes enough to
-    fail the build on them."""
+    fail the build on them. `-q` must be first — without it curl reads `~/.curlrc`, which
+    can inject `--insecure` / `--proxy` / `--cacert` and undo that pinning."""
     result = subprocess.run(
         [
             "curl",
+            "-q",
             "-fsSL",
             "--proto",
             "=https",
@@ -70,7 +78,14 @@ def fetch(url: str) -> str:
 
 
 def main() -> int:
-    local_text = READER.read_text(encoding="utf-8")
+    try:
+        local_text = READER.read_text(encoding="utf-8")
+    except OSError as err:
+        print(
+            f"checkbox-regex-drift FAILED: cannot read {READER.name} — {err}",
+            file=sys.stderr,
+        )
+        return 1
     local = LOCAL.search(local_text)
     if local is None:
         print(
