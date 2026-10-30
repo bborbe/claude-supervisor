@@ -418,7 +418,14 @@ def load(self_id, vault_paths=None):
 
     for path, text in goal_pages:
         title = os.path.splitext(os.path.basename(path))[0]
-        goals[title] = set(_task_links(text))
+        # MERGE, never overwrite. `goals` is keyed by page basename and every `private-*` /
+        # `seibert-*` vault carries a `24 Goals/…` tree, so a shared basename is routine.
+        # Overwriting let the last vault's `# Tasks` replace -- or, with no `# Tasks`
+        # heading, WIPE -- the set `own_titles` is built from, so an own task linked only
+        # from the first vault's page was EXCLUDEd as foreign. That is the fleet-silence
+        # direction this module exists to prevent. `declaring` merges and `managers`
+        # appends for the same reason; this walk was the one that did not.
+        goals.setdefault(title, set()).update(_task_links(text))
         front = _frontmatter(text)
         if front:
             match = _MANAGER_STAMP.search(front)

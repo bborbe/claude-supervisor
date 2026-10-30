@@ -32,13 +32,16 @@ defect the filter has actually shipped or would ship:
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import endpoint_fixture  # noqa: E402
 from endpoint_fixture import FixtureEndpoint, dead_url, ledger_row  # noqa: E402
@@ -1680,19 +1683,25 @@ class _FakeScope:
 
 
 class ScopeExclusion(unittest.TestCase):
-    """The third verdict, branch by branch. It may only turn an EMIT into an EXCLUDE."""
+    """The third verdict, branch by branch.
+
+    It may only turn a NON-EXCLUDE verdict into an EXCLUDE -- never a pane this watcher
+    spawned (`own-worker`), never its own session (`self`), and never one it adopted
+    (`own-claim`). The `DROP` case is why it is "non-exclude" rather than "EMIT": the
+    scope SUPERSEDES a spawn-edge drop too.
+    """
 
     LEDGER = {"worker-1": {"session_id": "worker-1", "parent_session": "manager-x"}}
     LIVE = {"worker-1", "manager-x", "manager-y"}
 
-    def call(self, session_id, spawner, scope, ledger=_UNSET, live=_UNSET):
+    def call(self, session_id, spawner, scope, ledger=_UNSET, live=_UNSET, claims=_UNSET):
         return gf.verdict(
             session_id,
             spawner,
             self.LEDGER if ledger is _UNSET else ledger,
             self.LIVE if live is _UNSET else live,
             ME,
-            None,
+            None if claims is _UNSET else claims,
             scope,
         )
 
@@ -1736,6 +1745,110 @@ class ScopeExclusion(unittest.TestCase):
         scope = _FakeScope({"w": (True, "foreign-goal:Some Other Goal")})
         self.assertEqual(self.call("w", "manager-y", scope),
                          (gf.EXCLUDE, "foreign-goal:Some Other Goal"))
+
+    def test_an_adopted_pane_is_never_excluded_by_the_scope(self):
+        """A gate this manager undertook to route is one it EXISTS to see.
+
+        The scope block sits ABOVE the claims path, so without the `adopted_by_self`
+        guard the durable answer silenced exactly the pane the claim was recorded for --
+        the fleet-silence direction `session-scope.py` names as the dangerous one. Hop 3b
+        already carries this guard; the scope block above it did not.
+        """
+        scope = _FakeScope({"w": (True, "foreign-goal:Some Other Goal")})
+        self.assertEqual(self.call("w", None, scope, claims={"w": ME}),
+                         (gf.EMIT, "own-claim"))
+
+    def test_the_claim_outranks_the_scope_and_only_the_claim_does(self):
+        """The precedence pinned in both directions, so neither half can drift alone.
+
+        An own claim wins over the scope; the SAME foreign scope with no claim still
+        excludes. Asserting only the first half would pass on a build that dropped the
+        scope check entirely, and only the second would pass on the bug.
+        """
+        scope = _FakeScope({"w": (True, "foreign-goal:Some Other Goal")})
+        self.assertEqual(self.call("w", None, scope, claims={"w": ME}),
+                         (gf.EMIT, "own-claim"))
+        self.assertEqual(self.call("w", None, scope, claims={}),
+                         (gf.EXCLUDE, "foreign-goal:Some Other Goal"))
+
+
+class ScopeCli(unittest.TestCase):
+    """The scope CLI seam, end to end through `_session_scope()` / `main()`.
+
+    Every other scope case in this file drives `_FakeScope`, so nothing pinned the real
+    `spec_from_file_location("session_scope", …)` + `load(self_id, vault_paths)` seam, nor
+    the two flags that reach it, nor the `SCOPE  unresolved:` line the FILTER emits. A
+    rename of the loaded module or a signature drift on `load` would have passed the suite.
+
+    The fixture's own vault, state and registry are used, so the pane→session mapping is the
+    real one; only the ledger endpoint is stubbed, which keeps the test offline.
+    """
+
+    #: The fixture's manager stamp — `replay.py`'s `SELF`, not this file's `ME`.
+    SELF = "49b471f1-a8a6-48b0-b2b2-14b9cb2437e3"
+    BASE = os.path.join(_HERE, "fixtures", "gate-owner-foreign-goal")
+
+    def run_filter(self, *argv):
+        """`(rc, stdout, stderr)` from `main()` with `argv`, ledger stubbed."""
+        with open(os.path.join(self.BASE, "feed.txt"), encoding="utf-8") as handle:
+            feed = handle.read()
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "argv", ["gate-owner-filter.py"] + list(argv)), \
+             mock.patch.object(sys, "stdin", io.StringIO(feed)), \
+             mock.patch.object(gf, "load_ledger", return_value={}), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = gf.main()
+        return rc, out.getvalue(), err.getvalue()
+
+    def common(self):
+        return [
+            "--state-dir", os.path.join(self.BASE, "state"),
+            "--registry-dir", os.path.join(self.BASE, "registry"),
+            "--claims-file", os.path.join(self.BASE, "claims.json"),
+            "--feed", "--explain",
+        ]
+
+    def test_the_importlib_seam_reaches_the_real_session_scope(self):
+        """A rename of the module, or a changed `load` signature, fails here."""
+        scope_mod = gf._session_scope()
+        scope = scope_mod.load(self.SELF, [os.path.join(self.BASE, "vault")])
+        self.assertTrue(scope.resolved, scope.reason)
+        # The fixture's own task — the CONTROL pane's page — must land in the own set, or
+        # the scope would exclude the very pane the fixture exists to protect.
+        self.assertIn("Own Worker Control Task", scope.own_titles)
+
+    def test_scope_vault_excludes_the_foreign_panes(self):
+        rc, out, err = self.run_filter(
+            "--self", self.SELF,
+            "--scope-vault", os.path.join(self.BASE, "vault"),
+            *self.common(),
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("excluded(foreign-goal): 3", err)
+        self.assertIn("excluded(owner-unknown): 2", err)
+        self.assertIn("emit: 1", err)
+        self.assertIn("exclude foreign-goal:", out)
+
+    def test_no_scope_emits_every_row(self):
+        """The flag disables the read entirely — the pre-scope behaviour, pinned."""
+        rc, out, err = self.run_filter("--self", self.SELF, "--no-scope", *self.common())
+        self.assertEqual(rc, 0)
+        self.assertIn("emit: 6", err)
+        self.assertIn("excluded(foreign-goal): 0", err)
+        self.assertNotIn("SCOPE  unresolved:", err)
+        self.assertNotIn("exclude ", out)
+
+    def test_an_unresolved_scope_announces_the_filters_own_line(self):
+        """`session-scope.py` emits a same-prefixed line, so the SUFFIX is what pins this one."""
+        rc, _out, err = self.run_filter(
+            "--self", self.SELF,
+            "--scope-vault", "/nonexistent-vault-for-this-test",
+            *self.common(),
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("SCOPE  unresolved:", err)
+        self.assertIn("— no row is excluded", err)
+        self.assertIn("emit: 6", err)
 
 
 class ForeignGoalFixture(unittest.TestCase):
