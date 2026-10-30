@@ -22,6 +22,7 @@ import os
 import tempfile
 import time
 import unittest
+import unittest.mock as mock
 from contextlib import redirect_stdout
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -272,6 +273,65 @@ class Stale(Base):
             rc = self.m.cmd_stale()
         self.assertEqual(rc, 0)
         self.assertIn("OK", buf.getvalue())
+
+
+class RisingAge(Base):
+    """SC2b — a lapse that never recovers must not silence itself after one report.
+
+    Measured 2026-10-30: the ledger carried `SUPPRESSED … reason=already-reported` on
+    every 60-second tick while the age climbed 1,374 s → 23,064 s over 6h24m. The
+    digest was never written, and the one detector on that path had gone quiet.
+
+    The clock is faked so the age can rise without the test sleeping, and so the digest
+    file — and therefore its parsed epoch — stays byte-identical across the run. That is
+    the live shape: in a real lapse nothing rewrites the digest, only the clock moves.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.now = 1800000000.0
+        self._clock = mock.patch.object(self.m.time, "time", side_effect=lambda: self.now)
+        self._clock.start()
+
+    def tearDown(self):
+        self._clock.stop()
+        super().tearDown()
+
+    def test_a_rising_age_refires(self):
+        # LIMIT is 1080 s: 4325 s of age is the fourth lapse interval.
+        self.digest("a.digest", self.ago(4325))
+        self.tick(60)
+        rc, out = self.run_check()
+        self.assertEqual(rc, self.m.EXIT_STALE)
+        self.assertIn("STALE", out)
+
+        # Still the same interval: a flat age keeps the dedup's original job.
+        self.now += 60
+        self.tick(60)
+        rc, out = self.run_check()
+        self.assertEqual(rc, 0)
+        self.assertIn("SUPPRESSED", out)
+
+        # A further interval has elapsed and the digest is still missing: re-fire.
+        self.now += 3000
+        self.tick(60)
+        rc, out = self.run_check()
+        self.assertEqual(rc, self.m.EXIT_STALE)
+        self.assertIn("STALE", out)
+        self.assertNotIn("SUPPRESSED", out)
+
+    def test_the_refire_does_not_wait_for_a_new_digest(self):
+        # The whole point: the epoch never changes in a real lapse, so a re-fire keyed
+        # on it alone would stay silent forever.
+        self.digest("a.digest", self.ago(4325))
+        self.tick(60)
+        first_epoch, _, _, _ = self.m.newest_round()
+        self.run_check()
+        self.now += 3000
+        self.tick(60)
+        self.run_check()
+        second_epoch, _, _, _ = self.m.newest_round()
+        self.assertEqual(first_epoch, second_epoch)
 
 
 if __name__ == "__main__":
