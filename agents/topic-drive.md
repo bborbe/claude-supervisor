@@ -135,8 +135,10 @@ wins.** Step 1's keep-alive verdict names the manager's state, so it beats Step 
 - **`To resume` and `To restart` beat `To start`** for the same goal: the manager exists, so
   reviving it is the act, not ranking a fresh one.
 
-Step 2's standalone `To start` and `Held: … N slots full` lines are for goals Step 1 did **not**
-already give a line — it is an annotation layer, never a second opinion.
+⚠️ **Those three pairs are the whole of the dedupe.** Step 2's `To start` and `Held: … N slots
+full` rows are NOT subsumed — Step 1 lines every declared goal, so a blanket "Step 1 wins" rule
+would make them unreachable and silently drop the over-cap signal a `held` row carries. Scope the
+precedence to the three pairs above and nothing more.
 
 <success_criteria>
 - Every declared goal has exactly one line.

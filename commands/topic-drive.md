@@ -130,8 +130,8 @@ Only then:
 
 1. `topic-spawn.py --topic "<topic>" --rank` → the ranked rows and which take the N slots.
 2. For each **flagged** `start` row not already running: `/supervisor:topic-spawn "<goal>"`. Its
-   tokens (`goal-not-in-scope`, `goal-not-startable`, `manager-cap`, the worker refusal) are the
-   gate — never re-derive them here.
+   tokens (`goal-not-in-scope`, `goal-not-startable`, `goal-terminal`, `goal-unflagged`,
+   `manager-cap`, the worker refusal) are the gate — never re-derive them here.
 3. ⚠️ **Never exceed N = 3 per topic and never exceed the fleet ceiling.** The cap is never
    raised to make room; rank and wait, or say which goal is starved and why.
 
