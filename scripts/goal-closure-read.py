@@ -61,9 +61,10 @@ TERMINAL_STATUSES = {"completed", "aborted"}
 # the vault writes ISO-8601 (`2026-10-19`, `2026-09-20T00:00:00Z`); no parsing, no
 # timezone, and a `created` on the cutoff date itself reads as post-cutoff.
 #
-# ⚠️ This is the SAME constant `agents/goal-auditor.md` § 12 carries. Two copies of one
-# date is the trade, not an oversight: a plugin script cannot import from a vault agent.
-# Change one, change both. The closure rule shipped in v0.217.0 without this cutoff and
+# ⚠️ This is the SAME constant the vault's `agents/goal-auditor.md` § 12 carries. Copies
+# of one date are the trade, not an oversight: a plugin script cannot import from a vault
+# agent. `commands/steps/goal-closure.md` and the CHANGELOG restate it too — change them
+# together. The closure rule shipped in v0.217.0 without this cutoff and
 # so made every grandfathered goal permanently unclosable — closable by every other
 # reader in the vault, unclosable by the one that actually closes it.
 #
@@ -77,6 +78,9 @@ DOD_REQUIRED_AS_OF = "2026-06-26"
 _BOX = re.compile(r"^[ \t]*[-*+][ \t]*\[(.)\]", re.M)
 _DONE = {"x", "X"}
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+# The only `created` shape the cutoff compares. A zero-padded ISO date, optionally with a
+# time suffix — anything else is refused rather than sorted into a verdict (see dod_exempt).
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 
 
 def normalise(text):
@@ -213,10 +217,18 @@ def dod_exempt(kind, created):
     DoD requirement was never part of it, and a topic closes on `# Completion Gate`,
     which has no grandfathering at all. Widening this to every kind would close tasks on
     evidence the vault never agreed to accept.
+
+    ⚠️ **Zero-padded ISO-8601 only, and anything else fails CLOSED.** The comparison is
+    lexicographic, which is exact for `YYYY-MM-DD` and for a timestamp on that prefix —
+    but `15.01.2026` and a bare `2026` both sort BELOW the cutoff and would exempt a page
+    that is not grandfathered. A false CLOSE is the expensive direction here, so an
+    unrecognised shape is refused rather than compared.
     """
     if kind != "goal":
         return False
-    return created is None or created < DOD_REQUIRED_AS_OF
+    if created is None:
+        return True
+    return bool(_ISO_DATE.match(created)) and created < DOD_REQUIRED_AS_OF
 
 
 def verdict_of(status, sections, dod_may_be_absent=False):

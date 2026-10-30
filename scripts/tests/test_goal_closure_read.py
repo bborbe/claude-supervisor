@@ -242,11 +242,18 @@ class CreatedFieldTest(unittest.TestCase):
 
     def test_a_non_padded_date_fails_closed(self):
         # Lexicographic comparison is exact only for zero-padded ISO-8601. A
-        # non-padded value compares as POST-cutoff, so it is never exempt — the
-        # strict direction, which can refuse a close but can never permit one.
+        # non-padded value is refused rather than compared — the strict direction,
+        # which can refuse a close but can never permit one.
         self.assertFalse(
             closure.dod_exempt("goal", closure.read_created("---\ncreated: 2026-6-1\n---\n"))
         )
+
+    def test_a_non_iso_date_fails_closed(self):
+        # `15.01.2026` and a bare `2026` both sort BELOW the cutoff lexicographically,
+        # so an unguarded comparison would exempt them — a false CLOSE, the expensive
+        # direction. The shape guard refuses them instead.
+        for raw in ("15.01.2026", "2026", "01/15/2026", "Jan 2026", ""):
+            self.assertFalse(closure.dod_exempt("goal", raw), raw)
 
 
 class SectionTest(unittest.TestCase):
