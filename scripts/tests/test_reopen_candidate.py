@@ -38,17 +38,27 @@ import unittest
 SCRIPT = pathlib.Path(__file__).resolve().parents[1] / "reopen-candidate.py"
 
 FAKE_LIVENESS = '''#!/usr/bin/env python3
-"""Stand-in for session-liveness.py: read the verdict from $FAKE_LIVENESS (a JSON map)."""
+"""Stand-in for session-liveness.py, mirroring the REAL stream and prefix shape.
+
+⚠️ This fake exists to be unfaithful in exactly the way the real script is: `LIVE` is
+printed to STDOUT with a `LIVE — ` prefix (so the line never equals `LIVE`), and every
+negative verdict goes to STDERR. An earlier fake printed a bare token to stdout with a
+matching exit code, which let a token-matching bug in `liveness()` pass the whole suite
+while making `resume` unreachable in production.
+"""
 import json, os, sys
 
 args = sys.argv[1:]
 if not args or args[0] != "--check" or len(args) < 2:
-    print("MALFORMED")
+    print("MALFORMED — usage", file=sys.stderr)
     sys.exit(4)
 table = json.loads(os.environ.get("FAKE_LIVENESS") or "{}")
 token = table.get(args[1], "UNKNOWN")
-print(token)
-sys.exit({"LIVE": 0, "ABSENT": 1, "UNKNOWN": 2, "AMBIGUOUS": 3, "MALFORMED": 4}.get(token, 2))
+if token == "LIVE":
+    print("LIVE — session is live  heartbeat age 3s  source heartbeat")
+    sys.exit(0)
+print("%s — not live" % token, file=sys.stderr)
+sys.exit({"ABSENT": 1, "UNKNOWN": 2, "AMBIGUOUS": 3, "MALFORMED": 4}.get(token, 2))
 '''
 
 TASK = """---
@@ -163,6 +173,18 @@ class TestVerdict(Harness):
         code, out = self.run_script(liveness={SID: "AMBIGUOUS"})
         self.assertEqual(out[0], "cannot-tell")
 
+    def test_malformed_liveness_is_cannot_tell(self):
+        code, out = self.run_script(liveness={SID: "MALFORMED"})
+        self.assertEqual(out[0], "cannot-tell")
+        self.assertEqual(code, 2)
+
+    def test_probe_that_cannot_run_is_cannot_tell(self):
+        """The security-critical direction: a probe that never ran is never ABSENT."""
+        os.remove(os.path.join(self.root, "scripts", "session-liveness.py"))
+        code, out = self.run_script()
+        self.assertEqual(out[0], "cannot-tell")
+        self.assertEqual(code, 2)
+
     def test_unreadable_state_store_is_cannot_tell(self):
         path = self.state_file()
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -247,6 +269,13 @@ class TestRecord(Harness):
         """A foreign id must not spend this task's budget."""
         other = "aaaaaaaa-0000-4000-8000-000000000002"
         code, out = self.run_script("--record-resume", other, liveness={other: "LIVE"})
+        self.assertEqual(out[0], "not-recorded")
+        self.assertFalse(os.path.exists(self.state_file()))
+
+    def test_record_refuses_a_task_with_no_recorded_id(self):
+        """An id-less task can never be resumed, so recording against it arms nothing."""
+        self.write_task(sid="")
+        code, out = self.run_script("--record-resume", SID, liveness={SID: "LIVE"})
         self.assertEqual(out[0], "not-recorded")
         self.assertFalse(os.path.exists(self.state_file()))
 

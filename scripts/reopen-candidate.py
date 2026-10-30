@@ -102,7 +102,15 @@ def open_boxes(text):
 
 
 def liveness(session_id):
-    """(token, detail) from session-liveness.py. Its exit code is the contract."""
+    """(token, detail) from session-liveness.py. Its EXIT CODE is the contract.
+
+    ⚠️ **Never match the printed token.** The real script writes
+    `LIVE — <msg>  heartbeat age <ns>  source <src>` to STDOUT, so the first line never
+    equals `LIVE`, and it writes `ABSENT — …` / `UNKNOWN — …` / `AMBIGUOUS — …` /
+    `MALFORMED — …` to STDERR, so stdout is empty for every negative verdict. A
+    token-equality check therefore reads CANNOT-TELL for LIVE *and* for ABSENT, which
+    makes `resume` unreachable — the exact defect this function shipped with once.
+    """
     try:
         proc = subprocess.run(
             [sys.executable, os.path.join(SCRIPTS, "session-liveness.py"), "--check", session_id],
@@ -112,13 +120,13 @@ def liveness(session_id):
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return "CANNOT-TELL", f"liveness probe could not run: {exc}"
-    lines = (proc.stdout or "").strip().splitlines()
-    token = lines[0].strip() if lines else ""
-    if proc.returncode == 0 and token == "LIVE":
-        return "LIVE", token
-    if proc.returncode == 1 and token == "ABSENT":
-        return "ABSENT", token
-    return "CANNOT-TELL", token or f"exit {proc.returncode}, no token"
+    lines = ((proc.stdout or "").strip() or (proc.stderr or "").strip()).splitlines()
+    detail = lines[0].strip() if lines else ""
+    if proc.returncode == 0:
+        return "LIVE", detail or "LIVE"
+    if proc.returncode == 1:
+        return "ABSENT", detail or "ABSENT"
+    return "CANNOT-TELL", detail or f"exit {proc.returncode}, no output"
 
 
 def state_path(task_path):
@@ -261,7 +269,12 @@ def record(task_path, session_id):
     if status in TERMINAL:
         return "not-recorded", [f"status: {status} -- a terminal task accrues no resumes"]
     recorded = scalar(block, "claude_session_id")
-    if recorded and recorded != session_id:
+    # ⚠️ Refuse when the task records NO id, not only when it records a different one:
+    # `decide()` already treats an id-less task as `not-open-work` ("a fresh spawn, not a
+    # reopen"), so recording against it would arm a cap on work that can never be resumed.
+    if not recorded:
+        return "not-recorded", ["no claude_session_id recorded -- nothing to record a resume against"]
+    if recorded != session_id:
         return "not-recorded", [
             f"session {session_id[:8]} is not this task's recorded owner ({recorded[:8]}) -- "
             "a foreign id must not spend this task's budget"
