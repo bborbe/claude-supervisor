@@ -171,6 +171,24 @@ class TestVerdict(Harness):
         code, out = self.run_script()
         self.assertEqual(out[0], "cannot-tell")
 
+    def test_malformed_state_entries_are_cannot_tell(self):
+        """A `resumes` list holding non-objects must not crash into an AttributeError."""
+        self.write_state([1, 2, 3])
+        code, out = self.run_script()
+        self.assertEqual(out[0], "cannot-tell")
+        self.assertEqual(code, 2)
+
+    def test_session_override_decides_for_that_id(self):
+        """The documented `--session` override must drive the probe, not the frontmatter."""
+        other = "aaaaaaaa-0000-4000-8000-000000000002"
+        code, out = self.run_script("--session", other, liveness={other: "ABSENT"})
+        self.assertEqual(out[0], "resume")
+
+    def test_session_override_live_blocks_the_resume(self):
+        other = "aaaaaaaa-0000-4000-8000-000000000002"
+        code, out = self.run_script("--session", other, liveness={other: "LIVE"})
+        self.assertEqual(out[0], "not-open-work")
+
 
 class TestCap(Harness):
     def resume_entry(self, boxes, at="2026-10-27T12:00:00+00:00"):
@@ -198,6 +216,13 @@ class TestCap(Harness):
         code, out = self.run_script()
         self.assertEqual(out[0], "capped")
 
+    def test_capped_without_a_box_count_renders_unknown(self):
+        """A `None` box count must not read as a measurement."""
+        self.write_state([{"at": "x", "session_id": SID} for _ in range(3)])
+        code, out = self.run_script()
+        self.assertEqual(out[0], "capped")
+        self.assertTrue(any("unknown ->" in line for line in out), out)
+
 
 class TestRecord(Harness):
     def test_record_writes_when_live(self):
@@ -217,6 +242,24 @@ class TestRecord(Harness):
         for _ in range(2):
             self.run_script("--record-resume", SID, liveness={SID: "LIVE"})
         self.assertEqual(len(self.read_state()["resumes"]), 2)
+
+    def test_record_refuses_a_foreign_id(self):
+        """A foreign id must not spend this task's budget."""
+        other = "aaaaaaaa-0000-4000-8000-000000000002"
+        code, out = self.run_script("--record-resume", other, liveness={other: "LIVE"})
+        self.assertEqual(out[0], "not-recorded")
+        self.assertFalse(os.path.exists(self.state_file()))
+
+    def test_record_refuses_a_terminal_task(self):
+        self.write_task(status="completed")
+        code, out = self.run_script("--record-resume", SID, liveness={SID: "LIVE"})
+        self.assertEqual(out[0], "not-recorded")
+        self.assertFalse(os.path.exists(self.state_file()))
+
+    def test_record_leaves_no_temp_file_behind(self):
+        self.run_script("--record-resume", SID, liveness={SID: "LIVE"})
+        leftovers = [n for n in os.listdir(os.path.dirname(self.state_file())) if n.endswith(".tmp")]
+        self.assertEqual(leftovers, [])
 
 
 class TestStateIsolation(Harness):

@@ -72,6 +72,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -151,18 +152,33 @@ def read_state(path):
         return {"resumes": []}
     except (OSError, json.JSONDecodeError) as exc:
         fail("cannot-tell", f"state store unreadable: {exc}")
-    if not isinstance(data, dict) or not isinstance(data.get("resumes"), list):
-        fail("cannot-tell", "state store malformed: no `resumes` list")
+    resumes = data.get("resumes") if isinstance(data, dict) else None
+    # ⚠️ Element shape is checked too, not just the container: a list holding a
+    # non-object would crash on `.get` below, and an uncaught AttributeError is not
+    # a verdict. A malformed store is `cannot-tell`, never a free resume.
+    if not isinstance(resumes, list) or not all(isinstance(entry, dict) for entry in resumes):
+        fail("cannot-tell", "state store malformed: `resumes` is not a list of objects")
     return data
 
 
 def write_state(path, state):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(state, handle, indent=2, sort_keys=True)
-        handle.write("\n")
-    os.replace(tmp, path)
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    # ⚠️ A fixed `<path>.tmp` is a lost-update hazard: two concurrent `--record-resume`
+    # runs write the same temp path, so one entry is dropped or the file is left
+    # half-written and every later read reports `cannot-tell`.
+    handle_fd, tmp = tempfile.mkstemp(dir=directory, prefix=".fleet-resume-", suffix=".tmp")
+    try:
+        with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
+            json.dump(state, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def effective_resumes(state, current_boxes):
@@ -211,10 +227,13 @@ def decide(task_path, session_override):
     if len(resumes) >= RESUME_CAP:
         last = resumes[-1].get("at", "unknown")
         first = resumes[0].get("open_boxes")
+        # ⚠️ An entry missing an int `open_boxes` must render `unknown`, never `None`:
+        # "open boxes: None -> 3" reads as a measurement and is not one.
+        delta = f"{first} -> {boxes}" if isinstance(first, int) else f"unknown -> {boxes}"
         return "capped", [
             f"resumes: {len(resumes)}/{RESUME_CAP}",
             f"last reopen: {last}",
-            f"open boxes: {first} -> {boxes} since the first reopen",
+            f"open boxes: {delta} since the first reopen",
         ]
 
     return "resume", [
@@ -225,16 +244,34 @@ def decide(task_path, session_override):
 
 
 def record(task_path, session_id):
-    """Record a resume that TOOK. A resume that never landed must not arm the cap."""
+    """Record a resume that TOOK. A resume that never landed must not arm the cap.
+
+    ⚠️ The id must be THIS task's recorded owner, and the task must still be open.
+    A foreign id would spend this task's budget on another session's resume, and a
+    terminal task has nothing left to resume -- both are refused rather than recorded.
+    """
+    try:
+        with open(task_path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as exc:
+        return "cannot-tell", [f"task unreadable: {exc}"]
+
+    block = frontmatter(text)
+    status = scalar(block, "status").lower()
+    if status in TERMINAL:
+        return "not-recorded", [f"status: {status} -- a terminal task accrues no resumes"]
+    recorded = scalar(block, "claude_session_id")
+    if recorded and recorded != session_id:
+        return "not-recorded", [
+            f"session {session_id[:8]} is not this task's recorded owner ({recorded[:8]}) -- "
+            "a foreign id must not spend this task's budget"
+        ]
+
     verdict, detail = liveness(session_id)
     if verdict != "LIVE":
         return "not-recorded", [f"liveness: {detail} -- a resume that did not land is not a resume"]
 
-    try:
-        with open(task_path, encoding="utf-8") as handle:
-            boxes = open_boxes(handle.read())
-    except OSError as exc:
-        return "cannot-tell", [f"task unreadable: {exc}"]
+    boxes = open_boxes(text)
 
     path = state_path(task_path)
     state = read_state(path)
