@@ -232,7 +232,10 @@ def has_dod_heading(body):
         return False
     for line in body.splitlines():
         text = line.strip().lstrip(">").strip().lstrip("#").strip().strip("*_").strip()
-        if text.lower().startswith("definition of done"):
+        # Collapse internal whitespace too: `# Definition  of  Done` (double-spaced, or
+        # with a non-breaking space) is the same heading to a renderer, and leaving it
+        # unmatched would be one more fail-open spelling.
+        if " ".join(text.lower().split()).startswith("definition of done"):
             return True
     return False
 
@@ -265,6 +268,23 @@ def dod_exempt(kind, created):
     if created is None:
         return True
     return bool(_ISO_DATE.match(created)) and created < DOD_REQUIRED_AS_OF
+
+
+def exemption_for(kind, text, body):
+    """The ONE entry point for the grandfathered-DoD exemption, guards included.
+
+    Both safety conditions live here rather than at the call site, so no caller can
+    reach the exemption by handing `verdict_of` a bare `True`:
+
+      - the frontmatter must have PARSED. `read_created` returns None for an absent field
+        and `_field` returns None for an unreadable page too, so without this a page
+        whose frontmatter does not parse would read as "no created" and be grandfathered.
+      - the page must carry no DoD heading in ANY shape (see `has_dod_heading`) — a
+        section this reader cannot parse is one it failed to read, not one the document
+        lacks, and closing on it is the false CLOSE this module refuses everywhere.
+    """
+    frontmatter_ok = _FRONTMATTER.match(normalise(text)) is not None
+    return frontmatter_ok and not has_dod_heading(body) and dod_exempt(kind, read_created(text))
 
 
 def verdict_of(status, sections, dod_may_be_absent=False):
@@ -315,15 +335,9 @@ def main(argv):
     body = strip_fences(text)
     fenced_ok = body is not None
     sections = {name: section_of(body, name, strict) for name, strict in SECTIONS[kind]}
-    # Two guards the cutoff must never skip, both failing CLOSED:
-    #  - the frontmatter has to have PARSED. `read_created` returns None for an absent
-    #    field, and `_field` returns None for an unreadable page too — so without this,
-    #    a page whose frontmatter does not parse (a BOM, a missing trailing newline)
-    #    would read as "no created" and be grandfathered, turning a refusal into a CLOSE.
-    #  - the page must carry no DoD heading at all, not merely none this reader could
-    #    parse (see `has_dod_heading`).
-    frontmatter_ok = _FRONTMATTER.match(normalise(text)) is not None
-    exempt = frontmatter_ok and not has_dod_heading(body) and dod_exempt(kind, created)
+    # The exemption's two safety guards live in `exemption_for`, so no caller can reach
+    # it by handing `verdict_of` a bare flag (see that function's docstring).
+    exempt = exemption_for(kind, text, body)
     verdict = verdict_of(status, sections, exempt)
 
     print(f"status: {status or 'ABSENT'}")

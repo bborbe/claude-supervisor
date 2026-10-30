@@ -61,7 +61,9 @@ For the subject, then each page of the tracked set:
    ⚠️ **A grandfathered goal is the one exception, and it is narrow.** The vault requires a
    `# Definition of Done` only on goals created on or after **`DOD_REQUIRED_AS_OF` =
    `2026-06-26`**; a goal created before that date, or carrying no `created` at all, is
-   **grandfathered** — an absent DoD is an accepted gap, not a violation. Without the
+   **grandfathered** — an absent DoD is an accepted gap, not a violation. (A page whose
+   frontmatter does not parse at all is **refused**, not grandfathered: the reader cannot
+   tell a missing `created` from an unreadable page, so it fails closed.) Without the
    exception this rule made every grandfathered goal permanently unclosable: closable by
    every other reader in the vault, unclosable by the one that actually closes it. The
    reader applies it, so an absent DoD on a grandfathered goal reads `CLOSE` and this step

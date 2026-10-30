@@ -440,6 +440,18 @@ class CliTest(unittest.TestCase):
             self.assertEqual(code, 1, heading)
             self.assertNotIn("grandfathered", out, heading)
 
+    def test_a_whitespace_variant_dod_heading_is_not_grandfathered(self):
+        # `# Definition  of  Done` and a non-breaking space are the same heading to a
+        # renderer, and `section_of` treats the line as a boundary either way.
+        for heading in ("# Definition  of  Done", "# Definition of Done"):
+            page = (
+                '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+                f"# Success Criteria\n\n- [x] a\n\n# Tasks\n\n- [x] b\n\n{heading}\n\n- [ ] never\n"
+            )
+            code, out = self._run_capture(page)
+            self.assertEqual(code, 1, heading)
+            self.assertNotIn("grandfathered", out, heading)
+
     def test_a_prose_mention_of_the_section_does_not_block_a_grandfathered_close(self):
         # The guard matches a line that BEGINS with the section name, so a sentence
         # about it does not over-refuse a goal that genuinely has no DoD.
