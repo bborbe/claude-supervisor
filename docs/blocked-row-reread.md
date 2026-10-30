@@ -51,7 +51,13 @@ moved on), never by this probe.
   § `<output_format>`) and the probe renders `[<pane>] <age> <name> …` — **neither carries a
   session id**, and names are not unique across a fleet. A rule that matched on session id
   could not be executed at all; that was this document's first draft, caught in review
-  2026-10-29. A row with `pane —` (the digest's "no pane" form) has no key and is **kept**
+  2026-10-29. ⚠️ **The no-key marker is a NON-NUMERIC pane token, not `pane —`.** The pane
+  column carries `who-needs-me.py`'s own token — a numeric pane id, or `?` / `hst` for a
+  pane-less row (`row()`, ~line 1898); `pane —` is the digest's **link**-column failure form
+  (`agents/fleet-sweep-reader.md`), not the pane column. A `?` / `hst` row therefore has no key
+  and is **kept** — never matched against the probe's own `[?]` / `[hst]` rows, which would
+  "confirm" a row nothing verified. Any other non-numeric token is treated the same way. A row
+  whose pane does not resolve is **kept**
   rather than dropped, with the re-read marked `no pane to re-read`.
 - **Read BOTH gate sections, and only those.** `--section needs-you --section board-missing`
   (`--section` is repeatable). ⚠️ **`board-missing` is a gate section too, and it is where this
