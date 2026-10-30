@@ -8,7 +8,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { DEFAULT_RESERVE_TOKENS, contextStatsFrom, readContextStats, resumeContextRefusal } from './context-guard.mjs'
+import { DEFAULT_RESERVE_TOKENS, contextStatsFrom, readContextStats, resumeAdmission, resumeContextRefusal } from './context-guard.mjs'
 
 // An assistant record carrying a usage block, in the shape the transcript actually writes.
 const assistant = (usage, model = 'claude-opus-5-5') => ({ type: 'assistant', message: { model, usage } })
@@ -249,4 +249,59 @@ test('the model is recorded for the caller, and a synthetic record never becomes
     assistant({ input_tokens: 2, cache_read_input_tokens: 2 }, '<synthetic>'),
   ])
   assert.equal(stats.model, 'deepseek-v4-flash-max')
+})
+
+// --- the admission gate the spawn path actually calls -------------------------------
+//
+// These drive `resumeAdmission`, which is the single call `spawnAgent`'s resume arm makes: it
+// resolves the path, reads it, and decides. A test against `resumeContextRefusal` alone proves
+// the arithmetic; these prove the branch, because a refusal here is what the caller turns into
+// `return { error }` before any spawn work.
+
+const fixture = (shape) => transcript(shape).map((r) => JSON.stringify(r)).join('\n')
+
+test('the resume gate REFUSES an above-bound session and hands back the reason to return', () => {
+  const admission = resumeAdmission({
+    transcriptPath: '/t/21c0b4ff.jsonl',
+    readFile: () => fixture(FAILURES['21c0b4ff']),
+  })
+  assert.equal(admission.admit, false, 'the spawn path must not proceed')
+  assert.ok(admission.error, 'and it must carry a reason the caller can return')
+  assert.match(admission.error, /Open a FRESH worker/)
+  assert.equal(admission.stats.restored, 157_727)
+})
+
+test('the resume gate ADMITS a below-bound session, so the spawn proceeds', () => {
+  const admission = resumeAdmission({
+    transcriptPath: '/t/healthy.jsonl',
+    readFile: () => fixture({ boundaries: 3, ceiling: 200_000, restored: 80_000, dropped: 100_000 }),
+  })
+  assert.equal(admission.admit, true)
+  assert.equal(admission.error, null, 'nothing for the caller to return')
+})
+
+test('the resume gate ADMITS when the transcript cannot be read — unmeasured is not refused', () => {
+  const admission = resumeAdmission({
+    transcriptPath: '/t/missing.jsonl',
+    readFile: () => { throw new Error('ENOENT') },
+  })
+  assert.equal(admission.admit, true)
+  assert.equal(admission.error, null)
+  assert.equal(admission.stats, null)
+})
+
+test('the resume gate is total: admit and error can never disagree', () => {
+  // The caller's branch is `if (!admission.admit) return { error: admission.error }`, so an
+  // `admit: false` with no error would return `{ error: undefined }` — a refusal with no reason.
+  const shapes = [
+    FAILURES['21c0b4ff'],
+    FAILURES['ab98608f'],
+    { boundaries: 3, ceiling: 200_000, restored: 80_000, dropped: 0 },
+    { boundaries: 0, ceiling: null, restored: 5_000, dropped: 0 },
+  ]
+  for (const shape of shapes) {
+    const a = resumeAdmission({ transcriptPath: '/t/x.jsonl', readFile: () => fixture(shape) })
+    assert.equal(a.admit, a.error === null, `disagreement on ${JSON.stringify(shape).slice(0, 60)}`)
+    if (!a.admit) assert.equal(typeof a.error, 'string')
+  }
 })
