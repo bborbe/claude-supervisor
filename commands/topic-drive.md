@@ -121,8 +121,8 @@ longer excludes it.
 
 A goal is **startable for this row** when all hold:
 
-- `flag: true` in its frontmatter, with `flag_set_by` equal to `operator` or `legacy` — an
-  absent or other value is refused, because the flag must be the operator's own mark;
+- `flag: true` in its frontmatter — **any setter**, because provenance is not read (operator
+  ruling 2026-10-30: *"it should not matter how set the flag"*);
 - the phase gate below passes (`goal-not-startable` is still the operator's approval boundary);
 - a keep-alive slot is free (`resume`/`restart` did not consume it).
 

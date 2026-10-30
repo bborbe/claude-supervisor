@@ -133,20 +133,22 @@ class OpenQueueTest(unittest.TestCase):
 
         self.assertEqual([r["name"] for r in opened], ["flagged"])
 
-    def test_bare_flag_is_not_an_operator_flag(self):
-        """`flag: true` with no `flag_set_by` is not an approval and does not rank first."""
+    def test_a_bare_flag_ranks_first(self):
+        """Provenance is not read. Operator ruling 2026-10-30: "in the end it should not
+        matter how set the flag". A bare `flag: true` ranks exactly as one written
+        `--by operator` — reading the setter here would reinstate the gate it removed."""
         task_file(self.tasks, "bare", "status: in_progress\npriority: 1\nflag: true\n")
         task_file(self.tasks, "plain", "status: in_progress\npriority: 1\n")
         rows, _ = self.collect(["bare", "plain"])
 
-        self.assertFalse([r for r in rows if r["name"] == "bare"][0]["operator_flagged"])
+        self.assertTrue([r for r in rows if r["name"] == "bare"][0]["operator_flagged"])
 
-    def test_agent_set_flag_is_not_an_operator_flag(self):
-        """Only the operator's own surface writes `flag_set_by: operator`."""
+    def test_an_agent_set_flag_ranks_first_too(self):
+        """Same ruling: the setter is a note, not a gate."""
         task_file(self.tasks, "agent", "status: in_progress\nflag: true\nflag_set_by: agent\n")
         rows, _ = self.collect(["agent"])
 
-        self.assertFalse(rows[0]["operator_flagged"])
+        self.assertTrue(rows[0]["operator_flagged"])
 
     # -- the guards, each with a control row ------------------------------
 

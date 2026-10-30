@@ -202,24 +202,25 @@ class TopicSpawnTest(unittest.TestCase):
         self.assertEqual(1, rc)
         self.assertEqual("goal-unflagged", out[0])
 
-    def test_a_goal_flagged_by_a_non_operator_is_refused(self):
-        """`flag: true` alone is not the operator's mark — `flag_set_by` must name one."""
+    def test_a_goal_flagged_by_a_non_operator_still_passes(self):
+        """Provenance is NOT read. Operator ruling 2026-10-30: "in the end it should not
+        matter how set the flag … if flag, should be open if claude session limit allow it".
+        Reading `flag_set_by` here again would silently reinstate the gate it removed."""
         self.goal("Delta", "planning", 4, setter="agent")
         rc, out = self.run_gate("--goal", "Delta")
-        self.assertEqual(1, rc)
-        self.assertEqual("goal-unflagged", out[0])
+        self.assertEqual(0, rc)
+        self.assertEqual("spawn-ok: Delta", out[0])
 
-    def test_a_goal_flagged_with_no_setter_is_refused(self):
-        """An absent `flag_set_by` is refused: a writer that set the flag without naming
-        itself is not evidence the operator asked for it."""
+    def test_a_goal_flagged_with_no_setter_still_passes(self):
+        """A bare `flag: true` is a flag. The setter is a note, not a condition."""
         page = self.vault / "24 Goals" / "Delta.md"
         page.write_text(
             page.read_text(encoding="utf-8").replace("flag_set_by: operator\n", ""),
             encoding="utf-8",
         )
         rc, out = self.run_gate("--goal", "Delta")
-        self.assertEqual(1, rc)
-        self.assertEqual("goal-unflagged", out[0])
+        self.assertEqual(0, rc)
+        self.assertEqual("spawn-ok: Delta", out[0])
 
     def test_a_legacy_flag_still_passes(self):
         """193 rows were flagged before the field was written; they keep working."""
@@ -249,6 +250,46 @@ class TopicSpawnTest(unittest.TestCase):
         rc, out = self.run_gate("--goal", "Delta")
         self.assertEqual(0, rc)
         self.assertEqual("spawn-ok: Delta", out[0])
+
+    # --- the topic tier's own gate (--topic-open) ------------------------------
+
+    def _flag_topic(self, setter="operator"):
+        page = self.vault / "23 Topics" / "A Topic.md"
+        page.write_text(
+            page.read_text(encoding="utf-8").replace(
+                "status: in_progress",
+                f"status: in_progress\nflag: true\nflag_set_by: {setter}",
+            ),
+            encoding="utf-8",
+        )
+
+    def test_an_unflagged_topic_is_refused(self):
+        """Without this gate a flag on a topic page is read by nothing — `open.md`'s topic
+        branch gates on `phase: todo` alone, so rule 4 had no leg one tier up."""
+        rc, out = self.run_gate("--topic-open")
+        self.assertEqual(1, rc)
+        self.assertEqual("topic-unflagged", out[0])
+
+    def test_a_flagged_topic_opens(self):
+        self._flag_topic()
+        rc, out = self.run_gate("--topic-open")
+        self.assertEqual(0, rc)
+        self.assertEqual("open-ok: A Topic", out[0])
+
+    def test_a_topic_flagged_by_an_agent_still_opens(self):
+        self._flag_topic(setter="agent")
+        rc, out = self.run_gate("--topic-open")
+        self.assertEqual(0, rc)
+        self.assertEqual("open-ok: A Topic", out[0])
+
+    def test_a_flagged_topic_is_refused_at_the_fleet_ceiling(self):
+        """The cap is the ONLY bound once the flag is present — that is the ruling."""
+        self._flag_topic()
+        ts.fleet_manager_count = lambda: 10
+        ts.fleet_manager_ceiling = lambda: 10
+        rc, out = self.run_gate("--topic-open")
+        self.assertEqual(1, rc)
+        self.assertEqual("manager-cap", out[0])
 
     # --- the flag gate's position among the other gates --------------------------
 

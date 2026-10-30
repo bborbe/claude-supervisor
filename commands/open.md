@@ -518,6 +518,17 @@ The goal branch **resolves the goal's manager and delegates**; it reimplements n
 
 0. **Approval gate — before resolving anything.** `vault-cli topic get "<topic>" phase`. A topic at `phase: todo` is in the operator's approval inbox and is NOT approved for management: print `⌛ waiting-approval — <topic> is at phase: todo; approve it with vault-cli topic approve "<topic>"` and STOP — spawn nothing, jump nowhere. An absent `phase` is **exempt**, as is every other value; `todo` alone is gated.
 
+0b. **Flag gate.** A topic manager is opened only for a FLAGGED topic; the cap is the only
+   other bound. Run the gate, do not read the page:
+
+   `topic-spawn.py --vault "<vault-root>" --topic "<topic>" --topic-open`
+
+   First line is the verdict: `open-ok: <topic>` (0) → item 1; `topic-unflagged` (1) → print
+   `⏸ held — no flag` and STOP, never set the flag yourself; `manager-cap` (1) → the second
+   line names the bound, start nothing this tick. ⚠️ **Provenance is not read** (operator
+   ruling 2026-10-30: *"it should not matter how set the flag"*), so the cap is the only bound
+   after the flag. **Restart is not open:** resuming a recorded id is untouched by this.
+
 1. Resolve the topic's manager from the **session registry**, not from `ListAgents` — but read it through its single reader rather than opening the directory here. `session-liveness.py --list --json` returns one record per live session carrying `sessionId`, a live `status`, the current `name`, **`formerNames`** (the names it has held since it started) and `cwd`:
 
    ```bash

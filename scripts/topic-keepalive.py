@@ -78,21 +78,21 @@ def scalar(fm: str, key: str) -> str:
     return (m.group(1).strip().strip("\"'") if m else "")
 
 
-FLAG_SETTERS = ("operator", "legacy")
 FLAG_TRUTHY = ("true", "yes", "on")
 
 
-def operator_flagged(fm: str) -> bool:
-    """The same predicate as `scripts/topic-spawn.py`'s `operator_flagged`.
+def flagged(fm: str) -> bool:
+    """The same predicate as `scripts/topic-spawn.py`'s `flagged` — flag present, provenance
+    not read.
+
+    Operator ruling 2026-10-30: *"in the end it should not matter how set the flag … if flag,
+    should be open if claude session limit allow it"*. `flag_set_by` is a note, not a gate.
 
     ⚠️ Duplicated deliberately — both scripts run standalone out of the plugin cache, so
     there is no shared module to import. A split verdict between them would open exactly
     the goal the spawn gate refuses, so `test_topic_keepalive.py` asserts the two agree.
     """
-    return (
-        scalar(fm, "flag").lower() in FLAG_TRUTHY
-        and scalar(fm, "flag_set_by").lower() in FLAG_SETTERS
-    )
+    return scalar(fm, "flag").lower() in FLAG_TRUTHY
 
 
 def base_slug(text: str) -> str:
@@ -210,7 +210,7 @@ def main(argv: list[str]) -> int:
         # verdict splits here instead of both arms printing `resume` and letting the agent
         # run `/supervisor:open --goal` for either. Operator ruling 2026-10-30: "we dont
         # want to auto open topic-manager, goal-manager ... but flag are fine".
-        if operator_flagged(fm):
+        if flagged(fm):
             print("open")
             print(f'{a.subject} has no manager_session_id and the operator flagged it — '
                   f'start one with /supervisor:open {opener} "{a.subject}"')

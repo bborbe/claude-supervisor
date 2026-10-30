@@ -155,7 +155,7 @@ class KeepAliveTest(unittest.TestCase):
             "",
         ):
             with self.subTest(fm=fm):
-                self.assertEqual(spawn.operator_flagged(fm), self.k.operator_flagged(fm))
+                self.assertEqual(spawn.flagged(fm), self.k.flagged(fm))
 
     # --- the crash-loop cap ---------------------------------------------------
 

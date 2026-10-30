@@ -151,16 +151,15 @@ def read_frontmatter(tasks_dir, name):
 
 
 def is_operator_flagged(block):
-    """`flag: true` **and** `flag_set_by: operator` — the operator's own mark.
+    """`flag: true` — **whoever set it**. Provenance is not read.
 
-    A bare `flag: true` is not an approval and does not rank first. The field is written
-    by the operator's own surface (Vault UI toggle, a hand-typed `--by operator`);
-    anything else — including an absent value — is a writer that did not declare itself,
-    which is the bypass `commands/open.md` Step 0.5 refuses.
+    Operator ruling 2026-10-30: *"in the end it should not matter how set the flag … if flag,
+    should be open if claude session limit allow it"*. `flag_set_by` is a note, not a gate,
+    so a bare `flag: true` with no setter ranks exactly as one written `--by operator`. The
+    flag still only decides WHICH already-approved row goes first — the approval is
+    `approved_at`, which this leg requires on every row it opens.
     """
-    flag = (field(block, "flag") or "").strip().lower()
-    by = (field(block, "flag_set_by") or "").strip().lower()
-    return flag == "true" and by == "operator"
+    return (field(block, "flag") or "").strip().lower() in ("true", "yes", "on")
 
 
 def priority_of(block):
