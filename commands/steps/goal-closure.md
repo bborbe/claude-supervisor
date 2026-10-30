@@ -58,6 +58,20 @@ For the subject, then each page of the tracked set:
    section holding no box satisfies vacuously — that is how an empty `# Definition of Done`
    reached the verb. An absent section and an empty one are the same answer: refuse.
 
+   ⚠️ **A grandfathered goal is the one exception, and it is narrow.** The vault requires a
+   `# Definition of Done` only on goals created on or after **`DOD_REQUIRED_AS_OF` =
+   `2026-06-26`**; a goal created before that date, or carrying no `created` at all, is
+   **grandfathered** — an absent DoD is an accepted gap, not a violation. Without the
+   exception this rule made every grandfathered goal permanently unclosable: closable by
+   every other reader in the vault, unclosable by the one that actually closes it. The
+   reader applies it, so an absent DoD on a grandfathered goal reads `CLOSE` and this step
+   closes it normally.
+   The exception covers **absence only** — a DoD heading that exists but holds no box is
+   still `UNMEASURABLE` at every cutoff — and **goals only**: a task's DoD requirement is
+   not part of that decision, and a topic closes on its `# Completion Gate`, which has no
+   cutoff. The date is the same constant `agents/goal-auditor.md` § 12 carries; it lives in
+   two places because a plugin script cannot import from a vault agent.
+
 2. **Run the tier's own verb, `--vault` passed explicitly, and quote it verbatim:**
    ```bash
    vault-cli task  complete "<task>"  --vault "<vault>"

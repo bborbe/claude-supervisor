@@ -39,17 +39,29 @@ def _load(name, filename):
 closure = _load("goal_closure_read", "goal-closure-read.py")
 
 
-def _page(sc_boxes, dod_boxes, status="in_progress"):
+def _page(sc_boxes, dod_boxes, status="in_progress", created=None):
     front = "---\n" if status is None else f"---\nstatus: {status}\n"
+    if created is not None:
+        front += f'created: "{created}"\n'
     body = f"{front}---\n\n# Success Criteria\n\n{sc_boxes}\n\n# Definition of Done\n\n{dod_boxes}\n"
     return body
 
 
+def _page_no_dod(sc_boxes, status="in_progress", created=None):
+    """A page with Success Criteria only — no `# Definition of Done` heading at all."""
+    front = "---\n" if status is None else f"---\nstatus: {status}\n"
+    if created is not None:
+        front += f'created: "{created}"\n'
+    return f"{front}---\n\n# Success Criteria\n\n{sc_boxes}\n"
+
+
 class VerdictTest(unittest.TestCase):
-    def _verdict(self, page):
+    def _verdict(self, page, kind="goal"):
+        names = [n for n, _ in closure.SECTIONS[kind]]
         return closure.verdict_of(
             closure.read_status(page),
-            {n: closure.read_section(page, n) for n in ("Success Criteria", "Definition of Done")},
+            {n: closure.read_section(page, n) for n in names},
+            closure.dod_exempt(kind, closure.read_created(page)),
         )
 
     def test_all_boxes_ticked_closes(self):
@@ -65,8 +77,41 @@ class VerdictTest(unittest.TestCase):
         self.assertEqual(self._verdict(_page("- [x] a", "")), "UNMEASURABLE")
 
     def test_missing_section_is_unmeasurable(self):
-        page = "---\nstatus: in_progress\n---\n\n# Success Criteria\n\n- [x] a\n"
+        # Post-cutoff: the DoD is required, so its absence still refuses the close.
+        page = _page_no_dod("- [x] a", created="2026-10-19")
         self.assertEqual(self._verdict(page), "UNMEASURABLE")
+
+    def test_grandfathered_goal_without_a_dod_closes(self):
+        # The vault's grandfathering decision: a goal created before
+        # DOD_REQUIRED_AS_OF carries no DoD and is not in violation. Refusing to close
+        # it made every grandfathered goal permanently unclosable — closable by every
+        # other reader in the vault, unclosable by the one that actually closes it.
+        page = _page_no_dod("- [x] a\n- [x] b", created="2026-01-15")
+        self.assertEqual(self._verdict(page), "CLOSE")
+
+    def test_goal_without_a_created_date_is_grandfathered(self):
+        # Absent metadata is grandfathered too: the rule trusts the document's own
+        # `created`, never the filesystem.
+        page = _page_no_dod("- [x] a")
+        self.assertEqual(self._verdict(page), "CLOSE")
+
+    def test_post_cutoff_goal_without_a_dod_is_unmeasurable(self):
+        # The negative control: the cutoff widens nothing for new goals.
+        page = _page_no_dod("- [x] a\n- [x] b", created="2026-07-01")
+        self.assertEqual(self._verdict(page), "UNMEASURABLE")
+
+    def test_created_on_the_cutoff_date_is_not_grandfathered(self):
+        page = _page_no_dod("- [x] a", created="2026-06-26")
+        self.assertEqual(self._verdict(page), "UNMEASURABLE")
+
+    def test_grandfathered_goal_with_an_empty_dod_is_unmeasurable(self):
+        # Grandfathering covers ABSENCE, never an empty section.
+        page = _page("- [x] a", "", created="2026-01-15")
+        self.assertEqual(self._verdict(page), "UNMEASURABLE")
+
+    def test_grandfathered_goal_with_open_criteria_never_closes(self):
+        page = _page_no_dod("- [x] a\n- [ ] b", created="2026-01-15")
+        self.assertEqual(self._verdict(page), "OPEN")
 
     def test_star_and_plus_bullets_are_counted(self):
         self.assertEqual(self._verdict(_page("* [x] a\n+ [x] b", "* [x] c")), "CLOSE")
@@ -125,7 +170,15 @@ class TopicKindTest(unittest.TestCase):
     def _verdict(self, page):
         body = closure.strip_fences(page)
         sections = {n: closure.section_of(body, n, strict) for n, strict in closure.SECTIONS["topic"]}
-        return closure.verdict_of(closure.read_status(page), sections)
+        return closure.verdict_of(
+            closure.read_status(page), sections, closure.dod_exempt("topic", closure.read_created(page))
+        )
+
+    def test_grandfathered_topic_without_a_gate_is_still_unmeasurable(self):
+        # The grandfathering decision names goals. A topic closes on its
+        # `# Completion Gate`, which has no cutoff at any age.
+        page = '---\nstatus: in_progress\ncreated: "2020-01-01"\n---\n\n# Success Criteria\n\n- [x] a\n'
+        self.assertEqual(self._verdict(page), "UNMEASURABLE")
 
     def test_topic_closes_on_sc_plus_gate(self):
         self.assertEqual(self._verdict(_topic_page("- [x] a", "- [x] G1\n- [x] G2")), "CLOSE")
@@ -147,6 +200,21 @@ class TopicKindTest(unittest.TestCase):
         # A topic page carrying a DoD must not be closed on it.
         page = _topic_page("- [x] a", "- [x] G1") + "\n# Definition of Done\n\n- [ ] never\n"
         self.assertEqual(self._verdict(page), "CLOSE")
+
+
+class TaskKindTest(unittest.TestCase):
+    def test_task_without_a_dod_is_unmeasurable_at_every_cutoff(self):
+        # A task's DoD requirement is not part of the grandfathering decision, so an
+        # ancient task with no DoD still refuses the close.
+        page = '---\nstatus: in_progress\ncreated: "2020-01-01"\n---\n\n# Success Criteria\n\n- [x] a\n'
+        body = closure.strip_fences(page)
+        sections = {n: closure.section_of(body, n, s) for n, s in closure.SECTIONS["task"]}
+        self.assertEqual(
+            closure.verdict_of(
+                closure.read_status(page), sections, closure.dod_exempt("task", closure.read_created(page))
+            ),
+            "UNMEASURABLE",
+        )
 
 
 class SectionTest(unittest.TestCase):

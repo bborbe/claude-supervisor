@@ -20,10 +20,18 @@ Prints one line per section plus a verdict, and exits on the verdict:
     VERDICT: CLOSE
 
     CLOSE         every section present, every section carrying at least one box,
-                  and zero open boxes across both          -> exit 0
+                  and zero open boxes across both — or an absent `# Definition of
+                  Done` on a GRANDFATHERED goal              -> exit 0
     OPEN          at least one box is open                -> exit 1
     UNMEASURABLE  a section is absent, or carries no recognised box -> exit 1
     TERMINAL      the page already reads completed/aborted -> exit 1
+
+⚠️ **A grandfathered goal is the one exception to "a section is absent".** The vault
+requires a `# Definition of Done` only on goals created on or after `DOD_REQUIRED_AS_OF`
+(`2026-06-26`); older goals — and ones with no `created` — are grandfathered, so an
+absent DoD is not a gap there. The exception covers ABSENCE ONLY (an empty DoD section
+stays UNMEASURABLE) and GOALS ONLY (a task keeps the strict rule, and a topic closes on
+its `# Completion Gate`, which has no cutoff).
 
 `VERDICT: TERMINAL` is the guard that stops a closed page being re-closed on every
 later tick: the close verb writes `status: completed` and leaves every box at `[x]`,
@@ -46,6 +54,22 @@ import re
 import sys
 
 TERMINAL_STATUSES = {"completed", "aborted"}
+
+# The date the vault began requiring a `# Definition of Done` on goals. A goal created
+# before it — or carrying no `created` at all — is GRANDFATHERED: an absent DoD is a
+# known, accepted gap, not a violation. Lexicographic comparison is exact here because
+# the vault writes ISO-8601 (`2026-10-19`, `2026-09-20T00:00:00Z`); no parsing, no
+# timezone, and a `created` on the cutoff date itself reads as post-cutoff.
+#
+# ⚠️ This is the SAME constant `agents/goal-auditor.md` § 12 carries. Two copies of one
+# date is the trade, not an oversight: a plugin script cannot import from a vault agent.
+# Change one, change both. The closure rule shipped in v0.217.0 without this cutoff and
+# so made every grandfathered goal permanently unclosable — closable by every other
+# reader in the vault, unclosable by the one that actually closes it.
+#
+# Revisit once the calendar has moved well past this date (> 6 months): either drop
+# grandfathering entirely, retrofitting the vault, or move the cutoff forward.
+DOD_REQUIRED_AS_OF = "2026-06-26"
 
 # `-`, `*` and `+` are all valid markdown bullets, and `[X]` is the same tick as
 # `[x]` to every renderer — the earlier `-`-only, lowercase-only regex read both as
@@ -101,15 +125,30 @@ def strip_fences(text):
     return None if in_fence else "".join(out)
 
 
-def read_status(text):
-    """The page's frontmatter `status:`, or None when the field is absent."""
+def _field(text, name):
+    """One frontmatter scalar, unquoted, or None when the field is absent."""
     m = _FRONTMATTER.match(normalise(text))
     if not m:
         return None
     for line in m.group(1).splitlines():
-        if line.startswith("status:"):
+        if line.startswith(f"{name}:"):
             return line.split(":", 1)[1].strip().strip("'\"") or None
     return None
+
+
+def read_status(text):
+    """The page's frontmatter `status:`, or None when the field is absent."""
+    return _field(text, "status")
+
+
+def read_created(text):
+    """The page's frontmatter `created:` date, or None when the field is absent.
+
+    Absent is a value here, not a parse failure: the grandfathering rule trusts the
+    document's own metadata and never infers a date from the filesystem, so a goal with
+    no `created` is grandfathered exactly like one dated before the cutoff.
+    """
+    return _field(text, "created")
 
 
 _LIST_ITEM = re.compile(r"^[ \t]*(?:[-*+]|\d+\.)[ \t]+\S", re.M)
@@ -158,15 +197,39 @@ SECTIONS = {
 }
 
 
-def verdict_of(status, sections):
+def dod_exempt(kind, created):
+    """True when an ABSENT `# Definition of Done` must not block this page's closure.
+
+    The vault's grandfathering decision: a goal created before `DOD_REQUIRED_AS_OF`, or
+    carrying no `created`, has no DoD and is not in violation — so refusing to close it
+    contradicts a decision the vault already made. Every other reader honours the cutoff;
+    a closure rule that does not is the one rule that can never agree with them.
+
+    ⚠️ **Absence only, never an empty section.** A page whose DoD heading exists but
+    holds no box is UNMEASURABLE at every cutoff. Grandfathering accepts that the section
+    was never written, not that it was written and left blank.
+
+    ⚠️ **Goals only.** The decision names goals (`agents/goal-auditor.md` § 12). A task's
+    DoD requirement was never part of it, and a topic closes on `# Completion Gate`,
+    which has no grandfathering at all. Widening this to every kind would close tasks on
+    evidence the vault never agreed to accept.
+    """
+    if kind != "goal":
+        return False
+    return created is None or created < DOD_REQUIRED_AS_OF
+
+
+def verdict_of(status, sections, dod_may_be_absent=False):
     if (status or "").strip().lower() in TERMINAL_STATUSES:
         return "TERMINAL"
-    for _, tally in sections.items():
+    for name, tally in sections.items():
         if tally is None:
+            if dod_may_be_absent and name == "Definition of Done":
+                continue
             return "UNMEASURABLE"
         if tally[0] + tally[1] == 0:
             return "UNMEASURABLE"
-    if any(tally[1] > 0 for _, tally in sections.items()):
+    if any(tally[1] > 0 for tally in sections.values() if tally is not None):
         return "OPEN"
     return "CLOSE"
 
@@ -200,17 +263,22 @@ def main(argv):
         return 2
 
     status = read_status(text)
+    created = read_created(text)
     body = strip_fences(text)
     fenced_ok = body is not None
     sections = {name: section_of(body, name, strict) for name, strict in SECTIONS[kind]}
-    verdict = verdict_of(status, sections)
+    exempt = dod_exempt(kind, created)
+    verdict = verdict_of(status, sections, exempt)
 
     print(f"status: {status or 'ABSENT'}")
     if not fenced_ok:
         print("fences: UNTERMINATED — the section bodies cannot be measured")
     for name, tally in sections.items():
         if tally is None:
-            print(f"{name}: MISSING" if fenced_ok else f"{name}: UNREADABLE")
+            if fenced_ok and exempt and name == "Definition of Done":
+                print(f"{name}: ABSENT — grandfathered (created {created or 'absent'} < {DOD_REQUIRED_AS_OF})")
+            else:
+                print(f"{name}: MISSING" if fenced_ok else f"{name}: UNREADABLE")
         elif tally[0] + tally[1] == 0:
             print(f"{name}: 0 boxes — unmeasurable")
         else:
