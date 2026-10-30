@@ -2,7 +2,7 @@
 name: topic-drive
 description: Perform the TOPIC sweep's act leg for ONE topic — keep each declared goal's manager alive (jump / resume / restart / leave / crash-loop), then rank and name the goals that should take the free N slots. Dispatched by /supervisor:topic-drive (operator, by hand) and by /supervisor:topic-loop (every tick, after its sweep). It consumes the classification the sweep already produced and never builds a second one. It starts no session itself — the caller executes every start.
 model: sonnet
-tools: Read, Bash
+tools: Read, Bash, Task
 allowed-tools: Bash(grep:*), Bash(vault-cli:*), Bash(find:*), Bash(stat:*), Bash(python3:*), Bash(date:*), Bash(wezterm cli list:*)
 color: red
 ---
@@ -38,6 +38,12 @@ a `SendMessage`. A worker row is reported downward to the goal manager that owns
 </constraints>
 
 <process>
+
+⚠️ **Delegate execution; keep this session for the sweep.** `Task` is available, so anything
+that is not the goal sweep itself — a task to investigate, a PR to chase, a long read — goes to
+a sub-agent. A topic manager that takes that work into its own session stops sweeping its
+goals, and the same starvation that stalled the fleet round for 2h30m on 2026-10-30 applies one
+tier down. The sweep is the product; everything else is delegated.
 
 1. **Keep each declared goal alive.** For every goal, run the keep-alive and take its first
    line as the verdict:
