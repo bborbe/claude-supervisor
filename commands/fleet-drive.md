@@ -34,7 +34,7 @@ argument-hint: "[--interval <N>m] (interval defaults to 15m; the round repeats b
 ---
 Fleet-drive — **the round**: one round, once, over the whole fleet, runnable by hand. The fleet's show is `/supervisor:fleet-status`.
 
-⚠️ **This is the round, not the arm.** The wakeup names THIS command; the arm (`/supervisor:fleet-loop`) is invoked **once** and **never** re-invoked from a wakeup — a wakeup re-invokes THIS command (`/supervisor:fleet-drive --interval <N>m`).
+⚠️ **This is the round, not the arm.** The wakeup names THIS command; the arm (`/supervisor:fleet-loop`) is invoked **once** to arm the loop and is **never** re-invoked from a wakeup — a wakeup re-invokes THIS command (`/supervisor:fleet-drive --interval <N>m`). This file is the **round** (read on every wakeup); `commands/fleet-loop.md` is the **arm** (read once).
 
 ⚠️ **A fleet-tier verb — never run it from a worker session.** Running a fleet-wide sweep inside a worker collapses the two roles silently: the session keeps its task anchor while its turns sweep the whole fleet (`${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles). A worker routes a sweep to its manager with `SendMessage`. A change to this command is exercised in a manager session's runtime, never from the session that authored it.
 
@@ -42,7 +42,7 @@ The hard invariants and gates live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/rule
 
 `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts` — every script below is `python3 $P/<script>`.
 
-Rationale and history: runbook § Fleet-Manager Command — Rationale and Measured History.
+Rationale: runbook § Fleet-Manager Command — Rationale and Measured History.
 
 ## Router
 
@@ -68,13 +68,14 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 13 | Attention watchers | every tick — arm ONE `Monitor` over the feed, re-arm on expiry/death: `python3 $P/gate-owner-filter.py --feed --self "<this-session-id>" --interval 60` and `python3 $P/answered-watch.py`, never append `2>&1` (stderr = heartbeat) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/attention-watcher.md` |
 | 14 | Auto-compaction | the hand-back reports `context70` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/auto-compaction.md` |
 | 15 | Readings | every tick — take all four readings (`fleet-board.py` · `approved-not-started.py` · `unarmed-goals.py` · `next-focus.py`; commands in the step) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |
-| 16 | Voice + notification | every tick — run the `{"gates": []}` prune on every round, and publish only the gates the operator must decide (§ Gate triage classes C, D, E) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/voice-notify.md` |
-| 17 | Persist | the snapshot path is missing or the write failed — run: `python3 $P/fleet-snapshot.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
-| 18 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
+| 16 | Open leg | every tick — after Readings | `${CLAUDE_PLUGIN_ROOT}/commands/steps/open.md` |
+| 17 | Voice + notification | every tick — run the `{"gates": []}` prune on every round, and publish only the gates the operator must decide (§ Gate triage classes C, D, E) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/voice-notify.md` |
+| 18 | Persist | the snapshot path is missing or the write failed — run: `python3 $P/fleet-snapshot.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
+| 19 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
 
-⚠️ **No manager-proposal row** — removed 2026-10-29: the round does not propose managers for unmanaged goals.
+⚠️ **No manager-proposal row** — removed 2026-10-29 (operator ruling): the round does not propose managers.
 
-⚠️ **The table is evaluated more than once per round, and the later reads are the ones that get skipped.** At the head only the rows decidable then can be honoured (`every tick` and the cold `rules` row); **every other row gates on data the round does not hold yet** — including `reap`, whose `When` is the drive leg — so **re-read this table the moment the sweep hand-back exists**, and again before the output shape renders, reading each row whose `When` has newly become decidable **and that has not already run this round**. Never re-run a leg: **every `every tick` row is once-per-round**, and a second sweep or drive leg would duplicate sends to peers. Measured 2026-10-12 on a cold `v0.130.0` round: rows 3 (`orphan=46`, `collision=1`), 8 (`ledger=16`) and 11 (`blocked=3`) each held, none was read, and the mandatory `📋 Open with the operator` render was omitted.
+⚠️ **The table is evaluated more than once per round, and the later reads are the ones that get skipped.** Re-read it the moment the sweep hand-back exists, and again before the output shape renders, honouring each row whose `When` has newly become decidable **and that has not already run this round**. Never re-run a leg: **every `every tick` row is once-per-round**, and a second sweep or drive leg would duplicate sends to peers. The full rule and its measured case live in `steps/rules.md` § Re-read the router.
 
 ## INLINE — the hard rules
 
