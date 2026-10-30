@@ -145,6 +145,39 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.assertEqual("jump", out[0])
         self.assertIn("deferred", out[1])
 
+    def test_a_todo_task_is_not_resumed(self):
+        # `phase: todo` is the operator's approval boundary — the same line the
+        # flagged-open leg protects on the other side.
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution", "phase: todo"))
+        rc, out = self.run_it(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("jump", out[0])
+        self.assertIn("parked", out[1])
+
+    def test_a_done_phase_is_not_resumed(self):
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution", "phase: done"))
+        rc, out = self.run_it(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("jump", out[0])
+        self.assertIn("parked", out[1])
+
+    def test_a_blocked_status_is_not_resumed(self):
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "status: in_progress", "status: blocked"))
+        rc, out = self.run_it(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("jump", out[0])
+        self.assertIn("parked", out[1])
+
+    def test_ambiguous_and_malformed_are_cannot_tell(self):
+        self.page()
+        for verdict in ("AMBIGUOUS", "MALFORMED"):
+            rc, out = self.run_it(live=verdict)
+            self.assertEqual(1, rc, verdict)
+            self.assertEqual("cannot-tell", out[0], verdict)
+
     # --- the cap --------------------------------------------------------------
 
     def test_fourth_resume_inside_the_window_is_a_crash_loop(self):

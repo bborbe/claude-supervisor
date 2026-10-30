@@ -34,9 +34,15 @@ row should carry one, so an absent value means a writer that did not declare its
 the bypass. Never widen the admitted set to make a row openable, and never "fix" a refusal by
 writing `flag_set_by` on the row.
 
-⚠️ **This leg opens work, never a manager.** A flagged *manager* is rule 2's subject and still
-opens through `/supervisor:open`; a flagged **goal with no manager** does not get a manager
-from this leg — that is rule 4, and `fleet-drive.md` removed the manager-proposal row for it.
+⚠️ **This leg opens work, never a manager — and not because rule 4 forbids it.** Rule 4
+explicitly permits a manager opened *because it was flagged*; what stops this leg is that
+`/supervisor:open --flagged` selects **tasks** only (`commands/open.md` § the batch). A flagged
+manager is rule 2's subject and opens through `/supervisor:open --goal` or `--topic`. ⚠️ **No
+fleet-tier leg opens a flagged goal manager today** — `fleet-drive.md` removed the
+manager-proposal row on 2026-10-29, so the tier table's *"a goal manager only when that goal is
+flagged"* has no fleet executor; the operator opens one, or the topic tier's ranking does on
+their instruction (`commands/topic-drive.md` § Start). Say that plainly rather than implying
+this leg covers it.
 
 **Report the count.** Print `unactioned: <n> operator-flagged` with the rows this leg left
 unopened — the `# Regression metric` reads it.

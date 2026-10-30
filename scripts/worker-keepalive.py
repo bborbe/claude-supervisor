@@ -48,11 +48,13 @@ TASKS_DIR = "25 Tasks"
 RESUME_CAP = 3
 RESUME_WINDOW = 30 * 60  # seconds
 TERMINAL = {"completed", "aborted"}
-#: A parked worker is not a dead one. `hold` is a deliberate pause, `human_review` is
-#: waiting on the operator, and a future `defer_date` is a snooze — resuming any of them
-#: would undo a decision rather than recover from a death.
+#: A parked worker is not a dead one. `hold`/`blocked` is a deliberate pause, `human_review`
+#: is waiting on the operator, `todo` is the operator's approval boundary, and `done` is
+#: finished — resuming any of them would undo a decision rather than recover from a death.
+#: `phase: done` is listed because `agents/goal-drive.md` treats it as terminal while `status`
+#: may still read `in_progress`.
 PARKED_STATUS = {"hold", "blocked"}
-PARKED_PHASE = {"human_review"}
+PARKED_PHASE = {"human_review", "todo", "done"}
 
 
 _KEEPALIVE = None
@@ -91,6 +93,8 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--vault", required=True, help="the vault ROOT path")
     ap.add_argument("--task", required=True)
+    ap.add_argument("--dir", help="override the task directory (a vault may rename `25 Tasks`; "
+                                  "read it from `vault-cli config list`)")
     ap.add_argument("--record-resume", metavar="SESSION_ID",
                     help="record a resume that the liveness instrument confirmed LIVE")
     ap.add_argument("--now", type=float, help="epoch seconds (tests only)")
@@ -111,7 +115,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     task_file = None
-    directory = os.path.join(vault, TASKS_DIR)
+    directory = os.path.join(vault, a.dir or TASKS_DIR)
     try:
         for entry in os.listdir(directory):
             if entry.lower() == a.task.lower() + ".md":

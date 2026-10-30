@@ -134,6 +134,8 @@ def main(argv: list[str]) -> int:
                     help="the goal or topic name; --goal is kept as an alias")
     ap.add_argument("--branch", choices=("goal", "topic"), default="goal",
                     help="which tier's subject page and cadence to read (default: goal)")
+    ap.add_argument("--dir", help="override the subject directory (a vault may rename "
+                                  "`24 Goals` / `23 Topics`; read it from `vault-cli config list`)")
     ap.add_argument("--record-resume", metavar="SESSION_ID",
                     help="record a resume that the liveness instrument confirmed LIVE")
     ap.add_argument("--now", type=float, help="epoch seconds (tests only)")
@@ -155,7 +157,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     goal_page = None
-    directory = os.path.join(vault, DIRS[a.branch])
+    directory = os.path.join(vault, a.dir or DIRS[a.branch])
     try:
         for entry in os.listdir(directory):
             if entry.lower() == a.subject.lower() + ".md":

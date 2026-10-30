@@ -96,7 +96,7 @@ The **first line is the verdict**:
 | verdict | meaning | what this round does |
 |---|---|---|
 | `jump` | live session, loop `OK` **or `UNARMED`** | render the row. ⚠️ `UNARMED` means no record exists under either name — the loop was **never armed**, not lost; the lever is `/supervisor:goal-loop "<goal>"`, never `restart` (a restart resumes a session that never armed anything) |
-| `resume` | no session (or `ABSENT`) | run `/supervisor:open --goal "<goal>"`, then `topic-keepalive.py --record-resume <the id>` **once the liveness instrument shows it live** |
+| `resume` | no session (or `ABSENT`) | run `/supervisor:open --goal "<goal>"`, then `topic-keepalive.py --vault "<vault>" --subject "<goal>" --record-resume <the id>` **once the liveness instrument shows it live** — `--subject` is required, and omitting it exits 2 so the cap never arms |
 | `restart` | live session, `STALE`/`INVALID` cadence | `/supervisor:restart <session-id>`; its `busy-target` refusal means mid-turn — wait a tick, never kill in-flight work |
 | `leave` | `STOPPED` — a deliberate stand-down | nothing; the operator stood it down |
 | `cannot-tell` | the probe could not decide | render `UNVERIFIED` and name the input; **never act** |
@@ -114,21 +114,24 @@ Only when a keep-alive slot is free (`resume`/`restart` did not consume it) and 
 goal is held:
 
 1. `topic-spawn.py --topic "<topic>" --rank` → the ranked rows and which take the N slots.
-2. For each `start` row not already running **whose goal page carries `flag: true`**:
-   `/supervisor:topic-spawn "<goal>"`. Its tokens (`goal-not-in-scope`, `goal-not-startable`,
-   `manager-cap`, the worker refusal) are the gate — never re-derive them here.
+2. **Render the ranking. Do not start from it.** This tier ranks; it does not open a goal
+   manager (`docs/session-tiers.md` rule 4 — *a manager is never opened fresh on the
+   operator's behalf*). The operator opens one with `/supervisor:open --goal "<goal>"`, and
+   the start then runs through `/supervisor:topic-spawn "<goal>"` on their instruction, with
+   its tokens (`goal-not-in-scope`, `goal-not-startable`, `manager-cap`, the worker refusal)
+   as the gate — never re-derived here.
 3. ⚠️ **Never exceed N = 3 per topic and never exceed the fleet ceiling.** The cap is never
    raised to make room; rank and wait, or say which goal is starved and why.
 
 ⚠️ **A `phase: todo` goal is never started** — `goal-not-startable` is the operator's
 approval boundary, not a bug.
 
-⚠️ **A start row whose goal is not flagged is ranked and reported, never started.** This is
-rule 4 — *a manager is never opened fresh on the operator's behalf* (`docs/session-tiers.md`
-§ The four tiers). `commands/fleet-drive.md` removed its manager-proposal row on 2026-10-29 for
-exactly this; the ranking here is a **report of the order**, not an instruction to act on it.
-Render the ranked rows with the reason each was not started, and start only the flagged ones.
-The operator opens an unflagged goal manager by flagging it, or by asking.
+⚠️ **This tier no longer starts goal managers, and that is rule 4, not an omission.**
+`commands/fleet-drive.md` removed its manager-proposal row on 2026-10-29 for the same reason;
+this is the tier below doing the same. ⚠️ **It is deliberately not conditioned on `flag`** —
+`24 Goals` carries no `flag` field on any of its 355 pages, so a `flag`-gated start would
+never fire and would read as "the topic tier stopped working". The ranking is the operator's
+view of which goal would take a free slot and why; acting on it is theirs.
 
 ## What this round must never do
 

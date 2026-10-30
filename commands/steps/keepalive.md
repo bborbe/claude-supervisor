@@ -15,24 +15,34 @@ had none, so a lapsed topic manager simply stayed lapsed and nothing reported it
 the missing rung: **restart is not open**, so resuming a topic manager that already owns its
 subject decides nothing new (`docs/session-tiers.md` § The four tiers, rule 1).
 
-**Population — every topic page carrying a `manager_session_id`.** Read the vault's
-`23 Topics/` directory, not the roster: a topic manager whose session died is absent from the
-roster, which is exactly the row this leg exists to recover.
+**Population — every topic page carrying a `manager_session_id`.** Read the vault's topic
+directory, not the roster: a topic manager whose session died is absent from the roster, which
+is exactly the row this leg exists to recover. ⚠️ **Resolve the directory from the vault's own
+config, never assume `23 Topics`** — a renamed directory would glob nothing and the leg would
+report a clean round, the exact silent failure it exists to remove:
 
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
-for f in "<vault>/23 Topics"/*.md; do
+TOPICS=$(vault-cli config list --output json | python3 -c "
+import json,sys
+for x in json.load(sys.stdin):
+    if x.get('topics_dir'):
+        print(x['topics_dir']); break")
+TOPICS="${TOPICS:-23 Topics}"
+for f in "<vault>/$TOPICS"/*.md; do
   name=$(basename "$f" .md)
   grep -q '^manager_session_id:' "$f" || continue
   printf '%s\t' "$name"
-  python3 "$P/topic-keepalive.py" --vault "<vault>" --subject "$name" --branch topic | head -2 | tr '\n' '\t'
+  python3 "$P/topic-keepalive.py" --vault "<vault>" --subject "$name" --branch topic --dir "$TOPICS" | head -2 | tr '\n' '\t'
   echo
 done
 ```
 
 **Act on the verdict, exactly as the goal tier does.** `restart` → run the printed
 `/supervisor:restart <session-id>`, then record the resume **once `session-liveness.py --check`
-shows the id live** (`topic-keepalive.py --record-resume <id> --branch topic`); `resume` → the
+shows the id live** (`topic-keepalive.py --vault "<vault>" --subject "<name>" --branch topic
+--record-resume <id>` — `--subject` is `required=True`, and omitting it makes argparse exit 2
+so the cap silently never arms); `resume` → the
 session is `ABSENT`, so open it with `/supervisor:open --topic "<name>"` and record the resume
 the same way; `jump` → hand the operator the pane; `leave` → a deliberate stand-down, do
 nothing; `cannot-tell` → report it and never act.
@@ -62,15 +72,22 @@ being resumed. The escalation stays for a worker that **cannot** be resumed (no 
 a spent cap, an undecidable probe) — it is no longer the disposition for every orphan.
 
 **Population — `in_progress` tasks with open boxes that record a `claude_session_id`.** Run
-the script per task; it decides, it never resumes:
+the script per task; it decides, it never resumes. ⚠️ **Resolve the task directory from the
+vault's config, never assume `25 Tasks`:**
 
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
-for f in "<vault>/25 Tasks"/*.md; do
+TASKS=$(vault-cli config list --output json | python3 -c "
+import json,sys
+for x in json.load(sys.stdin):
+    if x.get('tasks_dir'):
+        print(x['tasks_dir']); break")
+TASKS="${TASKS:-25 Tasks}"
+for f in "<vault>/$TASKS"/*.md; do
   grep -q '^claude_session_id:' "$f" || continue
   name=$(basename "$f" .md)
   printf '%s\t' "$name"
-  python3 "$P/worker-keepalive.py" --vault "<vault>" --task "$name" | head -2 | tr '\n' '\t'
+  python3 "$P/worker-keepalive.py" --vault "<vault>" --task "$name" --dir "$TASKS" | head -2 | tr '\n' '\t'
   echo
 done
 ```
@@ -92,6 +109,15 @@ refuses `busy-target` and `headless-target`); `scripts/stuck-heal.py` heals a **
 worker whose permission channel died while the session lives; this leg resumes a worker whose
 session is **gone**. Neither of the other two applies to a dead session, which has no pid left
 to kill and no channel left to reopen.
+
+⚠️ **`agents/goal-drive.md`'s orphan gate covers the same population, and the two must not both
+act in one window.** That gate runs on the goal tier's tick and resumes a dead worker with its
+own `last_auto_resume` cap; this leg runs on the fleet tick with the `worker--<slug>` cap. Both
+caps record only **after** a resume the instrument confirms `LIVE`, so a race lets two resumes
+land before either cap arms. **Act only on a row the goal tier has not already claimed** — a
+worker whose goal has a live manager is that manager's to resume; this leg takes the ones whose
+goal has no live manager (the same fallback `docs/fleet-surface.md` § Which manager owns a
+subject already states).
 
 **Report the count.** Print `unactioned: <n> dead-workers` alongside the manager count.
 
