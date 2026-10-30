@@ -78,9 +78,11 @@ DOD_REQUIRED_AS_OF = "2026-06-26"
 _BOX = re.compile(r"^[ \t]*[-*+][ \t]*\[(.)\]", re.M)
 _DONE = {"x", "X"}
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
-# The only `created` shape the cutoff compares. A zero-padded ISO date, optionally with a
-# time suffix — anything else is refused rather than sorted into a verdict (see dod_exempt).
-_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+# The only `created` shape the cutoff compares: a zero-padded ISO date with a real month
+# and day, optionally followed by a time. Anchored and range-checked — an unanchored prefix
+# match would let `2026-01-15garbage` through, and `2026-00-00` sorts below the cutoff and
+# would exempt a page whose date is malformed. Anything else is refused, not compared.
+_ISO_DATE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])($|[T ])")
 
 
 def normalise(text):

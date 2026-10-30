@@ -255,6 +255,21 @@ class CreatedFieldTest(unittest.TestCase):
         for raw in ("15.01.2026", "2026", "01/15/2026", "Jan 2026", ""):
             self.assertFalse(closure.dod_exempt("goal", raw), raw)
 
+    def test_a_well_shaped_but_invalid_or_trailing_date_fails_closed(self):
+        # The guard must match its own contract: an anchored, range-checked ISO date.
+        # `2026-00-00` sorts below the cutoff, and `2026-01-15garbage` is not a date at
+        # all — both would exempt a malformed page if the shape went unchecked.
+        for raw in ("2026-00-00", "2026-13-01", "2026-01-32", "2026-01-15garbage"):
+            self.assertFalse(closure.dod_exempt("goal", raw), raw)
+
+    def test_the_cutoff_boundary_is_exact_to_the_day(self):
+        # The lexicographic claim the whole cutoff rests on: a timestamp on the day
+        # BEFORE the cutoff is grandfathered, and one ON the cutoff date is not.
+        self.assertTrue(closure.dod_exempt("goal", "2026-06-25T23:59:59Z"))
+        self.assertFalse(closure.dod_exempt("goal", "2026-06-26T00:00:00Z"))
+        self.assertTrue(closure.dod_exempt("goal", "2026-06-25"))
+        self.assertFalse(closure.dod_exempt("goal", "2026-06-26"))
+
 
 class SectionTest(unittest.TestCase):
     def test_absent_section_is_none(self):
