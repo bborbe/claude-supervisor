@@ -17,6 +17,22 @@ When: every tick — run the `{"gates": []}` prune on every round, and publish o
 
     Send `{"gates": []}` on a round that raised none — the empty call prunes **your own** cleared gates only, never another manager's. **`--layer fleet` is required** (the ledger is per layer; this sweep is a subset). Publish only gates the operator must decide — § Gate triage classes **C, D, E** in the Manager Session runbook; **A and B** are yours to clear and stay silent. Surface the script's message rather than swallowing it. **Do not pre-filter for cross-layer duplicates** — the script de-dups by escalating session id and prints the skip; publish and let it decide.
 
+    ### Raise a crashed-manager card
+
+    **A manager that is live but whose loop has lapsed is the only manager ask this round raises.** Since 2026-10-29 the round no longer proposes managers for goals that never had one (operator ruling: *"u should not recommend to open more goals, maybe only crashed managers"*); the recovery reading replaced it.
+
+    ```bash
+    python3 $P/crashed-managers.py --post --vault "<this round's vault>"   # at most one card per uncovered subject; `--json` is a diagnosis-only run, never both
+    ```
+
+    ⚠️ **`--vault` is required, not optional.** The fleet round is per-vault, and the script's default is one hardcoded vault — omit the flag and a manager running elsewhere reads *that* vault's pages against a *different* vault's cadence records, classifying every subject as an abandoned record and carding nothing.
+
+    ⚠️ **Run the script — it owns the predicate, the coverage test and the card.** Not one of those rules is restated here, and none may be re-derived at this call site: a second copy of the `STALE`-vs-`STOPPED` test, the live-vs-abandoned discriminator or the keep-alive coverage boundary is the second answer this repo's `check-*` guards exist to refuse. Read the script's header for the population and why it is narrower than *"every lapsed manager"*.
+
+    ⚠️ **A `2` is REFUSED, never "no crashed managers".** An unreadable sweep-gate state dir prints its own reason to stderr; an empty fleet and an unreadable one must not render the same. Surface the line and do not report the round as clean.
+
+    ⚠️ **The card is an ASK, never an act.** Nothing is restarted until the operator answers — and where a keep-alive already covers the manager, no card is raised at all, because that restart is already being taken.
+
     ### Speak the asks; keep the detail in chat
 
     **The round's operator asks are spoken, once, as a count and a pointer.** The operator's standing instruction, 2026-10-14: *"if u write only … i will not read it most the time"* — *"combine this talking with the chat. You can tell me, hey, I have four tasks that need your attention. The links are in the chat."*

@@ -201,6 +201,29 @@ class TopicSpawnTest(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertEqual("spawn-ok: Delta", out[0])
 
+    def test_a_terminal_goal_is_refused(self):
+        """Closure leaves `phase: execution` in place, so a phase-only gate keeps
+        offering a goal the same tick has just closed — the "finished goal silently
+        restarts" failure. The refusal names the real cause."""
+        self.goal("Beta", "execution", 1)
+        page = self.vault / "24 Goals" / "Beta.md"
+        page.write_text(
+            page.read_text(encoding="utf-8").replace("status: in_progress", "status: completed"),
+            encoding="utf-8",
+        )
+        rc, out = self.run_gate("--goal", "Beta")
+        self.assertEqual(1, rc)
+        self.assertEqual("goal-terminal", out[0])
+
+    def test_a_terminal_goal_is_not_ranked(self):
+        page = self.vault / "24 Goals" / "Beta.md"
+        page.write_text(
+            page.read_text(encoding="utf-8").replace("status: in_progress", "status: completed"),
+            encoding="utf-8",
+        )
+        rows = ts.rank(str(self.vault), TOPIC, ["Alpha", "Beta", "Gamma", "Delta"], 3)
+        self.assertNotIn("Beta", [r["goal"] for r in rows])
+
     def test_a_goal_with_no_phase_is_ranked_not_dropped(self):
         (self.vault / "24 Goals" / "Delta.md").write_text(
             "---\npage_type: goal\nstatus: in_progress\npriority: 4\n---\n",

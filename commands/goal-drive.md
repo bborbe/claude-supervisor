@@ -56,6 +56,7 @@ Rationale and incident history: the Manager Session runbook § Command rationale
 | 2 | Take the round's readings | every tick, **before** the sweep dispatch | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-readings.md` |
 | 2b | Quiet check | every tick, after the readings | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-quiet.md` |
 | 3 | Sweep | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-sweep.md` |
+| 4c | Closure | every tick, after the sweep | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` |
 | 4 | Classify the rows | every tick, after the sweep | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-classify.md` |
 | 4b | Coverage | every tick, before the drive leg | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-coverage.md` |
 | 5 | Drive | every tick, after the table renders | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-drive.md` |
@@ -69,13 +70,17 @@ Rationale and incident history: the Manager Session runbook § Command rationale
 | 13 | Self-improvement | before the session ends, or a sweep exposes a gap | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-self-improvement.md` |
 | 14 | Unowned check | before declaring any member task unowned | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-unowned.md` |
 
+⚠️ **Row 4c runs before row 4, whatever its label reads** — the classify decides its `done`
+bucket from `status`, so a page closed after it is classified as active and rows 5–6 act on
+that stale bucket.
+
 ⚠️ **Opening a worker is bound by `docs/fleet-surface.md` § Spawn a worker item 6** — the mode is passed in both directions (`mode: headless` → `interactive=false`, `mode: interactive` → `interactive=true`). This file grants the tool but does not open; the binding and the call live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-spawn.md`.
 
 **Read a step file only when its `When` holds**, and if a step's text is not in context — after a compaction, say — **re-read it** rather than assuming it survived.
 
 ⚠️ **The `#` column is a stable label, not a running order — `When` sequences the round.** Rows 6 and 7 are referenced **by number** from other step files, so a new step takes a letter suffix rather than renumbering: `4b` is *between 4 and 5*, which is where it runs.
 
-⚠️ **The rules do not live here, and that is deliberate.** Every always-hold invariant and gate is **inline in the arm** (`commands/goal-loop.md`), and every per-round rule lives in **exactly one** step file above. Restating a rule in this command would give it two homes, and a rule with two homes drifts — one copy is amended and the other silently keeps the old behaviour. So this command is the **map**: it names the steps and the condition under which each is read, and nothing else. If you find yourself needing a rule that is not in a step file you have read, read the arm or the step file — do not act from memory of a previous round.
+⚠️ **The rules do not live here, deliberately.** Every always-hold invariant and gate is **inline in the arm** (`commands/goal-loop.md`), and every per-round rule lives in **exactly one** step file above. A rule with two homes drifts: one copy is amended, the other silently keeps the old behaviour. So this command is the **map** — steps and their read conditions, nothing else. If you find yourself needing a rule that is not in a step file you have read, read the arm or the step file — do not act from memory of a previous round.
 
 ⚠️ **The arm is not in context, and a round never assumes context left over from the previous round.** State lives on disk (the tracked-set file, the snapshot, the verdicts cache); re-read what a step needs rather than carrying it forward.
 

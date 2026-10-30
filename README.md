@@ -92,6 +92,19 @@ For a worker whose prompts you intend to answer yourself rather than letting its
 
 **Choose interactive when you want to see or steer it. Choose headless when you want the manager answering its prompts.** Neither is more capable; the trade is visibility against supervision.
 
+### Where a headless worker's process lives
+
+A headless worker's child process is spawned by **`claude-wrapper`**, not by this server. That is not an implementation detail — it decides who can answer the worker's prompts.
+
+A permission prompt parks with whoever holds the child's stdin. When this server held it, a park was answerable only by this server and died with it; a manager's `answer_permission` reached it only while that process lived. Now the wrapper holds stdin, so a park is released over its REST route — `POST /api/1.0/sessions/{id}/answer` — and the wrapper's session id is what names the target.
+
+Two consequences worth knowing before you spawn:
+
+- **`agent_status` and `list_agents` carry `pending_question`** — the wrapper's own live question record, including the `request_id` that `answer_permission` takes. `wrapper_session_id` sits beside it so a `null` for "not wrapper-backed" is distinguishable from a `null` for "nothing parked" and from an unreadable wrapper. The fleet gate is still `awaiting_input`; `pending_question` is a status field, never a gate.
+- **The policy tier does not run.** `decide()`, the manager allowlist, the carried decision and the 15-minute deny are all gone for these workers, because the wrapper owns the child's single `--permission-prompt-tool` and this server never sees the prompt. A spawn reply carries a `policy_gap` naming each one as not-run; **a successful spawn is not a policed spawn.** Answer parks explicitly with `answer_permission`.
+
+The wrapper is reached at `SUPERVISOR_WRAPPER_URL`, which must be loopback: its API is unauthenticated and a spawn sends it the inherited environment.
+
 ### Setting the fleet default
 
 The mode a worker opens in is a **fleet-wide decision**, so it lives in a file you edit rather than in the instructions each manager reads:

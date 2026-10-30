@@ -122,7 +122,7 @@ Print `Tracked (N): <goal> · <goal> …` at manager start, and **re-print it wh
 declaration read changes it**. Membership is never widened mid-run; the subject and branch
 detection resolve **once** at manager start, never per wakeup.
 
-4b. **⚠️ The phase precondition — a loop arms only a subject at `phase: execution`.** Having found the page, run `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` § *The phase precondition* **before arming anything**: read the page's `phase:` and, unless it reads `execution`, print the refusal naming `/vault-cli:execute-topic "<subject>"` and **STOP** — arm no cadence, record no arm, write no `status`. ⚠️ **`planning`, `todo` and an absent `phase:` are all refusals.** ⚠️ **Say plainly that the operator re-runs this command after the flip** — this file is the *arm*, it is never re-invoked by a wakeup, so a refusal here leaves no cadence running to carry the retry (unlike the round, which re-arms). ⚠️ **The loop never runs the gate and never writes `phase:`** — the operator runs it. ⚠️ **The rule, the refusal shape, the version-drift rationale and the eight-command scope table live in the doc — read them there; they are not restated here.**
+4b. **⚠️ The phase precondition — a loop arms only a subject at `phase: execution`.** Having found the page, run `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` § *The phase precondition* **before arming anything**: read the page's `phase:` and, unless it reads `execution`, print the refusal naming `/vault-cli:execute-topic "<subject>"` and **STOP** — arm no cadence, record no arm, write no `status`, and **record the stand-down with `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manager-liveness.py --stop --subject "<subject>" --branch topic`**. ⚠️ **`planning`, `todo` and an absent `phase:` are all refusals.** ⚠️ **Say plainly that the operator re-runs this command after the flip** — the refusal ends the loop, so no cadence is left running to carry the retry. The round carries the same rule: a refused loop stops rather than re-arming, because a re-arming refusal keeps recording liveness and would hide the subject from the armed-set check. ⚠️ **The loop never runs the gate and never writes `phase:`** — the operator runs it. ⚠️ **The rule, the refusal shape, the version-drift rationale and the eight-command scope table live in the doc — read them there; they are not restated here.**
 
 5. **Confirm no manager already owns this subject — before arming anything.** `ListAgents`
    for `<Topic> Manager`. Hit → print its name and age and **stop**. Miss → re-read the
@@ -193,8 +193,16 @@ code edits, no repo/PR/k8s verification, no investigation, no real debugging.
   `Operator answer, via supervisor:` when the operator answered here, `Manager answer, via
   supervisor:` for your own scope decision. Neither releases an irreversible or
   production-touching action.
-- **Never close a goal.** Its `# Success Criteria` are its closure contract and close
-  mechanically through `/vault-cli:complete-goal`. Report SC status; never tick SC and never
-  flip a goal's status **in order to close it**. ⚠️ **Scoped to closure** — the
-  resolution-time reconcile that flips a subject reading `todo`/`next` to `in_progress` is
-  the manager's own write and is required, not forbidden.
+- **Close on complete evidence; never certify one.** A member goal closes on its `# Success
+  Criteria` + `# Definition of Done`; **this topic closes on its `# Success Criteria` + its
+  `# Completion Gate`** — a topic is the only level carrying both sets
+  (`docs/session-progress.md:37`). When every box in both of a page's own sets reads `[x]`, the
+  round runs the tier's verb — `vault-cli goal complete "<goal>" --vault "<vault>"` or
+  `vault-cli topic complete "<topic>" --vault "<vault>"` — and quotes its verdict;
+  the execution, the terminal guard and the `--vault` contract live in
+  `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` and are not restated here. ⚠️ **Never
+  tick SC and never flip a page's status in order to close it** — a close that needs `--force`
+  is one you do not make. ⚠️ **Tasks are not this tier's** — a task closes under its goal's
+  manager, and this tier never reads a task file (`agents/topic-sweep-reader.md`).
+  ⚠️ **Scoped to closure** — the resolution-time reconcile that flips a subject reading
+  `todo`/`next` to `in_progress` is the manager's own write and is required, not forbidden.
