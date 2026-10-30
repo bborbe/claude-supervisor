@@ -2,7 +2,7 @@
 # No `name:` field, deliberately — a command takes its name from its filename. The
 # frontmatter rule for `commands/*.md` (`agent-cmd/command-frontmatter`) requires
 # `description`, `allowed-tools` and `argument-hint` and nothing else.
-description: Arm the TOPIC manager loop — watch the goals this topic declares and the goal managers running on them (default 15 min, `--interval`), keep the live ones alive, start what the ranking admits, print the goal table. The arm is invoked ONCE; every wakeup runs /supervisor:topic-drive. Sweeps goal managers, never workers.
+description: Arm the TOPIC manager loop — watch the goals this topic declares and the goal managers running on them (default 15 min, `--interval`), keep the live ones alive, start only the goal the operator flagged, print the goal table. The arm is invoked ONCE; every wakeup runs /supervisor:topic-drive. Sweeps goal managers, never workers.
 allowed-tools:
   - Task
   - Read
@@ -172,8 +172,12 @@ code edits, no repo/PR/k8s verification, no investigation, no real debugging.
   then report them as a table line. The modal is reserved for operator-only decisions
   (`phase: todo` approval, a production-touching or irreversible action, a TDR), and even
   those reach the operator as an attention-board card carrying a `--dedup-key`.
-- **No goal manager → start one, under the ranking.** `/supervisor:topic-spawn` is the only
-  route; it holds no spawn tool and delegates to `/supervisor:open --goal`.
+- **No goal manager → start one, under the ranking, and only for a goal the operator
+  FLAGGED.** `/supervisor:topic-spawn` is the only route; it holds no spawn tool and
+  delegates to `/supervisor:open --goal`. ⚠️ **Rule 4 — restart is not open:** a goal
+  carrying no operator flag is **reported and held**, never opened, however free the slots
+  are. `commands/topic-drive.md` § Start states the same rule and this line must not drift
+  from it; the executable gate is `scripts/topic-spawn.py`'s `goal-unflagged` refusal.
 - **Anchored, always.** No work is delegated or spawned without a goal anchoring it.
   Read-only manager business (sweep, table, TTS) needs no anchor.
 

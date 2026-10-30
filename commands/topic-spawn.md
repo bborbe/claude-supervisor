@@ -77,8 +77,12 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
   --vault "<vault-root>" --topic "<topic>" --rank
 ```
 
-It prints `rank: <n> startable of <m> declared · N = 3`, then one row per startable goal
-marked `start` or `held`. The order is **the first key that discriminates wins**:
+It prints `rank: <n> startable of <m> declared · N = 3`, then one row per goal marked
+`start`, `held` or `unflagged`. ⚠️ **`<n>` counts only the FLAGGED rows** — the ones that
+may actually take a slot — while every non-terminal, startable-phase goal is still listed.
+A row marked `unflagged` carries its rank and can never take one of the N: opening a manager
+is the operator's act, so it waits on `flag: true` with `flag_set_by: operator` or `legacy`,
+never on a slot. The order is **the first key that discriminates wins**:
 
 1. **Operator pin** — `manager_pin: true` on the goal, or a written `pinned (operator, …)`
    next to its entry on the topic page. Read as a written marking, never inferred from `status`.

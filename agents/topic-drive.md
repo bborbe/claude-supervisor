@@ -83,7 +83,12 @@ a `SendMessage`. A worker row is reported downward to the goal manager that owns
 
    Return the `start` rows whose goal has no live manager, in rank order, one per line:
    `To start: <goal> — rank <i>, <pin|ready work|priority>`. Return the rest as
-   `Held: <goal> — rank <i>, N slots full` or `Held: <goal> — phase todo`.
+   `Held: <goal> — rank <i>, N slots full`, `Held: <goal> — phase todo`, or — the fourth
+   slot `rank()` emits — `Held: <goal> — rank <i>, no operator flag`.
+
+   ⚠️ **`unflagged` is not `N slots full`.** An unflagged goal never competes for a slot, so
+   reporting it as a full slot names a lever the operator cannot pull: the row waits on their
+   flag, not on another manager finishing.
 
    ⚠️ **The ranking is the script's, never yours.** Re-sorting by feel is the drift the
    script exists to prevent.
@@ -106,10 +111,13 @@ a `SendMessage`. A worker row is reported downward to the goal manager that owns
 ```text
 Slots: <n>/3 filled · <m> free
 Live: <goal> [<sid8>] — loop OK
+To open: <goal> — /supervisor:open --goal "<goal>"
+Held: <goal> — no manager and no operator flag; report it, open nothing
 To resume: <goal> — /supervisor:open --goal "<goal>"
 To restart: <goal> [<sid8>] — /supervisor:restart <sid>
 To start: <goal> — rank 1, ready work 4
 Held: <goal> — rank 4, N slots full
+Held: <goal> — rank 4, no operator flag
 Stopped: <goal> — deliberate stand-down, no action
 Unverified: <goal> — <reason>
 Crash-loop: <goal> — 3 resumes in 30 min; escalate once
