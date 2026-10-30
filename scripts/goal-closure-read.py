@@ -83,6 +83,9 @@ _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 # match would let `2026-01-15garbage` through, and `2026-00-00` sorts below the cutoff and
 # would exempt a page whose date is malformed. Anything else is refused, not compared.
 _ISO_DATE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])($|[T ])")
+# Any DoD heading, at any level and with any suffix — deliberately looser than the exact
+# `# Definition of Done` that `section_of` reads. See `has_dod_heading`.
+_DOD_HEADING = re.compile(r"^#+[ \t]*Definition of Done", re.M)
 
 
 def normalise(text):
@@ -94,7 +97,7 @@ def normalise(text):
     TERMINAL guard and re-closes a finished page on every tick. `docs/subject-resolution.md:137`
     records the same trap for the shell path; this is the Python half of it.
     """
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+    return text.lstrip("﻿").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def strip_fences(text):
@@ -203,6 +206,22 @@ SECTIONS = {
 }
 
 
+def has_dod_heading(body):
+    """True when the fence-stripped body carries a DoD heading at ANY level or suffix.
+
+    `section_of` matches only an exact H1 `# Definition of Done`, so an `## Definition of
+    Done`, or a `# Definition of Done (optional)`, reads as absent. That refusal is right
+    for an ordinary page — the reader does not guess at shapes it does not support — but
+    it must not become a CLOSE for a grandfathered goal: the document plainly HAS a DoD
+    section holding boxes, this reader merely cannot read it, and closing on a section it
+    failed to parse is a false CLOSE, the one direction this module refuses everywhere.
+
+    Absence is therefore decided by a loose search, and exemption needs BOTH halves: no
+    DoD heading anywhere, AND the strict section reader finding none.
+    """
+    return body is not None and _DOD_HEADING.search(body) is not None
+
+
 def dod_exempt(kind, created):
     """True when an ABSENT `# Definition of Done` must not block this page's closure.
 
@@ -281,7 +300,15 @@ def main(argv):
     body = strip_fences(text)
     fenced_ok = body is not None
     sections = {name: section_of(body, name, strict) for name, strict in SECTIONS[kind]}
-    exempt = dod_exempt(kind, created)
+    # Two guards the cutoff must never skip, both failing CLOSED:
+    #  - the frontmatter has to have PARSED. `read_created` returns None for an absent
+    #    field, and `_field` returns None for an unreadable page too — so without this,
+    #    a page whose frontmatter does not parse (a BOM, a missing trailing newline)
+    #    would read as "no created" and be grandfathered, turning a refusal into a CLOSE.
+    #  - the page must carry no DoD heading at all, not merely none this reader could
+    #    parse (see `has_dod_heading`).
+    frontmatter_ok = _FRONTMATTER.match(normalise(text)) is not None
+    exempt = frontmatter_ok and not has_dod_heading(body) and dod_exempt(kind, created)
     verdict = verdict_of(status, sections, exempt)
 
     print(f"status: {status or 'ABSENT'}")

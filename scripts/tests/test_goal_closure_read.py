@@ -350,6 +350,49 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("grandfathered", out)
         self.assertIn("VERDICT: UNMEASURABLE", out)
 
+    def test_an_absent_created_prints_the_absent_arm(self):
+        # The `created or 'absent'` arm is the line a page with no `created` actually
+        # prints; without this it is covered only at the verdict_of level.
+        page = _page_no_dod("- [x] a")
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 0)
+        self.assertIn("created absent", out)
+
+    def test_a_page_with_unreadable_frontmatter_is_not_grandfathered(self):
+        # `read_created` returns None for an absent field AND for a page whose
+        # frontmatter never parsed. Without the parse guard the second reads as
+        # "no created" and closes a page the reader could not read at all.
+        page = "\n# Success Criteria\n\n- [x] a\n"
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 1)
+        self.assertIn("VERDICT: UNMEASURABLE", out)
+
+    def test_a_bom_page_is_read_and_still_honours_the_cutoff(self):
+        page = "﻿" + _page_no_dod("- [x] a", created="2026-01-15")
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 0)
+        self.assertIn("VERDICT: CLOSE", out)
+
+    def test_an_h2_dod_heading_is_not_grandfathered(self):
+        # The section reader wants an exact H1. An h2 DoD holding an OPEN box must not
+        # become a CLOSE merely because the heading shape was not recognised.
+        page = (
+            '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+            "# Success Criteria\n\n- [x] a\n\n## Definition of Done\n\n- [ ] never\n"
+        )
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 1)
+        self.assertIn("VERDICT: UNMEASURABLE", out)
+
+    def test_a_suffixed_dod_heading_is_not_grandfathered(self):
+        page = (
+            '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+            "# Success Criteria\n\n- [x] a\n\n# Definition of Done (optional)\n\n- [ ] never\n"
+        )
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 1)
+        self.assertIn("VERDICT: UNMEASURABLE", out)
+
     def test_close_exits_zero(self):
         self.assertEqual(self._run(_page("- [x] a", "- [x] c")), 0)
 
@@ -367,6 +410,18 @@ class CliTest(unittest.TestCase):
 
     def test_wrong_arity_exits_two(self):
         self.assertEqual(closure.main(["goal-closure-read.py"]), 2)
+
+
+class CutoffDocumentationTest(unittest.TestCase):
+    def test_the_closure_step_restates_the_cutoff_date(self):
+        # DOD_REQUIRED_AS_OF is deliberately restated in the step doc. Nothing else
+        # enforces the agreement, and a partial edit silently re-breaks closure —
+        # the exact failure this change repairs.
+        step = os.path.join(os.path.dirname(_SCRIPTS), "commands", "steps", "goal-closure.md")
+        with open(step, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertIn("DOD_REQUIRED_AS_OF", text)
+        self.assertIn(closure.DOD_REQUIRED_AS_OF, text)
 
 
 if __name__ == "__main__":
