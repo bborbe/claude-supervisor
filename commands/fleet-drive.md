@@ -44,6 +44,9 @@ The hard invariants and gates live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/rule
 
 Rationale: runbook § Fleet-Manager Command — Rationale and Measured History.
 
+⚠️ **Delegate; keep this session for the round.** `Task` is available — anything not the sweep
+goes to a sub-agent, or the round stalls (2026-10-30: 2h30m, 100 rows unmanaged).
+
 ## Router
 
 Read a step file only when its **When** holds; re-read it if its text is not in context (e.g. after a compaction).

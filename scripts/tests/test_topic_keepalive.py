@@ -129,7 +129,7 @@ class KeepAliveTest(unittest.TestCase):
         rc, out = self.run_keepalive(live="LIVE")
         self.assertEqual(0, rc)
         self.assertEqual("open-unflagged", out[0])
-        self.assertIn("not flagged by the operator", out[1])
+        self.assertIn("does not carry the flag", out[1])
 
     def test_no_recorded_id_with_an_operator_flag_opens(self):
         self.page(sid="", extra="flag: true\nflag_set_by: operator\n")
@@ -157,7 +157,7 @@ class KeepAliveTest(unittest.TestCase):
             "",
         ):
             with self.subTest(fm=fm):
-                self.assertEqual(spawn.operator_flagged(fm), self.k.operator_flagged(fm))
+                self.assertEqual(spawn.flagged(fm), self.k.flagged(fm))
 
     # --- the crash-loop cap ---------------------------------------------------
 

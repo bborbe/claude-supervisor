@@ -2,7 +2,7 @@
 name: topic-drive
 description: Perform the TOPIC sweep's act leg for ONE topic — keep each declared goal's manager alive (jump / resume / restart / leave / crash-loop), then rank and name the goals that should take the free N slots. Dispatched by /supervisor:topic-drive (operator, by hand) and by /supervisor:topic-loop (every tick, after its sweep). It consumes the classification the sweep already produced and never builds a second one. It starts no session itself — the caller executes every start.
 model: sonnet
-tools: Read, Bash
+tools: Read, Bash, Task
 allowed-tools: Bash(grep:*), Bash(vault-cli:*), Bash(find:*), Bash(stat:*), Bash(python3:*), Bash(date:*), Bash(wezterm cli list:*)
 color: red
 ---
@@ -39,6 +39,12 @@ a `SendMessage`. A worker row is reported downward to the goal manager that owns
 
 <process>
 
+⚠️ **Delegate execution; keep this session for the sweep.** `Task` is available, so anything
+that is not the goal sweep itself — a task to investigate, a PR to chase, a long read — goes to
+a sub-agent. A topic manager that takes that work into its own session stops sweeping its
+goals, and the same starvation that stalled the fleet round for 2h30m on 2026-10-30 applies one
+tier down. The sweep is the product; everything else is delegated.
+
 1. **Keep each declared goal alive.** For every goal, run the keep-alive and take its first
    line as the verdict:
 
@@ -51,7 +57,7 @@ a `SendMessage`. A worker row is reported downward to the goal manager that owns
    |---|---|
    | `jump` | `Live: <goal> [<sid8>] — loop OK` |
    | `open` | `To open: <goal> — /supervisor:open --goal "<goal>"` |
-   | `open-unflagged` | `Held: <goal> — no manager and no operator flag; report it, open nothing` |
+   | `open-unflagged` | `Held: <goal> — no manager and no flag; report it, open nothing` |
    | `resume` | `To resume: <goal> — /supervisor:open --goal "<goal>"` |
    | `restart` | `To restart: <goal> [<sid8>] — /supervisor:restart <sid>` |
    | `leave` | `Stopped: <goal> — deliberate stand-down, no action` |
@@ -59,9 +65,9 @@ a `SendMessage`. A worker row is reported downward to the goal manager that owns
    | `crash-loop` | `Crash-loop: <goal> — 3 resumes in 30 min; escalate once` |
 
    ⚠️ **`open` and `open-unflagged` are the two arms of an absent `manager_session_id`, and
-   they are not the same act.** `open` means the operator flagged the goal, so the open is
-   theirs and you run it; `open-unflagged` means they did not, so the row is **reported and
-   held** — rule 4 makes opening a manager the operator's act, and its workers are opened by
+   they are not the same act.** `open` means the goal carries the flag (whoever set it), so
+   you run the open; `open-unflagged` means it does not, so the row is **reported and
+   held** — rule 4 opens a manager only for a flagged page, and its workers are opened by
    the fleet round's open leg regardless. `resume` is neither: it continues a session that
    already has a recorded id.
 
@@ -115,7 +121,7 @@ Live: <goal> [<sid8>] — loop OK · rank 1, start
 To open: <goal> — /supervisor:open --goal "<goal>" · rank 2, start
 To resume: <goal> — /supervisor:open --goal "<goal>" · rank 3, start
 To restart: <goal> [<sid8>] — /supervisor:restart <sid> · rank 4, held
-Held: <goal> — no manager and no operator flag · rank 5, unflagged
+Held: <goal> — no manager and no flag · rank 5, unflagged
 Stopped: <goal> — deliberate stand-down, no action · rank 6, held
 Unverified: <goal> — <reason> · rank 7, held
 Crash-loop: <goal> — 3 resumes in 30 min; escalate once · rank 8, held
@@ -125,7 +131,7 @@ Crash-loop: <goal> — 3 resumes in 30 min; escalate once · rank 8, held
 ⚠️ **"Exactly one line" is structural here, not a precedence list.** Step 2 never writes a line
 of its own — it appends a suffix to the line Step 1 already produced. A precedence list was tried
 instead of this, and each review round found another overlapping pair (`To open` against
-`Held: … N slots full`, `Live` against `Held: … no operator flag`), because two independent
+`Held: … N slots full`, `Live` against `Held: … no flag`), because two independent
 passes over the same goals will always overlap somewhere. One template per verdict plus one
 annotation cannot.
 

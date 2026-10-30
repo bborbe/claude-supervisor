@@ -23,11 +23,14 @@ on it without parsing prose, and the exit code is non-zero for every one of them
                            open question this gate does not decide. Stated here because a
                            docstring that claimed `hold` was terminal would describe
                            behaviour the code does not implement.
-  goal-unflagged         the goal is not flagged by the operator — it needs `flag: true`
-                           with `flag_set_by: operator` or `legacy`. Opening a manager is
-                           the operator's act, so an unflagged goal is reported with its
-                           rank and never started; its WORKERS are still opened by the
-                           fleet round's open leg.
+  goal-unflagged         the goal does not carry `flag: true`. A flag is an intent signal
+                           whoever set it (operator ruling 2026-10-30), so provenance is
+                           not read — but an unflagged goal is reported with its rank and
+                           never started; its WORKERS are still opened by the fleet round's
+                           open leg.
+  topic-unflagged        `--topic-open` only: the TOPIC page does not carry `flag: true`.
+                           Same rule one tier up — a flagged topic is opened when the fleet
+                           manager ceiling admits another manager.
   manager-cap            a bound is reached; the SECOND line names which:
                            goal-cap      — this topic already runs N goal managers
                            manager-cap   — the fleet-wide manager ceiling is reached
@@ -76,43 +79,32 @@ REFUSE_TERMINAL = "goal-terminal"
 # for it*. Operator ruling 2026-10-30: "we dont want to auto open topic-manager,
 # goal-manager ... but flag are fine".
 REFUSE_UNFLAGGED = "goal-unflagged"
+# The topic tier's own refusal — a topic manager is opened for a TOPIC, so it needs a token
+# of its own rather than reusing the goal one.
+REFUSE_TOPIC_UNFLAGGED = "topic-unflagged"
 REFUSE_CAP = "manager-cap"
 
-# The only `flag_set_by` values that count as the operator's own mark. `legacy` covers rows
-# flagged before the field was written. An absent value is REFUSED — a writer that set the
-# flag without naming itself is not evidence the operator asked for it.
-#
-# ⚠️ **The evidence behind this gate is TASK-scoped, and its effect on GOALS is measured,
-# not assumed.** `bborbe/vault-cli` `docs/task-writing.md` § The approval flag and
-# `commands/open.md` § Step 0.5 both describe tasks, and no repo artifact shows a goal page
-# carrying the pair. Measured 2026-10-30 in the primary vault: **0 of 355 goal pages carry
-# `flag: true`, and 0 carry `flag_set_by` at all.** So the live effect is total — the topic
-# tier opens no goal manager until an operator flags one. That is the ruling ("we dont want
-# to auto open topic-manager, goal-manager ... but flag are fine") working as stated rather
-# than a gap in it: an unmanaged goal still gets its workers opened by the fleet round's
-# open leg, so the work moves without a manager.
-FLAG_SETTERS = ("operator", "legacy")
-
 # YAML spells a boolean three ways. `operator_pin` below already accepts `yes`, so taking
-# only the literal `true` would report a goal the operator *did* flag as "held for the
-# operator's flag" — a false refusal on the one path where the operator has already spoken.
+# only the literal `true` would report a page that IS flagged as "held for the flag".
 FLAG_TRUTHY = ("true", "yes", "on")
 
 
-def operator_flagged(fm: str) -> bool:
-    """True when the operator flagged this page to be picked up.
+def flagged(fm: str) -> bool:
+    """True when this page carries the flag — **whoever set it**.
 
-    `flag: true` alone is not enough: `docs/task-writing.md` § The approval flag makes it an
-    approval *for `/supervisor:open --flagged`*, so the setter must be the operator's own mark.
+    ⚠️ **Provenance is deliberately NOT read.** Operator ruling 2026-10-30: *"in the end it
+    should not matter how set the flag … if flag, should be open if claude session limit
+    allow it"*. `flag_set_by` is a note, not a gate: the flag is an intent signal, and the
+    only bound on acting on it is capacity. ⚠️ **The consequence is deliberate** — an agent
+    may flag its own page and get a manager opened for it, limited only by the cap. That is
+    the trade the ruling makes, not an oversight; reading `flag_set_by` here again would
+    silently reinstate the provenance gate the ruling removed.
 
-    ⚠️ `scripts/topic-keepalive.py` carries the same predicate for the no-recorded-id case;
-    `test_topic_keepalive.py` asserts the two agree on the same page, because a split verdict
-    between them would open exactly the goal this gate refuses.
+    ⚠️ `scripts/topic-keepalive.py` carries the same predicate; `test_topic_keepalive.py`
+    asserts the two agree on the same page, because a split verdict between them would open
+    exactly the goal the other refuses.
     """
-    return (
-        scalar(fm, "flag").lower() in FLAG_TRUTHY
-        and scalar(fm, "flag_set_by").lower() in FLAG_SETTERS
-    )
+    return scalar(fm, "flag").lower() in FLAG_TRUTHY
 
 
 def refuse(token: str, detail: str, bound: str | None = None) -> int:
@@ -404,7 +396,7 @@ def rank(vault: str, topic_text: str, goals: list[str], n: int) -> list[dict]:
         # § Start promises the operator the row *with its rank*, and a row that vanishes
         # from a sweep is indistinguishable from a row that got fixed. It carries the
         # `unflagged` slot below, so it is reported and can never be started.
-        flagged = operator_flagged(fm)
+        is_flagged = flagged(fm)
         phase = scalar(fm, "phase").lower()
         # An absent phase is exempt (see the module docstring): the goal is
         # startable, so it must be ranked, not silently dropped from the list.
@@ -420,7 +412,7 @@ def rank(vault: str, topic_text: str, goals: list[str], n: int) -> list[dict]:
             "ready": ready_work(vault, goal),
             "priority": priority,
             "order": goals.index(goal),
-            "flagged": flagged,
+            "flagged": is_flagged,
         })
     # pin desc, ready desc, priority asc, then declaration order (oldest first).
     rows.sort(key=lambda r: (not r["pin"], -r["ready"], r["priority"], r["order"]))
@@ -448,6 +440,9 @@ def main(argv: list[str]) -> int:
                     help="print the /supervisor:open line on success")
     ap.add_argument("--rank", action="store_true",
                     help="print the § 1 ranking for the topic and which goals take the N slots")
+    ap.add_argument("--topic-open", dest="topic_open", action="store_true",
+                    help="may a manager be opened for this TOPIC page itself? (the topic "
+                         "tier's flag gate)")
     a = ap.parse_args(argv)
 
     # (1) The verb boundary, checked first: it is the refusal a caller most often gets
@@ -487,6 +482,32 @@ def main(argv: list[str]) -> int:
                   f"pin={'yes' if r['pin'] else 'no'} ready={r['ready']} priority={r['priority']}")
         return 0
 
+    # (2c) `--topic-open` answers the TOPIC tier's own question: may a manager be opened for
+    # this topic page? Operator ruling 2026-10-30 — a flag is an intent signal whoever set it,
+    # so the only two questions are whether the flag is present and whether the ceiling admits
+    # another manager. ⚠️ Without this, a flag on a topic page is read by nothing: `open.md`'s
+    # topic branch gates on `phase: todo` alone, so the ruling had no executable leg one tier
+    # up from where it was already enforced.
+    if a.topic_open:
+        if not flagged(frontmatter(topic_text)):
+            return refuse(
+                REFUSE_TOPIC_UNFLAGGED,
+                f"<{a.topic}> is not flagged. Opening a topic manager is an open, and this "
+                f"tier only opens what carries the flag — set `flag: true` on the topic page. "
+                f"Worker sessions are opened by the fleet round's open leg regardless.",
+            )
+        ceiling = fleet_manager_ceiling()
+        count = fleet_manager_count() if ceiling is not None else None
+        if ceiling is not None and count is not None and count >= ceiling:
+            return refuse(
+                REFUSE_CAP,
+                f"the fleet manager ceiling is reached ({count} of {ceiling}); start nothing "
+                f"this tick and report the bound.",
+                "manager-cap",
+            )
+        print(f"open-ok: {a.topic}")
+        return 0
+
     if not a.goal:
         ap.error("--goal is required (with --topic, or use --rank / --worker)")
 
@@ -521,12 +542,13 @@ def main(argv: list[str]) -> int:
     # (5b) Opening a goal manager is the operator's act — only a FLAGGED goal is startable.
     # ⚠️ This is the executable half of rule 4: without it the gate lives only in
     # `commands/topic-drive.md`, and a documented mandate is not an executed one.
-    if not operator_flagged(goal_fm):
+    if not flagged(goal_fm):
         return refuse(
             REFUSE_UNFLAGGED,
-            f"<{a.goal}> is not flagged by the operator. Opening a goal manager is the "
-            f"operator's act: set `flag: true` with `flag_set_by: operator` to admit it. "
-            f"Its workers are opened by the fleet round's open leg regardless.",
+            f"<{a.goal}> is not flagged. Opening a goal manager is an open, and this tier "
+            f"only opens what carries the flag — set `flag: true` on the goal page. Whoever "
+            f"sets it is not read. Its workers are opened by the fleet round's open leg "
+            f"regardless.",
         )
 
     # (5) Startability — the operator's approval, read from disk.

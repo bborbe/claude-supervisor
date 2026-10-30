@@ -48,7 +48,7 @@ never starts a session (`docs/session-tiers.md` § The worker boundary).
    | `goal-not-in-scope` | 1 | the goal is not in this topic's `## Goals` | report it; the topic's declared membership is the boundary. Do **not** widen the list to make it fit |
    | `goal-not-startable` | 1 | the goal's `phase` is not `planning`/`execution` | report it as `⌛ waiting-approval`. The `todo → planning` flip is the operator's, never yours |
    | `goal-terminal` | 1 | the goal's `status` is `completed` or `aborted` — ⚠️ **not `hold`**, which is a pause, not a closure, and does not refuse here | report it as `⚪ done`. Closure leaves `phase` untouched, so this is the record that decides it — never reopen a closed goal, and never flip its phase to make it fit |
-   | `goal-unflagged` | 1 | the goal is not flagged by the operator — it needs `flag: true` with `flag_set_by: operator` or `legacy` | report it as `⏸ held — no operator flag`. Opening a manager is the operator's act; do **not** set the flag yourself, and do not treat the refusal as a stall — the fleet round's open leg still opens its workers |
+   | `goal-unflagged` | 1 | the goal does not carry `flag: true` — provenance is NOT read, so any setter counts | report it as `⏸ held — no flag`. Opening a manager is an open, and this tier opens only what carries the flag; do **not** set the flag yourself, and do not treat the refusal as a stall — the fleet round's open leg still opens its workers |
    | `manager-cap` | 1 | a bound is reached; the **second line** names it: `goal-cap` (this topic runs N) or `manager-cap` (the fleet ceiling) | print the bound and the ranked `held` rows; start nothing this tick |
    | `workers are not this verb's to start` | 1 | a `--worker` argument reached the gate | report it; a task is a worker's anchor, and a worker is opened with `/supervisor:open --task`, not this verb |
 
@@ -82,8 +82,7 @@ It prints `rank: <n> startable of <m> declared · N = 3`, then one row per goal 
 eligible to compete for a slot, which includes a flagged row beyond N that `rank()` marks
 `held` — while every non-terminal, startable-phase goal is still listed.
 A row marked `unflagged` carries its rank and can never take one of the N: opening a manager
-is the operator's act, so it waits on `flag: true` with `flag_set_by: operator` or `legacy`,
-never on a slot. The order is **the first key that discriminates wins**:
+is an open, so it waits on `flag: true` — any setter, provenance is not read — never on a slot. The order is **the first key that discriminates wins**:
 
 1. **Operator pin** — `manager_pin: true` on the goal, or a written `pinned (operator, …)`
    next to its entry on the topic page. Read as a written marking, never inferred from `status`.

@@ -57,11 +57,13 @@ the round itself, which prints the opened set in order.
 
 Rank
 ----
-1. **operator-flag first** — `flag: true` *and* `flag_set_by: operator`. The operator's
-   own mark outranks priority because it is the operator saying "this one". A bare
-   `flag: true` with no `flag_set_by` is **not** an approval and does not rank here —
-   the same rule `commands/open.md` Step 0.5 applies to its batch selector, and the one
-   `docs/task-writing.md` § The approval flag describes from the other side.
+1. **flag first** — `flag: true`, **whoever set it**. Operator ruling 2026-10-30: *"in the
+   end it should not matter how set the flag … if flag, should be open if claude session
+   limit allow it"* — so `flag_set_by` is a note here, not a gate, and a bare `flag: true`
+   with no setter ranks exactly as an operator's does. ⚠️ **This is deliberately wider than
+   `commands/open.md` Step 0.5's batch selector**, which keeps its provenance gate because
+   that batch writes `approved_by: operator`; this leg only ranks a row for opening, and
+   `docs/session-tiers.md` § rule 2 owns the split.
 2. **`priority` ascending** — 1 before 2 before 3; a row carrying no `priority` sorts
    after every row that does, because an unset field is not a high priority.
 3. **oldest `approved_at` first** — the tiebreak, so the queue drains in the order it
@@ -150,17 +152,16 @@ def read_frontmatter(tasks_dir, name):
         return None
 
 
-def is_operator_flagged(block):
-    """`flag: true` **and** `flag_set_by: operator` — the operator's own mark.
+def is_flagged(block):
+    """`flag: true` — **whoever set it**. Provenance is not read.
 
-    A bare `flag: true` is not an approval and does not rank first. The field is written
-    by the operator's own surface (Vault UI toggle, a hand-typed `--by operator`);
-    anything else — including an absent value — is a writer that did not declare itself,
-    which is the bypass `commands/open.md` Step 0.5 refuses.
+    Operator ruling 2026-10-30: *"in the end it should not matter how set the flag … if flag,
+    should be open if claude session limit allow it"*. `flag_set_by` is a note, not a gate,
+    so a bare `flag: true` with no setter ranks exactly as one written `--by operator`. The
+    flag still only decides WHICH already-approved row goes first — the approval is
+    `approved_at`, which this leg requires on every row it opens.
     """
-    flag = (field(block, "flag") or "").strip().lower()
-    by = (field(block, "flag_set_by") or "").strip().lower()
-    return flag == "true" and by == "operator"
+    return (field(block, "flag") or "").strip().lower() in ("true", "yes", "on")
 
 
 def priority_of(block):
@@ -233,7 +234,7 @@ def rank_key(row):
     # so two rows in different offsets compare as strings and sort by the digits rather
     # than by the instant. `age_seconds` is already normalised and sorts correctly.
     return (
-        0 if row["operator_flagged"] else 1,
+        0 if row["flagged"] else 1,
         row["priority"] if row["priority"] is not None else NO_PRIORITY,
         -float(row["age_seconds"]),
     )
@@ -298,7 +299,7 @@ def collect(tasks_dir, today, approved_json=None):
                 "approved_at": entry.get("approved_at", ""),
                 "age_seconds": entry.get("age_seconds", 0),
                 "manager": entry.get("manager"),
-                "operator_flagged": is_operator_flagged(block),
+                "flagged": is_flagged(block),
                 "priority": priority_of(block),
             }
         )
@@ -357,8 +358,8 @@ def render(opened, skipped, live, target):
     head = "open leg: selected %d (workers %d/%d)" % (len(opened), live, target)
     lines = [head]
     for index, row in enumerate(opened, start=1):
-        if row["operator_flagged"]:
-            why = "operator-flagged"
+        if row["flagged"]:
+            why = "flagged"
         elif row["priority"] is not None:
             why = "priority %d" % row["priority"]
         else:
