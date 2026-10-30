@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.221.2
 
 - fix: **a task the closure reader calls `CLOSE` is now one `vault-cli task complete` will actually close.** The reader measured `# Success Criteria` + `# Definition of Done` only, but the task verb refuses on any open box anywhere on the page (`countCheckboxStates` over `storage.CheckboxRegex`, no fence stripping). Measured 2026-10-30: a goal round read one task `CLOSE`, the verb refused `incomplete subtasks: 1 pending, 0 in-progress` (an open `# Tasks` box), and every later round would have repeated the attempt and the refusal. `--kind task` now also counts the verb's own gate page-wide, prints it as `Whole page (task complete's gate): N open`, and reads `OPEN` while it is non-zero. Goals are untouched — `vault-cli goal complete` checks linked task status, never boxes. Change set: `scripts/goal-closure-read.py`, `scripts/tests/test_goal_closure_read.py`, `commands/steps/goal-closure.md`, `CHANGELOG.md`.
 
