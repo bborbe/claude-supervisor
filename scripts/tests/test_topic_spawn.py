@@ -39,6 +39,8 @@ status: in_progress
 phase: {phase}
 priority: {priority}
 manager_session_id: {sid}
+flag: {flag}
+flag_set_by: {setter}
 ---
 # Success Criteria
 - [ ] one
@@ -145,9 +147,12 @@ class TopicSpawnTest(unittest.TestCase):
     def _restore(self):
         ts.live_goal_managers, ts.fleet_manager_count, ts.fleet_manager_ceiling = self._orig
 
-    def goal(self, name, phase, priority, sid=""):
+    def goal(self, name, phase, priority, sid="", flag="true", setter="operator"):
+        """Write a goal page. Flagged by the operator by default — opening a manager is
+        the operator's act (rule 4), so an unflagged goal is the exception under test."""
         (self.vault / "24 Goals" / f"{name}.md").write_text(
-            GOAL.format(phase=phase, priority=priority, sid=sid), encoding="utf-8"
+            GOAL.format(phase=phase, priority=priority, sid=sid, flag=flag, setter=setter),
+            encoding="utf-8",
         )
 
     def run_gate(self, *argv):
@@ -186,6 +191,109 @@ class TopicSpawnTest(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertEqual("spawn-ok: Delta", out[0])
 
+    # --- rule 4: opening a goal manager is the operator's act ---------------------
+
+    def test_an_unflagged_goal_is_refused(self):
+        """Operator ruling 2026-10-30: "we dont want to auto open topic-manager,
+        goal-manager ... but flag are fine". Without this the gate lives only in
+        `commands/topic-drive.md`, and a documented mandate is not an executed one."""
+        self.goal("Delta", "planning", 4, flag="false")
+        rc, out = self.run_gate("--goal", "Delta")
+        self.assertEqual(1, rc)
+        self.assertEqual("goal-unflagged", out[0])
+
+    def test_a_goal_flagged_by_a_non_operator_is_refused(self):
+        """`flag: true` alone is not the operator's mark — `flag_set_by` must name one."""
+        self.goal("Delta", "planning", 4, setter="agent")
+        rc, out = self.run_gate("--goal", "Delta")
+        self.assertEqual(1, rc)
+        self.assertEqual("goal-unflagged", out[0])
+
+    def test_a_goal_flagged_with_no_setter_is_refused(self):
+        """An absent `flag_set_by` is refused: a writer that set the flag without naming
+        itself is not evidence the operator asked for it."""
+        page = self.vault / "24 Goals" / "Delta.md"
+        page.write_text(
+            page.read_text(encoding="utf-8").replace("flag_set_by: operator\n", ""),
+            encoding="utf-8",
+        )
+        rc, out = self.run_gate("--goal", "Delta")
+        self.assertEqual(1, rc)
+        self.assertEqual("goal-unflagged", out[0])
+
+    def test_a_legacy_flag_still_passes(self):
+        """193 rows were flagged before the field was written; they keep working."""
+        self.goal("Delta", "planning", 4, setter="legacy")
+        rc, out = self.run_gate("--goal", "Delta")
+        self.assertEqual(0, rc)
+        self.assertEqual("spawn-ok: Delta", out[0])
+
+    def test_an_unflagged_goal_is_ranked_but_never_takes_a_slot(self):
+        """The rank path is the second door into the same open, so it carries the gate too.
+
+        ⚠️ Ranked, NOT dropped: `commands/topic-drive.md` § Start promises the operator the
+        row *with its rank*, and a row that vanishes from a sweep is indistinguishable from
+        a row that got fixed. The `unflagged` slot keeps it reported and unstartable.
+        """
+        self.goal("Beta", "execution", 1, flag="false")
+        rows = ts.rank(str(self.vault), TOPIC, ["Alpha", "Beta", "Gamma", "Delta"], 3)
+        by_goal = {r["goal"]: r for r in rows}
+        self.assertIn("Beta", by_goal)
+        self.assertEqual("unflagged", by_goal["Beta"]["slot"])
+        self.assertEqual(3, sum(1 for r in rows if r["slot"] == "start"))
+
+    def test_a_yes_flag_is_accepted(self):
+        """YAML spells a boolean three ways, and `operator_pin` beside this gate already
+        accepts `yes` — refusing it here would hold a goal the operator did flag."""
+        self.goal("Delta", "planning", 4, flag="yes")
+        rc, out = self.run_gate("--goal", "Delta")
+        self.assertEqual(0, rc)
+        self.assertEqual("spawn-ok: Delta", out[0])
+
+    # --- the flag gate's position among the other gates --------------------------
+
+    def test_an_unflagged_todo_goal_names_the_flag_not_the_phase(self):
+        """5b fires before the phase gate, so the refusal names the lever the operator has
+        to pull first. Both are true of this row; only one is the next act."""
+        self.goal("Delta", "todo", 4, flag="false")
+        rc, out = self.run_gate("--goal", "Delta")
+        self.assertEqual(1, rc)
+        self.assertEqual("goal-unflagged", out[0])
+
+    def test_a_terminal_goal_is_refused_as_terminal_even_when_unflagged(self):
+        """5a fires before 5b: a closed goal is not awaiting a flag, and telling the
+        operator to flag it would invite reopening finished work."""
+        self.goal("Beta", "execution", 1, flag="false")
+        page = self.vault / "24 Goals" / "Beta.md"
+        page.write_text(
+            page.read_text(encoding="utf-8").replace("status: in_progress", "status: completed"),
+            encoding="utf-8",
+        )
+        rc, out = self.run_gate("--goal", "Beta")
+        self.assertEqual(1, rc)
+        self.assertEqual("goal-terminal", out[0])
+
+    def test_the_flag_gate_precedes_the_cap(self):
+        """At the cap an unflagged goal must be told to wait for the flag, not for a slot —
+        otherwise the operator frees a slot and gets the identical refusal back."""
+        ts.live_goal_managers = lambda vault, topics_dir, goals: 3
+        self.goal("Alpha", "planning", 2, flag="false")
+        rc, out = self.run_gate("--goal", "Alpha")
+        self.assertEqual(1, rc)
+        self.assertEqual("goal-unflagged", out[0])
+
+    def test_the_absent_phase_exemption_does_not_rescue_an_unflagged_goal(self):
+        """The exemption is about `phase` alone, and must not read as a blanket pass — an
+        unflagged goal with no phase is still an open rule 4 forbids."""
+        (self.vault / "24 Goals" / "Delta.md").write_text(
+            "---\npage_type: goal\nstatus: in_progress\npriority: 4\n"
+            "flag: false\nflag_set_by: operator\n---\n",
+            encoding="utf-8",
+        )
+        rc, out = self.run_gate("--goal", "Delta")
+        self.assertEqual(1, rc)
+        self.assertEqual("goal-unflagged", out[0])
+
     def test_a_goal_with_no_phase_is_exempt_and_starts(self):
         """F1 — an ABSENT phase is exempt, not refused.
 
@@ -194,7 +302,7 @@ class TopicSpawnTest(unittest.TestCase):
         topic's 25 goals unstartable the moment the split shipped.
         """
         (self.vault / "24 Goals" / "Delta.md").write_text(
-            "---\npage_type: goal\nstatus: in_progress\npriority: 4\n---\n",
+            "---\npage_type: goal\nstatus: in_progress\npriority: 4\nflag: true\nflag_set_by: operator\n---\n",
             encoding="utf-8",
         )
         rc, out = self.run_gate("--goal", "Delta")
@@ -226,7 +334,7 @@ class TopicSpawnTest(unittest.TestCase):
 
     def test_a_goal_with_no_phase_is_ranked_not_dropped(self):
         (self.vault / "24 Goals" / "Delta.md").write_text(
-            "---\npage_type: goal\nstatus: in_progress\npriority: 4\n---\n",
+            "---\npage_type: goal\nstatus: in_progress\npriority: 4\nflag: true\nflag_set_by: operator\n---\n",
             encoding="utf-8",
         )
         rc, out = self.run_gate("--rank")

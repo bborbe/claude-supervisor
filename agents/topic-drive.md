@@ -50,11 +50,20 @@ a `SendMessage`. A worker row is reported downward to the goal manager that owns
    | verdict | your row |
    |---|---|
    | `jump` | `Live: <goal> [<sid8>] — loop OK` |
+   | `open` | `To open: <goal> — /supervisor:open --goal "<goal>"` |
+   | `open-unflagged` | `Held: <goal> — no manager and no operator flag; report it, open nothing` |
    | `resume` | `To resume: <goal> — /supervisor:open --goal "<goal>"` |
    | `restart` | `To restart: <goal> [<sid8>] — /supervisor:restart <sid>` |
    | `leave` | `Stopped: <goal> — deliberate stand-down, no action` |
    | `cannot-tell` | `Unverified: <goal> — <the reason the script printed>` |
    | `crash-loop` | `Crash-loop: <goal> — 3 resumes in 30 min; escalate once` |
+
+   ⚠️ **`open` and `open-unflagged` are the two arms of an absent `manager_session_id`, and
+   they are not the same act.** `open` means the operator flagged the goal, so the open is
+   theirs and you run it; `open-unflagged` means they did not, so the row is **reported and
+   held** — rule 4 makes opening a manager the operator's act, and its workers are opened by
+   the fleet round's open leg regardless. `resume` is neither: it continues a session that
+   already has a recorded id.
 
    ⚠️ **`cannot-tell` is never death.** `UNKNOWN`, `AMBIGUOUS` and `MALFORMED` all mean the
    probe could not decide; a second manager started on that reading is the double-writer

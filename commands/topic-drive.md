@@ -55,7 +55,7 @@ tiers). A worker row is reported downward.
 | 3 | Sweep — the goal rows and their manager state | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/topic-sweep.md` |
 | 4c | Closure — close what the evidence already finished | every tick, after the sweep | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` |
 | 5 | Keep alive — resume, restart or leave, per goal | every tick, after the sweep | *inline — § Keep alive below* |
-| 6 | Start — the ranking, then `topic-spawn` | the keep-alive left a slot free and a startable goal is held | *inline — § Start below* |
+| 6 | Start — the ranking, then `topic-spawn` | the keep-alive left a slot free **and a flagged startable goal is held** | *inline — § Start below* |
 | 12 | Tail — `noop` and re-arm | end of every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-tail.md` |
 | 13 | Self-improvement | before the session ends, or a sweep exposes a gap | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-self-improvement.md` |
 
@@ -96,7 +96,9 @@ The **first line is the verdict**:
 | verdict | meaning | what this round does |
 |---|---|---|
 | `jump` | live session, loop `OK` **or `UNARMED`** | render the row. ⚠️ `UNARMED` means no record exists under either name — the loop was **never armed**, not lost; the lever is `/supervisor:goal-loop "<goal>"`, never `restart` (a restart resumes a session that never armed anything) |
-| `resume` | no session (or `ABSENT`) | run `/supervisor:open --goal "<goal>"`, then `topic-keepalive.py --record-resume <the id>` **once the liveness instrument shows it live** |
+| `open` | no recorded id, **and the operator flagged the goal** | run `/supervisor:open --goal "<goal>"`. This is an **open**, and the flag is what makes it the operator's own act |
+| `open-unflagged` | no recorded id, **no operator flag** | ⚠️ **Report, never open.** Render the row with its rank and say it is held for the operator's flag. Rule 4: an open is the operator's act, so a round may not create one |
+| `resume` | a recorded `manager_session_id` whose session is `ABSENT` | resume the existing session: run `/supervisor:open --goal "<goal>"`, then `topic-keepalive.py --record-resume <the id>` **once the liveness instrument shows it live** |
 | `restart` | live session, `STALE`/`INVALID` cadence | `/supervisor:restart <session-id>`; its `busy-target` refusal means mid-turn — wait a tick, never kill in-flight work |
 | `leave` | `STOPPED` — a deliberate stand-down | nothing; the operator stood it down |
 | `cannot-tell` | the probe could not decide | render `UNVERIFIED` and name the input; **never act** |
@@ -110,15 +112,34 @@ reported as a dead manager is how a working session gets a second writer.
 
 ## Start — inline, because it is this tier's whole product
 
-Only when a keep-alive slot is free (`resume`/`restart` did not consume it) and a startable
-goal is held:
+⚠️ **This tier opens a goal manager only for a goal the operator FLAGGED.** Operator ruling
+2026-10-30: *"we dont want to auto open topic-manager, goal-manager ... but flag are fine"* —
+**restart is not open.** A restart resumes a session that already has a subject and a recorded
+id; an open creates supervision where none existed, and deciding who supervises is the
+operator's act. So the Start row is gated on the flag, and `goal-spawn`'s own flag clause no
+longer excludes it.
+
+A goal is **startable for this row** when all hold:
+
+- `flag: true` in its frontmatter, with `flag_set_by` equal to `operator` or `legacy` — an
+  absent or other value is refused, because the flag must be the operator's own mark;
+- the phase gate below passes (`goal-not-startable` is still the operator's approval boundary);
+- a keep-alive slot is free (`resume`/`restart` did not consume it).
+
+Only then:
 
 1. `topic-spawn.py --topic "<topic>" --rank` → the ranked rows and which take the N slots.
-2. For each `start` row not already running: `/supervisor:topic-spawn "<goal>"`. Its tokens
-   (`goal-not-in-scope`, `goal-not-startable`, `manager-cap`, the worker refusal) are the
+2. For each **flagged** `start` row not already running: `/supervisor:topic-spawn "<goal>"`. Its
+   tokens (`goal-not-in-scope`, `goal-not-startable`, `manager-cap`, the worker refusal) are the
    gate — never re-derive them here.
 3. ⚠️ **Never exceed N = 3 per topic and never exceed the fleet ceiling.** The cap is never
    raised to make room; rank and wait, or say which goal is starved and why.
+
+⚠️ **An UNFLAGGED goal with a free slot is not started — it is reported.** `--rank` keeps it in
+the output carrying the `unflagged` slot, which never takes one of the N, so the report and the
+gate cannot disagree. Say plainly that it is held for the operator's flag. That is not a stall
+and not a shortage: an unmanaged goal still gets its **workers** opened by the fleet round's
+open leg, so the work moves without a manager.
 
 ⚠️ **A `phase: todo` goal is never started** — `goal-not-startable` is the operator's
 approval boundary, not a bug.
