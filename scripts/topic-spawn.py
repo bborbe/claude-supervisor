@@ -57,7 +57,38 @@ REFUSE_STARTABLE = "goal-not-startable"
 # that the goal *finished*. Collapsing them tells an operator to flip a phase on a goal
 # that is already done.
 REFUSE_TERMINAL = "goal-terminal"
+# ⚠️ A fourth token, and it exists because opening a manager and approving a phase are
+# different operator acts. `phase` says *begin this work*; the flag says *open a manager
+# for it*. Operator ruling 2026-10-30: "we dont want to auto open topic-manager,
+# goal-manager ... but flag are fine".
+REFUSE_UNFLAGGED = "goal-unflagged"
 REFUSE_CAP = "manager-cap"
+
+# The only `flag_set_by` values that count as the operator's own mark. `legacy` covers the
+# 193 rows flagged before the field was written. An absent value is REFUSED — a writer that
+# set the flag without naming itself is not evidence the operator asked for it.
+FLAG_SETTERS = ("operator", "legacy")
+
+# YAML spells a boolean three ways. `operator_pin` below already accepts `yes`, so taking
+# only the literal `true` would report a goal the operator *did* flag as "held for the
+# operator's flag" — a false refusal on the one path where the operator has already spoken.
+FLAG_TRUTHY = ("true", "yes", "on")
+
+
+def operator_flagged(fm: str) -> bool:
+    """True when the operator flagged this page to be picked up.
+
+    `flag: true` alone is not enough: `docs/task-writing.md` § The approval flag makes it an
+    approval *for `/supervisor:open --flagged`*, so the setter must be the operator's own mark.
+
+    ⚠️ `scripts/topic-keepalive.py` carries the same predicate for the no-recorded-id case;
+    `test_topic_keepalive.py` asserts the two agree on the same page, because a split verdict
+    between them would open exactly the goal this gate refuses.
+    """
+    return (
+        scalar(fm, "flag").lower() in FLAG_TRUTHY
+        and scalar(fm, "flag_set_by").lower() in FLAG_SETTERS
+    )
 
 
 def refuse(token: str, detail: str, bound: str | None = None) -> int:
@@ -76,7 +107,10 @@ def frontmatter(text: str) -> str:
 
 
 def scalar(fm: str, key: str) -> str:
-    m = re.search(rf"^{re.escape(key)}:\s*(.*)$", fm, re.MULTILINE)
+    # ⚠️ `[ \t]*`, never `\s*`: `\s` matches the newline, so an EMPTY value makes the regex
+    # swallow the line break and return the NEXT key's line as this key's value — an
+    # unflagged page whose `flag:` is blank would then read as `flag: <the next key>`.
+    m = re.search(rf"^{re.escape(key)}:[ \t]*(.*)$", fm, re.MULTILINE)
     return (m.group(1).strip().strip("\"'") if m else "")
 
 
@@ -337,6 +371,16 @@ def rank(vault: str, topic_text: str, goals: list[str], n: int) -> list[dict]:
         # closed — the "finished goal silently restarts" failure.
         if scalar(fm, "status").lower() in TERMINAL_STATUSES:
             continue
+        # ⚠️ Opening a goal manager is the operator's act, so only a FLAGGED goal may take a
+        # slot. Operator ruling 2026-10-30: "we dont want to auto open topic-manager,
+        # goal-manager ... but flag are fine". Restart is not open — a restart resumes a
+        # session that already has a subject and a recorded id, so the keep-alive
+        # `restart`/`resume` arms are untouched by this gate; only a fresh open is.
+        # ⚠️ An unflagged goal is still RANKED, never dropped. `commands/topic-drive.md`
+        # § Start promises the operator the row *with its rank*, and a row that vanishes
+        # from a sweep is indistinguishable from a row that got fixed. It carries the
+        # `unflagged` slot below, so it is reported and can never be started.
+        flagged = operator_flagged(fm)
         phase = scalar(fm, "phase").lower()
         # An absent phase is exempt (see the module docstring): the goal is
         # startable, so it must be ranked, not silently dropped from the list.
@@ -352,11 +396,19 @@ def rank(vault: str, topic_text: str, goals: list[str], n: int) -> list[dict]:
             "ready": ready_work(vault, goal),
             "priority": priority,
             "order": goals.index(goal),
+            "flagged": flagged,
         })
     # pin desc, ready desc, priority asc, then declaration order (oldest first).
     rows.sort(key=lambda r: (not r["pin"], -r["ready"], r["priority"], r["order"]))
-    for i, r in enumerate(rows):
-        r["slot"] = "start" if i < n else "held"
+    # Only a flagged row competes for a slot, so N is spent on rows the operator admitted —
+    # an unflagged row keeps its position in the report and can never take a slot from one.
+    taken = 0
+    for r in rows:
+        if not r["flagged"]:
+            r["slot"] = "unflagged"
+            continue
+        r["slot"] = "start" if taken < n else "held"
+        taken += 1
     return rows
 
 
@@ -401,9 +453,13 @@ def main(argv: list[str]) -> int:
     if a.rank:
         goals = declared_goals(topic_text, os.path.join(vault, GOALS_DIR))
         rows = rank(vault, topic_text, goals, a.max_goal_managers)
-        print(f"rank: {len(rows)} startable of {len(goals)} declared · N = {a.max_goal_managers}")
+        # `startable` counts the rows that may actually take a slot. The unflagged rows are
+        # printed below with their rank but are never counted here — counting them would
+        # report a topic as having work it cannot start.
+        startable = sum(1 for r in rows if r["flagged"])
+        print(f"rank: {startable} startable of {len(goals)} declared · N = {a.max_goal_managers}")
         for i, r in enumerate(rows, 1):
-            print(f"{i} {r['slot']:<5} {r['goal']} "
+            print(f"{i} {r['slot']:<9} {r['goal']} "
                   f"pin={'yes' if r['pin'] else 'no'} ready={r['ready']} priority={r['priority']}")
         return 0
 
@@ -436,6 +492,17 @@ def main(argv: list[str]) -> int:
             REFUSE_TERMINAL,
             f"<{a.goal}> reads status `{status}` — it is finished, not unstarted. "
             f"Closure leaves `phase` untouched, so this is the record that decides it.",
+        )
+
+    # (5b) Opening a goal manager is the operator's act — only a FLAGGED goal is startable.
+    # ⚠️ This is the executable half of rule 4: without it the gate lives only in
+    # `commands/topic-drive.md`, and a documented mandate is not an executed one.
+    if not operator_flagged(goal_fm):
+        return refuse(
+            REFUSE_UNFLAGGED,
+            f"<{a.goal}> is not flagged by the operator. Opening a goal manager is the "
+            f"operator's act: set `flag: true` with `flag_set_by: operator` to admit it. "
+            f"Its workers are opened by the fleet round's open leg regardless.",
         )
 
     # (5) Startability — the operator's approval, read from disk.
