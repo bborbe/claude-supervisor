@@ -206,15 +206,23 @@ class OpenQueueTest(unittest.TestCase):
 
         self.assertEqual([r["name"] for r in opened], ["row"])
 
-    def test_unlimited_target_admits_every_eligible_row(self):
+    def test_unlimited_target_opens_nothing_and_says_so(self):
+        """A removed cap is not a licence to open the whole queue.
+
+        `spawn.maxConcurrent: 0` means unlimited, so the leg has no bound to rank
+        against; admitting every row there would be the bulk opening the 2026-10-01
+        ruling forbids. The leg refuses and names the config state instead.
+        """
         task_file(self.tasks, "a", "status: in_progress\n")
         task_file(self.tasks, "b", "status: in_progress\n")
         rows, _ = self.collect(["a", "b"])
 
         opened, skipped = oq.select(rows, live=99, target=None)
+        block = oq.render(opened, skipped, 99, None)
 
-        self.assertEqual(len(opened), 2)
-        self.assertEqual(skipped, [])
+        self.assertEqual(opened, [])
+        self.assertEqual(len(skipped), 2)
+        self.assertIn("target unlimited — opened 0", block)
 
     # -- the block --------------------------------------------------------
 

@@ -78,8 +78,13 @@ Capacity
 --------
 `live` comes from `worker-sessions.py --count` and `target` from `worker-target.py` —
 the two instruments `docs/fleet-surface.md` § Spawn a worker item 5 names, never a
-number restated here. `target` may be `unlimited` (the soft key set to `0`), in which
-case every eligible row is admitted; the server's own hard cap still refuses at spawn.
+number restated here.
+
+⚠️ **A target of `unlimited` (the soft key set to `0`) opens nothing.** The cap is the
+only bound this leg has to rank against; admitting every eligible row because the bound
+was removed is bulk opening by construction, which the operator's 2026-10-01 ruling
+forbids. The leg refuses and names the config state rather than inventing a per-round
+number — the operator sets a target.
 
 ⚠️ **`unknown` is a third answer, never `0`.** An unreadable capacity store prints
 `unknown` and exits non-zero: *"no free slots"* and *"I could not count"* must not
@@ -279,11 +284,15 @@ def capacity():
 def select(rows, live, target):
     """Split ranked rows into (opened, skipped-for-capacity).
 
-    `target is None` means unlimited: every eligible row is admitted, and the server's
-    hard cap still refuses at spawn.
+    ⚠️ **`target is None` (the soft key set to `0`, i.e. unlimited) admits NOTHING.**
+    "Unlimited" switches the server's cap off, and a cap is the only thing this leg has
+    to bound a round against: admitting every eligible row because the bound was removed
+    is bulk opening by construction, which the operator's 2026-10-01 ruling forbids
+    ("approving and starting all of them is not a good idea"). So the leg refuses and
+    names the config state instead of guessing a number — the operator can set a target.
     """
     if target is None:
-        return list(rows), []
+        return [], list(rows)
     free = max(0, target - live)
     return rows[:free], rows[free:]
 
@@ -291,16 +300,18 @@ def select(rows, live, target):
 def render(opened, skipped, live, target):
     """The round's block.
 
-    Zero free slots has its own literal line — the round quotes it verbatim, and a leg
-    that opened nothing must be distinguishable from a leg with nothing to open.
+    Three forms, each of which the round prints verbatim. Zero free slots and an
+    unlimited target each have their own line: a leg that opened nothing because the
+    fleet was full, because the target was removed, and because the queue was empty
+    must not render the same.
     """
-    if target is not None and live is not None and max(0, target - live) == 0:
+    if target is None:
+        return "open leg: target unlimited — opened 0 (workers unlimited)"
+
+    if live is not None and max(0, target - live) == 0:
         return "open leg: no free slots — opened 0 (workers %d/%d)" % (live, target)
 
-    head = "open leg: opened %d (workers %s)" % (
-        len(opened),
-        "unlimited" if target is None else "%d/%d" % (live, target),
-    )
+    head = "open leg: opened %d (workers %d/%d)" % (len(opened), live, target)
     lines = [head]
     for index, row in enumerate(opened, start=1):
         if row["operator_flagged"]:
