@@ -1,5 +1,5 @@
 ---
-description: ONE round of the TOPIC manager loop — read the goals this topic declares and the goal managers on them, keep the live ones alive, start only goals the operator flagged, render the goal table and re-arm. The round the topic loop's wakeup runs, and runnable by hand. Sweeps goal managers, never workers.
+description: ONE round of the TOPIC manager loop — read the goals this topic declares and the goal managers on them, keep the live ones alive, start only flagged goals, render the goal table and re-arm. The round the topic loop's wakeup runs, and runnable by hand. Sweeps goal managers, never workers.
 allowed-tools:
   - Task
   - Read
@@ -96,8 +96,8 @@ The **first line is the verdict**:
 | verdict | meaning | what this round does |
 |---|---|---|
 | `jump` | live session, loop `OK` **or `UNARMED`** | render the row. ⚠️ `UNARMED` means no record exists under either name — the loop was **never armed**, not lost; the lever is `/supervisor:goal-loop "<goal>"`, never `restart` (a restart resumes a session that never armed anything) |
-| `open` | no recorded id, **and the operator flagged the goal** | run `/supervisor:open --goal "<goal>"`. This is an **open**, and the flag is what makes it the operator's own act |
-| `open-unflagged` | no recorded id, **no operator flag** | ⚠️ **Report, never open.** Render the row with its rank and say it is held for the operator's flag. Rule 4: an open is the operator's act, so a round may not create one |
+| `open` | no recorded id, **and the goal carries the flag** (any setter) | run `/supervisor:open --goal "<goal>"`. This is an **open**, and the flag is what licenses it |
+| `open-unflagged` | no recorded id, **no flag** | ⚠️ **Report, never open.** Render the row with its rank and say it is held for a flag. Rule 4: a manager is opened only for a flagged page, so a round may not create one |
 | `resume` | a recorded `manager_session_id` whose session is `ABSENT` | run `/supervisor:open --goal "<goal>"`, then `topic-keepalive.py --vault "<vault>" --subject "<goal>" --record-resume <the id>` **once the liveness instrument shows it live** |
 | `restart` | live session, `STALE`/`INVALID` cadence | `/supervisor:restart <session-id>`; its `busy-target` refusal means mid-turn — wait a tick, never kill in-flight work |
 | `leave` | `STOPPED` — a deliberate stand-down | nothing; the operator stood it down |

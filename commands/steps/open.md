@@ -19,7 +19,7 @@ The script owns the population, the guards, the rank and the cap; **this step ow
 ## The block
 
     open leg: selected 3 (workers 27/30)
-      1. Fix the Fleet View — operator-flagged
+      1. Fix the Fleet View — flagged
       2. Reap a Manager Whose Subject Is Terminal — priority 1
       3. Tighten the Reflect Scan — priority 2
       skipped: 130 — 3 blocked · 116 capacity · 10 deferred · 1 waiting approval
@@ -45,9 +45,9 @@ Two rounds print a different line and nothing else:
 
 ⚠️ **This leg opens workers only. It never spawns, arms or resumes a topic manager or a goal manager.** Operator ruling 2026-10-30, verbatim: *"we dont want to auto open topic-manager, goal-manager ... but flag are fine"*. A goal with ready rows and no live manager gets its **workers** opened; the goal's manager state is unchanged by this leg and is the negative control the round reports (`manager-liveness.py --state --subject "<goal>"`, before and after).
 
-⚠️ **The operator's flag is a mark, not an approval, and it is the operator's alone.** `flag: true` **with `flag_set_by: operator`** ranks a row first — the operator saying "this one". A bare `flag: true`, or one an agent set, is **not** an approval and does not rank here; the script refuses it as an operator flag.
+⚠️ **The flag is a mark, not an approval, and whoever set it counts.** `flag: true` (`true`/`yes`/`on`) ranks a row first; `flag_set_by` is a note, not a gate (operator ruling 2026-10-30: *"it should not matter how set the flag"*). The approval is still `approved_at`, which every row this leg ranks already carries.
 
-⚠️ **This predicate is deliberately narrower than `commands/open.md` § Step 0.5's.** That selector's `OPENING_ACTORS` is `('operator', 'legacy')` — it also opens the 270 pre-field rows dispositioned `legacy` on 2026-09-30, because for those the disposition *is* the operator's answer. The leg accepts `operator` only, so a `legacy` row opens through the selector but never ranks first here. The two are not the same question: the selector decides **whether a row may open at all**, the leg decides **which approved row goes first**, and widening the leg to `legacy` would let a dispositioned row jump the queue ahead of the operator's current mark.
+⚠️ **This predicate is deliberately wider than `commands/open.md` § Step 0.5's.** That selector keeps `OPENING_ACTORS = ('operator', 'legacy')` because it writes `approved_by: operator`; this leg only orders already-approved rows, so it reads the flag alone. `docs/session-tiers.md` § rule 2 owns the split.
 
 ## Where the rules live
 

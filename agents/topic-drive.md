@@ -57,7 +57,7 @@ tier down. The sweep is the product; everything else is delegated.
    |---|---|
    | `jump` | `Live: <goal> [<sid8>] — loop OK` |
    | `open` | `To open: <goal> — /supervisor:open --goal "<goal>"` |
-   | `open-unflagged` | `Held: <goal> — no manager and no operator flag; report it, open nothing` |
+   | `open-unflagged` | `Held: <goal> — no manager and no flag; report it, open nothing` |
    | `resume` | `To resume: <goal> — /supervisor:open --goal "<goal>"` |
    | `restart` | `To restart: <goal> [<sid8>] — /supervisor:restart <sid>` |
    | `leave` | `Stopped: <goal> — deliberate stand-down, no action` |
@@ -65,9 +65,9 @@ tier down. The sweep is the product; everything else is delegated.
    | `crash-loop` | `Crash-loop: <goal> — 3 resumes in 30 min; escalate once` |
 
    ⚠️ **`open` and `open-unflagged` are the two arms of an absent `manager_session_id`, and
-   they are not the same act.** `open` means the operator flagged the goal, so the open is
-   theirs and you run it; `open-unflagged` means they did not, so the row is **reported and
-   held** — rule 4 makes opening a manager the operator's act, and its workers are opened by
+   they are not the same act.** `open` means the goal carries the flag (whoever set it), so
+   you run the open; `open-unflagged` means it does not, so the row is **reported and
+   held** — rule 4 opens a manager only for a flagged page, and its workers are opened by
    the fleet round's open leg regardless. `resume` is neither: it continues a session that
    already has a recorded id.
 
@@ -121,7 +121,7 @@ Live: <goal> [<sid8>] — loop OK · rank 1, start
 To open: <goal> — /supervisor:open --goal "<goal>" · rank 2, start
 To resume: <goal> — /supervisor:open --goal "<goal>" · rank 3, start
 To restart: <goal> [<sid8>] — /supervisor:restart <sid> · rank 4, held
-Held: <goal> — no manager and no operator flag · rank 5, unflagged
+Held: <goal> — no manager and no flag · rank 5, unflagged
 Stopped: <goal> — deliberate stand-down, no action · rank 6, held
 Unverified: <goal> — <reason> · rank 7, held
 Crash-loop: <goal> — 3 resumes in 30 min; escalate once · rank 8, held
@@ -131,7 +131,7 @@ Crash-loop: <goal> — 3 resumes in 30 min; escalate once · rank 8, held
 ⚠️ **"Exactly one line" is structural here, not a precedence list.** Step 2 never writes a line
 of its own — it appends a suffix to the line Step 1 already produced. A precedence list was tried
 instead of this, and each review round found another overlapping pair (`To open` against
-`Held: … N slots full`, `Live` against `Held: … no operator flag`), because two independent
+`Held: … N slots full`, `Live` against `Held: … no flag`), because two independent
 passes over the same goals will always overlap somewhere. One template per verdict plus one
 annotation cannot.
 

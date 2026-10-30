@@ -19,8 +19,8 @@ Two independent signals are read every time, because neither answers the other's
 The first line of stdout is the verdict, one token:
 
   jump            a live session with an armed loop — hand the operator the pane
-  open            no recorded id, and the operator flagged the goal — `/supervisor:open --goal`
-  open-unflagged  no recorded id and no operator flag — report it held; rule 4 forbids the open
+  open            no recorded id, and the goal carries the flag — `/supervisor:open --goal`
+  open-unflagged  no recorded id and no flag — report it held; rule 4 forbids the open
   resume          recorded id, session ABSENT — resume with `/supervisor:open --goal`
   restart         live session, lapsed loop; resume it in place with `/supervisor:restart`
   leave           deliberately stopped — do nothing
@@ -234,7 +234,7 @@ def main(argv: list[str]) -> int:
         # want to auto open topic-manager, goal-manager ... but flag are fine".
         if flagged(fm):
             print("open")
-            print(f'{a.subject} has no manager_session_id and the operator flagged it — '
+            print(f'{a.subject} has no manager_session_id and it carries the flag — '
                   f'start one with /supervisor:open {opener} "{a.subject}"')
         else:
             print("open-unflagged")
