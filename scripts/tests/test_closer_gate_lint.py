@@ -49,10 +49,12 @@ EXPECTED = {
     "06-dark-factory-prompt-approve.jsonl": 2,
     "07-dark-factory-spec-approve.jsonl": 2,
     "08-prod-buca.jsonl": 0,
-    "09-gh-pr-merge.jsonl": 0,
+    "09-gh-pr-merge.jsonl": 2,
     "10-pick.jsonl": 0,
     "11-no-closer.jsonl": 0,
     "12-truncated.jsonl": 0,
+    "13-vault-cli-session-close.jsonl": 2,
+    "14-gh-pr-merge-admin.jsonl": 0,
 }
 
 
@@ -90,12 +92,33 @@ class CloserGateLintTest(unittest.TestCase):
         self.assertIn("coding-local-review", text)
         self.assertEqual("review", record["verb"])
 
-    def test_gh_pr_merge_is_outside_the_allow_list(self):
+    def test_gh_pr_merge_on_a_green_pr_is_allow_listed(self):
+        # Operator decision 2026-10-30: a plain merge names work § After Opening a PR
+        # already authorises, so it must not cost the operator a gate.
         _code, text, record = self.mod.evaluate(
             self.payload("09-gh-pr-merge.jsonl"), environ={})
+        self.assertEqual("gh-pr-merge", record["matched"])
+        self.assertIn("gh-pr-merge", text)
+
+    def test_gh_pr_merge_admin_stays_gated(self):
+        # ⚠️ The negative arm, and the one fixture this pair exists for: --admin
+        # bypasses branch protection. It must never enter the allow-list, so the lint
+        # allows the stop (exit 0) and the operator's gate stands. An exit 2 here is
+        # the regression.
+        code, text, record = self.mod.evaluate(
+            self.payload("14-gh-pr-merge-admin.jsonl"), environ={})
+        self.assertEqual(0, code)
         self.assertIsNone(record["matched"])
         self.assertEqual("not-allow-listed", record["reason"])
         self.assertEqual("", text)
+
+    def test_vault_cli_session_close_is_allow_listed(self):
+        # CLAUDE.md § Async State Closer: the session runs its own close, and offering
+        # `approve: /vault-cli:session-close` is named there as the defect.
+        _code, text, record = self.mod.evaluate(
+            self.payload("13-vault-cli-session-close.jsonl"), environ={})
+        self.assertEqual("vault-cli-session-close", record["matched"])
+        self.assertIn("vault-cli-session-close", text)
 
     def test_prod_deploy_stays_the_operators(self):
         _code, _text, record = self.mod.evaluate(

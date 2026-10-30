@@ -18,10 +18,21 @@ no-ask work: `~/.claude/CLAUDE.md` § After Opening a PR § PR Watch Guards pref
 non-production subtask with no `approve:` line. Each gate still costs the operator an
 action, and gates are the binding throughput constraint.
 
-⚠️ **The allow-list is DERIVED from those rules, not invented, and may not widen.** It is
-the verb vocabulary of the After Opening a PR rules. `gh pr merge` is deliberately absent:
-§ Execution Phase No Re-Ask says in terms that it does not weaken "merge", so a merge
-closer stays a gate. Adding a verb is an operator decision.
+⚠️ **The allow-list is DERIVED from those rules, not invented, and may not widen without
+an operator decision.** It is the verb vocabulary of the After Opening a PR rules, plus the
+no-ask verbs those rules name outright. Adding a verb is an operator decision, taken per
+closer class and recorded on the vault task that measured the class.
+
+⚠️ **`gh pr merge` is allow-listed in its plain form only** (operator decision 2026-10-30).
+§ After Opening a PR § Merge on Green says in terms to "merge without asking", which makes
+the plain merge no-ask in its own right; the earlier text here read § Execution Phase
+No Re-Ask's do-not-weaken list as keeping every merge gated, and the two rules were left
+contradicting each other. `--admin` stays gated — it bypasses branch protection — and the
+matcher enforces that with a negative lookahead, pinned by
+`fixtures/closer-gate-lint/14-gh-pr-merge-admin.jsonl`. Compaction and
+`git worktree remove` were measured in the same decision and deliberately left gated:
+neither has a no-ask basis in CLAUDE.md, so allow-listing either would mean writing a new
+rule first, not editing this list.
 
 ⚠️ **The matcher is verb-based and cannot verify the rule's own preconditions.** It cannot
 tell whether the subtask is written in the task file, or whether a `gh pr ready` is on an
@@ -88,6 +99,11 @@ ALLOW = (
     ("gh-pr-ready", re.compile(r"\bgh\s+pr\s+ready\b", re.IGNORECASE)),
     ("dark-factory-prompt-approve", re.compile(r"\bdark-factory\s+prompt\s+approve\b", re.IGNORECASE)),
     ("dark-factory-spec-approve", re.compile(r"\bdark-factory\s+spec\s+approve\b", re.IGNORECASE)),
+    ("vault-cli-session-close", re.compile(r"/vault-cli:session-close\b", re.IGNORECASE)),
+    # ⚠️ The negative lookahead is load-bearing, not decoration. `--admin` bypasses
+    # branch protection, so the admin form must keep its gate; a bare `gh.*pr merge`
+    # pattern would swallow it. Pinned by 14-gh-pr-merge-admin.jsonl.
+    ("gh-pr-merge", re.compile(r"^(?!.*--admin\b).*\bgh\b.*\bpr\s+merge\b", re.IGNORECASE)),
 )
 
 # ⚠️ The one prose alias, and it is measured rather than guessed: the observed pane-832
