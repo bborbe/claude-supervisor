@@ -104,7 +104,7 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 <output_format>
 **Two artifacts, two shapes.** The **payload** is the render below, written to disk; the **hand-back** is the ≤ 1 KB verdict summary the caller receives.
 
-**Payload** — write the fenced render below to `~/.claude/state/fleet-handback/<round timestamp>.drive`, verbatim and byte-for-byte: `mkdir -p` the directory, write `<path>.tmp`, then `mv` it over. It sits beside the `.digest` the sweep reader wrote for this same round — **sanitize the round timestamp by the rule `agents/fleet-sweep-reader.md` § `<output_format>` states; that clause is its single home**, so the filenames cannot drift apart. The caller reads it for the `REAPS` / `NUDGES` text it sends and for the `Waiting on your keystroke` list it prints — neither rides the hand-back.
+**Payload** — write the fenced render below to `~/.claude/state/fleet-handback/<round timestamp>.drive`, verbatim and byte-for-byte: `mkdir -p` the directory, write `<path>.tmp`, then `mv` it over. It sits beside the `.digest` the sweep reader wrote for this same round — **sanitize the round timestamp by the rule `agents/fleet-sweep-reader.md` § `<output_format>` states; that clause is its single home**, so the filenames cannot drift apart. The caller reads it for the `REAPS` / `NUDGES` text and the `Waiting on your keystroke` list — neither rides the hand-back.
 
 Return exactly this in the payload, each section `(none)` rather than dropped:
 
@@ -133,7 +133,7 @@ FREEABLE TABS (a slot the operator can free without a diagnosis)
   <name> · <task | omit when equal to name> · <finished | deferred <date> | long-wait <age>> · <link the digest carried>
   (none)
 Waiting on your keystroke — re-read <stamp|failed: <why> — rows unverified>
-  1. **<Action verb>** <rest of the action> — <task name> · <link the digest carried>
+  1. **<Action verb>** <rest of the action> — <task name> · <link the digest carried | no pane to re-read>
   2. ...
   (nothing waiting on you)   (only when there are no rows)
   re-read <stamp>: no open gate for <name> [pane <id>]   (one per BLOCKED row the probe omitted)
@@ -141,7 +141,7 @@ Waiting on your keystroke — re-read <stamp|failed: <why> — rows unverified>
 LEDGER  ~/.claude/state/fleet-drive/ledger.json · <n> entries · written <ts>
 ```
 
-⚠️ **`RETAINED` and `PARKED` are one line per row — a summary line is a failure, not a rendering choice.** Measured 2026-10-20 on the first `v0.194.0` round (`2026-10-20T21-16-09Z.drive`): 74 retained rows were collapsed into `74 rows, all unverifiable: … Full list: python3 drive-retained.py reprobe`, with **zero** per-row lines, and it carried none of the three things the section exists to show — the round tag, that round's command, its result. `RETAINED` is the re-probe *evidence*, so render every row however long the list; `PARKED` names each changed row, or `(none)` when none changed. **The blocks are `python3 $P/drive-retained.py render` output, pasted verbatim** — prose-only prohibitions lose to an agent under load, while a rendered block can only be shortened by deleting lines a reader counts.
+⚠️ **`RETAINED` and `PARKED` are one line per row — a summary line is a failure, not a rendering choice.** Measured 2026-10-20 on the first `v0.194.0` round (`2026-10-20T21-16-09Z.drive`): 74 retained rows were collapsed into `74 rows, all unverifiable: … Full list: python3 drive-retained.py reprobe`, with **zero** per-row lines, and it carried none of the three things the section exists to show — the round tag, that round's command, its result. `RETAINED` is the re-probe *evidence*, so render every row however long the list; `PARKED` names each changed row, or `(none)` when none changed. **The blocks are `python3 $P/drive-retained.py render` output, pasted verbatim** — prose-only prohibitions lose to an agent under load, while a rendered block shortens only by deleting lines a reader counts.
 
 Every `revive` row must carry its probe lines — "verified-unblocked" is evidenced, never asserted.
 
