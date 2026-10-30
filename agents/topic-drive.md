@@ -124,10 +124,19 @@ Crash-loop: <goal> — 3 resumes in 30 min; escalate once
 ```
 </output_format>
 
-⚠️ **`To open` subsumes `To start` for the same goal.** A goal with no recorded manager and an
-operator flag yields the keep-alive verdict `open` *and* ranks `start`, so both templates match
-it. Emit **one** line — the `To open` one — because the success criterion below is one line per
-declared goal, and the two resolve to the same `/supervisor:open --goal` command.
+⚠️ **One line per declared goal, and where two templates match the same goal the more specific
+wins.** Step 1's keep-alive verdict names the manager's state, so it beats Step 2's rank row:
+
+- **`To open` beats `To start`.** A manager-less goal with an operator flag yields the verdict
+  `open` *and* ranks `start`; both resolve to the same `/supervisor:open --goal`.
+- **`Held: … no manager and no operator flag` beats `Held: … rank <i>, no operator flag`.** Same
+  goal, same reason — the keep-alive row just says it first. Append the rank if you want it:
+  `Held: <goal> — no manager and no operator flag, rank <i>; report it, open nothing`.
+- **`To resume` and `To restart` beat `To start`** for the same goal: the manager exists, so
+  reviving it is the act, not ranking a fresh one.
+
+Step 2's standalone `To start` and `Held: … N slots full` lines are for goals Step 1 did **not**
+already give a line — it is an annotation layer, never a second opinion.
 
 <success_criteria>
 - Every declared goal has exactly one line.

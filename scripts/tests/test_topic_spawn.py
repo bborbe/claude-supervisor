@@ -273,6 +273,20 @@ class TopicSpawnTest(unittest.TestCase):
         self.assertEqual(1, rc)
         self.assertEqual("goal-terminal", out[0])
 
+    def test_a_held_goal_still_passes(self):
+        """`hold` is a pause, not a closure — `TERMINAL_STATUSES` is `(completed, aborted)`,
+        and the module docstring says so. Without this positive control, adding `hold` to
+        that tuple would silently contradict the documentation with no failing test."""
+        self.goal("Beta", "execution", 1)
+        page = self.vault / "24 Goals" / "Beta.md"
+        page.write_text(
+            page.read_text(encoding="utf-8").replace("status: in_progress", "status: hold"),
+            encoding="utf-8",
+        )
+        rc, out = self.run_gate("--goal", "Beta")
+        self.assertEqual(0, rc)
+        self.assertEqual("spawn-ok: Beta", out[0])
+
     def test_the_flag_gate_precedes_the_cap(self):
         """At the cap an unflagged goal must be told to wait for the flag, not for a slot —
         otherwise the operator frees a slot and gets the identical refusal back."""

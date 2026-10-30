@@ -34,6 +34,7 @@ allowed-tools:
   - mcp__tts__say
   - mcp__supervisor__list_agents
   - mcp__supervisor__agent_status
+argument-hint: "[topic] [--interval <N>m] (topic detected when omitted)"
 ---
 ⚠️ **A voiced question is also a board card** — any `mcp__tts__say` containing `?` is paired with an `attention-ask.py post` within 60 s. Rule and detector: [`docs/voice-asks.md`](../docs/voice-asks.md).
 
