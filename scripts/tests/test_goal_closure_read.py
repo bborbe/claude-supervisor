@@ -417,6 +417,40 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("VERDICT: UNMEASURABLE", out)
 
+    def test_a_suffixed_setext_dod_after_tasks_is_not_grandfathered(self):
+        # The layout that slipped through every earlier guard: the DoD sits AFTER
+        # `# Tasks`, so its boxes are not absorbed into the SC tally, and its heading is
+        # a suffixed setext — invisible to `section_of` and to a heading regex.
+        page = (
+            '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+            "# Success Criteria\n\n- [x] a\n\n# Tasks\n\n- [x] b\n\n"
+            "Definition of Done (optional)\n-----------------------------\n\n- [ ] never\n"
+        )
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 1)
+        self.assertNotIn("grandfathered", out)
+
+    def test_a_blockquoted_or_bold_dod_heading_is_not_grandfathered(self):
+        for heading in ("> # Definition of Done", "# **Definition of Done**", "Definition of Done"):
+            page = (
+                '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+                f"# Success Criteria\n\n- [x] a\n\n# Tasks\n\n- [x] b\n\n{heading}\n\n- [ ] never\n"
+            )
+            code, out = self._run_capture(page)
+            self.assertEqual(code, 1, heading)
+            self.assertNotIn("grandfathered", out, heading)
+
+    def test_a_prose_mention_of_the_section_does_not_block_a_grandfathered_close(self):
+        # The guard matches a line that BEGINS with the section name, so a sentence
+        # about it does not over-refuse a goal that genuinely has no DoD.
+        page = (
+            '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+            "# Success Criteria\n\n- [x] a\n\nThis goal predates the Definition of Done requirement.\n"
+        )
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 0)
+        self.assertIn("VERDICT: CLOSE", out)
+
     def test_close_exits_zero(self):
         self.assertEqual(self._run(_page("- [x] a", "- [x] c")), 0)
 

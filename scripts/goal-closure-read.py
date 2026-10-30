@@ -78,19 +78,13 @@ DOD_REQUIRED_AS_OF = "2026-06-26"
 _BOX = re.compile(r"^[ \t]*[-*+][ \t]*\[(.)\]", re.M)
 _DONE = {"x", "X"}
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
-# The only `created` shape the cutoff compares: a zero-padded ISO date with a real month
-# and day, optionally followed by a time. Anchored and range-checked — an unanchored prefix
+# The only `created` shape the cutoff compares: a zero-padded ISO date, optionally
+# followed by a time. Anchored, with month 01-12 and day 01-31 — an unanchored prefix
 # match would let `2026-01-15garbage` through, and `2026-00-00` sorts below the cutoff and
-# would exempt a page whose date is malformed. Anything else is refused, not compared.
+# would exempt a page whose date is malformed. Calendar validity is NOT checked:
+# `2026-02-30` sorts exactly where its claimed date implies, which is the safe direction.
+# Anything else is refused, not compared.
 _ISO_DATE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])($|[T ]\d{2}:\d{2})")
-# Any DoD heading, in ANY shape Obsidian renders — ATX at 0–3 leading spaces, or setext
-# underlined with `===`/`---`. Deliberately looser than the exact `# Definition of Done`
-# that `section_of` reads. See `has_dod_heading`.
-_DOD_HEADING = re.compile(
-    r"^[ \t]{0,3}#+[ \t]*Definition of Done"
-    r"|^[ \t]{0,3}Definition of Done[ \t]*\n[ \t]{0,3}(=+|-+)[ \t]*$",
-    re.M,
-)
 
 
 def normalise(text):
@@ -212,20 +206,35 @@ SECTIONS = {
 
 
 def has_dod_heading(body):
-    """True when the fence-stripped body carries a DoD heading at ANY level or suffix.
+    """True when any line of the fence-stripped body is a DoD heading, in ANY shape.
 
-    `section_of` matches only an exact H1 `# Definition of Done`, so an `## Definition of
-    Done`, a `# Definition of Done (optional)`, a heading indented up to three spaces, or a
-    setext heading underlined with `---` all read as absent. That refusal is right for an
-    ordinary page — the reader does not guess at shapes it does not support — but it must
-    not become a CLOSE for a grandfathered goal: the document plainly HAS a DoD section
-    holding boxes, this reader merely cannot read it, and closing on a section it failed to
-    parse is a false CLOSE, the one direction this module refuses everywhere.
+    `section_of` deliberately matches only an exact H1 `# Definition of Done` — every
+    other reader in the tree requires that, and `test_h2_heading_is_not_the_section`
+    pins it. So this predicate answers the different question the exemption needs: does
+    the DOCUMENT carry a DoD section at all, whatever shape it is written in?
 
-    Absence is therefore decided by a loose search, and exemption needs BOTH halves: no
-    DoD heading anywhere, AND the strict section reader finding none.
+    ⚠️ **A regex over heading syntax is the wrong tool here, and every earlier attempt
+    proved it.** Each shape it missed became a fail-open: `## Definition of Done`, then
+    a suffixed heading, then an ATX heading indented up to three spaces, then a setext
+    heading, then a suffixed setext heading. Markdown has too many spellings of "this is
+    a heading" for a second parser to track `section_of` reliably.
+
+    So this does not parse headings at all. It normalises each line down to its text —
+    stripping leading whitespace, a blockquote marker, the `#`s, and emphasis markers —
+    and asks whether that text BEGINS with the section name. That is shape-independent by
+    construction: ATX at any level, indentation or suffix, setext, blockquote, bold, and
+    a plain-text heading all normalise to the same string. A mid-sentence mention is not
+    matched, so prose about the section does not over-refuse the page.
+
+    False positives are the safe direction — the page is refused rather than closed.
     """
-    return body is not None and _DOD_HEADING.search(body) is not None
+    if body is None:
+        return False
+    for line in body.splitlines():
+        text = line.strip().lstrip(">").strip().lstrip("#").strip().strip("*_").strip()
+        if text.lower().startswith("definition of done"):
+            return True
+    return False
 
 
 def dod_exempt(kind, created):
