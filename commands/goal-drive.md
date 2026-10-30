@@ -59,10 +59,6 @@ Rationale and incident history: the Manager Session runbook § Command rationale
 | 4c | Closure | every tick, after the sweep | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` |
 | 4 | Classify the rows | every tick, after the sweep | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-classify.md` |
 | 4b | Coverage | every tick, before the drive leg | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-coverage.md` |
-
-⚠️ **Row 4c runs before row 4, whatever its label reads** — the classify decides its `done`
-bucket from `status`, so a page closed after it is classified as active and rows 5–6 act on
-that stale bucket.
 | 5 | Drive | every tick, after the table renders | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-drive.md` |
 | 5b | Parked workers — one lever row each | every tick, after the drive leg returns | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-parked.md` |
 | 6 | Spawn on the handover | the drive leg returned `To open` / `To resume` rows | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-spawn.md` |
@@ -73,6 +69,10 @@ that stale bucket.
 | 12 | Tail — `noop` and re-arm | end of every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-tail.md` |
 | 13 | Self-improvement | before the session ends, or a sweep exposes a gap | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-self-improvement.md` |
 | 14 | Unowned check | before declaring any member task unowned | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-unowned.md` |
+
+⚠️ **Row 4c runs before row 4, whatever its label reads** — the classify decides its `done`
+bucket from `status`, so a page closed after it is classified as active and rows 5–6 act on
+that stale bucket.
 
 ⚠️ **Opening a worker is bound by `docs/fleet-surface.md` § Spawn a worker item 6** — the mode is passed in both directions (`mode: headless` → `interactive=false`, `mode: interactive` → `interactive=true`). This file grants the tool but does not open; the binding and the call live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-spawn.md`.
 

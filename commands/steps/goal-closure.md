@@ -22,10 +22,16 @@ For the subject, then each page of the tracked set:
 
 1. **Read it with the reader script — never a whole-page count:**
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/goal-closure-read.py --kind goal  "<goal>"
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/goal-closure-read.py --kind task  "<task>"
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/goal-closure-read.py --kind topic "<topic>"
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/goal-closure-read.py --kind goal  "<path to the goal page>"
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/goal-closure-read.py --kind task  "<path to the task page>"
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/goal-closure-read.py --kind topic "<path to the topic page>"
    ```
+   ⚠️ **The argument is a page PATH, not a name** — the reader opens it as a file and exits 2
+   with `cannot read` on anything else. The resolution step prints the subject's path
+   (`Branch: goal (24 Goals/<Goal>.md)`), so take it from there. A name from `Tracked (N):`
+   resolves to `<goals-dir>/<name>.md` or `<tasks-dir>/<name>.md` by the same **exact
+   basename, case-insensitive** match the resolution step uses — never a substring glob, and
+   never a hand-built join that misses a filename typed in a different case.
    ⚠️ **`--kind` is not cosmetic — the tiers close on different evidence.** A goal and a
    task close on `# Success Criteria` + `# Definition of Done`; a **topic closes on
    `# Success Criteria` + `# Completion Gate`** (`docs/session-progress.md:37`,
@@ -62,12 +68,13 @@ For the subject, then each page of the tracked set:
    subject in any other vault lands on the wrong page or nowhere at all. It is the same
    explicit-`--vault` contract `commands/steps/goal-resolve.md` carries for the manager's write.
 
-   ⚠️ **Single-quote the names, never double-quote them, and refuse a name carrying a single
-   quote.** A page title containing `"` closes double-quoting and one containing `$(…)` or a
-   backtick executes — this line runs unattended every tick. `commands/open.md:499` carries the
-   same mandate without naming a mechanism; this is the mechanism: write `vault-cli goal complete
-   '$GOAL' --vault '$VAULT'` with the values already resolved into those variables, and when a
-   name contains `'`, escape it as `'\''` or stop and report rather than guess.
+   ⚠️ **Double-quote, as the rest of the tree does — and refuse a name that cannot be safely
+   double-quoted.** The template above is the contract; the guard is on the input. Before
+   running any of the three, check the page name for `$`, a backtick, `"` or `\`: those four
+   characters are the entire injection surface inside a double-quoted word, and this line runs
+   unattended every tick. **If a name carries one, do not run the verb** — report the name and
+   stop. That is a stricter rule than `commands/open.md:499` states, deliberately: it is the
+   mechanism that mandate leaves unnamed.
 
    The verb re-checks its own gate. **Its verdict is the authority, never this step's read** —
    when the two disagree, the verb wins and the disagreement is reported, not resolved by hand.
