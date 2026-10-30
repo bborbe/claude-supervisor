@@ -143,6 +143,12 @@ class StaticOnABrokenCopy(unittest.TestCase):
         failures = check.static_failures()
         self.assertTrue(any("no longer declares `--digest`" in f for f in failures), failures)
 
+    def test_a_script_that_declares_the_flag_but_drops_the_wiring_fails(self):
+        """The argparse line alone is not the wiring: the call that writes must survive."""
+        self.edit(check.SCRIPT, "write_digest(args.digest, block)", "pass  # unwired")
+        failures = check.static_failures()
+        self.assertTrue(any("wires it" in f for f in failures), failures)
+
 
 class Artifacts(unittest.TestCase):
     def setUp(self):
@@ -199,6 +205,26 @@ class Artifacts(unittest.TestCase):
         self.assertEqual(run_main(["--digest"]), 1)
         self.assertEqual(run_main(["--drive"]), 1)
         self.assertEqual(run_main(["--digest", "--drive"]), 1)
+
+    def test_an_unknown_flag_or_positional_is_an_error(self):
+        """A misspelled or positional path must fail, not skip silently.
+
+        `_parse` used to skip any token it did not recognise, so a doubly-misspelled
+        invocation (`--digset`/`--driv`) or two positional paths left both paths None and
+        exited 0 over an unchecked pair -- the blocking finding on the 563a5a10 review.
+        """
+        self.assertEqual(run_main(["--digset", "/tmp/a", "--driv", "/tmp/b"]), 1)
+        self.assertEqual(run_main(["--digest", "/tmp/a", "--driv", "/tmp/b"]), 1)
+        self.assertEqual(run_main(["/tmp/a", "/tmp/b"]), 1)
+
+    def test_an_unreadable_artifact_is_distinct_from_a_missing_block(self):
+        """An absent file reports 'unreadable', not 'carries no block' -- different diagnoses."""
+        block = check.drive_block(DRIVE_WITH_BLOCK)
+        digest = self.digest_with(block)
+        missing = self.tmp / "nope.drive"
+        failures = check.artifact_failures(digest, missing)
+        self.assertTrue(any("unreadable" in f for f in failures), failures)
+        self.assertFalse(any("carries no UNVERIFIABLE block" in f for f in failures), failures)
 
     def test_the_equals_form_is_accepted(self):
         block = check.drive_block(DRIVE_WITH_BLOCK)

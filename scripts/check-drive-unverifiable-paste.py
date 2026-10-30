@@ -191,16 +191,26 @@ def static_failures():
             "%s no longer emits `%s` -- the block the paste sites carry has no producer"
             % (_label(SCRIPT), PRODUCER_LINE)
         )
-    if '"--digest"' not in script:
+    # The flag alone is not the wiring: the argparse line could survive while the call that
+    # writes the mirror is deleted, leaving the static half green and the mirror never
+    # written. Require the declaration AND the call that consumes it.
+    if '"--digest"' not in script or "write_digest(args.digest" not in script:
         failures.append(
-            "%s no longer declares `--digest` -- the mirror cannot be written"
-            % _label(SCRIPT)
+            "%s no longer declares `--digest` AND wires it (`write_digest(args.digest, ...)`) "
+            "-- the mirror cannot be written" % _label(SCRIPT)
         )
     return failures
 
 
 def artifact_failures(digest_path, drive_path):
+    """Failures for the round's artifact PAIR, from one read of each.
+
+    The text is kept from the first loop and compared afterwards: a second read would be
+    redundant, and a file that disappeared between the two would raise an uncaught
+    `OSError` (a traceback) instead of the clean FAIL the loop already produces.
+    """
     failures = []
+    texts = {}
     for path, extract, label in (
         (digest_path, digest_block, "digest"),
         (drive_path, drive_block, "drive"),
@@ -210,6 +220,7 @@ def artifact_failures(digest_path, drive_path):
         except OSError as exc:
             failures.append("%s artifact unreadable: %s" % (label, exc))
             continue
+        texts[label] = text
         if not extract(text):
             failures.append(
                 "%s artifact carries no UNVERIFIABLE block: %s -- a round that lost the "
@@ -218,9 +229,7 @@ def artifact_failures(digest_path, drive_path):
             )
     if failures:
         return failures
-    digest_text = Path(digest_path).read_text(encoding="utf-8")
-    drive_text = Path(drive_path).read_text(encoding="utf-8")
-    if digest_block(digest_text) != drive_block(drive_text):
+    if digest_block(texts["digest"]) != drive_block(texts["drive"]):
         failures.append(
             "the two artifacts' UNVERIFIABLE blocks disagree -- digest %s, drive %s"
             % (digest_path, drive_path)
@@ -239,7 +248,11 @@ def _parse(argv):
     """(digest, drive, error). Accepts `--flag <path>` and `--flag=<path>`.
 
     A flag present with no value, or followed by another flag, is an error rather than an
-    absence. No flag at all is the Makefile/CI static run and is legal.
+    absence. An UNKNOWN flag or a positional argument is an error too: skipping it silently
+    let a doubly-misspelled invocation (`--digset`/`--driv`) or two positional paths fall
+    through to the static-only run and exit 0 over an unchecked pair -- the same green gate
+    the valueless guard closes. No argument at all is the Makefile/CI static run and is
+    legal.
     """
     values = {"--digest": None, "--drive": None}
     i = 0
@@ -247,8 +260,12 @@ def _parse(argv):
         token = argv[i]
         name, eq, inline = token.partition("=")
         if name not in values:
-            i += 1
-            continue
+            if token.startswith("-"):
+                return None, None, "unknown flag %s" % name
+            return None, None, (
+                "unexpected argument %r -- artifact paths must be given as "
+                "--digest/--drive" % token
+            )
         if eq:
             value = inline
             i += 1

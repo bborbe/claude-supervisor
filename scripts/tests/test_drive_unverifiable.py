@@ -602,13 +602,32 @@ class TestDigestMirror(unittest.TestCase):
         self.assertIn("UNVERIFIABLE — fresh", body)
         self.assertNotIn("stale", body)
 
-    def test_a_missing_digest_is_reported_but_is_not_an_error(self):
+    def test_a_missing_digest_raises_so_the_round_fails_loudly(self):
+        """A lost mirror must not be a stderr line and exit 0.
+
+        The block is printed to stdout before the mirror is attempted, so raising here
+        costs nothing the agent needs -- and it is what makes `handle` exit
+        `MIRROR_FAILED` so the round says `unverifiable: mirror failed` instead of reading
+        a lost digest mirror as a quiet round.
+        """
+        missing = os.path.join(self.tmp, "absent.digest")
+        with self.assertRaises(OSError):
+            drive_unverifiable.write_digest(missing, "UNVERIFIABLE — x\n  (none)")
+
+    def test_handle_exits_mirror_failed_when_the_digest_cannot_be_written(self):
+        entries = os.path.join(self.tmp, "round.json")
+        with open(entries, "w", encoding="utf-8") as handle:
+            json.dump({"round": "2026-10-29T14-00-00Z", "entries": []}, handle)
         missing = os.path.join(self.tmp, "absent.digest")
         buf = io.StringIO()
-        with redirect_stderr(buf):
-            changed = drive_unverifiable.write_digest(missing, "UNVERIFIABLE — x\n  (none)")
-        self.assertFalse(changed)
-        self.assertIn("digest not mirrored", buf.getvalue())
+        err = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(err):
+            rc = drive_unverifiable.main(
+                ["handle", "--entries", entries, "--json-out", entries, "--digest", missing]
+            )
+        self.assertEqual(rc, drive_unverifiable.MIRROR_FAILED)
+        self.assertIn("UNVERIFIABLE ESCALATIONS —", buf.getvalue(), "the block still printed")
+        self.assertIn("digest not mirrored", err.getvalue())
 
 
 class TestFixtureRound(unittest.TestCase):

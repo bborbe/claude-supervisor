@@ -79,6 +79,12 @@ import sys
 #: crash) so a caller can tell "refused" from "broke" -- a refused round acted on nothing.
 REFUSED = 2
 
+#: Exit code for "the block rendered and printed, but the digest mirror could not be
+#: written". Distinct from REFUSED (nothing was acted on) and from 1 (a crash): the paste
+#: is still on stdout and the `.drive` still carries it, so the round must report the lost
+#: mirror rather than either retrying or reading it as a quiet round.
+MIRROR_FAILED = 3
+
 #: The consecutive-unverifiable count at which a row becomes actionable. The test is
 #: `>=`, and the ledger's `unverifiable_action` marker is what makes the action fire once
 #: per silence -- see the module docstring for why an equality test is the wrong rule.
@@ -563,24 +569,32 @@ def write_digest(path, block):
 
     Idempotent, and atomic like the sweep reader's own write: a crash mid-write must not
     leave a partial digest that reads as a smaller fleet. Returns True when the file
-    changed. A missing file is reported on stderr and is NOT an error here -- the block is
-    already on stdout and in the `.drive`, and `check-drive-unverifiable-paste.py` is what
-    fails loudly on a round whose digest lost it.
+    changed, False when the mirror was already current.
+
+    **A failed mirror RAISES `OSError` rather than returning quietly.** The block is printed
+    to stdout before this is called, so the paste is never lost; the raise is what lets
+    `cmd_handle` exit non-zero and the round say `unverifiable: mirror failed` instead of
+    reading a lost digest mirror as a quiet round. A missing digest, an unwritable
+    directory, a full disk and an immutable file are all the same failure to the reader.
     """
-    try:
-        with open(path, encoding="utf-8") as handle:
-            body = handle.read()
-    except OSError as exc:
-        print("drive-unverifiable: digest not mirrored: %s" % exc, file=sys.stderr)
-        return False
+    with open(path, encoding="utf-8") as handle:
+        body = handle.read()
     marked = digest_render(block)
     updated = strip_mirror(body).rstrip("\n") + "\n\n" + marked + "\n"
     if updated == body:
         return False
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        handle.write(updated)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(updated)
+        os.replace(tmp, path)
+    finally:
+        # A failed write must not leave `<digest>.tmp` behind for the next run to read.
+        if os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
     return True
 
 
@@ -617,11 +631,17 @@ def cmd_handle(args):
             json.dump(payload, handle, indent=2, sort_keys=True)
             handle.write("\n")
     block = render(acted, held, args.max_actions)
+    # Print BEFORE the mirror: a failed digest write must never take the block the agent
+    # pastes out of stdout with it. The write's failure is then reported by its own exit.
+    print(block)
     if args.digest:
         # The digest gets the same block the `.drive` payload carries, so a reader of either
         # artifact can tell "nothing was unverifiable" from "the block never arrived".
-        write_digest(args.digest, block)
-    print(block)
+        try:
+            write_digest(args.digest, block)
+        except OSError as exc:
+            print("drive-unverifiable: digest not mirrored: %s" % exc, file=sys.stderr)
+            return MIRROR_FAILED
     return 0
 
 
