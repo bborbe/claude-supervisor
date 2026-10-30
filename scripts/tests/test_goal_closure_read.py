@@ -452,6 +452,30 @@ class CliTest(unittest.TestCase):
             self.assertEqual(code, 1, heading)
             self.assertNotIn("grandfathered", out, heading)
 
+    def test_a_list_marker_dod_heading_is_not_grandfathered(self):
+        # A bulleted or numbered DoD label is one more spelling of the heading.
+        for heading in ("- Definition of Done", "1. Definition of Done", "- **Definition of Done**"):
+            page = (
+                '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+                f"# Success Criteria\n\n- [x] a\n\n# Tasks\n\n- [x] b\n\n{heading}\n\n- [ ] never\n"
+            )
+            code, out = self._run_capture(page)
+            self.assertEqual(code, 1, heading)
+            self.assertNotIn("grandfathered", out, heading)
+
+    def test_a_grandfathered_goal_with_an_unterminated_fence_is_unmeasurable(self):
+        # The absence guard is vacuous when the body cannot be read, so this path must
+        # fail closed on the Success Criteria section alone — and never print the
+        # grandfathered line for a page whose fences are broken.
+        page = (
+            '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+            "# Success Criteria\n\n- [x] a\n\n```\n- [x] example\n"
+        )
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 1)
+        self.assertIn("VERDICT: UNMEASURABLE", out)
+        self.assertNotIn("grandfathered", out)
+
     def test_a_prose_mention_of_the_section_does_not_block_a_grandfathered_close(self):
         # The guard matches a line that BEGINS with the section name, so a sentence
         # about it does not over-refuse a goal that genuinely has no DoD.

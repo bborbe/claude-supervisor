@@ -85,6 +85,9 @@ _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 # `2026-02-30` sorts exactly where its claimed date implies, which is the safe direction.
 # Anything else is refused, not compared.
 _ISO_DATE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])($|[T ]\d{2}:\d{2})")
+# A leading list marker — `- `, `* `, `+ `, `1. ` — which `has_dod_heading` strips before
+# comparing a line to the section name.
+_LIST_MARKER = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 
 
 def normalise(text):
@@ -231,7 +234,10 @@ def has_dod_heading(body):
     if body is None:
         return False
     for line in body.splitlines():
-        text = line.strip().lstrip(">").strip().lstrip("#").strip().strip("*_").strip()
+        text = line.strip().lstrip(">").strip().lstrip("#").strip()
+        # A list marker is one more way to spell a heading: `- Definition of Done`,
+        # `1. Definition of Done`, `- **Definition of Done**`.
+        text = _LIST_MARKER.sub("", text).strip().strip("*_").strip()
         # Collapse internal whitespace too: `# Definition  of  Done` (double-spaced, or
         # with a non-breaking space) is the same heading to a renderer, and leaving it
         # unmatched would be one more fail-open spelling.
@@ -284,7 +290,12 @@ def exemption_for(kind, text, body):
         lacks, and closing on it is the false CLOSE this module refuses everywhere.
     """
     frontmatter_ok = _FRONTMATTER.match(normalise(text)) is not None
-    return frontmatter_ok and not has_dod_heading(body) and dod_exempt(kind, read_created(text))
+    return (
+        body is not None
+        and frontmatter_ok
+        and not has_dod_heading(body)
+        and dod_exempt(kind, read_created(text))
+    )
 
 
 def verdict_of(status, sections, dod_may_be_absent=False):
