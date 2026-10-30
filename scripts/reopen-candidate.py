@@ -83,7 +83,7 @@ TERMINAL = {"completed", "aborted"}
 FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 OPEN_BOX = re.compile(r"^[ \t]*-[ \t]*\[[ /]\]", re.MULTILINE)
 
-EXIT = {"resume": 0, "recorded": 0, "capped": 1, "not-open-work": 1, "not-recorded": 1, "cannot-tell": 2}
+EXIT = {"resume": 0, "recorded": 0, "refusal-recorded": 0, "capped": 1, "blocked": 1, "not-open-work": 1, "not-recorded": 1, "cannot-tell": 2}
 
 
 def frontmatter(text):
@@ -172,9 +172,11 @@ def read_state(path):
 def write_state(path, state):
     directory = os.path.dirname(path)
     os.makedirs(directory, exist_ok=True)
-    # ⚠️ A fixed `<path>.tmp` is a lost-update hazard: two concurrent `--record-resume`
-    # runs write the same temp path, so one entry is dropped or the file is left
-    # half-written and every later read reports `cannot-tell`.
+    # ⚠️ A fixed `<path>.tmp` lets two concurrent `--record-resume` runs collide on the
+    # TEMP path, leaving a half-written file that every later read reports as
+    # `cannot-tell`. This closes that and nothing more: the read-modify-write is still
+    # unlocked, so a lost update remains possible if two writers ever overlap. The drive
+    # leg is a single sequential writer, which is why that is documented rather than locked.
     handle_fd, tmp = tempfile.mkstemp(dir=directory, prefix=".fleet-resume-", suffix=".tmp")
     try:
         with os.fdopen(handle_fd, "w", encoding="utf-8") as handle:
@@ -213,7 +215,8 @@ def decide(task_path, session_override):
 
     block = frontmatter(text)
     status = scalar(block, "status").lower()
-    session_id = session_override or scalar(block, "claude_session_id")
+    recorded = scalar(block, "claude_session_id")
+    session_id = session_override or recorded
     boxes = open_boxes(text)
 
     if status in TERMINAL:
@@ -224,6 +227,13 @@ def decide(task_path, session_override):
         return "not-open-work", ["open boxes: 0 -- nothing to resume"]
     if not session_id:
         return "not-open-work", ["no claude_session_id recorded -- a fresh spawn, not a reopen"]
+    # ⚠️ The override is not an exemption from the ownership rule `record()` enforces.
+    # A foreign id would return `resume` here and then `not-recorded` there, so the cap
+    # could never arm and the caller would retry the same resume every round.
+    if recorded and session_override and session_override != recorded:
+        return "not-open-work", [
+            f"session {session_override[:8]} is not this task's recorded owner ({recorded[:8]})"
+        ]
 
     verdict, detail = liveness(session_id)
     if verdict == "LIVE":
@@ -231,7 +241,22 @@ def decide(task_path, session_override):
     if verdict != "ABSENT":
         return "cannot-tell", [f"liveness: {detail} -- only ABSENT licenses a resume"]
 
-    resumes = effective_resumes(read_state(state_path(task_path)), boxes)
+    state = read_state(state_path(task_path))
+    # ⚠️ **A refusal is terminal for this session id, and without this the leg loops.**
+    # `restart-worker.py` resolves its target from the registry and refuses
+    # `unknown-session-id` BEFORE its hold/status/kind gates -- and the sessions this
+    # rule selects are exactly the registry-absent ones, so that refusal is the normal
+    # outcome, not an edge case. A refused resume never arms the cap (`--record-resume`
+    # writes only on LIVE), so without this check the row returns `resume` again next
+    # round and the leg re-runs the resumer and re-escalates forever.
+    refused = state.get("refused") or {}
+    if isinstance(refused, dict) and refused.get("session_id") == session_id:
+        return "blocked", [
+            f"session {session_id[:8]} was already refused: {refused.get('reason') or 'unknown'}",
+            "no resumer exists for a registry-absent id -- operator action required",
+        ]
+
+    resumes = effective_resumes(state, boxes)
     if len(resumes) >= RESUME_CAP:
         last = resumes[-1].get("at", "unknown")
         first = resumes[0].get("open_boxes")
@@ -304,14 +329,45 @@ def record(task_path, session_id):
     return "recorded", [f"resumes: {len(resumes)}/{RESUME_CAP}", f"open boxes: {boxes}"]
 
 
+def record_refusal(task_path, session_id, reason):
+    """Record a refusal so the leg stops re-running a resumer that cannot succeed.
+
+    ⚠️ This is what makes the rule terminate. The resumer refuses a registry-absent id
+    at its first gate, and every session this rule selects is registry-absent, so a
+    refusal is the expected outcome. Recording it turns the next round's `resume` into
+    `blocked` -- surfaced once, with its reason, rather than retried forever.
+    """
+    path = state_path(task_path)
+    state = read_state(path)
+    state["refused"] = {
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "session_id": session_id,
+        "reason": reason,
+    }
+    try:
+        write_state(path, state)
+    except OSError as exc:
+        return "cannot-tell", [f"state store unwritable: {exc}"]
+    return "refusal-recorded", [f"session {session_id[:8]} refused: {reason}"]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Decide whether a dead session's open task may be reopened.")
     parser.add_argument("--task", required=True, help="path to the task file")
     parser.add_argument("--session", default="", help="session id to decide for (default: the task's recorded one)")
     parser.add_argument("--record-resume", default="", help="record a resume that took, then exit")
+    parser.add_argument(
+        "--record-refusal",
+        nargs=2,
+        metavar=("SESSION_ID", "REASON"),
+        default=None,
+        help="record that the resumer refused this id, so it is never retried, then exit",
+    )
     args = parser.parse_args()
 
-    if args.record_resume:
+    if args.record_refusal:
+        verdict, lines = record_refusal(args.task, *args.record_refusal)
+    elif args.record_resume:
         verdict, lines = record(args.task, args.record_resume)
     else:
         verdict, lines = decide(args.task, args.session)

@@ -200,9 +200,10 @@ class TestVerdict(Harness):
         self.assertEqual(out[0], "cannot-tell")
         self.assertEqual(code, 2)
 
-    def test_session_override_decides_for_that_id(self):
-        """The documented `--session` override must drive the probe, not the frontmatter."""
+    def test_session_override_decides_for_an_id_less_task(self):
+        """The override supplies the id when the task records none -- the ledger may know it."""
         other = "aaaaaaaa-0000-4000-8000-000000000002"
+        self.write_task(sid="")
         code, out = self.run_script("--session", other, liveness={other: "ABSENT"})
         self.assertEqual(out[0], "resume")
 
@@ -210,6 +211,37 @@ class TestVerdict(Harness):
         other = "aaaaaaaa-0000-4000-8000-000000000002"
         code, out = self.run_script("--session", other, liveness={other: "LIVE"})
         self.assertEqual(out[0], "not-open-work")
+
+    def test_session_override_must_be_the_recorded_owner(self):
+        """A foreign override must not return resume -- record() would refuse it, so the cap never arms."""
+        other = "aaaaaaaa-0000-4000-8000-000000000002"
+        code, out = self.run_script("--session", other, liveness={other: "ABSENT"})
+        self.assertEqual(out[0], "not-open-work")
+        self.assertIn("recorded owner", " ".join(out))
+
+
+class TestRefusal(Harness):
+    """A refused resume must terminate the leg, not retry it every round."""
+
+    def test_recorded_refusal_turns_resume_into_blocked(self):
+        code, out = self.run_script()
+        self.assertEqual(out[0], "resume")
+
+        code, out = self.run_script("--record-refusal", SID, "unknown-session-id", liveness={SID: "ABSENT"})
+        self.assertEqual(out[0], "refusal-recorded")
+
+        code, out = self.run_script()
+        self.assertEqual(out[0], "blocked")
+        self.assertEqual(code, 1)
+        self.assertIn("unknown-session-id", " ".join(out))
+
+    def test_refusal_does_not_stick_to_a_different_session(self):
+        """A task re-stamped with a new id is a new attempt, not a permanent block."""
+        self.run_script("--record-refusal", SID, "unknown-session-id", liveness={SID: "ABSENT"})
+        other = "bbbbbbbb-0000-4000-8000-000000000003"
+        self.write_task(sid=other)
+        code, out = self.run_script(liveness={other: "ABSENT"})
+        self.assertEqual(out[0], "resume")
 
 
 class TestCap(Harness):

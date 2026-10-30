@@ -45,7 +45,7 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
    Dispositions it emits, each recorded this round like any digest candidate:
    - `finished` — terminal task; joins step 1b's reap set.
-   - `blocked` — task `in_progress` with open boxes and the session absent from the registry; cause `orphan` — `reopen-candidate.py`; `resume` → **revive**, else escalate.
+   - `blocked` — task `in_progress` with open boxes and the session absent from the registry; cause `orphan` — ⚠️ **check `~/.claude/state/session-holds.json` first**: a held id is rendered, never run through the rule and never escalated. Otherwise `reopen-candidate.py`; `resume` → **revive**, else escalate.
    - `unverifiable` — no `task_file`, the file is missing, or the registry could not be read.
    - `needs-step-4` — task `in_progress` with open boxes and the session live. Run step 4's probes: they clear → **revive** (drafted in step 6); a live blocker → **blocked**; a probe that cannot run → **unverifiable**.
 
@@ -53,7 +53,7 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
    ⚠️ **Every retained row is re-probed every round, and its `probe` is rewritten with this round's command and result.** Carrying the previous round's `probe` string forward is the defect this step exists to remove — the stub-probe test fails it. The same rewrite is what makes the dedup key work: an unchanged observation is precisely what `already signalled` means.
 
-1. **Candidates.** Every `CLASSIFICATION` row whose class is `parked`, **plus every `ORPHAN CANDIDATES` row** (a dead task is never in `CLASSIFICATION`). Run `python3 $P/reopen-candidate.py --task "<vault>/25 Tasks/<task>.md"` on each — the row carries a **stem**, not a path. `finished — reap candidate` rows (and `REAP CANDIDATES`) are **finished**: never nudged, but **reaped** in step 1b — before any revive is drafted. `deferred` rows are never nudged either; step 1b verifies them and lists them as freeable. `[unresolved]` rows and rows with no task are **unverifiable**.
+1. **Candidates.** Every `CLASSIFICATION` row whose class is `parked`, **plus every `ORPHAN CANDIDATES` row** (a dead task is never in `CLASSIFICATION`). Run `python3 $P/reopen-candidate.py --task "<vault>/25 Tasks/<task>.md"` on each — the row carries a **stem**, not a path. ⚠️ An orphan row carries no open-box column, so step 2's digest-row authority does not reach it: its count is the `open boxes:` line from this script's own output. `finished — reap candidate` rows (and `REAP CANDIDATES`) are **finished**: never nudged, but **reaped** in step 1b — before any revive is drafted. `deferred` rows are never nudged either; step 1b verifies them and lists them as freeable. `[unresolved]` rows and rows with no task are **unverifiable**.
 
 1b. **Reap the finished — before drafting any nudge.** This is the reap contract's canonical home: `fleet-loop` Step 3b dispatches this leg on every round and points here rather than restating it. Measured 2026-09-23 the fleet snapshot had not been written for ~14h and the ledger held two `finished` verdicts that nothing ever messaged. For each finished row, re-read the three disk facts this run:
 
@@ -86,7 +86,8 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
    | verdict | condition | action |
    |---|---|---|
-   | **revive** | both probes ran, neither found a blocker, **and** its `CLOSERS` row is classed `routine`, passed the routine-continue table, **or** no row and `reopen-candidate.py` returned `resume` | draft a nudge; for `resume`, `restart-worker.py <id>` (**never a fresh spawn**), then `--record-resume <id>` once LIVE; **any** `restart-worker.py` refusal (`headless-target`, `unknown-session-id`, `busy-target`, `stale-load-path`) or 3 with no tick → **`blocked`** — ⚠️ **never a silent re-`resume`**: a refusal records nothing, so re-entering `revive` retries it forever and never arms the cap |
+   | **revive** | both probes ran, neither found a blocker, **and** its `CLOSERS` row is classed `routine`, passed the routine-continue table, **or** no row and `reopen-candidate.py` returned `resume` | draft a nudge; for `resume`, `restart-worker.py <id>` (**never a fresh spawn**), then `--record-resume <id>` once LIVE; **any** `restart-worker.py` refusal (`headless-target`, `unknown-session-id`, `busy-target`, `stale-load-path`) → **`blocked`** **and** `reopen-candidate.py --record-refusal <id> <token>`, which makes every later round read `blocked` — ⚠️ **never a silent re-`resume`**: without the record the leg re-runs the resumer forever, because a refused resume never arms the cap |
+   | **not-open-work** | `reopen-candidate.py` returned it: the session is LIVE, the task is terminal, it has no open boxes, or it records no id | no action — this row is not a reopen candidate |
    | **blocked** | a probe found a live blocker, **or** `reopen-candidate.py` returned `capped` | escalate, with the probe and its result |
    | **unverifiable** | a probe could not run, no task resolved, no `CLOSERS` row on a **live** candidate, a row classed `parked-wait` / `none`, or `reopen-candidate.py` returned `cannot-tell` | observation only — except at streak 2 (6b): a resolving pane acts, a pane-less row is observed |
    | **finished** | from step 1, disk facts hold (1b) | reap message drafted |
