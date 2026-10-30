@@ -34,6 +34,16 @@ row should carry one, so an absent value means a writer that did not declare its
 the bypass. Never widen the admitted set to make a row openable, and never "fix" a refusal by
 writing `flag_set_by` on the row.
 
+⚠️ **This leg removes the human from the loop, and that is a real change in blast radius.**
+Before it, the batch ran only when the operator typed the command; now it runs every tick
+unattended. `legacy` is a plain frontmatter value with no enforcement behind it, so under the
+fleet's cooperative-agent trust model an agent that writes `flag: true` +
+`flag_set_by: legacy` can get its own task opened without the operator. The same assumption
+underlies `keepalive.md` resuming a page-supplied `claude_session_id`. **That is the accepted
+model, not a defect — but it is named here so nobody reads the `flag_set_by` check as an
+authentication control.** If the model ever changes, this leg and the keep-alive are the two
+places that must change with it.
+
 ⚠️ **This leg opens work, never a manager — and not because rule 4 forbids it.** Rule 4
 explicitly permits a manager opened *because it was flagged*; what stops this leg is that
 `/supervisor:open --flagged` selects **tasks** only (`commands/open.md` § the batch). A flagged

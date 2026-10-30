@@ -171,6 +171,35 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.assertEqual("jump", out[0])
         self.assertIn("parked", out[1])
 
+    def test_a_task_owned_by_a_live_goal_manager_is_left_alone(self):
+        # The mutual exclusion with goal-drive's orphan gate: the fleet leg must not race it.
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution", "phase: execution\ngoals:\n    - '[[A Goal]]'"))
+        (self.vault / "24 Goals").mkdir(parents=True)
+        (self.vault / "24 Goals" / "A Goal.md").write_text(
+            "---\nmanager_session_id: gm-1\n---\n# Success Criteria\n", encoding="utf-8")
+        self.kp.session_verdict = lambda sid: "LIVE" if sid == "gm-1" else "ABSENT"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.k.main(["--vault", str(self.vault), "--task", "A Task"])
+        self.assertEqual(0, rc)
+        lines = out.getvalue().splitlines()
+        self.assertEqual("jump", lines[0])
+        self.assertIn("owns this task", lines[1])
+
+    def test_a_task_whose_goal_manager_is_dead_is_still_resumed(self):
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution", "phase: execution\ngoals:\n    - '[[A Goal]]'"))
+        (self.vault / "24 Goals").mkdir(parents=True)
+        (self.vault / "24 Goals" / "A Goal.md").write_text(
+            "---\nmanager_session_id: gm-1\n---\n", encoding="utf-8")
+        self.kp.session_verdict = lambda sid: "ABSENT"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.k.main(["--vault", str(self.vault), "--task", "A Task"])
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out.getvalue().splitlines()[0])
+
     def test_ambiguous_and_malformed_are_cannot_tell(self):
         self.page()
         for verdict in ("AMBIGUOUS", "MALFORMED"):

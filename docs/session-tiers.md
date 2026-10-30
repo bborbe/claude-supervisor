@@ -27,10 +27,11 @@ Load this page, with the rest of `docs/`, via `/supervisor:read-guides`.
 
 The tiers form a **tree**, and the operator's hierarchy (2026-10-23, amended 2026-10-30) names
 what each level may open: **the fleet manager is top of everything** — it opens topic managers,
-and a worker or a goal manager **only when no lower-tier manager owns that subject**; **a topic
-manager opens workers, and a goal manager only when that goal is flagged**; **a goal manager
-opens workers**; **a worker opens nothing**. A tier opens a lower one through
-`/supervisor:open`, never by a bare spawn.
+and a worker or a goal manager **only when no lower-tier manager owns that subject**, the
+goal-manager half further narrowed to *only when that goal is flagged*; **a topic manager opens
+workers, and a goal manager only when that goal is flagged**; **a goal manager opens workers**;
+**a worker opens nothing**. A tier opens a lower one through `/supervisor:open`, never by a
+bare spawn.
 
 ⚠️ **The ownership condition survived the 2026-10-30 amendment, and it is not the same rule as
 the one it sat beside.** The clause that was removed read *"each when no lower-tier manager owns
@@ -50,7 +51,10 @@ nothing new, while opening one decides who supervises. Four rules follow:
 2. **A flagged page is opened automatically by the tier above it** — `flag: true` means
    *"open me"*, and it opens only when `flag_set_by` is `operator` or `legacy`. Any other
    value, **including an absent one**, is refused: an absent `flag_set_by` is a writer that
-   did not declare itself, which is the bypass (`commands/open.md`).
+   did not declare itself, which is the bypass (`commands/open.md`). ⚠️ **Scope: this rule's
+   automated executor opens flagged *task* pages.** `/supervisor:open --flagged` selects tasks
+   only, and no fleet-tier leg opens a flagged *manager* — one is opened by the operator, or
+   by the topic tier's ranking on their instruction.
 3. **An approved worker is opened automatically**, up to `spawn.maxConcurrent`.
 4. **A manager is never opened fresh on the operator's behalf** — not by a loop, not by a
    round, not to fill a gap. Only restarted, or opened because it was flagged.

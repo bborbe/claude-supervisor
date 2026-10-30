@@ -110,14 +110,16 @@ worker whose permission channel died while the session lives; this leg resumes a
 session is **gone**. Neither of the other two applies to a dead session, which has no pid left
 to kill and no channel left to reopen.
 
-⚠️ **`agents/goal-drive.md`'s orphan gate covers the same population, and the two must not both
-act in one window.** That gate runs on the goal tier's tick and resumes a dead worker with its
-own `last_auto_resume` cap; this leg runs on the fleet tick with the `worker--<slug>` cap. Both
-caps record only **after** a resume the instrument confirms `LIVE`, so a race lets two resumes
-land before either cap arms. **Act only on a row the goal tier has not already claimed** — a
-worker whose goal has a live manager is that manager's to resume; this leg takes the ones whose
-goal has no live manager (the same fallback `docs/fleet-surface.md` § Which manager owns a
-subject already states).
+⚠️ **`agents/goal-drive.md`'s orphan gate covers the same population, and `worker-keepalive.py`
+enforces the exclusion itself rather than leaving it to this prose.** That gate runs on the
+goal tier's tick with its own `last_auto_resume` cap; this leg runs on the fleet tick with the
+`worker--<slug>` cap. Both caps record only **after** a resume the instrument confirms `LIVE`,
+so a check-then-act race would let two resumes land before either cap arms. The script therefore
+reads the task's `goals:` wikilinks and, if any of those goals has a `manager_session_id` the
+liveness instrument reads `LIVE`, returns `jump` with *"goal manager <id> is live and owns this
+task"* — the fleet leg never acts on a row the goal tier owns. This leg takes only the rows
+whose goal has no live manager, the same fallback `docs/fleet-surface.md` § Which manager owns a
+subject already states.
 
 **Report the count.** Print `unactioned: <n> dead-workers` alongside the manager count.
 

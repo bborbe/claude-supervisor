@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import re
 import sys
 import time
 from datetime import date
@@ -89,12 +90,40 @@ def open_boxes(text: str) -> int:
     return n
 
 
+def goal_manager_live(fm: str, vault: str, goals_dir: str) -> str:
+    """The id of a LIVE goal manager that already owns this task, else "".
+
+    ⚠️ **This is the mutual exclusion with `agents/goal-drive.md`'s orphan gate, and it is a
+    mechanism rather than a note on purpose.** That gate resumes the same dead-worker
+    population on the goal tier's tick, and both caps record only AFTER a resume the
+    instrument confirms LIVE — so a check-then-act race lets two resumes land before either
+    cap arms. Deferring here means the fleet leg never races at all: a worker whose goal has a
+    live manager is that manager's to resume.
+    """
+    k = _keepalive()
+    # `goals:` is a YAML list, so `scalar` cannot read it — scan the frontmatter for the
+    # wikilinks instead, which works for both the list and the single-inline forms.
+    for name in re.findall(r"\[\[([^\]|]+)", fm):
+        page = os.path.join(vault, goals_dir, name.strip() + ".md")
+        try:
+            with open(page, encoding="utf-8") as fh:
+                gfm = k.frontmatter(fh.read())
+        except OSError:
+            continue
+        sid = k.scalar(gfm, "manager_session_id")
+        if sid and k.session_verdict(sid) == "LIVE":
+            return sid
+    return ""
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--vault", required=True, help="the vault ROOT path")
     ap.add_argument("--task", required=True)
     ap.add_argument("--dir", help="override the task directory (a vault may rename `25 Tasks`; "
                                   "read it from `vault-cli config list`)")
+    ap.add_argument("--goals-dir", default="24 Goals",
+                    help="where the goal pages live, for the ownership check")
     ap.add_argument("--record-resume", metavar="SESSION_ID",
                     help="record a resume that the liveness instrument confirmed LIVE")
     ap.add_argument("--now", type=float, help="epoch seconds (tests only)")
@@ -149,6 +178,12 @@ def main(argv: list[str]) -> int:
     if open_boxes(text) == 0:
         print("jump")
         print("no open boxes; the worker has nothing left to drive")
+        return 0
+
+    owner = goal_manager_live(fm, vault, a.goals_dir)
+    if owner:
+        print("jump")
+        print(f"goal manager {owner} is live and owns this task; the goal tier resumes it")
         return 0
 
     sid = k.scalar(fm, "claude_session_id")
