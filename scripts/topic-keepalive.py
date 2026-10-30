@@ -1,34 +1,37 @@
 #!/usr/bin/env python3
-"""The topic tier's keep-alive: is this subject's manager running, and may we resume it?
-
-Serves **both** branches. `--branch goal` (the default) keeps a goal manager alive and reads
-`24 Goals`; `--branch topic` keeps a topic manager alive and reads `23 Topics`. The two differ
-only in which directory the subject page comes from and which cadence file is read — the
-field, the verdicts and the cap are identical, so a second script would have been a copy.
+"""The topic tier's keep-alive: is this goal's manager running, and may we resume it?
 
 Two independent signals are read every time, because neither answers the other's question:
 
-  1. **Is a session there?** The subject page's `manager_session_id`, probed with
+  1. **Is a session there?** The goal page's `manager_session_id`, probed with
      `session-liveness.py --check`. `LIVE` (0) / `ABSENT` (1) / `UNKNOWN` (2) /
      `AMBIGUOUS` (3) / `MALFORMED` (4). Only `ABSENT` licenses a resume: `UNKNOWN` and
      `AMBIGUOUS` are **cannot tell**, never dead.
-  2. **Is its loop armed?** `manager-liveness.py --state --subject <subject> --branch goal|topic`
+  2. **Is its loop armed?** `manager-liveness.py --state --subject <goal> --branch goal`
      → `OK` / `STALE` / `STOPPED` / `UNARMED` / `INVALID`. This is the signal a liveness
      probe structurally cannot give — a manager process can be alive with its loop unarmed
      after a missed re-arm. `STOPPED` is a deliberate stand-down and is left alone.
      ⚠️ `UNARMED` (no record under either name) is **not** restart-worthy and must not be
      folded into `INVALID`: a restart resumes a session that never armed a loop, so it
      cannot create the record. It reads as `jump` for a live session — the lever is
-     `/supervisor:goal-loop` (or `/supervisor:topic-loop`), which arms.
+     `/supervisor:goal-loop`, which arms.
 
 The first line of stdout is the verdict, one token:
 
-  jump          a live session with an armed loop — hand the operator the pane
-  resume        no session; start one with `/supervisor:open --goal`
-  restart       live session, lapsed loop; resume it in place with `/supervisor:restart`
-  leave         deliberately stopped — do nothing
-  cannot-tell   the probe could not decide; report, never act
-  crash-loop    the resume cap is spent; stop restarting and escalate once
+  jump            a live session with an armed loop — hand the operator the pane
+  open            no recorded id, and the operator flagged the goal — `/supervisor:open --goal`
+  open-unflagged  no recorded id and no operator flag — report it held; rule 4 forbids the open
+  resume          recorded id, session ABSENT — resume with `/supervisor:open --goal`
+  restart         live session, lapsed loop; resume it in place with `/supervisor:restart`
+  leave           deliberately stopped — do nothing
+  cannot-tell     the probe could not decide; report, never act
+  crash-loop      the resume cap is spent; stop restarting and escalate once
+
+⚠️ **`open` and `open-unflagged` are one case split in two, and `resume` is not one of
+them.** An absent `manager_session_id` means no session was ever created, so the row is an
+**open** — which rule 4 makes the operator's act. A recorded id whose session has died is a
+**resume**, which continues a subject that already exists. Collapsing the first into the
+second is how an unflagged goal manager gets opened by a round that was told not to.
 
 ⚠️ **Never a fresh spawn while a recorded id exists.** A second manager on one goal is the
 double-writer failure `commands/open.md` § Step 2C exists to prevent. The resume is the
@@ -67,8 +70,29 @@ def frontmatter(text: str) -> str:
 
 
 def scalar(fm: str, key: str) -> str:
-    m = re.search(rf"^{re.escape(key)}:\s*(.*)$", fm, re.MULTILINE)
+    # ⚠️ `[ \t]*`, never `\s*`: `\s` matches the newline, so an EMPTY value makes the regex
+    # swallow the line break and return the NEXT key's line as this key's value. A goal page
+    # carrying `manager_session_id:` with no id would then read as having one — and this
+    # script would resume a session that does not exist instead of reporting an open.
+    m = re.search(rf"^{re.escape(key)}:[ \t]*(.*)$", fm, re.MULTILINE)
     return (m.group(1).strip().strip("\"'") if m else "")
+
+
+FLAG_SETTERS = ("operator", "legacy")
+FLAG_TRUTHY = ("true", "yes", "on")
+
+
+def operator_flagged(fm: str) -> bool:
+    """The same predicate as `scripts/topic-spawn.py`'s `operator_flagged`.
+
+    ⚠️ Duplicated deliberately — both scripts run standalone out of the plugin cache, so
+    there is no shared module to import. A split verdict between them would open exactly
+    the goal the spawn gate refuses, so `test_topic_keepalive.py` asserts the two agree.
+    """
+    return (
+        scalar(fm, "flag").lower() in FLAG_TRUTHY
+        and scalar(fm, "flag_set_by").lower() in FLAG_SETTERS
+    )
 
 
 def base_slug(text: str) -> str:
@@ -143,8 +167,8 @@ def main(argv: list[str]) -> int:
 
     now = a.now if a.now is not None else time.time()
     vault = os.path.abspath(os.path.expanduser(a.vault))
-    path = state_path(vault, a.subject, a.branch)
     opener = "--topic" if a.branch == "topic" else "--goal"
+    path = state_path(vault, a.subject, a.branch)
 
     # A confirmed resume is recorded and nothing else — the caller has already acted.
     if a.record_resume:
@@ -167,7 +191,7 @@ def main(argv: list[str]) -> int:
         goal_page = None
     if not goal_page:
         print("cannot-tell")
-        print(f"no {a.branch} page at {directory}/{a.subject}.md")
+        print(f"no goal page at {directory}/{a.subject}.md")
         return 1
     with open(goal_page, encoding="utf-8") as fh:
         fm = frontmatter(fh.read())
@@ -181,8 +205,21 @@ def main(argv: list[str]) -> int:
         return 0
 
     if not sid:
-        print("resume")
-        print(f"no manager_session_id recorded — start one with /supervisor:open {opener}")
+        # ⚠️ No recorded id is an OPEN, not a resume — a resume continues a session that
+        # already has a subject and an id. Rule 4 makes opening the operator's act, so the
+        # verdict splits here instead of both arms printing `resume` and letting the agent
+        # run `/supervisor:open --goal` for either. Operator ruling 2026-10-30: "we dont
+        # want to auto open topic-manager, goal-manager ... but flag are fine".
+        if operator_flagged(fm):
+            print("open")
+            print(f'{a.subject} has no manager_session_id and the operator flagged it — '
+                  f'start one with /supervisor:open {opener} "{a.subject}"')
+        else:
+            print("open-unflagged")
+            print(f"{a.subject} has no manager_session_id and is not flagged by the operator "
+                  f"(`flag: true` with `flag_set_by: operator|legacy`) — rule 4 forbids "
+                  f"opening a manager for it; the fleet round's open leg still opens its "
+                  f"workers, so the work moves without one")
         return 0
 
     live = session_verdict(sid)

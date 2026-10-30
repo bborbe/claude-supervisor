@@ -41,7 +41,7 @@ page_type: goal
 status: in_progress
 phase: execution
 manager_session_id: {sid}
----
+{extra}---
 # Success Criteria
 - [ ] one
 """
@@ -65,9 +65,9 @@ class KeepAliveTest(unittest.TestCase):
     def _restore(self):
         self.k.session_verdict, self.k.cadence, self.k.state_path = self._orig
 
-    def page(self, sid="sid-1"):
+    def page(self, sid="sid-1", extra=""):
         (self.vault / "24 Goals" / "A Goal.md").write_text(
-            GOAL_PAGE.format(sid=sid), encoding="utf-8"
+            GOAL_PAGE.format(sid=sid, extra=extra), encoding="utf-8"
         )
 
     def run_keepalive(self, live="ABSENT", cadence="OK", argv=()):
@@ -118,11 +118,44 @@ class KeepAliveTest(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertEqual("leave", out[0])
 
-    def test_no_recorded_id_resumes(self):
+    def test_no_recorded_id_without_a_flag_is_held(self):
+        """An absent `manager_session_id` is an OPEN, not a resume, and rule 4 makes an open
+        the operator's act. The two arms must not share a verdict — `resume` here handed the
+        agent a `/supervisor:open --goal` line for a goal it may not open, which is the whole
+        defect this split removes."""
         self.page(sid="")
         rc, out = self.run_keepalive(live="LIVE")
         self.assertEqual(0, rc)
-        self.assertEqual("resume", out[0])
+        self.assertEqual("open-unflagged", out[0])
+        self.assertIn("not flagged by the operator", out[1])
+
+    def test_no_recorded_id_with_an_operator_flag_opens(self):
+        self.page(sid="", extra="flag: true\nflag_set_by: operator\n")
+        rc, out = self.run_keepalive(live="LIVE")
+        self.assertEqual(0, rc)
+        self.assertEqual("open", out[0])
+
+    def test_the_flag_predicate_agrees_with_topic_spawn(self):
+        """⚠️ The predicate is duplicated because both scripts run standalone out of the
+        plugin cache. This is the anti-drift control: a split verdict between the two would
+        open exactly the goal the spawn gate refuses."""
+        spec = importlib.util.spec_from_file_location(
+            "topic_spawn", str(_HERE.parent / "topic-spawn.py")
+        )
+        spawn = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(spawn)
+        for fm in (
+            "flag: true\nflag_set_by: operator\n",
+            "flag: true\nflag_set_by: legacy\n",
+            "flag: yes\nflag_set_by: operator\n",
+            "flag: on\nflag_set_by: operator\n",
+            "flag: true\nflag_set_by: agent\n",
+            "flag: true\n",
+            "flag: false\nflag_set_by: operator\n",
+            "",
+        ):
+            with self.subTest(fm=fm):
+                self.assertEqual(spawn.operator_flagged(fm), self.k.operator_flagged(fm))
 
     # --- the crash-loop cap ---------------------------------------------------
 
@@ -173,7 +206,7 @@ class KeepAliveTest(unittest.TestCase):
     def test_topic_branch_reads_the_topic_directory_and_writes_its_own_cap(self):
         (self.vault / "23 Topics").mkdir(parents=True)
         (self.vault / "23 Topics" / "A Topic.md").write_text(
-            GOAL_PAGE.format(sid="sid-2"), encoding="utf-8"
+            GOAL_PAGE.format(sid="sid-2", extra=""), encoding="utf-8"
         )
         self.k.session_verdict = lambda sid: "LIVE"
         self.k.cadence = lambda subject, branch="goal": "OK"
@@ -198,10 +231,13 @@ class KeepAliveTest(unittest.TestCase):
         self.assertEqual(1, rc)
         self.assertEqual("cannot-tell", out.getvalue().splitlines()[0])
 
-    def test_topic_resume_names_the_topic_opener(self):
+    def test_topic_branch_names_the_topic_opener_on_an_open(self):
+        # Master's `open`/`open-unflagged` split applies to the topic branch too: a topic
+        # page with no recorded id is an OPEN, and rule 4 makes that the operator's act.
         (self.vault / "23 Topics").mkdir(parents=True)
         (self.vault / "23 Topics" / "A Topic.md").write_text(
-            GOAL_PAGE.format(sid=""), encoding="utf-8"
+            GOAL_PAGE.format(sid="", extra="flag: true\nflag_set_by: operator\n"),
+            encoding="utf-8"
         )
         self.k.cadence = lambda subject, branch="goal": "OK"
         out = io.StringIO()
@@ -209,13 +245,24 @@ class KeepAliveTest(unittest.TestCase):
             self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
                          "--branch", "topic"])
         lines = out.getvalue().splitlines()
-        self.assertEqual("resume", lines[0])
+        self.assertEqual("open", lines[0])
         self.assertIn("/supervisor:open --topic", lines[1])
+
+    def test_topic_branch_refuses_an_unflagged_open(self):
+        (self.vault / "23 Topics").mkdir(parents=True)
+        (self.vault / "23 Topics" / "A Topic.md").write_text(
+            GOAL_PAGE.format(sid="", extra=""), encoding="utf-8")
+        self.k.cadence = lambda subject, branch="goal": "OK"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
+                         "--branch", "topic"])
+        self.assertEqual("open-unflagged", out.getvalue().splitlines()[0])
 
     def test_a_topic_stand_down_is_left_alone(self):
         (self.vault / "23 Topics").mkdir(parents=True)
         (self.vault / "23 Topics" / "A Topic.md").write_text(
-            GOAL_PAGE.format(sid="sid-2"), encoding="utf-8"
+            GOAL_PAGE.format(sid="sid-2", extra=""), encoding="utf-8"
         )
         self.k.session_verdict = lambda sid: "LIVE"
         self.k.cadence = lambda subject, branch="goal": "STOPPED"
