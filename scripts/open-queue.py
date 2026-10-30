@@ -97,6 +97,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from datetime import date
@@ -120,8 +121,15 @@ def frontmatter(text):
 
 
 def field(block, key):
-    """First value of a scalar frontmatter key, or None."""
-    match = re.search(rf"^{re.escape(key)}:\s*(.+)$", block, re.MULTILINE)
+    r"""First value of a scalar frontmatter key, or None.
+
+    ⚠️ **`[ \t]*`, never `\s*`.** `\s` matches `\n`, so `^key:\s*(.*)$` lets an EMPTY
+    `key:` swallow the newline and capture the NEXT line as its value — `phase:` followed
+    by `status: in_progress` reads `phase` as `status: in_progress`, and a `defer_date:`
+    with no value reads the following key and compares it as a date. Bounded to the
+    horizontal whitespace a YAML scalar actually uses.
+    """
+    match = re.search(rf"^{re.escape(key)}:[ \t]*(.*)$", block, re.MULTILINE)
     if not match:
         return None
     return match.group(1).strip().strip('"').strip("'")
@@ -180,11 +188,12 @@ def has_blocked_by(block):
     There the cost was a proposal that never fired; here it is a spawn, so the guard
     reads both forms.
     """
-    match = re.search(r"^blocked_by:\s*(.*)$", block, re.MULTILINE)
+    match = re.search(r"^blocked_by:[ \t]*(.*)$", block, re.MULTILINE)
     if not match:
         return False
-    if match.group(1).strip().strip('"').strip("'"):
-        return True  # inline scalar
+    inline = match.group(1).strip().strip('"').strip("'")
+    if inline and inline not in ("[]", "[ ]"):
+        return True  # inline scalar — `[]` is an empty list, not a blocker
     for line in block[match.end():].splitlines():
         if not line.strip():
             continue
@@ -216,10 +225,14 @@ def guards(block, today):
 
 def rank_key(row):
     """Sort key: operator-flag first, then priority asc, then oldest approval."""
+    # ⚠️ `-age_seconds`, never the raw `approved_at` string. `approved-not-started.py`
+    # re-emits it via `datetime.isoformat()`, which preserves each row's own UTC offset,
+    # so two rows in different offsets compare as strings and sort by the digits rather
+    # than by the instant. `age_seconds` is already normalised and sorts correctly.
     return (
         0 if row["operator_flagged"] else 1,
         row["priority"] if row["priority"] is not None else NO_PRIORITY,
-        row["approved_at"],
+        -float(row["age_seconds"]),
     )
 
 
@@ -363,10 +376,15 @@ def main(argv=None):
     )
     parser.add_argument("--tasks-dir", required=True, help="the vault's task directory")
     parser.add_argument("--now", default=None, help="ISO date for the defer guard (default: today)")
+    parser.add_argument("--vault", default=None,
+                        help="vault name, used to compose each row's ready-to-run action")
     parser.add_argument("--json", action="store_true", help="emit the selection as JSON")
     args = parser.parse_args(argv)
 
     if not os.path.isdir(args.tasks_dir):
+        # Both streams: the exit code is the signal, but a round that captured only
+        # stdout would otherwise render nothing at all, which reads as a clean round.
+        print("open leg: unknown")
         print("❌ tasks dir not found: %s" % args.tasks_dir, file=sys.stderr)
         return 2
 
@@ -387,9 +405,21 @@ def main(argv=None):
     all_skipped = skipped + [{"name": r["name"], "reason": "capacity"} for r in capacity_skipped]
 
     if args.json:
+        # ⚠️ `action` is pre-quoted with `shlex.quote`, mirroring `next-focus.py`'s
+        # `action` field. A row name is a task-file stem, and the vault is
+        # worker-writable, so a `"` in it breaks naive quoting and a `$(…)` or backtick
+        # executes in the session's shell. The round takes this string verbatim.
+        vault = ' --vault %s' % shlex.quote(args.vault) if args.vault else ""
         json.dump(
             {
-                "selected": [r["name"] for r in opened],
+                "selected": [
+                    {
+                        "name": r["name"],
+                        "action": "/supervisor:open %s --task%s"
+                        % (shlex.quote(r["name"]), vault),
+                    }
+                    for r in opened
+                ],
                 "skipped": all_skipped,
                 "live": live,
                 "target": target,

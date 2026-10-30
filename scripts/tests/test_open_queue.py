@@ -99,11 +99,19 @@ class OpenQueueTest(unittest.TestCase):
         self.assertEqual([r["name"] for r in rows], ["three", "none"])
 
     def test_oldest_approval_breaks_a_priority_tie(self):
+        """The tie-break sorts on `age_seconds`, not on the raw ISO string.
+
+        `approved-not-started.py` re-emits `approved_at` with each row's own UTC offset,
+        so comparing those strings sorts by digits rather than by instant. The fixture
+        therefore carries the normalised `age_seconds` — a larger age is an older row.
+        """
         task_file(self.tasks, "newer", "status: in_progress\npriority: 1\n")
         task_file(self.tasks, "older", "status: in_progress\npriority: 1\n")
         payload = approved(["newer", "older"])
         payload["rows"][0]["approved_at"] = "2026-10-20T09:00:00+00:00"
-        payload["rows"][1]["approved_at"] = "2026-10-02T09:00:00+00:00"
+        payload["rows"][0]["age_seconds"] = 600
+        payload["rows"][1]["approved_at"] = "2026-10-02T09:00:00+02:00"
+        payload["rows"][1]["age_seconds"] = 2_000_000
 
         rows, _, err = oq.collect(self.tasks, TODAY, approved_json=payload)
 
@@ -186,6 +194,31 @@ class OpenQueueTest(unittest.TestCase):
         rows, skipped = self.collect(["empty"])
 
         self.assertEqual([r["name"] for r in rows], ["empty"])
+        self.assertEqual(skipped, [])
+
+    def test_empty_list_blocked_by_is_not_a_blocker(self):
+        """`blocked_by: []` is an empty list, not a blocker."""
+        task_file(self.tasks, "emptylist", "status: in_progress\nblocked_by: []\n")
+        rows, skipped = self.collect(["emptylist"])
+
+        self.assertEqual([r["name"] for r in rows], ["emptylist"])
+        self.assertEqual(skipped, [])
+
+    def test_empty_key_does_not_read_the_next_line_as_its_value(self):
+        """`\\s*` matches `\\n`, so an empty key would swallow the line below it.
+
+        A bare `phase:` followed by `status: in_progress` must not read `phase` as
+        `status: in_progress` (which would refuse the row as unapproved), and a bare
+        `defer_date:` must not compare the next key's text as a date.
+        """
+        task_file(
+            self.tasks,
+            "bare",
+            "phase:\nstatus: in_progress\npriority: 1\ndefer_date:\nclaude_session_id:\n",
+        )
+        rows, skipped = self.collect(["bare"])
+
+        self.assertEqual([r["name"] for r in rows], ["bare"])
         self.assertEqual(skipped, [])
 
     def test_past_defer_date_is_not_refused(self):
