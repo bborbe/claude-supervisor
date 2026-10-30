@@ -240,3 +240,23 @@ function refusal(stats, room, reserveTokens, ceiling, count, under) {
     `resuming — the task keeps its state, the conversation does not need to.`
   )
 }
+
+// The whole resume gate, as ONE call: resolve the transcript, read it, decide.
+//
+// ⚠️ THIS EXISTS SO THE TEST CAN DRIVE THE BRANCH, NOT A STEP INSIDE IT. `spawnAgent`'s resume
+// arm used to do three things inline — `transcriptPathFor`, `readContextStats`, then
+// `resumeContextRefusal` — and a test could only reach the last of them. Extracting the three
+// into one function means the test exercises the same call the spawn path makes, with the
+// transcript read included: a fixture that feeds bytes through `readFile` goes all the way to
+// the verdict, and a regression in how the path is resolved or how a torn line is parsed is
+// caught here rather than only at spawn time.
+//
+// `admit: false` is the ONLY thing the caller has to act on, and the caller acts on it with a
+// single `return { error }` placed before any spawn work. That is what makes "no spawn_agent
+// call is made" a property of one reviewable line rather than of an untested code path — see
+// `supervisor.mjs`'s resume arm.
+export function resumeAdmission({ transcriptPath, readFile, reserveTokens } = {}) {
+  const stats = readContextStats(transcriptPath, { readFile })
+  const error = resumeContextRefusal({ stats, reserveTokens })
+  return { admit: error === null, error, stats }
+}
