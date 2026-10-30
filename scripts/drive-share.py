@@ -151,32 +151,43 @@ def task_mtime(path):
         return None
 
 
-def class_index(parts):
-    """Which cell holds the class: 3 when a leading cell precedes it, else 2.
+def row_cells(text):
+    """The cells of one row after its `[sid8]`: `·`-separated when the render uses them.
 
-    The two observed shapes differ by exactly one cell -- `name · state · CLASS · task · …`
-    and `name · state · <age> · CLASS · …`.
+    Two renders are live at once, and they are not one shape with an optional column --
+    they differ in the separator itself. Measured 2026-10-29 across consecutive rounds:
 
-    ⚠️ **The position is decided structurally, because enumerating the age format does not
-    converge.** Measured across nine live digests the age cell has appeared as `11m`,
-    `75s`, `42m`, `25m`, `0.3h`, `0.1h`, `18:04Z` and `stall 2`; every enumeration missed
-    the next form, and the decimal one alone dropped **13 real stalled/parked rows** on
-    2026-10-28. A pattern is the wrong instrument here.
+        `⚙ exactly-once-fix [79c6d892] · shell · 9h · parked · Exactly-Once Still Fails…`
+        `Agents Spawn and Finish Withou [c328d8e3] waiting 6h lapsed — b— http://…`
 
-    The structural fact is that **the class cell is never a task basename**. A cell ending
-    in `.md` is the task column, so a class word found there is the collision case
-    (`brandnewclass · Parked Ideas.md`) and is rejected rather than counted. Two candidate
-    positions, one guard, and anything unrecognised falls through to the loud path.
+    The second truncates the name and drops every `·`, so a parser that only splits on `·`
+    gets one part, skips the row as too short, and reports **zero** rows *and* zero
+    unparsed -- a silent zero that reads exactly like "the fleet has no parked sessions".
+    Rounds `2026-10-29T05-29-16Z` and `06-01-14Z` were both that shape.
     """
-    if class_token(parts[2]) in DIGEST_CLASSES and not parts[2].lower().endswith(".md"):
-        return 2
-    if (
-        len(parts) > 3
-        and class_token(parts[3]) in DIGEST_CLASSES
-        and not parts[3].lower().endswith(".md")
-    ):
-        return 3
-    return 2
+    if "·" in text:
+        return [cell.strip() for cell in text.split("·") if cell.strip()]
+    return text.split()
+
+
+def class_in_cells(cells):
+    """The class token among the first three cells after the sid.
+
+    Status and age always precede the class and the task column always follows it, so
+    three is the whole window in every observed shape -- with an age, without one, and
+    with either separator. Bounded rather than open-ended, because scanning the rest of
+    the row walks into the task title and reads `brandnewclass · Parked Ideas.md` as a
+    parked row.
+
+    The structural guard survives the render change: **the class cell is never a task
+    basename**, so a cell ending `.md` is rejected even when its first word is a class.
+    An empty result is the caller's loud path, never a silently dropped row.
+    """
+    for cell in cells[:3]:
+        token = class_token(cell)
+        if token in DIGEST_CLASSES and not cell.lower().endswith(".md"):
+            return token
+    return ""
 
 
 def classification_present(path):
@@ -207,7 +218,9 @@ def digest_rows(path):
     class the render adds.
 
     Read as text, because the digest is a render rather than a serialisation: the section
-    runs from its heading to the next all-caps heading, and each row is `·`-separated.
+    runs from its heading to the next all-caps heading, rows are separated by ` || `, and
+    a row's own cells are separated by `·` -- or by whitespace alone in the compact
+    render, which drops the `·` entirely. See `row_cells`.
 
     ⚠️ **The class column is LOCATED, never assumed.** The digest alternates between two
     live shapes: `Name [sid8] · idle · parked · task · boxes · link` (class at index 2)
@@ -217,6 +230,13 @@ def digest_rows(path):
     dominated by the ledger's `unverifiable` entries. Measured 2026-10-22 across three
     consecutive live rounds: the fixed index detected 0, 0 and 1; scanning detected 5, 7
     and 1.
+
+    The separator is a second axis of the same problem, and it failed the same way on
+    2026-10-29: two consecutive rounds used the compact render, whose rows carry no `·`,
+    so the split produced one part, the row was skipped as too short, and the parser
+    returned **0 rows with 0 unparsed** -- a silent zero, indistinguishable from a fleet
+    with nothing parked. The share it printed that round was short by exactly the 13
+    digest-only parked rows.
 
     A digest with no `CLASSIFICATION` section yields `([], 0)` here; `cmd_share` refuses
     that case through `classification_present()` rather than reporting a share over the
@@ -243,31 +263,30 @@ def digest_rows(path):
             continue
         if line and not line[0].isspace():
             break
-        parts = [part.strip() for part in stripped.split("·")]
-        if len(parts) < 3:
-            continue
-        label = parts[0]
-        # A parenthesised line inside the section is a summary, not a session row. It is
-        # skipped without counting: `(none)` and `(waiting x6: …)` are prose, not rows, and
-        # counting them would make the unparsed figure permanently non-zero and therefore
-        # ignorable -- the opposite of loud.
-        if label.startswith("("):
-            continue
-        match = re.search(r"\[([^\]]+)\]", label)
-        sid8 = match.group(1) if match else ""
-        name = label[: match.start()].strip() if match else label
-        # The class position is decided from the row's own shape (see `class_index`), then
-        # exactly one cell is read. A cell that is not a known class is counted as
-        # unparsed -- never silently dropped, and never satisfied by the task basename.
-        index = class_index(parts)
-        klass = parts[index] if index < len(parts) else ""
-        if class_token(klass) not in DIGEST_CLASSES:
-            unparsed += 1
-            continue
-        # Lowercased on the way out: the scan compares case-insensitively, and `measure()`
-        # compares the stored value against the lowercase `DETECTED_CLASSES`. Storing the
-        # original case made the two halves disagree for a token like `Parked`.
-        rows.append((name, sid8, class_token(klass)))
+        # One line can carry several rows: the compact render joins them with ` || `.
+        # Splitting on it here is what makes that render readable at all -- without it a
+        # three-row line parses as one row and the other two vanish.
+        for text in stripped.split(" || "):
+            text = text.strip()
+            if not text:
+                continue
+            # A parenthesised line inside the section is a summary, not a session row. It
+            # is skipped without counting: `(none)` and `(waiting x6: …)` are prose, not
+            # rows, and counting them would make the unparsed figure permanently non-zero
+            # and therefore ignorable -- the opposite of loud.
+            if text.startswith("("):
+                continue
+            match = re.search(r"\[([^\]]+)\]", text)
+            sid8 = match.group(1) if match else ""
+            name = text[: match.start()].strip() if match else text
+            # Everything after the sid is the cell stream, in whichever separator this
+            # render uses. A row whose first three cells carry no class is counted as
+            # unparsed -- never silently dropped, and never satisfied by a task basename.
+            klass = class_in_cells(row_cells(text[match.end():] if match else text))
+            if not klass:
+                unparsed += 1
+                continue
+            rows.append((name, sid8, klass))
     return rows, unparsed
 
 

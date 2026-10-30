@@ -18,12 +18,20 @@ Two independent signals are read every time, because neither answers the other's
 
 The first line of stdout is the verdict, one token:
 
-  jump          a live session with an armed loop — hand the operator the pane
-  resume        no session; start one with `/supervisor:open --goal`
-  restart       live session, lapsed loop; resume it in place with `/supervisor:restart`
-  leave         deliberately stopped — do nothing
-  cannot-tell   the probe could not decide; report, never act
-  crash-loop    the resume cap is spent; stop restarting and escalate once
+  jump            a live session with an armed loop — hand the operator the pane
+  open            no recorded id, and the goal carries the flag — `/supervisor:open --goal`
+  open-unflagged  no recorded id and no flag — report it held; rule 4 forbids the open
+  resume          recorded id, session ABSENT — resume with `/supervisor:open --goal`
+  restart         live session, lapsed loop; resume it in place with `/supervisor:restart`
+  leave           deliberately stopped — do nothing
+  cannot-tell     the probe could not decide; report, never act
+  crash-loop      the resume cap is spent; stop restarting and escalate once
+
+⚠️ **`open` and `open-unflagged` are one case split in two, and `resume` is not one of
+them.** An absent `manager_session_id` means no session was ever created, so the row is an
+**open** — which rule 4 makes the operator's act. A recorded id whose session has died is a
+**resume**, which continues a subject that already exists. Collapsing the first into the
+second is how an unflagged goal manager gets opened by a round that was told not to.
 
 ⚠️ **Never a fresh spawn while a recorded id exists.** A second manager on one goal is the
 double-writer failure `commands/open.md` § Step 2C exists to prevent. The resume is the
@@ -49,9 +57,10 @@ import sys
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GOALS_DIR = "24 Goals"
+DIRS = {"goal": "24 Goals", "topic": "23 Topics"}
 RESUME_CAP = 3
 RESUME_WINDOW = 30 * 60  # seconds
+PROBE_TIMEOUT = 30  # seconds; a hung liveness probe must not wedge the tick
 
 
 def frontmatter(text: str) -> str:
@@ -62,19 +71,40 @@ def frontmatter(text: str) -> str:
 
 
 def scalar(fm: str, key: str) -> str:
-    m = re.search(rf"^{re.escape(key)}:\s*(.*)$", fm, re.MULTILINE)
+    # ⚠️ `[ \t]*`, never `\s*`: `\s` matches the newline, so an EMPTY value makes the regex
+    # swallow the line break and return the NEXT key's line as this key's value. A goal page
+    # carrying `manager_session_id:` with no id would then read as having one — and this
+    # script would resume a session that does not exist instead of reporting an open.
+    m = re.search(rf"^{re.escape(key)}:[ \t]*(.*)$", fm, re.MULTILINE)
     return (m.group(1).strip().strip("\"'") if m else "")
+
+
+FLAG_TRUTHY = ("true", "yes", "on")
+
+
+def flagged(fm: str) -> bool:
+    """The same predicate as `scripts/topic-spawn.py`'s `flagged` — flag present, provenance
+    not read.
+
+    Operator ruling 2026-10-30: *"in the end it should not matter how set the flag … if flag,
+    should be open if claude session limit allow it"*. `flag_set_by` is a note, not a gate.
+
+    ⚠️ Duplicated deliberately — both scripts run standalone out of the plugin cache, so
+    there is no shared module to import. A split verdict between them would open exactly
+    the goal the spawn gate refuses, so `test_topic_keepalive.py` asserts the two agree.
+    """
+    return scalar(fm, "flag").lower() in FLAG_TRUTHY
 
 
 def base_slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
 
 
-def state_path(vault: str, goal: str) -> str:
+def state_path(vault: str, subject: str, branch: str = "goal") -> str:
     name = os.path.basename(vault.rstrip(os.sep)) or "vault"
     directory = os.path.expanduser(os.path.join("~/.claude/state/manager-resumes", name))
     os.makedirs(directory, exist_ok=True)
-    return os.path.join(directory, f"goal--{base_slug(goal)}.json")
+    return os.path.join(directory, f"{branch}--{base_slug(subject)}.json")
 
 
 def load_resumes(path: str) -> list[float]:
@@ -99,22 +129,43 @@ def record(path: str, stamps: list[float], now: float) -> None:
     os.replace(tmp, path)
 
 
+#: `scripts/session-liveness.py`'s documented contract is the EXIT CODE, not the text:
+#: `LIVE` (0) / `ABSENT` (1) / `UNKNOWN` (2) / `AMBIGUOUS` (3) / `MALFORMED` (4). Only `LIVE`
+#: prints to stdout — every other verdict goes to stderr — so parsing stdout collapsed them
+#: all to `UNKNOWN`.
+VERDICT_BY_EXIT = {0: "LIVE", 1: "ABSENT", 2: "UNKNOWN", 3: "AMBIGUOUS", 4: "MALFORMED"}
+
+
 def session_verdict(sid: str) -> str:
-    """`LIVE` / `ABSENT` / `UNKNOWN` / `AMBIGUOUS` / `MALFORMED`, from the instrument."""
-    probe = subprocess.run(
-        [sys.executable, os.path.join(REPO, "scripts", "session-liveness.py"), "--check", sid],
-        capture_output=True, text=True,
-    )
-    for word in ("LIVE", "ABSENT", "UNKNOWN", "AMBIGUOUS", "MALFORMED"):
-        if probe.stdout.startswith(word):
-            return word
-    return "UNKNOWN"  # an unparseable answer is cannot-tell, never death
+    """`LIVE` / `ABSENT` / `UNKNOWN` / `AMBIGUOUS` / `MALFORMED`, from the instrument.
+
+    ⚠️ **Read the exit code, never the text.** This function used to scan `stdout` for the
+    verdict word, which made `ABSENT` unreachable: the instrument prints `ABSENT` to **stderr**
+    and exits 1, so every non-`LIVE` answer fell through to `UNKNOWN`. `ABSENT` is the only
+    verdict that licenses a resume, so the entire keep-alive — the goal tier that had shipped
+    for months, the topic tier and the worker tier — could never resume anything. Measured
+    2026-10-30 on a killed manager: stdout `''`, stderr `'ABSENT — <id>'`, rc 1.
+
+    An exit code outside the documented set is `UNKNOWN` — cannot-tell is never death.
+    ⚠️ **An unrunnable or hung probe is `UNKNOWN` too.** Without the guard a missing
+    interpreter or a stuck child raises out of this function and aborts the whole tick with a
+    traceback, instead of answering `cannot-tell` for the one subject being read. Same shape as
+    `scripts/crashed-managers.py`'s `session_state()`.
+    """
+    try:
+        probe = subprocess.run(
+            [sys.executable, os.path.join(REPO, "scripts", "session-liveness.py"), "--check", sid],
+            capture_output=True, text=True, timeout=PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "UNKNOWN"
+    return VERDICT_BY_EXIT.get(probe.returncode, "UNKNOWN")
 
 
-def cadence(goal: str) -> str:
+def cadence(subject: str, branch: str = "goal") -> str:
     probe = subprocess.run(
         [sys.executable, os.path.join(REPO, "scripts", "manager-liveness.py"),
-         "--state", "--subject", goal, "--branch", "goal"],
+         "--state", "--subject", subject, "--branch", branch],
         capture_output=True, text=True,
     )
     first = (probe.stdout.splitlines() or [""])[0]
@@ -125,7 +176,12 @@ def cadence(goal: str) -> str:
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--vault", required=True, help="the vault ROOT path")
-    ap.add_argument("--goal", required=True)
+    ap.add_argument("--subject", "--goal", dest="subject", required=True,
+                    help="the goal or topic name; --goal is kept as an alias")
+    ap.add_argument("--branch", choices=("goal", "topic"), default="goal",
+                    help="which tier's subject page and cadence to read (default: goal)")
+    ap.add_argument("--dir", help="override the subject directory (a vault may rename "
+                                  "`24 Goals` / `23 Topics`; read it from `vault-cli config list`)")
     ap.add_argument("--record-resume", metavar="SESSION_ID",
                     help="record a resume that the liveness instrument confirmed LIVE")
     ap.add_argument("--now", type=float, help="epoch seconds (tests only)")
@@ -133,7 +189,8 @@ def main(argv: list[str]) -> int:
 
     now = a.now if a.now is not None else time.time()
     vault = os.path.abspath(os.path.expanduser(a.vault))
-    path = state_path(vault, a.goal)
+    opener = "--topic" if a.branch == "topic" else "--goal"
+    path = state_path(vault, a.subject, a.branch)
 
     # A confirmed resume is recorded and nothing else — the caller has already acted.
     if a.record_resume:
@@ -146,23 +203,23 @@ def main(argv: list[str]) -> int:
         return 0
 
     goal_page = None
-    directory = os.path.join(vault, GOALS_DIR)
+    directory = os.path.join(vault, a.dir or DIRS[a.branch])
     try:
         for entry in os.listdir(directory):
-            if entry.lower() == a.goal.lower() + ".md":
+            if entry.lower() == a.subject.lower() + ".md":
                 goal_page = os.path.join(directory, entry)
                 break
     except OSError:
         goal_page = None
     if not goal_page:
         print("cannot-tell")
-        print(f"no goal page at {directory}/{a.goal}.md")
+        print(f"no goal page at {directory}/{a.subject}.md")
         return 1
     with open(goal_page, encoding="utf-8") as fh:
         fm = frontmatter(fh.read())
     sid = scalar(fm, "manager_session_id")
 
-    loop = cadence(a.goal)
+    loop = cadence(a.subject, a.branch)
 
     if loop == "STOPPED":
         print("leave")
@@ -170,8 +227,21 @@ def main(argv: list[str]) -> int:
         return 0
 
     if not sid:
-        print("resume")
-        print("no manager_session_id recorded — start one with /supervisor:open --goal")
+        # ⚠️ No recorded id is an OPEN, not a resume — a resume continues a session that
+        # already has a subject and an id. Rule 4 makes opening the operator's act, so the
+        # verdict splits here instead of both arms printing `resume` and letting the agent
+        # run `/supervisor:open --goal` for either. Operator ruling 2026-10-30: "we dont
+        # want to auto open topic-manager, goal-manager ... but flag are fine".
+        if flagged(fm):
+            print("open")
+            print(f'{a.subject} has no manager_session_id and it carries the flag — '
+                  f'start one with /supervisor:open {opener} "{a.subject}"')
+        else:
+            print("open-unflagged")
+            print(f"{a.subject} has no manager_session_id and does not carry the flag "
+                  f"(`flag: true`, whoever set it) — rule 4 forbids opening a manager for "
+                  f"it; the fleet round's open leg still opens its workers, so the work "
+                  f"moves without one")
         return 0
 
     live = session_verdict(sid)
@@ -193,11 +263,11 @@ def main(argv: list[str]) -> int:
     spent = len(recent(load_resumes(path), now))
     if spent >= RESUME_CAP:
         print("crash-loop")
-        print(f"⚠️ MANAGER CRASH-LOOP: {a.goal} — {spent} resumes in 30 min; stop restarting")
+        print(f"⚠️ MANAGER CRASH-LOOP: {a.subject} — {spent} resumes in 30 min; stop restarting")
         return 1
     print("resume")
     print(f'session {sid} is ABSENT (cadence {loop}); resume with '
-          f'/supervisor:open --goal "{a.goal}" — attempt {spent + 1} of {RESUME_CAP}')
+          f'/supervisor:open {opener} "{a.subject}" — attempt {spent + 1} of {RESUME_CAP}')
     return 0
 
 

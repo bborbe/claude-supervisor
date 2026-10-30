@@ -9,7 +9,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { query, resolveSettings } from '@anthropic-ai/claude-agent-sdk'
+import { resolveSettings } from '@anthropic-ai/claude-agent-sdk'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { isAbsolute, join } from 'path'
@@ -17,6 +17,7 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
+import { answerWrappedSession, listWrappedSessions, pendingQuestionOf, sendWrappedSession, spawnWrappedSession, stopWrappedSession, streamWrappedSession } from './wrapper-stream.mjs'
 import { HEARTBEAT_INTERVAL_MS, a2aStamp, clearStamp, heartbeatDir, selfStampRefusal, stampRecord, startSelfStamp } from './heartbeat.mjs'
 import { workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
@@ -47,13 +48,14 @@ import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, ledgerWriteRoute, mergeRecord, parentSessionId, stoppedPatch, UNOBSERVED_STATUS, unobservedPatch } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 import { resumeRefusal } from './resume-guard.mjs'
+import { resumeAdmission } from './context-guard.mjs'
 import { fetchAttentionItems, fetchOpenCards, openCardsOf } from './open-cards.mjs'
 import { foreignParkRefusal } from './park-refusal.mjs'
 import { answerPathRefusal } from './answer-path.mjs'
 import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
 import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
 import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
-import { SHIPPING_PERMISSION_MODE, launcherHonoursModeEnv, shippingSettings, shippingSupportError, shippingTabEnv } from './shipping-settings.mjs'
+import { SHIPPING_PERMISSION_MODE, launcherHonoursModeEnv, shippingSupportError, shippingTabEnv } from './shipping-settings.mjs'
 import { liveSessionIds, rehydratableAgents, unionRoster } from './registry-rehydrate.mjs'
 import { patchSessionLedgerRow, postSessionLedger, readSessionLedger, readSessionLedgerRow, recordToWire } from './session-ledger.mjs'
 
@@ -709,6 +711,70 @@ function makeCanUseTool(agent) {
     })
 }
 
+// Answer a park the WRAPPER holds, for a wrapper-backed worker.
+//
+// ⚠️ The id is authoritative and the record is read LIVE, never from a cache. A worker can
+// unpark and re-park between a status read and this call, so answering by agent would answer
+// a question the caller never saw; naming the request id means a stale call gets the
+// wrapper's own 409 and changes nothing. That asymmetry is the whole reason this shape was
+// chosen over an `agent_id` argument.
+//
+// ⚠️ FOUR outcomes, and the caller must keep them apart. Folding `unreadable` into `not_found`
+// is what made a wrapper that was down indistinguishable from a request id that never
+// existed — the conflation the refusal text used to claim it had already fixed:
+//   {answered, behavior, agent_id, via} — released
+//   {error}                             — a wrapper-backed worker held the id and the answer was refused
+//   {unreadable: true, error}           — a wrapper-backed worker exists but the wrapper could
+//                                         not be read, so "no park" is NOT a fact here
+//   {not_found: true}                   — the wrapper was read and nothing is parked on this id
+async function answerWrapperPark(requestId, behavior) {
+  const wanted = behavior === 'allow' ? 'allow' : 'deny'
+  const backed = [...agents.values()].filter((a) => a.wrapperSessionId)
+  if (backed.length === 0) return { consulted: false }
+  let sessions
+  try {
+    // ONE read for every wrapper-backed worker. The per-agent loop this replaces cost N
+    // sequential round-trips on the miss path, which is the common path.
+    sessions = await listWrappedSessions({ baseUrl: config.wrapperUrl })
+    if (!Array.isArray(sessions)) throw new Error('wrapper session list was not an array')
+  } catch (error) {
+    return { unreadable: true, error: `wrapper session list unreadable: ${error.message}` }
+  }
+  for (const agent of backed) {
+    const session = sessions.find((s) => s?.id === agent.wrapperSessionId)
+    if (session?.question?.request_id !== requestId) continue
+    try {
+      await answerWrappedSession({
+        baseUrl: config.wrapperUrl,
+        sessionId: agent.wrapperSessionId,
+        requestId,
+        behavior: wanted,
+      })
+    } catch (error) {
+      return { error: `wrapper answer for ${agent.id} failed: ${error.message}` }
+    }
+    if (agent.status === 'blocked-on-permission') agent.status = 'running'
+    log(`permission ${requestId} ${wanted.toUpperCase()} by manager (wrapper-backed worker ${agent.id})`)
+    return { answered: requestId, behavior: wanted, agent_id: agent.id, via: 'wrapper' }
+  }
+  return { not_found: true }
+}
+
+// One wrapper read for the whole roster, or null when it cannot be read or was not needed.
+//
+// `needed` is not an optimisation detail: without it every manager sweep in a fleet holding no
+// wrapper-backed worker would still pay a round-trip (and, wrapper down, its timeout) for a
+// field that cannot apply to any row.
+async function readWrapperQuestions(needed) {
+  if (!needed) return null
+  try {
+    const sessions = await listWrappedSessions({ baseUrl: config.wrapperUrl })
+    return Array.isArray(sessions) ? sessions : null
+  } catch {
+    return null
+  }
+}
+
 function waitForPermission(timeoutMs) {
   const first = pending.values().next().value
   if (first) return Promise.resolve(publicPerm(first))
@@ -842,6 +908,10 @@ function writeLedger(agent, patch) {
       resumedFrom: agent.resumedFrom ?? null,
       policy: agent.policyPath ?? null,
       shipping: agent.shipping === true,
+      // Persisted, unlike `shipping`: the wrapper is the only holder of this worker's parked
+      // prompt, so a server that lost the id on restart could neither report the park nor
+      // answer it.
+      wrapperSessionId: agent.wrapperSessionId ?? null,
       parentSession: agent.parentSession ?? null,
       // The role this spawn declared. Carried into the record because the spawn edge
       // cannot otherwise distinguish a manager from a worker: `gate-owner-filter.py`
@@ -1050,6 +1120,48 @@ function launcherPreservesModeEnv(scriptPath) {
 // CLI flag, not as settings, so settingSources cannot reach them: an SDK worker with
 // settings loaded still saw 7 fewer servers than its tab twin. Handing the same file
 // to query()'s mcpServers is what makes the two modes functionally identical.
+// The launcher's own `--mcp-config <file>` path, for the wrapper-backed path.
+//
+// resolveMcpServers parses that file and returns the SERVERS, which is what the SDK's
+// `mcpServers` option takes. The wrapper takes a FILE, so the same regex is used here to
+// return the path itself — one source of truth for "where the launcher keeps its config",
+// two shapes because the two spawn mechanisms disagree about what they want.
+function launcherMcpConfigFile(claudeCmd) {
+  if (config.mcpConfig) return config.mcpConfig
+  if (!claudeCmd) return null
+  try {
+    const match = readFileSync(claudeCmd, 'utf8').match(/--mcp-config\s+["']?(~?[^"'\s\\]+)/)
+    if (!match) return null
+    return match[1].replace(/^~/, homedir())
+  } catch {
+    return null
+  }
+}
+
+// What a wrapper-backed worker does NOT get, named field by field.
+//
+// ⚠️ A summary ("policy unavailable") is not enough: a reader has to know WHICH parts went
+// quiet, because they differ in consequence. The 15-minute deny changes behaviour most — a
+// prompt that used to die now parks indefinitely — and `decide()` is the one whose absence
+// turns every policy-allowed prompt into a human wait. Named individually so an operator
+// reading a spawn response can decide what to depend on, and so an answered park in a
+// wrapper-backed run is attributable to the wrapper's hook rather than to a policy tier
+// that never ran.
+function wrapperPolicyGap({ shipping }) {
+  return {
+    // Why: the wrapper spends the child's single --permission-prompt-tool on its own MCP
+    // tool, and the supervisor sees the child only as an event stream.
+    reason: 'wrapper owns the permission hook',
+    not_run: ['decide()', 'manager allowlist', 'carried decision', '15-minute deny'],
+    // The shipping tier is a SEPARATE loss, not a restatement: permission_mode survives,
+    // the flag-tier `settings` object does not, so a wrapper-backed shipping worker hits
+    // the permission channel for the edits and git verbs its flag tier was meant to skip.
+    shipping_settings: shipping === true ? 'not applied — no wrapper counterpart for the settings tier' : 'n/a',
+    // What IS still true, so the field is not read as "nothing works".
+    answerable_via: 'POST /api/1.0/sessions/{id}/answer',
+  }
+}
+
 function resolveMcpServers(claudeCmd) {
   let path = config.mcpConfig
   if (!path) {
@@ -2476,6 +2588,38 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     }
     log(`resume of ${resume} allowed: ${reason} [probes: ${probes.join(', ') || 'none'}]`)
 
+    // ⚠️ Liveness is not the only thing that can make a resume useless. A resume restores the
+    // whole prior conversation, so a long-lived worker comes back carrying the payload its last
+    // turn already ran at; if that payload sits close to the point where the harness compacts,
+    // the resumed session compacts on its first turn or dies with "Prompt is too long". Measured
+    // 2026-10-27 on five workers, one of them dead after a SINGLE turn — see context-guard.mjs
+    // for the numbers and the bound. This is the second guard on this path and answers a
+    // different question from `resume-guard.mjs` (which asks whether a live worker blocks the
+    // resume); the two must stay separate.
+    //
+    // The transcript is resolved by SESSION ID, never from a cwd: a `cc-*` launcher `cd`s into
+    // its own vault, so the spawn's recorded cwd is not where the transcript was written
+    // (CLAUDE.md § "transcript_dir on a tab worker is unreliable").
+    // ⚠️ ONE CALL, AND THE REFUSAL RETURNS BEFORE ANY SPAWN WORK — the `return` on the very next
+    // line is the whole "no worker is created" guarantee, and `context-guard.test.mjs` drives
+    // this same function with fixture transcripts so the gate is exercised end to end rather
+    // than only its arithmetic. Do not inline these three steps again: a test can reach a named
+    // function, and it cannot reach a block.
+    const admission = resumeAdmission({ transcriptPath: transcriptPathFor(resume), readFile: readFileSync })
+    if (!admission.admit) {
+      log(`refusing to resume ${resume}: ${admission.error}`)
+      return { error: admission.error }
+    }
+    const contextStats = admission.stats
+    // Reported even when it allows, because "the guard looked and found nothing" and "the guard
+    // could not look" are different facts about this resume, and only one of them is reassuring.
+    log(
+      contextStats
+        ? `resume of ${resume} context: ${contextStats.restored ?? 'no usage'} restored against a ` +
+            `${contextStats.ceiling ?? 'no'} ceiling${contextStats.model ? ` [${contextStats.model}]` : ''}`
+        : `resume of ${resume} context: not measured (no transcript) — guard allowed it`,
+    )
+
     // A decision can only ride a resume, and only one that names the park on record.
     //
     // The record is this server's own evidence that a park happened: written at park
@@ -2527,6 +2671,10 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // recoverable is a separate change (persist it, then read it back in `toAgentRecord`).
     shipping: shipping === true,
     sessionId: null,
+    // The WRAPPER's handle for this child, set on the wrapper-backed headless path only.
+    // Every wrapper route keys off it, and it is the only thing that can reach a park the
+    // wrapper holds. Null for a tab or cluster worker, which have no wrapper session.
+    wrapperSessionId: null,
     // Which conversation this one continues, when it is an adoption rather than a
     // fresh start. `sessionId` alone cannot say: on resume the SDK reports the SAME
     // id, so the two fields together are what tell the operator which conversation
@@ -2701,44 +2849,91 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // the headless path each resolved the launcher separately and could disagree about the
   // same spawn.
 
-  const q = query({
-    prompt,
+  // ⚠️ **The headless child is started by claude-wrapper, not by this process.** A
+  // permission park belongs to whoever holds the child's stdin: `canUseTool` parked into
+  // THIS process's `pending` Map, so a prompt raised here was answerable only by this
+  // server and died with it after 15 minutes. With the wrapper holding stdin,
+  // `POST /api/1.0/sessions/{id}/answer` releases the park from any manager.
+  //
+  // ⚠️ **What the seam costs, named rather than implied.** The wrapper spends the child's
+  // single `--permission-prompt-tool` on its own MCP tool, so this server never sees a
+  // prompt and none of its policy machinery can run. `wrapperPolicyGap` carries that on the
+  // agent record AND the spawn response, because a reader who has to infer which parts went
+  // quiet will infer wrong in the direction that matters — the 15-minute deny changes
+  // behaviour most. Naming it also keeps a later verification honest: an answered park in a
+  // wrapper-backed run was answered by the wrapper's hook, never by `decide()`, so it is not
+  // evidence that the policy tier works.
+  // ⚠️ A refused SUPERVISOR_WRAPPER_URL is refused HERE, not at import. `config.mjs` returns
+  // the refusal rather than throwing so one mistyped variable cannot make the module
+  // unimportable and take the whole server down at load; the cost is that the refusal has to
+  // be acted on at the one place that would use the value.
+  if (config.wrapperUrlRefusal) {
+    agents.delete(id)
+    return { error: config.wrapperUrlRefusal }
+  }
+  // ⚠️ Every throw from here to the stream start must undo `agents.set(id, …)` above. Without
+  // this, a failed wrapper spawn leaves a phantom `running` row that `list_agents` reports for
+  // the life of the process — the tab path's `agents.delete(id)` rollback, which this branch
+  // otherwise omits.
+  let wrapperSession
+  try {
+    wrapperSession = await spawnWrappedSession({
+    baseUrl: config.wrapperUrl,
     options: {
       cwd: agent.cwd,
-      // Hand the worker the mode this server already resolved, so it never has to infer
-      // its own from a config file that describes the fleet rather than this worker. The
-      // SDK's `env` REPLACES the subprocess environment instead of merging with it, which
-      // is why workerEnvFor spreads the inherited env — without that spread the worker
-      // loses PATH, HOME and ANTHROPIC_BASE_URL, and the last of those silently stops it
-      // routing through the router. That base env comes from config.mjs rather than being
-      // read here, because this module owns no environment reads at all.
-      // `overrides` is the caller's per-call `env`. It sits above the inherited environment
-      // and below the mode handover — see workerEnvFor for why that order is the only
-      // correct one.
+      // The mode and environment this server already resolved, handed to the child
+      // directly. The wrapper MERGES `env` over its own environment, which is why the whole
+      // inherited environment rides along: a hand-picked subset would drop PATH, HOME and
+      // ANTHROPIC_BASE_URL, and losing the last silently stops the worker routing through
+      // the router while looking like nothing at all.
       env: workerEnvFor({ mode: spawnMode.mode, source: spawnMode.source, env: config.baseEnv, overrides: envOverrides }),
-      // Load the same settings an interactive session gets. Without this the SDK
-      // starts from nothing — no plugin skills, no settings.json permissions, no
-      // user MCP servers — and a worker missing its normal tooling is not a cheaper
-      // worker, it is one that fails in unfamiliar ways.
-      settingSources: SETTING_SOURCES,
-      // Same reason as settingSources: parity with a tab worker. Spawning is rare, so
-      // the per-spawn launcher lookup is not a hot path.
-      mcpServers: resolveMcpServers(agent.launcher),
-      // Continuing an existing conversation. Because THIS call creates the session,
-      // canUseTool applies to it — which is the whole point: a session you did not
-      // create cannot be supervised, but one you resume you do create.
+      // A shipping worker runs under `acceptEdits`, so its edits and its three git verbs
+      // never depend on the permission channel. ⚠️ Only the MODE survives the wrapper: the
+      // flag-tier `settings` object has no wrapper counterpart, which `wrapperPolicyGap`
+      // records separately — a wrapper-backed shipping worker is not faithfully wrapped.
+      permission_mode: shipping === true ? SHIPPING_PERMISSION_MODE : PERMISSION_MODE,
+      // The launcher's own config FILE. It arrives as a CLI flag, so no setting source can
+      // reach it, and without it this worker's server list is measurably shorter than a tab
+      // worker's — the gap `resolveMcpServers` was written to close on the SDK path.
+      ...(launcherMcpConfigFile(agent.launcher) ? { mcp_configs: [launcherMcpConfigFile(agent.launcher)] } : {}),
+      // Continuing a conversation: the wrapper emits `--resume` INSTEAD of minting an id,
+      // so the child's claude id is the resumed one and arrives on `system`/`init` exactly
+      // as it did through `query()`.
       ...(resume ? { resume } : {}),
-      // Resolved and validated once at module load — never read env in the hot path.
-      // A shipping worker runs under `acceptEdits` instead, so its edits and its three git
-      // verbs never depend on the permission channel; see shipping-settings.mjs for why
-      // that mode and not a wider one. The option and the flag-tier `settings` say the
-      // same thing on purpose: either alone leaves a reader to wonder which one won.
-      permissionMode: shipping === true ? SHIPPING_PERMISSION_MODE : PERMISSION_MODE,
-      ...(shipping === true ? { settings: shippingSettings(true) } : {}),
-      canUseTool: makeCanUseTool(agent),
-      hooks: { PermissionRequest: [{ hooks: [makePermissionHook(agent)] }] },
     },
   })
+  } catch (error) {
+    agents.delete(id)
+    throw error
+  }
+  if (!wrapperSession || !wrapperSession.id) {
+    agents.delete(id)
+    throw new Error(`wrapper spawn for ${id} returned no session id — nothing can answer its prompts`)
+  }
+  // The WRAPPER's handle, never the child's claude id: every wrapper route keys off it, and
+  // it is the only thing `answer_permission` can use to reach a park.
+  agent.wrapperSessionId = wrapperSession.id
+
+  // ⚠️ The opening turn is a SEPARATE call. `query({ prompt })` delivered it while creating
+  // the session; the wrapper takes turns as messages, so a spawn that only streams leaves a
+  // child that initialises and sits idle — indistinguishable from one that is thinking.
+  if (prompt) {
+    // ⚠️ A refused opening turn is not a no-op: the child exists, holds stdin and streams
+    // nothing, so it looks exactly like one that is thinking. Reap it here rather than
+    // returning an agent id for a worker that will never produce a turn — and reap it on
+    // ANY throw, because the wrapper session is already live by this line.
+    try {
+      await sendWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id, text: prompt })
+    } catch (error) {
+      await stopWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id }).catch((reapError) => {
+        log(`WARNING: could not reap wrapper session ${wrapperSession.id} after a refused opening turn: ${reapError.message}`)
+      })
+      agents.delete(id)
+      throw error
+    }
+  }
+
+  const q = streamWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id })
   agent.query = q
 
   // Fire-and-forget on purpose: a spawn must return its agent id without waiting for
@@ -2772,6 +2967,11 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // inferring it from the absence of an error.
     policy: agent.policyPath,
     shipping: agent.shipping === true,
+    // ⚠️ Reported, never omitted. A caller that needs `decide()` or the 15-minute deny must
+    // be able to refuse to depend on them HERE, rather than discover their absence when a
+    // prompt parks forever. Named field by field — see wrapperPolicyGap.
+    policy_gap: wrapperPolicyGap({ shipping: agent.shipping }),
+    wrapper_session_id: agent.wrapperSessionId,
     // Same field as the tab path, and here too it is not redundant: this is the half a
     // headless-only implementation would leave unexercised, so a caller reading it back is
     // how "both paths carry it" stops being a claim about the diff. Keys only — see envReport.
@@ -2822,6 +3022,10 @@ const agentView = (a) => {
     // indistinguishable from "no gate outstanding" — the exact reading that cost a manager a
     // misdirected worker in the v0.110.4 incident. See registry-rehydrate.mjs.
     rehydrated: a.rehydrated === true,
+    // The wrapper session this worker's child runs under, or null when the worker is not
+    // wrapper-backed. Ships beside `pending_question` because it is the field that tells a
+    // caller which of that field's nulls it is holding.
+    wrapper_session_id: a.wrapperSessionId ?? null,
     // Which source decided interactive-vs-headless: argument, env, config or default. A
     // worker that opened the wrong way is otherwise diagnosed by guessing which of four
     // places was consulted.
@@ -3457,10 +3661,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // this session) on every row: collapsing them reports a parked worker as unblocked, which
       // is the false negative this field exists to remove.
       const items = await fetchAttentionItems({ storeUrl: config.attentionStoreUrl })
+      // ⚠️ Same shape, same reason: ONE wrapper read for the whole roster, and skipped
+      // entirely when no row is wrapper-backed. A per-row `readWrappedSession` would be N
+      // round-trips with the wrapper down being N × the timeout in front of every sweep.
+      const questions = await readWrapperQuestions(roster.some((a) => a.wrapperSessionId))
       return reply(
         roster.map((agent) => ({
           ...agentView(agent),
           open_cards: items === null ? null : openCardsOf(items, agent.sessionId),
+          pending_question: pendingQuestionOf(questions, agent.wrapperSessionId),
         })),
       )
     }
@@ -3473,7 +3682,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // are the gate a manager can see — and, via the plugin's PermissionRequest hook,
       // answer with `attention-answer.py answer <item_id>`. Null = store unreadable/off.
       const open_cards = await fetchOpenCards({ storeUrl: config.attentionStoreUrl, sessionId: agent.sessionId })
-      return reply({ ...agentView(agent), open_cards })
+      // Read the wrapper's LIVE record, never a cache: a worker can unpark and re-park, and a
+      // request id read from anything stale names a question the caller can no longer answer.
+      const questions = await readWrapperQuestions(Boolean(agent.wrapperSessionId))
+      return reply({
+        ...agentView(agent),
+        open_cards,
+        pending_question: pendingQuestionOf(questions, agent.wrapperSessionId),
+      })
     }
 
     case 'read_push_config': {
@@ -3519,11 +3735,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case 'answer_permission': {
       const record = pending.get(args.request_id)
       if (!record) {
-        // ⚠️ Never the bare `no pending permission <id>`: the commonest reason this misses is
-        // that the park belongs to ANOTHER manager's server, and that caller can act on the
-        // store route. See `park-refusal.mjs`.
+        const viaWrapper = await answerWrapperPark(args.request_id, args.behavior)
+        // Computed, never constant — see `answerWrapperPark`'s four outcomes.
+        const consulted = viaWrapper.consulted === false ? ['pending'] : ['pending', 'wrapper']
+        // ⚠️ `unreadable` FIRST. It carries an `error` too, so testing `.error` before it made
+        // this arm unreachable and the outage sentence dead — the branch order is the fix.
+        if (viaWrapper.unreadable) {
+          return reply({
+            error: `${viaWrapper.error} — a wrapper-backed worker may still be parked on ${args.request_id}; this is an outage, not a foreign park`,
+            sources_consulted: consulted,
+          })
+        }
+        if (viaWrapper.answered || viaWrapper.error) return reply({ ...viaWrapper, sources_consulted: consulted })
+        // Both sources were read and neither holds the id.
         return reply({
           error: await foreignParkRefusal({ requestId: args.request_id, readLedger: readSessionLedger }),
+          sources_consulted: consulted,
         })
       }
       // Record the manager's verdict too: a key the manager allows over and over

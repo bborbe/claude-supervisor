@@ -2,7 +2,7 @@
 # No `name:` field, deliberately — a command takes its name from its filename. The
 # frontmatter rule for `commands/*.md` (`agent-cmd/command-frontmatter`) requires
 # `description`, `allowed-tools` and `argument-hint` and nothing else.
-description: Arm the TOPIC manager loop — watch the goals this topic declares and the goal managers running on them (default 15 min, `--interval`), keep the live ones alive, start what the ranking admits, print the goal table. The arm is invoked ONCE; every wakeup runs /supervisor:topic-drive. Sweeps goal managers, never workers.
+description: Arm the TOPIC manager loop — watch the goals this topic declares and the goal managers running on them (default 15 min, `--interval`), keep the live ones alive, start only flagged goals, print the goal table. The arm is invoked ONCE; every wakeup runs /supervisor:topic-drive. Sweeps goal managers, never workers.
 allowed-tools:
   - Task
   - Read
@@ -34,6 +34,7 @@ allowed-tools:
   - mcp__tts__say
   - mcp__supervisor__list_agents
   - mcp__supervisor__agent_status
+argument-hint: "[topic] [--interval <N>m] (topic detected when omitted)"
 ---
 ⚠️ **A voiced question is also a board card** — any `mcp__tts__say` containing `?` is paired with an `attention-ask.py post` within 60 s. Rule and detector: [`docs/voice-asks.md`](../docs/voice-asks.md).
 
@@ -172,8 +173,17 @@ code edits, no repo/PR/k8s verification, no investigation, no real debugging.
   then report them as a table line. The modal is reserved for operator-only decisions
   (`phase: todo` approval, a production-touching or irreversible action, a TDR), and even
   those reach the operator as an attention-board card carrying a `--dedup-key`.
-- **No goal manager → start one, under the ranking.** `/supervisor:topic-spawn` is the only
-  route; it holds no spawn tool and delegates to `/supervisor:open --goal`.
+- **No goal manager → start one, under the ranking, and only for a FLAGGED goal
+  (whoever set the flag).** `/supervisor:topic-spawn` is the only route; it holds no spawn tool and
+  delegates to `/supervisor:open --goal`. ⚠️ **Rule 4 — restart is not open:** a goal
+  carrying no flag **and no recorded `manager_session_id`** is **reported and
+  held**, never opened, however free the slots are. `commands/topic-drive.md` § Start states
+  the same rule and this line must not drift from it; the executable gate is
+  `scripts/topic-spawn.py`'s `goal-unflagged` refusal.
+  ⚠️ **That gate is the OPEN's and must never be applied to a resume.** A goal with a
+  recorded id whose session is `ABSENT`, or whose loop is `STALE`, is a **restart** — rule 1
+  restarts it automatically and the flag is not consulted. Holding those as "unflagged"
+  makes the goal tier's automatic restart inert for every unflagged goal.
 - **Anchored, always.** No work is delegated or spawned without a goal anchoring it.
   Read-only manager business (sweep, table, TTS) needs no anchor.
 
@@ -193,8 +203,16 @@ code edits, no repo/PR/k8s verification, no investigation, no real debugging.
   `Operator answer, via supervisor:` when the operator answered here, `Manager answer, via
   supervisor:` for your own scope decision. Neither releases an irreversible or
   production-touching action.
-- **Never close a goal.** Its `# Success Criteria` are its closure contract and close
-  mechanically through `/vault-cli:complete-goal`. Report SC status; never tick SC and never
-  flip a goal's status **in order to close it**. ⚠️ **Scoped to closure** — the
-  resolution-time reconcile that flips a subject reading `todo`/`next` to `in_progress` is
-  the manager's own write and is required, not forbidden.
+- **Close on complete evidence; never certify one.** A member goal closes on its `# Success
+  Criteria` + `# Definition of Done`; **this topic closes on its `# Success Criteria` + its
+  `# Completion Gate`** — a topic is the only level carrying both sets
+  (`docs/session-progress.md:37`). When every box in both of a page's own sets reads `[x]`, the
+  round runs the tier's verb — `vault-cli goal complete "<goal>" --vault "<vault>"` or
+  `vault-cli topic complete "<topic>" --vault "<vault>"` — and quotes its verdict;
+  the execution, the terminal guard and the `--vault` contract live in
+  `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` and are not restated here. ⚠️ **Never
+  tick SC and never flip a page's status in order to close it** — a close that needs `--force`
+  is one you do not make. ⚠️ **Tasks are not this tier's** — a task closes under its goal's
+  manager, and this tier never reads a task file (`agents/topic-sweep-reader.md`).
+  ⚠️ **Scoped to closure** — the resolution-time reconcile that flips a subject reading
+  `todo`/`next` to `in_progress` is the manager's own write and is required, not forbidden.

@@ -25,7 +25,14 @@ Three things are load-bearing, and each is a way the suite could be plausibly wr
   an incident with no evidence must NOT close, a corrupt ledger must NOT read as
   empty, and `--dry-run` must NOT write.
 
-`post_card` is stubbed throughout. The real one shells out to `attention-ask.py` and
+- **The card id.** `test_escalate_persists_the_id_the_poster_printed` runs the real
+  `post_card` against a stubbed subprocess and reads the record back from DISK. The
+  field was empty on every escalated incident for as long as the ledger existed, and
+  the failure mode of the fix is a value captured and dropped one line later -- which
+  an in-memory assertion cannot see.
+
+`post_card` is stubbed in the escalate cases, and only its subprocess in the capture
+cases (`TestCardIdCapture`). The real one shells out to `attention-ask.py` and
 would reach the operator's attention service from a unit test -- a test that posts a
 board card is a test that needs the operator, which is the opposite of what this is.
 
@@ -52,6 +59,19 @@ SESSION = "11111111-2222-3333-4444-555555555555"
 OTHER_SESSION = "66666666-7777-8888-9999-aaaaaaaaaaaa"
 OWNER = "manager-session-1"
 
+#: What the store mints for an item id: 32 lowercase hex characters. Used as the
+#: stubbed poster's answer so a test can assert the id the escalation RECORDS.
+CARD_ID = "0123456789abcdef0123456789abcdef"
+
+
+class _Run:
+    """A `subprocess.run` result stand-in: only the three fields `post_card` reads."""
+
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
 
 def iso(delta=None):
     when = datetime.datetime.now(datetime.timezone.utc)
@@ -71,6 +91,11 @@ class Base(unittest.TestCase):
         self._env = dict(os.environ)
         os.environ.pop("SUPERVISOR_INCIDENT_DEADLINE_SECONDS", None)
         os.environ.pop("SUPERVISOR_INCIDENT_STALL_ROUNDS", None)
+        # Neutralised HERE, not per class: any class that inherits `Base` and reaches
+        # `escalate` would otherwise read the host's value, so its verdict would depend
+        # on the operator's shell -- green on a host with a large budget, red on a host
+        # with none. A class that wants a specific budget sets it in its own `setUp`.
+        os.environ.pop("SUPERVISOR_INCIDENT_STALL_BUDGET", None)
         # The real post_card would post a board card from a unit test.
         self._post_card = il.post_card
         self.posted = []
@@ -78,7 +103,7 @@ class Base(unittest.TestCase):
 
     def _stub_post(self, incident):
         self.posted.append(incident["dedup_key"])
-        return True
+        return CARD_ID
 
     def tearDown(self):
         il.LEDGER, il.LOCK = self._ledger, self._lock
@@ -274,6 +299,18 @@ class TestClose(Base):
         )
         self.assertEqual(self.records()[0]["outcome"], "self-cleared")
 
+    def test_close_refuses_skipped_gone(self):
+        """`skipped-gone` is the ledger's own retirement, not a verified resume."""
+        self.open_incident()
+        with self.assertRaises(SystemExit) as caught:
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.run_cli(
+                    "close", "--session", SESSION, "--kind", "permission",
+                    "--outcome", il.SKIPPED_GONE, "--resume-evidence", "tool call",
+                )
+        self.assertEqual(caught.exception.code, il.REFUSED)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+
     def test_close_of_an_absent_incident_is_a_no_op(self):
         rc, out = self.run_cli(
             "close", "--session", OTHER_SESSION, "--kind", "question",
@@ -357,6 +394,32 @@ class TestShare(Base):
 
 
 class TestEscalate(Base):
+    def setUp(self):
+        super().setUp()
+        # The liveness probe is stubbed so a stall test's verdict does not depend on
+        # which sessions happen to be running on the host. The default is "these
+        # sessions are live"; the gone cases set it themselves.
+        #
+        # ⚠️ **Retargeted to `live_states`.** `cmd_escalate` reads the per-row
+        # `(status, state)` pair now, so a `live_sessions` stub would be inert and the
+        # leg would fall through to the host's real fleet. The cases below still assign
+        # a plain SET to `self.live` — the stub adapts it, so each reads as "these ids
+        # are live and parked", which is what every one of them means.
+        self._live_states = il.live_states
+        self.live = {SESSION, SESSION[:8], OTHER_SESSION, OTHER_SESSION[:8]}
+        il.live_states = lambda: (
+            None if self.live is None else {sid: ("idle", "idle") for sid in self.live}
+        )
+        # `test_escalate_persists_the_id_the_poster_printed` stubs the poster's
+        # subprocess instead of `post_card`; restored here so no later case in this
+        # class can shell out to the real attention store.
+        self._run = il.subprocess.run
+
+    def tearDown(self):
+        il.live_states = self._live_states
+        il.subprocess.run = self._run
+        super().tearDown()
+
     def make_overdue(self, session=SESSION, kind="permission"):
         self.open_incident(session=session, kind=kind, deadline_seconds=1)
         data = self.ledger()
@@ -403,17 +466,481 @@ class TestEscalate(Base):
     def test_a_failed_post_leaves_the_incident_pending(self):
         # Stamping after a failed post would record an escalation that never
         # reached the board -- the same class of false green the ledger exists for.
+        #
+        # ⚠️ `None` is `post_card`'s "nothing was posted". The empty string is a
+        # DIFFERENT answer -- posted, id unread -- and it must still stamp (see the
+        # next case), so this stub cannot use a falsy value interchangeably.
         self.make_overdue()
-        il.post_card = lambda incident: False
+        il.post_card = lambda incident: None
         with contextlib.redirect_stderr(io.StringIO()):
             self.run_cli("escalate", "--round-id", "r1")
         self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+        self.assertEqual(self.records()[0]["card_id"], "")
+
+    def test_a_post_that_prints_no_id_still_escalates_with_an_empty_card_id(self):
+        """The honest degradation: a posted card is never left `pending`.
+
+        A poster that exits 0 but prints nothing parseable has still posted the
+        card, so the row is stamped with `card_id` empty -- the pre-fix state, which
+        `post_card` names on stderr. Leaving it pending instead would re-post it
+        next round and duplicate the escalation.
+        """
+        self.make_overdue()
+        il.post_card = lambda incident: ""
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.run_cli("escalate", "--round-id", "r1")
+        record = self.records()[0]
+        self.assertEqual(record["outcome"], il.TIMED_OUT)
+        self.assertEqual(record["card_id"], "")
+
+    def test_an_existing_handle_is_replaced_and_the_replacement_is_named(self):
+        """A `timed-out` row must join on the ESCALATION's card, and the move is loud.
+
+        `open --card-id` supplies a handle for the blocker card; the escalation posts
+        a different one, whose `dedup_key` is the incident's own. Moving the field to
+        it is what makes the join checkable, and the warning is what keeps the
+        replacement from being silent.
+        """
+        self.open_incident(card_id="blk-1")
+        self.make_overdue()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(self.records()[0]["card_id"], CARD_ID)
+        self.assertIn("blk-1", err.getvalue())
+        self.assertIn(CARD_ID, err.getvalue())
+
+    def test_an_unread_id_does_not_blank_an_existing_handle(self):
+        """The negative control for the case above: an empty capture erases nothing.
+
+        Blanking the field would destroy a real join to record nothing at all, so a
+        poster that printed no id leaves the row's own handle in place.
+        """
+        self.open_incident(card_id="blk-1")
+        self.make_overdue()
+        il.post_card = lambda incident: ""
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.run_cli("escalate", "--round-id", "r1")
+        record = self.records()[0]
+        self.assertEqual(record["outcome"], il.TIMED_OUT)
+        self.assertEqual(record["card_id"], "blk-1", "a real handle is not erased")
+
+    def test_escalate_persists_the_id_the_poster_printed(self):
+        """SC1 + SC2 end to end inside the unit: the poster's line reaches the FILE.
+
+        `post_card` is the REAL one and only the subprocess is stubbed, so this
+        covers the capture and the write together -- a stub returning an id would
+        prove neither, and reading the record back from disk is the point: the
+        defect is a value captured and then dropped one line later.
+        """
+        self.make_overdue()
+        il.post_card = self._post_card
+        il.subprocess.run = lambda command, **kwargs: _Run(
+            stdout="ITEM_ID: %s\nPOLL: python3 attention-ask.py poll %s\n"
+            % (CARD_ID, CARD_ID)
+        )
+        self.run_cli("escalate", "--round-id", "r1")
+        record = self.records()[0]
+        self.assertEqual(record["card_id"], CARD_ID, "the id never reached the record")
+        self.assertEqual(record["outcome"], il.TIMED_OUT)
 
     def test_escalate_is_idempotent(self):
         self.make_overdue()
         self.run_cli("escalate", "--round-id", "r1")
         self.run_cli("escalate", "--round-id", "r1")
         self.assertEqual(len(self.posted), 1)
+
+    # --- the gone-session leg -------------------------------------------------
+    def make_overdue_stall(self, session=SESSION):
+        self.open_incident(session=session, kind="stall", deadline_seconds=1)
+        data = self.ledger()
+        for record in data["incidents"]:
+            if record["session_id"] == session and record["kind"] == "stall":
+                record["deadline"] = iso(datetime.timedelta(seconds=-5))
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+
+    def test_a_failed_probe_warns_and_still_posts(self):
+        """SC1: the leg that POSTS the card says so when it cannot judge.
+
+        `cmd_stall` already warned; `cmd_escalate` skipped the gate for the whole run
+        in silence, so a probe outage disabled the gate in the leg that posts and the
+        only visible effect was the absence of a skip line.
+        """
+        il.live_states = lambda: None
+        self.make_overdue_stall()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertIn("warning: session liveness unavailable", err.getvalue())
+        self.assertEqual(len(self.posted), 1, "an outage must not suppress the card")
+        self.assertEqual(self.records()[0]["outcome"], il.TIMED_OUT)
+
+    def test_a_gone_stall_incident_is_retired_not_left_pending(self):
+        """SC2: a skip is a terminal state, and it is NOT `timed-out`."""
+        self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
+        self.make_overdue_stall()
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertIn("gone sessions", out)
+        record = self.records()[0]
+        self.assertEqual(record["outcome"], il.SKIPPED_GONE)
+        self.assertNotEqual(record["outcome"], il.TIMED_OUT, "a skip is not an escalation")
+        self.assertEqual(self.posted, [])
+
+    def test_a_retired_incident_is_not_re_listed_next_round(self):
+        """SC2, second half: the next round must print no skip line for it."""
+        self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
+        self.make_overdue_stall()
+        self.run_cli("escalate", "--round-id", "r1")
+        key = self.records()[0]["dedup_key"]
+        rc, second = self.run_cli("escalate", "--round-id", "r2")
+        self.assertEqual(rc, 0)
+        self.assertNotIn(key, second)
+
+    def test_a_retired_incident_leaves_the_share_denominator(self):
+        """SC2, third half: an incident with no possible numerator is no denominator."""
+        self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
+        self.make_overdue_stall()
+        self.run_cli("escalate", "--round-id", "r1")
+        rc, out = self.run_cli("share", "--days", "1")
+        self.assertEqual(rc, 0)
+        self.assertIn("total: 0", out)
+        self.assertIn("retired 1 gone-session incident(s)", out)
+
+    def test_a_dry_run_says_would_retire(self):
+        """A dry run must not claim a state change it did not make.
+
+        `would escalate` and `would close` already follow this rule; `retired` on a
+        run that never calls `write_ledger` would be indistinguishable from a real
+        one in its own output — the false signal this ledger exists to remove.
+        """
+        self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
+        self.make_overdue_stall()
+        rc, out = self.run_cli("escalate", "--round-id", "r1", "--dry-run")
+        self.assertEqual(rc, 0)
+        self.assertIn("would retire 1", out)
+        self.assertNotIn("retired 1", out)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+
+    def test_a_retired_incident_carries_the_probe_time(self):
+        """The record names WHEN the judgement was made, not just that it was made."""
+        self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
+        self.make_overdue_stall()
+        self.run_cli("escalate", "--round-id", "r1")
+        evidence = self.records()[0]["resume_evidence"]
+        self.assertIn("liveness probe taken at", evidence)
+        self.assertIn("round:r1", evidence)
+
+    def test_bounded_names_at_exactly_the_limit_has_no_remainder(self):
+        """The no-remainder branch: five names, no `(+N more)` tail."""
+        self.assertEqual(il.bounded_names(["a", "b", "c", "d", "e"]), "a, b, c, d, e")
+        self.assertEqual(
+            il.bounded_names(["a", "b", "c", "d", "e", "f"]), "a, b, c, d, e, … (+1 more)"
+        )
+
+    def test_the_skip_line_is_bounded(self):
+        """SC4: 120 gone rows must not render as 120 names on one line."""
+        self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
+        sessions = ["%08x-aaaa-bbbb-cccc-dddddddddddd" % i for i in range(120)]
+        for sid in sessions:
+            self.open_incident(session=sid, kind="stall", deadline_seconds=0)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        line = [row for row in out.splitlines() if "gone sessions" in row][0]
+        self.assertIn("(+115 more)", line)
+        self.assertEqual(line.count("incident:"), 5, "five names, then a count")
+
+    def test_a_malformed_session_id_fails_open(self):
+        """SC5: one bad row must not abort the round with `AttributeError`."""
+        self.make_overdue_stall()
+        data = self.ledger()
+        data["incidents"][0]["session_id"] = 12345
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertIn("malformed session_id", err.getvalue())
+        self.assertEqual(len(self.posted), 1, "an unjudgeable id escalates, not retires")
+
+    def test_the_probe_is_not_paid_when_nothing_is_due(self):
+        """SC6: a probe with nothing to judge is a subprocess plus an HTTP call for nothing."""
+        calls = []
+        il.live_states = lambda: calls.append(1) or {SESSION: ("idle", "idle")}
+        self.open_incident(kind="stall")  # still before its deadline
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [])
+
+    # --- the per-round budget ------------------------------------------------
+    def make_due_stalls(self, count, reverse=False):
+        """`count` overdue stall incidents, one per distinct live session.
+
+        ⚠️ **Deadlines are spread across distinct past hours, and `reverse` moves the
+        INSERTION order without moving the deadlines.** That is the whole point of the
+        parameter: with a shared deadline the selection order would be whatever
+        `data["incidents"]` happened to hold, so a `due[:budget]` slice would satisfy
+        the cap and still pick the wrong three. Session `i` is always `count - i` hours
+        overdue, so session 0 is the oldest no matter which order it was written in.
+
+        The sessions are live AND parked (`setUp` stubs `live_states` to
+        `("idle", "idle")`, which `parked_on_a_human` reads as "a card is owed"), so
+        the liveness gate cannot retire the fixture before the budget is consulted --
+        the same trap the end-to-end seed must avoid.
+        """
+        sessions = ["%08x-aaaa-bbbb-cccc-dddddddddddd" % i for i in range(count)]
+        self.live = set(sessions) | {sid[:8] for sid in sessions}
+        for sid in (reversed(sessions) if reverse else sessions):
+            self.open_incident(session=sid, kind="stall", deadline_seconds=1)
+        data = self.ledger()
+        hours_past = {sid: -(count - index) for index, sid in enumerate(sessions)}
+        for record in data["incidents"]:
+            record["deadline"] = iso(
+                datetime.timedelta(hours=hours_past[record["session_id"]])
+            )
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        return sessions
+
+    def escalated_keys(self, out):
+        return [
+            row.split()[1] for row in out.splitlines() if row.startswith("escalated ")
+        ]
+
+    def test_the_round_escalates_at_most_the_budget(self):
+        """10 due, budget 3 — three cards, seven still pending."""
+        sessions = self.make_due_stalls(10)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.escalated_keys(out)), il.incident_budget())
+        pending = [r for r in self.records() if r["outcome"] == il.PENDING]
+        self.assertEqual(len(pending), 7)
+        self.assertEqual(
+            self.posted,
+            [il.dedup_key(sid, "stall") for sid in sessions[:3]],
+            "in selection order, not merely the same three",
+        )
+
+    def test_the_held_back_line_is_bounded(self):
+        """Seven held back renders as five names plus a remainder, not seven."""
+        self.make_due_stalls(10)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        line = [row for row in out.splitlines() if "past their deadline:" in row][0]
+        self.assertIn("held back 7", line)
+        self.assertIn("(+2 more)", line)
+        self.assertEqual(line.count("incident:"), 5, "five names, then a count")
+        # A real run must not borrow the dry-run's wording: `would hold back` also
+        # contains `held back`, so the positive assertion alone would pass either way.
+        self.assertNotIn("would hold back", out)
+
+    def test_the_env_override_caps_the_round(self):
+        """The knob the stall leg uses is the knob that caps this leg."""
+        self.make_due_stalls(10)
+        os.environ["SUPERVISOR_INCIDENT_STALL_BUDGET"] = "1"
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.escalated_keys(out)), 1)
+        self.assertIn("held back 9", out)
+
+    def test_a_zero_override_cannot_disable_the_cap(self):
+        """`0` falls back to the default 3 — it is not "unlimited"."""
+        self.make_due_stalls(10)
+        os.environ["SUPERVISOR_INCIDENT_STALL_BUDGET"] = "0"
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.escalated_keys(out)), 3)
+
+    def test_a_dry_run_matches_the_applied_set(self):
+        """A preview that promises 10 cards the run will not post is a lie."""
+        self.make_due_stalls(10)
+        rc, dry = self.run_cli("escalate", "--round-id", "r1", "--dry-run")
+        self.assertEqual(rc, 0)
+        would = [r.split()[2] for r in dry.splitlines() if r.startswith("would escalate")]
+        self.assertEqual(len(would), 3)
+        self.assertIn("would hold back 7", dry)
+        self.assertIn("(+2 more)", dry)
+        self.assertEqual(self.posted, [], "a dry run posts nothing")
+        # Same selection, not merely the same count.
+        rc, real = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(would, self.escalated_keys(real))
+
+    def test_the_oldest_blockers_are_chosen(self):
+        """The selection is the three most overdue, in deadline order."""
+        sessions = self.make_due_stalls(10)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            self.escalated_keys(out),
+            [il.dedup_key(sid, "stall") for sid in sessions[:3]],
+            "the three most overdue, in deadline order",
+        )
+
+    def test_the_choice_survives_a_reversed_insertion_order(self):
+        """Same deadlines written backwards — the same three, in the same order.
+
+        This is the case a `due[:budget]` slice fails: it would post whichever three
+        rows happened to be written first, so the cap would hold while the selection
+        was arbitrary.
+        """
+        sessions = self.make_due_stalls(10, reverse=True)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            self.escalated_keys(out),
+            [il.dedup_key(sid, "stall") for sid in sessions[:3]],
+        )
+        line = [row for row in out.splitlines() if "past their deadline:" in row][0]
+        self.assertIn(
+            ", ".join(il.dedup_key(sid, "stall") for sid in sessions[3:8]), line
+        )
+
+    def test_the_budget_is_spent_after_the_liveness_gate(self):
+        """Mid-command rows are skipped without spending a slot.
+
+        With six mid-command and four parked rows due and a budget of three, a round
+        that capped the RAW due set would post nothing: all three slots would go to
+        rows it then skips. Moving the budget check above the mid-command branch is
+        the regression this case exists to catch.
+        """
+        mid = ["%08x-bbbb-cccc-dddd-eeeeeeeeeeee" % i for i in range(6)]
+        parked = ["%08x-cccc-dddd-eeee-ffffffffffff" % i for i in range(4)]
+        states = {sid: ("idle", "idle") for sid in parked}
+        for sid in mid:
+            states[sid] = ("shell", "busy")
+        il.live_states = lambda: states
+        for sid in mid + parked:
+            self.open_incident(session=sid, kind="stall", deadline_seconds=1)
+        data = self.ledger()
+        for record in data["incidents"]:
+            record["deadline"] = iso(datetime.timedelta(hours=-1))
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            len(self.escalated_keys(out)), 3, "all three slots went to parked rows"
+        )
+        self.assertIn("held back 1", out)
+        self.assertIn("skipped 6 stall incident(s) for sessions mid-command", out)
+
+    def test_the_budget_is_the_same_function_on_both_legs(self):
+        """One function, reached from both legs.
+
+        A duplicated guard — a second constant, or a re-derived `due[:3]` — passes the
+        env-override cases above and fails here. A grep for the call site cannot show
+        *nesting*, so this asserts the call instead of its spelling.
+
+        `live_sessions` is stubbed for the `stall` half: an unstubbed run would answer
+        from the host's real fleet, which is the trap `TestStall` documents.
+        """
+        calls = []
+        real_budget = il.incident_budget
+        real_sessions = il.live_sessions
+        il.incident_budget = lambda: calls.append(1) or real_budget()
+        il.live_sessions = lambda: {SESSION, SESSION[:8]}
+        try:
+            self.make_overdue()
+            rc, _ = self.run_cli("escalate", "--round-id", "r1")
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(calls), 1, "cmd_escalate consults the shared budget")
+
+            del calls[:]
+            path = os.path.join(self.tmp, "drive.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "round": iso(),
+                        "entries": [
+                            {
+                                "session_id": SESSION,
+                                "verdict": "unverifiable",
+                                "unverifiable_streak": 5,
+                                "unverifiable_round": iso(),
+                            }
+                        ],
+                    },
+                    handle,
+                )
+            rc, _ = self.run_cli("stall", "--drive-ledger", path, "--round-id", "r1")
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(calls), 1, "cmd_stall consults the same budget")
+        finally:
+            il.incident_budget = real_budget
+            il.live_sessions = real_sessions
+
+
+class TestCardIdCapture(Base):
+    """`post_card` reads the id the poster prints, and refuses anything else.
+
+    The poster is stubbed at `subprocess.run`, never invoked: the real one reaches
+    the operator's attention store, which is the opposite of what a unit test may do.
+    `Base` has already replaced `post_card` itself, so the ORIGINAL is held in
+    `self._post_card` and that is what these cases call.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._run = il.subprocess.run
+        self.incident = {
+            "dedup_key": "incident:%s:stall" % SESSION,
+            "session_id": SESSION,
+            "kind": "stall",
+            "owner": OWNER,
+            "opened_at": "2026-10-29T10:00:00Z",
+            "deadline": "2026-10-29T10:15:00Z",
+            "detected_by": "drive:unverifiable@r1",
+        }
+
+    def tearDown(self):
+        il.subprocess.run = self._run
+        super().tearDown()
+
+    def post(self, **result):
+        il.subprocess.run = lambda command, **kwargs: _Run(**result)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            card_id = self._post_card(self.incident)
+        return card_id, err.getvalue()
+
+    def test_the_item_id_line_is_what_is_captured(self):
+        card_id, err = self.post(
+            stdout="ITEM_ID: %s\nPOLL: python3 attention-ask.py poll %s\n"
+            % (CARD_ID, CARD_ID)
+        )
+        self.assertEqual(card_id, CARD_ID)
+        self.assertEqual(err, "", "a clean post says nothing")
+
+    def test_a_candidate_that_is_not_a_store_id_is_refused(self):
+        """Shape, not existence: the store mints 32 hex characters.
+
+        A truncated id or another script's display id would 404 at poll time and
+        read as "the card is gone", so it is refused here rather than recorded.
+        """
+        candidates = (
+            "0123456789abcdef",  # truncated by hand
+            "0123456789abcdef0123456789abcdeZ",  # 32 characters, not hex
+            "",  # the poster printed the label and no value
+        )
+        for candidate in candidates:
+            with self.subTest(candidate=candidate):
+                card_id, err = self.post(stdout="ITEM_ID: %s\n" % candidate)
+                self.assertEqual(card_id, "")
+                self.assertIn("printed no ITEM_ID", err)
+
+    def test_a_failed_post_returns_none_and_says_why(self):
+        card_id, err = self.post(returncode=1, stderr="store unreachable")
+        self.assertIsNone(card_id, "a failed post is not an empty id")
+        self.assertIn("could not post escalation", err)
+
+    def test_stdout_that_is_empty_is_not_an_id(self):
+        card_id, _ = self.post(stdout="")
+        self.assertEqual(card_id, "")
 
 
 class TestRefusal(Base):
@@ -455,6 +982,21 @@ class TestPrune(Base):
             "--outcome", "manager", "--resume-evidence", "tool call",
         )
         data = self.ledger()
+        data["incidents"][0]["closed_at"] = iso(datetime.timedelta(days=-90))
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        self.run_cli("prune", "--max-age-hours", "1")
+        self.assertEqual(self.records(), [])
+
+    def test_a_skipped_gone_incident_is_pruned_on_the_same_clock(self):
+        """SC2: the retirement is TERMINAL, so `prune` drops it like any other.
+
+        `cmd_prune` keeps only `PENDING`, so this works by construction — the test is
+        here because the docstring now claims it and nothing pinned it.
+        """
+        self.open_incident(kind="stall", deadline_seconds=0)
+        data = self.ledger()
+        data["incidents"][0]["outcome"] = il.SKIPPED_GONE
         data["incidents"][0]["closed_at"] = iso(datetime.timedelta(days=-90))
         with open(il.LEDGER, "w", encoding="utf-8") as handle:
             json.dump(data, handle)
@@ -764,6 +1306,107 @@ class TestLiveSessions(Base):
         self.stub_run("", stderr="rows=0 registry_live=0 degraded=0\n")
         self.assertIsNone(il.live_sessions())
 
+    def test_live_states_carries_both_readings_over_both_key_forms(self):
+        """The projection `cmd_escalate` reads, over the same dual key space.
+
+        ⚠️ Both forms, for the same reason `live_sessions()` returns both: an
+        incident keyed on the 8-char handle must still join to its row.
+        """
+        self.stub_run(
+            '[{"sessionId": "%s", "status": "shell", "state": "busy"}]' % SESSION
+        )
+        self.assertEqual(
+            il.live_states(),
+            {
+                SESSION: ("shell", "busy"),
+                SESSION[:8]: ("shell", "busy"),
+            },
+        )
+
+    def test_live_states_defaults_a_missing_reading_to_empty(self):
+        # The producer substitutes `unstamped` / `live` itself, but an absent key
+        # must still yield a comparable pair rather than raising.
+        self.stub_run('[{"sessionId": "a"}]')
+        self.assertEqual(il.live_states(), {"a": ("", "")})
+
+    def test_live_states_is_none_on_a_failed_probe(self):
+        """Never `{}`: an empty mapping reads as "every session is gone"."""
+        self.stub_run("[]", returncode=1)
+        self.assertIsNone(il.live_states())
+
+    def test_live_states_drops_a_row_without_a_session_id(self):
+        self.stub_run('[{"sessionId": "a", "status": "idle"}, {"nope": 1}]')
+        self.assertEqual(il.live_states(), {"a": ("idle", "")})
+    def test_an_empty_probe_is_unavailable_not_an_empty_fleet(self):
+        """SC3: `[]` at exit 0 with `degraded=0` must not read as "everything is gone".
+
+        Returning an empty set made every eligible row read as gone, so the whole
+        stall class went quiet behind a plausible skip line -- the same silent-off
+        reached from the fail-closed side.
+        """
+        self.stub_run("[]\n", stderr="rows=0 registry_live=0 degraded=0\n")
+        self.assertIsNone(il.live_sessions())
+
+    def test_a_degraded_but_non_empty_probe_is_still_usable(self):
+        """`degraded=` marks uncorroborated rows, not missing ones — so it cannot veto.
+
+        Measured 2026-10-29 on a healthy fleet: `rows=45 registry_live=43 degraded=7`.
+        Treating `degraded > 0` as "unavailable" therefore returned None every round,
+        warned every round, and never retired anything — the gone gate was silently
+        off in the leg that posts the cards. A session ABSENT from a non-empty set is
+        still absent; only an EMPTY set is unusable.
+
+        The header is the shape the producer can actually emit: `degraded` is set only
+        on REGISTRY rows, so `registry_live >= degraded` always holds. `rows=1
+        registry_live=0 degraded=1` is impossible and would pin a synthetic case.
+        """
+        self.stub_run(
+            '[{"sessionId": "a"}]', stderr="rows=1 registry_live=1 degraded=1\n"
+        )
+        self.assertEqual(il.live_sessions(), {"a"})
+
+    def test_an_all_degraded_probe_is_unavailable(self):
+        """No corroborated row means the set may be registry-only, so it cannot decide.
+
+        The producer names this state: during a partial rollout the endpoint holds no
+        `live: true` row while the registry still lists sessions. A cluster/a2a worker
+        lives ONLY in the endpoint, so it would read as absent and its stall incident
+        would be retired `skipped-gone` — terminally — for a session that is alive.
+        """
+        self.stub_run(
+            '[{"sessionId": "a", "degraded": true}, '
+            '{"sessionId": "b", "degraded": true}]',
+            stderr="rows=2 registry_live=2 degraded=2\n",
+        )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertIsNone(il.live_sessions())
+        # The branch must say WHICH fail-open fired: the callers' shared warning is
+        # one line for every unavailable read, so a partial rollout would otherwise
+        # be indistinguishable from an empty probe or a subprocess failure.
+        self.assertIn("corroborated none of them", err.getvalue())
+        self.assertIn("2 session(s)", err.getvalue())
+
+    def test_one_corroborated_row_makes_the_probe_usable(self):
+        """The negative control: a single endpoint-corroborated row restores the gate."""
+        self.stub_run(
+            '[{"sessionId": "a", "degraded": true}, '
+            '{"sessionId": "b", "degraded": false}]',
+            stderr="rows=2 registry_live=1 degraded=1\n",
+        )
+        self.assertEqual(il.live_sessions(), {"a", "b"})
+
+    def test_an_unreadable_degraded_header_does_not_change_the_verdict(self):
+        """A header this reader cannot parse is ignored, not read as a veto."""
+        self.stub_run(
+            '[{"sessionId": "a"}]', stderr="rows=1 registry_live=1 degraded=many\n"
+        )
+        self.assertEqual(il.live_sessions(), {"a"})
+
+    def test_a_row_with_a_non_string_session_id_is_dropped(self):
+        self.stub_run('[{"sessionId": "a"}, {"sessionId": 42}]')
+        self.assertEqual(il.live_sessions(), {"a"})
+
 
 class TestIncidentBudget(Base):
     """`incident_budget()`'s env parsing.
@@ -803,33 +1446,173 @@ class TestEscalateSkipsGoneStallIncidents(Base):
 
     def setUp(self):
         super().setUp()
-        self._live_sessions = il.live_sessions
-        self.live = set()
-        il.live_sessions = lambda: self.live
+        self._live_states = il.live_states
+        # ⚠️ A MAPPING now, not a set: `cmd_escalate` reads the per-row (status,
+        # state) pair, so a set stub would be inert and the leg would fall through
+        # to the host's real fleet. Empty means "every session absent".
+        self.live = {}
+        il.live_states = lambda: self.live
 
     def tearDown(self):
-        il.live_sessions = self._live_sessions
+        il.live_states = self._live_states
         super().tearDown()
 
-    def test_a_gone_stall_incident_posts_no_card(self):
+    def test_a_gone_stall_incident_posts_no_card_and_is_retired(self):
+        """No card, and NOT left pending: a pending skip re-lists and re-probes forever.
+
+        Left `pending` it sat in `share`'s all-time denominator with no possible
+        numerator, permanently depressing the one metric this ledger reports.
+        """
         self.open_incident(kind="stall", deadline_seconds=0)
         rc, out = self.run_cli("escalate", "--round-id", "r1")
         self.assertEqual(rc, 0)
         self.assertIn("gone sessions", out)
         self.assertEqual(self.posted, [])
         self.assertEqual(
-            self.records()[0]["outcome"], il.PENDING, "a skip is not an escalation"
+            self.records()[0]["outcome"], il.SKIPPED_GONE, "a skip is not an escalation"
         )
 
     def test_a_live_stall_incident_still_escalates(self):
         """Negative control: the gate must not disable escalation generally."""
-        self.live = {SESSION, SESSION[:8]}
+        self.live = {
+            SESSION: ("idle", "idle"),
+            SESSION[:8]: ("idle", "idle"),
+        }
         self.open_incident(kind="stall", deadline_seconds=0)
         rc, out = self.run_cli("escalate", "--round-id", "r1")
         self.assertEqual(rc, 0)
         self.assertIn("escalated", out)
         self.assertEqual(len(self.posted), 1)
         self.assertEqual(self.records()[0]["outcome"], il.TIMED_OUT)
+
+
+class TestEscalateMidCommandPredicate(Base):
+    """A session that is PRESENT is not necessarily a session PARKED on a human.
+
+    `live_sessions()` answers only "is the session listed", so a session that is
+    present but mid-command passed the gone-gate and got a card for a blocker it had
+    already moved past — measured 2026-10-29, roughly two thirds of a live fleet
+    reads `shell` or `busy` at any moment.
+
+    ⚠️ **The `H` and `I` rows are the reason this suite exists.** They make the
+    registry `status` and the heartbeat `state` disagree in BOTH directions, so no
+    single-field predicate satisfies the set: a status-only reading suppresses `H`,
+    a state-only reading suppresses `E`. Without them the heartbeat half of the
+    predicate could ship untested and every other case would still pass.
+    """
+
+    A = "aaaa0000-1111-2222-3333-444444444444"
+    B = "bbbb0000-1111-2222-3333-444444444444"
+    C = "cccc0000-1111-2222-3333-444444444444"
+    D = "dddd0000-1111-2222-3333-444444444444"
+    E = "eeee0000-1111-2222-3333-444444444444"
+    F = "ffff0000-1111-2222-3333-444444444444"
+    G = "99990000-1111-2222-3333-444444444444"
+    H = "88880000-1111-2222-3333-444444444444"
+    I = "77770000-1111-2222-3333-444444444444"
+
+    def setUp(self):
+        super().setUp()
+        # This class proves the mid-command PREDICATE, not the per-round cap. Its
+        # largest fixture has six due rows of which five must escalate in ONE round,
+        # so the default budget of 3 would fail it for a reason it is not testing.
+        os.environ["SUPERVISOR_INCIDENT_STALL_BUDGET"] = "10"
+        self._live_states = il.live_states
+        self.states = {}
+        il.live_states = lambda: self.states
+
+    def tearDown(self):
+        il.live_states = self._live_states
+        super().tearDown()
+
+    def due_stall(self, sessions):
+        for sid in sessions:
+            self.open_incident(session=sid, kind="stall", deadline_seconds=0)
+
+    def escalated(self):
+        """The round's escalated set, as session ids — the criterion's observable."""
+        return sorted(key.split(":")[1] for key in self.posted)
+
+    def run_round(self):
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        return out
+
+    def test_a_mid_command_session_is_not_escalated_but_a_parked_one_is(self):
+        """SC1: `shell` suppressed, absent suppressed, `waiting-on-operator` escalated."""
+        self.due_stall([self.A, self.B, self.C])
+        self.states = {
+            self.A: ("shell", "busy"),           # mid-command
+            # self.B absent from the store entirely
+            self.C: ("", "waiting-on-operator"),  # parked via the heartbeat
+        }
+        self.run_round()
+        self.assertEqual(self.escalated(), [self.C])
+
+    def test_the_disposition_follows_the_reading_not_the_incidents_age(self):
+        """SC2: same incident, same registry status, only `state` changes.
+
+        ⚠️ The registry status stays `shell` in BOTH rounds on purpose. A fixture
+        that rewrote the whole row would be satisfied by an implementation that reads
+        only the registry; this one is not.
+        """
+        self.due_stall([self.A])
+        self.states = {self.A: ("shell", "busy")}
+        self.run_round()
+        self.assertEqual(self.escalated(), [], "mid-command must not escalate")
+
+        self.posted.clear()
+        self.states = {self.A: ("shell", "waiting-on-operator")}
+        self.run_round()
+        self.assertEqual(self.escalated(), [self.A], "the same row, now parked")
+
+    def test_busy_does_not_fall_through_and_every_parked_reading_escalates(self):
+        """SC3: the two-field precedence, which no single-field predicate satisfies."""
+        self.due_stall([self.D, self.E, self.F, self.G, self.H, self.I])
+        self.states = {
+            self.D: ("busy", "busy"),                  # mid-command
+            self.E: ("", "unstamped"),                 # no reading -> fail OPEN
+            self.F: ("waiting", ""),                   # registry parked, no state
+            self.G: ("", "waiting-on-operator"),       # heartbeat parked, no status
+            self.H: ("busy", "waiting-on-operator"),   # heartbeat BEATS a busy status
+            self.I: ("waiting", "busy"),               # parked status BEATS a busy state
+        }
+        self.run_round()
+        self.assertEqual(
+            self.escalated(),
+            sorted([self.E, self.F, self.G, self.H, self.I]),
+            "only the mid-command row is suppressed",
+        )
+
+    def test_a_failed_probe_escalates_unfiltered(self):
+        """An unreadable store is not evidence that anyone is mid-command.
+
+        ⚠️ **EVERY due incident escalates, including the absent one.** During an
+        outage the gate cannot tell a gone session from a working one, so it does
+        not judge at all — the same fail-open `live_sessions()` holds one function
+        up. That is also why this leg is a stronger discriminator than "the
+        mid-command row is escalated": an implementation that coerced `None` to `{}`
+        would escalate `A` and `C` but suppress `B`, and one that treated `None` as
+        "everything absent" would suppress all three.
+        """
+        il.live_states = lambda: None
+        self.due_stall([self.A, self.B, self.C])
+        self.run_round()
+        self.assertEqual(self.escalated(), sorted([self.A, self.B, self.C]))
+
+    def test_a_mid_command_incident_stays_pending_for_rejudgement(self):
+        """The suppression is a skip, not a retirement.
+
+        A mid-command session still exists, so its incident must be re-judged next
+        round. Retiring it (the gone-session outcome) would drop a live worker's
+        blocker permanently.
+        """
+        self.due_stall([self.A])
+        self.states = {self.A: ("shell", "busy")}
+        out = self.run_round()
+        self.assertIn("mid-command", out)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+        self.assertIsNone(self.records()[0]["escalated_by"])
 
 
 class TestResume(Base):

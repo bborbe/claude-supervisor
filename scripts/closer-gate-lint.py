@@ -18,10 +18,24 @@ no-ask work: `~/.claude/CLAUDE.md` § After Opening a PR § PR Watch Guards pref
 non-production subtask with no `approve:` line. Each gate still costs the operator an
 action, and gates are the binding throughput constraint.
 
-⚠️ **The allow-list is DERIVED from those rules, not invented, and may not widen.** It is
-the verb vocabulary of the After Opening a PR rules. `gh pr merge` is deliberately absent:
-§ Execution Phase No Re-Ask says in terms that it does not weaken "merge", so a merge
-closer stays a gate. Adding a verb is an operator decision.
+⚠️ **The allow-list is DERIVED from those rules, not invented, and may not widen without
+an operator decision.** It is the verb vocabulary of the After Opening a PR rules, plus the
+no-ask verbs those rules name outright. Adding a verb is an operator decision, taken per
+closer class and recorded on the vault task that measured the class.
+
+⚠️ **`gh pr merge` is allow-listed in its plain form only** (operator decision 2026-10-30).
+§ After Opening a PR § Merge on Green says in terms to "merge without asking", which makes
+the plain merge no-ask in its own right; the earlier text here read § Execution Phase
+No Re-Ask's do-not-weaken list as keeping every merge gated, and the two rules were left
+contradicting each other. `--admin` stays gated — it bypasses branch protection — and that
+exclusion lives in `DENY`, checked before `ALLOW` is walked, because `match_allow` returns
+the first match: a per-pattern lookahead would let a body naming both `--admin` and
+another allow-listed verb through on the other entry. Pinned by
+`fixtures/closer-gate-lint/14-gh-pr-merge-admin.jsonl` and
+`15-session-close-with-admin-merge.jsonl`. Compaction and
+`git worktree remove` were measured in the same decision and deliberately left gated:
+neither has a no-ask basis in CLAUDE.md, so allow-listing either would mean writing a new
+rule first, not editing this list.
 
 ⚠️ **The matcher is verb-based and cannot verify the rule's own preconditions.** It cannot
 tell whether the subtask is written in the task file, or whether a `gh pr ready` is on an
@@ -88,6 +102,18 @@ ALLOW = (
     ("gh-pr-ready", re.compile(r"\bgh\s+pr\s+ready\b", re.IGNORECASE)),
     ("dark-factory-prompt-approve", re.compile(r"\bdark-factory\s+prompt\s+approve\b", re.IGNORECASE)),
     ("dark-factory-spec-approve", re.compile(r"\bdark-factory\s+spec\s+approve\b", re.IGNORECASE)),
+    ("vault-cli-session-close", re.compile(r"/vault-cli:session-close\b", re.IGNORECASE)),
+    ("gh-pr-merge", re.compile(r"\bgh\b.*\bpr\s+merge\b", re.IGNORECASE)),
+)
+
+# ⚠️ A GLOBAL deny, deliberately not a lookahead inside one ALLOW entry. `match_allow`
+# returns the FIRST match, so a body naming both `--admin` and another allow-listed verb
+# is released by the other entry and the admin bypass slips through — measured on
+# `approve: /vault-cli:session-close then gh pr merge 60 --merge --admin`, where the
+# session-close entry matched first. Checking here makes the exclusion independent of
+# ALLOW's order and of which verb the closer happens to name first.
+DENY = (
+    re.compile(r"--admin\b", re.IGNORECASE),
 )
 
 # ⚠️ The one prose alias, and it is measured rather than guessed: the observed pane-832
@@ -96,6 +122,16 @@ ALLOW = (
 PROSE_ALIASES = (
     ("coding-local-review", re.compile(r"\blocal review\b", re.IGNORECASE)),
 )
+
+# The precondition each allow-listed verb carries in the rules, named in the message.
+# ⚠️ The hook cannot verify any of these — it is verb-based by construction — so the
+# message says what to check rather than implying the check already happened. An entry
+# absent here carries no precondition the rules attach.
+WHEN = {
+    "gh-pr-merge": "the PR is bot-approved and its CI is green (§ After Opening a PR § Merge on Green)",
+    "gh-pr-ready": "the local review loop is clean, CI is green and origin/master is merged",
+    "vault-cli-session-close": "the task is terminal on disk (§ Async State Closer)",
+}
 
 
 def state_dir():
@@ -181,6 +217,9 @@ def match_allow(body):
     observed `/github-pr-watch` closer spells the verb as `` `watch` `` and names the
     command later in the same line.
     """
+    for pattern in DENY:
+        if pattern.search(body):
+            return None
     for name, pattern in ALLOW:
         if pattern.search(body):
             return name
@@ -237,14 +276,26 @@ def evaluate(payload, environ=None):
 def _message(reason, verb, matched):
     if reason != "allow-listed":
         return ""
-    return (
+    # ⚠️ The message must not assert the step is reversible. `gh pr merge` is
+    # irreversible, so the old "reversible, in-scope, non-production … keep the line if
+    # the action is irreversible" pair contradicted itself on the exact closer the
+    # allow-list now releases, and a careful model resolved it by keeping the gate —
+    # reinstating the cost the entry exists to remove. Name the precondition instead:
+    # it is the thing the rules actually attach, and the thing this hook cannot check.
+    lines = [
         f"closer-gate-lint: `{verb}:` names {matched}, which the global rules already "
-        "authorise for a reversible, in-scope, non-production step "
-        "(CLAUDE.md § Execution Phase No Re-Ask; § After Opening a PR).\n"
-        "Do not end the turn on an operator gate — perform the step now and continue. "
-        "Keep the `approve:`/`review:` line only if the action is production-touching, "
-        "irreversible, or outside this task's declared scope.\n"
-    )
+        "authorise for this step (CLAUDE.md § Execution Phase No Re-Ask; § After Opening "
+        "a PR; § Async State Closer).",
+    ]
+    when = WHEN.get(matched)
+    if when:
+        lines.append(
+            f"Precondition those rules attach, which this hook cannot check: {when}.")
+    lines.append(
+        "Verify the precondition, then perform the step now and continue — do not end the "
+        "turn on an operator gate. Keep the `approve:`/`review:` line only if the "
+        "precondition does not hold, or the action is outside this task's declared scope.")
+    return "\n".join(lines) + "\n"
 
 
 def _bare_record(reason):

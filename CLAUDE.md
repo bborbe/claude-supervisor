@@ -148,7 +148,7 @@ commands/attention-next.md + scripts/attention-answer.py  answer an attention it
 commands/{fleet-loop,fleet-status}.md            fleet surface — many sessions; the loop's arm and its read-only snapshot
 commands/fleet-drive.md                          fleet surface — the loop's round, dispatched on every wakeup and runnable by hand
 commands/{topic-loop,topic-status}.md    one TOPIC — the loop's arm and its read-only goal snapshot
-commands/topic-drive.md                  one TOPIC — the loop's round: keep goal managers alive, start what the ranking admits
+commands/topic-drive.md                  one TOPIC — the loop's round: keep goal managers alive, start only goals the operator flagged
 commands/topic-spawn.md                  one TOPIC — start ONE goal manager; holds no spawn tool, delegates to /supervisor:open --goal
 commands/topic-verify.md                 topic manager — verify one topic, suggest fixes
 commands/{goal-loop,goal-status}.md      one GOAL — the loop's arm and its read-only task snapshot
@@ -169,6 +169,7 @@ commands/ready.md                                ready ONE named task to the bar
 commands/stop.md                                 stand that loop down
 commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
 docs/fleet-surface.md                            spawn shape + fleet table render spec (canonical)
+docs/closer-classes.md                           the CLOSERS class vocabulary, the routine-continue table and the digest join rule (canonical)
 docs/sweep-output.md                             the manager sweep's output frame — columns, widths, icons (canonical)
 docs/session-tiers.md                            session tiers + command → tier table (canonical)
 docs/subject-resolution.md                      the four-source subject chain the eight manager commands share
@@ -181,7 +182,8 @@ scripts/manager-predispatch.py                   the pre-dispatch gate both mana
 scripts/plugin-version-census.py                 the fleet reading of the plugin-install probe — who is stale, and `--reload` the lever that moves them
 scripts/approved-not-started.py                  the approved-but-unstarted reading both loops print (tick = 30 min constant; `unknown`, never `0`, on an unreadable registry)
 scripts/adopt-orphans.py                         adopts an exited manager's live workers into the ownership-claim store (/fleet-loop Step 3a) — successor-by-subject, else the tick session
-scripts/gate-owner-filter.py                     the ownership-scoped attention arm — drops gates a live peer manager owns (state: ~/.claude/state/gate-feed/<self-session-id>.json)
+scripts/gate-owner-filter.py                     the ownership-scoped attention arm — drops gates a live peer manager owns, excludes gates the vault says belong to another goal (state: ~/.claude/state/gate-feed/<self-session-id>.json)
+scripts/session-scope.py                         that arm's durable ownership input — which goal a session belongs to, from the vault's page stamps (not a live store)
 commands/read-guides.md                          load every guide in docs/
 scripts/{jump,who-needs-me}.py                   their helpers
 agents/goal-wrangler.md                routine approval loop over headless workers

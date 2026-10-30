@@ -259,6 +259,12 @@ PARK_AGE_THRESHOLDS = (15, 60)
 # because it was filed from a registry-`waiting` incident; its stated guarantee —
 # *even when the store is lossy, a tracked worker's park must not go unescalated*
 # — is not limited to the reasons that incident happened to show.
+#
+# ⚠️ **`registry:waiting` is also how a verb-carrying `🔴 BLOCKED` closer arrives**
+# since `stuck_reason` stopped reading that panel as a stall: such a worker is
+# parked on its own closer, so the gate falls through to the registry branch and
+# this set picks it up — which is what makes the closer's own card the only one it
+# gets (the re-post is suppressed while that card is open).
 PARKED_REASONS = ("registry:waiting", "busy+parked-modal", "headless+closer")
 
 # Which incident kind a raised gate records. EVERY reason that can reach `NEW GATE`
@@ -282,6 +288,14 @@ INCIDENT_KIND_BY_REASON = {
 
 #: `stuck:` is a headless worker, `stuck-tab:` a registered one — both are a stall:
 #: the worker is not moving, which is a duration rather than a gate someone can answer.
+#:
+#: ⚠️ **A `blocked-closer` cause reaches here only when the closer was VERBLESS**
+#: (`stuck_reason`). A `🔴 BLOCKED` panel carrying an answerable `👤 You:` verb is a
+#: park, so it arrives as `registry:waiting` (records `permission`) or `idle+closer`
+#: (records nothing) instead of a `stall`. That matters because a stall has no
+#: answer path and therefore no close path — filing a settled park as one made the
+#: record escalate-only. `stream-closed` and `permission-failures` are untouched: a
+#: dead channel is a stall whoever wrote the last panel.
 STALL_REASON_PREFIXES = ("stuck:", "stuck-tab:")
 
 
@@ -785,12 +799,28 @@ def stuck_reason(text, tail):
     `blocked-closer` matches the state line as a line PREFIX: the phrase also occurs
     mid-line in a worker's prose about it, and a substring match would fire on a
     worker that is merely discussing a block.
+
+    ⚠️ **`blocked-closer` is the VERBLESS closer, and that is the discriminator.**
+    A `🔴 BLOCKED` line accompanied by an answerable `👤 You:` verb is a worker
+    that reached its own closer and told the operator where to answer — parked,
+    not stuck — so it deliberately does NOT match here, and the gate falls through
+    to the registry branch (`registry:waiting` / `idle+closer`), a park reason
+    that already exists and already routes to the operator. Only a closer whose
+    panel reads `nothing` (or carries no `👤 You:` line at all) means nobody was
+    told, and only that one keeps this cause and keeps escalating.
+
+    ⚠️ **`stream-closed` and `permission-failures` are unaffected**, and their
+    positions on either side of this limb are what says so: a dead channel and an
+    exhausted retry run are stuck whoever wrote the last panel, so a verb-carrying
+    closer sitting on a three-failure run still reads `permission-failures`.
     """
     outcomes = permission_outcomes(tail)
     run = trailing_failures(outcomes)
     if run and any(sc for _, sc in outcomes[len(outcomes) - run:]):
         return "stream-closed"
-    if text and any(l.strip().startswith(BLOCKED_PREFIX) for l in text.splitlines()):
+    if (text
+            and any(l.strip().startswith(BLOCKED_PREFIX) for l in text.splitlines())
+            and not is_ask(closer_body(text))):
         return "blocked-closer"
     if run >= STUCK_PERM_FAILURES:
         return "permission-failures"

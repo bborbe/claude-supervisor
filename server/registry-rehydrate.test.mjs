@@ -499,3 +499,14 @@ test('the in-process map is not mutated', () => {
   assert.equal(inProcess.size, 1)
   assert.equal(inProcess.get('agent_1').label, 'mine')
 })
+
+// A silent field loss here is the class this module's own comments warn about: the ledger
+// carries `wrapper_session_id`, and a mapping that does not read it leaves an adopted row
+// unable to see or answer a park the wrapper is holding for it.
+test('an adopted row keeps the wrapper session it was spawned under', () => {
+  const agent = toAgentRecord({ session_id: 's-1', agent_id: 'agent_1', mode: 'headless', wrapper_session_id: 'w-1' })
+  assert.equal(agent.wrapperSessionId, 'w-1')
+  // A pre-field record and a genuinely non-wrapper worker are the same absence on the ledger —
+  // which is why `rehydrated` marks the row rather than this field trying to say which it is.
+  assert.equal(toAgentRecord({ session_id: 's-1', agent_id: 'agent_1', mode: 'headless' }).wrapperSessionId, null)
+})
