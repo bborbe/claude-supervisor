@@ -1669,5 +1669,152 @@ class FeedStateSurvivesTheReArm(unittest.TestCase):
         self.assertFalse(os.path.exists(self.feed_state), os.listdir(self.dir))
 
 
+class _FakeScope:
+    """The narrowest stand-in for `session-scope.Scope`: one answer per session id."""
+
+    def __init__(self, answers):
+        self.answers = answers
+
+    def exclusion(self, session_id, self_id):
+        return self.answers.get(session_id, (False, ""))
+
+
+class ScopeExclusion(unittest.TestCase):
+    """The third verdict, branch by branch. It may only turn an EMIT into an EXCLUDE."""
+
+    LEDGER = {"worker-1": {"session_id": "worker-1", "parent_session": "manager-x"}}
+    LIVE = {"worker-1", "manager-x", "manager-y"}
+
+    def call(self, session_id, spawner, scope, ledger=_UNSET, live=_UNSET):
+        return gf.verdict(
+            session_id,
+            spawner,
+            self.LEDGER if ledger is _UNSET else ledger,
+            self.LIVE if live is _UNSET else live,
+            ME,
+            None,
+            scope,
+        )
+
+    def test_a_foreign_session_is_excluded_and_names_its_goal(self):
+        scope = _FakeScope({"w": (True, "foreign-goal:Some Other Goal")})
+        self.assertEqual(self.call("w", "nobody", scope),
+                         (gf.EXCLUDE, "foreign-goal:Some Other Goal"))
+
+    def test_an_owner_unknown_session_is_excluded_too(self):
+        scope = _FakeScope({"w": (True, "owner-unknown")})
+        self.assertEqual(self.call("w", "nobody", scope), (gf.EXCLUDE, "owner-unknown"))
+
+    def test_a_scoped_own_session_falls_through_to_the_spawner_path(self):
+        """Own is not a verdict — it leaves every existing rule exactly as it was.
+
+        Asserted against the UNSCOPED answer for the same inputs, so the pin is the property
+        rather than a ledger row this test happens to carry.
+        """
+        scope = _FakeScope({})
+        for session_id, spawner in (("w", "manager-y"), ("worker-1", "manager-x"), ("w", None)):
+            self.assertEqual(
+                self.call(session_id, spawner, scope),
+                self.call(session_id, spawner, None),
+                (session_id, spawner),
+            )
+
+    def test_no_scope_changes_nothing(self):
+        self.assertEqual(self.call("w", "manager-y", None), (gf.DROP, "peer-manager"))
+
+    def test_a_pane_this_watcher_spawned_is_never_excluded(self):
+        """`own-worker` returns above the scope check: these are the panes it EXISTS to see."""
+        scope = _FakeScope({"w": (True, "foreign-goal:Some Other Goal")})
+        self.assertEqual(self.call("w", ME, scope), (gf.EMIT, "own-worker"))
+
+    def test_the_asking_session_is_never_excluded(self):
+        scope = _FakeScope({ME: (True, "foreign-goal:Some Other Goal")})
+        self.assertEqual(self.call(ME, "manager-y", scope), (gf.EMIT, "self"))
+
+    def test_the_scope_outranks_a_spawn_edge_drop_for_a_foreign_pane(self):
+        """The durable answer wins, and it is the only one that names the real owner."""
+        scope = _FakeScope({"w": (True, "foreign-goal:Some Other Goal")})
+        self.assertEqual(self.call("w", "manager-y", scope),
+                         (gf.EXCLUDE, "foreign-goal:Some Other Goal"))
+
+
+class ForeignGoalFixture(unittest.TestCase):
+    """The five measured foreign firings, replayed end to end through the CLI.
+
+    Fixture: `scripts/tests/fixtures/gate-owner-foreign-goal/`. The stub registry holds only
+    this manager, so every foreign spawner reads `dead-manager` — the firing-time shape, where
+    the live ownership chain does not resolve and the filter used to emit every foreign gate.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util as ilu
+
+        path = os.path.join(_HERE, "fixtures", "gate-owner-foreign-goal", "replay.py")
+        spec = ilu.spec_from_file_location("foreign_goal_replay", path)
+        cls.replay = ilu.module_from_spec(spec)
+        spec.loader.exec_module(cls.replay)
+        cls.scoped = cls.replay.run(scope=True)
+        cls.unscoped = cls.replay.run(scope=False)
+
+    def rows(self, result="json"):
+        return json.loads(self.scoped[result].stdout)
+
+    def by_pane(self):
+        return {row["pane"]: row for row in self.rows()}
+
+    def test_the_five_foreign_panes_leave_the_feed(self):
+        self.assertEqual(self.scoped["feed"].stdout.split(), [self.replay.CONTROL],
+                         self.scoped["feed"].stdout)
+
+    def test_the_own_worker_control_still_emits(self):
+        """Without this the fixture would pass on a filter that excludes everything."""
+        self.assertEqual(self.by_pane()[self.replay.CONTROL]["verdict"], gf.EMIT)
+        self.assertEqual(self.by_pane()[self.replay.CONTROL]["reason"], "own-worker")
+
+    def test_all_six_rows_survive_in_json(self):
+        """A pane missing from `--json` is a FAIL: a silent drop is what a fixed row looks like."""
+        self.assertEqual(
+            set(self.by_pane()),
+            set(self.replay.FOREIGN) | {self.replay.CONTROL},
+        )
+
+    def test_each_foreign_row_names_its_owner(self):
+        expected = {
+            "269": "foreign-goal:PR Reviews Return a Verdict Within Minutes, Not Hours",
+            "260": "foreign-goal:All Octopus Builds Green on Dev, Staging, and Master",
+            "272": "owner-unknown",
+            "278": "foreign-goal:Every Recurring Task Is Structurally Valid and Linked to a Runbook",
+            "279": "owner-unknown",
+        }
+        rows = self.by_pane()
+        for pane, reason in expected.items():
+            self.assertEqual(rows[pane]["verdict"], gf.EXCLUDE, rows[pane])
+            self.assertEqual(rows[pane]["reason"], reason, rows[pane])
+
+    def test_counts_line_reports_an_exclusion_apart_from_a_drop(self):
+        stderr = self.scoped["feed"].stderr
+        self.assertIn("excluded(foreign-goal): 3", stderr)
+        self.assertIn("excluded(owner-unknown): 2", stderr)
+        self.assertIn("dropped(peer-manager): 0", stderr)
+        self.assertIn("emit: 1", stderr)
+
+    def test_without_the_scope_input_every_row_is_emitted(self):
+        """The before-reading, pinned in-tree: the same fixture, the pre-fix path."""
+        self.assertEqual(
+            self.unscoped["feed"].stdout.split(),
+            list(self.replay.FOREIGN) + [self.replay.CONTROL],
+            self.unscoped["feed"].stdout,
+        )
+        self.assertIn("emit: 6", self.unscoped["feed"].stderr)
+        self.assertIn("excluded(foreign-goal): 0", self.unscoped["feed"].stderr)
+
+    def test_the_pre_fix_path_prints_the_same_five_the_task_measured(self):
+        """5 of 5 — not "at least one", and not a single case."""
+        printed = self.unscoped["feed"].stdout.split()
+        self.assertEqual([pane for pane in printed if pane in self.replay.FOREIGN],
+                         list(self.replay.FOREIGN))
+
+
 if __name__ == "__main__":
     unittest.main()
