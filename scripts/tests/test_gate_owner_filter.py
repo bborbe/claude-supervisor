@@ -1738,5 +1738,83 @@ class ScopeExclusion(unittest.TestCase):
                          (gf.EXCLUDE, "foreign-goal:Some Other Goal"))
 
 
+class ForeignGoalFixture(unittest.TestCase):
+    """The five measured foreign firings, replayed end to end through the CLI.
+
+    Fixture: `scripts/tests/fixtures/gate-owner-foreign-goal/`. The stub registry holds only
+    this manager, so every foreign spawner reads `dead-manager` — the firing-time shape, where
+    the live ownership chain does not resolve and the filter used to emit every foreign gate.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util as ilu
+
+        path = os.path.join(_HERE, "fixtures", "gate-owner-foreign-goal", "replay.py")
+        spec = ilu.spec_from_file_location("foreign_goal_replay", path)
+        cls.replay = ilu.module_from_spec(spec)
+        spec.loader.exec_module(cls.replay)
+        cls.scoped = cls.replay.run(scope=True)
+        cls.unscoped = cls.replay.run(scope=False)
+
+    def rows(self, result="json"):
+        return json.loads(self.scoped[result].stdout)
+
+    def by_pane(self):
+        return {row["pane"]: row for row in self.rows()}
+
+    def test_the_five_foreign_panes_leave_the_feed(self):
+        self.assertEqual(self.scoped["feed"].stdout.split(), [self.replay.CONTROL],
+                         self.scoped["feed"].stdout)
+
+    def test_the_own_worker_control_still_emits(self):
+        """Without this the fixture would pass on a filter that excludes everything."""
+        self.assertEqual(self.by_pane()[self.replay.CONTROL]["verdict"], gf.EMIT)
+        self.assertEqual(self.by_pane()[self.replay.CONTROL]["reason"], "own-worker")
+
+    def test_all_six_rows_survive_in_json(self):
+        """A pane missing from `--json` is a FAIL: a silent drop is what a fixed row looks like."""
+        self.assertEqual(
+            set(self.by_pane()),
+            set(self.replay.FOREIGN) | {self.replay.CONTROL},
+        )
+
+    def test_each_foreign_row_names_its_owner(self):
+        expected = {
+            "269": "foreign-goal:PR Reviews Return a Verdict Within Minutes, Not Hours",
+            "260": "foreign-goal:All Octopus Builds Green on Dev, Staging, and Master",
+            "272": "owner-unknown",
+            "278": "foreign-goal:Every Recurring Task Is Structurally Valid and Linked to a Runbook",
+            "279": "owner-unknown",
+        }
+        rows = self.by_pane()
+        for pane, reason in expected.items():
+            self.assertEqual(rows[pane]["verdict"], gf.EXCLUDE, rows[pane])
+            self.assertEqual(rows[pane]["reason"], reason, rows[pane])
+
+    def test_counts_line_reports_an_exclusion_apart_from_a_drop(self):
+        stderr = self.scoped["feed"].stderr
+        self.assertIn("excluded(foreign-goal): 3", stderr)
+        self.assertIn("excluded(owner-unknown): 2", stderr)
+        self.assertIn("dropped(peer-manager): 0", stderr)
+        self.assertIn("emit: 1", stderr)
+
+    def test_without_the_scope_input_every_row_is_emitted(self):
+        """The before-reading, pinned in-tree: the same fixture, the pre-fix path."""
+        self.assertEqual(
+            self.unscoped["feed"].stdout.split(),
+            list(self.replay.FOREIGN) + [self.replay.CONTROL],
+            self.unscoped["feed"].stdout,
+        )
+        self.assertIn("emit: 6", self.unscoped["feed"].stderr)
+        self.assertIn("excluded(foreign-goal): 0", self.unscoped["feed"].stderr)
+
+    def test_the_pre_fix_path_prints_the_same_five_the_task_measured(self):
+        """5 of 5 — not "at least one", and not a single case."""
+        printed = self.unscoped["feed"].stdout.split()
+        self.assertEqual([pane for pane in printed if pane in self.replay.FOREIGN],
+                         list(self.replay.FOREIGN))
+
+
 if __name__ == "__main__":
     unittest.main()
