@@ -41,12 +41,18 @@ import importlib.util
 import os
 import sys
 import time
+from datetime import date
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TASKS_DIR = "25 Tasks"
 RESUME_CAP = 3
 RESUME_WINDOW = 30 * 60  # seconds
 TERMINAL = {"completed", "aborted"}
+#: A parked worker is not a dead one. `hold` is a deliberate pause, `human_review` is
+#: waiting on the operator, and a future `defer_date` is a snooze — resuming any of them
+#: would undo a decision rather than recover from a death.
+PARKED_STATUS = {"hold", "blocked"}
+PARKED_PHASE = {"human_review"}
 
 
 _KEEPALIVE = None
@@ -125,6 +131,16 @@ def main(argv: list[str]) -> int:
     if status in TERMINAL:
         print("jump")
         print(f"task is {status}; nothing to resume")
+        return 0
+    phase = k.scalar(fm, "phase")
+    if status in PARKED_STATUS or phase in PARKED_PHASE:
+        print("jump")
+        print(f"task is parked (status {status}, phase {phase}); a park is not a death")
+        return 0
+    defer = k.scalar(fm, "defer_date")[:10]
+    if defer and defer > date.today().isoformat():
+        print("jump")
+        print(f"task is deferred to {defer}; a snooze is not a death")
         return 0
     if open_boxes(text) == 0:
         print("jump")

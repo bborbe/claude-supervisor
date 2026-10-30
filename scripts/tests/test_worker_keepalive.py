@@ -119,6 +119,32 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.assertEqual(1, rc)
         self.assertEqual("cannot-tell", out[0])
 
+    # --- a park is not a death ------------------------------------------------
+
+    def test_a_held_task_is_not_resumed(self):
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "status: in_progress", "status: hold"))
+        rc, out = self.run_it(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("jump", out[0])
+        self.assertIn("parked", out[1])
+
+    def test_a_task_in_human_review_is_not_resumed(self):
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution", "phase: human_review"))
+        rc, out = self.run_it(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("jump", out[0])
+        self.assertIn("parked", out[1])
+
+    def test_a_deferred_task_is_not_resumed(self):
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution", "phase: execution\ndefer_date: \"2999-01-01\""))
+        rc, out = self.run_it(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("jump", out[0])
+        self.assertIn("deferred", out[1])
+
     # --- the cap --------------------------------------------------------------
 
     def test_fourth_resume_inside_the_window_is_a_crash_loop(self):
