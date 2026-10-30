@@ -37,10 +37,22 @@ missed stand-down, not a false one.
 **Quiet shapes**, each read from frontmatter or the blocker resolver, never inferred:
 
   * `status` in `completed` / `aborted`  -> TERMINAL, excluded from the set entirely
-  * `status` in `next` / `backlog` / `hold` -> not surfaced; the manager drives none
+  * `status` in `backlog` / `hold`       -> not surfaced; the manager drives none
+  * `phase` is `todo`                    -> waiting-approval; the operator's boundary
   * `defer_date` on a future date        -> deferred
   * `blocked_by` with an unmet entry     -> blocked (`blocked_by_verdict`, reused)
   * anything else                        -> RUNNABLE
+
+⚠️ **`status: next` is RUNNABLE, and that is deliberate.** `vault-cli task approve`
+writes `phase: todo -> planning` and leaves `status` at `next` — "the row stays queued,
+not owned" (commit `1804f59`, 2026-10-09). Counting `next` quiet here made a subject
+full of approved rows read as *empty* to the stand-down counter: two ticks later the
+manager retired itself and drove none of them, which is the loss this script exists to
+prevent. The approval boundary is `phase: todo`, not `status: next`, because `phase` is
+the field `approve` actually moves. This mirrors `sweep-gate.py`'s `_classify`, whose
+ready-to-start arm is `status == "next" or (in_progress and phase == "planning")` — the
+runbook's rule is that the two renderers must agree, and this file was the third copy
+that did not.
 
 The readers are `manager-predispatch.py`'s, loaded by path rather than re-implemented:
 `split_frontmatter`, `fm_scalar`, `blocked_by_verdict`, `resolve_tracked`. A second
@@ -75,9 +87,22 @@ STATE_DIR = os.path.expanduser(
 
 TERMINAL_STATUSES = frozenset({"completed", "aborted"})
 # Not surfaced: the manager drives none of these, so they are quiet rather than runnable.
-# `next` is queued-not-surfaced, `backlog` is someday, `hold` is paused with no resume
-# date — the vault's own Task Status Semantics.
-UNSURFACED_STATUSES = frozenset({"next", "backlog", "hold"})
+# `backlog` is someday and `hold` is paused with no resume date — the vault's own Task
+# Status Semantics.
+#
+# ⚠️ **`next` is NOT in this set.** `vault-cli task approve` writes `phase: todo ->
+# planning` and deliberately leaves `status` at `next` ("the row stays queued, not
+# owned"), so an approved, never-started row carries `status: next`. Counting it quiet
+# here made a subject full of approved rows read as empty, and the stand-down counter
+# then retired the manager that had just approved them. The approval boundary moved to
+# `UNAPPROVED_PHASE` below, which is the field `approve` actually writes.
+UNSURFACED_STATUSES = frozenset({"backlog", "hold"})
+
+# The operator's approval boundary, mirroring `sweep-gate.py`'s `_classify`: a row at
+# `phase: todo` is waiting on a human by construction — agents file there and stop, and
+# the operator's `todo -> planning` flip IS the approval. It must read quiet even though
+# it now carries `status: next`, which the set above no longer covers.
+UNAPPROVED_PHASE = "todo"
 
 EXIT_OK = 0
 EXIT_UNREADABLE = 2
@@ -239,6 +264,9 @@ def classify(fm: str, tasks_dir: str, index, today_key) -> dict:
     if status in TERMINAL_STATUSES:
         return {"kind": "terminal", "defer": None, "blocked": []}
     if status in UNSURFACED_STATUSES:
+        return {"kind": "quiet", "defer": None, "blocked": []}
+    phase = (pd.fm_scalar(fm, "phase") or "").strip().lower()
+    if phase == UNAPPROVED_PHASE:
         return {"kind": "quiet", "defer": None, "blocked": []}
     raw_due = pd.fm_scalar(fm, "defer_date")
     due = _date_key(raw_due)
