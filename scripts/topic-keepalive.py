@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
-"""The topic tier's keep-alive: is this goal's manager running, and may we resume it?
+"""The topic tier's keep-alive: is this subject's manager running, and may we resume it?
+
+Serves **both** branches. `--branch goal` (the default) keeps a goal manager alive and reads
+`24 Goals`; `--branch topic` keeps a topic manager alive and reads `23 Topics`. The two differ
+only in which directory the subject page comes from and which cadence file is read — the
+field, the verdicts and the cap are identical, so a second script would have been a copy.
 
 Two independent signals are read every time, because neither answers the other's question:
 
-  1. **Is a session there?** The goal page's `manager_session_id`, probed with
+  1. **Is a session there?** The subject page's `manager_session_id`, probed with
      `session-liveness.py --check`. `LIVE` (0) / `ABSENT` (1) / `UNKNOWN` (2) /
      `AMBIGUOUS` (3) / `MALFORMED` (4). Only `ABSENT` licenses a resume: `UNKNOWN` and
      `AMBIGUOUS` are **cannot tell**, never dead.
-  2. **Is its loop armed?** `manager-liveness.py --state --subject <goal> --branch goal`
+  2. **Is its loop armed?** `manager-liveness.py --state --subject <subject> --branch goal|topic`
      → `OK` / `STALE` / `STOPPED` / `UNARMED` / `INVALID`. This is the signal a liveness
      probe structurally cannot give — a manager process can be alive with its loop unarmed
      after a missed re-arm. `STOPPED` is a deliberate stand-down and is left alone.
      ⚠️ `UNARMED` (no record under either name) is **not** restart-worthy and must not be
      folded into `INVALID`: a restart resumes a session that never armed a loop, so it
      cannot create the record. It reads as `jump` for a live session — the lever is
-     `/supervisor:goal-loop`, which arms.
+     `/supervisor:goal-loop` (or `/supervisor:topic-loop`), which arms.
 
 The first line of stdout is the verdict, one token:
 
@@ -49,7 +54,7 @@ import sys
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GOALS_DIR = "24 Goals"
+DIRS = {"goal": "24 Goals", "topic": "23 Topics"}
 RESUME_CAP = 3
 RESUME_WINDOW = 30 * 60  # seconds
 
@@ -70,11 +75,11 @@ def base_slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
 
 
-def state_path(vault: str, goal: str) -> str:
+def state_path(vault: str, subject: str, branch: str = "goal") -> str:
     name = os.path.basename(vault.rstrip(os.sep)) or "vault"
     directory = os.path.expanduser(os.path.join("~/.claude/state/manager-resumes", name))
     os.makedirs(directory, exist_ok=True)
-    return os.path.join(directory, f"goal--{base_slug(goal)}.json")
+    return os.path.join(directory, f"{branch}--{base_slug(subject)}.json")
 
 
 def load_resumes(path: str) -> list[float]:
@@ -111,10 +116,10 @@ def session_verdict(sid: str) -> str:
     return "UNKNOWN"  # an unparseable answer is cannot-tell, never death
 
 
-def cadence(goal: str) -> str:
+def cadence(subject: str, branch: str = "goal") -> str:
     probe = subprocess.run(
         [sys.executable, os.path.join(REPO, "scripts", "manager-liveness.py"),
-         "--state", "--subject", goal, "--branch", "goal"],
+         "--state", "--subject", subject, "--branch", branch],
         capture_output=True, text=True,
     )
     first = (probe.stdout.splitlines() or [""])[0]
@@ -125,7 +130,10 @@ def cadence(goal: str) -> str:
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--vault", required=True, help="the vault ROOT path")
-    ap.add_argument("--goal", required=True)
+    ap.add_argument("--subject", "--goal", dest="subject", required=True,
+                    help="the goal or topic name; --goal is kept as an alias")
+    ap.add_argument("--branch", choices=("goal", "topic"), default="goal",
+                    help="which tier's subject page and cadence to read (default: goal)")
     ap.add_argument("--record-resume", metavar="SESSION_ID",
                     help="record a resume that the liveness instrument confirmed LIVE")
     ap.add_argument("--now", type=float, help="epoch seconds (tests only)")
@@ -133,7 +141,8 @@ def main(argv: list[str]) -> int:
 
     now = a.now if a.now is not None else time.time()
     vault = os.path.abspath(os.path.expanduser(a.vault))
-    path = state_path(vault, a.goal)
+    path = state_path(vault, a.subject, a.branch)
+    opener = "--topic" if a.branch == "topic" else "--goal"
 
     # A confirmed resume is recorded and nothing else — the caller has already acted.
     if a.record_resume:
@@ -146,23 +155,23 @@ def main(argv: list[str]) -> int:
         return 0
 
     goal_page = None
-    directory = os.path.join(vault, GOALS_DIR)
+    directory = os.path.join(vault, DIRS[a.branch])
     try:
         for entry in os.listdir(directory):
-            if entry.lower() == a.goal.lower() + ".md":
+            if entry.lower() == a.subject.lower() + ".md":
                 goal_page = os.path.join(directory, entry)
                 break
     except OSError:
         goal_page = None
     if not goal_page:
         print("cannot-tell")
-        print(f"no goal page at {directory}/{a.goal}.md")
+        print(f"no {a.branch} page at {directory}/{a.subject}.md")
         return 1
     with open(goal_page, encoding="utf-8") as fh:
         fm = frontmatter(fh.read())
     sid = scalar(fm, "manager_session_id")
 
-    loop = cadence(a.goal)
+    loop = cadence(a.subject, a.branch)
 
     if loop == "STOPPED":
         print("leave")
@@ -171,7 +180,7 @@ def main(argv: list[str]) -> int:
 
     if not sid:
         print("resume")
-        print("no manager_session_id recorded — start one with /supervisor:open --goal")
+        print(f"no manager_session_id recorded — start one with /supervisor:open {opener}")
         return 0
 
     live = session_verdict(sid)
@@ -193,11 +202,11 @@ def main(argv: list[str]) -> int:
     spent = len(recent(load_resumes(path), now))
     if spent >= RESUME_CAP:
         print("crash-loop")
-        print(f"⚠️ MANAGER CRASH-LOOP: {a.goal} — {spent} resumes in 30 min; stop restarting")
+        print(f"⚠️ MANAGER CRASH-LOOP: {a.subject} — {spent} resumes in 30 min; stop restarting")
         return 1
     print("resume")
     print(f'session {sid} is ABSENT (cadence {loop}); resume with '
-          f'/supervisor:open --goal "{a.goal}" — attempt {spent + 1} of {RESUME_CAP}')
+          f'/supervisor:open {opener} "{a.subject}" — attempt {spent + 1} of {RESUME_CAP}')
     return 0
 
 
