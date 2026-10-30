@@ -554,6 +554,54 @@ class TaskVerbGateTest(unittest.TestCase):
         self.assertNotIn("Whole page", out)
 
 
+class DivergenceClassTest(unittest.TestCase):
+    """Every class where `_BOX` and `_VERB_BOX` disagree is pinned on BOTH sides.
+
+    The reader's own `_BOX` and the verb gate's `_VERB_BOX` are deliberately different
+    regexes, and that divergence is the whole reason `verb_open_boxes` exists. Each test
+    below asserts the count on both sides, so an edit to either regex fails here instead
+    of silently moving the verdict away from `vault-cli task complete`. Asserting only the
+    verb's count — the first version of these tests — leaves an edit to `_BOX` unpinned.
+
+    The classes are derived from the two literals rather than hand-picked: `_BOX` takes
+    `[-*+]` with `[ \\t]*` before the box and any marker char, and needs no text after it;
+    `_VERB_BOX` takes `[-*]` with exactly one space and `[ x/]`, and requires `(.+)`.
+    """
+
+    @staticmethod
+    def _reader_open(text):
+        """Open boxes by the reader's own `_BOX` — the counterpart of `verb_open_boxes`."""
+        return sum(1 for marker in closure._BOX.findall(text) if marker not in closure._DONE)
+
+    def _assert_diverges(self, box):
+        page = _page("- [x] a", "- [x] b") + f"\n# Tasks\n\n{box}\n"
+        self.assertEqual(self._reader_open(page), 1, f"{box!r} must read OPEN to _BOX")
+        self.assertEqual(
+            closure.verb_open_boxes(page), 0, f"{box!r} must NOT be counted by _VERB_BOX"
+        )
+
+    def test_plus_bullet(self):
+        self._assert_diverges("+ [ ] plus")
+
+    def test_separator_wider_than_one_space(self):
+        self._assert_diverges("-  [ ] two spaces")
+
+    def test_tab_separator(self):
+        self._assert_diverges("-\t[ ] tab")
+
+    def test_marker_outside_the_verb_class(self):
+        # `_BOX` takes any marker char; `_VERB_BOX` takes only `[ x/]`.
+        for box in ("- [?] question", "- [o] circle"):
+            with self.subTest(box=box):
+                self._assert_diverges(box)
+
+    def test_no_text_after_the_box(self):
+        # `_VERB_BOX` requires `(.+)` after the box; `_BOX` requires nothing.
+        for box in ("- [ ]", "- [ ] ", "- [ ]glued"):
+            with self.subTest(box=box):
+                self._assert_diverges(box)
+
+
 class CutoffDocumentationTest(unittest.TestCase):
     def test_the_closure_step_restates_the_cutoff_date(self):
         # DOD_REQUIRED_AS_OF is deliberately restated in the step doc. Nothing else

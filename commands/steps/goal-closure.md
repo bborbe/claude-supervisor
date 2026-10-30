@@ -50,6 +50,12 @@ For the subject, then each page of the tracked set:
    | `OPEN` | at least one box is open — for `--kind task`, anywhere on the page (`Whole page` line), since `vault-cli task complete` refuses on any open box | report which, close nothing |
    | `CLOSE` | both sections present, every box `[x]` — or an absent DoD on a grandfathered goal (see below) | step 2 |
 
+   ⚠️ **The `Whole page` line prints on every `--kind task` run, `0 open` included.** It is
+   the verb's own gate, not a section tally: `vault-cli task complete` refuses on any open
+   box anywhere on the page, `# Tasks` included. `Whole page (task complete's gate): 0 open`
+   is the **passing** reading. The line's absence from a `--kind task` output means the run
+   never reached the tally — it never means the gate does not apply.
+
    ⚠️ **`TERMINAL` is what stops a page being re-closed every tick.** The verb writes
    `status: completed` and leaves every box at `[x]`, so a page closed last tick satisfies the
    same predicate this tick — without this guard the round reports a close attempt forever.
