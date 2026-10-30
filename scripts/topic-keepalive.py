@@ -60,6 +60,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIRS = {"goal": "24 Goals", "topic": "23 Topics"}
 RESUME_CAP = 3
 RESUME_WINDOW = 30 * 60  # seconds
+PROBE_TIMEOUT = 30  # seconds; a hung liveness probe must not wedge the tick
 
 
 def frontmatter(text: str) -> str:
@@ -146,11 +147,18 @@ def session_verdict(sid: str) -> str:
     2026-10-30 on a killed manager: stdout `''`, stderr `'ABSENT — <id>'`, rc 1.
 
     An exit code outside the documented set is `UNKNOWN` — cannot-tell is never death.
+    ⚠️ **An unrunnable or hung probe is `UNKNOWN` too.** Without the guard a missing
+    interpreter or a stuck child raises out of this function and aborts the whole tick with a
+    traceback, instead of answering `cannot-tell` for the one subject being read. Same shape as
+    `scripts/crashed-managers.py`'s `session_state()`.
     """
-    probe = subprocess.run(
-        [sys.executable, os.path.join(REPO, "scripts", "session-liveness.py"), "--check", sid],
-        capture_output=True, text=True,
-    )
+    try:
+        probe = subprocess.run(
+            [sys.executable, os.path.join(REPO, "scripts", "session-liveness.py"), "--check", sid],
+            capture_output=True, text=True, timeout=PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "UNKNOWN"
     return VERDICT_BY_EXIT.get(probe.returncode, "UNKNOWN")
 
 
