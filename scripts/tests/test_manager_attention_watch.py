@@ -105,6 +105,19 @@ def assistant(text=None, tool=None, thinking=None):
     return {"type": "assistant", "message": {"content": content}}
 
 
+def user_result(content, is_error):
+    """One `user` record carrying a single `tool_result` block."""
+    return {"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "t1", "is_error": is_error,
+         "content": content}]}}
+
+
+STREAM_CLOSED_ERROR = "Tool permission request failed: AbortError: Stream closed"
+BLOCKED_HEAD = "🔴 BLOCKED · nothing running · needs intervention"
+BLOCKED_ASK = BLOCKED_HEAD + "\n👤 You: approve: merge it"
+BLOCKED_NOTHING = BLOCKED_HEAD + "\n👤 You: nothing"
+
+
 class Fixture:
     """A temp vault + transcript tree + registry, one tracked task."""
 
@@ -1777,6 +1790,13 @@ class IncidentKindTest(unittest.TestCase):
         self.assertEqual(watch.incident_kind("stuck:stream-closed"), "stall")
         self.assertEqual(watch.incident_kind("stuck-tab:no-writes"), "stall")
 
+    def test_blocked_closer_is_a_stall_only_for_the_verbless_closer(self):
+        # The cause still maps to `stall` — `stuck_reason` decides WHO reaches it,
+        # and it now hands over only a `👤 You: nothing` tail. A verb-carrying
+        # closer arrives as `registry:waiting` / `idle+closer` and never gets here,
+        # which is what takes a settled park off the answer-less stall path.
+        self.assertEqual(watch.incident_kind("stuck-tab:blocked-closer"), "stall")
+
     def test_held_reasons_record_nothing(self):
         for reason in ("unregistered", "held:busy", "held:shell", "headless:no-ask",
                        "idle:no-ask"):
@@ -1787,6 +1807,95 @@ class IncidentKindTest(unittest.TestCase):
         # would be a gate the ledger never hears about.
         for reason in watch.PARKED_REASONS:
             self.assertIsNotNone(watch.incident_kind(reason), reason)
+
+
+class BlockedCloserGateTest(unittest.TestCase):
+    """A `🔴 BLOCKED` closer carrying an answerable verb is a PARK, end to end.
+
+    `test_stuck.py` pins the predicate; this pins the CONSEQUENCE through a real
+    transcript fixture and the commit loop, which is where the incident is actually
+    written. `--once` returns before that write, so this drives `--max-polls` — the
+    same reason `CommitLoopTest` exists.
+
+    The two controls are the point, not decoration: the discriminator is *someone
+    was told*. A `👤 You: nothing` panel mints no card, so that worker is still
+    stuck and must still escalate; a dead permission channel is stuck whoever wrote
+    the last panel.
+    """
+
+    def _run(self, records, status):
+        fx = Fixture(records, status)
+        self.addCleanup(fx.cleanup)
+        opened, out = [], io.StringIO()
+        with mock.patch.object(watch, "open_incident",
+                               lambda sid, reason: opened.append((sid, reason))), \
+             mock.patch.object(watch, "open_store_items", lambda *a, **kw: None), \
+             mock.patch.object(watch, "resume_observer", lambda *a, **kw: None), \
+             mock.patch.object(watch.time, "sleep", lambda *_: None), \
+             redirect_stdout(out), redirect_stderr(io.StringIO()):
+            rc = watch.main(["--tracked", fx.tracked, "--tasks-dir", fx.tasks,
+                             "--projects-root", fx.projects,
+                             "--sessions-dir", fx.sessions,
+                             "--state", os.path.join(fx.dir, "state"),
+                             "--max-polls", "3"])
+        self.assertEqual(rc, 0)
+        return opened, out.getvalue()
+
+    def test_a_verb_carrying_closer_opens_no_stuck_incident(self):
+        opened, text = self._run([assistant(text=BLOCKED_ASK)], "waiting")
+        self.assertIn("registry:waiting", text)
+        self.assertTrue(opened, "the gate must still be raised: " + text)
+        self.assertEqual([r for _, r in opened if r.startswith("stuck")], [],
+                         "a parked closer must open no stuck incident: %r"
+                         % (opened,))
+        self.assertEqual(watch.incident_kind(opened[0][1]), "permission")
+
+    def test_a_verbless_closer_still_opens_a_stall_incident(self):
+        opened, text = self._run([assistant(text=BLOCKED_NOTHING)], "waiting")
+        self.assertIn("stuck-tab:blocked-closer", text)
+        self.assertEqual([r for _, r in opened], ["stuck-tab:blocked-closer"])
+        self.assertEqual(watch.incident_kind(opened[0][1]), "stall")
+
+    def test_a_stream_closed_worker_still_opens_a_stall_incident(self):
+        opened, text = self._run(
+            [assistant(text="retrying"),
+             user_result(STREAM_CLOSED_ERROR, True),
+             user_result(STREAM_CLOSED_ERROR, True),
+             user_result(STREAM_CLOSED_ERROR, True)], "waiting")
+        self.assertIn("stuck-tab:stream-closed", text)
+        self.assertEqual([r for _, r in opened], ["stuck-tab:stream-closed"])
+
+    def test_the_parked_worker_produces_one_card_not_two(self):
+        # The `Stop` hook already minted the closer's card, produced by the worker's
+        # own session id — the join `repost_empty_parks` reads. So the watcher's gate
+        # must add nothing: one block, one card.
+        fx = Fixture([assistant(text=BLOCKED_ASK)], "waiting")
+        self.addCleanup(fx.cleanup)
+        state = fx.probe()
+        # The fixture reading, straight through `probe()`: a `waiting` worker whose
+        # tail ends on a verb-carrying `🔴 BLOCKED` closer is gated with a reason that
+        # is neither `stuck:` nor `stuck-tab:`, and that reason is not a stall kind.
+        self.assertEqual(state[SID8][2], "registry:waiting")
+        self.assertNotEqual(watch.incident_kind(state[SID8][2]), "stall")
+        parked = watch.parked_keys(state)
+        self.assertEqual(parked, [SID8], "a verb-carrying closer is a PARK")
+        posted = []
+        with mock.patch.object(watch, "open_store_items",
+                               lambda *a, **kw: ({SID}, set())):
+            watch.repost_empty_parks(
+                parked, {SID8: (TASK, SID)},
+                os.path.join(fx.dir, "events.jsonl"),
+                post=lambda *a, **kw: posted.append(a) or True,
+                park_since={SID8: 0.0})
+        self.assertEqual(posted, [], "the closer's own card is already open")
+
+    def test_a_stall_is_not_a_park_so_it_still_escalates(self):
+        # The contrast that makes the one-card assertion meaningful: the genuinely
+        # stuck class keeps the escalate leg, whose card is the only one it gets —
+        # no closer was ever written for it, so no hook card exists to duplicate.
+        state = {SID8: (TASK, "retrying", "stuck-tab:stream-closed", True)}
+        self.assertEqual(watch.parked_keys(state), [])
+        self.assertEqual(watch.incident_kind("stuck-tab:stream-closed"), "stall")
 
 
 class OpenIncidentTest(unittest.TestCase):
