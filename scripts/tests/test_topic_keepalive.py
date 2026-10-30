@@ -57,8 +57,8 @@ class KeepAliveTest(unittest.TestCase):
         self.state = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(self.state, ignore_errors=True))
         self._orig = (self.k.session_verdict, self.k.cadence, self.k.state_path)
-        self.k.state_path = lambda vault, goal: str(
-            self.state / f"goal--{self.k.base_slug(goal)}.json"
+        self.k.state_path = lambda vault, subject, branch="goal": str(
+            self.state / f"{branch}--{self.k.base_slug(subject)}.json"
         )
         self.addCleanup(self._restore)
 
@@ -72,7 +72,7 @@ class KeepAliveTest(unittest.TestCase):
 
     def run_keepalive(self, live="ABSENT", cadence="OK", argv=()):
         self.k.session_verdict = lambda sid: live
-        self.k.cadence = lambda goal: cadence
+        self.k.cadence = lambda subject, branch="goal": cadence
         out = io.StringIO()
         with redirect_stdout(out):
             rc = self.k.main(["--vault", str(self.vault), "--goal", "A Goal", *argv])
@@ -199,6 +199,85 @@ class KeepAliveTest(unittest.TestCase):
         self.assertEqual(1, rc)
         self.assertEqual("cannot-tell", out.getvalue().splitlines()[0])
         self.assertFalse(os.path.exists(self.k.state_path(str(self.vault), "A Goal")))
+
+
+    # --- the topic branch -----------------------------------------------------
+
+    def test_topic_branch_reads_the_topic_directory_and_writes_its_own_cap(self):
+        (self.vault / "23 Topics").mkdir(parents=True)
+        (self.vault / "23 Topics" / "A Topic.md").write_text(
+            GOAL_PAGE.format(sid="sid-2", extra=""), encoding="utf-8"
+        )
+        self.k.session_verdict = lambda sid: "LIVE"
+        self.k.cadence = lambda subject, branch="goal": "OK"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
+                              "--branch", "topic", "--record-resume", "sid-2"])
+        self.assertEqual(0, rc)
+        self.assertEqual("recorded", out.getvalue().splitlines()[0])
+        self.assertTrue(os.path.exists(self.k.state_path(str(self.vault), "A Topic", "topic")))
+        # The goal branch's cap is a different file — a topic resume must not arm it.
+        self.assertFalse(os.path.exists(self.k.state_path(str(self.vault), "A Topic", "goal")))
+
+    def test_topic_branch_never_reads_a_goal_page(self):
+        # The goal page exists and the topic page does not: a topic read must not
+        # fall back to it, or a lapsed goal manager would be reported as a topic one.
+        self.page()
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.k.main(["--vault", str(self.vault), "--subject", "A Goal",
+                              "--branch", "topic"])
+        self.assertEqual(1, rc)
+        self.assertEqual("cannot-tell", out.getvalue().splitlines()[0])
+
+    def test_topic_branch_names_the_topic_opener_on_an_open(self):
+        # Master's `open`/`open-unflagged` split applies to the topic branch too: a topic
+        # page with no recorded id is an OPEN, and rule 4 makes that the operator's act.
+        (self.vault / "23 Topics").mkdir(parents=True)
+        (self.vault / "23 Topics" / "A Topic.md").write_text(
+            GOAL_PAGE.format(sid="", extra="flag: true\nflag_set_by: operator\n"),
+            encoding="utf-8"
+        )
+        self.k.cadence = lambda subject, branch="goal": "OK"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
+                         "--branch", "topic"])
+        lines = out.getvalue().splitlines()
+        self.assertEqual("open", lines[0])
+        self.assertIn("/supervisor:open --topic", lines[1])
+
+    def test_topic_branch_refuses_an_unflagged_open(self):
+        (self.vault / "23 Topics").mkdir(parents=True)
+        (self.vault / "23 Topics" / "A Topic.md").write_text(
+            GOAL_PAGE.format(sid="", extra=""), encoding="utf-8")
+        self.k.cadence = lambda subject, branch="goal": "OK"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
+                         "--branch", "topic"])
+        self.assertEqual("open-unflagged", out.getvalue().splitlines()[0])
+
+    def test_a_topic_stand_down_is_left_alone(self):
+        (self.vault / "23 Topics").mkdir(parents=True)
+        (self.vault / "23 Topics" / "A Topic.md").write_text(
+            GOAL_PAGE.format(sid="sid-2", extra=""), encoding="utf-8"
+        )
+        self.k.session_verdict = lambda sid: "LIVE"
+        self.k.cadence = lambda subject, branch="goal": "STOPPED"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
+                              "--branch", "topic"])
+        self.assertEqual(0, rc)
+        self.assertEqual("leave", out.getvalue().splitlines()[0])
+
+    def test_the_goal_alias_still_works(self):
+        self.page()
+        rc, out = self.run_keepalive(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out[0])
 
 
 if __name__ == "__main__":

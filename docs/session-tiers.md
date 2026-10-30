@@ -25,11 +25,46 @@ Load this page, with the rest of `docs/`, via `/supervisor:read-guides`.
 
 ## The four tiers
 
-The tiers form a **tree**, and the operator's hierarchy (2026-10-23) names what each level may
-open: **the fleet manager is top of everything** — it opens topic managers, goal managers and
-workers, each when no lower-tier manager owns the subject; **a topic manager opens goal
-managers and workers**; **a goal manager opens workers**; **a worker opens nothing**. A tier
-opens a lower one through `/supervisor:open`, never by a bare spawn.
+The tiers form a **tree**, and the operator's hierarchy (2026-10-23, amended 2026-10-30) names
+what each level may open: **the fleet manager is top of everything** — it opens topic managers,
+and a **worker** only when no lower-tier manager owns that subject, and a goal manager **only
+when that goal is flagged**; **a topic manager opens workers, and a goal manager only when that
+goal is flagged**; **a goal manager opens workers**; **a worker opens nothing**. A tier opens a
+lower one through `/supervisor:open`, never by a bare spawn.
+
+⚠️ **The ownership condition survived the 2026-10-30 amendment, and it is not the same rule as
+the one it sat beside.** The clause that was removed read *"each when no lower-tier manager owns
+the subject"* and governed **goal managers** — a manager is never opened fresh at all now, so
+that half is gone. The **worker** half is unchanged and still binds: a worker is opened directly
+by the fleet manager only when no topic or goal manager owns its subject, which is the same
+fallback `docs/fleet-surface.md` § Which manager owns a subject states. Do not read the removal
+as licensing the fleet tier to open a worker under a live goal manager.
+
+⚠️ **Restart is not open, and that distinction is what makes the tree coherent** (operator
+ruling 2026-10-30). A restart resumes a session that already has a subject and a recorded id;
+an open creates supervision where none existed. Restarting a broken manager therefore decides
+nothing new, while opening one decides who supervises. Four rules follow:
+
+1. **A crashed or lapsed manager or worker is restarted automatically** — it already owns its
+   subject, so the restart decides nothing new.
+2. **A flagged page is opened automatically by the tier above it** — `flag: true` means
+   *"open me"*, and it opens only when `flag_set_by` is `operator` or `legacy`. Any other
+   value, **including an absent one**, is refused: an absent `flag_set_by` is a writer that
+   did not declare itself, which is the bypass (`commands/open.md`). ⚠️ **Scope: this rule's
+   automated executor opens flagged *task* pages.** `/supervisor:open --flagged` selects tasks
+   only, and no fleet-tier leg opens a flagged *manager* — one is opened by the operator, or
+   by the topic tier's ranking on their instruction.
+3. **An approved worker is opened automatically**, up to `spawn.maxConcurrent`.
+4. **A manager is never opened fresh on the operator's behalf** — not by a loop, not by a
+   round, not to fill a gap. Only restarted, or opened because it was flagged.
+
+⚠️ **Rule 4 binds every tier.** The fleet tier removed its manager-proposal row on 2026-10-29
+(`commands/fleet-drive.md`: *"No manager-proposal row — the round does not propose managers for
+unmanaged goals"*). No other tier restores that behaviour under another name.
+
+⚠️ **`flag` carries one meaning tree-wide.** It marks a page the operator wants opened. A leg
+that reads it as *"parked / waiting-on-human"* and excludes it inverts the operator's mark; the
+parked class needs its own marker, never this field.
 
 ⚠️ **The `-spawn` verbs are narrower than their tier, and that is not a contradiction.** A
 `-spawn` verb starts the level directly below it and nothing else — `topic-spawn` starts a
@@ -41,8 +76,8 @@ open — and no `worker-spawn` at all.
 
 | Tier | Manages | May start | Done condition |
 |---|---|---|---|
-| **Fleet manager** | every topic manager, and every goal with no topic | a topic manager (on the operator's initiative), and — when no lower-tier manager owns the subject — a goal manager or a worker directly | the fleet has no unmanaged subject and no gate it owns is outstanding |
-| **Topic manager** | ONE topic's declared goal set, the goal managers running on it, and the workers it opens | a **goal manager**, at most N at once per topic and never past the fleet manager ceiling; and a **worker** | every goal in its declared set is either managed, terminal, or ranked out of the N slots with the reason stated |
+| **Fleet manager** | every topic manager, and every goal with no topic | a topic manager (on the operator's initiative), a **worker** directly when no lower-tier manager owns it, and a goal manager **only when that goal is flagged** | the fleet has no unmanaged subject and no gate it owns is outstanding |
+| **Topic manager** | ONE topic's declared goal set, the goal managers running on it, and the workers it opens | a **worker**; and a **goal manager only when that goal is flagged**, at most N at once per topic and never past the fleet manager ceiling | every goal in its declared set is either managed, terminal, or ranked out of the N slots with the reason stated |
 | **Goal manager** | ONE goal's declared task set, and the workers running on it | a **worker**, under the spawn cap | every task in its declared set is terminal, waiting on a named party, or held with a stated reason |
 | **Worker** | ONE anchored task | nothing — a worker never opens a session | its anchored task is terminal, or it reports the gate that stops it |
 
