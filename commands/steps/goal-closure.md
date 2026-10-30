@@ -48,7 +48,7 @@ For the subject, then each page of the tracked set:
    | `TERMINAL` | the page already reads `completed`/`aborted` | **skip it** — nothing to close |
    | `UNMEASURABLE` | a section is absent, or carries no recognised box | report the gap, close nothing |
    | `OPEN` | at least one box is open | report which, close nothing |
-   | `CLOSE` | both sections present, every box `[x]` | step 2 |
+   | `CLOSE` | both sections present, every box `[x]` — or an absent DoD on a grandfathered goal (see below) | step 2 |
 
    ⚠️ **`TERMINAL` is what stops a page being re-closed every tick.** The verb writes
    `status: completed` and leaves every box at `[x]`, so a page closed last tick satisfies the
@@ -69,7 +69,8 @@ For the subject, then each page of the tracked set:
    The exception covers **absence only** — a DoD heading that exists but holds no box is
    still `UNMEASURABLE` at every cutoff — and **goals only**: a task's DoD requirement is
    not part of that decision, and a topic closes on its `# Completion Gate`, which has no
-   cutoff. The date is the same constant `agents/goal-auditor.md` § 12 carries; it lives in
+   cutoff. The date is the same constant **the vault's** `agents/goal-auditor.md` § 12 carries —
+   not a path in this repo, which ships no `goal-auditor.md`; it lives in
    two places because a plugin script cannot import from a vault agent. On such a goal the
    reader prints `Definition of Done: ABSENT — grandfathered (created <date> < 2026-06-26)`
    where it would otherwise print `MISSING`, so a close it now permits is never mistaken for
@@ -142,7 +143,9 @@ arm says — which is why the topic row exists rather than the rule being restat
   forbidden at every tier.
 - **Never set `status: completed` directly.** The verb writes it; nothing else may.
 - **Never close on a partial read.** A page whose DoD section is missing or empty is
-  *unmeasurable*, not complete — report it as a gap.
+  *unmeasurable*, not complete — report it as a gap. **The one exception is an absent DoD on
+  a grandfathered goal**, which reads `CLOSE` by design (see the cutoff note in step 1); an
+  *empty* DoD section is still unmeasurable at every cutoff.
 - **Never close a page whose open boxes are another task's work.** Report which boxes are open
   and whose they are; closure is not a way to dispose of them.
 

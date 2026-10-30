@@ -20,7 +20,9 @@ Four properties, each of which has been wrong in this tree in some form:
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
+import io
 import os
 import tempfile
 import unittest
@@ -217,6 +219,36 @@ class TaskKindTest(unittest.TestCase):
         )
 
 
+class CreatedFieldTest(unittest.TestCase):
+    """`created` is read as a raw scalar, and the cutoff compares it lexicographically."""
+
+    def test_quoted_date(self):
+        self.assertEqual(closure.read_created('---\ncreated: "2026-01-15"\n---\n'), "2026-01-15")
+
+    def test_unquoted_date(self):
+        self.assertEqual(closure.read_created("---\ncreated: 2026-01-15\n---\n"), "2026-01-15")
+
+    def test_timestamp_suffix(self):
+        self.assertEqual(
+            closure.read_created("---\ncreated: 2026-09-20T00:00:00Z\n---\n"), "2026-09-20T00:00:00Z"
+        )
+
+    def test_absent_is_none(self):
+        self.assertIsNone(closure.read_created("---\nstatus: in_progress\n---\n"))
+
+    def test_created_date_key_is_not_created(self):
+        # Tasks carry `created_date:`; that key must not satisfy the `created` read.
+        self.assertIsNone(closure.read_created('---\ncreated_date: "2026-01-15"\n---\n'))
+
+    def test_a_non_padded_date_fails_closed(self):
+        # Lexicographic comparison is exact only for zero-padded ISO-8601. A
+        # non-padded value compares as POST-cutoff, so it is never exempt — the
+        # strict direction, which can refuse a close but can never permit one.
+        self.assertFalse(
+            closure.dod_exempt("goal", closure.read_created("---\ncreated: 2026-6-1\n---\n"))
+        )
+
+
 class SectionTest(unittest.TestCase):
     def test_absent_section_is_none(self):
         self.assertIsNone(closure.read_section("---\n---\n\n# Success Criteria\n\n- [x] a\n", "Definition of Done"))
@@ -263,13 +295,38 @@ class AbsentStatusTest(unittest.TestCase):
 
 class CliTest(unittest.TestCase):
     def _run(self, page):
+        return self._run_capture(page)[0]
+
+    def _run_capture(self, page):
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as handle:
             handle.write(page)
             path = handle.name
+        buf = io.StringIO()
         try:
-            return closure.main(["goal-closure-read.py", path])
+            with contextlib.redirect_stdout(buf):
+                code = closure.main(["goal-closure-read.py", path])
         finally:
             os.unlink(path)
+        return code, buf.getvalue()
+
+    def test_grandfathered_goal_prints_the_absent_line(self):
+        # The line shape is load-bearing: it separates a close the rule now PERMITS
+        # from a section the reader failed to find. Collapsing the two — or dropping
+        # the exemption branch in main — leaves every verdict test above green.
+        page = _page_no_dod("- [x] a", created="2026-01-15")
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 0)
+        self.assertIn("ABSENT — grandfathered", out)
+        self.assertNotIn("MISSING", out)
+        self.assertIn("VERDICT: CLOSE", out)
+
+    def test_post_cutoff_goal_prints_missing(self):
+        page = _page_no_dod("- [x] a", created="2026-10-19")
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 1)
+        self.assertIn("MISSING", out)
+        self.assertNotIn("grandfathered", out)
+        self.assertIn("VERDICT: UNMEASURABLE", out)
 
     def test_close_exits_zero(self):
         self.assertEqual(self._run(_page("- [x] a", "- [x] c")), 0)
