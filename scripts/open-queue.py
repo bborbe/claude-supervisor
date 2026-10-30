@@ -169,6 +169,33 @@ def priority_of(block):
         return None
 
 
+def has_blocked_by(block):
+    """True when the row declares any blocker, in **either** frontmatter shape.
+
+    ⚠️ **`blocked_by` is written as a multi-line YAML block in this vault** — a bare
+    `blocked_by:` followed by indented `- '[[…]]'` items — so a scalar-only read returns
+    None for the shape the vault actually uses and the guard never fires. That is the
+    measured defect `scripts/next-focus.py` records for its own hold-goal class: *"An
+    inline-only read returns '' for it … the value's absence read as 'no blocker'"*.
+    There the cost was a proposal that never fired; here it is a spawn, so the guard
+    reads both forms.
+    """
+    match = re.search(r"^blocked_by:\s*(.*)$", block, re.MULTILINE)
+    if not match:
+        return False
+    if match.group(1).strip().strip('"').strip("'"):
+        return True  # inline scalar
+    for line in block[match.end():].splitlines():
+        if not line.strip():
+            continue
+        if line.startswith((" ", "\t")):
+            if line.strip().startswith("-"):
+                return True  # a block-list item
+            continue
+        break
+    return False
+
+
 def guards(block, today):
     """The reason this row may not open, or None when it may.
 
@@ -179,7 +206,7 @@ def guards(block, today):
         return "unreadable task file"
     if (field(block, "phase") or "").strip() == "todo":
         return "waiting approval"
-    if (field(block, "blocked_by") or "").strip():
+    if has_blocked_by(block):
         return "blocked"
     defer = (field(block, "defer_date") or "").strip()[:10]
     if defer and defer > today:
@@ -306,12 +333,12 @@ def render(opened, skipped, live, target):
     must not render the same.
     """
     if target is None:
-        return "open leg: target unlimited — opened 0 (workers unlimited)"
+        return "open leg: target unlimited — selected 0 (workers unlimited)"
 
     if live is not None and max(0, target - live) == 0:
-        return "open leg: no free slots — opened 0 (workers %d/%d)" % (live, target)
+        return "open leg: no free slots — selected 0 (workers %d/%d)" % (live, target)
 
-    head = "open leg: opened %d (workers %d/%d)" % (len(opened), live, target)
+    head = "open leg: selected %d (workers %d/%d)" % (len(opened), live, target)
     lines = [head]
     for index, row in enumerate(opened, start=1):
         if row["operator_flagged"]:
@@ -362,7 +389,7 @@ def main(argv=None):
     if args.json:
         json.dump(
             {
-                "opened": [r["name"] for r in opened],
+                "selected": [r["name"] for r in opened],
                 "skipped": all_skipped,
                 "live": live,
                 "target": target,

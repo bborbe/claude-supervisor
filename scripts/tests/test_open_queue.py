@@ -166,6 +166,28 @@ class OpenQueueTest(unittest.TestCase):
         self.assertEqual([r["name"] for r in rows], ["control"])
         self.assertEqual(skipped, [{"name": "parked", "reason": "deferred"}])
 
+    def test_blocked_by_block_list_is_refused(self):
+        """The vault writes `blocked_by` as a multi-line YAML block, not a scalar.
+
+        A scalar-only read returns '' for that shape, so the guard would never fire and
+        the leg would rank and open a row with an unmet blocker — the measured defect
+        `next-focus.py` records for its own hold-goal class. Both shapes must refuse.
+        """
+        task_file(self.tasks, "blocked", "status: in_progress\nblocked_by:\n    - '[[Something]]'\n")
+        task_file(self.tasks, "control", "status: in_progress\n")
+        rows, skipped = self.collect(["blocked", "control"])
+
+        self.assertEqual([r["name"] for r in rows], ["control"])
+        self.assertEqual(skipped, [{"name": "blocked", "reason": "blocked"}])
+
+    def test_empty_blocked_by_is_not_a_blocker(self):
+        """A bare `blocked_by:` with no items declares no blocker."""
+        task_file(self.tasks, "empty", "status: in_progress\nblocked_by:\n")
+        rows, skipped = self.collect(["empty"])
+
+        self.assertEqual([r["name"] for r in rows], ["empty"])
+        self.assertEqual(skipped, [])
+
     def test_past_defer_date_is_not_refused(self):
         """`defer_date` is defer-UNTIL: a past one is due, not parked."""
         task_file(self.tasks, "due", "status: in_progress\ndefer_date: '2026-10-01'\n")
@@ -191,7 +213,7 @@ class OpenQueueTest(unittest.TestCase):
         block = oq.render(opened, capacity_skipped, 30, 30)
 
         self.assertEqual(opened, [])
-        self.assertIn("no free slots — opened 0", block)
+        self.assertIn("no free slots — selected 0", block)
 
     def test_one_free_slot_opens_exactly_one(self):
         """The positive control for the zero-slot case.
@@ -222,7 +244,7 @@ class OpenQueueTest(unittest.TestCase):
 
         self.assertEqual(opened, [])
         self.assertEqual(len(skipped), 2)
-        self.assertIn("target unlimited — opened 0", block)
+        self.assertIn("target unlimited — selected 0", block)
 
     # -- the block --------------------------------------------------------
 

@@ -14,11 +14,11 @@ When: every tick — after Readings
 
 The script owns the population, the guards, the rank and the cap; **this step owns only the opening**. Print its block verbatim into the round's output, then open the rows it lists, in the order it lists them.
 
-**Opening one row** — `/supervisor:open "<name>" --task`, once per row, in the printed order. Nothing else: no batch helper, no in-line `spawn_agent` (`docs/fleet-surface.md` § Spawn a worker item 6 holds `spawn_agent` for `resume=` alone), no reordering.
+**Opening one row** — `/supervisor:open "<name>" --task --vault "<vault>"`, once per row, in the printed order. ⚠️ **`--vault` is load-bearing.** Task titles are not namespaced across vaults (`commands/open.md:321`), and without it `/supervisor:open` resolves the vault from the session cwd — so a row read from `<vault>` can open a same-named task in a different vault, or be refused as not-found. The population and the action must name one vault. Nothing else: no batch helper, no in-line `spawn_agent` (`docs/fleet-surface.md` § Spawn a worker item 6 holds `spawn_agent` for `resume=` alone), no reordering.
 
 ## The block
 
-    open leg: opened 3 (workers 27/30)
+    open leg: selected 3 (workers 27/30)
       1. Fix the Fleet View — operator-flagged
       2. Reap a Manager Whose Subject Is Terminal — priority 1
       3. Tighten the Reflect Scan — priority 2
@@ -28,8 +28,8 @@ The skipped reasons are **counted, not named**, and print in alphabetical order 
 
 Two rounds print a different line and nothing else:
 
-    open leg: no free slots — opened 0 (workers 30/30)
-    open leg: target unlimited — opened 0 (workers unlimited)
+    open leg: no free slots — selected 0 (workers 30/30)
+    open leg: target unlimited — selected 0 (workers unlimited)
 
 ⚠️ **`target unlimited` is the `spawn.maxConcurrent: 0` config, and the leg opens nothing there on purpose.** `0` removes the server's cap, and the cap is the only bound this leg has to rank against — admitting every eligible row because the bound was removed would be the bulk opening the 2026-10-01 ruling forbids. The line names a config state, not a quiet round: a fleet with no target set is the operator's to fix, and it is the round's to report.
 
