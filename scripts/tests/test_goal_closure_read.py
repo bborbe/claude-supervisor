@@ -259,8 +259,12 @@ class CreatedFieldTest(unittest.TestCase):
         # The guard must match its own contract: an anchored, range-checked ISO date.
         # `2026-00-00` sorts below the cutoff, and `2026-01-15garbage` is not a date at
         # all — both would exempt a malformed page if the shape went unchecked.
-        for raw in ("2026-00-00", "2026-13-01", "2026-01-32", "2026-01-15garbage"):
+        for raw in ("2026-00-00", "2026-13-01", "2026-01-32", "2026-01-15garbage", "2026-01-15 note"):
             self.assertFalse(closure.dod_exempt("goal", raw), raw)
+
+    def test_a_time_suffix_still_parses(self):
+        for raw in ("2026-01-15T00:00:00Z", "2026-01-15 12:30", "2026-01-15"):
+            self.assertTrue(closure.dod_exempt("goal", raw), raw)
 
     def test_the_cutoff_boundary_is_exact_to_the_day(self):
         # The lexicographic claim the whole cutoff rests on: a timestamp on the day
@@ -388,6 +392,26 @@ class CliTest(unittest.TestCase):
         page = (
             '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
             "# Success Criteria\n\n- [x] a\n\n# Definition of Done (optional)\n\n- [ ] never\n"
+        )
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 1)
+        self.assertIn("VERDICT: UNMEASURABLE", out)
+
+    def test_an_indented_atx_dod_heading_is_not_grandfathered(self):
+        # CommonMark/Obsidian render an ATX heading indented by up to three spaces.
+        page = (
+            '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+            "# Success Criteria\n\n- [x] a\n\n  # Definition of Done\n\n- [ ] never\n"
+        )
+        code, out = self._run_capture(page)
+        self.assertEqual(code, 1)
+        self.assertIn("VERDICT: UNMEASURABLE", out)
+
+    def test_a_setext_dod_heading_is_not_grandfathered(self):
+        # A setext heading is a heading to Obsidian and invisible to `section_of`.
+        page = (
+            '---\nstatus: in_progress\ncreated: "2026-01-15"\n---\n\n'
+            "# Success Criteria\n\n- [x] a\n\nDefinition of Done\n------------------\n\n- [ ] never\n"
         )
         code, out = self._run_capture(page)
         self.assertEqual(code, 1)

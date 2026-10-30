@@ -82,10 +82,15 @@ _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
 # and day, optionally followed by a time. Anchored and range-checked — an unanchored prefix
 # match would let `2026-01-15garbage` through, and `2026-00-00` sorts below the cutoff and
 # would exempt a page whose date is malformed. Anything else is refused, not compared.
-_ISO_DATE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])($|[T ])")
-# Any DoD heading, at any level and with any suffix — deliberately looser than the exact
-# `# Definition of Done` that `section_of` reads. See `has_dod_heading`.
-_DOD_HEADING = re.compile(r"^#+[ \t]*Definition of Done", re.M)
+_ISO_DATE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])($|[T ]\d{2}:\d{2})")
+# Any DoD heading, in ANY shape Obsidian renders — ATX at 0–3 leading spaces, or setext
+# underlined with `===`/`---`. Deliberately looser than the exact `# Definition of Done`
+# that `section_of` reads. See `has_dod_heading`.
+_DOD_HEADING = re.compile(
+    r"^[ \t]{0,3}#+[ \t]*Definition of Done"
+    r"|^[ \t]{0,3}Definition of Done[ \t]*\n[ \t]{0,3}(=+|-+)[ \t]*$",
+    re.M,
+)
 
 
 def normalise(text):
@@ -210,11 +215,12 @@ def has_dod_heading(body):
     """True when the fence-stripped body carries a DoD heading at ANY level or suffix.
 
     `section_of` matches only an exact H1 `# Definition of Done`, so an `## Definition of
-    Done`, or a `# Definition of Done (optional)`, reads as absent. That refusal is right
-    for an ordinary page — the reader does not guess at shapes it does not support — but
-    it must not become a CLOSE for a grandfathered goal: the document plainly HAS a DoD
-    section holding boxes, this reader merely cannot read it, and closing on a section it
-    failed to parse is a false CLOSE, the one direction this module refuses everywhere.
+    Done`, a `# Definition of Done (optional)`, a heading indented up to three spaces, or a
+    setext heading underlined with `---` all read as absent. That refusal is right for an
+    ordinary page — the reader does not guess at shapes it does not support — but it must
+    not become a CLOSE for a grandfathered goal: the document plainly HAS a DoD section
+    holding boxes, this reader merely cannot read it, and closing on a section it failed to
+    parse is a false CLOSE, the one direction this module refuses everywhere.
 
     Absence is therefore decided by a loose search, and exemption needs BOTH halves: no
     DoD heading anywhere, AND the strict section reader finding none.
