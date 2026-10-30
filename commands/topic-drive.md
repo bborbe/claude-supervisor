@@ -114,14 +114,21 @@ Only when a keep-alive slot is free (`resume`/`restart` did not consume it) and 
 goal is held:
 
 1. `topic-spawn.py --topic "<topic>" --rank` → the ranked rows and which take the N slots.
-2. For each `start` row not already running: `/supervisor:topic-spawn "<goal>"`. Its tokens
-   (`goal-not-in-scope`, `goal-not-startable`, `manager-cap`, the worker refusal) are the
-   gate — never re-derive them here.
+2. For each `start` row not already running **whose goal page carries `flag: true`**:
+   `/supervisor:topic-spawn "<goal>"`. Its tokens (`goal-not-in-scope`, `goal-not-startable`,
+   `manager-cap`, the worker refusal) are the gate — never re-derive them here.
 3. ⚠️ **Never exceed N = 3 per topic and never exceed the fleet ceiling.** The cap is never
    raised to make room; rank and wait, or say which goal is starved and why.
 
 ⚠️ **A `phase: todo` goal is never started** — `goal-not-startable` is the operator's
 approval boundary, not a bug.
+
+⚠️ **A start row whose goal is not flagged is ranked and reported, never started.** This is
+rule 4 — *a manager is never opened fresh on the operator's behalf* (`docs/session-tiers.md`
+§ The four tiers). `commands/fleet-drive.md` removed its manager-proposal row on 2026-10-29 for
+exactly this; the ranking here is a **report of the order**, not an instruction to act on it.
+Render the ranked rows with the reason each was not started, and start only the flagged ones.
+The operator opens an unflagged goal manager by flagging it, or by asking.
 
 ## What this round must never do
 
