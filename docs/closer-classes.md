@@ -65,6 +65,15 @@ when **all** hold:
 | 3 | the body names none of: `push`, `merge`, `deploy`, `release`, `tag`, `apply`, `buca`, `kubectl`, `delete`, `rm `, `trade`, `session-close`, `prod` | same line |
 | 4 | the session has no `BLOCKED` row **other than the closer under test** — a permission prompt or an open question is a gate; a `BLOCKED` row whose text is this same `approve:` closer is not a second gate | the section, both rows quoted |
 
+⚠️ **Test 3 is a different instrument from the lint, and the two are not in conflict.**
+`closer-gate-lint.py` blocks the stop on an allow-listed verb, so that closer never reaches
+this sweep at all; since the operator decision of 2026-10-30 that now covers
+`/vault-cli:session-close` and the plain `gh pr merge`. The `merge` and `session-close`
+entries stay in test 3 regardless: a `gh pr merge --admin` closer and any session-close the
+lint does not match are still real gates, and classifying one as a routine continue would
+resume a session straight past it. The lint narrows what reaches the sweep; it does not
+change what the sweep must treat as a gate.
+
 ⚠️ Test 4 must exclude the closer itself. The attention feed lists a rendered
 `approve:` closer under `BLOCKED` as well as `CLOSERS`, so "not in `BLOCKED` at all"
 fails every `approve:` closer by construction and makes this table unreachable —
