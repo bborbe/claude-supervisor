@@ -128,16 +128,30 @@ def record(path: str, stamps: list[float], now: float) -> None:
     os.replace(tmp, path)
 
 
+#: `scripts/session-liveness.py`'s documented contract is the EXIT CODE, not the text:
+#: `LIVE` (0) / `ABSENT` (1) / `UNKNOWN` (2) / `AMBIGUOUS` (3) / `MALFORMED` (4). Only `LIVE`
+#: prints to stdout — every other verdict goes to stderr — so parsing stdout collapsed them
+#: all to `UNKNOWN`.
+VERDICT_BY_EXIT = {0: "LIVE", 1: "ABSENT", 2: "UNKNOWN", 3: "AMBIGUOUS", 4: "MALFORMED"}
+
+
 def session_verdict(sid: str) -> str:
-    """`LIVE` / `ABSENT` / `UNKNOWN` / `AMBIGUOUS` / `MALFORMED`, from the instrument."""
+    """`LIVE` / `ABSENT` / `UNKNOWN` / `AMBIGUOUS` / `MALFORMED`, from the instrument.
+
+    ⚠️ **Read the exit code, never the text.** This function used to scan `stdout` for the
+    verdict word, which made `ABSENT` unreachable: the instrument prints `ABSENT` to **stderr**
+    and exits 1, so every non-`LIVE` answer fell through to `UNKNOWN`. `ABSENT` is the only
+    verdict that licenses a resume, so the entire keep-alive — the goal tier that had shipped
+    for months, the topic tier and the worker tier — could never resume anything. Measured
+    2026-10-30 on a killed manager: stdout `''`, stderr `'ABSENT — <id>'`, rc 1.
+
+    An exit code outside the documented set is `UNKNOWN` — cannot-tell is never death.
+    """
     probe = subprocess.run(
         [sys.executable, os.path.join(REPO, "scripts", "session-liveness.py"), "--check", sid],
         capture_output=True, text=True,
     )
-    for word in ("LIVE", "ABSENT", "UNKNOWN", "AMBIGUOUS", "MALFORMED"):
-        if probe.stdout.startswith(word):
-            return word
-    return "UNKNOWN"  # an unparseable answer is cannot-tell, never death
+    return VERDICT_BY_EXIT.get(probe.returncode, "UNKNOWN")
 
 
 def cadence(subject: str, branch: str = "goal") -> str:

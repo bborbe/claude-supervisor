@@ -280,5 +280,46 @@ class KeepAliveTest(unittest.TestCase):
         self.assertEqual("resume", out[0])
 
 
+class SessionVerdictTest(unittest.TestCase):
+    """`session_verdict` must read the instrument's EXIT CODE, not its text.
+
+    The instrument prints only `LIVE` to stdout; every other verdict goes to stderr. A
+    stdout-scanning implementation therefore reports `UNKNOWN` for a dead session, which makes
+    the resume branch unreachable — the whole keep-alive inert. These tests pin the contract
+    the instrument actually documents.
+    """
+
+    def setUp(self):
+        self.k = load()
+        self._orig = self.k.subprocess.run
+
+    def tearDown(self):
+        self.k.subprocess.run = self._orig
+
+    def _stub(self, rc, stdout="", stderr=""):
+        class R:
+            returncode = rc
+        self.k.subprocess.run = lambda *a, **kw: R()
+
+    def test_absent_is_read_from_exit_1_even_though_nothing_reaches_stdout(self):
+        # The measured shape: stdout empty, the verdict on stderr, exit 1.
+        self._stub(1, stdout="", stderr="ABSENT — sid-1\n")
+        self.assertEqual("ABSENT", self.k.session_verdict("sid-1"))
+
+    def test_live_is_read_from_exit_0(self):
+        self._stub(0, stdout="LIVE — sid-1\n")
+        self.assertEqual("LIVE", self.k.session_verdict("sid-1"))
+
+    def test_every_documented_code_maps(self):
+        for rc, want in ((0, "LIVE"), (1, "ABSENT"), (2, "UNKNOWN"),
+                         (3, "AMBIGUOUS"), (4, "MALFORMED")):
+            self._stub(rc)
+            self.assertEqual(want, self.k.session_verdict("sid-1"), rc)
+
+    def test_an_undocumented_exit_is_cannot_tell(self):
+        self._stub(7)
+        self.assertEqual("UNKNOWN", self.k.session_verdict("sid-1"))
+
+
 if __name__ == "__main__":
     unittest.main()
