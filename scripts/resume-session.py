@@ -25,6 +25,7 @@ Refusal tokens, first line of stdout, each exit 1:
 
   malformed-id         the argument is not a single session id
   already-live         the session is LIVE -- resuming it would be a second writer
+  cannot-tell          the liveness probe could not answer; retryable, never terminal
   unknown-transcript   no `~/.claude/projects/*/<id>.jsonl` carries this session
   no-cwd               the transcript carries no readable `cwd`
   launcher-unresolved  no launcher could be resolved for this session
@@ -35,7 +36,9 @@ Refusal tokens, first line of stdout, each exit 1:
 ⚠️ **`already-live` is the safety gate, and it is checked first.** A resume onto a live
 session is the double-writer failure `session-liveness.py` and `topic-keepalive.py` both
 exist to prevent, and it is the one mistake here that loses work rather than time.
-`UNKNOWN` / `AMBIGUOUS` / `MALFORMED` are **cannot-tell**, never "not live".
+⚠️ **`already-live` means LIVE and nothing else.** `UNKNOWN` / `AMBIGUOUS` / `MALFORMED`
+are `cannot-tell`, a separate retryable token — folding them into `already-live` would
+let one transient probe failure become a terminal refusal the caller records.
 
 Usage:
   resume-session.py --session <id> [--title <text>] [--colour <chip>] [--dry-run]
@@ -127,7 +130,11 @@ def main():
     if verdict == "LIVE":
         return refuse("already-live", f"session {sid[:8]} is LIVE ({detail}) -- a resume would be a second writer")
     if verdict != "ABSENT":
-        return refuse("already-live", f"liveness: {detail or verdict} -- only ABSENT licenses a resume")
+        # ⚠️ NOT `already-live`. A probe that could not run is retryable; folding it into
+        # `already-live` would let one transient failure become a terminal refusal the
+        # caller records, permanently blocking a candidate the rule had just judged
+        # resumable. Only a positively LIVE answer is terminal.
+        return refuse("cannot-tell", f"liveness: {detail or verdict} -- only ABSENT licenses a resume")
 
     cwd, source, token = transcript_cwd(sid)
     if cwd is None:

@@ -220,7 +220,6 @@ def decide(task_path, session_override):
     block = frontmatter(text)
     status = scalar(block, "status").lower()
     recorded = scalar(block, "claude_session_id")
-    session_id = session_override or recorded
     boxes = open_boxes(text)
 
     if status in TERMINAL:
@@ -229,15 +228,19 @@ def decide(task_path, session_override):
         return "not-open-work", [f"status: {status or '(none)'} -- not open work"]
     if boxes < 1:
         return "not-open-work", ["open boxes: 0 -- nothing to resume"]
-    if not session_id:
+    if not recorded:
+        # ⚠️ An id-less task is NOT a reopen candidate, and `--session` must not make it
+        # one: `record()` refuses a task with no recorded id, so returning `resume` here
+        # would leave the cap unarmable and the resume unbounded.
         return "not-open-work", ["no claude_session_id recorded -- a fresh spawn, not a reopen"]
-    # ⚠️ The override is not an exemption from the ownership rule `record()` enforces.
-    # A foreign id would return `resume` here and then `not-recorded` there, so the cap
-    # could never arm and the caller would retry the same resume every round.
-    if recorded and session_override and session_override != recorded:
+    # ⚠️ The override may only CONFIRM the recorded owner, never replace it -- `record()`
+    # refuses a foreign id, so an override that disagreed would return `resume` here and
+    # `not-recorded` there, and the cap could never arm.
+    if session_override and session_override != recorded:
         return "not-open-work", [
             f"session {session_override[:8]} is not this task's recorded owner ({recorded[:8]})"
         ]
+    session_id = recorded
 
     verdict, detail = liveness(session_id)
     # ⚠️ A LIVE session is its own token, never `not-open-work`. Step 1 runs this script
@@ -347,6 +350,20 @@ def record_refusal(task_path, session_id, reason):
     """
     path = state_path(task_path)
     state = read_state(path)
+    try:
+        with open(task_path, encoding="utf-8") as handle:
+            block = frontmatter(handle.read())
+    except OSError as exc:
+        return "cannot-tell", [f"task unreadable: {exc}"]
+    recorded = scalar(block, "claude_session_id")
+    # ⚠️ Mirror `record()`'s ownership check: the refusal is a single slot, so a foreign
+    # id would overwrite the real session's refusal, silently un-block it, and re-arm the
+    # retry loop this record exists to stop.
+    if recorded and recorded != session_id:
+        return "cannot-tell", [
+            f"session {session_id[:8]} is not this task's recorded owner ({recorded[:8]}) -- "
+            "a foreign id must not overwrite this task's refusal"
+        ]
     state["refused"] = {
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "session_id": session_id,

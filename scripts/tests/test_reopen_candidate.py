@@ -204,17 +204,15 @@ class TestVerdict(Harness):
         self.assertEqual(out[0], "cannot-tell")
         self.assertEqual(code, 2)
 
-    def test_session_override_decides_for_an_id_less_task(self):
-        """The override supplies the id when the task records none -- the ledger may know it."""
+    def test_session_override_cannot_make_an_id_less_task_resumable(self):
+        """record() refuses a task with no recorded id, so decide() must not offer one."""
         other = "aaaaaaaa-0000-4000-8000-000000000002"
         self.write_task(sid="")
         code, out = self.run_script("--session", other, liveness={other: "ABSENT"})
-        self.assertEqual(out[0], "resume")
+        self.assertEqual(out[0], "not-open-work")
 
     def test_session_override_live_is_live(self):
-        other = "aaaaaaaa-0000-4000-8000-000000000002"
-        self.write_task(sid="")
-        code, out = self.run_script("--session", other, liveness={other: "LIVE"})
+        code, out = self.run_script("--session", SID, liveness={SID: "LIVE"})
         self.assertEqual(out[0], "live")
 
     def test_session_override_must_be_the_recorded_owner(self):
@@ -247,6 +245,16 @@ class TestRefusal(Harness):
         self.write_task(sid=other)
         code, out = self.run_script(liveness={other: "ABSENT"})
         self.assertEqual(out[0], "resume")
+
+    def test_foreign_refusal_cannot_overwrite_the_real_one(self):
+        """The refusal is a single slot: a foreign id would un-block the real session."""
+        self.run_script("--record-refusal", SID, "unknown-session-id", liveness={SID: "ABSENT"})
+        other = "bbbbbbbb-0000-4000-8000-000000000003"
+        code, out = self.run_script("--record-refusal", other, "whatever", liveness={SID: "ABSENT"})
+        self.assertEqual(out[0], "cannot-tell")
+        # the real session's refusal must survive
+        code, out = self.run_script()
+        self.assertEqual(out[0], "blocked")
 
 
 class TestCap(Harness):

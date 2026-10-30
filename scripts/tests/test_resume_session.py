@@ -112,10 +112,13 @@ class TestRefusals(Harness):
         self.assertEqual(out[0], "already-live")
         self.assertEqual(code, 1)
 
-    def test_unknown_liveness_is_refused(self):
+    def test_unknown_liveness_is_cannot_tell_not_already_live(self):
+        """A probe that could not run must stay RETRYABLE -- folding it into already-live
+        would let one transient failure become a terminal refusal the caller records."""
         self.write_transcript()
         code, out = self.run_script("--session", SID, liveness={SID: "UNKNOWN"})
-        self.assertEqual(out[0], "already-live")
+        self.assertEqual(out[0], "cannot-tell")
+        self.assertEqual(code, 1)
 
     def test_unknown_transcript(self):
         code, out = self.run_script("--session", SID)
