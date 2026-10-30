@@ -47,6 +47,8 @@ never starts a session (`docs/session-tiers.md` § The worker boundary).
    | `spawn-ok: <goal>` | 0 | every gate held | go to step 3 |
    | `goal-not-in-scope` | 1 | the goal is not in this topic's `## Goals` | report it; the topic's declared membership is the boundary. Do **not** widen the list to make it fit |
    | `goal-not-startable` | 1 | the goal's `phase` is not `planning`/`execution` | report it as `⌛ waiting-approval`. The `todo → planning` flip is the operator's, never yours |
+   | `goal-terminal` | 1 | the goal's `status` is terminal (`completed`/`aborted`/`hold`) | report it as `⚪ done`. Closure leaves `phase` untouched, so this is the record that decides it — never reopen a closed goal, and never flip its phase to make it fit |
+   | `goal-unflagged` | 1 | the goal is not flagged by the operator — it needs `flag: true` with `flag_set_by: operator` or `legacy` | report it as `⏸ held — no operator flag`. Opening a manager is the operator's act; do **not** set the flag yourself, and do not treat the refusal as a stall — the fleet round's open leg still opens its workers |
    | `manager-cap` | 1 | a bound is reached; the **second line** names it: `goal-cap` (this topic runs N) or `manager-cap` (the fleet ceiling) | print the bound and the ranked `held` rows; start nothing this tick |
    | `workers are not this verb's to start` | 1 | a `--worker` argument reached the gate | report it; a task is a worker's anchor, and a worker is opened with `/supervisor:open --task`, not this verb |
 

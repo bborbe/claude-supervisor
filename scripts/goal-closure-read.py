@@ -20,10 +20,18 @@ Prints one line per section plus a verdict, and exits on the verdict:
     VERDICT: CLOSE
 
     CLOSE         every section present, every section carrying at least one box,
-                  and zero open boxes across both          -> exit 0
+                  and zero open boxes across both — or an absent `# Definition of
+                  Done` on a GRANDFATHERED goal              -> exit 0
     OPEN          at least one box is open                -> exit 1
     UNMEASURABLE  a section is absent, or carries no recognised box -> exit 1
     TERMINAL      the page already reads completed/aborted -> exit 1
+
+⚠️ **A grandfathered goal is the one exception to "a section is absent".** The vault
+requires a `# Definition of Done` only on goals created on or after `DOD_REQUIRED_AS_OF`
+(`2026-06-26`); older goals — and ones with no `created` — are grandfathered, so an
+absent DoD is not a gap there. The exception covers ABSENCE ONLY (an empty DoD section
+stays UNMEASURABLE) and GOALS ONLY (a task keeps the strict rule, and a topic closes on
+its `# Completion Gate`, which has no cutoff).
 
 `VERDICT: TERMINAL` is the guard that stops a closed page being re-closed on every
 later tick: the close verb writes `status: completed` and leaves every box at `[x]`,
@@ -47,12 +55,39 @@ import sys
 
 TERMINAL_STATUSES = {"completed", "aborted"}
 
+# The date the vault began requiring a `# Definition of Done` on goals. A goal created
+# before it — or carrying no `created` at all — is GRANDFATHERED: an absent DoD is a
+# known, accepted gap, not a violation. Lexicographic comparison is exact here because
+# the vault writes ISO-8601 (`2026-10-19`, `2026-09-20T00:00:00Z`); no parsing, no
+# timezone, and a `created` on the cutoff date itself reads as post-cutoff.
+#
+# ⚠️ This is the SAME constant the vault's `agents/goal-auditor.md` § 12 carries. Copies
+# of one date are the trade, not an oversight: a plugin script cannot import from a vault
+# agent. `commands/steps/goal-closure.md` and the CHANGELOG restate it too — change them
+# together. The closure rule shipped in v0.217.0 without this cutoff and
+# so made every grandfathered goal permanently unclosable — closable by every other
+# reader in the vault, unclosable by the one that actually closes it.
+#
+# Revisit once the calendar has moved well past this date (> 6 months): either drop
+# grandfathering entirely, retrofitting the vault, or move the cutoff forward.
+DOD_REQUIRED_AS_OF = "2026-06-26"
+
 # `-`, `*` and `+` are all valid markdown bullets, and `[X]` is the same tick as
 # `[x]` to every renderer — the earlier `-`-only, lowercase-only regex read both as
 # "no boxes", which the verdict then treated as complete.
 _BOX = re.compile(r"^[ \t]*[-*+][ \t]*\[(.)\]", re.M)
 _DONE = {"x", "X"}
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+# The only `created` shape the cutoff compares: a zero-padded ISO date, optionally
+# followed by a time. Anchored, with month 01-12 and day 01-31 — an unanchored prefix
+# match would let `2026-01-15garbage` through, and `2026-00-00` sorts below the cutoff and
+# would exempt a page whose date is malformed. Calendar validity is NOT checked:
+# `2026-02-30` sorts exactly where its claimed date implies, which is the safe direction.
+# Anything else is refused, not compared.
+_ISO_DATE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])($|[T ]\d{2}:\d{2})")
+# A leading list marker — `- `, `* `, `+ `, `1. ` — which `has_dod_heading` strips before
+# comparing a line to the section name.
+_LIST_MARKER = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 
 
 def normalise(text):
@@ -64,7 +99,7 @@ def normalise(text):
     TERMINAL guard and re-closes a finished page on every tick. `docs/subject-resolution.md:137`
     records the same trap for the shell path; this is the Python half of it.
     """
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+    return text.lstrip("﻿").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def strip_fences(text):
@@ -101,15 +136,30 @@ def strip_fences(text):
     return None if in_fence else "".join(out)
 
 
-def read_status(text):
-    """The page's frontmatter `status:`, or None when the field is absent."""
+def _field(text, name):
+    """One frontmatter scalar, unquoted, or None when the field is absent."""
     m = _FRONTMATTER.match(normalise(text))
     if not m:
         return None
     for line in m.group(1).splitlines():
-        if line.startswith("status:"):
+        if line.startswith(f"{name}:"):
             return line.split(":", 1)[1].strip().strip("'\"") or None
     return None
+
+
+def read_status(text):
+    """The page's frontmatter `status:`, or None when the field is absent."""
+    return _field(text, "status")
+
+
+def read_created(text):
+    """The page's frontmatter `created:` date, or None when the field is absent.
+
+    Absent is a value here, not a parse failure: the grandfathering rule trusts the
+    document's own metadata and never infers a date from the filesystem, so a goal with
+    no `created` is grandfathered exactly like one dated before the cutoff.
+    """
+    return _field(text, "created")
 
 
 _LIST_ITEM = re.compile(r"^[ \t]*(?:[-*+]|\d+\.)[ \t]+\S", re.M)
@@ -158,15 +208,107 @@ SECTIONS = {
 }
 
 
-def verdict_of(status, sections):
+def has_dod_heading(body):
+    """True when any line of the fence-stripped body is a DoD heading, in ANY shape.
+
+    `section_of` deliberately matches only an exact H1 `# Definition of Done` — every
+    other reader in the tree requires that, and `test_h2_heading_is_not_the_section`
+    pins it. So this predicate answers the different question the exemption needs: does
+    the DOCUMENT carry a DoD section at all, whatever shape it is written in?
+
+    ⚠️ **A regex over heading syntax is the wrong tool here, and every earlier attempt
+    proved it.** Each shape it missed became a fail-open: `## Definition of Done`, then
+    a suffixed heading, then an ATX heading indented up to three spaces, then a setext
+    heading, then a suffixed setext heading. Markdown has too many spellings of "this is
+    a heading" for a second parser to track `section_of` reliably.
+
+    So this does not parse headings at all. It normalises each line down to its text —
+    stripping leading whitespace, a blockquote marker, the `#`s, and emphasis markers —
+    and asks whether that text BEGINS with the section name. That is shape-independent by
+    construction: ATX at any level, indentation or suffix, setext, blockquote, bold, and
+    a plain-text heading all normalise to the same string. A mid-sentence mention is not
+    matched, so prose about the section does not over-refuse the page.
+
+    False positives are the safe direction — the page is refused rather than closed.
+    """
+    if body is None:
+        return False
+    for line in body.splitlines():
+        text = line.strip().lstrip(">").strip().lstrip("#").strip()
+        # A list marker is one more way to spell a heading: `- Definition of Done`,
+        # `1. Definition of Done`, `- **Definition of Done**`.
+        text = _LIST_MARKER.sub("", text).strip().strip("*_").strip()
+        # Collapse internal whitespace too: `# Definition  of  Done` (double-spaced, or
+        # with a non-breaking space) is the same heading to a renderer, and leaving it
+        # unmatched would be one more fail-open spelling.
+        if " ".join(text.lower().split()).startswith("definition of done"):
+            return True
+    return False
+
+
+def dod_exempt(kind, created):
+    """True when an ABSENT `# Definition of Done` must not block this page's closure.
+
+    The vault's grandfathering decision: a goal created before `DOD_REQUIRED_AS_OF`, or
+    carrying no `created`, has no DoD and is not in violation — so refusing to close it
+    contradicts a decision the vault already made. Every other reader honours the cutoff;
+    a closure rule that does not is the one rule that can never agree with them.
+
+    ⚠️ **Absence only, never an empty section.** A page whose DoD heading exists but
+    holds no box is UNMEASURABLE at every cutoff. Grandfathering accepts that the section
+    was never written, not that it was written and left blank.
+
+    ⚠️ **Goals only.** The decision names goals (`agents/goal-auditor.md` § 12). A task's
+    DoD requirement was never part of it, and a topic closes on `# Completion Gate`,
+    which has no grandfathering at all. Widening this to every kind would close tasks on
+    evidence the vault never agreed to accept.
+
+    ⚠️ **Zero-padded ISO-8601 only, and anything else fails CLOSED.** The comparison is
+    lexicographic, which is exact for `YYYY-MM-DD` and for a timestamp on that prefix —
+    but `15.01.2026` and a bare `2026` both sort BELOW the cutoff and would exempt a page
+    that is not grandfathered. A false CLOSE is the expensive direction here, so an
+    unrecognised shape is refused rather than compared.
+    """
+    if kind != "goal":
+        return False
+    if created is None:
+        return True
+    return bool(_ISO_DATE.match(created)) and created < DOD_REQUIRED_AS_OF
+
+
+def exemption_for(kind, text, body):
+    """The ONE entry point for the grandfathered-DoD exemption, guards included.
+
+    Both safety conditions live here rather than at the call site, so no caller can
+    reach the exemption by handing `verdict_of` a bare `True`:
+
+      - the frontmatter must have PARSED. `read_created` returns None for an absent field
+        and `_field` returns None for an unreadable page too, so without this a page
+        whose frontmatter does not parse would read as "no created" and be grandfathered.
+      - the page must carry no DoD heading in ANY shape (see `has_dod_heading`) — a
+        section this reader cannot parse is one it failed to read, not one the document
+        lacks, and closing on it is the false CLOSE this module refuses everywhere.
+    """
+    frontmatter_ok = _FRONTMATTER.match(normalise(text)) is not None
+    return (
+        body is not None
+        and frontmatter_ok
+        and not has_dod_heading(body)
+        and dod_exempt(kind, read_created(text))
+    )
+
+
+def verdict_of(status, sections, dod_may_be_absent=False):
     if (status or "").strip().lower() in TERMINAL_STATUSES:
         return "TERMINAL"
-    for _, tally in sections.items():
+    for name, tally in sections.items():
         if tally is None:
+            if dod_may_be_absent and name == "Definition of Done":
+                continue
             return "UNMEASURABLE"
         if tally[0] + tally[1] == 0:
             return "UNMEASURABLE"
-    if any(tally[1] > 0 for _, tally in sections.items()):
+    if any(tally[1] > 0 for tally in sections.values() if tally is not None):
         return "OPEN"
     return "CLOSE"
 
@@ -200,17 +342,24 @@ def main(argv):
         return 2
 
     status = read_status(text)
+    created = read_created(text)
     body = strip_fences(text)
     fenced_ok = body is not None
     sections = {name: section_of(body, name, strict) for name, strict in SECTIONS[kind]}
-    verdict = verdict_of(status, sections)
+    # The exemption's two safety guards live in `exemption_for`, so no caller can reach
+    # it by handing `verdict_of` a bare flag (see that function's docstring).
+    exempt = exemption_for(kind, text, body)
+    verdict = verdict_of(status, sections, exempt)
 
     print(f"status: {status or 'ABSENT'}")
     if not fenced_ok:
         print("fences: UNTERMINATED — the section bodies cannot be measured")
     for name, tally in sections.items():
         if tally is None:
-            print(f"{name}: MISSING" if fenced_ok else f"{name}: UNREADABLE")
+            if fenced_ok and exempt and name == "Definition of Done":
+                print(f"{name}: ABSENT — grandfathered (created {created or 'absent'} < {DOD_REQUIRED_AS_OF})")
+            else:
+                print(f"{name}: MISSING" if fenced_ok else f"{name}: UNREADABLE")
         elif tally[0] + tally[1] == 0:
             print(f"{name}: 0 boxes — unmeasurable")
         else:
