@@ -83,8 +83,8 @@ a `SendMessage`. A worker row is reported downward to the goal manager that owns
 
    Return the `start` rows whose goal has no live manager, in rank order, one per line:
    `To start: <goal> — rank <i>, <pin|ready work|priority>`. Return the rest as
-   `Held: <goal> — rank <i>, N slots full`, `Held: <goal> — phase todo`, or — the fourth
-   slot `rank()` emits — `Held: <goal> — rank <i>, no operator flag`.
+   `Held: <goal> — rank <i>, N slots full`, `Held: <goal> — phase todo`, or — the
+   `unflagged` slot `rank()` emits — `Held: <goal> — rank <i>, no operator flag`.
 
    ⚠️ **`unflagged` is not `N slots full`.** An unflagged goal never competes for a slot, so
    reporting it as a full slot names a lever the operator cannot pull: the row waits on their

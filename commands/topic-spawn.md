@@ -1,5 +1,5 @@
 ---
-description: Start ONE goal manager for a goal this topic declares — the topic tier's only spawn verb. Refuses with a named token: goal-not-in-scope, goal-not-startable, manager-cap, or the worker refusal. Holds no spawn tool; delegates to /supervisor:open --goal.
+description: Start ONE goal manager for a goal this topic declares — the topic tier's only spawn verb. Refuses with a named token: goal-not-in-scope, goal-not-startable, goal-terminal, goal-unflagged, manager-cap, or the worker refusal. Holds no spawn tool; delegates to /supervisor:open --goal.
 argument-hint: "<goal> [--rank] (the topic is resolved from the session)"
 allowed-tools:
   - Read
@@ -78,8 +78,9 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 ```
 
 It prints `rank: <n> startable of <m> declared · N = 3`, then one row per goal marked
-`start`, `held` or `unflagged`. ⚠️ **`<n>` counts only the FLAGGED rows** — the ones that
-may actually take a slot — while every non-terminal, startable-phase goal is still listed.
+`start`, `held` or `unflagged`. ⚠️ **`<n>` counts only the FLAGGED rows** — the rows
+eligible to compete for a slot, which includes a flagged row beyond N that `rank()` marks
+`held` — while every non-terminal, startable-phase goal is still listed.
 A row marked `unflagged` carries its rank and can never take one of the N: opening a manager
 is the operator's act, so it waits on `flag: true` with `flag_set_by: operator` or `legacy`,
 never on a slot. The order is **the first key that discriminates wins**:
