@@ -204,6 +204,22 @@ class OpenQueueTest(unittest.TestCase):
         self.assertEqual([r["name"] for r in rows], ["emptylist"])
         self.assertEqual(skipped, [])
 
+    def test_empty_list_blocked_by_does_not_scan_the_next_key(self):
+        """An inline `[]` is the whole answer — the scan must not run on.
+
+        Scanning past it reads the next key's indented list (`tags:`, `depends_on:`)
+        as a blocker and refuses a row that has none.
+        """
+        task_file(
+            self.tasks,
+            "nextkey",
+            "status: in_progress\nblocked_by: []\ntags:\n    - '[[Task]]'\n    - '[[Other]]'\n",
+        )
+        rows, skipped = self.collect(["nextkey"])
+
+        self.assertEqual([r["name"] for r in rows], ["nextkey"])
+        self.assertEqual(skipped, [])
+
     def test_empty_key_does_not_read_the_next_line_as_its_value(self):
         """`\\s*` matches `\\n`, so an empty key would swallow the line below it.
 

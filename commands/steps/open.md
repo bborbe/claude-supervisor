@@ -10,11 +10,11 @@ When: every tick — after Readings
 
 ## The leg
 
-    python3 $P/open-queue.py --tasks-dir "<vault>/<tasks-dir>"
+    python3 $P/open-queue.py --tasks-dir "<vault>/<tasks-dir>" --vault "<vault>" --json
 
-The script owns the population, the guards, the rank and the cap; **this step owns only the opening**. Print its block verbatim into the round's output, then open the rows it lists, in the order it lists them.
+The script owns the population, the guards, the rank and the cap; **this step owns only the opening**. ⚠️ **ONE invocation, two fields** — `--json` carries both `render` (the block, to print verbatim) and `selected[].action` (each row's ready-to-run command). Never run the leg twice: a second read is a different tick's queue, so the block and the actions could name different rows.
 
-**Opening one row** — `/supervisor:open "<name>" --task --vault "<vault>"`, once per row, in the printed order. ⚠️ **`--vault` is load-bearing.** Task titles are not namespaced across vaults (`commands/open.md:321`), and without it `/supervisor:open` resolves the vault from the session cwd — so a row read from `<vault>` can open a same-named task in a different vault, or be refused as not-found. The population and the action must name one vault. ⚠️ **Never compose the command from the printed name — take the `action` string from `--json`.** A row name is a task-file stem and the vault is worker-writable, so a `"` in it breaks naive quoting and a `$(…)` or backtick executes in this session's shell; the script emits each selected row's action already `shlex.quote`d (`selected[].action`), the same shape `next-focus.py` uses for its `action` field. Paste it verbatim. Nothing else: no batch helper, no in-line `spawn_agent` (`docs/fleet-surface.md` § Spawn a worker item 6 holds `spawn_agent` for `resume=` alone), no reordering.
+**Print `.render` verbatim**, then **run each `.selected[].action` verbatim**, in the order given. ⚠️ **`--vault` is load-bearing.** Task titles are not namespaced across vaults (`commands/open.md:321`), and without it `/supervisor:open` resolves the vault from the session cwd — so a row read from `<vault>` can open a same-named task in a different vault, or be refused as not-found. The population and the action must name one vault. ⚠️ **Never compose the command from the printed name — take the `action` string from `--json`.** A row name is a task-file stem and the vault is worker-writable, so a `"` in it breaks naive quoting and a `$(…)` or backtick executes in this session's shell; the script emits each selected row's action already `shlex.quote`d (`selected[].action`), the same shape `next-focus.py` uses for its `action` field. Paste it verbatim. Nothing else: no batch helper, no in-line `spawn_agent` (`docs/fleet-surface.md` § Spawn a worker item 6 holds `spawn_agent` for `resume=` alone), no reordering.
 
 ## The block
 

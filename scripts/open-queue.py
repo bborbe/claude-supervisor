@@ -192,8 +192,11 @@ def has_blocked_by(block):
     if not match:
         return False
     inline = match.group(1).strip().strip('"').strip("'")
-    if inline and inline not in ("[]", "[ ]"):
-        return True  # inline scalar — `[]` is an empty list, not a blocker
+    if inline:
+        # An inline value is the WHOLE answer — including `[]`, which is an empty list
+        # and not a blocker. Scanning on from here would read the next key's indented
+        # list (`tags:`, `depends_on:`) as a blocker and refuse an eligible row.
+        return inline not in ("[]", "[ ]")
     for line in block[match.end():].splitlines():
         if not line.strip():
             continue
@@ -423,6 +426,11 @@ def main(argv=None):
                 "skipped": all_skipped,
                 "live": live,
                 "target": target,
+                # The rendered block rides the JSON, as `next-focus.py` does, so one
+                # invocation yields both the block to print and the quoted actions —
+                # two reads could disagree, and a step that needs both would otherwise
+                # have to run the leg twice.
+                "render": render(opened, all_skipped, live, target),
             },
             sys.stdout,
             indent=2,
