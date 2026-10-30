@@ -68,24 +68,44 @@ For the subject, then each page of the tracked set:
    subject in any other vault lands on the wrong page or nowhere at all. It is the same
    explicit-`--vault` contract `commands/steps/goal-resolve.md` carries for the manager's write.
 
-   ⚠️ **Double-quote, as the rest of the tree does — and refuse a name that cannot be safely
-   double-quoted.** The template above is the contract; the guard is on the input. Before
-   running any of the three, check the page name for `$`, a backtick, `"` or `\`: those four
-   characters are the entire injection surface inside a double-quoted word, and this line runs
-   unattended every tick. **If a name carries one, do not run the verb** — report the name and
-   stop. That is a stricter rule than `commands/open.md:499` states, deliberately: it is the
-   mechanism that mandate leaves unnamed.
+   ⚠️ **Double-quote, as the rest of the tree does — and check the name first, with the
+   script rather than with your own eye:**
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/closure-name-safe.py "<name>"
+   ```
+   It exits 0 on a safe name and 1 on one carrying `$`, a backtick, `"` or `\` — the entire
+   injection surface inside a double-quoted word. **On exit 1, do not run the verb** — report
+   the name and stop. ⚠️ **The check is a script, not a convention:** this line runs unattended
+   every tick, and a rule the model has to remember each time is not a gate. It is stricter
+   than `commands/open.md:499` states, deliberately — it is the mechanism that mandate leaves
+   unnamed.
 
    The verb re-checks its own gate. **Its verdict is the authority, never this step's read** —
    when the two disagree, the verb wins and the disagreement is reported, not resolved by hand.
 
-3. **Stop the loop when the SUBJECT closes** — report the verdict, record the stand-down with
-   `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manager-liveness.py --stop --subject "<subject>" --branch <goal|topic>`,
-   and end the tick without re-arming. A loop that keeps arming on a completed subject reports
-   work where there is none. ⚠️ **A tracked page closing is not this** — only the subject ends
-   the loop; a task or member goal closing just leaves the tracked set.
+3. **Never pass `--force`.** A close that needs it is a close this step does not make.
 
-4. **Never pass `--force`.** A close that needs it is a close this step does not make.
+## Only after the whole set is examined — ending the round
+
+⚠️ **Steps 1–3 run over EVERY page before anything stops.** Ending the tick from inside the
+loop would close the subject and quit before the tracked set was read, so the tasks a finished
+goal owns would never be closed — and on the topic branch it would also preempt row 12, whose
+tail (`commands/steps/round-tail.md`) owns the topic's post-close sequence: reconcile the
+Status Summary → `/vault-cli:sync-progress` → stop the loop → `/vault-cli:session-close`.
+
+Once every page in the set has been examined, and **only** if the SUBJECT itself reported
+`CLOSE`:
+
+- **Goal branch** — report the verdict, record the stand-down with
+  `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manager-liveness.py --stop --subject "<subject>" --branch goal`,
+  and end the tick without re-arming. A loop that keeps arming on a completed subject reports
+  work where there is none.
+- **Topic branch** — report the verdict and **hand off to the tail**: do not stop here, because
+  the tail owns the reconcile, the sync and the session close. Let row 12 run its close
+  sequence, which stops the loop itself.
+
+⚠️ **A tracked page closing is not this** — a task or a member goal closing just leaves the
+tracked set; only the subject ends the round.
 
 ## Which pages this covers
 
