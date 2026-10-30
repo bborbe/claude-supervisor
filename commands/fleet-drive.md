@@ -34,7 +34,7 @@ argument-hint: "[--interval <N>m] (interval defaults to 15m; the round repeats b
 ---
 Fleet-drive — **the round**: one round, once, over the whole fleet, runnable by hand. The fleet's show is `/supervisor:fleet-status`.
 
-⚠️ **This is the round, not the arm.** The wakeup names THIS command; the arm (`/supervisor:fleet-loop`) is invoked **once** to arm the loop and is **never** re-invoked from a wakeup — a wakeup re-invokes THIS command (`/supervisor:fleet-drive --interval <N>m`). This file is the **round** (read on every wakeup); `commands/fleet-loop.md` is the **arm** (read once).
+⚠️ **This is the round, not the arm.** The wakeup names THIS command; the arm (`/supervisor:fleet-loop`) is invoked **once** and **never** re-invoked from a wakeup — a wakeup re-invokes THIS command (`/supervisor:fleet-drive --interval <N>m`).
 
 ⚠️ **A fleet-tier verb — never run it from a worker session.** Running a fleet-wide sweep inside a worker collapses the two roles silently: the session keeps its task anchor while its turns sweep the whole fleet (`${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles). A worker routes a sweep to its manager with `SendMessage`. A change to this command is exercised in a manager session's runtime, never from the session that authored it.
 
@@ -57,6 +57,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 4 | Adopt | `adopt-orphans.py` printed rows or exited non-zero — run: `python3 $P/adopt-orphans.py --self "$CLAUDE_CODE_SESSION_ID"` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/adopt.md` |
 | 5 | Drive leg | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/drive.md` |
 | 5b | Keep alive | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/keepalive.md` |
+| 5c | Flagged open | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/flagged-open.md` |
 | 6 | Reap contract | the drive leg runs | `${CLAUDE_PLUGIN_ROOT}/commands/steps/reap.md` |
 | 7 | Answer a parked or exited worker | a worker is parked on a question or has exited | `${CLAUDE_PLUGIN_ROOT}/commands/steps/worker-channels.md` |
 | 8 | Act on the open-items ledger | the ledger holds ≥1 open entry | `${CLAUDE_PLUGIN_ROOT}/commands/steps/act.md` · `${CLAUDE_PLUGIN_ROOT}/commands/steps/open-items.md` |
