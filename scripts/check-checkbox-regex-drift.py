@@ -31,17 +31,35 @@ UPSTREAM = "https://raw.githubusercontent.com/bborbe/vault-cli/master/pkg/storag
 TIMEOUT_SECONDS = 10
 
 # `_VERB_BOX = re.compile(r"…", re.M)` — the raw-string body, backslashes intact.
-LOCAL = re.compile(r'_VERB_BOX\s*=\s*re\.compile\(r"([^"]*)"')
-# `CheckboxRegex = regexp.MustCompile(`…`)` — the backtick raw-string body.
-REMOTE = re.compile(r"CheckboxRegex\s*=\s*regexp\.MustCompile\(`([^`]*)`\)")
+# Anchored under `re.M` so a differently-named assignment cannot satisfy it: unanchored,
+# `MY_VERB_BOX = …` matches on the `_VERB_BOX` substring and the guard reports `ok` for a
+# line that is not the mirror at all.
+LOCAL = re.compile(r'^\s*_VERB_BOX\s*=\s*re\.compile\(r"([^"]*)"', re.M)
+# `CheckboxRegex = regexp.MustCompile(`…`)` — the backtick raw-string body, tab-indented
+# in the Go source, so `^\s*` rather than `^`.
+REMOTE = re.compile(r"^\s*CheckboxRegex\s*=\s*regexp\.MustCompile\(`([^`]*)`\)", re.M)
 
 
 def fetch(url: str) -> str:
     """`curl`, not `urllib`: the macOS framework Python carries no CA bundle, so `urllib`
     fails CERTIFICATE_VERIFY_FAILED on a machine where `curl` succeeds. Measured on this
-    repo's own first run — the check is worthless if it cannot reach its source."""
+    repo's own first run — the check is worthless if it cannot reach its source.
+
+    `--proto`/`--proto-redir` pin both the request and any redirect to HTTPS: `-L` alone
+    would follow an HTTPS→HTTP downgrade, and the check trusts the fetched bytes enough to
+    fail the build on them."""
     result = subprocess.run(
-        ["curl", "-fsSL", "--max-time", str(TIMEOUT_SECONDS), url],
+        [
+            "curl",
+            "-fsSL",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--max-time",
+            str(TIMEOUT_SECONDS),
+            url,
+        ],
         capture_output=True,
         text=True,
         check=False,
