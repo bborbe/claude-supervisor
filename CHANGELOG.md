@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.220.3
 
 - test: **the resume context gate is exercised by the spawn path's own call, so "no worker is created" is a tested property rather than an inspection.** `spawnAgent`'s resume arm did three things inline — `transcriptPathFor`, `readContextStats`, `resumeContextRefusal` — and a test could only reach the last of them, so the guard's own criterion ("asserts the refusal line is emitted and no `spawn_agent` call is made") rested on reading the code. The three are now one function, `resumeAdmission`, and `context-guard.test.mjs` drives it with fixture transcripts through `readFile`: an above-bound session returns `admit: false` with the reason the caller returns, a below-bound one returns `admit: true`, an unreadable transcript returns `admit: true` (unmeasured is not refused), and a totality test pins `admit === (error === null)` across four shapes — because the caller's branch is `if (!admission.admit) return { error: admission.error }`, and an `admit: false` carrying no error would be a refusal with no reason. The one-line `return` placed before any spawn work remains the "no worker" guarantee, and it is now the only thing standing between the tested gate and a spawn. No behaviour change. Change set: `server/context-guard.mjs`, `server/context-guard.test.mjs`, `server/supervisor.mjs`, `CHANGELOG.md`.
 
