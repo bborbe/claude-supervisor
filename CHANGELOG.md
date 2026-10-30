@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.217.2
 
 - fix: **`changelog-archive.py` extends the archive instead of replacing it.** A rotation that actually cut wrote `ARCHIVE_HEADER + archived` straight over `CHANGELOG-archive.md`, so every section an earlier rotation had archived vanished from the repository — observed 2026-10-29, when a real second rotation dropped **316 released sections (v0.102.3 … v0.1.0)** and nothing else in the tree held them. ⚠️ **The suite was green throughout, and why is the point:** the only second-run test was `test_second_run_is_a_no_op`, whose second run finds nothing to cut and returns *before* the archive write — so the overwrite branch was never executed by a test. `merge_archive()` now prepends the prior archive's sections, deduped by heading so a repeated run cannot duplicate one, and separates the junction by a blank line; `test_a_second_rotation_extends_the_archive_instead_of_replacing_it` grows the changelog again with strictly newer versions so the second run really rotates, and asserts ordering, retention and the junction. The archive is also written **before** `CHANGELOG.md` is truncated, so a failed write duplicates at worst and never drops the freshly cut sections. Change set: `scripts/changelog-archive.py`, `scripts/tests/test_changelog_archive.py`, `CHANGELOG.md`.
 
