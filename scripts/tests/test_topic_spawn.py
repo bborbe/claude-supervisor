@@ -273,6 +273,20 @@ class TopicSpawnTest(unittest.TestCase):
         self.assertEqual(1, rc)
         self.assertEqual("goal-terminal", out[0])
 
+    def test_a_held_goal_still_passes(self):
+        """`hold` is a pause, not a closure — `TERMINAL_STATUSES` is `(completed, aborted)`,
+        and the module docstring says so. Without this positive control, adding `hold` to
+        that tuple would silently contradict the documentation with no failing test."""
+        self.goal("Beta", "execution", 1)
+        page = self.vault / "24 Goals" / "Beta.md"
+        page.write_text(
+            page.read_text(encoding="utf-8").replace("status: in_progress", "status: hold"),
+            encoding="utf-8",
+        )
+        rc, out = self.run_gate("--goal", "Beta")
+        self.assertEqual(0, rc)
+        self.assertEqual("spawn-ok: Beta", out[0])
+
     def test_the_flag_gate_precedes_the_cap(self):
         """At the cap an unflagged goal must be told to wait for the flag, not for a slot —
         otherwise the operator frees a slot and gets the identical refusal back."""
@@ -375,6 +389,29 @@ class TopicSpawnTest(unittest.TestCase):
         self.assertEqual("rank: 4 startable of 4 declared · N = 3", out[0])
         self.assertEqual(3, sum(1 for line in out[1:] if " start " in line))
         self.assertEqual(1, sum(1 for line in out[1:] if " held " in line))
+
+    def test_the_rank_header_counts_only_the_flagged_rows(self):
+        """`<n>` is the flagged count, never `len(rows)` — an unflagged row is listed but can
+        never take a slot, so counting it would report work the topic cannot start."""
+        self.goal("Delta", "execution", 4, flag="false")
+        rc, out = self.run_gate("--rank")
+        self.assertEqual(0, rc)
+        self.assertEqual("rank: 3 startable of 4 declared · N = 3", out[0])
+
+    def test_the_rank_output_prints_the_unflagged_slot(self):
+        """The dict is asserted elsewhere; this pins the PRINTED line, which is what the
+        agent renders — a slot the report cannot show is a row the operator never sees."""
+        self.goal("Delta", "execution", 4, flag="false")
+        rc, out = self.run_gate("--rank")
+        line = next((l for l in out[1:] if "Delta" in l), None)
+        self.assertIsNotNone(line, f"no Delta row in the ranking output: {out}")
+        self.assertIn("unflagged", line)
+
+    def test_a_yes_flag_is_ranked(self):
+        """The truthy set is shared by both paths, so the rank path must accept it too."""
+        self.goal("Delta", "execution", 4, flag="yes")
+        rc, out = self.run_gate("--rank")
+        self.assertEqual("rank: 4 startable of 4 declared · N = 3", out[0])
 
     def test_the_ranking_orders_by_priority_ascending(self):
         rc, out = self.run_gate("--rank")
