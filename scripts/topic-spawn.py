@@ -57,7 +57,29 @@ REFUSE_STARTABLE = "goal-not-startable"
 # that the goal *finished*. Collapsing them tells an operator to flip a phase on a goal
 # that is already done.
 REFUSE_TERMINAL = "goal-terminal"
+# ⚠️ A fourth token, and it exists because opening a manager and approving a phase are
+# different operator acts. `phase` says *begin this work*; the flag says *open a manager
+# for it*. Operator ruling 2026-10-30: "we dont want to auto open topic-manager,
+# goal-manager ... but flag are fine".
+REFUSE_UNFLAGGED = "goal-unflagged"
 REFUSE_CAP = "manager-cap"
+
+# The only `flag_set_by` values that count as the operator's own mark. `legacy` covers the
+# 193 rows flagged before the field was written. An absent value is REFUSED — a writer that
+# set the flag without naming itself is not evidence the operator asked for it.
+FLAG_SETTERS = ("operator", "legacy")
+
+
+def operator_flagged(fm: str) -> bool:
+    """True when the operator flagged this page to be picked up.
+
+    `flag: true` alone is not enough: `docs/task-writing.md` § The approval flag makes it an
+    approval *for `/supervisor:open --flagged`*, so the setter must be the operator's own mark.
+    """
+    return (
+        scalar(fm, "flag").lower() == "true"
+        and scalar(fm, "flag_set_by").lower() in FLAG_SETTERS
+    )
 
 
 def refuse(token: str, detail: str, bound: str | None = None) -> int:
@@ -337,6 +359,16 @@ def rank(vault: str, topic_text: str, goals: list[str], n: int) -> list[dict]:
         # closed — the "finished goal silently restarts" failure.
         if scalar(fm, "status").lower() in TERMINAL_STATUSES:
             continue
+        # ⚠️ Opening a goal manager is the operator's act, so only a FLAGGED goal is
+        # rankable here. Operator ruling 2026-10-30: "we dont want to auto open
+        # topic-manager, goal-manager ... but flag are fine". Restart is not open — a
+        # restart resumes a session that already has a subject and a recorded id, so
+        # the keep-alive `restart`/`resume` arms are untouched by this gate; only a
+        # fresh open is. An unflagged goal is reported by the round with its rank, and
+        # still gets its WORKERS opened by the fleet round's open leg, so the work
+        # moves without a manager.
+        if not operator_flagged(fm):
+            continue
         phase = scalar(fm, "phase").lower()
         # An absent phase is exempt (see the module docstring): the goal is
         # startable, so it must be ranked, not silently dropped from the list.
@@ -436,6 +468,17 @@ def main(argv: list[str]) -> int:
             REFUSE_TERMINAL,
             f"<{a.goal}> reads status `{status}` — it is finished, not unstarted. "
             f"Closure leaves `phase` untouched, so this is the record that decides it.",
+        )
+
+    # (5b) Opening a goal manager is the operator's act — only a FLAGGED goal is startable.
+    # ⚠️ This is the executable half of rule 4: without it the gate lives only in
+    # `commands/topic-drive.md`, and a documented mandate is not an executed one.
+    if not operator_flagged(goal_fm):
+        return refuse(
+            REFUSE_UNFLAGGED,
+            f"<{a.goal}> is not flagged by the operator. Opening a goal manager is the "
+            f"operator's act: set `flag: true` with `flag_set_by: operator` to admit it. "
+            f"Its workers are opened by the fleet round's open leg regardless.",
         )
 
     # (5) Startability — the operator's approval, read from disk.
