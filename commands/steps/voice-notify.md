@@ -22,8 +22,7 @@ When: every tick — run the `{"gates": []}` prune on every round, and publish o
     **A manager that is live but whose loop has lapsed is the only manager ask this round raises.** Since 2026-10-29 the round no longer proposes managers for goals that never had one (operator ruling: *"u should not recommend to open more goals, maybe only crashed managers"*); the recovery reading replaced it.
 
     ```bash
-    python3 $P/crashed-managers.py --json --vault "<this round's vault>"   # the computation, posts nothing
-    python3 $P/crashed-managers.py --post --vault "<this round's vault>"   # at most one card per uncovered subject
+    python3 $P/crashed-managers.py --post --vault "<this round's vault>"   # at most one card per uncovered subject; `--json` is a diagnosis-only run, never both
     ```
 
     ⚠️ **`--vault` is required, not optional.** The fleet round is per-vault, and the script's default is one hardcoded vault — omit the flag and a manager running elsewhere reads *that* vault's pages against a *different* vault's cadence records, classifying every subject as an abandoned record and carding nothing.

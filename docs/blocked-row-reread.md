@@ -53,8 +53,9 @@ moved on), never by this probe.
   could not be executed at all; that was this document's first draft, caught in review
   2026-10-29. ⚠️ **The no-key marker is a NON-NUMERIC pane token, not `pane —`.** The pane
   column carries `who-needs-me.py`'s own token — a numeric pane id, or `?` / `hst` for a
-  pane-less row (`row()`, ~line 1898); `pane —` is the digest's **link**-column failure form
-  (`agents/fleet-sweep-reader.md`), not the pane column. A `?` / `hst` row therefore has no key
+  pane-less row (`row()`, ~line 1898); `pane —` is the pane-column failure form of the
+  fleet-drive `ESCALATION` row (`agents/fleet-drive.md`), and the digest's link column fails as
+  a bare `—` (`agents/fleet-sweep-reader.md`). A `?` / `hst` row therefore has no key
   and is **kept** — never matched against the probe's own `[?]` / `[hst]` rows, which would
   "confirm" a row nothing verified. Any other non-numeric token is treated the same way. A row
   whose pane does not resolve is **kept**
@@ -69,8 +70,9 @@ moved on), never by this probe.
   on every peer's rendered closer. Read `--all`, so a row past the default 20 is not dropped for
   being late in the list.
 - **Stamp the read.** Take the wall clock at the moment the probe runs and carry that stamp on
-  every row the probe confirmed. It is the only timestamp that says *when* the row was
-  verified, and without it the render cannot be distinguished from the digest it came from.
+  the section header — `Waiting on your keystroke — re-read <stamp>`. It is the only timestamp
+  that says *when* the rows were verified, and without it the render cannot be distinguished
+  from the digest it came from.
 - **A `BLOCKED` row the probe does not list is dropped — and the drop is printed**, beneath the
   section: `re-read <stamp>: no open gate for <name> [pane <id>]`. A section that quietly shrinks is
   indistinguishable from a fleet that never had a gate, so the operator must be able to see
