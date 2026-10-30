@@ -74,7 +74,7 @@ moved on), never by this probe.
   that says *when* the rows were verified, and without it the render cannot be distinguished
   from the digest it came from.
 - **A `BLOCKED` row the probe does not list is dropped — and the drop is printed**, beneath the
-  section: `re-read <stamp>: no open gate for <name> [pane <id>]`. A section that quietly shrinks is
+  rows: `re-read <stamp>: no open gate for <name> [pane <id>]`. A section that quietly shrinks is
   indistinguishable from a fleet that never had a gate, so the operator must be able to see
   that a row existed and was cleared.
 - **A probe that errors leaves every row standing**, and the section carries
@@ -85,7 +85,7 @@ moved on), never by this probe.
 ## Why both directions are load-bearing
 
 Deleting the section satisfies the "no stale row" half and none of the intent. A gate the probe
-**does** list still renders, with its live stamp. The two directions guard each other: without
+**does** list still renders, under the section header's live stamp. The two directions guard each other: without
 the drop, a closed gate renders as an ask; without the retention, a live ask is deleted along
 with the stale ones. Either alone is a regression, and a change that does only one of them
 should be refused in review.
