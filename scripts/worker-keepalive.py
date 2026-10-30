@@ -101,9 +101,13 @@ def goal_manager_live(fm: str, vault: str, goals_dir: str) -> str:
     live manager is that manager's to resume.
     """
     k = _keepalive()
-    # `goals:` is a YAML list, so `scalar` cannot read it — scan the frontmatter for the
-    # wikilinks instead, which works for both the list and the single-inline forms.
-    for name in re.findall(r"\[\[([^\]|]+)", fm):
+    # `goals:` is a YAML list, so `scalar` cannot read it. Scope the scan to that key's own
+    # block: a wikilink in ANY other frontmatter field (a `themes:` or a stray `related:`)
+    # would otherwise match a page with a live manager and silently skip a dead worker.
+    block = re.search(r"^goals:[ \t]*(.*(?:\n[ \t-].*)*)", fm, re.MULTILINE)
+    if not block:
+        return ""
+    for name in re.findall(r"\[\[([^\]|]+)", block.group(1)):
         page = os.path.join(vault, goals_dir, name.strip() + ".md")
         try:
             with open(page, encoding="utf-8") as fh:

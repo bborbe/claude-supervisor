@@ -31,7 +31,7 @@ for x in json.load(sys.stdin):
 TOPICS="${TOPICS:-23 Topics}"
 for f in "<vault>/$TOPICS"/*.md; do
   name=$(basename "$f" .md)
-  grep -q '^manager_session_id:' "$f" || continue
+  grep -qE '^manager_session_id: *[^ ]' "$f" || continue
   printf '%s\t' "$name"
   python3 "$P/topic-keepalive.py" --vault "<vault>" --subject "$name" --branch topic --dir "$TOPICS" | head -2 | tr '\n' '\t'
   echo
@@ -71,7 +71,7 @@ is restarted automatically, and a worker that already owns its task decides noth
 being resumed. The escalation stays for a worker that **cannot** be resumed (no recorded id,
 a spent cap, an undecidable probe) — it is no longer the disposition for every orphan.
 
-**Population — `in_progress` tasks with open boxes that record a `claude_session_id`.** Run
+**Population — every task page carrying a non-empty `claude_session_id`.** The script narrows it: a terminal status, a parked one (`hold`/`blocked`, or `human_review`/`todo`/`done` phase), a future `defer_date`, no open boxes, and a live owning goal manager all return `jump`. Any other non-terminal status (`next`, for one) with an open box **is** resumed — the guard is the parks above, not `status: in_progress`. Run
 the script per task; it decides, it never resumes. ⚠️ **Resolve the task directory from the
 vault's config, never assume `25 Tasks`:**
 
@@ -83,18 +83,24 @@ for x in json.load(sys.stdin):
     if x.get('tasks_dir'):
         print(x['tasks_dir']); break")
 TASKS="${TASKS:-25 Tasks}"
+GOALS=$(vault-cli config list --output json | python3 -c "
+import json,sys
+for x in json.load(sys.stdin):
+    if x.get('goals_dir'):
+        print(x['goals_dir']); break")
+GOALS="${GOALS:-24 Goals}"
 for f in "<vault>/$TASKS"/*.md; do
-  grep -q '^claude_session_id:' "$f" || continue
+  grep -qE '^claude_session_id: *[^ ]' "$f" || continue
   name=$(basename "$f" .md)
   printf '%s\t' "$name"
-  python3 "$P/worker-keepalive.py" --vault "<vault>" --task "$name" --dir "$TASKS" | head -2 | tr '\n' '\t'
+  python3 "$P/worker-keepalive.py" --vault "<vault>" --task "$name" --dir "$TASKS" --goals-dir "$GOALS" | head -2 | tr '\n' '\t'
   echo
 done
 ```
 
 **Act on the verdict.** `resume` → `/supervisor:open --task "<name>"`, then record the resume
-**once `session-liveness.py --check` shows the id live** (`worker-keepalive.py --record-resume
-<id> --task "<name>"`); `jump` → hand the operator the pane; `crash-loop` → stop resuming that
+**once `session-liveness.py --check` shows the id live** (`worker-keepalive.py --vault "<vault>" --task "<name>"
+--record-resume <id>` — `--vault` is `required=True`, and omitting it exits 2 so the cap never arms); `jump` → ⚠️ **read its second line before acting** — the script prints `jump` for a live session, a terminal task, a parked one, a deferred one, one with no open boxes, and one whose goal has a live manager; only the live case has a pane, so render the reason rather than the pane action; `crash-loop` → stop resuming that
 task and escalate once with the `⚠️ WORKER CRASH-LOOP` line; `cannot-tell` → report it and
 never act.
 
@@ -115,8 +121,8 @@ enforces the exclusion itself rather than leaving it to this prose.** That gate 
 goal tier's tick with its own `last_auto_resume` cap; this leg runs on the fleet tick with the
 `worker--<slug>` cap. Both caps record only **after** a resume the instrument confirms `LIVE`,
 so a check-then-act race would let two resumes land before either cap arms. The script therefore
-reads the task's `goals:` wikilinks and, if any of those goals has a `manager_session_id` the
-liveness instrument reads `LIVE`, returns `jump` with *"goal manager <id> is live and owns this
+scans the task's frontmatter for wikilinks and, if any page one names has a `manager_session_id`
+the liveness instrument reads `LIVE`, returns `jump` with *"goal manager <id> is live and owns this
 task"* — the fleet leg never acts on a row the goal tier owns. This leg takes only the rows
 whose goal has no live manager, the same fallback `docs/fleet-surface.md` § Which manager owns a
 subject already states.

@@ -200,6 +200,21 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertEqual("resume", out.getvalue().splitlines()[0])
 
+    def test_a_wikilink_outside_goals_does_not_skip_the_worker(self):
+        # A `themes:` link to a page with a live manager must not be read as ownership —
+        # that would silently skip exactly the dead worker this leg exists to recover.
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution", "phase: execution\nthemes:\n    - '[[A Theme]]'"))
+        (self.vault / "24 Goals").mkdir(parents=True)
+        (self.vault / "24 Goals" / "A Theme.md").write_text(
+            "---\nmanager_session_id: gm-1\n---\n", encoding="utf-8")
+        self.kp.session_verdict = lambda sid: "LIVE" if sid == "gm-1" else "ABSENT"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.k.main(["--vault", str(self.vault), "--task", "A Task"])
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out.getvalue().splitlines()[0])
+
     def test_ambiguous_and_malformed_are_cannot_tell(self):
         self.page()
         for verdict in ("AMBIGUOUS", "MALFORMED"):

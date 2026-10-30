@@ -27,11 +27,10 @@ Load this page, with the rest of `docs/`, via `/supervisor:read-guides`.
 
 The tiers form a **tree**, and the operator's hierarchy (2026-10-23, amended 2026-10-30) names
 what each level may open: **the fleet manager is top of everything** — it opens topic managers,
-and a worker or a goal manager **only when no lower-tier manager owns that subject**, the
-goal-manager half further narrowed to *only when that goal is flagged*; **a topic manager opens
-workers, and a goal manager only when that goal is flagged**; **a goal manager opens workers**;
-**a worker opens nothing**. A tier opens a lower one through `/supervisor:open`, never by a
-bare spawn.
+and a **worker** only when no lower-tier manager owns that subject, and a goal manager **only
+when that goal is flagged**; **a topic manager opens workers, and a goal manager only when that
+goal is flagged**; **a goal manager opens workers**; **a worker opens nothing**. A tier opens a
+lower one through `/supervisor:open`, never by a bare spawn.
 
 ⚠️ **The ownership condition survived the 2026-10-30 amendment, and it is not the same rule as
 the one it sat beside.** The clause that was removed read *"each when no lower-tier manager owns
