@@ -45,7 +45,7 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
    Dispositions it emits, each recorded this round like any digest candidate:
    - `finished` — terminal task; joins step 1b's reap set.
-   - `blocked` — task `in_progress` with open boxes and the session absent from the registry; cause `orphan` — escalate, never nudge.
+   - `blocked` — task `in_progress` with open boxes and the session absent from the registry; cause `orphan` — **resume it** (`keepalive.md` 5b).
    - `unverifiable` — no `task_file`, the file is missing, or the registry could not be read.
    - `needs-step-4` — task `in_progress` with open boxes and the session live. Run step 4's probes: they clear → **revive** (drafted in step 6); a live blocker → **blocked**; a probe that cannot run → **unverifiable**.
 
