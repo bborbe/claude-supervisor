@@ -52,6 +52,11 @@ TERMINAL_STATUSES = ("completed", "aborted")
 REFUSE_WORKER = "workers are not this verb's to start"
 REFUSE_SCOPE = "goal-not-in-scope"
 REFUSE_STARTABLE = "goal-not-startable"
+# ⚠️ A separate token from `goal-not-startable`, because the causes are not the same and
+# the levers differ: `phase` is the operator's approval to *begin*, `status` is the record
+# that the goal *finished*. Collapsing them tells an operator to flip a phase on a goal
+# that is already done.
+REFUSE_TERMINAL = "goal-terminal"
 REFUSE_CAP = "manager-cap"
 
 
@@ -326,6 +331,12 @@ def rank(vault: str, topic_text: str, goals: list[str], n: int) -> list[dict]:
                 fm = frontmatter(fh.read())
         except OSError:
             continue
+        # ⚠️ A terminal goal is never a candidate, whatever its phase says. Closure
+        # (router row 4c) sets `status: completed` and leaves `phase: execution` in
+        # place, so a phase-only ranking keeps offering a goal the same tick has just
+        # closed — the "finished goal silently restarts" failure.
+        if scalar(fm, "status").lower() in TERMINAL_STATUSES:
+            continue
         phase = scalar(fm, "phase").lower()
         # An absent phase is exempt (see the module docstring): the goal is
         # startable, so it must be ranked, not silently dropped from the list.
@@ -414,6 +425,17 @@ def main(argv: list[str]) -> int:
             REFUSE_SCOPE,
             f"<{a.goal}> is not in {a.topic}'s `## Goals` list "
             f"({len(goals)} declared). The topic's declared membership is the boundary.",
+        )
+
+    # (5a) A terminal goal is not startable, and this is checked before the phase gate
+    # so the refusal names the real cause: closure leaves `phase: execution` in place,
+    # so a phase-first read would report the goal as perfectly startable.
+    status = scalar(goal_fm, "status")
+    if status.lower() in TERMINAL_STATUSES:
+        return refuse(
+            REFUSE_TERMINAL,
+            f"<{a.goal}> reads status `{status}` — it is finished, not unstarted. "
+            f"Closure leaves `phase` untouched, so this is the record that decides it.",
         )
 
     # (5) Startability — the operator's approval, read from disk.
