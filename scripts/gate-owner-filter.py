@@ -713,13 +713,23 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None, scope=None)
         # its own workers; this keeps that from returning through either door.
         return EMIT, "own-worker"
 
+    # A pane this watcher ADOPTED is one it EXISTS to see, and the claim block below
+    # promises exactly that with its `own-claim` arm. Computed HERE, above the scope
+    # block, because that block is the first thing that can silence a pane: a foreign
+    # scope page plus a live claim is precisely the row the adopting manager undertook
+    # to route, so the durable answer must not outrank the claim. Measured contract, not
+    # a hypothetical: `ownership-claim.py` records the adoption precisely so the adopting
+    # manager keeps seeing a spawnerless pane, and hop 3b sits below this for the same
+    # reason the claim block does.
+    adopted_by_self = bool(claims and self_id and claims.get(session_id) == self_id)
+
     # THE DURABLE INPUT. `scope` is `None` when the vault could not be read, when `--no-scope`
     # was passed, or when this manager has no page of its own -- and every one of those leaves
     # the filter exactly as it was. It reaches only panes the two branches above did not claim:
     # never one this watcher spawned (`own-worker`) and never its own session (`self`). For a
     # positively-foreign pane it SUPERSEDES the spawn edge's verdict, reason included -- the
     # pane leaves the feed either way, but it leaves named instead of mislabelled.
-    if scope is not None:
+    if scope is not None and not adopted_by_self:
         excluded, why = scope.exclusion(session_id, self_id)
         if excluded:
             return EXCLUDE, why
@@ -737,15 +747,13 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None, scope=None)
     # applied one hop differently; the module header carries the measured cases
     # and why this keys on ledger membership rather than on an empty spawner.
     # A pane this watcher ADOPTED is one it EXISTS to see, and the claim block
-    # below promises exactly that with its `own-claim` arm. The adoption is
-    # checked here as well because hop 3b sits ABOVE that block: without this
-    # guard it would drop an adopted pane before the claim was ever read,
-    # silencing the gate for the one manager that undertook to route it -- and
-    # the peer's own watcher exits at the `self` check, so nobody is left to
-    # report it. Measured contract, not a hypothetical: `ownership-claim.py`
-    # records the adoption precisely so the adopting manager keeps seeing a
-    # spawnerless pane.
-    adopted_by_self = bool(claims and self_id and claims.get(session_id) == self_id)
+    # below promises exactly that with its `own-claim` arm. `adopted_by_self` is
+    # computed above, at the scope block -- the first place that could silence
+    # such a pane -- so hop 3b reuses it rather than re-deriving the predicate.
+    # Without the guard hop 3b would drop an adopted pane before the claim was
+    # ever read, silencing the gate for the one manager that undertook to route
+    # it, and the peer's own watcher exits at the `self` check, so nobody is left
+    # to report it.
     if not spawner and is_manager(session_id, ledger) and not adopted_by_self:
         # Liveness stays a requirement, so a DEAD peer manager's own gate falls
         # through and emits: it cannot act on its own gate, so nothing
