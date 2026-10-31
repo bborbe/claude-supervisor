@@ -18,6 +18,7 @@ The load-bearing properties are the ones a death would expose:
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import datetime
 import importlib.util
 import json
 import os
@@ -317,6 +318,140 @@ class PaneFromEnvironment(StoreTestCase):
         result = self._run("append", "--rc", "0", "--now", "t", env={"WEZTERM_PANE": "4242"})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(os.listdir(self.dir), ["pane-4242.log"])
+
+
+class Daily(StoreTestCase):
+    """The standing metric: end kinds per calendar day, and the unexplained share.
+
+    The failure this guards is a metric that counts something else. `spawn` and `heartbeat`
+    are markers, and a denominator that includes them answers "how busy was the machine"
+    while reading as "how many deaths were unexplained" — so they are asserted absent from
+    both the numerator and the denominator, not merely documented as excluded.
+    """
+
+    def _write(self, pane, kind, now, rc="0"):
+        args = ["append", "--pane", pane, "--now", now, "--rc", rc]
+        if kind != "auto":
+            args += ["--kind", kind]
+        result = self._run(*args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_counts_each_end_kind_by_day(self):
+        self._write("1", "auto", "2026-10-28T01:00:00Z", rc="0")
+        self._write("2", "auto", "2026-10-28T02:00:00Z", rc="137")
+        self._write("3", "auto", "2026-10-28T03:00:00Z", rc="0")
+        self._write("4", "unknown-end", "2026-10-29T03:00:00Z")
+        rows = json.loads(self._run("daily", "--json").stdout)["days"]
+        self.assertEqual([row["day"] for row in rows], ["2026-10-28", "2026-10-29"])
+        self.assertEqual(rows[0][sx.KIND_EXITED], 2)
+        self.assertEqual(rows[0][sx.KIND_SIGNALLED], 1)
+        self.assertEqual(rows[0][sx.KIND_UNKNOWN], 0)
+        self.assertEqual(rows[0]["total"], 3)
+        self.assertEqual(rows[1][sx.KIND_UNKNOWN], 1)
+        self.assertEqual(rows[1]["total"], 1)
+
+    def test_markers_are_not_counted(self):
+        """A spawn or a heartbeat is not a death, and must not enter the denominator."""
+        self._write("1", "spawn", "2026-10-28T01:00:00Z")
+        self._write("1", "heartbeat", "2026-10-28T01:00:30Z")
+        self._write("1", "unknown-end", "2026-10-28T02:00:00Z")
+        rows = json.loads(self._run("daily", "--json").stdout)["days"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["total"], 1)
+        self.assertEqual(rows[0]["unknown_end_pct"], 100.0)
+
+    def test_the_share_is_over_deaths_not_over_records(self):
+        self._write("1", "spawn", "2026-10-28T01:00:00Z")
+        self._write("2", "auto", "2026-10-28T02:00:00Z", rc="0")
+        self._write("3", "unknown-end", "2026-10-28T03:00:00Z")
+        rows = json.loads(self._run("daily", "--json").stdout)["days"]
+        self.assertEqual(rows[0]["unknown_end_pct"], 50.0)
+
+    def test_days_is_a_window_ending_today(self):
+        """`--days N` is a trailing window, not the last N data rows — a window that
+        skipped quiet days could not distinguish them from days with no writer."""
+        today = datetime.datetime.now(datetime.timezone.utc).date()
+        yesterday = (today - datetime.timedelta(days=1)).isoformat()
+        self._write("1", "auto", f"{yesterday}T01:00:00Z")
+        rows = json.loads(self._run("daily", "--json", "--days", "2").stdout)["days"]
+        self.assertEqual([row["day"] for row in rows], [yesterday, today.isoformat()])
+        self.assertEqual(rows[0][sx.KIND_EXITED], 1)
+        self.assertEqual(rows[1]["total"], 0)
+
+    def test_line_form_is_one_greppable_line_per_day(self):
+        self._write("1", "unknown-end", "2026-10-28T01:00:00Z")
+        out = self._run("daily", "--line").stdout.splitlines()
+        self.assertEqual(len(out), 1)
+        self.assertIn("2026-10-28", out[0])
+        self.assertIn("unknown_end=1", out[0])
+        self.assertIn("unknown_end_pct=100.0", out[0])
+
+    def test_an_absent_store_is_empty_not_an_error(self):
+        result = self._run("daily")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no end records", result.stdout)
+
+    def _write_raw(self, pane, text, mode="w"):
+        with open(os.path.join(self.dir, f"pane-{pane}.log"), mode, encoding="utf-8") as handle:
+            handle.write(text)
+
+    def test_a_quiet_day_inside_the_window_is_zero_filled(self):
+        """A day with no deaths must print `ends=0`, not vanish — otherwise it is
+        indistinguishable from a day the writer never ran."""
+        today = datetime.datetime.now(datetime.timezone.utc).date()
+        quiet = (today - datetime.timedelta(days=1)).isoformat()
+        self._write("1", "unknown-end", f"{today.isoformat()}T01:00:00Z")
+        rows = json.loads(self._run("daily", "--json", "--days", "3").stdout)["days"]
+        self.assertEqual(len(rows), 3)
+        by_day = {row["day"]: row for row in rows}
+        self.assertIn(quiet, by_day)
+        self.assertEqual(by_day[quiet]["total"], 0)
+        self.assertEqual(by_day[quiet]["unknown_end_pct"], 0.0)
+
+    def test_the_window_is_contiguous_even_past_the_data(self):
+        self._write("1", "unknown-end", "2026-10-28T01:00:00Z")
+        rows = json.loads(self._run("daily", "--json", "--days", "30").stdout)["days"]
+        self.assertEqual(len(rows), 30)
+        days = [datetime.date.fromisoformat(row["day"]) for row in rows]
+        self.assertEqual(days, sorted(days))
+        self.assertEqual((days[-1] - days[0]).days, 29)
+
+    def test_single_day_on_an_absent_store_still_prints_a_reading(self):
+        """The launchd invocation is `--days 1`; a quiet host must still leave a line."""
+        result = self._run("daily", "--line", "--days", "1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(result.stdout.splitlines()), 1)
+        self.assertIn("ends=0", result.stdout)
+
+    def test_a_line_without_a_leading_timestamp_is_skipped(self):
+        """A torn record must not become a phantom day keyed on `kind=unkno`."""
+        self._write_raw("1", "kind=unknown-end\tpane=1\tpid=1\twriter=observer\n")
+        self._write("2", "unknown-end", "2026-10-28T01:00:00Z")
+        rows = json.loads(self._run("daily", "--json").stdout)["days"]
+        self.assertEqual([row["day"] for row in rows], ["2026-10-28"])
+        self.assertEqual(rows[0]["total"], 1)
+
+    def test_a_non_pane_file_is_ignored(self):
+        with open(os.path.join(self.dir, "notes.txt"), "w", encoding="utf-8") as handle:
+            handle.write("2026-10-28T01:00:00Z\tkind=unknown-end\n")
+        self._write("1", "unknown-end", "2026-10-28T01:00:00Z")
+        rows = json.loads(self._run("daily", "--json").stdout)["days"]
+        self.assertEqual(rows[0]["total"], 1)
+
+    def test_an_undecodable_byte_degrades_one_file_not_the_run(self):
+        with open(os.path.join(self.dir, "pane-9.log"), "wb") as handle:
+            handle.write(b"2026-10-28T01:00:00Z\tkind=unknown-end\tpane=9\t\xff\xfe\n")
+        self._write("1", "unknown-end", "2026-10-28T01:00:00Z")
+        result = self._run("daily", "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = json.loads(result.stdout)["days"]
+        self.assertEqual(rows[0]["day"], "2026-10-28")
+        self.assertEqual(rows[0]["total"], 2)
+
+    def test_json_wins_over_line(self):
+        self._write("1", "unknown-end", "2026-10-28T01:00:00Z")
+        out = self._run("daily", "--json", "--line").stdout
+        self.assertEqual(json.loads(out)["days"][0]["day"], "2026-10-28")
 
 
 if __name__ == "__main__":
