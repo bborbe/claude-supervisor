@@ -23,7 +23,13 @@ name: Changelog Unreleased Fold Precheck
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    # `edited` is not noise: retargeting a PR's base branch fires only that
+    # event, so without it a PR opened against one base and later retargeted to
+    # master keeps a green check computed against the old base — and the merge
+    # into master, the one that can fold, is never prechecked. The guard
+    # short-circuits on the head heading before computing any merge, so the
+    # title/body edits that also fire it cost one grep.
+    types: [opened, synchronize, reopened, edited]
 
 jobs:
   changelog-unreleased-fold:
