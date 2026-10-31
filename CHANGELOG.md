@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.224.1
 
 - fix: **the fleet keeper no longer restarts a fleet the operator stood down on purpose.** `/supervisor:stop` writes `<slug>.stopped` precisely so a watcher reads the silence that follows as a stop, not a lapse (`docs/fleet-surface.md` § Session end). But the digest goes stale either way, and `fleet-keeper.py` read only the digest — so roughly one digest limit after every deliberate stop it would have killed and resumed the Fleet Manager the operator had just stood down. It now reads `manager-liveness.py --state` after a `stale` verdict and leaves a `STOPPED` fleet alone (verdict `stopped`, no card — a deliberate stop is not something to report). ⚠️ **The read SUPPRESSES and never TRIGGERS:** only the `STOPPED` token is acted on, and `manager-liveness.py`'s own `OK`/`STALE` is ignored, because its staleness is heartbeat-based and reads `OK` throughout a lapsed round — the keeper's staleness input stays `fleet-keepalive.py`'s verdict alone. An unreadable stop state kills nothing and is carded, since whether the operator stopped the fleet is exactly what a kill must not guess at. Tests 45 → 54, including a round trip through the real `manager-liveness.py --stop` writer; both directions mutation-checked (ignoring the marker, and letting `STALE` count as a stop, each turn exactly their own test red). Change set: `scripts/fleet-keeper.py`, `scripts/tests/test_fleet_keeper.py`, `CHANGELOG.md`.
 
