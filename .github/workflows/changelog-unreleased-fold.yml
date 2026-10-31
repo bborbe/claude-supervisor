@@ -26,9 +26,12 @@ on:
     # `edited` is not noise: retargeting a PR's base branch fires only that
     # event, so without it a PR opened against one base and later retargeted to
     # master keeps a green check computed against the old base — and the merge
-    # into master, the one that can fold, is never prechecked. The guard
-    # short-circuits on the head heading before computing any merge, so the
-    # title/body edits that also fire it cost one grep.
+    # into master, the one that can fold, is never prechecked. The title/body
+    # edits that also fire it are only cheap when the branch carries
+    # nothing pending: the guard exits before computing a merge unless the
+    # head's topmost heading is `## Unreleased` AND the base's is a released
+    # `## vX.Y.Z`. A PR with pending work pays a full merge-tree on each edit,
+    # which is the cost of not missing a retarget.
     types: [opened, synchronize, reopened, edited]
 
 jobs:
