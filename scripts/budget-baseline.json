@@ -4,7 +4,7 @@
   "files": {
     "agents/fleet-drive.md": 32369,
     "agents/fleet-sweep-reader.md": 40443,
-    "agents/goal-drive.md": 140843,
+    "agents/goal-drive.md": 140833,
     "agents/goal-sweep-reader.md": 167634,
     "commands/fleet-loop.md": 4402,
     "commands/goal-drive.md": 10112,
