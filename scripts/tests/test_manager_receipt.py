@@ -582,12 +582,11 @@ class Receipt(unittest.TestCase):
     def test_printed_limit_never_understates_a_fractional_boundary(self):
         """`observed_period()` interpolates a p90, so the limit is not always an integer.
 
-        Truncating it on the way out lets a round that lapsed by under a second print
-        `started 1400s ago, limit 1360s` — no: worse, `limit 1360s` against an enforced
-        1360.2 — a line whose two numbers read as *not* lapsed while the round was
-        refused. The invariant pinned here is one-directional: the printed limit is never
-        below the enforced one, so rounding up (which can overstate by <1 s) is correct
-        and truncating is not.
+        Truncating it on the way out lets a refused round print a limit below the
+        enforced boundary, so the two printed numbers read as *not* lapsed. The invariant
+        pinned here is one-directional: the printed limit is never below the enforced
+        one, so rounding up (which can overstate by <1 s) is correct and truncating is
+        not.
         """
         now = 1_700_000_000.0
         # p90 of (1000, 1101, 1200) interpolates to 1180.2, so the limit is 1360.2.
@@ -602,6 +601,28 @@ class Receipt(unittest.TestCase):
         self.assertEqual(rc, self.m.EXIT_SKIPPED)
         printed = int(out.split("limit ")[1].split("s")[0])
         self.assertGreaterEqual(printed, limit)
+
+    def test_reported_fallback_is_the_interval_plus_the_same_slack(self):
+        """With no `.arms` history the limit is `interval + SLACK`, not a multiple of it.
+
+        This is the branch every subject spends its first three arms in, and nothing else
+        pins it: every other test supplies history, so reverting the fallback to a `2 x`
+        multiple — or reading the wrong file for the declared cadence — would pass the
+        whole suite. It also pins `liveness_slug()`'s bare-base return, the other half of
+        the same fallback.
+        """
+        now = 1_700_000_000.0
+        self.start()
+        self._set_started(now - 10)
+        # No `.arms` at all; only the declared cadence exists.
+        with open(os.path.join(self.live.name, "recurring-operator-gates.cadence"), "w") as fh:
+            fh.write("900\n")
+
+        s = self.m.slug(self.topic)
+        self.assertEqual(self.m.liveness_slug(s), s, "no prefixed record -> the bare base")
+        _, limit, basis = self.m.window(s, now)
+        self.assertEqual(limit, 900 + 180)
+        self.assertEqual(basis, "period=900s(reported,1x+180)")
 
 
 

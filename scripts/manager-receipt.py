@@ -62,14 +62,16 @@ restated here. The limit is `period + SLACK` — 1x the observed period plus 180
 falling back to `interval + 180` when there is too little history.
 
 **One rule, one definition.** Until 2026-10-21 this file carried its own basis while
-its docstring asserted that the two checks were aligned, and the assertion was false
-twice over: the multiple was `2x` against liveness's `1x`, and the statistic was the
-UPPER median (`gaps[len//2]`) against liveness's true `median()`, which differs on
-every even gap count. Measured 2026-10-21 over the retained `.arms` history, the two
-limits differed on 46 of 46 subjects, and the band between them was the defect: a
-manager liveness had already called stale could still have its round's fields judged
-current. The receipt now imports the rule, so agreement holds by construction rather
-than by assertion.
+its docstring asserted that the two checks were aligned, and the assertion was false in
+three ways: the multiple was `2x` against liveness's `1x`; the slack was 60 s against
+liveness's 180 s; and the statistic was the UPPER median (`gaps[len//2]`) against the
+true `median()`, which differs on every even gap count — so even the number being
+multiplied was not the same one. (Liveness's period is the p90 capped at `PERIOD_CAP` x
+that median, not the median itself.) Measured 2026-10-21 over the retained `.arms`
+history, the two limits differed on 46 of 46 subjects, and the band between them was
+the defect: a manager liveness had already called stale could still have its round's
+fields judged current. The receipt now imports the rule, so agreement holds by
+construction rather than by assertion.
 """
 import argparse, datetime, importlib.util, json, math, os, re, sys, time
 
