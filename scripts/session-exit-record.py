@@ -97,6 +97,7 @@ lists them; the code is the truth.
 
 import argparse
 import datetime
+import datetime
 import json
 import os
 import re
@@ -473,6 +474,54 @@ def cmd_list(args):
     return 0
 
 
+def record_day(line):
+    """The record's calendar day (UTC), or `None` when the line carries no leading timestamp.
+
+    The timestamp is positional — the store's line format is fixed-field-order and `ts` is
+    not a `name=value` field, so `parse_field` cannot reach it. A torn or hand-edited line
+    whose first field is not a date is skipped rather than bucketed under a junk key such as
+    `kind=unkno`, which would surface as a phantom row in the metric.
+    """
+    stamp = line.split("\t", 1)[0][:10]
+    try:
+        datetime.date.fromisoformat(stamp)
+    except ValueError:
+        return None
+    return stamp
+
+
+def _day_rows(counts, days):
+    """One row per day: the days with records, or a zero-filled window of `days` days.
+
+    `days > 0` anchors on today (UTC) and walks back `days - 1` days, so the window is
+    contiguous and a quiet day prints as `ends=0`. `days == 0` returns only the days the
+    store actually holds, which is the right shape for a one-off look at the whole history.
+    """
+    def build(day):
+        bucket = counts.get(day, {})
+        row = {"day": day, "total": 0}
+        for kind in END_KINDS:
+            row[kind] = bucket.get(kind, 0)
+            row["total"] += row[kind]
+        row["unknown_end_pct"] = (
+            round(100.0 * row[KIND_UNKNOWN] / row["total"], 1) if row["total"] else 0.0
+        )
+        return row
+
+    if days > 0:
+        end = datetime.datetime.now(datetime.timezone.utc).date()
+        if counts:
+            latest = max(datetime.date.fromisoformat(day) for day in counts)
+            end = max(end, latest)
+        start = end - datetime.timedelta(days=days - 1)
+        out, day = [], start
+        while day <= end:
+            out.append(build(day.isoformat()))
+            day += datetime.timedelta(days=1)
+        return out
+    return [build(day) for day in sorted(counts)]
+
+
 def cmd_daily(args):
     """Per-calendar-day counts of every end kind, and the unknown-end share of them.
 
@@ -487,6 +536,16 @@ def cmd_daily(args):
     is meant to answer "of the deaths, how many are unexplained", not "how busy was the
     machine". A pane with a `spawn` and no end line is a session still running, so it is
     absent from every count rather than counted as zero.
+
+    ⚠️ **`--days N` zero-fills the window**, and that is the difference between a metric and
+    a report. Emitting only the days that carry records makes a day with no deaths and a day
+    the writer did not run look identical — both simply absent — which is precisely the
+    confusion this store exists to remove. A window therefore always prints N consecutive
+    days, a quiet one as `ends=0`.
+
+    ⚠️ **Days are UTC**, because every record's `ts` is UTC (`now_utc`) and the day is the
+    first ten characters of it. A caller firing at local midnight sees a *provisional*
+    latest row until the UTC day rolls over; the plist states its own offset.
     """
     directory = state_dir()
     counts = {}
@@ -499,7 +558,11 @@ def cmd_daily(args):
             continue
         path = os.path.join(directory, name)
         try:
-            handle = open(path, encoding="utf-8")
+            # `errors="replace"` rather than a strict decode: one non-UTF-8 byte in any of
+            # the several hundred pane logs would otherwise abort the whole unattended run
+            # and lose that day's reading, since `UnicodeDecodeError` is raised during
+            # iteration and is not an `OSError`.
+            handle = open(path, encoding="utf-8", errors="replace")
         except OSError:
             continue
         with handle:
@@ -509,22 +572,13 @@ def cmd_daily(args):
                 kind = parse_field(line, "kind")
                 if kind not in END_KINDS:
                     continue
-                day = line.split("\t", 1)[0][:10]
+                day = record_day(line)
+                if day is None:
+                    continue
                 bucket = counts.setdefault(day, {})
                 bucket[kind] = bucket.get(kind, 0) + 1
 
-    rows = []
-    for day in sorted(counts):
-        row = {"day": day, "total": 0}
-        for kind in END_KINDS:
-            row[kind] = counts[day].get(kind, 0)
-            row["total"] += row[kind]
-        row["unknown_end_pct"] = (
-            round(100.0 * row[KIND_UNKNOWN] / row["total"], 1) if row["total"] else 0.0
-        )
-        rows.append(row)
-    if args.days > 0:
-        rows = rows[-args.days :]
+    rows = _day_rows(counts, args.days)
 
     if args.json:
         print(json.dumps({"days": rows}, indent=2))
