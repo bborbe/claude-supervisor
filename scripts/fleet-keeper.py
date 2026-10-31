@@ -537,6 +537,31 @@ def main(argv):
 
     attempt = f"attempt {len(stamps) + 1} of {tk.RESUME_CAP}"
 
+    # Read BEFORE the kill — afterwards the registry briefly holds two records for this id, and
+    # the re-arm tells the resumed process from the killed one by this pid. Checked before the
+    # dry-run branch too, so a dry run makes the same decision a real tick would.
+    old_pid = registry_pid(sid)
+    if old_pid is None:
+        # ⚠️ No kill without a way to follow it through. Without the pre-kill pid the re-arm
+        # cannot tell the resumed process from the killed one, so readiness would rest on the
+        # pane text alone — and a kill whose re-arm cannot be confirmed only feeds the loop.
+        # The two causes need different repairs, so the card names which one this is.
+        recs = registry_records(sid)
+        found = ("the registry could not be read" if recs is None
+                 else f"the registry holds {len(recs)} records for it, not one")
+        item = notify(
+            "fleet-keeper-pid-unreadable",
+            f"The fleet round is stale, but {found} (fleet manager, session {sid[:8]}), so the "
+            f"keeper cannot tell the process it would kill from the one it would resume. It did "
+            f"not restart.",
+            ["acknowledge"],
+            context=detail,
+        )
+        report("cannot-tell",
+               f"no single registry pid for {sid[:8]} — {found}; not killing what cannot be "
+               f"re-armed{card(item)}", now)
+        return 1
+
     if a.dry_run:
         outcome, note, _pane = restart(sid, dry=True)
         if outcome != "ran":
@@ -544,26 +569,6 @@ def main(argv):
             return 1
         report("restarted", f"dry-run: would resume {sid[:8]} and send {REARM_COMMAND} ({attempt})", now)
         return 0
-
-    # Read BEFORE the kill — afterwards the registry briefly holds two records for this id, and
-    # the re-arm tells the resumed process from the killed one by this pid.
-    old_pid = registry_pid(sid)
-    if old_pid is None:
-        # ⚠️ No kill without a way to follow it through. Without the pre-kill pid the re-arm
-        # cannot tell the resumed process from the killed one, so readiness would rest on the
-        # pane text alone — and a kill whose re-arm cannot be confirmed only feeds the loop.
-        item = notify(
-            "fleet-keeper-pid-unreadable",
-            f"The fleet round is stale, but the registry does not hold exactly one pid for the "
-            f"fleet manager (session {sid[:8]}), so the keeper cannot tell the process it would "
-            f"kill from the one it would resume. It did not restart.",
-            ["acknowledge"],
-            context=detail,
-        )
-        report("cannot-tell",
-               f"no single registry pid for {sid[:8]} — not killing what cannot be re-armed{card(item)}",
-               now)
-        return 1
 
     outcome, note, pane = restart(sid)
 

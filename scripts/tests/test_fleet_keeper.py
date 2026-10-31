@@ -246,6 +246,14 @@ class FleetKeeperTest(KeeperBase):
         self.assertEqual([], self.cap.load_resumes(self.cap.path))
         self.assertIn("fleet-keeper-pid-unreadable", self.cards)
 
+    def test_a_dry_run_makes_the_same_no_pid_decision_as_a_real_tick(self):
+        """A dry run must not claim it would resume where a real tick refuses to kill."""
+        self.register_fleet()
+        fk.registry_pid = lambda sid: None
+        rc, out = self.run_keeper("--dry-run", "--now", str(NOW))
+        self.assertEqual("cannot-tell", out[0])
+        self.assertEqual([], self.restarts, "not even the dry-run restart is consulted")
+
     def test_a_busy_manager_is_not_a_lapse_and_arms_nothing(self):
         self.register_fleet()
         self.restart_outcome = ("busy", "busy-target", None)
