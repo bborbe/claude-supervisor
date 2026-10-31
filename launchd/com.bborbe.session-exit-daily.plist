@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Session-exit daily metric — one reading a day, with no Claude session as its parent.
+
+  WHY THIS EXISTS. The store at `~/.claude/state/session-exit/` recorded a jump from 2
+  unexplained session deaths on 2026-10-27 to 37 on 2026-10-28, and nobody saw it for four
+  days, because seeing it meant remembering to run a shell pipeline over 200+ files. A
+  metric that only exists while someone is looking is not a metric; this agent is what
+  makes the next step change visible on the day it happens.
+
+  WHY LAUNCHD, and not a detached loop: a detached loop can die silently and take the
+  measurement with it, which is the failure mode being measured. `StartCalendarInterval`
+  runs a fresh process, so there is no loop to die. Same shape as
+  `com.bborbe.fleet-keeper.plist` and `com.bborbe.flow-push-victoriametrics.plist`.
+
+  WHY 23:50: the unit is a calendar day, so a reading taken at the end of the day is a
+  complete one. An hourly interval would re-print a partial count for the same day and
+  make the log's last line per day the only meaningful one — a reading a human has to
+  reconstruct. `RunAtLoad` still fires one on install, so the metric has a baseline the
+  moment it is wired rather than the next evening.
+
+  The script path is the marketplace clone, not a version-pinned cache dir: a cache path
+  would pin the agent to one release and silently run stale code after every upgrade.
+
+  Install:
+    cp launchd/com.bborbe.session-exit-daily.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.bborbe.session-exit-daily.plist
+
+  Reload after an upgrade:
+    launchctl kickstart -k gui/$UID/com.bborbe.session-exit-daily
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bborbe.session-exit-daily</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/bborbe/.claude/plugins/marketplaces/claude-supervisor/scripts/session-exit-record.py</string>
+        <string>daily</string>
+        <string>--line</string>
+        <string>--days</string>
+        <string>14</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>23</integer>
+        <key>Minute</key>
+        <integer>50</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/bborbe/Library/Logs/session-exit-daily.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/bborbe/Library/Logs/session-exit-daily.log</string>
+</dict>
+</plist>

@@ -473,6 +473,84 @@ def cmd_list(args):
     return 0
 
 
+def cmd_daily(args):
+    """Per-calendar-day counts of every end kind, and the unknown-end share of them.
+
+    A standing metric rather than a one-off query. The rate at which sessions die without a
+    recorded cause is the thing this store exists to make visible, and it stayed invisible
+    for four days after the first jump because seeing it meant remembering to run a shell
+    pipeline. This subcommand is the pipeline; `--line` is the form a monitor or a `grep`
+    reads without parsing a table.
+
+    Only end kinds are counted. `spawn` and `heartbeat` are markers, and folding them in
+    would make the denominator track the fleet's size instead of its deaths — the fraction
+    is meant to answer "of the deaths, how many are unexplained", not "how busy was the
+    machine". A pane with a `spawn` and no end line is a session still running, so it is
+    absent from every count rather than counted as zero.
+    """
+    directory = state_dir()
+    counts = {}
+    try:
+        names = sorted(os.listdir(directory))
+    except FileNotFoundError:
+        names = []
+    for name in names:
+        if not (name.startswith("pane-") and name.endswith(".log")):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            handle = open(path, encoding="utf-8")
+        except OSError:
+            continue
+        with handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                kind = parse_field(line, "kind")
+                if kind not in END_KINDS:
+                    continue
+                day = line.split("\t", 1)[0][:10]
+                bucket = counts.setdefault(day, {})
+                bucket[kind] = bucket.get(kind, 0) + 1
+
+    rows = []
+    for day in sorted(counts):
+        row = {"day": day, "total": 0}
+        for kind in END_KINDS:
+            row[kind] = counts[day].get(kind, 0)
+            row["total"] += row[kind]
+        row["unknown_end_pct"] = (
+            round(100.0 * row[KIND_UNKNOWN] / row["total"], 1) if row["total"] else 0.0
+        )
+        rows.append(row)
+    if args.days > 0:
+        rows = rows[-args.days :]
+
+    if args.json:
+        print(json.dumps({"days": rows}, indent=2))
+        return 0
+    if args.line:
+        for row in rows:
+            print(
+                f"{row['day']} ends={row['total']} unknown_end={row[KIND_UNKNOWN]} "
+                f"unknown_end_pct={row['unknown_end_pct']}"
+            )
+        return 0
+    if not rows:
+        print("no end records in the store")
+        return 0
+    print(
+        f"{'day':<12}{'exited':>8}{'signalled':>11}{'unknown-end':>13}"
+        f"{'total':>8}{'unknown%':>10}"
+    )
+    for row in rows:
+        print(
+            f"{row['day']:<12}{row[KIND_EXITED]:>8}{row[KIND_SIGNALLED]:>11}"
+            f"{row[KIND_UNKNOWN]:>13}{row['total']:>8}{row['unknown_end_pct']:>10}"
+        )
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Record how a Claude Code pane ended.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -515,6 +593,14 @@ def main(argv=None):
     p_list = sub.add_parser("list", help="list every record in the store")
     p_list.add_argument("--json", action="store_true")
     p_list.set_defaults(func=cmd_list)
+
+    p_daily = sub.add_parser(
+        "daily", help="per-day end-kind counts — the standing unknown-end metric"
+    )
+    p_daily.add_argument("--days", type=int, default=0, help="only the last N days (0 = all)")
+    p_daily.add_argument("--json", action="store_true")
+    p_daily.add_argument("--line", action="store_true", help="one key=value line per day")
+    p_daily.set_defaults(func=cmd_daily)
 
     args = parser.parse_args(argv)
     return args.func(args)

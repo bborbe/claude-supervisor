@@ -319,5 +319,73 @@ class PaneFromEnvironment(StoreTestCase):
         self.assertEqual(os.listdir(self.dir), ["pane-4242.log"])
 
 
+class Daily(StoreTestCase):
+    """The standing metric: end kinds per calendar day, and the unexplained share.
+
+    The failure this guards is a metric that counts something else. `spawn` and `heartbeat`
+    are markers, and a denominator that includes them answers "how busy was the machine"
+    while reading as "how many deaths were unexplained" — so they are asserted absent from
+    both the numerator and the denominator, not merely documented as excluded.
+    """
+
+    def _write(self, pane, kind, now, rc="0"):
+        args = ["append", "--pane", pane, "--now", now, "--rc", rc]
+        if kind != "auto":
+            args += ["--kind", kind]
+        result = self._run(*args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_counts_each_end_kind_by_day(self):
+        self._write("1", "auto", "2026-10-28T01:00:00Z", rc="0")
+        self._write("2", "auto", "2026-10-28T02:00:00Z", rc="137")
+        self._write("3", "auto", "2026-10-28T03:00:00Z", rc="0")
+        self._write("4", "unknown-end", "2026-10-29T03:00:00Z")
+        rows = json.loads(self._run("daily", "--json").stdout)["days"]
+        self.assertEqual([row["day"] for row in rows], ["2026-10-28", "2026-10-29"])
+        self.assertEqual(rows[0][sx.KIND_EXITED], 2)
+        self.assertEqual(rows[0][sx.KIND_SIGNALLED], 1)
+        self.assertEqual(rows[0][sx.KIND_UNKNOWN], 0)
+        self.assertEqual(rows[0]["total"], 3)
+        self.assertEqual(rows[1][sx.KIND_UNKNOWN], 1)
+        self.assertEqual(rows[1]["total"], 1)
+
+    def test_markers_are_not_counted(self):
+        """A spawn or a heartbeat is not a death, and must not enter the denominator."""
+        self._write("1", "spawn", "2026-10-28T01:00:00Z")
+        self._write("1", "heartbeat", "2026-10-28T01:00:30Z")
+        self._write("1", "unknown-end", "2026-10-28T02:00:00Z")
+        rows = json.loads(self._run("daily", "--json").stdout)["days"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["total"], 1)
+        self.assertEqual(rows[0]["unknown_end_pct"], 100.0)
+
+    def test_the_share_is_over_deaths_not_over_records(self):
+        self._write("1", "spawn", "2026-10-28T01:00:00Z")
+        self._write("2", "auto", "2026-10-28T02:00:00Z", rc="0")
+        self._write("3", "unknown-end", "2026-10-28T03:00:00Z")
+        rows = json.loads(self._run("daily", "--json").stdout)["days"]
+        self.assertEqual(rows[0]["unknown_end_pct"], 50.0)
+
+    def test_days_limits_to_the_most_recent(self):
+        self._write("1", "auto", "2026-10-28T01:00:00Z")
+        self._write("2", "auto", "2026-10-29T01:00:00Z")
+        self._write("3", "auto", "2026-10-30T01:00:00Z")
+        rows = json.loads(self._run("daily", "--json", "--days", "2").stdout)["days"]
+        self.assertEqual([row["day"] for row in rows], ["2026-10-29", "2026-10-30"])
+
+    def test_line_form_is_one_greppable_line_per_day(self):
+        self._write("1", "unknown-end", "2026-10-28T01:00:00Z")
+        out = self._run("daily", "--line").stdout.splitlines()
+        self.assertEqual(len(out), 1)
+        self.assertIn("2026-10-28", out[0])
+        self.assertIn("unknown_end=1", out[0])
+        self.assertIn("unknown_end_pct=100.0", out[0])
+
+    def test_an_absent_store_is_empty_not_an_error(self):
+        result = self._run("daily")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no end records", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
