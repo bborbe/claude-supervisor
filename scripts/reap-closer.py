@@ -99,7 +99,7 @@ def tail_lines(path, max_bytes=MAX_SCAN):
 
 _TYPE_TEXT = re.compile(r'\{\s*"type"\s*:\s*"text"')
 _TEXT_KEY = re.compile(r'"text"\s*:\s*"')
-_ASSISTANT = re.compile(r'"type"\s*:\s*"assistant"')
+_ASSISTANT = re.compile(r'"(?:role|type)"\s*:\s*"assistant"')
 
 
 def _json_string_at(text, start):
@@ -155,6 +155,10 @@ def _partial_closer(text):
     `gh pr merge` gate was recorded as `not-a-gate` 266 ms after the message was written.
 
     The text is already on disk, so recover it rather than fall back to a stale message.
+    ⚠️ **The assistant test must accept `message.role`.** A real record serializes
+    `message` at key index 2 and the top-level `type` at index 9, so a line cut inside
+    `message.content` — the very shape this salvages — carries `"role": "assistant"` but
+    no `"type": "assistant"` at all. Keying on `type` alone left the whole path inert.
     """
     if not _ASSISTANT.search(text):
         return None
