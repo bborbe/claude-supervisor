@@ -138,6 +138,34 @@ class RoleResolution(unittest.TestCase):
                            "absent.yaml`\n")),
             ("agent", "on-disk"))
 
+    def normalised(self, template_root):
+        root = tempfile.mkdtemp()
+        tasks = os.path.join(root, "25 Tasks")
+        page_path = os.path.join(tasks, "A Task.md")
+        write(page_path, page("flag: true\nstatus: in_progress\nrole: agent",
+                              "\n`bborbe/nuke/task/recurring-schedules/prod/absent.yaml`\n"))
+        ctx = {"today": "2026-10-31", "role_map": {}, "template_root": template_root,
+               "no_liveness": True, "managers": set(), "topic_map": {},
+               "mode_default": "interactive", "normalised": [],
+               "subjects": {}, "liveness_cache": {}}
+        cfg = {"tasks_dir": "25 Tasks", "path": root, "worker_launcher": "/opt/l/cc-v"}
+        fr.row_for("v", cfg, "task", page_path, ctx)
+        return ctx["normalised"]
+
+    def test_a_footer_naming_a_missing_template_is_reported(self):
+        # A named-but-unreadable template must not look like a page with none.
+        self.assertEqual(self.normalised(tempfile.mkdtemp()),
+                         [{"vault": "v", "name": "A Task", "field": "role_template",
+                           "raw": "absent", "used": "unreadable"}])
+
+    def test_a_template_that_declares_no_role_is_not_reported(self):
+        # `topic-backup-saturday.yaml` and `shutdown-k3s.yaml` both omit `role:`
+        # deliberately; reporting them would cry wolf on every such template.
+        root = tempfile.mkdtemp()
+        write(os.path.join(root, "absent.yaml"),
+              "spec:\n  template:\n    frontmatter:\n      priority: 3\n")
+        self.assertEqual(self.normalised(root), [])
+
 
 class BranchPartition(unittest.TestCase):
     """The ordered predicate list — first match wins, so the set is a partition."""
@@ -400,6 +428,14 @@ class LauncherResolution(unittest.TestCase):
     def test_a_manager_row_uses_the_manager_arm(self):
         self.assertEqual(fr.resolve_launcher("task", "manager", page("status: x"), self.cfg()),
                          ("/opt/l/cc-m", "manager-default"))
+
+    def test_a_bare_manager_override_resolves_beside_the_manager_launcher(self):
+        # Not beside the WORKER launcher — different directory, different binary.
+        cfg = {"worker_launcher": "/opt/w/cc-v", "manager_launcher": "/opt/m/cc-m",
+               "claude_script": "/opt/l/cc"}
+        self.assertEqual(
+            fr.resolve_launcher("goal", "manager", page("manager_launcher: cc-z"), cfg),
+            ("/opt/m/cc-z", "subject"))
 
     def test_a_subject_override_outranks_the_configured_manager_launcher(self):
         self.assertEqual(

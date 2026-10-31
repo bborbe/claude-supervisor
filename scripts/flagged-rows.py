@@ -237,7 +237,7 @@ def resolve_role(block, text, template_root):
     ⚠️ `text` is the WHOLE page, not the frontmatter block: the `# Source` footer it
     keys on lives in the body, so a search over `block` alone can never match.
     """
-    template = template_role(text, template_root)
+    template, _ = template_role(text, template_root)
     if template:
         return template, "template"
     on_disk = (open_queue.field(block, "role") or "").strip()
@@ -246,20 +246,35 @@ def resolve_role(block, text, template_root):
     return "agent", "body"
 
 
-def template_role(text, template_root):
-    """The `role:` in the `# Source` schedule YAML's own `frontmatter:` block.
+def template_slug(text):
+    """The schedule YAML's filename from a page's `# Source` footer, or None.
 
-    Read from source control (`bborbe/nuke`), never the deployed CR, which lags.
     `<slug>` is the footer's filename — `start-day` for the instance titled
     `Start Day - 2026-10-31` — never the instance title, which carries the period.
     """
     match = re.search(
         r"`bborbe/nuke/task/recurring-schedules/prod/([A-Za-z0-9._-]+)\.yaml`", text)
-    if not match or not template_root:
-        return None
-    text = read_text(os.path.join(template_root, match.group(1) + ".yaml"))
+    return match.group(1) if match else None
+
+
+def template_role(text, template_root):
+    """(role or None, missing) from the `# Source` schedule YAML's `frontmatter:`.
+
+    Read from source control (`bborbe/nuke`), never the deployed CR, which lags.
+    `missing` is True only when the page NAMES a template the resolver cannot
+    read — no root configured, or no such file. ⚠️ A readable template that
+    declares no `role:` is NOT missing: `topic-backup-saturday.yaml` and
+    `shutdown-k3s.yaml` both omit the key deliberately, and reporting them would
+    cry wolf on every template that has no opinion about role.
+    """
+    slug = template_slug(text)
+    if not slug:
+        return None, False
+    if not template_root:
+        return None, True
+    text = read_text(os.path.join(template_root, slug + ".yaml"))
     if not text:
-        return None
+        return None, True
     # ⚠️ `frontmatter:` is INDENTED — it sits under `spec.template` in the real
     # schedule YAML (`start-day.yaml` line 58 is `    frontmatter:`), so a
     # column-0 anchor never matches and `role_source: template` silently never
@@ -268,7 +283,7 @@ def template_role(text, template_root):
     # than the key itself.
     key = re.search(r"^([ \t]*)frontmatter:[ \t]*$", text, re.MULTILINE)
     if not key:
-        return None
+        return None, False
     indent = len(key.group(1))
     lines = []
     for line in text[key.end():].splitlines():
@@ -276,7 +291,7 @@ def template_role(text, template_root):
             break
         lines.append(line)
     role = re.search(r"^[ \t]+role:[ \t]*[\"']?([A-Za-z]+)", "\n".join(lines), re.MULTILINE)
-    return role.group(1) if role else None
+    return (role.group(1) if role else None), False
 
 
 #: `session-liveness.py --list` renders `<sid>  pid <pid>  <name>  [<transport>]`,
@@ -394,12 +409,17 @@ def normalise_role(role):
     return (role, None) if role in ROLES else ("agent", role)
 
 
-def _beside(value, cfg, source):
-    """Resolve a page-supplied launcher: a bare name sits beside the vault's launcher."""
+def _beside(value, base, source):
+    """Resolve a page-supplied launcher: a bare name sits beside the vault's launcher.
+
+    ⚠️ `base` is the launcher of the ARM doing the resolving, passed in — never a
+    single `worker_launcher or manager_launcher` fallback. On a vault where the two
+    differ, that fallback resolves a manager's `manager_launcher:` beside the WORKER
+    script, which is a different directory and a different binary.
+    """
     if "/" in value:
         return os.path.expanduser(value), source
-    base = ((cfg.get("worker_launcher") or cfg.get("manager_launcher")
-             or cfg.get("claude_script") or "").strip())
+    base = (base or "").strip()
     if not base:
         return value, source
     return os.path.join(os.path.dirname(os.path.expanduser(base)), value), source
@@ -425,7 +445,8 @@ def resolve_launcher(kind, role, block, cfg):
     if role == "manager" or kind in ("goal", "topic"):
         override = (open_queue.field(block, "manager_launcher") or "").strip()
         if override:
-            return _beside(override, cfg, "subject")
+            return _beside(override, cfg.get("manager_launcher")
+                           or cfg.get("claude_script"), "subject")
         configured = (cfg.get("manager_launcher") or "").strip()
         if configured:
             return os.path.expanduser(configured), "manager-default"
@@ -436,7 +457,7 @@ def resolve_launcher(kind, role, block, cfg):
         return None, "unresolved"
     own = (open_queue.field(block, "launcher") or "").strip()
     if own:
-        return _beside(own, cfg, "task")
+        return _beside(own, cfg.get("worker_launcher") or cfg.get("claude_script"), "task")
     configured = (cfg.get("worker_launcher") or "").strip()
     if configured:
         return os.path.expanduser(configured), "worker-default"
@@ -637,6 +658,15 @@ def row_for(vault, cfg, kind, path, ctx):
     name = os.path.basename(path)[:-3]
     page_kind = page_type(block, kind)
     role, role_source = resolve_role(block, text, ctx["template_root"])
+    # ⚠️ A page naming a template the resolver cannot read must SAY so. Without
+    # this the template rung degrades to `on-disk` and reads exactly like a page
+    # that carries no template at all — the silent-unreachable-rung shape that hid
+    # the `# Source` bug this release fixes.
+    slug = template_slug(text)
+    if slug and template_role(text, ctx["template_root"])[1]:
+        ctx["normalised"].append({"vault": vault, "name": name,
+                                  "field": "role_template", "raw": slug,
+                                  "used": "unreadable"})
     role, role_raw = normalise_role(role)
     mode, mode_raw = resolve_mode(block, ctx["mode_default"])
     for field_name, raw, used in (("role", role_raw, role), ("mode", mode_raw, mode)):
