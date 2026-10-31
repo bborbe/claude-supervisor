@@ -17,7 +17,10 @@ This script is that check. The round records the artifact each load-bearing step
 produced; the tail re-arm reads the receipt back and prints `skipped: <step>` for
 every field that does not resolve to an artifact produced THIS round.
 
-Three verbs, one receipt per topic:
+Three verbs, one receipt per subject. `--subject` is an alias for `--topic` (the fleet
+tier's name for it), and `--branch` selects the tier: `""` (the default) is the goal or
+topic round, `fleet` is the fleet round, whose slug carries the branch exactly as
+`manager-liveness.py` writes it (`fleet--fleet-manager`).
 
   --start  --topic T            begin a round: writes `round_started_at` and clears
                                 every field, so a receipt can only ever describe the
@@ -30,6 +33,11 @@ Three verbs, one receipt per topic:
                                 tracked-set arm's `events.jsonl`) and `readings`
                                 (the `<slug>.readings` document
                                 `scripts/round-readings.py` writes).
+                                The **fleet tier** (`--branch fleet`) owes a different
+                                pair instead: `re-arm` (the `fleet--<subject>.arms` ring
+                                `manager-liveness.py --arm` appends to) and `digest` (the
+                                sweep reader's rendered payload under
+                                `~/.claude/state/fleet-handback/`).
   --check  --topic T            validate against the round window. Prints
                                 `skipped: <step>` per unresolved field and exits 11
                                 if any; prints nothing and exits 0 on a full round.
@@ -75,15 +83,57 @@ EXIT_SKIPPED = 11
 # to name.
 STEPS = ("needs-you", "sweep", "watcher", "readings")
 
+# The fleet round's own two load-bearing steps, in their own tuple rather than appended
+# to STEPS. A goal or topic round owes no digest, so a shared tuple would make every such
+# round report `skipped: digest` forever — a permanent false red on a healthy round, which
+# is the failure mode this whole check exists to avoid. The fleet round is the only tier
+# that owes both a per-round arm and a per-round digest.
+FLEET_STEPS = ("re-arm", "digest")
+ALL_STEPS = STEPS + FLEET_STEPS
+
+# The branches this receipt knows: `""` (the goal/topic tier, which carries no prefix) and
+# `fleet`. `manager-liveness.py:110-112` validates its own set before building the same
+# slug, and this module mirrors the validation so an unknown branch cannot interpolate into
+# the state path.
+#
+# ⚠️ The two sets are deliberately NOT identical, and the asymmetry has a consequence worth
+# stating rather than discovering: a goal or topic round passes no branch here, so
+# `window()` and `observed_interval()` read `<base>.cadence` / `<base>.arms`, while
+# `manager-liveness.py` writes `goal--<base>` / `topic--<base>`. The observed-median basis
+# therefore never engages for those tiers and the reported 900 s interval is always used —
+# so the "the two checks agree" claim in this module's docstring holds for the fleet tier
+# only. Pre-existing, not introduced by the fleet tier; the remedy is for the goal/topic
+# call sites to pass their branch.
+BRANCHES = ("", "fleet")
+
+
+def steps_for(branch: str) -> tuple:
+    """The steps a round of `branch` owes. No branch is the goal/topic tier."""
+    return FLEET_STEPS if branch == "fleet" else STEPS
+
 # OSC 8 hyperlink: ESC ] 8 ; params ; URI ST. The payload `--write-payload` stores is
 # already link-free, but a frame captured from the screen carries them, and they are
 # zero-width — so they must never decide a shape question either way.
 OSC8_RE = re.compile(r"\x1b\]8;;[^\x1b\x07]*(?:\x1b\\|\x07)")
 
 
-def slug(topic: str) -> str:
-    # Same slug as sweep-gate.py, stop-probe.py and manager-liveness.py.
-    return re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")
+def base_slug(subject: str) -> str:
+    # Same base transform as sweep-gate.py, stop-probe.py and manager-liveness.py.
+    return re.sub(r"[^a-z0-9]+", "-", subject.lower()).strip("-")
+
+
+def slug(subject: str, branch: str = "") -> str:
+    """The state slug, carrying the BRANCH exactly as `manager-liveness.py:101` does.
+
+    A fleet round writes its liveness under `fleet--fleet-manager`, so a receipt keyed
+    on the bare `fleet-manager` reads a file the arm step never wrote and reports
+    `skipped: re-arm` on a round that armed perfectly. Every goal/topic caller passes no
+    branch and keeps the unprefixed slug it has always used.
+    """
+    if branch not in BRANCHES:
+        raise ValueError(f"branch must be one of {BRANCHES}, got {branch!r}")
+    base = base_slug(subject)
+    return f"{branch}--{base}" if branch else base
 
 
 def path(s: str) -> str:
@@ -107,8 +157,8 @@ def read_receipt(s: str) -> dict:
     return d if isinstance(d, dict) else {}
 
 
-def start(topic: str) -> int:
-    s = slug(topic)
+def start(topic: str, branch: str = "") -> int:
+    s = slug(topic, branch)
     # Fields are CLEARED, not carried: a receipt that survived its own round would
     # let a skipped round inherit the previous round's artifacts and pass.
     write_atomic(path(s), json.dumps({"topic": topic, "round_started_at": time.time(), "fields": {}}) + "\n")
@@ -116,8 +166,8 @@ def start(topic: str) -> int:
     return 0
 
 
-def record(topic: str, step: str, artifact: str) -> int:
-    s = slug(topic)
+def record(topic: str, branch: str, step: str, artifact: str) -> int:
+    s = slug(topic, branch)
     d = read_receipt(s)
     if not d.get("round_started_at"):
         # Refuse rather than invent a window: a receipt with no start cannot say
@@ -344,9 +394,51 @@ def watcher_shape(artifact: str, started: float, now: float) -> bool:
     return newest is not None and started <= newest <= now
 
 
-def check(topic: str, now: float = None) -> int:
+def rearm_shape(artifact: str, started: float, now: float) -> bool:
+    """An arm epoch INSIDE the round window — the step, not the file's existence.
+
+    `manager-liveness.py --arm` appends an epoch to `<slug>.arms`, so the ring is the
+    arm step's own record. But a ring inherited from an earlier round, or one emptied by
+    `manager-liveness.py:345` at the first arm after a stand-down, would pass an
+    existence test and prove nothing about THIS round. The newest epoch must fall inside
+    it — the same rule `watcher_shape` applies to its own log.
+    """
+    try:
+        with open(artifact, encoding="utf-8") as fh:
+            vals = [float(x) for x in fh.read().split()]
+    except (OSError, ValueError):
+        return False
+    # The ring stores WHOLE seconds, so both bounds are floored to that resolution: an arm
+    # stamped in the same wall-clock second as `round_started_at` can round *below* it, and
+    # one stamped in the same second the check runs can read as *after* a fractional `now`.
+    # Flooring both is the honest cost of a one-second timestamp — the same flooring
+    # `watcher_shape` documents for its own log. The residual is that an arm up to ~1s
+    # before the window can pass; unreachable in practice, since a previous round's arm is
+    # minutes earlier and the round opens its window before it arms.
+    return any(int(started) <= v <= int(now) + 1 for v in vals)
+
+
+def digest_shape(text: str) -> bool:
+    """The sweep reader's rendered digest, by its own opening line.
+
+    `agents/fleet-sweep-reader.md` renders `DIGEST <round timestamp> · <N> sessions ·
+    snapshot written: <swept_at>` as the file's first line. A truncated file loses it
+    and a stub written by anything else never had it, so these three ASCII markers are
+    the shape — not "it parses", and not "it is non-empty".
+    """
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        return (line.startswith("DIGEST ")
+                and "sessions" in line
+                and "snapshot written:" in line)
+    return False
+
+
+def check(topic: str, branch: str = "", now: float = None) -> int:
     now = time.time() if now is None else now
-    s = slug(topic)
+    s = slug(topic, branch)
     d = read_receipt(s)
     started, limit, basis = window(s, now)
 
@@ -361,7 +453,7 @@ def check(topic: str, now: float = None) -> int:
 
     fields = d.get("fields") or {}
     skipped = []
-    for step in STEPS:
+    for step in steps_for(branch):
         artifact = fields.get(step)
         if not artifact:
             skipped.append((step, "no artifact recorded"))
@@ -369,6 +461,10 @@ def check(topic: str, now: float = None) -> int:
         if step == "watcher":
             if not watcher_shape(artifact, started, now):
                 skipped.append((step, f"no events.jsonl record inside the round window ({artifact})"))
+            continue
+        if step == "re-arm":
+            if not rearm_shape(artifact, started, now):
+                skipped.append((step, f"no arm epoch inside the round window ({artifact})"))
             continue
         try:
             mtime = os.path.getmtime(artifact)
@@ -388,6 +484,8 @@ def check(topic: str, now: float = None) -> int:
             ok = needs_you_shape(text)
         elif step == "readings":
             ok = readings_shape(text)
+        elif step == "digest":
+            ok = digest_shape(text)
         else:
             ok = sweep_shape(text)
         if not ok:
@@ -405,18 +503,30 @@ def main() -> int:
     mode.add_argument("--record", action="store_true", help="record a step's artifact")
     mode.add_argument("--check", action="store_true", help="validate the round (manager, tail)")
     ap.add_argument("--topic")
-    ap.add_argument("--step", choices=STEPS)
+    ap.add_argument("--subject", help="alias for --topic; the fleet tier's name for it")
+    ap.add_argument("--branch", default="",
+                    help="the session tier; `fleet` selects the fleet round's steps")
+    ap.add_argument("--step", choices=ALL_STEPS)
     ap.add_argument("--path", help="the artifact the step produced")
     a = ap.parse_args()
+    subject = a.subject or a.topic
+    # Validate here as well as in `slug()`: the CLI owes an argparse usage error, not a
+    # traceback, and the tier check keeps a fleet step off a goal receipt where
+    # `steps_for()` would never look for it.
+    if a.branch not in BRANCHES:
+        ap.error(f"--branch must be one of {BRANCHES}, got {a.branch!r}")
+    if a.step and a.step not in steps_for(a.branch):
+        ap.error(f"--step {a.step!r} is not a {a.branch or 'goal/topic'} step")
     if a.check:
-        return check(a.topic) if a.topic else (ap.error("--check requires --topic") or 2)
-    if not a.topic:
-        ap.error("--topic is required with --start/--record")
+        return check(subject, a.branch) if subject else (
+            ap.error("--check requires --topic or --subject") or 2)
+    if not subject:
+        ap.error("--topic or --subject is required with --start/--record")
     if a.start:
-        return start(a.topic)
+        return start(subject, a.branch)
     if not a.step or not a.path:
         ap.error("--record needs --step and --path")
-    return record(a.topic, a.step, a.path)
+    return record(subject, a.branch, a.step, a.path)
 
 
 if __name__ == "__main__":

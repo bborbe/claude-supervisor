@@ -70,6 +70,12 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# The exit-record writer, which sits beside this script. Passed to the spawned pane as an
+# absolute path through `env`, because the pane inherits wezterm's mux-server environment
+# and cannot resolve `$CLAUDE_PLUGIN_ROOT` for a script this file already knows the
+# location of.
+RECORD_SCRIPT = os.path.join(HERE, "session-exit-record.py")
+
 # The registry. `SUPERVISOR_SESSIONS_DIR` first so a drill can point at a fixture tree;
 # never a hardcoded home path in committed content.
 SESSIONS_DIR = os.path.expanduser(
@@ -526,7 +532,13 @@ def changed_inputs(load_path, load_mtime, argv, launcher, started):
 
 
 def describe_changed(changed):
-    """`plugin version (0.1.0); MCP config (/p)` — one line naming every changed input."""
+    """`plugin version (0.1.0); MCP config (/p)` — one line naming every changed input.
+
+    Empty means a `--reason lapse` restart: the loop stopped, no input changed. Said out loud
+    rather than left blank, so the caller cannot read an empty string as a missing report.
+    """
+    if not changed:
+        return "nothing — the loop stopped, no input changed (`--reason lapse`)"
     return "; ".join(f"{label} ({what})" for label, what in changed)
 
 
@@ -582,15 +594,39 @@ def resume_command(sid, title, chip, cwd, launcher):
     manager relaunched as a worker on 2026-09-18. The quotes are dropped here, deliberately.
     """
     script = launcher
+    # ⚠️ NO `exec`, and the trap is why. `exec` replaces the pane's shell with the launcher,
+    # so no process is left to `waitpid` and the session's exit status stops existing — a
+    # SIGKILLed worker then leaves no record anywhere, which is the whole gap
+    # `session-exit-record.py` closes. Measured 2026-10-27 on this shape: as a child with
+    # `trap _sx EXIT`, a `kill -9` records `rc=137`; behind `exec`, the trap cannot fire.
+    # The writer path travels as an `env` assignment because a spawned pane inherits
+    # wezterm's mux-server environment, not this process's.
+    #
+    # The observer is started BEFORE the trap and BEFORE the launcher, and it detaches into
+    # its own session, so it outlives a kill of this whole process group. It watches `$$`
+    # — this shell — because the shell outlives the launcher and dies exactly when the group
+    # is killed, which is the case the trap cannot record. Its own `append` call writes the
+    # spawn marker first so a record that begins at `kind=spawn` proves the writer was wired.
+    trap = (
+        '_sx() { rc=$?; "$SESSION_EXIT_RECORD" append --session "'
+        + sid
+        + '" --pid $$ --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn '
+        '--session "'
+        + sid
+        + '" --pid $$ || true; "$SESSION_EXIT_RECORD" observe --pid $$ --session "'
+        + sid
+        + '" || true; trap _sx EXIT; '
+    )
     inner = (
         "unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN "
         "CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; "
-        f'exec "{script}" --resume {sid} -n "{title}" "/color {chip}"'
+        + trap
+        + f'"{script}" --resume {sid} -n "{title}" "/color {chip}"'
     )
     argv = ["wezterm", "cli", "spawn"]
     if cwd:
         argv += ["--cwd", cwd]
-    return argv + ["--", "bash", "-lc", inner]
+    return argv + ["--", "env", f"SESSION_EXIT_RECORD={RECORD_SCRIPT}", "bash", "-lc", inner]
 
 
 HOLDS_PATH = os.path.expanduser(
@@ -635,6 +671,12 @@ def main():
     )
     ap.add_argument("session_id", help="the session id to restart")
     ap.add_argument("--dry-run", action="store_true", help="check everything, kill nothing")
+    ap.add_argument("--reason", choices=("code", "lapse"), default="code",
+                    help="why this restart is justified. `code` (default) requires something "
+                         "newer than the session's start to load, which is precondition 4. "
+                         "`lapse` is for a session whose LOOP stopped — a lapsed fleet round "
+                         "writes no file, so no input changed — and skips precondition 4 and "
+                         "nothing else: a held, busy or headless target is still refused")
     ap.add_argument("--sessions-dir", help=f"registry dir (default: {SESSIONS_DIR})")
     args = ap.parse_args()
 
@@ -724,30 +766,38 @@ def main():
     # here, before the kill, because afterwards there is no process left to read.
     load_path, load_mtime = newest_load_path()
     started = parse_started(rec)
-    if started is None:
-        return refuse(
-            "stale-load-path",
-            f"session {sid} carries no parseable start time, so it cannot be shown that "
-            "anything would load differently",
-        )
     argv = worker_argv(pid)
     subject = fb.manager_subject(name, index, slugs) if role == "manager" and index is not None else None
     launcher, launcher_source = resolve_launcher(sid, (rec.get("cwd") or "").strip(), fb, subject)
-    changed = changed_inputs(load_path, load_mtime, argv, launcher, started)
-    if not changed:
-        checked = [
-            f"load path {os.path.basename(load_path)}" if load_path
-            else f"no load path under {LOAD_PATH_ROOT}",
-            "MCP config (unreadable argv)" if argv is None
-            else ", ".join(mcp_config_paths(argv)) or "no --mcp-config",
-            launcher or f"launcher unresolved: {launcher_source}",
-        ]
-        return refuse(
-            "stale-load-path",
-            f"none of plugin version, MCP config or launcher is newer than session "
-            f"{sid}'s start ({'; '.join(checked)}); restarting would reload identical "
-            "code and config",
-        )
+
+    # ⚠️ Precondition 4 applies to a CODE-staleness restart only. `--reason lapse` restarts a
+    # session whose LOOP stopped, not one whose code changed: a lapsed fleet round writes no
+    # file, so requiring a newer input would refuse every legitimate lapse restart and the
+    # keeper that calls this could never act. Everything above and below still applies — a
+    # held, busy, headless or unresumable target is refused exactly as before.
+    changed = []
+    if args.reason == "code":
+        if started is None:
+            return refuse(
+                "stale-load-path",
+                f"session {sid} carries no parseable start time, so it cannot be shown that "
+                "anything would load differently",
+            )
+        changed = changed_inputs(load_path, load_mtime, argv, launcher, started)
+        if not changed:
+            checked = [
+                f"load path {os.path.basename(load_path)}" if load_path
+                else f"no load path under {LOAD_PATH_ROOT}",
+                "MCP config (unreadable argv)" if argv is None
+                else ", ".join(mcp_config_paths(argv)) or "no --mcp-config",
+                launcher or f"launcher unresolved: {launcher_source}",
+            ]
+            return refuse(
+                "stale-load-path",
+                f"none of plugin version, MCP config or launcher is newer than session "
+                f"{sid}'s start ({'; '.join(checked)}); restarting would reload identical "
+                "code and config",
+            )
 
     print(
         f"🔄 restart-worker · session {sid[:8]} · pid {pid} · {name!r}"
@@ -792,6 +842,10 @@ def main():
         )
         return 1
 
+    # A machine token, printed BEFORE the signal: a caller that must know whether a failure
+    # came before or after the kill reads this line rather than matching the prose of
+    # whichever refusal follows. `scripts/fleet-keeper.py` arms its cap on it.
+    print(f"   killing-pid {pid}")
     try:
         os.kill(pid, 15)
     except ProcessLookupError:

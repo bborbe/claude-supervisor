@@ -122,6 +122,7 @@ export function buildRecord({
   result = null,
   workerId = null,
   target = null,
+  wrapperSessionId = null,
   spawnedAt,
 }) {
   if (!sessionId) throw new Error('buildRecord needs a sessionId — it is the key')
@@ -175,6 +176,13 @@ export function buildRecord({
     // authenticates turns, and this record is a file anyone on the machine can read.
     worker_id: workerId,
     target,
+    // The `claude-wrapper` session this worker's child runs under, or null when it is not
+    // wrapper-backed. ⚠️ CARRIED FOR THE SAME REASON AS `worker_id`, AND THE FAILURE IS THE
+    // SAME SHAPE: the wrapper is the only holder of a parked prompt, so a reconnected server
+    // that lost this id can neither see the park (`pending_question`) nor answer it
+    // (`answer_permission`) — a worker that really is parked would read as "not parked" for
+    // the rest of its life, which is the false negative this whole path exists to remove.
+    wrapper_session_id: wrapperSessionId,
   }
 }
 

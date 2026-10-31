@@ -803,7 +803,12 @@ def post_card(item, sid, script_dir=None, timeout=ATTENTION_ASK_TIMEOUT):
         ask_script(script_dir),
         "post",
         "--producer-id", sid,
-        "--producer-kind", "session",
+        # `manager`, not the raising session's own kind: this ledger is the MANAGER
+        # loop's (see the module docstring — "manager loops: fleet-loop /
+        # manager-loop"), so the card it posts is a manager's escalation. The
+        # `--producer-id` above is still the raising session, which is what
+        # `answered-watch.py` keys on; the kind describes the producing loop.
+        "--producer-kind", "manager",
         "--dedup-key", CARD_DEDUP_PREFIX + item["id"],
         "--payload", item["text"],
     ]

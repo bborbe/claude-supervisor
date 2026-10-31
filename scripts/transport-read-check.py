@@ -136,6 +136,16 @@ SITE_LIST = {
     # deliberately not driven into the three states below — the card is posted either
     # way, so the read's failure is a degraded affordance and not a gate of its own.
     ("manager-attention-watch.py", "pane_for_session_name"),
+    # added 2026-10-31 — `fleet-keeper.py`'s `wezterm` helper, behind the re-arm the fleet
+    # keeper sends into the pane its own resume just spawned (`get-text` for the bounded
+    # readiness wait, `send-text` for the command and its separate submit). It keeps the
+    # three states apart by returning `(rc, stdout)`: a failed or hung query is `rc != 0`,
+    # a reachable pane with nothing on it is `(0, "")`, and `rearm()` acts only on `rc == 0`
+    # — so an unreadable pane can never satisfy the readiness wait and get typed into, which
+    # is the same reason `spawn-goal.py`'s wait refuses to read absence as arming. Enumerated
+    # so the mechanism and this list agree; like `spawn-goal.py`'s `send` it is also an
+    # ACTION, so it is deliberately not driven into the three states below.
+    ("fleet-keeper.py", "wezterm"),
 }
 
 

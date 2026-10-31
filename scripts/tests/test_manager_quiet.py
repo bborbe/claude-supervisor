@@ -41,7 +41,7 @@ GOAL = "---\npage_type: goal\nstatus: in_progress\n---\n\nA goal.\n"
 
 TASK = """---
 status: {status}
-phase: execution
+phase: {phase}
 {extra}goals:
     - '[[AGoal]]'
 ---
@@ -87,8 +87,11 @@ class Base(unittest.TestCase):
         with open(os.path.join(self.vault, rel), "w", encoding="utf-8") as fh:
             fh.write(text)
 
-    def task(self, name, status="in_progress", extra=""):
-        self.write("25 Tasks/%s.md" % name, TASK.format(status=status, extra=extra))
+    def task(self, name, status="in_progress", phase="execution", extra=""):
+        self.write(
+            "25 Tasks/%s.md" % name,
+            TASK.format(status=status, phase=phase, extra=extra),
+        )
 
     def arm(self, subject="AGoal"):
         """Simulate the manager's head-of-round arm — which is what marks a NEW tick.
@@ -178,11 +181,46 @@ class TestQuietShapes(Base):
     """Each quiet shape is read from a field — none is inferred."""
 
     def test_unsurfaced_statuses_are_quiet(self):
-        for i, status in enumerate(("next", "backlog", "hold")):
+        for i, status in enumerate(("backlog", "hold")):
             self.task("Row%d" % i, status=status)
         r = self.tick()
         self.assertEqual(r["runnable"], [])
-        self.assertEqual(sorted(r["quiet"]), ["Row0", "Row1", "Row2"])
+        self.assertEqual(sorted(r["quiet"]), ["Row0", "Row1"])
+
+    def test_an_approved_next_row_is_runnable(self):
+        """`vault-cli task approve` leaves `status: next`; the row is approved, not queued.
+
+        Counting it quiet here made a subject full of approved rows read as empty, so
+        the stand-down counter retired the manager that had just approved them.
+        """
+        self.task("Approved", status="next", phase="planning")
+        r = self.tick()
+        self.assertEqual(r["runnable"], ["Approved"])
+        self.assertEqual(r["quiet"], [])
+
+    def test_a_next_row_with_no_phase_key_is_runnable(self):
+        """`sweep-gate.py` keeps the `status == "next"` arm for exactly this shape.
+
+        Rows filed before the phase field existed carry no `phase` key at all; a
+        `phase`-only predicate would drop every one of them out of the offer silently.
+        """
+        self.write(
+            "25 Tasks/Unphased.md",
+            "---\nstatus: next\ngoals:\n    - '[[AGoal]]'\n---\n\n# Tasks\n\n- [ ] x\n",
+        )
+        r = self.tick()
+        self.assertEqual(r["runnable"], ["Unphased"])
+
+    def test_a_todo_phase_is_quiet_even_at_status_next(self):
+        """The approval boundary is `phase: todo`, the field `task approve` moves.
+
+        Without this guard, admitting `status: next` would surface the operator's whole
+        unapproved inbox as runnable work.
+        """
+        self.task("Unapproved", status="next", phase="todo")
+        r = self.tick()
+        self.assertEqual(r["runnable"], [])
+        self.assertEqual(r["quiet"], ["Unapproved"])
 
     def test_terminal_tasks_are_excluded_not_quiet(self):
         self.task("Done", status="completed")

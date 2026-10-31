@@ -25,11 +25,66 @@ Load this page, with the rest of `docs/`, via `/supervisor:read-guides`.
 
 ## The four tiers
 
-The tiers form a **tree**, and the operator's hierarchy (2026-10-23) names what each level may
-open: **the fleet manager is top of everything** — it opens topic managers, goal managers and
-workers, each when no lower-tier manager owns the subject; **a topic manager opens goal
-managers and workers**; **a goal manager opens workers**; **a worker opens nothing**. A tier
-opens a lower one through `/supervisor:open`, never by a bare spawn.
+The tiers form a **tree**, and the operator's hierarchy (2026-10-23, amended 2026-10-30) names
+what each level may open: **the fleet manager is top of everything** — it opens topic managers,
+and a **worker** only when no lower-tier manager owns that subject, and a goal manager **only
+when that goal is flagged**; **a topic manager opens workers, and a goal manager only when that
+goal is flagged**; **a goal manager opens workers**; **a worker opens nothing**. A tier opens a
+lower one through `/supervisor:open`, never by a bare spawn.
+
+⚠️ **The ownership condition survived the 2026-10-30 amendment, and it is not the same rule as
+the one it sat beside.** The clause that was removed read *"each when no lower-tier manager owns
+the subject"* and governed **goal managers** — a manager is never opened fresh at all now, so
+that half is gone. The **worker** half is unchanged and still binds: a worker is opened directly
+by the fleet manager only when no topic or goal manager owns its subject, which is the same
+fallback `docs/fleet-surface.md` § Which manager owns a subject states. Do not read the removal
+as licensing the fleet tier to open a worker under a live goal manager.
+
+⚠️ **Restart is not open, and that distinction is what makes the tree coherent** (operator
+ruling 2026-10-30). A restart resumes a session that already has a subject and a recorded id;
+an open creates supervision where none existed. Restarting a broken manager therefore decides
+nothing new, while opening one decides who supervises. Four rules follow:
+
+1. **A crashed or lapsed manager or worker is restarted automatically** — it already owns its
+   subject, so the restart decides nothing new. ⚠️ **This binds the fleet tier too, and the
+   fleet tier is the one that needed it most.** `scripts/fleet-keepalive.py` detects a lapsed
+   fleet round; `scripts/fleet-keeper.py` resumes it. Until the keeper existed the fleet tier
+   had a detector and no hands — `fleet-keepalive.py` printed `stale` and the words "Resume the
+   fleet manager", and nothing resumed, so a lapse was measured, announced once, and suppressed
+   for every minute after until a human looked at a screen. A detector that only prints is a
+   watchdog with no hands. The keeper **restarts — it never opens** (rule 4).
+2. **A flagged page is opened automatically by the tier above it** — `flag: true` means
+   *"open me"*, and **provenance is not read**. Operator ruling 2026-10-30: *"in the end it
+   should not matter how set the flag … if flag, should be open if claude session limit allow
+   it"* — so `flag_set_by` is a note, not a gate, and the only bound after the flag is
+   capacity. ⚠️ **The consequence is deliberate:** an agent may flag its own page and get
+   something opened for it, limited only by the cap. ⚠️ **Scope: three legs, and the boundary
+   is the WRITE, not the tier** — `topic-spawn.py --goal` (goal managers),
+   `topic-spawn.py --topic-open` (topic managers) and `open-queue.py` (the fleet round's open
+   leg, for tasks) read the flag alone. ⚠️ **`/supervisor:open --flagged` is the exception and
+   keeps its provenance gate**, because that batch does not merely open: its first move is
+   `vault-cli task approve`, which writes `approved_by: operator` onto the row. Reading the
+   flag alone there would let an agent mint an operator approval, so `flag_set_by` still
+   bounds it to `operator`/`legacy`. A flag on a page no leg reads is inert, which is the
+   defect `--topic-open` was added to remove.
+3. **An approved worker is opened automatically**, up to `spawn.maxConcurrent`.
+4. **A manager is never opened fresh on the operator's behalf** — not by a loop, not by a
+   round, not to fill a gap. Only restarted, or opened because it was flagged.
+
+⚠️ **Rule 4 binds every tier.** The fleet tier removed its manager-proposal row on 2026-10-29
+(`commands/fleet-drive.md`: *"No manager-proposal row — the round does not propose managers for
+unmanaged goals"*). No other tier restores that behaviour under another name.
+
+⚠️ **The fleet keeper obeys rule 4 in its sharpest form.** There is exactly one fleet manager,
+so a second would be a double writer over every subject: `scripts/fleet-keeper.py` resumes the
+**recorded session id** through `restart-worker.py --reason lapse` and never spawns a fresh
+one. Two sessions claiming the `Fleet Manager` registration is its own verdict — the keeper
+refuses rather than picks, because resuming one of two restarts the wrong half of the double
+writer.
+
+⚠️ **`flag` carries one meaning tree-wide.** It marks a page the operator wants opened. A leg
+that reads it as *"parked / waiting-on-human"* and excludes it inverts the operator's mark; the
+parked class needs its own marker, never this field.
 
 ⚠️ **The `-spawn` verbs are narrower than their tier, and that is not a contradiction.** A
 `-spawn` verb starts the level directly below it and nothing else — `topic-spawn` starts a
@@ -41,8 +96,8 @@ open — and no `worker-spawn` at all.
 
 | Tier | Manages | May start | Done condition |
 |---|---|---|---|
-| **Fleet manager** | every topic manager, and every goal with no topic | a topic manager (on the operator's initiative), and — when no lower-tier manager owns the subject — a goal manager or a worker directly | the fleet has no unmanaged subject and no gate it owns is outstanding |
-| **Topic manager** | ONE topic's declared goal set, the goal managers running on it, and the workers it opens | a **goal manager**, at most N at once per topic and never past the fleet manager ceiling; and a **worker** | every goal in its declared set is either managed, terminal, or ranked out of the N slots with the reason stated |
+| **Fleet manager** | every topic manager, and every goal with no topic | a topic manager (on the operator's initiative), a **worker** directly when no lower-tier manager owns it, and a goal manager **only when that goal is flagged** | the fleet has no unmanaged subject and no gate it owns is outstanding |
+| **Topic manager** | ONE topic's declared goal set, the goal managers running on it, and the workers it opens | a **worker**; and a **goal manager only when that goal is flagged**, at most N at once per topic and never past the fleet manager ceiling | every goal in its declared set is either managed, terminal, or ranked out of the N slots with the reason stated |
 | **Goal manager** | ONE goal's declared task set, and the workers running on it | a **worker**, under the spawn cap | every task in its declared set is terminal, waiting on a named party, or held with a stated reason |
 | **Worker** | ONE anchored task | nothing — a worker never opens a session | its anchored task is terminal, or it reports the gate that stops it |
 
@@ -186,7 +241,17 @@ output — the fleet table.
   § Session roles attaches to the worker-side prohibition, so do not go hunting for an
   enforcement that does not exist.
 - **A topic manager starts a goal manager with `/supervisor:open --goal "<goal>"`**, and only
-  for a goal its own `## Goals` list declares. `commands/topic-spawn.md` owns the three
-  refusals (`goal-not-in-scope`, `goal-not-startable`, `manager-cap`), the ranking that picks
-  which goals get one of the N slots, and the keep-alive contract. It holds no `spawn_agent`
-  tool.
+  for a goal its own `## Goals` list declares **and that carries the flag** (whoever set it). `commands/topic-spawn.md`
+  owns the five refusals (`goal-not-in-scope`, `goal-not-startable`, `goal-terminal`,
+  `goal-unflagged`, `manager-cap`), the ranking that picks which goals get one of the N slots, and
+  the keep-alive contract. It holds no `spawn_agent` tool.
+  ⚠️ **The flag gates the OPEN, never the RESTART.** A goal with **no recorded
+  `manager_session_id`** is an open: an unflagged one is reported (`open-unflagged`) and
+  held, however free the slots are — that is rule 4, and `topic-spawn.py`'s `goal-unflagged`
+  refusal is its executable gate. A goal that **already carries a recorded id** and whose
+  session is `ABSENT`, or whose loop is `STALE`, is a **restart**: rule 1 restarts it
+  automatically and **the flag is not consulted**, because `/supervisor:open --goal` resumes
+  the same session and decides nothing about who supervises.
+  ⚠️ **Reading this bullet as "an unflagged goal is held", without that split, is what makes
+  rule 1 inert on the topic tier** — the round then reports dead managers as *"resume held …
+  unflagged"* and restarts none of them, which is the state measured on 2026-10-30.
