@@ -66,6 +66,8 @@ EXPECTED = {
     # pinned by the two tests below.
     "20-unreadable-assistant-no-closer.jsonl": 0,
     "21-partial-tool-result-quoting-a-closer.jsonl": 0,
+    "22-partial-quoted-subject-before-admin.jsonl": 0,
+    "23-partial-tool-use-quoting-a-closer.jsonl": 0,
 }
 
 
@@ -186,6 +188,25 @@ class CloserGateLintTest(unittest.TestCase):
             self.payload("21-partial-tool-result-quoting-a-closer.jsonl"), environ={})
         self.assertEqual("not-a-gate", record["reason"])
         self.assertIsNone(record["matched"])
+
+    def test_a_quoted_subject_does_not_truncate_away_a_trailing_admin(self):
+        # ⚠️ Cutting the salvaged segment at the first `"` stops at a JSON-ESCAPED quote,
+        # so `--subject "Release 1.2" --admin --merge` truncated to `--subject \` and the
+        # `--admin` deny at closer-gate-lint.py never fired — an admin merge released on
+        # the salvage path, which is exactly what fixtures 14/15 exist to prevent.
+        _code, _text, record = self.mod.evaluate(
+            self.payload("22-partial-quoted-subject-before-admin.jsonl"), environ={})
+        self.assertEqual("not-allow-listed", record["reason"])
+        self.assertIsNone(record["matched"])
+        self.assertIn("--admin", record["closer"])
+
+    def test_a_closer_quoted_in_a_tool_use_input_is_not_salvaged(self):
+        # ⚠️ The parsed path joins only `type == "text"` blocks, so the salvage must too —
+        # a closer quoted in a `tool_use` input is not the operator's gate.
+        _code, _text, record = self.mod.evaluate(
+            self.payload("23-partial-tool-use-quoting-a-closer.jsonl"), environ={})
+        self.assertEqual("no-closer", record["reason"])
+        self.assertIsNone(record["closer"])
 
     def test_the_message_never_calls_the_step_reversible(self):
         # ⚠️ A merge is irreversible. The old text said "authorise for a reversible,

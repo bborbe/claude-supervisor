@@ -97,7 +97,51 @@ def tail_lines(path, max_bytes=MAX_SCAN):
             end = start
 
 
-def _partial_closer(raw):
+_TYPE_TEXT = re.compile(r'"type"\s*:\s*"text"')
+_TEXT_KEY = re.compile(r'"text"\s*:\s*"')
+_ASSISTANT = re.compile(r'"type"\s*:\s*"assistant"')
+
+
+def _json_string_at(text, start):
+    """The raw body of a JSON string whose opening quote ends at `start`.
+
+    Stops at the closing quote or at truncation, and **never** mistakes an escaped
+    `\\"` for the terminator. Cutting at the first `"` instead — as this did — dropped
+    everything after a quoted `--subject`, including a trailing `--admin`, so the
+    admin-merge deny check never fired.
+    """
+    i = start
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == '"':
+            return text[start:i]
+        i += 1
+    return text[start:]
+
+
+def _text_values(text):
+    """The `text` content blocks of a partial assistant line, in order.
+
+    Mirrors the parsed path, which joins only `type == "text"` blocks — a closer
+    quoted in a `tool_use` input or a `thinking` block is not the operator's gate.
+    """
+    values, pos = [], 0
+    while True:
+        kind = _TYPE_TEXT.search(text, pos)
+        if not kind:
+            return values
+        # Bounded to this block: an unbounded search could pair a truncated block's
+        # marker with the NEXT block's text key and salvage the wrong string.
+        key = _TEXT_KEY.search(text, kind.end(), kind.end() + 200)
+        if not key:
+            return values
+        values.append(_json_string_at(text, key.end()))
+        pos = key.end()
+
+
+def _partial_closer(text):
     """`(timestamp, line)` recovered from a partially-written assistant line, or `None`.
 
     The harness streams a message to disk, so a `Stop` hook can read a line whose JSON is
@@ -106,26 +150,20 @@ def _partial_closer(raw):
     `gh pr merge` gate was recorded as `not-a-gate` 266 ms after the message was written.
 
     The text is already on disk, so recover it rather than fall back to a stale message.
-    ⚠️ Only assistant lines qualify: a partial tool result quoting the same words must
-    never become a gate.
     """
-    try:
-        text = raw.decode("utf-8", "replace")
-    except Exception:
+    if not _ASSISTANT.search(text):
         return None
-    if '"type": "assistant"' not in text and '"type":"assistant"' not in text:
-        return None
-    idx = text.rfind("👤 You:")
+    body = "\n".join(_text_values(text))
+    idx = body.rfind("👤 You:")
     if idx < 0:
         return None
-    seg = text[idx:]
-    # The line's JSON is unclosed, so the closer ends at the first escaped newline
-    # (`\n` in the raw bytes) or at the string's closing quote — whichever comes first.
-    stops = [p for p in (seg.find("\\n"), seg.find('"')) if p > 0]
-    if stops:
-        seg = seg[: min(stops)]
+    # The closer's line ends at the JSON-escaped newline; the string body itself is
+    # already bounded by its closing quote, so no quote handling is needed here.
+    line = body[idx:].split("\\n", 1)[0].strip()
+    if not line:
+        return None
     ts = re.search(r'"timestamp":\s*"([^"]+)"', text)
-    return (ts.group(1) if ts else "?"), seg.strip()
+    return (ts.group(1) if ts else "?"), line
 
 
 def last_closer(path, max_bytes=MAX_SCAN):
@@ -141,11 +179,11 @@ def last_closer(path, max_bytes=MAX_SCAN):
             # ⚠️ A partial final line is the turn's own message, not a line to skip past.
             # Falling back to an older message here is the stale-closer defect: the hook
             # then decides on a closer the operator never saw.
-            salvaged = _partial_closer(raw)
+            text = raw.decode("utf-8", "replace")
+            salvaged = _partial_closer(text)
             if salvaged is not None:
                 return salvaged
-            text = raw.decode("utf-8", "replace")
-            if '"type": "assistant"' in text or '"type":"assistant"' in text:
+            if _ASSISTANT.search(text):
                 # An assistant message we cannot read is not a licence to use an older one.
                 return None
             continue
