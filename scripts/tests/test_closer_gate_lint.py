@@ -58,6 +58,17 @@ EXPECTED = {
     "15-session-close-with-admin-merge.jsonl": 0,
     "16-compact-stays-gated.jsonl": 0,
     "17-worktree-remove-stays-gated.jsonl": 0,
+    # ⚠️ The partial-write pair: a well-formed fixture cannot reproduce the stale read
+    # at any scan bound, so these carry an unparseable final line (see the test below).
+    "18-partial-write-gh-pr-merge.jsonl": 2,
+    "19-partial-write-session-close.jsonl": 2,
+    # Both exit 0, so only their `reason` distinguishes them from a stale fallback —
+    # pinned by the two tests below.
+    "20-unreadable-assistant-no-closer.jsonl": 0,
+    "21-partial-tool-result-quoting-a-closer.jsonl": 0,
+    "22-partial-quoted-subject-before-admin.jsonl": 0,
+    "23-partial-tool-use-quoting-a-closer.jsonl": 0,
+    "24-partial-cut-inside-the-closer.jsonl": 0,
 }
 
 
@@ -142,6 +153,70 @@ class CloserGateLintTest(unittest.TestCase):
                 code, _text, record = self.mod.evaluate(self.payload(name), environ={})
                 self.assertEqual(0, code)
                 self.assertEqual("not-allow-listed", record["reason"])
+
+    def test_a_partial_final_line_still_yields_the_turns_closer(self):
+        # ⚠️ The measured defect (2026-10-31, session 95e9b174). The harness had not
+        # finished writing the final message, so its line is unparseable; the extractor
+        # skipped it and returned the PREVIOUS message's `👤 You: nothing`, recording
+        # `not-a-gate` 266 ms after a real `gh pr merge` gate. A well-formed fixture
+        # cannot reproduce this at any scan bound: `tail_lines` scans backwards from EOF,
+        # so reaching the earlier message implies reaching the later one. Only a partial
+        # final line reproduces it — measured, see the task's `# Results`.
+        for name, matched in (
+            ("18-partial-write-gh-pr-merge.jsonl", "gh-pr-merge"),
+            ("19-partial-write-session-close.jsonl", "vault-cli-session-close"),
+        ):
+            with self.subTest(fixture=name):
+                code, _text, record = self.mod.evaluate(self.payload(name), environ={})
+                self.assertEqual(2, code)
+                self.assertEqual("allow-listed", record["reason"])
+                self.assertEqual(matched, record["matched"])
+
+    def test_an_unreadable_final_line_never_falls_back_to_an_older_closer(self):
+        # ⚠️ The `return None` branch. Without it the scan falls through to the earlier
+        # `👤 You: nothing` and reports `not-a-gate` — the same stale-closer defect one
+        # line further out. Both outcomes exit 0, so only the reason distinguishes them.
+        _code, _text, record = self.mod.evaluate(
+            self.payload("20-unreadable-assistant-no-closer.jsonl"), environ={})
+        self.assertEqual("no-closer", record["reason"])
+        self.assertIsNone(record["closer"])
+
+    def test_a_partial_tool_result_quoting_a_closer_is_not_a_gate(self):
+        # ⚠️ `_partial_closer` requires `"type": "assistant"`, so a tool result that
+        # happens to quote a closer never becomes one — it falls through to the earlier
+        # message instead.
+        _code, _text, record = self.mod.evaluate(
+            self.payload("21-partial-tool-result-quoting-a-closer.jsonl"), environ={})
+        self.assertEqual("not-a-gate", record["reason"])
+        self.assertIsNone(record["matched"])
+
+    def test_a_quoted_subject_does_not_truncate_away_a_trailing_admin(self):
+        # ⚠️ Cutting the salvaged segment at the first `"` stops at a JSON-ESCAPED quote,
+        # so `--subject "Release 1.2" --admin --merge` truncated to `--subject \` and the
+        # `--admin` deny at closer-gate-lint.py never fired — an admin merge released on
+        # the salvage path, which is exactly what fixtures 14/15 exist to prevent.
+        _code, _text, record = self.mod.evaluate(
+            self.payload("22-partial-quoted-subject-before-admin.jsonl"), environ={})
+        self.assertEqual("not-allow-listed", record["reason"])
+        self.assertIsNone(record["matched"])
+        self.assertIn("--admin", record["closer"])
+
+    def test_a_closer_quoted_in_a_tool_use_input_is_not_salvaged(self):
+        # ⚠️ The parsed path joins only `type == "text"` blocks, so the salvage must too —
+        # a closer quoted in a `tool_use` input is not the operator's gate.
+        _code, _text, record = self.mod.evaluate(
+            self.payload("23-partial-tool-use-quoting-a-closer.jsonl"), environ={})
+        self.assertEqual("no-closer", record["reason"])
+        self.assertIsNone(record["closer"])
+
+    def test_a_closer_cut_mid_command_is_not_recovered(self):
+        # ⚠️ The write can stop INSIDE the closer. `--admi` is not `--admin`, so salvaging
+        # it would let the deny miss and the lint release a branch-protection bypass. A
+        # closer line that runs into an unterminated tail is therefore unrecoverable.
+        _code, _text, record = self.mod.evaluate(
+            self.payload("24-partial-cut-inside-the-closer.jsonl"), environ={})
+        self.assertEqual("no-closer", record["reason"])
+        self.assertIsNone(record["closer"])
 
     def test_the_message_never_calls_the_step_reversible(self):
         # ⚠️ A merge is irreversible. The old text said "authorise for a reversible,
