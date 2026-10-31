@@ -79,7 +79,7 @@ class FakeCap:
 class KeeperBase(unittest.TestCase):
     PATCHED = ("STATE_DIR", "HEARTBEAT", "KEEPER_LOG", "REGISTER_DIR",
                "verdict", "liveness", "restart", "rearm", "notify", "load_sibling",
-               "registry_pid")
+               "registry_pid", "stand_down")
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -116,6 +116,8 @@ class KeeperBase(unittest.TestCase):
         fk.restart = lambda sid, dry=False: (self.restarts.append((sid, dry)) or self.restart_outcome)
         fk.rearm = lambda pane, sid, old_pid: (self.rearms.append((pane, sid, old_pid)) or self.rearm_result)
         fk.registry_pid = lambda sid: 4242
+        self.stood = "running"
+        fk.stand_down = lambda: self.stood
         fk.notify = lambda key, payload, options, context="": (self.cards.append(key) or f"item-{key}")
 
     def _restore(self):
@@ -235,6 +237,35 @@ class FleetKeeperTest(KeeperBase):
         self.assertLess(3 * fk.HOLD_OFF, self.cap.RESUME_WINDOW)
 
     # --- refusals: nothing may be killed --------------------------------------
+
+    def test_a_deliberate_stop_is_left_alone(self):
+        """`/supervisor:stop` makes the digest go stale too. Read as a lapse, the keeper would
+        restart a fleet the operator stood down on purpose."""
+        self.register_fleet()
+        self.stood = "STOPPED"
+        rc, out = self.run_keeper("--now", str(NOW))
+        self.assertEqual(0, rc)
+        self.assertEqual("stopped", out[0])
+        self.assertEqual([], self.restarts)
+        self.assertEqual([], self.cap.load_resumes(self.cap.path))
+        self.assertEqual([], self.cards, "a deliberate stop is not something to report")
+
+    def test_an_unreadable_stop_state_kills_nothing(self):
+        """Whether the operator stopped the fleet is exactly what a kill must not guess at."""
+        self.register_fleet()
+        self.stood = None
+        rc, out = self.run_keeper("--now", str(NOW))
+        self.assertEqual("cannot-tell", out[0])
+        self.assertEqual([], self.restarts)
+        self.assertIn("fleet-keeper-stop-state-unreadable", self.cards)
+
+    def test_a_healthy_round_never_consults_the_stop_state(self):
+        """The stop read only SUPPRESSES; it is never reached on a round that needs nothing."""
+        self.verdict_word = "ok"
+        self.stood = None   # would card and refuse if it were read
+        rc, out = self.run_keeper("--now", str(NOW))
+        self.assertEqual("ok", out[0])
+        self.assertEqual([], self.cards)
 
     def test_an_unreadable_pre_kill_pid_kills_nothing(self):
         """Without the pre-kill pid the re-arm cannot be confirmed, so nothing is killed."""
@@ -395,7 +426,51 @@ class VerdictTest(unittest.TestCase):
             self.assertEqual("unknown", _REAL_VERDICT()[0])
 
 
+class StandDownTest(unittest.TestCase):
+    """`stand_down()` maps `manager-liveness.py --state` to STOPPED / running / None."""
+
+    def check(self, stdout, rc=0):
+        done = subprocess.CompletedProcess([], rc, stdout=stdout, stderr="")
+        with mock.patch.object(fk.subprocess, "run", return_value=done):
+            return _REAL_STAND_DOWN()
+
+    def test_the_stop_marker_reads_stopped(self):
+        self.assertEqual("STOPPED", self.check("STOPPED\tfleet--fleet-manager\tmarker present\n"))
+
+    def test_a_stale_heartbeat_does_not_count_as_a_stop(self):
+        """manager-liveness's own STALE must never stand in for a stop, or a second
+        staleness rule would decide whether the keeper acts."""
+        self.assertEqual("running", self.check("STALE\tfleet--fleet-manager\tage=9s\n"))
+
+    def test_ok_and_unarmed_are_running(self):
+        self.assertEqual("running", self.check("OK\tfleet--fleet-manager\tage=9s\n"))
+        self.assertEqual("running", self.check("UNARMED\tfleet--fleet-manager\tno cadence\n"))
+
+    def test_unparseable_output_is_unknown(self):
+        self.assertIsNone(self.check("garbage\n"))
+        self.assertIsNone(self.check(""))
+
+    def test_a_failed_probe_is_unknown(self):
+        self.assertIsNone(self.check("STOPPED\tx\ty\n", rc=2))
+        with mock.patch.object(fk.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired(["x"], 30)):
+            self.assertIsNone(_REAL_STAND_DOWN())
+
+    def test_the_real_stop_writer_and_this_reader_agree_on_the_marker(self):
+        """Positive control through the REAL manager-liveness.py: `--stop` writes the marker
+        `/supervisor:stop` writes, and the keeper reads it back as STOPPED."""
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"MANAGER_LIVENESS_STATE_DIR": tmp}):
+            subprocess.run(
+                [fk.sys.executable, fk.MANAGER_LIVENESS, "--stop",
+                 "--subject", fk.SUBJECT, "--branch", fk.BRANCH],
+                capture_output=True, text=True, timeout=30, check=True,
+            )
+            self.assertEqual("STOPPED", _REAL_STAND_DOWN())
+
+
 _REAL_VERDICT = fk.verdict
+_REAL_STAND_DOWN = fk.stand_down
 _REAL_REARM = fk.rearm
 _REAL_RESTART = fk.restart
 
