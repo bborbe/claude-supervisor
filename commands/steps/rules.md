@@ -73,3 +73,7 @@ Before naming a cause in Step 5, confirm it against the system it is about — `
 ⚠️ **The router table is evaluated more than once per round, and the later reads are the ones that get skipped.** At the head only the rows decidable then can be honoured (`every tick` and the cold `rules` row); **every other row gates on data the round does not hold yet** — including `reap`, whose `When` is the drive leg — so re-read it the moment the sweep hand-back exists, and again before the output shape renders. Never re-run a leg: **every `every tick` row is once-per-round**, and a second sweep or drive leg would duplicate sends to peers.
 
 Measured 2026-10-12 on a cold `v0.130.0` round: rows 3 (`orphan=46`, `collision=1`), 8 (`ledger=16`) and 11 (`blocked=3`) each held, none was read, and the mandatory `📋 Open with the operator` render was omitted.
+
+## No manager-proposal row
+
+⚠️ **The round does not propose managers for unmanaged goals.** The row was removed 2026-10-29 by operator ruling, so a round that reports an unmanaged topic reports it and stops. This lives here rather than in `commands/fleet-drive.md` because the router table carries rows that run, and an absence is not a row — but it is stated, so a future reader does not read the gap as an omission and add it back.
