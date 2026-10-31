@@ -300,5 +300,33 @@ class TrackedSet(Tmp):
         self.assertTrue(path.endswith("bro-21389-mdm-via-rest.readings"))
 
 
+class ParkThreshold(Tmp):
+    """The park cell is 2x the cadence; the frozen cell is 1x. One field, one rule."""
+
+    def test_park_threshold_is_twice_the_clamped_interval(self):
+        """A 15-minute tick must record 1800, not 900.
+
+        The receipt recorded 1x the interval, so the sweep reader had to reconcile
+        its declared park threshold against the 2x the gate derives — on every
+        round. Reading this field as the frozen threshold is the same mistake in
+        the other direction, which is why the pair is asserted together.
+        """
+        path = os.path.join(self.dir, "tracked.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("A task\n")
+        doc = rr.compute("A subject", path, None, 900, now=1_700_000_000,
+                         attention_dir=self.attention)
+        self.assertEqual(doc["park_threshold_seconds"], 1800)
+
+    def test_a_shorter_tick_scales_with_it(self):
+        """300s tick -> 600s park threshold: the rule is a multiple, not a constant."""
+        path = os.path.join(self.dir, "tracked.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("A task\n")
+        doc = rr.compute("A subject", path, None, 300, now=1_700_000_000,
+                         attention_dir=self.attention)
+        self.assertEqual(doc["park_threshold_seconds"], 600)
+
+
 if __name__ == "__main__":
     unittest.main()
