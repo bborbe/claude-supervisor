@@ -339,6 +339,10 @@ class RisingAge(Base):
         self.assertEqual(rc, 0)
         self.assertIn("RECOVERED", out)
 
+        # Drop the old round first: `newest_round()` orders by parsed timestamp, so a
+        # surviving 4325s-old `a.digest` would be selected over a 9000s-old `b.digest`
+        # and the "higher lapse on the new round" this test names would never run.
+        os.unlink(os.path.join(self.digests, "a.digest"))
         self.digest("b.digest", self.ago(9000))  # step 8, a fresh lapse
         self.tick(60)
         rc, out = self.run_check()

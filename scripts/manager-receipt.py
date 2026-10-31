@@ -398,10 +398,13 @@ def rearm_shape(artifact: str, started: float, now: float) -> bool:
             vals = [float(x) for x in fh.read().split()]
     except (OSError, ValueError):
         return False
-    # The ring stores WHOLE seconds, so an arm stamped in the same wall-clock second the
-    # check runs can read as *after* a fractional `now`. Widening the upper bound by that
-    # second is the honest cost of a one-second timestamp — the same flooring
-    # `watcher_shape` documents for its own log.
+    # The ring stores WHOLE seconds, so both bounds are floored to that resolution: an arm
+    # stamped in the same wall-clock second as `round_started_at` can round *below* it, and
+    # one stamped in the same second the check runs can read as *after* a fractional `now`.
+    # Flooring both is the honest cost of a one-second timestamp — the same flooring
+    # `watcher_shape` documents for its own log. The residual is that an arm up to ~1s
+    # before the window can pass; unreachable in practice, since a previous round's arm is
+    # minutes earlier and the round opens its window before it arms.
     return any(int(started) <= v <= int(now) + 1 for v in vals)
 
 
@@ -497,6 +500,13 @@ def main() -> int:
     ap.add_argument("--path", help="the artifact the step produced")
     a = ap.parse_args()
     subject = a.subject or a.topic
+    # Validate here as well as in `slug()`: the CLI owes an argparse usage error, not a
+    # traceback, and the tier check keeps a fleet step off a goal receipt where
+    # `steps_for()` would never look for it.
+    if a.branch not in BRANCHES:
+        ap.error(f"--branch must be one of {BRANCHES}, got {a.branch!r}")
+    if a.step and a.step not in steps_for(a.branch):
+        ap.error(f"--step {a.step!r} is not a {a.branch or 'goal/topic'} step")
     if a.check:
         return check(subject, a.branch) if subject else (
             ap.error("--check requires --topic or --subject") or 2)

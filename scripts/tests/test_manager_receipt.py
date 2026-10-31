@@ -646,6 +646,22 @@ class FleetTier(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.m.slug(FLEET_SUBJECT, "fleet/../../etc")
 
+    def test_an_unknown_branch_is_a_usage_error_not_a_traceback(self):
+        # The library guard alone would surface as an uncaught ValueError (exit 1 with a
+        # traceback); the CLI owes an argparse usage error.
+        with self.assertRaises(SystemExit) as caught:
+            self.cli("--check", "--subject", FLEET_SUBJECT, "--branch", "fleet/../../etc")
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_a_fleet_step_cannot_be_recorded_on_a_goal_receipt(self):
+        # `steps_for("")` never looks for `digest`, so recording one there would be a
+        # dead field the tail silently ignores.
+        self.cli("--start", "--topic", "Recurring Operator Gates")
+        with self.assertRaises(SystemExit) as caught:
+            self.cli("--record", "--topic", "Recurring Operator Gates",
+                     "--step", "digest", "--path", "/tmp/whatever")
+        self.assertEqual(caught.exception.code, 2)
+
     def test_topic_check_never_reports_fleet_steps(self):
         self.cli("--start", "--topic", "Recurring Operator Gates")
         rc, out = self.cli("--check", "--topic", "Recurring Operator Gates")
