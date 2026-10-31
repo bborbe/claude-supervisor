@@ -579,6 +579,30 @@ class Receipt(unittest.TestCase):
         self.assertEqual(limit, gap + 180)
         self.assertEqual(basis, f"period={gap}s(observed,1x+180)")
 
+    def test_printed_limit_never_understates_a_fractional_boundary(self):
+        """`observed_period()` interpolates a p90, so the limit is not always an integer.
+
+        Truncating it on the way out lets a round that lapsed by under a second print
+        `started 1400s ago, limit 1360s` — no: worse, `limit 1360s` against an enforced
+        1360.2 — a line whose two numbers read as *not* lapsed while the round was
+        refused. The invariant pinned here is one-directional: the printed limit is never
+        below the enforced one, so rounding up (which can overstate by <1 s) is correct
+        and truncating is not.
+        """
+        now = 1_700_000_000.0
+        # p90 of (1000, 1101, 1200) interpolates to 1180.2, so the limit is 1360.2.
+        self._history("recurring-operator-gates", now, [1000, 1101, 1200], cadence=300)
+        self.start()
+        self._set_started(now - 1400)
+
+        _, limit, _ = self.m.window(self.m.slug(self.topic), now)
+        self.assertNotEqual(limit, int(limit), "fixture must produce a fractional limit")
+
+        rc, out = self._check_at(now)
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        printed = int(out.split("limit ")[1].split("s")[0])
+        self.assertGreaterEqual(printed, limit)
+
 
 
 FLEET_SUBJECT = "Fleet Manager"

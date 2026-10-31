@@ -71,7 +71,7 @@ manager liveness had already called stale could still have its round's fields ju
 current. The receipt now imports the rule, so agreement holds by construction rather
 than by assertion.
 """
-import argparse, datetime, importlib.util, json, os, re, sys, time
+import argparse, datetime, importlib.util, json, math, os, re, sys, time
 
 STATE_DIR = os.path.expanduser(
     os.environ.get("MANAGER_RECEIPT_STATE_DIR", "~/.claude/state/manager-receipts")
@@ -509,7 +509,12 @@ def check(topic: str, branch: str = "", now: float = None) -> int:
     if (now - started) > limit:
         # The round's own window lapsed: every field is unjudgeable, so name the
         # window rather than each step — a stale receipt fails all of them at once.
-        print(f"skipped: receipt — round started {int(now - started)}s ago, limit {int(limit)}s {basis}")
+        # ⚠️ `math.ceil`, not `int`. `observed_period()` interpolates a p90, so the limit
+        # can be fractional; truncating it lets a round that lapsed by under a second
+        # print `started 1180s ago, limit 1180s` — a line that reads as NOT lapsed while
+        # the round was refused. Rounding up can overstate by <1 s, which is the safe
+        # direction: the printed limit is never below the enforced one.
+        print(f"skipped: receipt — round started {int(now - started)}s ago, limit {math.ceil(limit)}s {basis}")
         return EXIT_SKIPPED
 
     fields = d.get("fields") or {}
