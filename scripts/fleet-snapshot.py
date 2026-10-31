@@ -21,7 +21,14 @@ no scope to record and none to mismatch.
 """
 import sys, json, os, datetime
 
-PATH = os.path.expanduser("~/.claude/state/fleet-snapshot.json")
+# ⚠️ `FLEET_SNAPSHOT_PATH` overrides, matching the env knobs the rest of the store
+# family already honours (`ATTENTION_STATE_DIR` in `who-needs-me.py`, `declared-wait.py`,
+# `fleet-board.py`, `manager-predispatch.py`). Without it a replay cannot seed a prior
+# snapshot without writing the LIVE one, so the `stalled` rule — which needs
+# `stall_count >= 2` from a previous sweep — is unexercisable outside a real fleet.
+PATH = os.environ.get("FLEET_SNAPSHOT_PATH") or os.path.expanduser(
+    "~/.claude/state/fleet-snapshot.json"
+)
 
 
 def extract_sessions(payload):

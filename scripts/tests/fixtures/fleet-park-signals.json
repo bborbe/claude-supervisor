@@ -1,0 +1,76 @@
+{
+  "_note": "SYNTHETIC. The five signal SHAPES the fleet sweep must tell apart, and nothing else. Deliberately NOT the three 2026-10-02 rows that motivated this change: bborbe/claude-supervisor is a PUBLIC repo, and committing a real session would publish the operator's session ids, session names, watcher ids and pane narrative into permanent git history — the hazard scripts/tests/test_stuck.py's header already documents for its own fixtures, which is why they reproduce shapes too. The real rows are provenance in the private task file only. Every id, name, task title and detail line below is invented; the shapes are what is pinned.",
+  "_how": "Consumed by scripts/tests/fleet-park-replay.py, which materialises these rows into a temp attention store, registry and vault so the RELEASED fleet-sweep-reader can read them with its own tools. The reader must derive each row's class from the shapes; expected_class is the harness's check, never an input the reader is handed.",
+  "rows": [
+    {
+      "key": "parked-on-watcher",
+      "session_id": "11111111-1111-4111-8111-111111111111",
+      "name": "Parked On Watcher",
+      "status": "busy",
+      "task_file": "Synthetic Watcher Task.md",
+      "task_open_boxes": 3,
+      "task_mtime": "2026-10-08T09:00:00Z",
+      "stop_detail": "🟡 WAITING\n👤 You:    nothing\n⏰ Ends:   the watcher prints a suppression line (watch.sh, background Bash bodotrpiq)",
+      "gate": null,
+      "transcript_age_seconds": 4200,
+      "expected_class": "parked-on-watcher"
+    },
+    {
+      "key": "waiting-on-human",
+      "session_id": "22222222-2222-4222-8222-222222222222",
+      "name": "Waiting On Human",
+      "status": "busy",
+      "task_file": "Synthetic Gate Task.md",
+      "task_open_boxes": 2,
+      "task_mtime": "2026-10-08T09:00:00Z",
+      "stop_detail": "🔵 READY\n👤 You:    approve: make precommit",
+      "gate": {
+        "kind": "permission",
+        "state": "open",
+        "detail": "Bash(make precommit)"
+      },
+      "transcript_age_seconds": 4200,
+      "expected_class": "waiting-on-human"
+    },
+    {
+      "key": "progressing",
+      "session_id": "33333333-3333-4333-8333-333333333333",
+      "name": "Mid Tool Call",
+      "status": "busy",
+      "task_file": "Synthetic Benchmark Task.md",
+      "task_open_boxes": 4,
+      "task_mtime": "2026-10-08T09:00:00Z",
+      "stop_detail": "🟢 ACTIVE · 1 running (benchmark) · nothing needed\n👤 You:    nothing\n⏰ Next:   the benchmark reports a progress line",
+      "gate": null,
+      "transcript_age_seconds": 30,
+      "expected_class": "progressing"
+    },
+    {
+      "key": "parked-control",
+      "session_id": "44444444-4444-4444-8444-444444444444",
+      "name": "Parked Routine Continue",
+      "status": "idle",
+      "task_file": "Synthetic Continue Task.md",
+      "task_open_boxes": 5,
+      "task_mtime": "2026-10-08T09:00:00Z",
+      "stop_detail": "🔵 READY\n👤 You:    approve: proceed with recording the results",
+      "gate": null,
+      "transcript_age_seconds": 3600,
+      "phase": "execution",
+      "expected_class": "parked"
+    },
+    {
+      "key": "idle-at-prompt-control",
+      "session_id": "55555555-5555-4555-8555-555555555555",
+      "name": "Idle At Prompt",
+      "status": "busy",
+      "task_file": "Synthetic Stalled Task.md",
+      "task_open_boxes": 2,
+      "task_mtime": "2026-10-08T09:00:00Z",
+      "stop_detail": "👤 You:    nothing",
+      "gate": null,
+      "transcript_age_seconds": 4200,
+      "expected_class": "stalled"
+    }
+  ]
+}
