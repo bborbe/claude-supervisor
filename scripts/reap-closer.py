@@ -97,6 +97,39 @@ def tail_lines(path, max_bytes=MAX_SCAN):
             end = start
 
 
+def _partial_closer(raw):
+    """`(timestamp, line)` recovered from a partially-written assistant line, or `None`.
+
+    The harness streams a message to disk, so a `Stop` hook can read a line whose JSON is
+    not closed yet. `json.loads` rejects it, and the pre-fix scan then SKIPPED it and
+    returned an EARLIER message's closer — measured 2026-10-31, session `95e9b174`: a real
+    `gh pr merge` gate was recorded as `not-a-gate` 266 ms after the message was written.
+
+    The text is already on disk, so recover it rather than fall back to a stale message.
+    ⚠️ Only assistant lines qualify: a partial tool result quoting the same words must
+    never become a gate.
+    """
+    try:
+        text = raw.decode("utf-8", "replace")
+    except Exception:
+        return None
+    if '"type": "assistant"' not in text and '"type":"assistant"' not in text:
+        return None
+    idx = text.rfind("👤 You:")
+    if idx < 0:
+        return None
+    seg = text[idx:]
+    # The line's JSON is unclosed, so the closer ends at the first escaped newline
+    # (`\n` in the raw bytes) or at the string's closing quote, whichever comes first.
+    for stop in ("\\n", '"'):
+        cut = seg.find(stop)
+        if cut > 0:
+            seg = seg[:cut]
+            break
+    ts = re.search(r'"timestamp":\s*"([^"]+)"', text)
+    return (ts.group(1) if ts else "?"), seg.strip()
+
+
 def last_closer(path, max_bytes=MAX_SCAN):
     """`(timestamp, line)` for the transcript's last `👤 You:` line, or `None`.
 
@@ -107,6 +140,16 @@ def last_closer(path, max_bytes=MAX_SCAN):
         try:
             d = json.loads(raw)
         except ValueError:
+            # ⚠️ A partial final line is the turn's own message, not a line to skip past.
+            # Falling back to an older message here is the stale-closer defect: the hook
+            # then decides on a closer the operator never saw.
+            salvaged = _partial_closer(raw)
+            if salvaged is not None:
+                return salvaged
+            text = raw.decode("utf-8", "replace")
+            if '"type": "assistant"' in text or '"type":"assistant"' in text:
+                # An assistant message we cannot read is not a licence to use an older one.
+                return None
             continue
         if d.get("type") != "assistant":
             continue
