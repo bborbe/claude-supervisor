@@ -74,9 +74,8 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 16 | Open leg | every tick — after Readings | `${CLAUDE_PLUGIN_ROOT}/commands/steps/open.md` |
 | 17 | Voice + notification | every tick — run the `{"gates": []}` prune on every round, and publish only the gates the operator must decide (§ Gate triage classes C, D, E) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/voice-notify.md` |
 | 18 | Persist | the snapshot path is missing or the write failed — run: `python3 $P/fleet-snapshot.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
-| 19 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
-
-⚠️ **No manager-proposal row** — removed 2026-10-29 (operator ruling): the round does not propose managers.
+| 19 | Round tail | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/fleet-round-tail.md` |
+| 20 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
 
 ⚠️ **The table is evaluated more than once per round, and the later reads are the ones that get skipped.** Re-read it the moment the sweep hand-back exists, and again before the output shape renders, honouring each row whose `When` has newly become decidable **and that has not already run this round**. Never re-run a leg: **every `every tick` row is once-per-round**, and a second sweep or drive leg would duplicate sends to peers. The full rule and its measured case live in `steps/rules.md` § Re-read the router.
 

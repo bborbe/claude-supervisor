@@ -186,6 +186,7 @@ scripts/gate-owner-filter.py                     the ownership-scoped attention 
 scripts/session-scope.py                         that arm's durable ownership input — which goal a session belongs to, from the vault's page stamps (not a live store)
 commands/read-guides.md                          load every guide in docs/
 scripts/{jump,who-needs-me}.py                   their helpers
+scripts/declared-wait.py                         the shared `⏰ Ends:` reader — one home for the slot `fleet-board.py`, `manager-predispatch.py` and the fleet sweep all key on (the "fourth definition of idle" guard)
 agents/goal-wrangler.md                routine approval loop over headless workers
 agents/topic-sweep-reader.md            the TOPIC sweep's read half — goal rows and their managers (called by topic-loop/topic-status)
 agents/topic-drive.md                   the TOPIC sweep's act leg — keep-alive and the ranked start hand-over

@@ -22,6 +22,7 @@ import os
 import tempfile
 import time
 import unittest
+import unittest.mock as mock
 from contextlib import redirect_stdout
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -272,6 +273,99 @@ class Stale(Base):
             rc = self.m.cmd_stale()
         self.assertEqual(rc, 0)
         self.assertIn("OK", buf.getvalue())
+
+
+class RisingAge(Base):
+    """SC2b — a lapse that never recovers must not silence itself after one report.
+
+    Measured 2026-10-30: the ledger carried `SUPPRESSED … reason=already-reported` on
+    every 60-second tick while the age climbed 1,374 s → 23,064 s over 6h24m. The
+    digest was never written, and the one detector on that path had gone quiet.
+
+    The clock is faked so the age can rise without the test sleeping, and so the digest
+    file — and therefore its parsed epoch — stays byte-identical across the run. That is
+    the live shape: in a real lapse nothing rewrites the digest, only the clock moves.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.now = 1800000000.0
+        self._clock = mock.patch.object(self.m.time, "time", side_effect=lambda: self.now)
+        self._clock.start()
+
+    def tearDown(self):
+        self._clock.stop()
+        super().tearDown()
+
+    def test_a_rising_age_refires(self):
+        # LIMIT is 1080 s: 4325 s of age is the fourth lapse interval.
+        self.digest("a.digest", self.ago(4325))
+        self.tick(60)
+        rc, out = self.run_check()
+        self.assertEqual(rc, self.m.EXIT_STALE)
+        self.assertIn("STALE", out)
+
+        # Still the same interval: a flat age keeps the dedup's original job.
+        self.now += 60
+        self.tick(60)
+        rc, out = self.run_check()
+        self.assertEqual(rc, 0)
+        self.assertIn("SUPPRESSED", out)
+
+        # A further interval has elapsed and the digest is still missing: re-fire.
+        self.now += 3000
+        self.tick(60)
+        rc, out = self.run_check()
+        self.assertEqual(rc, self.m.EXIT_STALE)
+        self.assertIn("STALE", out)
+        self.assertNotIn("SUPPRESSED", out)
+
+    def test_a_zero_or_negative_limit_does_not_crash(self):
+        # The re-fire step divides by LIMIT, so a misconfigured 0 must not become a
+        # ZeroDivisionError where the old code merely reported stale, and a negative
+        # value must not pin every lapse at step 1.
+        self.assertEqual(load(self.digests, self.state, limit=0).LIMIT, 1)
+        self.assertEqual(load(self.digests, self.state, limit=-5).LIMIT, 1)
+
+    def test_a_recovery_then_a_higher_lapse_reports_again(self):
+        self.digest("a.digest", self.ago(4325))  # step 4
+        self.tick(60)
+        rc, out = self.run_check()
+        self.assertEqual(rc, self.m.EXIT_STALE)
+
+        self.digest("b.digest", self.ago(5))  # a healthy round clears the marker
+        self.tick(60)
+        rc, out = self.run_check()
+        self.assertEqual(rc, 0)
+        self.assertIn("RECOVERED", out)
+
+        # Drop the old round first: `newest_round()` orders by parsed timestamp, so a
+        # surviving 4325s-old `a.digest` would be selected over a 9000s-old `b.digest`
+        # and the "higher lapse on the new round" this test names would never run.
+        os.unlink(os.path.join(self.digests, "a.digest"))
+        self.digest("b.digest", self.ago(9000))  # step 8, a fresh lapse
+        self.tick(60)
+        rc, out = self.run_check()
+        self.assertEqual(rc, self.m.EXIT_STALE)
+
+    def test_the_refire_does_not_wait_for_a_new_digest(self):
+        # The whole point: the epoch never changes in a real lapse, so a re-fire keyed
+        # on it alone would stay silent forever.
+        self.digest("a.digest", self.ago(4325))
+        self.tick(60)
+        first_epoch, _, _, _ = self.m.newest_round()
+        rc, _ = self.run_check()
+        self.assertEqual(rc, self.m.EXIT_STALE)
+
+        self.now += 3000
+        self.tick(60)
+        rc, out = self.run_check()
+        # The assertion that makes this test non-vacuous: the epoch is unchanged, so
+        # only the rising step can produce a second STALE rather than SUPPRESSED.
+        self.assertEqual(rc, self.m.EXIT_STALE)
+        self.assertIn("STALE", out)
+        second_epoch, _, _, _ = self.m.newest_round()
+        self.assertEqual(first_epoch, second_epoch)
 
 
 if __name__ == "__main__":

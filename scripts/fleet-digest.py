@@ -36,9 +36,13 @@ Verbs, one file each, all under STATE_DIR:
               RECOVERED  digest=<ts> age=<s> limit=<s>
               UNOBSERVED gap=<s> — this watcher did not run across the gap; baseline reset
 
-            Exit 10 on the STALE **transition** only. The notified marker holds the
-            baseline it reported, so one lapse notifies once and the following healthy
-            round clears it (exit 0, RECOVERED). A second lapse reports again.
+            Exit 10 on each STALE report — once per lapse interval, not once per
+            transition. The notified marker holds the
+            baseline it reported and the lapse interval reached, so a FLAT age notifies
+            once and the following healthy round clears it (exit 0, RECOVERED). A
+            RISING age re-fires once per further LIMIT — a lapse that never recovers is
+            still a lapse, and silencing it after one report is how a 6h24m gap went
+            unreported. A second lapse after a recovery reports again.
             Exit 2 on any failure to read the digest directory — never 0, so a broken
             read can never read as "healthy".
 
@@ -86,7 +90,11 @@ DIGEST_DIR = os.path.expanduser(
 STATE_DIR = os.path.expanduser(
     os.environ.get("FLEET_DIGEST_STATE_DIR", "~/.claude/state/fleet-digest")
 )
-LIMIT = int(os.environ.get("FLEET_DIGEST_LIMIT", "1080"))
+# Floored at 1: the re-fire step below divides by it, so a misconfigured 0 would raise
+# `ZeroDivisionError` (exit 1, traceback) where the previous code merely reported stale —
+# turning a tuning knob into a crash. A negative value would otherwise pin every lapse at
+# step 1 and suppress the re-fire entirely.
+LIMIT = max(1, int(os.environ.get("FLEET_DIGEST_LIMIT", "1080")))
 TICK = int(os.environ.get("FLEET_DIGEST_TICK", "60"))
 
 HEARTBEAT = "heartbeat"
@@ -306,13 +314,22 @@ def cmd_check():
         # Dedup on the baseline EPOCH, not on a substring of the rendered detail. The
         # rendered line is for the ledger and may change shape; keying the "already
         # reported" decision on it would make a cosmetic edit silently re-notify.
-        if was and was.get("epoch") == epoch:
+        # ⚠️ The epoch alone is not enough, and deduping on it alone was the defect
+        # measured 2026-10-30: a lapse that never recovers keeps the SAME newest digest,
+        # so the epoch never moves and every later tick printed `SUPPRESSED` while the
+        # age climbed 1,374 s -> 23,064 s over 6h24m. The discriminator is therefore a
+        # RISING age, recorded as the lapse interval it has reached: a flat age stays
+        # quiet — the dedup's original job — and each further LIMIT of age re-fires once.
+        age = int(time.time() - epoch)
+        step = max(1, age // LIMIT)
+        if was and was.get("epoch") == epoch and was.get("step", 1) >= step:
             write_heartbeat(0)
             print("SUPPRESSED %s reason=already-reported" % detail)
             return 0
         write_notified({"epoch": epoch,
                         "digest": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)),
-                        "reported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+                        "reported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "step": step})
         write_heartbeat(EXIT_STALE)
         print("STALE %s" % detail)
         return EXIT_STALE
