@@ -354,10 +354,16 @@ class RisingAge(Base):
         self.digest("a.digest", self.ago(4325))
         self.tick(60)
         first_epoch, _, _, _ = self.m.newest_round()
-        self.run_check()
+        rc, _ = self.run_check()
+        self.assertEqual(rc, self.m.EXIT_STALE)
+
         self.now += 3000
         self.tick(60)
-        self.run_check()
+        rc, out = self.run_check()
+        # The assertion that makes this test non-vacuous: the epoch is unchanged, so
+        # only the rising step can produce a second STALE rather than SUPPRESSED.
+        self.assertEqual(rc, self.m.EXIT_STALE)
+        self.assertIn("STALE", out)
         second_epoch, _, _, _ = self.m.newest_round()
         self.assertEqual(first_epoch, second_epoch)
 

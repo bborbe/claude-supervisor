@@ -24,6 +24,10 @@ It prints `skipped: <step> — <why>` for every field that does not resolve to a
 
 ⚠️ **The fleet tier owes two steps, not the goal tier's four:** `re-arm` (an arm epoch **inside** the round window, read from the `.arms` ring — the file's existence proves nothing, since a ring survives from earlier rounds and `manager-liveness.py:345` empties it at the first arm after a stand-down) and `digest` (the sweep reader's rendered payload, identified by its own `DIGEST … sessions … snapshot written:` opening line). A missing digest is reported as `skipped: digest`, never folded into `skipped: sweep`.
 
+⚠️ **Surface every `skipped:` line in this tick's render, and re-arm regardless of the verdict.** An exit code nobody reads is the failure this check exists to end: a round that printed `skipped: digest` into a Bash result and then rendered a complete-looking table has replaced one silence with another. The tail runs **before** the output-shape row for exactly that reason — a skip discovered after the render cannot reach the block the operator reads.
+
+⚠️ **Re-arm regardless.** The verdict is a report, not a brake: a round that skips a step still arms the next one, so the fleet is not left unwatched by the very check that found the gap.
+
 ⚠️ **Run it at the tail, against the round that just ran.** The check reads the receipt `--start` opened this round, so running it before the round's own steps have run reports the round as empty — correctly, and unhelpfully.
 
 ⚠️ **This catches a round that ran and skipped a step. It cannot catch a round that never ran at all** — a hand-assembled substitute never reads this router table, so no tail row fires. That shape is `scripts/fleet-digest.py --check`'s job: it ages the newest digest independently of any round, and re-fires while the age keeps rising (`scripts/fleet-digest.py` § `--check`). Neither check substitutes for the other.

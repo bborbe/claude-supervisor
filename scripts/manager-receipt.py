@@ -91,9 +91,19 @@ STEPS = ("needs-you", "sweep", "watcher", "readings")
 FLEET_STEPS = ("re-arm", "digest")
 ALL_STEPS = STEPS + FLEET_STEPS
 
-# The branches this receipt knows. `manager-liveness.py:110-112` validates the same set
-# before building its slug, and this module claims parity with it — so it validates too.
-# `""` is the goal/topic tier, which carries no prefix.
+# The branches this receipt knows: `""` (the goal/topic tier, which carries no prefix) and
+# `fleet`. `manager-liveness.py:110-112` validates its own set before building the same
+# slug, and this module mirrors the validation so an unknown branch cannot interpolate into
+# the state path.
+#
+# ⚠️ The two sets are deliberately NOT identical, and the asymmetry has a consequence worth
+# stating rather than discovering: a goal or topic round passes no branch here, so
+# `window()` and `observed_interval()` read `<base>.cadence` / `<base>.arms`, while
+# `manager-liveness.py` writes `goal--<base>` / `topic--<base>`. The observed-median basis
+# therefore never engages for those tiers and the reported 900 s interval is always used —
+# so the "the two checks agree" claim in this module's docstring holds for the fleet tier
+# only. Pre-existing, not introduced by the fleet tier; the remedy is for the goal/topic
+# call sites to pass their branch.
 BRANCHES = ("", "fleet")
 
 

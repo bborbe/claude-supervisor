@@ -32,7 +32,7 @@ When: every tick — arm `ScheduleWakeup` FIRST, before the read half
 
   ```bash
   python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --record --subject "Fleet Manager" --branch fleet \
-    --step re-arm --path "$HOME/.claude/state/sweep-gate/fleet--fleet-manager.arms"
+    --step re-arm --path "${MANAGER_LIVENESS_STATE_DIR:-$HOME/.claude/state/sweep-gate}/fleet--fleet-manager.arms"
   ```
 
   ⚠️ **`--branch fleet` is what makes the receipt read the same `fleet--fleet-manager` files this step just wrote** — without it the check looks for a bare `fleet-manager` slug nothing ever writes, and reports `skipped: re-arm` on a round that armed perfectly. ⚠️ **Recording a ring path after a refused arm is safe**: `rearm_shape` validates an epoch *inside* the window, so a skipped arm still reports `skipped: re-arm` at the tail rather than passing on the file's existence.
