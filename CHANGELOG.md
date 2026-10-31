@@ -269,6 +269,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## v0.202.0
 
+- docs(worker-drive): resolve the `attention-ask.py` path in the §7 denial-card step and the §8 poll step. The skill instructed a bare `attention-ask.py`, which does not exist — the script ships in this plugin's `scripts/`, the same location the file already resolves for `answered-watch.py`. Measured 2026-10-22: the bare form failed with `can't open file '/Users/bborbe/.claude/scripts/attention-ask.py': [Errno 2] No such file or directory` and the card had to be re-posted.
 - feat: **Incident ledger — a blocker closes only on a verified resume.** `scripts/incident-ledger.py` records every worker blocker (permission prompt, question, stall) with owner, opened-at, deadline and outcome, and closes it only on the worker's next tool call or task change after the answer — never on a card close, which the attention store records as CLEARED rather than answered. `share --days <n>` prints the manager-resolved share, with an answered-but-never-resumed incident counted in the denominator only. `escalate` posts a board card for an incident past its deadline and stamps its caller (`round:<id>` from the periodic round, `manual:<session>` from a hand-run), so "escalated automatically" is an observation rather than an assertion.
 
 ## v0.201.0
