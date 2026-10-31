@@ -166,6 +166,33 @@ def materialise(root):
         os.utime(os.path.join(root, "vault", "25 Tasks", row["task_file"]),
                  (stamp, stamp))
 
+    # The prior snapshot, so `stall_count` has a history to advance from. ⚠️ **Without this
+    # the `stalled` rule is unreachable:** it keys on `stall_count >= 2` after this sweep's
+    # update, a first-seen session starts at 0, and the control row falls to
+    # `no prior snapshot … unclassified` — the harness would grade a row it never gave the
+    # reader enough state to classify.
+    #
+    # ⚠️ Seeded through `FLEET_SNAPSHOT_PATH` (exported by `reader_inputs`), never the live
+    # `~/.claude/state/fleet-snapshot.json`: writing that path would advance the operator's
+    # real fleet snapshot from a replay.
+    prior = {}
+    for row in rows:
+        prior[row["session_id"]] = {
+            "name": row["name"],
+            "status": row["status"],
+            "task_file": os.path.join(root, "vault", "25 Tasks", row["task_file"]),
+            "task_mtime": row["task_mtime"],
+            # One sweep of history for the row the fixture expects to read `stalled`, so
+            # this sweep's update takes it to 2. Every other row starts at 0.
+            "stall_count": 1 if row["expected_class"] == "stalled" else 0,
+        }
+    with open(os.path.join(root, "fleet-snapshot.json"), "w", encoding="utf-8") as fh:
+        json.dump(
+            {"swept_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 900)),
+             "sessions": prior},
+            fh,
+        )
+
     return {row["key"]: row["session_id"] for row in rows}
 
 
@@ -190,9 +217,21 @@ def reader_inputs(root, sids):
     for row in rows:
         lines.append("  ⚙ %s  ·  interactive  ·  %s"
                      % (row["name"], row["status"]))
-    lines += ["", "Synthetic session ids (read the digest back against these):"]
+    lines += [
+        "",
+        "⚠️ ROSTER JOIN (SUPPLIED) — resolve each roster row by NAME to the id below,",
+        "  instead of calling `session-liveness.py --list --json`.",
+        "  ⚠️ **This is the second supplied half, beside the feed.** That join reads the",
+        "  session-heartbeat endpoint AND the live identity registry for names, and the",
+        "  reader invokes it with no `--dir` — so the registry cannot be isolated from",
+        "  outside this harness, and every synthetic row would resolve `[unresolved]` and",
+        "  render no CLASSIFICATION row at all. Supplying the mapping exercises the",
+        "  CLASSIFICATION rules (this harness's subject) while leaving the join itself",
+        "  untested; that residual is stated here rather than papered over.",
+        "",
+    ]
     for row in rows:
-        lines.append("  %-24s %s" % (row["key"], sids[row["key"]]))
+        lines.append("  %-24s %s  (%s)" % (row["name"], sids[row["key"]], row["key"]))
     lines += ["", "Isolated roots — export these before dispatching the reader:"]
     for var, sub in ROOTS:
         lines.append("  export %s=%s" % (var, os.path.join(root, sub)))
@@ -212,6 +251,10 @@ def reader_inputs(root, sids):
         "  # the name leg and can render rows unowned while still looking isolated.",
         "  export OBSIDIAN_DIR=%s" % root,
         "  export SUPERVISOR_PROJECTS_DIR=%s" % os.path.join(root, "projects"),
+        "  # ⚠️ The seeded prior snapshot, so `stall_count` advances. Without this export",
+        "  # `fleet-snapshot.py` reads the LIVE ~/.claude/state/fleet-snapshot.json and the",
+        "  # `stalled` control row is first-seen (count 0) — it would render `unclassified`.",
+        "  export FLEET_SNAPSHOT_PATH=%s" % os.path.join(root, "fleet-snapshot.json"),
         "",
         "⚠️ BOUNDARY — the FEED half is SUPPLIED, not read.",
         "  `who-needs-me.py` refuses outright when the WezTerm pane list is unreadable",
@@ -239,7 +282,19 @@ def reader_inputs(root, sids):
     for row in rows:
         lines.append("  %s · pane — · %s"
                      % (row["name"], row["stop_detail"].replace("\n", " | ")[:90]))
-    lines += ["", "Expected class per row (the CHECK, never an input to the reader):"]
+    return "\n".join(lines)
+
+
+def expected_classes():
+    """The CHECK — printed separately so it never rides in the block the reader receives.
+
+    ⚠️ `reader_inputs` is documented as the block a caller hands the released reader
+    verbatim. Appending the answers to that string handed the agent under test its own
+    expected classes, which defeats the harness's stated purpose ("a harness that printed
+    the expected classes and called it a pass would be the stub SC3's falsifier names").
+    """
+    rows = load_fixture()["rows"]
+    lines = ["Expected class per row (the CHECK — never an input to the reader):"]
     for row in rows:
         lines.append("  %-24s %s" % (row["key"], row["expected_class"]))
     return "\n".join(lines)
@@ -247,9 +302,10 @@ def reader_inputs(root, sids):
 
 # The `CLASSIFICATION` row shape the reader is required to emit
 # (`agents/fleet-sweep-reader.md` § output_format):
-#   <name> [<session id 8>] · <status> · <class> · <task file | —> · <boxes | —> · <link | —>
-# The class is therefore the SECOND `·`-delimited field after the id — which is why the
-# check reads that field instead of testing whether the class name occurs in the line.
+#   <name> [<session id 8>] · <status> · <age> · <class> · <task file | —> · <boxes | —> · <link | —>
+# ⚠️ The `<age>` column sits between `<status>` and `<class>`, so after the regex consumes
+# `[sid] ·` the class is the THIRD field (`fields[2]`), not the second. Reading `fields[1]`
+# grades every row against its age and reports MISMATCH for a correct reader.
 _ROW_RE = re.compile(r"^\s+\S.*?\[(?P<sid>[0-9a-f]{8})\]\s*·(?P<rest>.*)$")
 
 
@@ -276,8 +332,8 @@ def _rendered_class(lines, sid8):
         if not m or m.group("sid") != sid8:
             continue
         fields = m.group("rest").split("·")
-        if len(fields) >= 2:
-            return _norm_class(fields[1])
+        if len(fields) >= 3:
+            return _norm_class(fields[2])
     return None
 
 
@@ -359,6 +415,11 @@ def main(argv):
     sids = materialise(root)
     try:
         print(reader_inputs(root, sids))
+        print()
+        print("=" * 72)
+        print("KEEP THIS SECTION OUT OF THE READER'S INPUT — it is the answer key.")
+        print("=" * 72)
+        print(expected_classes())
         print(f"\nmaterialised at: {root}")
         if not a.keep and not a.root:
             print("(removed on exit — pass --keep to inspect the tree)")

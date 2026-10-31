@@ -105,9 +105,9 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
    | session carries an **open permission / AskUserQuestion gate** | **waiting-on-human** — render `⌛ waiting-on-human`; never `stalled` |
    | `idle` **and** all boxes `[x]` / task complete | **finished — reap candidate** |
    | `idle`, `in_progress`, future `defer_date` | **deferred** |
-   | transcript tail ends on an operator-facing `👤 You:` closer with no user/tool turn after it | parked — **whatever the status says, including `shell`** |
    | session's **transcript was written inside `LIVE_WINDOW`** (5 min) | progressing — in flight, never `stalled` |
    | session's newest `Stop` record carries a non-empty **`⏰ Ends:`** slot | **parked-on-watcher** — render `⌛ parked-on-watcher`; never `stalled`, never nudged |
+   | transcript tail ends on an operator-facing `👤 You:` closer with no user/tool turn after it | parked — **whatever the status says, including `shell`** — ⚠️ **and this row MUST sit BELOW the `⏰ Ends:` row above**, because its canonical predicate `scripts/who-needs-my-help.py::parked()` returns True for a `👤 You: nothing` closer whose `⏰` line names a machine (`machine_wait()`): placed above, it claims exactly the session this change exists to stop nudging, the row renders `parked`, and `agents/fleet-drive.md` step 1 nudges a worker that is correctly waiting |
    | `busy`/`shell` **and** task mtime unchanged for ≥2 consecutive sweeps (`stall_count >= 2` after this sweep's update) | **stalled** |
    | `idle` **and** task file has open `[ ]`/`[/]` boxes | parked |
    | task `in_progress` + `claude_session_id` + not `parked` / `parked-on-watcher` / `waiting-on-human` + transcript `LAST-ACTIVE` ≥4h + absent from `ListAgents` + task mtime ≤7d | **orphan** candidate |
@@ -179,7 +179,7 @@ NOTES   runbook/command disagreements, unreadable inputs
 
 ```text
 sessions=<N> · snapshot=written|skipped|UNKNOWN · payload=<path>
-progressing=<n> · stalled=<n> · parked=<n> · held=<n> · stood-down=<n> · lapsed=<n> · finished=<n> · unclassified=<n>
+progressing=<n> · stalled=<n> · parked=<n> · parked-on-watcher=<n> · waiting-on-human=<n> · held=<n> · stood-down=<n> · lapsed=<n> · finished=<n> · unclassified=<n>
 blocked=<n> · closers=<n> · orphan=<n> · reap=<n> · collision=<n> · unmanaged=<n> · context70=<n> · ledger=<n>
 ```
 
