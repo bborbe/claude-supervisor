@@ -77,15 +77,18 @@ is a real case rather than a bug, and it is refused rather than posted: an item
 with no producer can never be polled back by anyone, so it would be a question
 asked into a void.
 
-`--closer` is the one declaration that is OPTIONAL. It names the `👤 You:` line
+`--closer` is the one declaration that is OPTIONAL at the CLI — but REQUIRED
+whenever the closer repeats the card's ask, which is the common case for a
+manager relaying a worker's gate. It names the `👤 You:` line
 this card answers, and it exists because a session that posts a card and then
 ends its turn with the same ask on that line put ONE ask on the board twice: the
 deliberate card declares a `dedup_key` slug while the hook's echo derives
 sha256(sid:kind:detail), and those two keys can never collide. Passing it writes
 <sid>.posted.json, which the hook's `Stop` branch and the feed's `reclassify_idle`
 both read to decline the echo. Omitted, nothing is recorded and the echo is
-raised exactly as before — the mechanism is opt-in, so the board stays dirty
-until a poster passes it.
+raised exactly as before — so omitting it is correct only when the closer asks
+something *else*. A closer that repeats the card's ask must pass it, or the
+board carries one question twice.
 
 Run: python3 attention-ask.py post --dedup-key KEY --payload "..." [--option L]... [--closer "..."]
      python3 attention-ask.py post-batch --dedup-key KEY --task "..." [--task "..."]...
@@ -293,12 +296,27 @@ def is_store_item_id(candidate):
     return len(candidate) == STORE_ITEM_ID_LEN and all(c in _HEX_DIGITS for c in candidate)
 
 
-# The answer mechanisms this script posts. It asks questions, so `message` is
-# the only one it offers: a `permission` item is approve-shaped and only the
-# operator may answer it, in the session that raised it, and an `ack` item asks
-# nothing. Offering either here would let a manager post a gate it cannot
-# legally answer.
+# The answer mechanism this script posts by default. It asks questions, so
+# `message` is the default.
 MECHANISM = "message"
+
+# The mechanisms a caller may select with `--mechanism`.
+#
+# ⚠️ **`permission` is deliberately absent, and the omission is the rule rather
+# than an unfinished enum.** A `permission` item is approve-shaped: its verdict
+# is `decision`, it carries no options, and the release path reads `resolved_by`
+# — a field only an ARM writes, never the board (`attention-answer.py` records
+# why, and `attention-store-impl.go` permits the arm's second write for exactly
+# this class). A poster that minted one here would be creating a gate whose
+# Allow/Deny the operator can click and which releases nothing, which is the
+# defect this script must not be able to express.
+#
+# `ack` IS offered because it is the honest shape for a card that reports a
+# condition and asks nothing: it renders no input field and no Allow/Deny, so it
+# cannot offer an action it does not have. The re-registered-park arm uses it for
+# a session parked on a native permission modal — the modal is answerable only in
+# that session's pane, so a card there must say so and offer no field.
+POSTABLE_MECHANISMS = (MECHANISM, "ack")
 
 
 # The producer kinds the store accepts. It validates this field against a closed
@@ -307,7 +325,7 @@ MECHANISM = "message"
 # is — the failure reads as a store fault rather than a bad argument. Pinning the
 # enum here lets argparse reject it before the request is sent, and list the
 # accepted values in `--help`.
-PRODUCER_KINDS = ("session", "agent", "cron", "dark-factory")
+PRODUCER_KINDS = ("session", "manager", "agent", "cron", "dark-factory")
 # The three levels the store's schema declares for `risk`. It is a producer
 # declaration, stored unchanged; the board may render HIGHER than it and never
 # lower, so a poster that under-declares still cannot make a destructive card
@@ -534,6 +552,7 @@ def post_question(
     context,
     options,
     expires_at,
+    mechanism=MECHANISM,
 ):
     body = {
         "producer_id": producer_id,
@@ -542,7 +561,7 @@ def post_question(
         "dedup_key": dedup_key,
         "interrupt_class": interrupt_class,
         "payload": payload,
-        "answer_mechanism": MECHANISM,
+        "answer_mechanism": mechanism,
     }
     # Omitted rather than sent empty. The schema treats an absent `context` and
     # an absent `expires_at` as pre-change/optional values, while "" would be a
@@ -790,7 +809,8 @@ def _report_transport_failure(reason, item_may_exist, out):
     return 1
 
 
-def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
+def _post_and_report(args, producer_id, liveness_ref, payload, options, out,
+                     mechanism=MECHANISM):
     """POST one item and print its id and poll line. Returns the exit code."""
     # ⚠️ Resolved BEFORE the store call, and reported HERE rather than raised out
     # of the helper, so a bad `$ATTENTION_ASK_TTL_HOURS` follows the file's own
@@ -816,6 +836,7 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
             context=args.context,
             options=options,
             expires_at=expires_at,
+            mechanism=mechanism,
         )
     except urllib.error.HTTPError as err:
         detail = err.read().decode(errors="replace")
@@ -842,9 +863,49 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
     return 0
 
 
+def _mechanism_or_default(args):
+    """`args.mechanism`, the default when the caller supplied none, else a refusal.
+
+    ⚠️ Not a bare `getattr(args, "mechanism", MECHANISM)`. `getattr` only falls
+    back when the ATTRIBUTE is absent, and callers that build their args from a
+    mock or a hand-made namespace carry one that is not a legal mechanism — which
+    is how a test fixture's placeholder reached the request body and made the
+    store's own field unserialisable. A placeholder is silently defaulted.
+
+    ⚠️ **A real string outside the set is REFUSED, not defaulted.** argparse
+    already rejects every bad typed value, so reaching here with one means a
+    programmatic caller — and silently downgrading `"ack "` or `"ACK"` to
+    `message` would post exactly the misleading question card this change
+    exists to remove, with no error anywhere. A value that is not a string at
+    all is a placeholder and takes the default.
+    """
+    mechanism = getattr(args, "mechanism", MECHANISM)
+    if mechanism in POSTABLE_MECHANISMS:
+        return mechanism, None
+    if isinstance(mechanism, str) and mechanism.strip():
+        return None, (
+            f"--mechanism {mechanism!r} is not one of "
+            f"{', '.join(POSTABLE_MECHANISMS)}")
+    return MECHANISM, None
+
+
 def cmd_post(args, out=sys.stdout):
     producer = _producer_or_refuse(args, out)
     if producer is None:
+        return 2
+    mechanism, refusal = _mechanism_or_default(args)
+    if refusal:
+        print(f"REFUSED: {refusal}", file=out)
+        return 2
+    if mechanism == "ack" and (args.option or args.recommend):
+        # The store rejects `options` on an `ack` item (the schema gives the
+        # mechanism no choices), so the refusal has to land here where it reads
+        # as a bad argument rather than a store fault.
+        print(
+            "REFUSED: --mechanism ack asks nothing, so --option and --recommend "
+            "are not allowed — post the card with no choices, or drop the "
+            "--mechanism flag to ask a message question.",
+            file=out)
         return 2
     try:
         options = build_options(args.option, args.recommend)
@@ -866,7 +927,8 @@ def cmd_post(args, out=sys.stdout):
             "--force if the card is deliberate.",
             file=out)
         return 2
-    return _post_and_report(args, *producer, args.payload, options, out)
+    return _post_and_report(args, *producer, args.payload, options, out,
+                            mechanism=mechanism)
 
 
 def cmd_post_batch(args, out=sys.stdout):
@@ -934,19 +996,45 @@ def cmd_poll(item_id, out=sys.stdout):
     verdict, reason = attribution.classify(item)
     described = describe_answer(item)
     # `OPEN` is the one terminal that means "still unanswered", and it is
-    # reached only when the record carries neither an answer nor an act. An
-    # item that moved but whose mover cannot be attributed falls through to
-    # NOT_OPERATOR_ANSWERED rather than being read as open — failing closed in
-    # that direction is what keeps a re-ask from looking like a lost gate.
+    # reached only when the record is still open AND carries neither an answer
+    # nor an act. An item that moved but whose mover cannot be attributed falls
+    # through to NOT_OPERATOR_ANSWERED rather than being read as open — failing
+    # closed in that direction is what keeps a re-ask from looking like a lost
+    # gate.
     #
-    # ⚠️ **This branch is deliberately NOT keyed on `state`, and 2026-09-27 is
-    # why it was checked.** A `closed` item that carries an actor still classifies
-    # as an act and falls through to NOT_OPERATOR_ANSWERED — the item moved, and
-    # saying "open" would invite a manager to keep waiting on a card that is
-    # gone. Only a record with no actor at all — the reaped close — reaches OPEN
-    # here, which is what makes a reap and an acknowledgement distinguishable in
-    # the terminal rather than collapsed into one word.
-    if verdict == attribution.NOTHING and described is None:
+    # ⚠️ **This branch IS keyed on `state`, and the 2026-09-27 note it replaces
+    # is why.** That note argued the opposite: a record with no actor at all —
+    # the reaped close — should reach OPEN, so a reap and an acknowledgement
+    # stay distinguishable in the terminal. The reasoning holds; the terminal it
+    # picked does not. A reap is not the only record with no actor. Every one of
+    # these posts an empty body and lands here with no `answered_by`:
+    # `sweep_dead_sessions` (attention-watcher.py:668), the compact-crossing
+    # clear (:1327), a forwarded `SessionEnd` (:2991), and
+    # `close_session_approval` (:1213) — and the last is not a producer exit at
+    # all. So "no actor" cannot stand in for "open", and printing OPEN for it
+    # made a reaped close read exactly like a live gate: measured 2026-10-27,
+    # `poll` and `answer` disagreed about one card seconds apart because of it.
+    #
+    # The separation the old note protected survives, but on a different field,
+    # and saying so plainly is the point of this paragraph. A reaped close now
+    # falls through to NOT_OPERATOR_ANSWERED — and so does an acknowledgement,
+    # the actor-carrying close (`state: closed` + `answered_by`, no
+    # `answered_at`), which `answered-attribution.py` deliberately does not
+    # treat as a release (pinned by
+    # `test_ack_close_with_no_client_is_not_operator_answered`). The two stay
+    # distinguishable by `ANSWERED_BY:` — an acknowledgement carries an actor
+    # and a reap carries none — not by the terminal word. What the old branch
+    # actually bought was a word that also meant "a live gate is waiting", and
+    # that overload is what this change gives up. `state` is the only field that
+    # can carry the open/not-open distinction: the store refuses an arm-caused
+    # close of an open `permission` gate (attention-store-impl.go:1498-1506),
+    # so the reaped record has no `answered_by` to read. A record whose `state`
+    # is unreadable is not claimed as open either; failing closed is the point.
+    if (
+        verdict == attribution.NOTHING
+        and described is None
+        and item.get("state") == "open"
+    ):
         print("OPEN", file=out)
         return 0
     answered_by = item.get("answered_by") or ""
@@ -998,6 +1086,16 @@ def main(argv=None):
     post.add_argument("--dedup-key", required=True)
     post.add_argument("--payload", required=True)
     post.add_argument("--context", default="")
+    post.add_argument(
+        "--mechanism",
+        default=MECHANISM,
+        choices=POSTABLE_MECHANISMS,
+        help="how this item is answered; default message. `ack` reports a "
+             "condition and asks nothing (no input field, no options). "
+             "`permission` is not offered: a permission gate is released only "
+             "by an arm answer carrying resolved_by, which the board never "
+             "sends, so a card minted here could not release one.",
+    )
     post.add_argument("--option", action="append", default=[])
     post.add_argument("--recommend", default="")
     post.add_argument(

@@ -1,0 +1,38 @@
+---
+# Read by the router, never invoked — without this key Claude Code
+# registers this file as /<plugin>:steps:<name>.
+user-invocable: false
+---
+
+# Fleet round tail
+
+When: every tick
+
+## The round's receipt — the mechanical check that the steps ran
+
+`commands/fleet-drive.md` is a router map: it names the steps and the condition under which each is read, and nothing verifies that any of them ran. A round can therefore arm its wakeup, take the readings and render exactly like a full one, while the digest was never written and nothing on the round's own tail said so.
+
+Measured 2026-10-30: the fleet round ran `manager-liveness.py --arm` twelve times across a window in which **no digest was written for 6h38m**, and no line of that round's output distinguished it from a complete one.
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --check --subject "Fleet Manager" --branch fleet
+```
+
+It prints `skipped: <step> — <why>` for every field that does not resolve to an artifact produced **this round**, and exits **11**; a full round prints nothing and exits **0**.
+
+⚠️ **`--branch fleet` is load-bearing, not decoration.** The fleet round writes its liveness under `fleet--fleet-manager` (the slug `manager-liveness.py` builds from `--branch fleet`); a receipt keyed on the bare `fleet-manager` reads a file the arm step never wrote, so every round would report `skipped: re-arm` whether or not it armed. The same flag is what makes `--start` / `--record` write the receipt this check reads — a round that records under one slug and checks under another reports `skipped: receipt`.
+
+⚠️ **The fleet tier owes two steps, not the goal tier's four:** `re-arm` (an arm epoch **inside** the round window, read from the `.arms` ring — the file's existence proves nothing, since a ring survives from earlier rounds and `manager-liveness.py:345` empties it at the first arm after a stand-down) and `digest` (the sweep reader's rendered payload, identified by its own `DIGEST … sessions … snapshot written:` opening line). A missing digest is reported as `skipped: digest`, never folded into `skipped: sweep`.
+
+⚠️ **Surface every `skipped:` line in this tick's render, and re-arm regardless of the verdict.** An exit code nobody reads is the failure this check exists to end: a round that printed `skipped: digest` into a Bash result and then rendered a complete-looking table has replaced one silence with another. The tail runs **before** the output-shape row for exactly that reason — a skip discovered after the render cannot reach the block the operator reads.
+
+⚠️ **Re-arm regardless.** The verdict is a report, not a brake: a round that skips a step still arms the next one, so the fleet is not left unwatched by the very check that found the gap.
+
+⚠️ **Run it at the tail, against the round that just ran.** The check reads the receipt `--start` opened this round, so running it before the round's own steps have run reports the round as empty — correctly, and unhelpfully.
+
+⚠️ **What this check catches, stated exactly — because a check that over-claims is worse than one that says where it stops.**
+
+- **Catches: a round that opened its receipt and skipped a step.** The arm missing → `skipped: re-arm`; the digest missing → `skipped: digest`. That is the measured 2026-10-30 shape and the reason this row exists.
+- **Catches: a round whose receipt is older than its own window** — reported as `skipped: receipt`, because `--check` refuses a round that started more than `2 × period + 60 s` ago.
+- **Does NOT catch: a round that skipped `--start` itself.** The previous round's `round_started_at` and `fields` survive, the new arm and digest are recorded into that stale receipt, and both predicates resolve against the *previous* window — so one such round can read green. It is bounded: the stale window lapses within `2 × period + 60 s` (≈31 min at a 15-minute cadence), so at most one round is masked before `skipped: receipt` starts firing. Closing it needs a witness outside the receipt — a per-round id compared against the `.arms` ring — and a wrong guess there produces a false red on a healthy round, which is the failure this whole check exists to prevent. Named here rather than fixed blind.
+- **Does NOT catch: a round that never ran at all** — a hand-assembled substitute never reads this router table, so no tail row fires. That shape is `scripts/fleet-digest.py --check`'s job: it ages the newest digest independently of any round, and re-fires while the age keeps rising (`scripts/fleet-digest.py` § `--check`). Neither check substitutes for the other.

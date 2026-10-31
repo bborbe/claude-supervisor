@@ -11,7 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { armDelivery, decisionOf, producingAgent, selectParked, startAttentionPoll, storeDecisionRecord, STORE_DECIDER } from './attention-poll.mjs'
+import { armDelivery, decisionOf, producingAgent, selectParked, startAttentionPoll, storeDecisionRecord, STORE_DECIDER, timeoutDecisionRecord, TIMEOUT_DECIDER } from './attention-poll.mjs'
 
 // An optional third element sets the agent's `mode`, which `armDelivery` reads. It is
 // omitted by default so the many specs that predate the field keep the mode-less shape a
@@ -565,6 +565,60 @@ test('the manager-settled path keeps its own decider, distinct from the store ar
     'the store value must be written at the poll site only, never by a second site',
   )
   assert.notEqual(STORE_DECIDER, 'manager')
+})
+
+// --- the timeout record ----------------------------------------------------------------
+//
+// SC5(a) reads `decided_by: 'timeout'` rows out of `permissions.jsonl`, and until this
+// existed the settle path wrote none — so the log's `manager deny` rows could not proxy a
+// timeout and the criterion had no observable at all. The builder is tested behaviourally;
+// the CALL SITE is pinned by source text, because `supervisor.mjs` cannot be imported
+// (importing it starts the MCP server).
+
+test('a timeout record is one deny row, distinguishable from a manager deny', () => {
+  const now = new Date('2026-10-23T12:00:00.000Z')
+  const row = timeoutDecisionRecord({
+    requestId: 'perm_7',
+    agentId: 'agent_3',
+    park: { toolName: 'Bash', input: { command: 'git push' }, requestedAt: '2026-10-23T11:45:00.000Z' },
+    now,
+  })
+  assert.equal(row.decision, 'deny')
+  assert.equal(row.decided_by, 'timeout')
+  assert.equal(row.request_id, 'perm_7')
+  assert.equal(row.agent, 'agent_3')
+  assert.equal(row.tool, 'Bash')
+  assert.equal(row.latency_ms, 15 * 60 * 1000)
+  assert.notEqual(TIMEOUT_DECIDER, STORE_DECIDER)
+  assert.notEqual(TIMEOUT_DECIDER, 'manager')
+})
+
+test('the timeout record carries the same keys as the store record — one comparable log', () => {
+  const park = { toolName: 'Bash', input: { command: 'ls' }, requestedAt: '2026-10-23T11:59:00.000Z' }
+  const now = new Date('2026-10-23T12:00:00.000Z')
+  const timeout = timeoutDecisionRecord({ requestId: 'perm_7', agentId: 'agent_3', park, now })
+  const store = storeDecisionRecord({ requestId: 'perm_7', agentId: 'agent_3', decision: 'allow', park, now })
+  assert.deepEqual(Object.keys(timeout).sort(), Object.keys(store).sort())
+  assert.equal(timeout.key, store.key)
+})
+
+test('the timeout record is written at the settle path, and only there', () => {
+  const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  const sites = src.match(/logPermission\(timeoutDecisionRecord\(/g) ?? []
+  assert.equal(sites.length, 1, 'exactly one site — a second would double-count the 7-day window')
+  const at = src.indexOf('logPermission(timeoutDecisionRecord(')
+  const around = src.slice(Math.max(0, at - 700), at + 300)
+  assert.match(around, /PERMISSION_TIMEOUT_MS/, 'the call must sit inside the timeout timer')
+  assert.match(around, /timed out -> deny/)
+  assert.match(around, /Supervisor did not answer within 15 minutes\./)
+
+  // ⚠️ ORDER, not just presence. The claim this record exists for is that the row is written
+  // BEFORE the park is settled, so it survives a settle that throws — and every assertion
+  // above is order-insensitive, so a reorder would keep them all green while breaking it.
+  const logAt = src.indexOf('logPermission(timeoutDecisionRecord(')
+  const settleAt = src.indexOf("settle({ behavior: 'deny', message: 'Supervisor did not answer within 15 minutes.' })")
+  assert.ok(settleAt > 0, 'the timeout settle call must be found')
+  assert.ok(logAt < settleAt, 'the record must be written before the settle, never after it')
 })
 
 // --- the idle cadence ------------------------------------------------------------------

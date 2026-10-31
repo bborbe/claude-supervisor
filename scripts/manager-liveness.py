@@ -8,7 +8,7 @@ mtime) tells a lapsed manager from a healthy one between ticks, so the manager l
 evidence on disk itself. This script writes that evidence and checks it.
 
 Four verbs, one file each, all in the sweep-gate state dir. **`<slug>` carries the
-branch — `goal--<base>` or `topic--<base>`** — because a topic and a goal may share a
+branch — `goal--<base>`, `topic--<base>` or `fleet--<base>`** — because a topic and a goal may share a
 name, and a flat slug let one subject's cadence record overwrite the other's:
 
 
@@ -79,7 +79,14 @@ STATE_DIR = os.path.expanduser(
     os.environ.get("MANAGER_LIVENESS_STATE_DIR", "~/.claude/state/sweep-gate")
 )
 NOTIFIED = "liveness-notified.json"
-BRANCHES = ("goal", "topic")
+# ⚠️ `fleet` is a THIRD tier, not a synonym for either of the others. The fleet loop answers
+# headless workers' parked prompts exactly as a goal manager does — it runs the wrangler and
+# watches the queue — but it manages no subject page, so it could not honestly register under
+# `goal` or `topic`. Leaving it unregistered was not neutral: `scripts/answer-path-check.py`
+# reads a session with no record as having no answer path, which refuses every headless spawn
+# the Fleet Manager makes (measured 2026-10-23 — the refusal was correct for the probe and
+# wrong for that session, and the fix is the record, not a bypass).
+BRANCHES = ("goal", "topic", "fleet")
 SLACK = 180  # seconds: the tick's own runtime plus ordinary jitter before a re-arm lands
 PERIOD_CAP = 2.5  # the p90 period estimate never exceeds this multiple of the median
 ARMS_KEEP = 12  # re-arm epochs retained per topic — enough for a stable percentile
@@ -92,7 +99,7 @@ def base_slug(subject: str) -> str:
 
 
 def slug(subject: str, branch: str) -> str:
-    """The state slug, carrying the BRANCH: `goal--<base>` / `topic--<base>`.
+    """The state slug, carrying the BRANCH: `goal--<base>` / `topic--<base>` / `fleet--<base>`.
 
     ⚠️ The prefix is not decoration. A topic and a goal may share a name — that is
     exactly why `docs/subject-resolution.md` requires exact-basename matching — so a
@@ -224,7 +231,14 @@ def detect_branch(subject: str, vault: str = ".") -> str:
     resolved a page in this process:
 
       1. **An existing prefixed record** — a manager already running under
-         `goal--<base>` or `topic--<base>` keeps its branch, whatever the page says now.
+         `goal--<base>`, `topic--<base>` or `fleet--<base>` keeps its branch, whatever the
+         page says now. `fleet` is checked like the others because the Fleet Manager arms a
+         loop and manages no page: it has no other way to be resolved.
+         ⚠️ The order is goal → topic → fleet, so a goal or topic literally named
+         "Fleet Manager" shadows the fleet record. The arm path is unaffected — every arm
+         passes `--branch fleet` explicitly — but a branch-less call (`commands/stop.md`
+         runs `--stop --topic <subject>` with no branch) would mark the wrong record. The
+         goal-vs-topic ambiguity of the same shape predates this branch.
       2. **The vault's pages** — `24 Goals/<subject>.md` is a goal; the topics folder
          holding `<subject>.md` is a topic.
       3. **`goal`** — the default, announced on stderr so a wrong guess is visible
@@ -460,7 +474,7 @@ def main() -> int:
     ap.add_argument(
         "--branch",
         choices=BRANCHES,
-        help="goal | topic — auto-detected when omitted (existing record, then the vault's pages)",
+        help="goal | topic | fleet — auto-detected when omitted (existing record, then the vault's pages)",
     )
     ap.add_argument("--vault", default=".", help="vault ROOT, used only to auto-detect --branch")
     ap.add_argument("--interval", type=int, help="the ScheduleWakeup delay just armed, seconds")

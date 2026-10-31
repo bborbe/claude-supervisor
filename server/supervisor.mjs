@@ -9,7 +9,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { query, resolveSettings } from '@anthropic-ai/claude-agent-sdk'
+import { resolveSettings } from '@anthropic-ai/claude-agent-sdk'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { isAbsolute, join } from 'path'
@@ -17,16 +17,19 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
+import { answerWrappedSession, listWrappedSessions, pendingQuestionOf, sendWrappedSession, spawnWrappedSession, stopWrappedSession, streamWrappedSession } from './wrapper-stream.mjs'
 import { HEARTBEAT_INTERVAL_MS, a2aStamp, clearStamp, heartbeatDir, selfStampRefusal, stampRecord, startSelfStamp } from './heartbeat.mjs'
 import { workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
-import { startAttentionPoll, storeDecisionRecord } from './attention-poll.mjs'
+import { startAttentionPoll, storeDecisionRecord, timeoutDecisionRecord } from './attention-poll.mjs'
 import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
+import { confinedCandidate, loadManagerAllowlist, matchManagerEntry } from './manager-allowlist.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
-import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
+import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import { A2A_DEFAULT_CLUSTER, a2aTargetsForClusters, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, clusterAllowlistRefusal, clusterOfTarget, collectWorkerTurn, configuredA2AClusters, createWorkerOnController, fetchWorkerCard, isA2ATarget, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pendingPushRegistration, pollA2A, pushDiagnosticPatch, readPushCallbackFromWorker, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
 import { createA2APushRegistry } from './a2a-push-registry.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
@@ -36,6 +39,7 @@ import { CLUSTER_ANSWER_MAX, classifyClusterAnswer, newSessionId, resolveCluster
 import { resolveMessageChannel } from './message-channel.mjs'
 import { bindSessionToTask } from './task-binding.mjs'
 import { windowIdArgument } from './window-id.mjs'
+import { tabSpawnInner } from './tab-spawn.mjs'
 import { resolveRole } from './role-map.mjs'
 import { managerSessions } from './manager-sessions.mjs'
 import { mtimeReloadedConfig } from './config-reload.mjs'
@@ -43,13 +47,15 @@ import { mtimeReloadedAllowlist } from './cluster-allowlist.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
 import { buildRecord, ledgerWriteRoute, mergeRecord, parentSessionId, stoppedPatch, UNOBSERVED_STATUS, unobservedPatch } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
-import { findLiveHolder } from './resume-guard.mjs'
+import { resumeRefusal } from './resume-guard.mjs'
+import { resumeAdmission } from './context-guard.mjs'
 import { fetchAttentionItems, fetchOpenCards, openCardsOf } from './open-cards.mjs'
 import { foreignParkRefusal } from './park-refusal.mjs'
+import { answerPathRefusal } from './answer-path.mjs'
 import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
 import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
 import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
-import { SHIPPING_PERMISSION_MODE, shippingSettings, shippingSupportError } from './shipping-settings.mjs'
+import { SHIPPING_PERMISSION_MODE, launcherHonoursModeEnv, shippingSupportError, shippingTabEnv } from './shipping-settings.mjs'
 import { liveSessionIds, rehydratableAgents, unionRoster } from './registry-rehydrate.mjs'
 import { patchSessionLedgerRow, postSessionLedger, readSessionLedger, readSessionLedgerRow, recordToWire } from './session-ledger.mjs'
 
@@ -336,6 +342,16 @@ const STATE_DIR = config.stateDir
 const USER_POLICY = config.userPolicy
 const BUNDLED_POLICY = new URL('./policy.json', import.meta.url).pathname
 const PERMISSION_LOG = config.permissionLog
+// The session end record's writer, handed to the spawned pane as `SESSION_EXIT_RECORD`.
+// Resolved from this module so the tab spawn and the rest of the fleet write the same
+// store; a missing or non-executable script is fail-open (every call is `|| true`), so a
+// partial deploy costs a record, never a spawn.
+// `fileURLToPath`, not `.pathname`: a `.pathname` is percent-encoded, so a plugin installed
+// under a path with a space or a non-ASCII character yields `%20`/`%C3%BC` and the variable
+// names a file that does not exist — every write then fails open behind `|| true` and the
+// pane silently records nothing, which reads exactly like a session that is still alive.
+// Same idiom as `server/answer-path.mjs:36`. Raised by the PR review.
+const RECORD_SCRIPT = fileURLToPath(new URL('../scripts/session-exit-record.py', import.meta.url))
 
 const PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto']
 
@@ -538,8 +554,67 @@ const publicPerm = (p) => ({
   reason: p.decisionReason ?? null,
   blocked_path: p.blockedPath ?? null,
   input: p.input,
+  // The manager-allowlist entry covering this prompt, so the answering manager can see WHY it
+  // is allowed to answer before it does — rather than re-deriving a match from the command text.
+  allowlist_entry: p.allowlistEntry?.prefix ?? null,
   requested_at: p.requestedAt,
 })
+
+// The files a test-run entry's confinement reads. A `clean-runner-config` entry means "run this
+// repository's committed test suite", so none of these may carry an uncommitted change — the
+// worker can already write in its cwd, and an edited Makefile turns `make test` into whatever
+// the edit says.
+// ⚠️ Every filename the runners will read, not just the canonical one. `make` prefers
+// `GNUmakefile`, then `makefile`, then `Makefile`; `bun` reads `bunfig.toml` for preloads and
+// test configuration. Checking only `Makefile` left a worker free to write `GNUmakefile` (which
+// `make test` reads INSTEAD) and pass a clean-tree check.
+const RUNNER_CONFIG_FILES = [
+  'GNUmakefile',
+  'makefile',
+  'Makefile',
+  'package.json',
+  'bunfig.toml',
+  'bun.lock',
+  'bun.lockb',
+  'package-lock.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+]
+
+// True only when git succeeds AND reports no change to those files. Every failure — no git, not
+// a repository, a timeout, a non-string result — reads as NOT clean. The entry this gates grants
+// arbitrary execution, so a check that could not run must not grant it.
+function runnerConfigClean(cwd) {
+  if (!cwd) return false
+  try {
+    const out = spawnSync('git', ['status', '--porcelain', '--', ...RUNNER_CONFIG_FILES], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 5000,
+    })
+    if (out.status !== 0 || typeof out.stdout !== 'string') return false
+    return out.stdout.trim() === ''
+  } catch {
+    return false
+  }
+}
+
+// The manager-allowlist entry that authorises this prompt, or null when none does.
+//
+// Read per call: the file is tiny, and the operator must be able to edit it without a restart —
+// the same live-read expectation the policy overlay has. A missing or malformed file yields no
+// entries and therefore no match, which sends every prompt to the operator: the safe direction.
+//
+// The confinement input is computed ONLY when a confined entry's prefix matches, so the common
+// prompt never pays for a `git status`.
+function managerAllowlistEntry(toolName, key, cwd) {
+  const { entries } = loadManagerAllowlist()
+  if (!entries) return null
+  const direct = matchManagerEntry(entries, toolName, key, {})
+  if (direct) return direct
+  if (!confinedCandidate(entries, toolName, key)) return null
+  return matchManagerEntry(entries, toolName, key, { runnerConfigClean: runnerConfigClean(cwd) })
+}
 
 function makeCanUseTool(agent) {
   return (toolName, input, opts = {}) =>
@@ -566,11 +641,22 @@ function makeCanUseTool(agent) {
         decisionReason: opts.decisionReason,
         blockedPath: opts.blockedPath,
         requestedAt: new Date().toISOString(),
+        // Which manager-allowlist entry covers this prompt, or null. Computed HERE, at park
+        // time, so the answer record can carry a server-produced `matched_entry` rather than
+        // one the manager asserts about itself — a manager reporting its own match would make
+        // the audit read the answerer's claim as evidence.
+        allowlistEntry: managerAllowlistEntry(toolName, inputKey(input), agent.cwd),
         settle,
       }
       // Fail safe: an unanswered prompt must not park a worker forever.
+      // ⚠️ The timeout writes a record BEFORE it settles, and that ordering is the point:
+      // this path used to settle with no `permissions.jsonl` row at all, so a timeout and a
+      // clean exit were indistinguishable in the log and the 7-day criterion had no
+      // observable (SC5(a)). The builder lives in `attention-poll.mjs` because this file
+      // cannot be imported by a test; only the call site is pinned here, by source text.
       const timer = setTimeout(() => {
         log(`permission ${requestId} timed out -> deny`)
+        logPermission(timeoutDecisionRecord({ requestId, agentId: agent.id, park: record }))
         settle({ behavior: 'deny', message: 'Supervisor did not answer within 15 minutes.' })
       }, PERMISSION_TIMEOUT_MS)
 
@@ -623,6 +709,70 @@ function makeCanUseTool(agent) {
       log(`permission requested by ${agent.id}: ${toolName} (${requestId})`)
       for (const waiter of [...waiters]) waiter(publicPerm(record))
     })
+}
+
+// Answer a park the WRAPPER holds, for a wrapper-backed worker.
+//
+// ⚠️ The id is authoritative and the record is read LIVE, never from a cache. A worker can
+// unpark and re-park between a status read and this call, so answering by agent would answer
+// a question the caller never saw; naming the request id means a stale call gets the
+// wrapper's own 409 and changes nothing. That asymmetry is the whole reason this shape was
+// chosen over an `agent_id` argument.
+//
+// ⚠️ FOUR outcomes, and the caller must keep them apart. Folding `unreadable` into `not_found`
+// is what made a wrapper that was down indistinguishable from a request id that never
+// existed — the conflation the refusal text used to claim it had already fixed:
+//   {answered, behavior, agent_id, via} — released
+//   {error}                             — a wrapper-backed worker held the id and the answer was refused
+//   {unreadable: true, error}           — a wrapper-backed worker exists but the wrapper could
+//                                         not be read, so "no park" is NOT a fact here
+//   {not_found: true}                   — the wrapper was read and nothing is parked on this id
+async function answerWrapperPark(requestId, behavior) {
+  const wanted = behavior === 'allow' ? 'allow' : 'deny'
+  const backed = [...agents.values()].filter((a) => a.wrapperSessionId)
+  if (backed.length === 0) return { consulted: false }
+  let sessions
+  try {
+    // ONE read for every wrapper-backed worker. The per-agent loop this replaces cost N
+    // sequential round-trips on the miss path, which is the common path.
+    sessions = await listWrappedSessions({ baseUrl: config.wrapperUrl })
+    if (!Array.isArray(sessions)) throw new Error('wrapper session list was not an array')
+  } catch (error) {
+    return { unreadable: true, error: `wrapper session list unreadable: ${error.message}` }
+  }
+  for (const agent of backed) {
+    const session = sessions.find((s) => s?.id === agent.wrapperSessionId)
+    if (session?.question?.request_id !== requestId) continue
+    try {
+      await answerWrappedSession({
+        baseUrl: config.wrapperUrl,
+        sessionId: agent.wrapperSessionId,
+        requestId,
+        behavior: wanted,
+      })
+    } catch (error) {
+      return { error: `wrapper answer for ${agent.id} failed: ${error.message}` }
+    }
+    if (agent.status === 'blocked-on-permission') agent.status = 'running'
+    log(`permission ${requestId} ${wanted.toUpperCase()} by manager (wrapper-backed worker ${agent.id})`)
+    return { answered: requestId, behavior: wanted, agent_id: agent.id, via: 'wrapper' }
+  }
+  return { not_found: true }
+}
+
+// One wrapper read for the whole roster, or null when it cannot be read or was not needed.
+//
+// `needed` is not an optimisation detail: without it every manager sweep in a fleet holding no
+// wrapper-backed worker would still pay a round-trip (and, wrapper down, its timeout) for a
+// field that cannot apply to any row.
+async function readWrapperQuestions(needed) {
+  if (!needed) return null
+  try {
+    const sessions = await listWrappedSessions({ baseUrl: config.wrapperUrl })
+    return Array.isArray(sessions) ? sessions : null
+  } catch {
+    return null
+  }
 }
 
 function waitForPermission(timeoutMs) {
@@ -758,6 +908,10 @@ function writeLedger(agent, patch) {
       resumedFrom: agent.resumedFrom ?? null,
       policy: agent.policyPath ?? null,
       shipping: agent.shipping === true,
+      // Persisted, unlike `shipping`: the wrapper is the only holder of this worker's parked
+      // prompt, so a server that lost the id on restart could neither report the park nor
+      // answer it.
+      wrapperSessionId: agent.wrapperSessionId ?? null,
       parentSession: agent.parentSession ?? null,
       // The role this spawn declared. Carried into the record because the spawn edge
       // cannot otherwise distinguish a manager from a worker: `gate-owner-filter.py`
@@ -946,10 +1100,68 @@ function launcherModelFor(scriptPath) {
   }
 }
 
+// Whether the launcher PRESERVES an exported `PERMISSION_MODE` rather than overwriting
+// it — the precondition a shipping tab worker rests on.
+//
+// `false` when the launcher cannot be read, deliberately: a launcher we cannot inspect
+// is one we cannot promise will keep the value, and `shippingSupportError` turns that
+// into a refusal at spawn time. Defaulting to `true` here would recreate the silent
+// overwrite this check exists to catch.
+function launcherPreservesModeEnv(scriptPath) {
+  if (!scriptPath) return false
+  try {
+    return launcherHonoursModeEnv(readFileSync(scriptPath, 'utf8'))
+  } catch {
+    return false
+  }
+}
+
 // Read the servers the launcher passes via `--mcp-config <file>`. These arrive as a
 // CLI flag, not as settings, so settingSources cannot reach them: an SDK worker with
 // settings loaded still saw 7 fewer servers than its tab twin. Handing the same file
 // to query()'s mcpServers is what makes the two modes functionally identical.
+// The launcher's own `--mcp-config <file>` path, for the wrapper-backed path.
+//
+// resolveMcpServers parses that file and returns the SERVERS, which is what the SDK's
+// `mcpServers` option takes. The wrapper takes a FILE, so the same regex is used here to
+// return the path itself — one source of truth for "where the launcher keeps its config",
+// two shapes because the two spawn mechanisms disagree about what they want.
+function launcherMcpConfigFile(claudeCmd) {
+  if (config.mcpConfig) return config.mcpConfig
+  if (!claudeCmd) return null
+  try {
+    const match = readFileSync(claudeCmd, 'utf8').match(/--mcp-config\s+["']?(~?[^"'\s\\]+)/)
+    if (!match) return null
+    return match[1].replace(/^~/, homedir())
+  } catch {
+    return null
+  }
+}
+
+// What a wrapper-backed worker does NOT get, named field by field.
+//
+// ⚠️ A summary ("policy unavailable") is not enough: a reader has to know WHICH parts went
+// quiet, because they differ in consequence. The 15-minute deny changes behaviour most — a
+// prompt that used to die now parks indefinitely — and `decide()` is the one whose absence
+// turns every policy-allowed prompt into a human wait. Named individually so an operator
+// reading a spawn response can decide what to depend on, and so an answered park in a
+// wrapper-backed run is attributable to the wrapper's hook rather than to a policy tier
+// that never ran.
+function wrapperPolicyGap({ shipping }) {
+  return {
+    // Why: the wrapper spends the child's single --permission-prompt-tool on its own MCP
+    // tool, and the supervisor sees the child only as an event stream.
+    reason: 'wrapper owns the permission hook',
+    not_run: ['decide()', 'manager allowlist', 'carried decision', '15-minute deny'],
+    // The shipping tier is a SEPARATE loss, not a restatement: permission_mode survives,
+    // the flag-tier `settings` object does not, so a wrapper-backed shipping worker hits
+    // the permission channel for the edits and git verbs its flag tier was meant to skip.
+    shipping_settings: shipping === true ? 'not applied — no wrapper counterpart for the settings tier' : 'n/a',
+    // What IS still true, so the field is not read as "nothing works".
+    answerable_via: 'POST /api/1.0/sessions/{id}/answer',
+  }
+}
+
 function resolveMcpServers(claudeCmd) {
   let path = config.mcpConfig
   if (!path) {
@@ -1005,7 +1217,12 @@ async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowI
   // the parameter, and the half a headless-only implementation leaves unexercised. It goes
   // before the `cd` so it survives the login shell's profile files; see `shellEnvExports`
   // for why it must be an `export` rather than a `VAR=value` prefix on the `cd`.
-  const inner = `${shellEnvExports(env)}cd ${shellQuote(cwd)} && exec ${claudeCmd} -n ${shellQuote(tabName)} ${shellQuote(prompt)}`
+  // The shape — the `EXIT` trap, the start marker, the observer, and the absence of `exec` —
+  // lives in `tab-spawn.mjs`, where it can be asserted on. This is the SIXTH call site of that
+  // shape (the other five are `commands/open.md` ×3, `docs/fleet-surface.md` and
+  // `scripts/restart-worker.py`), and the only one that a review found rather than a test: the
+  // string was built here, so nothing could check it without starting an MCP server.
+  const inner = tabSpawnInner({ cwd, launcher: claudeCmd, tabName, prompt, env })
   // `--window-id` is what puts the tab in a ROLE's window. Omitted, the tab inherits
   // WEZTERM_PANE from the calling session and lands in whatever window the caller is
   // in — which is how a human-only task came up in the Agents window (2026-09-20).
@@ -1015,7 +1232,10 @@ async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowI
   if (windowId !== undefined && windowId !== null && String(windowId).trim() !== '') {
     spawnArgs.push('--window-id', String(windowId))
   }
-  spawnArgs.push('--', 'bash', '-lc', inner)
+  // The writer path rides as an `env` assignment rather than a `VAR=value` prefix, because a
+  // spawned pane inherits wezterm's MUX-SERVER environment, not this process's — the same
+  // reason `scripts/restart-worker.py` passes it this way.
+  spawnArgs.push('--', 'env', `SESSION_EXIT_RECORD=${RECORD_SCRIPT}`, 'bash', '-lc', inner)
   const res = spawnSync('wezterm', spawnArgs, { encoding: 'utf8' })
 
   if (res.error || res.status !== 0) {
@@ -1798,6 +2018,7 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
     workerId: created.worker.worker_id,
     a2aUrl: card.endpoint,
     workerToken: created.token,
+    protocolVersion: card.protocolVersion,
     parentSession: parentSessionId({ dir: config.sessionsDir }),
     createdAt: new Date().toISOString(),
   })
@@ -1848,6 +2069,7 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
     text: prompt,
     token: created.token,
     messageId: randomUUID(),
+    protocolVersion: card.protocolVersion,
   })
 
   // The conversation the first turn opened — what `send_agent_message` continues. Held in memory
@@ -1920,6 +2142,7 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
           taskId,
           push,
           token: created.token,
+          protocolVersion: card.protocolVersion,
         })
         // ⚠️ RECORDED, NOT DISCARDED — and that is the whole fix. `registerPushCallbackOnWorker`
         // returns its refusal precisely so the caller can record it, and this call used to drop
@@ -2154,6 +2377,32 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     if (managerError) return { error: managerError }
   }
 
+  // ⚠️ THE ANSWER-PATH GUARD, and it sits HERE rather than first because it is the only guard
+  // that costs a subprocess. `docs/fleet-surface.md` § Spawn a worker item 6, constraint (a):
+  // a headless worker's permission gate parks with the session that SPAWNED it, so a spawner
+  // with no answer path strands it (measured 2026-09-20: two workers, four gates expired in
+  // ~90 minutes). Nothing asked at the spawn site until now.
+  //
+  // REFUSED rather than warned: a warning cannot block a spawn, and the caller reads the
+  // returned text as the reply. The probe is `scripts/answer-path-check.py` — this server
+  // owns no second observable (see `answer-path.mjs`'s header for why).
+  //
+  // ⚠️ **Placement is a cost decision, and it is a real one.** `parentSessionId` walks the
+  // process tree with up to ten `spawnSync('ps')` calls and `runProbe` shells out to python,
+  // and both are SYNCHRONOUS — this one process also answers every worker's `canUseTool`, so a
+  // hung probe would stall unrelated workers' permission handling for up to its timeout. Every
+  // refusal above costs no subprocess, so they go first: a bad role, a full fleet, an
+  // unsupported resume or policy is answered before the probe is paid for. The remaining
+  // window is the one a spawn would have paid anyway.
+  //
+  // The asking session is resolved the way every ledger row's `parent_session` is: by
+  // walking the process tree, because an MCP server carries no argument naming it.
+  const answerPathError = answerPathRefusal({
+    opensInteractive,
+    sessionId: parentSessionId({ dir: config.sessionsDir }),
+  })
+  if (answerPathError) return { error: answerPathError }
+
   // An explicit window id WINS — the caller may need a window the map does not describe.
   // Otherwise the role decides, in-process, and no window id crosses the tool boundary.
   const targetWindowId = windowId ?? roleResolution.windowId
@@ -2168,9 +2417,6 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // refused, not accepted and quietly ignored.
   const unsupportedPolicy = policySupportError({ policy: policyPath, interactive: opensInteractive })
   if (unsupportedPolicy) return { error: unsupportedPolicy }
-  // Same class again: shipping settings a tab worker would never load are refused.
-  const unsupportedShipping = shippingSupportError({ shipping, interactive: opensInteractive })
-  if (unsupportedShipping) return { error: unsupportedShipping }
 
   // Resolved before anything is spawned, so a bad path costs no worker, no ledger
   // record, and no half-started session running under rules nobody chose.
@@ -2187,23 +2433,62 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // `SUPERVISOR_CLAUDE_CMD` stays the top override: an explicit operator setting rather
   // than a fallback, and the documented way to force a launcher for a one-off spawn.
   //
-  // Below it, a task's own `launcher:` frontmatter, then its goal's, then the vault's
-  // `claude_script` — see `resolveTaskLauncher`.
-  let taskLauncher = { launcher: workerTarget.launcher, source: 'vault' }
+  // Below it, a task's own `launcher:` frontmatter, then the vault's configured WORKER default
+  // (`worker_launcher`) — see `resolveTaskLauncher`. A goal's `launcher:` is not in that chain:
+  // it is a manager statement, and letting it reach a worker gave every task under a goal its
+  // manager's Opus launcher (measured 2026-10-22, 12 private-personal goals).
+  //
+  // ⚠️ The default is the WORKER rule with no task, not the bare vault launcher. A spawn with
+  // no `task` is still a worker, and `scripts/restart-worker.py` applies `worker_launcher` to a
+  // taskless session — so defaulting to `claude_script` here made a taskless worker spawn on one
+  // launcher and restart on another, silently changing model whenever the two differ.
+  let taskLauncher = resolveTaskLauncher({
+    vaultLauncher: workerTarget.launcher,
+    workerLauncher: workerTarget.workerLauncher,
+  })
   if (!config.claudeCmd && roleResolution.role === 'manager') {
-    // A manager takes the manager rule, not the worker rule: the `-claude` sibling of the
-    // vault launcher when it exists — see `resolveManagerLauncher`. No subject page is read
-    // here; a topic's `manager_launcher:` is resolved by `/supervisor:open` Step 2C.
-    taskLauncher = resolveManagerLauncher({ vaultLauncher: workerTarget.launcher, exists: existsSync })
+    // A manager takes the manager rule, not the worker rule: the vault's configured manager
+    // default, then the `-claude` sibling — see `resolveManagerLauncher`. No subject page is
+    // read here; a topic's `manager_launcher:` is resolved by `/supervisor:open` Step 2C.
+    taskLauncher = resolveManagerLauncher({
+      vaultLauncher: workerTarget.launcher,
+      managerDefault: workerTarget.managerLauncher,
+      exists: existsSync,
+    })
   } else if (!config.claudeCmd && typeof task === 'string' && task) {
     const read = readTaskLaunchers({ task, vault: workerTarget.vault })
     if (read.error) return { error: read.error }
-    taskLauncher = resolveTaskLauncher({ vaultLauncher: workerTarget.launcher, ...read })
-    for (const w of read.warnings ?? []) log(`spawn ${task}: ${w}`)
-    if (taskLauncher.error) return { error: taskLauncher.error }
+    taskLauncher = resolveTaskLauncher({
+      vaultLauncher: workerTarget.launcher,
+      workerLauncher: workerTarget.workerLauncher,
+      ...read,
+    })
   }
+  // ONE check, after every branch. The manager branch could not fail before `managerDefault`
+  // existed, so it carried no check; it can now (an unsafe configured `manager_launcher`), and
+  // an unchecked `{ error }` here makes `workerLauncher` `undefined` — the tab path then execs
+  // `undefined` and the headless path loses its MCP servers, both silently.
+  if (taskLauncher.error) return { error: taskLauncher.error }
   const workerLauncher = config.claudeCmd || taskLauncher.launcher
   const workerModel = launcherModelFor(workerLauncher)
+
+  // Shipping is checked HERE rather than with the support guards above because it needs
+  // the LAUNCHER: the tab path delivers the mode through an env var the launcher reads,
+  // and a launcher that overwrites that var would leave the worker parked on the very
+  // gate `shipping` exists to remove. Still before every side effect — no tab, no slot,
+  // no ledger record — so the refusal costs a rejected call and nothing else.
+  const unsupportedShipping = shippingSupportError({
+    shipping,
+    interactive: opensInteractive,
+    launcherHonoursModeEnv: launcherPreservesModeEnv(workerLauncher),
+  })
+  if (unsupportedShipping) return { error: unsupportedShipping }
+
+  // The tab path's carrier. Merged AFTER the caller's env so the SERVER's value wins —
+  // a caller setting PERMISSION_MODE on a shipping worker must not be able to choose a
+  // wider mode than `acceptEdits`. Null for every non-shipping and every headless
+  // spawn, which is the negative control: those tabs keep the launcher's own default.
+  const tabShippingEnv = shippingTabEnv(shipping === true && opensInteractive)
   let workerRules = null
   let resolvedPolicyPath = null
   if (policyPath) {
@@ -2280,16 +2565,18 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // deleted filter existed to prevent, now bounded and self-healing on retry rather than
     // immediate. And when `liveSessionIds()` answers `null`, every row is kept — the fail-closed
     // direction, but a weaker property than "live by construction".
+    //
+    // ⚠️ The 60s bound does NOT cover a TAB row, and that asymmetry is the defect this path was
+    // fixed for. `pruneRehydratedAgents` only touches `rehydrated` rows, and an `interactive` row
+    // never settles anyway, so a tab's row is permanent — the age proxy never expires it. That is
+    // why the release lives in `resumeRefusal` (which sees `live`) and not in the prune.
     pruneRehydratedAgents()
-    const holder = findLiveHolder(agents.values(), resume)
-    if (holder) {
-      return {
-        // ⚠️ A rehydrated row's worker lives in the supervisor process that SPAWNED it, not
-        // in this one (`registry-rehydrate.mjs` — adoption crosses processes), so naming
-        // "this server" sends the operator to close the wrong thing.
-        error: `session ${resume} is still running (worker ${holder.id} is mid-turn ${holder.rehydrated ? 'in the supervisor process that spawned it' : 'in this server'}) — close it before resuming, or you will have two writers on one conversation`,
-      }
-    }
+    // The refusal is built in resume-guard.mjs rather than here, and `live` is passed in
+    // because it is the one fact that separates a dead tab from a live headless worker —
+    // see that module's header. It is also the seam a test can reach: this file starts an
+    // MCP server at module load and cannot be imported.
+    const refusal = resumeRefusal({ agentRecords: agents.values(), sessionId: resume, live })
+    if (refusal) return { error: refusal }
     // Neither probe could be read. Fail CLOSED: "could not tell" and "confirmed
     // closed" are different answers, and only one of them is safe to act on. A
     // refused resume costs one retry; an unguarded one corrupts a conversation.
@@ -2300,6 +2587,38 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       }
     }
     log(`resume of ${resume} allowed: ${reason} [probes: ${probes.join(', ') || 'none'}]`)
+
+    // ⚠️ Liveness is not the only thing that can make a resume useless. A resume restores the
+    // whole prior conversation, so a long-lived worker comes back carrying the payload its last
+    // turn already ran at; if that payload sits close to the point where the harness compacts,
+    // the resumed session compacts on its first turn or dies with "Prompt is too long". Measured
+    // 2026-10-27 on five workers, one of them dead after a SINGLE turn — see context-guard.mjs
+    // for the numbers and the bound. This is the second guard on this path and answers a
+    // different question from `resume-guard.mjs` (which asks whether a live worker blocks the
+    // resume); the two must stay separate.
+    //
+    // The transcript is resolved by SESSION ID, never from a cwd: a `cc-*` launcher `cd`s into
+    // its own vault, so the spawn's recorded cwd is not where the transcript was written
+    // (CLAUDE.md § "transcript_dir on a tab worker is unreliable").
+    // ⚠️ ONE CALL, AND THE REFUSAL RETURNS BEFORE ANY SPAWN WORK — the `return` on the very next
+    // line is the whole "no worker is created" guarantee, and `context-guard.test.mjs` drives
+    // this same function with fixture transcripts so the gate is exercised end to end rather
+    // than only its arithmetic. Do not inline these three steps again: a test can reach a named
+    // function, and it cannot reach a block.
+    const admission = resumeAdmission({ transcriptPath: transcriptPathFor(resume), readFile: readFileSync })
+    if (!admission.admit) {
+      log(`refusing to resume ${resume}: ${admission.error}`)
+      return { error: admission.error }
+    }
+    const contextStats = admission.stats
+    // Reported even when it allows, because "the guard looked and found nothing" and "the guard
+    // could not look" are different facts about this resume, and only one of them is reassuring.
+    log(
+      contextStats
+        ? `resume of ${resume} context: ${contextStats.restored ?? 'no usage'} restored against a ` +
+            `${contextStats.ceiling ?? 'no'} ceiling${contextStats.model ? ` [${contextStats.model}]` : ''}`
+        : `resume of ${resume} context: not measured (no transcript) — guard allowed it`,
+    )
 
     // A decision can only ride a resume, and only one that names the park on record.
     //
@@ -2352,6 +2671,10 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // recoverable is a separate change (persist it, then read it back in `toAgentRecord`).
     shipping: shipping === true,
     sessionId: null,
+    // The WRAPPER's handle for this child, set on the wrapper-backed headless path only.
+    // Every wrapper route keys off it, and it is the only thing that can reach a park the
+    // wrapper holds. Null for a tab or cluster worker, which have no wrapper session.
+    wrapperSessionId: null,
     // Which conversation this one continues, when it is an adoption rather than a
     // fresh start. `sessionId` alone cannot say: on resume the SDK reports the SAME
     // id, so the two fields together are what tell the operator which conversation
@@ -2416,7 +2739,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
 
   if (opensInteractive) {
     agent.status = 'interactive'
-    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, launcher: agent.launcher, label: agent.label, windowId: targetWindowId, chip: roleResolution.chip, env: envOverrides })
+    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, launcher: agent.launcher, label: agent.label, windowId: targetWindowId, chip: roleResolution.chip, env: tabShippingEnv ? { ...envOverrides, ...tabShippingEnv } : envOverrides })
     if (res.error) {
       agents.delete(id)
       return { error: res.error }
@@ -2526,44 +2849,91 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // the headless path each resolved the launcher separately and could disagree about the
   // same spawn.
 
-  const q = query({
-    prompt,
+  // ⚠️ **The headless child is started by claude-wrapper, not by this process.** A
+  // permission park belongs to whoever holds the child's stdin: `canUseTool` parked into
+  // THIS process's `pending` Map, so a prompt raised here was answerable only by this
+  // server and died with it after 15 minutes. With the wrapper holding stdin,
+  // `POST /api/1.0/sessions/{id}/answer` releases the park from any manager.
+  //
+  // ⚠️ **What the seam costs, named rather than implied.** The wrapper spends the child's
+  // single `--permission-prompt-tool` on its own MCP tool, so this server never sees a
+  // prompt and none of its policy machinery can run. `wrapperPolicyGap` carries that on the
+  // agent record AND the spawn response, because a reader who has to infer which parts went
+  // quiet will infer wrong in the direction that matters — the 15-minute deny changes
+  // behaviour most. Naming it also keeps a later verification honest: an answered park in a
+  // wrapper-backed run was answered by the wrapper's hook, never by `decide()`, so it is not
+  // evidence that the policy tier works.
+  // ⚠️ A refused SUPERVISOR_WRAPPER_URL is refused HERE, not at import. `config.mjs` returns
+  // the refusal rather than throwing so one mistyped variable cannot make the module
+  // unimportable and take the whole server down at load; the cost is that the refusal has to
+  // be acted on at the one place that would use the value.
+  if (config.wrapperUrlRefusal) {
+    agents.delete(id)
+    return { error: config.wrapperUrlRefusal }
+  }
+  // ⚠️ Every throw from here to the stream start must undo `agents.set(id, …)` above. Without
+  // this, a failed wrapper spawn leaves a phantom `running` row that `list_agents` reports for
+  // the life of the process — the tab path's `agents.delete(id)` rollback, which this branch
+  // otherwise omits.
+  let wrapperSession
+  try {
+    wrapperSession = await spawnWrappedSession({
+    baseUrl: config.wrapperUrl,
     options: {
       cwd: agent.cwd,
-      // Hand the worker the mode this server already resolved, so it never has to infer
-      // its own from a config file that describes the fleet rather than this worker. The
-      // SDK's `env` REPLACES the subprocess environment instead of merging with it, which
-      // is why workerEnvFor spreads the inherited env — without that spread the worker
-      // loses PATH, HOME and ANTHROPIC_BASE_URL, and the last of those silently stops it
-      // routing through the router. That base env comes from config.mjs rather than being
-      // read here, because this module owns no environment reads at all.
-      // `overrides` is the caller's per-call `env`. It sits above the inherited environment
-      // and below the mode handover — see workerEnvFor for why that order is the only
-      // correct one.
+      // The mode and environment this server already resolved, handed to the child
+      // directly. The wrapper MERGES `env` over its own environment, which is why the whole
+      // inherited environment rides along: a hand-picked subset would drop PATH, HOME and
+      // ANTHROPIC_BASE_URL, and losing the last silently stops the worker routing through
+      // the router while looking like nothing at all.
       env: workerEnvFor({ mode: spawnMode.mode, source: spawnMode.source, env: config.baseEnv, overrides: envOverrides }),
-      // Load the same settings an interactive session gets. Without this the SDK
-      // starts from nothing — no plugin skills, no settings.json permissions, no
-      // user MCP servers — and a worker missing its normal tooling is not a cheaper
-      // worker, it is one that fails in unfamiliar ways.
-      settingSources: SETTING_SOURCES,
-      // Same reason as settingSources: parity with a tab worker. Spawning is rare, so
-      // the per-spawn launcher lookup is not a hot path.
-      mcpServers: resolveMcpServers(agent.launcher),
-      // Continuing an existing conversation. Because THIS call creates the session,
-      // canUseTool applies to it — which is the whole point: a session you did not
-      // create cannot be supervised, but one you resume you do create.
+      // A shipping worker runs under `acceptEdits`, so its edits and its three git verbs
+      // never depend on the permission channel. ⚠️ Only the MODE survives the wrapper: the
+      // flag-tier `settings` object has no wrapper counterpart, which `wrapperPolicyGap`
+      // records separately — a wrapper-backed shipping worker is not faithfully wrapped.
+      permission_mode: shipping === true ? SHIPPING_PERMISSION_MODE : PERMISSION_MODE,
+      // The launcher's own config FILE. It arrives as a CLI flag, so no setting source can
+      // reach it, and without it this worker's server list is measurably shorter than a tab
+      // worker's — the gap `resolveMcpServers` was written to close on the SDK path.
+      ...(launcherMcpConfigFile(agent.launcher) ? { mcp_configs: [launcherMcpConfigFile(agent.launcher)] } : {}),
+      // Continuing a conversation: the wrapper emits `--resume` INSTEAD of minting an id,
+      // so the child's claude id is the resumed one and arrives on `system`/`init` exactly
+      // as it did through `query()`.
       ...(resume ? { resume } : {}),
-      // Resolved and validated once at module load — never read env in the hot path.
-      // A shipping worker runs under `acceptEdits` instead, so its edits and its three git
-      // verbs never depend on the permission channel; see shipping-settings.mjs for why
-      // that mode and not a wider one. The option and the flag-tier `settings` say the
-      // same thing on purpose: either alone leaves a reader to wonder which one won.
-      permissionMode: shipping === true ? SHIPPING_PERMISSION_MODE : PERMISSION_MODE,
-      ...(shipping === true ? { settings: shippingSettings(true) } : {}),
-      canUseTool: makeCanUseTool(agent),
-      hooks: { PermissionRequest: [{ hooks: [makePermissionHook(agent)] }] },
     },
   })
+  } catch (error) {
+    agents.delete(id)
+    throw error
+  }
+  if (!wrapperSession || !wrapperSession.id) {
+    agents.delete(id)
+    throw new Error(`wrapper spawn for ${id} returned no session id — nothing can answer its prompts`)
+  }
+  // The WRAPPER's handle, never the child's claude id: every wrapper route keys off it, and
+  // it is the only thing `answer_permission` can use to reach a park.
+  agent.wrapperSessionId = wrapperSession.id
+
+  // ⚠️ The opening turn is a SEPARATE call. `query({ prompt })` delivered it while creating
+  // the session; the wrapper takes turns as messages, so a spawn that only streams leaves a
+  // child that initialises and sits idle — indistinguishable from one that is thinking.
+  if (prompt) {
+    // ⚠️ A refused opening turn is not a no-op: the child exists, holds stdin and streams
+    // nothing, so it looks exactly like one that is thinking. Reap it here rather than
+    // returning an agent id for a worker that will never produce a turn — and reap it on
+    // ANY throw, because the wrapper session is already live by this line.
+    try {
+      await sendWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id, text: prompt })
+    } catch (error) {
+      await stopWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id }).catch((reapError) => {
+        log(`WARNING: could not reap wrapper session ${wrapperSession.id} after a refused opening turn: ${reapError.message}`)
+      })
+      agents.delete(id)
+      throw error
+    }
+  }
+
+  const q = streamWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id })
   agent.query = q
 
   // Fire-and-forget on purpose: a spawn must return its agent id without waiting for
@@ -2597,6 +2967,11 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // inferring it from the absence of an error.
     policy: agent.policyPath,
     shipping: agent.shipping === true,
+    // ⚠️ Reported, never omitted. A caller that needs `decide()` or the 15-minute deny must
+    // be able to refuse to depend on them HERE, rather than discover their absence when a
+    // prompt parks forever. Named field by field — see wrapperPolicyGap.
+    policy_gap: wrapperPolicyGap({ shipping: agent.shipping }),
+    wrapper_session_id: agent.wrapperSessionId,
     // Same field as the tab path, and here too it is not redundant: this is the half a
     // headless-only implementation would leave unexercised, so a caller reading it back is
     // how "both paths carry it" stops being a claim about the diff. Keys only — see envReport.
@@ -2647,6 +3022,10 @@ const agentView = (a) => {
     // indistinguishable from "no gate outstanding" — the exact reading that cost a manager a
     // misdirected worker in the v0.110.4 incident. See registry-rehydrate.mjs.
     rehydrated: a.rehydrated === true,
+    // The wrapper session this worker's child runs under, or null when the worker is not
+    // wrapper-backed. Ships beside `pending_question` because it is the field that tells a
+    // caller which of that field's nulls it is holding.
+    wrapper_session_id: a.wrapperSessionId ?? null,
     // Which source decided interactive-vs-headless: argument, env, config or default. A
     // worker that opened the wrong way is otherwise diagnosed by guessing which of four
     // places was consulted.
@@ -2743,12 +3122,12 @@ const TOOLS = [
         task: {
           type: 'string',
           description:
-            'The vault task this worker is opened for. On every LOCAL path it also chooses the launcher: the task\'s `launcher:` frontmatter, else its goal\'s, else the vault\'s `claude_script` (rule: docs/fleet-surface.md § Spawn a worker item 8) — so a task that cannot be read REFUSES the spawn. Honoured on the TAB and CLUSTER paths, and there it is what binds the worker to the vault: the session id is written to this task\'s `claude_session_id` (through the ownership rule in `task-binding.mjs` — stamped only when the field is EMPTY, otherwise appended to `metrics_sessions`) and reported back as `bind`. REQUIRED with any A2A target — `docker`, `k8s`, or `k8s:<cluster>` — and with the retired `cluster` target. ⚠️ The local HEADLESS path (`target: "local"` with `interactive: false`) does NOT bind and reports no `bind` key at all, so a headless spawn carrying `task` leaves the field unwritten. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
+            'The vault task this worker is opened for. On every LOCAL path it also chooses the launcher: the task\'s own `launcher:` frontmatter, else the vault\'s `worker_launcher`, else the vault\'s `claude_script` (rule: docs/fleet-surface.md § Spawn a worker item 8) — so a task that cannot be read REFUSES the spawn. ⚠️ A GOAL\'s `launcher:` is NOT read: it describes how that goal\'s manager runs, and inheriting it gave every worker under such a goal its manager\'s launcher. Honoured on the TAB and CLUSTER paths, and there it is what binds the worker to the vault: the session id is written to this task\'s `claude_session_id` (through the ownership rule in `task-binding.mjs` — stamped only when the field is EMPTY, otherwise appended to `metrics_sessions`) and reported back as `bind`. REQUIRED with any A2A target — `docker`, `k8s`, or `k8s:<cluster>` — and with the retired `cluster` target. ⚠️ The local HEADLESS path (`target: "local"` with `interactive: false`) does NOT bind and reports no `bind` key at all, so a headless spawn carrying `task` leaves the field unwritten. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
         },
         vault: {
           type: 'string',
           description:
-            'The vault this worker belongs to. Resolves BOTH the working directory and the default launcher (that vault\'s `claude_script`, which a `task`\'s `launcher:` frontmatter can override) from one value, so the two cannot disagree — the reliable form of the required `cwd`/`vault` pair, and the one to prefer. An unknown vault, or a vault with no `claude_script`, is refused rather than falling back to another vault\'s launcher or to the bare `claude` binary. With `target: "cluster"` it instead names the vault the `task` lives in, because task names collide across boards.',
+            'The vault this worker belongs to. Resolves BOTH the working directory and the default launcher from one value, so the two cannot disagree: the launcher is that vault\'s `worker_launcher` (a `manager` spawn takes `manager_launcher`), falling back to `claude_script`, and a `task`\'s own `launcher:` frontmatter can override it — the reliable form of the required `cwd`/`vault` pair, and the one to prefer. An unknown vault, or a vault with no `claude_script`, is refused rather than falling back to another vault\'s launcher or to the bare `claude` binary. With `target: "cluster"` it instead names the vault the `task` lives in, because task names collide across boards.',
         },
         resume: {
           type: 'string',
@@ -2769,7 +3148,7 @@ const TOOLS = [
         shipping: {
           type: 'boolean',
           description:
-            'Mark this worker as SHIPPING: it runs under `acceptEdits` with `git add` / `git commit` / `git push` pre-allowed, so its edits and commits never depend on the supervisor permission channel — a headless worker whose channel dies ("Stream closed") can otherwise neither edit nor commit. Every other tool still prompts, so the approval policy stays in force. Headless and local only: combining it with interactive:true or target:"cluster" is refused. Omit for an ordinary worker.',
+            'Mark this worker as SHIPPING: it runs under `acceptEdits`, so its edits and commits never depend on the supervisor permission channel — a headless worker whose channel dies ("Stream closed") can otherwise neither edit nor commit, and a tab worker otherwise parks on an operator-only Shift+Tab. ⚠️ The two paths carry it DIFFERENTLY: a HEADLESS worker gets `git add` / `git commit` / `git push` pre-allowed; a TAB worker gets the MODE ONLY, so its unattended command set is the ambient `permissions.allow`. Every other tool still prompts, so the approval policy stays in force. Local only — target:"cluster" is refused, and so is a tab spawn whose launcher does not preserve an exported PERMISSION_MODE. Omit for an ordinary worker.',
         },
         policy: {
           type: 'string',
@@ -3066,6 +3445,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           text: args.message,
           token: channel.token,
           messageId: randomUUID(),
+          protocolVersion: channel.protocolVersion,
         })
         const sendMs = Date.now() - t0
         if (sent.error) return reply({ error: `the turn could not be sent: ${sent.error}`, send_ms: sendMs })
@@ -3108,6 +3488,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               taskId,
               push,
               token: push.token,
+              protocolVersion: channel.protocolVersion,
             })
             agent.pushRegistration = registration.error
               ? { state: 'attempted-error', taskId, error: registration.error, at: new Date().toISOString() }
@@ -3280,10 +3661,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // this session) on every row: collapsing them reports a parked worker as unblocked, which
       // is the false negative this field exists to remove.
       const items = await fetchAttentionItems({ storeUrl: config.attentionStoreUrl })
+      // ⚠️ Same shape, same reason: ONE wrapper read for the whole roster, and skipped
+      // entirely when no row is wrapper-backed. A per-row `readWrappedSession` would be N
+      // round-trips with the wrapper down being N × the timeout in front of every sweep.
+      const questions = await readWrapperQuestions(roster.some((a) => a.wrapperSessionId))
       return reply(
         roster.map((agent) => ({
           ...agentView(agent),
           open_cards: items === null ? null : openCardsOf(items, agent.sessionId),
+          pending_question: pendingQuestionOf(questions, agent.wrapperSessionId),
         })),
       )
     }
@@ -3296,7 +3682,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // are the gate a manager can see — and, via the plugin's PermissionRequest hook,
       // answer with `attention-answer.py answer <item_id>`. Null = store unreadable/off.
       const open_cards = await fetchOpenCards({ storeUrl: config.attentionStoreUrl, sessionId: agent.sessionId })
-      return reply({ ...agentView(agent), open_cards })
+      // Read the wrapper's LIVE record, never a cache: a worker can unpark and re-park, and a
+      // request id read from anything stale names a question the caller can no longer answer.
+      const questions = await readWrapperQuestions(Boolean(agent.wrapperSessionId))
+      return reply({
+        ...agentView(agent),
+        open_cards,
+        pending_question: pendingQuestionOf(questions, agent.wrapperSessionId),
+      })
     }
 
     case 'read_push_config': {
@@ -3324,6 +3717,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         endpoint: agent.a2aUrl,
         taskId: reg.taskId,
         token: agent.workerToken,
+        protocolVersion: agent.protocolVersion,
       })
       if (out.error) return reply({ error: out.error, task_id: reg.taskId })
       return reply({ agent_id: agent.id, task_id: reg.taskId, configs: out.configs })
@@ -3341,11 +3735,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case 'answer_permission': {
       const record = pending.get(args.request_id)
       if (!record) {
-        // ⚠️ Never the bare `no pending permission <id>`: the commonest reason this misses is
-        // that the park belongs to ANOTHER manager's server, and that caller can act on the
-        // store route. See `park-refusal.mjs`.
+        const viaWrapper = await answerWrapperPark(args.request_id, args.behavior)
+        // Computed, never constant — see `answerWrapperPark`'s four outcomes.
+        const consulted = viaWrapper.consulted === false ? ['pending'] : ['pending', 'wrapper']
+        // ⚠️ `unreadable` FIRST. It carries an `error` too, so testing `.error` before it made
+        // this arm unreachable and the outage sentence dead — the branch order is the fix.
+        if (viaWrapper.unreadable) {
+          return reply({
+            error: `${viaWrapper.error} — a wrapper-backed worker may still be parked on ${args.request_id}; this is an outage, not a foreign park`,
+            sources_consulted: consulted,
+          })
+        }
+        if (viaWrapper.answered || viaWrapper.error) return reply({ ...viaWrapper, sources_consulted: consulted })
+        // Both sources were read and neither holds the id.
         return reply({
           error: await foreignParkRefusal({ requestId: args.request_id, readLedger: readSessionLedger }),
+          sources_consulted: consulted,
         })
       }
       // Record the manager's verdict too: a key the manager allows over and over
@@ -3357,6 +3762,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           tool: record.toolName,
           key: inputKey(record.input),
           matched_rule: null,
+          // The manager allowlist entry the server matched at park time, or null when the
+          // prompt was outside the list. Server-produced on purpose: an audit that read the
+          // manager's own claim about which entry covered it would be reading the answerer as
+          // its own witness.
+          matched_entry: record.allowlistEntry?.prefix ?? null,
           decision: behavior,
           decided_by: 'manager',
           request_id: args.request_id,

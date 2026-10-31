@@ -30,6 +30,7 @@ import {
   WORKER_MODE_ENV,
   WORKER_MODE_SOURCE_ENV,
 } from './spawn-mode.mjs'
+import { SHIPPING_MODE_ENV } from './shipping-settings.mjs'
 
 const file = (mode) => ({ spawn: { mode } })
 
@@ -779,6 +780,24 @@ test('a caller cannot declare a worker\'s spawn mode', () => {
   })
 })
 
+// ⚠️ The tab path's shipping carrier is what made this name dangerous. The launchers now
+// DEFAULT `PERMISSION_MODE` instead of assigning it, so a caller-supplied value reaches
+// `--permission-mode` on ANY tab — and `bypassPermissions` would start a worker with every
+// approval gate disabled, the exact mode the shipping design exists to refuse, with the
+// export outliving the pane for any nested `claude` or `cc-*` launched from it. The server
+// owns it: only `shippingTabEnv` may set it, and only to `acceptEdits`. Found by the PR
+// review, which caught that the shipping merge protected one branch and left every other tab
+// open.
+test('a caller cannot choose a tab worker\'s permission mode', () => {
+  const { error } = resolveEnvOverrides({ env: { [SHIPPING_MODE_ENV]: 'bypassPermissions' } })
+  assert.ok(error, `expected ${SHIPPING_MODE_ENV} to be refused`)
+  assert.match(error, /cannot set/)
+  // The refusal is about the NAME — the same value on a lookalike key is ordinary.
+  assert.deepEqual(resolveEnvOverrides({ env: { [`${SHIPPING_MODE_ENV}_X`]: 'bypassPermissions' } }).env, {
+    [`${SHIPPING_MODE_ENV}_X`]: 'bypassPermissions',
+  })
+})
+
 test('the tab path quoting survives a real shell for every metacharacter', () => {
   // The claim the tab path rests on is that `shellQuote` is airtight for EVERY shell
   // metacharacter — a single-quoted context is literal for all of them — but only the quote
@@ -804,10 +823,21 @@ test('both spawn paths are wired — the claim no pure-helper test can reach', (
   // the same stated reason: a text scan cannot prove the wiring RUNS, but it does prove a
   // call site cannot silently omit it. Found by the PR review.
   const source = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  // The tab path carries the caller's env either directly or spread into the shipping
+  // merge — both keep the claim (the call site cannot silently omit it), and the second
+  // is the shipping path, so the two assertions below cover each half.
   assert.match(
     source,
-    /spawnInteractiveAgent\(\{[^}]*env: envOverrides/,
+    /spawnInteractiveAgent\(\{[^}]*env: (?:envOverrides|tabShippingEnv \? \{ \.\.\.envOverrides)/,
     'the tab path must be handed envOverrides',
+  )
+  // ⚠️ The tab path's shipping carrier, asserted for the same reason as the env itself:
+  // a shipping tab spawn that omitted this would pass every pure-helper test in
+  // `shipping-settings.test.mjs` and still park on the operator's mode switch.
+  assert.match(
+    source,
+    /spawnInteractiveAgent\(\{[^}]*\.\.\.tabShippingEnv/,
+    'the tab path must be handed the shipping env',
   )
   assert.match(
     source,

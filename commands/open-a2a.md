@@ -52,6 +52,8 @@ If no name survives parsing **and `--flagged` was not given**, print `❌ Pass a
 
 Everything above is `/supervisor:open`'s, run by reference. This is the half that is not.
 
+⚠️ **A `goal_loop: true` row is refused HERE, before any backend branch.** This path reads the task's frontmatter but never runs the goal emitter, so the goal would be silently absent — a downgrade with no error. Print `⛔ goal_loop not supported on open-a2a — use /supervisor:open` and spawn nothing. It sits at the top of Step 2 rather than in § 2.3 because a target-less row dispatches through § 2.2 and would otherwise never reach the check. Rule: `docs/fleet-surface.md` § Spawn a worker item 10.
+
 ### 2.1 Read `target:` — it picks the backend, and nothing else does
 
 ```bash
@@ -83,7 +85,7 @@ It prints `worker_id: <id>`, then the reply, redacted. The backend is served at 
 
 ⚠️ **The create call carries `task`, `vault` and (when given) `first_step`.** `vault` is the resolved vault from Step 0–1.5: the controller reads the task's launcher, role and goals from that vault, starts the tab in its directory and writes the bind there. `cwd` is never sent. Omitting `--vault` falls back to the controller's own configured vault — never omit it.
 
-⚠️ **The reply carries `launcher` and `launcher_source`, because this backend resolves the launcher itself.** The controller applies the same rule as `spawn_agent` — the task's `launcher:` frontmatter, else its goal's, else the vault's `claude_script` (rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8) — and `launcher_source` names which of `task` / `goal` / `vault` won. So a local create is not launcher-blind: read both fields back and check them as you would on the `spawn_agent` arms.
+⚠️ **The reply carries `launcher` and `launcher_source`, because this backend resolves the launcher itself.** The controller resolves the launcher in its OWN process, and ⚠️ **as of 2026-10-22 it still applies the older goal-inheriting rule** — the task's `launcher:` frontmatter, else its goal's, else the vault's `claude_script` — while `spawn_agent` has dropped the goal rung (rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8). So a local create under a goal carrying `launcher:` can still come back on that goal's launcher; read `launcher` and `launcher_source` back and do not assume they match the `spawn_agent` arms. `launcher_source` names which of `task` / `goal` / `vault` won. So a local create is not launcher-blind: read both fields back and check them as you would on the `spawn_agent` arms.
 
 ⚠️ **A `launcher:` that is not an executable file is refused before any tab is opened**, which is stricter than the `spawn_agent` arms — those validate the value's shape only, because a bad launcher there surfaces as an unreadable `model: null`, an observable this arm does not have (`wezterm cli spawn` reports success for a tab whose `exec` then fails). ⚠️ **The refusal reason is not on the reply:** the FAILED path carries no detail, so a create that fails for this reason reports only that it failed — the named error is in the controller's own log. Reconcile against `list` (§ Step 3) as with any other FAILED outcome.
 

@@ -519,7 +519,7 @@ export function resolveA2AControllerTarget({
 // control API on a route that answers a single object, and asking it for a stream reads as a call
 // that produced no frames. The turn that follows goes to the WORKER, over the streaming spelling
 // — two different routes, and conflating them is the mistake this split exists to prevent.
-export function a2aCreateCallFor({ endpoint, task, token, messageId, contextId, mint, mounts, secrets } = {}) {
+export function a2aCreateCallFor({ endpoint, task, token, messageId, contextId, mint, mounts, secrets, protocolVersion } = {}) {
   const context = a2aContextIdFor({ previous: contextId, mint })
   if (context.error) return { error: context.error }
   // `mounts` / `secrets` are forwarded UNCHANGED — this path's whole job for them is to carry a
@@ -528,7 +528,7 @@ export function a2aCreateCallFor({ endpoint, task, token, messageId, contextId, 
   // with the first, and the builder is what puts bytes on the wire.
   const control = a2aControlRequestFor({ operation: 'create', task, mounts, secrets })
   if (control.error) return { error: control.error }
-  const call = a2aSendRequestFor({ endpoint, contextId: context.contextId, request: control.request, token, messageId })
+  const call = a2aSendRequestFor({ endpoint, contextId: context.contextId, request: control.request, token, messageId, protocolVersion })
   if (call.error) return { error: call.error }
   return { ...call, contextId: context.contextId }
 }
@@ -550,6 +550,44 @@ export function a2aCardUrlFor({ a2aUrl } = {}) {
     return { error: 'the worker A2A URL returned by `create` is not a parseable URL.' }
   }
   return { url: `${parsed.origin}/.well-known/agent-card.json` }
+}
+
+// The protocol version the CONTROLLER advertises, read from its own Agent Card.
+//
+// ⚠️ THE CONTROL PLANE NEEDS THIS FOR THE SAME REASON THE TURN PLANE DOES. From controller
+// `v0.17.0` (a2a-go v2.7.0) the handler defaults an ABSENT `A2A-Version` to "0.3" and refuses it,
+// so every control call — `create`, `list`, `stop` — is rejected before it runs. Measured
+// 2026-10-22: `create` answered `-32009 … requested "0.3", served "1.0"`.
+//
+// ⚠️ A FAILED CARD READ IS NOT A FAILED CONTROL CALL, so it returns `undefined` rather than an
+// error. `undefined` sends no header — the pre-negotiation behaviour, which a controller that has
+// no version check at all still accepts. The control call that follows is the thing that should
+// report a problem, and it reports what actually happened rather than a secondhand read failure.
+//
+// ⚠️ **THE CARD IS AUTHENTICATED, AND READING IT WITHOUT THE TOKEN SILENTLY READS NOTHING.** The
+// controller guards its whole surface, `/.well-known/agent-card.json` included: measured
+// 2026-10-22, an unauthenticated GET answers **401 `{"error":{"code":"UNAUTHORIZED"…}}`**. A read
+// that omitted the token therefore took the `!res.ok` branch, returned `undefined`, sent no
+// `A2A-Version`, and the controller defaulted the absent header to "0.3" and refused — the exact
+// `-32009` this function exists to prevent, reproduced *through* the fix. The worker's card is
+// public, which is why the turn plane never needed this; the control plane does.
+export async function fetchControllerProtocolVersion({ endpoint, token, fetchImpl = fetch } = {}) {
+  const card = a2aCardUrlFor({ a2aUrl: endpoint })
+  if (card.error) return undefined
+  try {
+    const res = await fetchImpl(card.url, {
+      headers: {
+        accept: 'application/json',
+        ...(typeof token === 'string' && token !== '' ? { authorization: `Bearer ${token}` } : {}),
+      },
+    })
+    if (!res.ok) return undefined
+    const body = await res.json()
+    const version = body?.supportedInterfaces?.[0]?.protocolVersion
+    return typeof version === 'string' && version !== '' ? version : undefined
+  } catch {
+    return undefined
+  }
 }
 
 // The `pushRegistration` seed: no registration has been sent for this turn yet.
@@ -589,6 +627,7 @@ export function a2aWorkerRecord({
   workerId,
   a2aUrl,
   workerToken,
+  protocolVersion,
   parentSession = null,
   createdAt,
 } = {}) {
@@ -645,6 +684,13 @@ export function a2aWorkerRecord({
       a2aUrl,
       workerId,
       workerToken,
+      // ⚠️ NOT A CREDENTIAL, but it rides here for the same reason and must be carried, not
+      // re-derived: every later call to this worker — a follow-up turn, the push registration, the
+      // read-back — has to speak the version the worker's card advertised at spawn time, and the
+      // record is the only thing those paths still hold. `undefined` when the card named none,
+      // which sends no header. Safe to project, unlike its three neighbours above; it is left out
+      // of `agentView` / `buildRecord` anyway so the roster's shape does not grow per wire detail.
+      protocolVersion,
     },
   }
 }
@@ -669,7 +715,8 @@ export function a2aWorkerRecord({
 // the credential this task's Definition of Done forbids writing anywhere. A throwing capture
 // never fails the spawn.
 export async function createWorkerOnController({ endpoint, task, token, messageId, contextId, mint, mounts, secrets, fetchImpl = fetch, capture } = {}) {
-  const call = a2aCreateCallFor({ endpoint, task, token, messageId, contextId, mint, mounts, secrets })
+  const protocolVersion = await fetchControllerProtocolVersion({ endpoint, token, fetchImpl })
+  const call = a2aCreateCallFor({ endpoint, task, token, messageId, contextId, mint, mounts, secrets, protocolVersion })
   if (call.error) return { error: call.error }
   if (typeof capture === 'function') {
     try {
@@ -790,7 +837,11 @@ export async function fetchWorkerCard({
   }
   const endpoint = resolveA2AEndpoint(card)
   if (endpoint.error) return { error: endpoint.error }
-  return { card, endpoint: endpoint.url }
+  // `protocolVersion` rides beside the endpoint because every later call to this worker — the turn
+  // and both push-config calls — must speak the version this card advertises. It is `undefined`
+  // when the card names none, and that is a supported state: no header is sent, which is what the
+  // client did before negotiation existed.
+  return { card, endpoint: endpoint.url, protocolVersion: endpoint.protocolVersion }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -848,10 +899,11 @@ export async function openWorkerTurn({
   text,
   token,
   messageId,
+  protocolVersion,
   ackTimeoutMs = A2A_ACK_TIMEOUT_MS,
   fetchImpl = fetch,
 } = {}) {
-  const call = a2aStreamRequestFor({ endpoint, contextId, text, token, messageId })
+  const call = a2aStreamRequestFor({ endpoint, contextId, text, token, messageId, protocolVersion })
   if (call.error) return { error: call.error }
 
   // ⚠️ `issued` RESOLVES TO THE RESPONSE ITSELF, not to a wrapper — because it is handed back as
@@ -913,10 +965,11 @@ export async function registerPushCallbackOnWorker({
   taskId,
   push,
   token,
+  protocolVersion,
   fetchImpl = fetch,
   timeoutMs = A2A_REGISTER_TIMEOUT_MS,
 } = {}) {
-  const call = a2aPushConfigCallFor({ endpoint, taskId, push, token })
+  const call = a2aPushConfigCallFor({ endpoint, taskId, push, token, protocolVersion })
   if (call.error) return { error: call.error }
   // ⚠️ BOUNDED, AND THE BOUND IS HALF THE FIX. Without a signal this await can never settle, and
   // the caller's write never happens — see `A2A_REGISTER_TIMEOUT_MS`. A non-positive bound disables
@@ -963,10 +1016,11 @@ export async function readPushCallbackFromWorker({
   endpoint,
   taskId,
   token,
+  protocolVersion,
   fetchImpl = fetch,
   timeoutMs = A2A_REGISTER_TIMEOUT_MS,
 } = {}) {
-  const call = a2aPushConfigListCallFor({ endpoint, taskId, token })
+  const call = a2aPushConfigListCallFor({ endpoint, taskId, token, protocolVersion })
   if (call.error) return { error: call.error }
   const signal = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined
   let res
@@ -1207,12 +1261,12 @@ export function a2aTurnPatch(collected, { at } = {}) {
 const A2A_NOT_RUNNING = /stop|exit|dead|fail|terminat|remov/i
 
 // The `list` control call — `{ url, headers, body, contextId }`, or `{ error }`.
-export function a2aListCallFor({ endpoint, token, messageId, contextId, mint } = {}) {
+export function a2aListCallFor({ endpoint, token, messageId, contextId, mint, protocolVersion } = {}) {
   const context = a2aContextIdFor({ previous: contextId, mint })
   if (context.error) return { error: context.error }
   const control = a2aControlRequestFor({ operation: 'list' })
   if (control.error) return { error: control.error }
-  const call = a2aSendRequestFor({ endpoint, contextId: context.contextId, request: control.request, token, messageId })
+  const call = a2aSendRequestFor({ endpoint, contextId: context.contextId, request: control.request, token, messageId, protocolVersion })
   if (call.error) return { error: call.error }
   return { ...call, contextId: context.contextId }
 }
@@ -1225,12 +1279,12 @@ export function a2aListCallFor({ endpoint, token, messageId, contextId, mint } =
 // name — the only other handle a caller holds. `a2aControlRequestFor` refuses a `stop` that names
 // a task, so a caller passing the wrong handle is refused at the builder rather than sending a
 // request the controller cannot honour.
-export function a2aStopCallFor({ endpoint, workerId, token, messageId, contextId, mint } = {}) {
+export function a2aStopCallFor({ endpoint, workerId, token, messageId, contextId, mint, protocolVersion } = {}) {
   const context = a2aContextIdFor({ previous: contextId, mint })
   if (context.error) return { error: context.error }
   const control = a2aControlRequestFor({ operation: 'stop', workerId })
   if (control.error) return { error: control.error }
-  const call = a2aSendRequestFor({ endpoint, contextId: context.contextId, request: control.request, token, messageId })
+  const call = a2aSendRequestFor({ endpoint, contextId: context.contextId, request: control.request, token, messageId, protocolVersion })
   if (call.error) return { error: call.error }
   return { ...call, contextId: context.contextId }
 }
@@ -1265,7 +1319,8 @@ export async function stopWorkerOnController({
   timeoutMs = A2A_STOP_TIMEOUT_MS,
   capture,
 } = {}) {
-  const call = a2aStopCallFor({ endpoint, workerId, token, messageId, contextId, mint })
+  const protocolVersion = await fetchControllerProtocolVersion({ endpoint, token, fetchImpl })
+  const call = a2aStopCallFor({ endpoint, workerId, token, messageId, contextId, mint, protocolVersion })
   if (call.error) return { error: call.error }
   // The exact body this call sends, at the send site — what a test (and SC4) diffs to prove the
   // `worker_id` on the wire is the one the caller was given. ⚠️ NEVER THE HEADERS: the controller
@@ -1337,7 +1392,8 @@ export function a2aLiveSessions({ workers, records } = {}) {
 // process's whole life. Aborting a `list` is harmless — it starts nothing on the worker.
 export const A2A_LIST_TIMEOUT_MS = 10_000
 export async function listWorkersOnController({ endpoint, token, messageId, contextId, mint, fetchImpl = fetch, timeoutMs = A2A_LIST_TIMEOUT_MS } = {}) {
-  const call = a2aListCallFor({ endpoint, token, messageId, contextId, mint })
+  const protocolVersion = await fetchControllerProtocolVersion({ endpoint, token, fetchImpl })
+  const call = a2aListCallFor({ endpoint, token, messageId, contextId, mint, protocolVersion })
   if (call.error) return { error: call.error }
 
   let res

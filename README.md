@@ -59,11 +59,13 @@ For a worker whose prompts you intend to answer yourself rather than letting its
 | `scripts/manager-launcher.py` | print the launcher a **manager** session opens on and which rule chose it (`subject` / `claude-sibling` / `vault`) — rule in `docs/fleet-surface.md` § Which launcher a manager opens on |
 | `scripts/drive-ledger.py` | the fleet-drive ledger's **one writer** — `read` normalises the file's two shapes (flat `sid` rows and an `entries` list) to one canonical shape, and `merge` takes **only this round's entries**, so a round cannot shrink the ledger by omission. A corrupt ledger is refused rather than read as empty, and `.bak` is the pre-merge copy |
 | `scripts/manager-predispatch.py` | the **pre-dispatch gate** `/supervisor:goal-drive` and `/supervisor:goal-status` run first — when the tracked tree has not moved it replays the stored table and dispatches **no agent**; a worker dying counts as movement, because session liveness is in the digest |
+| `scripts/resolve-folders.py` | resolve the three folders a subject command reads — `topics_dir`, `goals_dir`, `tasks_dir` — from `vault-cli config list`, matching the session's cwd **or its nearest ancestor**. Prints `TOPICS_DIR\|GOALS_DIR\|TASKS_DIR\|VAULT_NAME` — absolute paths plus the **registered** vault name, never the directory basename — or `UNKNOWN <reason>`; a missing key is reported, never defaulted |
 | `/supervisor:fleet-loop` `/supervisor:fleet-status` | watch every session on the machine; one stateful loop (the **arm**, invoked once), one read-only snapshot |
 | `/supervisor:fleet-drive` | the loop's **round** — one full fleet round, dispatched by `/supervisor:fleet-loop` on every wakeup and runnable by hand: nudge idle sessions with open work and no verified blocker; escalate the rest grouped by cause |
 | `/supervisor:fleet-verify` | read-only: verify the fleet layer's own contract, ending in a numbered fix list |
 | `/supervisor:goal-loop` `/supervisor:goal-status` | watch ONE goal or topic; its task set, its sessions, what is blocked on you |
 | `/supervisor:goal-verify` | read-only: verify ONE goal or topic and suggest fixes, ending in a numbered fix list |
+| `/supervisor:topic-verify` | read-only: verify ONE topic against its own sixteen-row check — eleven disk-backed page-consistency checks, one coverage read and four advisory rows — ending in a numbered fix list. Self-sufficient: it carries the checks itself and resolves the vault's folders from `vault-cli config`, so it needs no vault-local command |
 | `/supervisor:stop` | stand a manager loop down — disarm the model-waking cadence, keep the gate loop and the session |
 | `/supervisor:reset` | re-discover a manager's state from disk — re-resolve the subject, force a full sweep, re-validate the asks ledger without discarding, re-read the tracked set |
 | `/supervisor:worker-drive` | a worker drives its own anchored task to done |
@@ -89,6 +91,19 @@ For a worker whose prompts you intend to answer yourself rather than letting its
 | Manager can steer it | yes — `send_agent_message`, or close the tab | **no** — no `interrupt`, and no channel into an SDK session |
 
 **Choose interactive when you want to see or steer it. Choose headless when you want the manager answering its prompts.** Neither is more capable; the trade is visibility against supervision.
+
+### Where a headless worker's process lives
+
+A headless worker's child process is spawned by **`claude-wrapper`**, not by this server. That is not an implementation detail — it decides who can answer the worker's prompts.
+
+A permission prompt parks with whoever holds the child's stdin. When this server held it, a park was answerable only by this server and died with it; a manager's `answer_permission` reached it only while that process lived. Now the wrapper holds stdin, so a park is released over its REST route — `POST /api/1.0/sessions/{id}/answer` — and the wrapper's session id is what names the target.
+
+Two consequences worth knowing before you spawn:
+
+- **`agent_status` and `list_agents` carry `pending_question`** — the wrapper's own live question record, including the `request_id` that `answer_permission` takes. `wrapper_session_id` sits beside it so a `null` for "not wrapper-backed" is distinguishable from a `null` for "nothing parked" and from an unreadable wrapper. The fleet gate is still `awaiting_input`; `pending_question` is a status field, never a gate.
+- **The policy tier does not run.** `decide()`, the manager allowlist, the carried decision and the 15-minute deny are all gone for these workers, because the wrapper owns the child's single `--permission-prompt-tool` and this server never sees the prompt. A spawn reply carries a `policy_gap` naming each one as not-run; **a successful spawn is not a policed spawn.** Answer parks explicitly with `answer_permission`.
+
+The wrapper is reached at `SUPERVISOR_WRAPPER_URL`, which must be loopback: its API is unauthenticated and a spawn sends it the inherited environment.
 
 ### Setting the fleet default
 

@@ -1,0 +1,807 @@
+"""The 2-round rule, driven as a replay: two rounds, one ledger, a fixture pane.
+
+The load-bearing test is `test_two_round_session_gets_one_pane_read_and_one_nudge`. The
+defect the change exists to remove is a drive leg that marks a row `unverifiable` and does
+nothing for as long as it stays that way -- a build that never reads a pane passes every
+content assertion, so the test counts pane reads and asserts WHICH round they happened in.
+
+The two negative controls run in the same replay, because both fail in a different way:
+a 1-round session that gets acted on means the counter is not consecutive, and a session
+that resets after being verified means a stale count survives a recovery.
+"""
+import importlib.util
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+import io
+
+SCRIPTS = pathlib.Path(__file__).resolve().parent.parent
+SCRIPT = SCRIPTS / "drive-unverifiable.py"
+LEDGER = SCRIPTS / "drive-ledger.py"
+
+_spec = importlib.util.spec_from_file_location("drive_unverifiable", SCRIPT)
+drive_unverifiable = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(drive_unverifiable)
+
+#: The fixture pane for the 2-round session. Deliberately holds TWO closer lines, so
+#: "last" is a real choice rather than the only match, and a status bar below them, so a
+#: positional "last non-empty line" implementation is caught.
+PANE = """\
+  Running the precommit target.
+  ✔ precommit green
+
+  ────────────────────────────────────────
+  👤 You:    approve: start subtask 3
+  ⏵⏵ auto mode on
+"""
+
+
+def entry(sid, verdict, **over):
+    row = {
+        "session_id": sid,
+        "name": "Task %s" % sid,
+        "verdict": verdict,
+        "open_boxes": 2,
+        "probe": "no task file recorded",
+        "nudge": "none",
+        "suppression": "none",
+        "task_file": "",
+        "reprobe_verdict": "",
+        "reprobe_probe": "",
+    }
+    row.update(over)
+    return row
+
+
+class Replay(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.ledger_path = os.path.join(self.tmp, "ledger.json")
+        self._prior = os.environ.get("SUPERVISOR_DRIVE_LEDGER")
+        os.environ["SUPERVISOR_DRIVE_LEDGER"] = self.ledger_path
+
+        def restore():
+            if self._prior is None:
+                os.environ.pop("SUPERVISOR_DRIVE_LEDGER", None)
+            else:
+                os.environ["SUPERVISOR_DRIVE_LEDGER"] = self._prior
+
+        self.addCleanup(restore)
+        self.pane_reads = []
+
+        def pane_for(sid):
+            return {
+                "aaaaaaaa": "700",
+                "bbbbbbbb": "701",
+                "cccccccc": "702",
+                "dddddddd": "703",
+                "eeeeeeee": "704",
+            }.get(sid, "")
+
+        def pane_text(pane):
+            self.pane_reads.append(pane)
+            return PANE
+
+        self.pane_for = pane_for
+        self.pane_text = pane_text
+
+    def merge(self, payload):
+        out = subprocess.run(
+            [sys.executable, str(LEDGER), "merge"],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+
+    def round(self, tag, entries, max_actions=drive_unverifiable.MAX_ACTIONS):
+        ledger, reason = drive_unverifiable.read_ledger()
+        self.assertIsNone(reason)
+        payload = {"round": tag, "entries": entries}
+        acted, held = drive_unverifiable.plan(
+            payload["entries"],
+            ledger,
+            tag,
+            self.pane_for,
+            self.pane_text,
+            lambda pane: "/supervisor:jump %s" % pane,
+            max_actions=max_actions,
+        )
+        self.merge(payload)
+        return acted, drive_unverifiable.render(acted, held, max_actions)
+
+    def ledger_entries(self):
+        ledger, reason = drive_unverifiable.read_ledger()
+        self.assertIsNone(reason)
+        return {row["session_id"]: row for row in ledger["entries"]}
+
+
+class TestTwoRoundRule(Replay):
+    def test_two_round_session_gets_one_pane_read_and_one_nudge(self):
+        # Round 1: aaaa and bbbb unverifiable, cccc verified.
+        _, out1 = self.round(
+            "2026-10-22T10-00-00Z",
+            [
+                entry("aaaaaaaa", "unverifiable"),
+                entry("bbbbbbbb", "unverifiable"),
+                entry("cccccccc", "revive", nudge="drafted"),
+            ],
+        )
+        self.assertEqual(self.pane_reads, [], "round 1 must read no pane")
+        self.assertNotIn("TO: Task aaaaaaaa", out1)
+
+        # Round 2: aaaa still unverifiable (streak 2), bbbb verified (reset), cccc stays verified.
+        acted, out2 = self.round(
+            "2026-10-22T10-15-00Z",
+            [
+                entry("aaaaaaaa", "unverifiable"),
+                entry("bbbbbbbb", "revive", nudge="drafted"),
+                entry("cccccccc", "revive", nudge="drafted"),
+            ],
+        )
+
+        self.assertEqual(self.pane_reads, ["700"], "exactly one pane read, for aaaa only")
+        self.assertEqual(len(acted), 1)
+        self.assertEqual(acted[0][0]["session_id"], "aaaaaaaa")
+        self.assertEqual(acted[0][1]["action"], "nudge")
+
+        # The quoted line is the fixture pane's last closer, verbatim.
+        self.assertIn("👤 You:    approve: start subtask 3", out2)
+        self.assertNotIn("TO: Task bbbbbb", out2)
+        self.assertNotIn("TO: Task cccccc", out2)
+
+        # Negative control: the reset really happened on disk, not just in this round's dict.
+        rows = self.ledger_entries()
+        self.assertEqual(rows["bbbbbbbb"]["unverifiable_streak"], 0)
+        self.assertEqual(rows["bbbbbbbb"]["unverifiable_round"], "")
+        self.assertEqual(rows["cccccccc"]["unverifiable_streak"], 0)
+        self.assertEqual(rows["aaaaaaaa"]["unverifiable_streak"], 2)
+
+    def test_a_gap_resets_the_count_to_one(self):
+        """Round 1 unverifiable, round 2 verified, round 3 unverifiable again -> streak 1.
+
+        This is the control the counter's consecutiveness rests on: without the reset the
+        count would read 2 at round 3 and act on a session that had recovered in between.
+        """
+        self.round("2026-10-22T10-00-00Z", [entry("aaaaaaaa", "unverifiable")])
+        self.round("2026-10-22T10-15-00Z", [entry("aaaaaaaa", "revive")])
+        acted, _ = self.round("2026-10-22T10-30-00Z", [entry("aaaaaaaa", "unverifiable")])
+        self.assertEqual(acted, [])
+        self.assertEqual(self.pane_reads, [])
+        self.assertEqual(self.ledger_entries()["aaaaaaaa"]["unverifiable_streak"], 1)
+
+    def test_acts_once_at_two_and_never_again(self):
+        """A session silent for four rounds gets one action, not three.
+
+        The ledger's whole suppression philosophy: a re-nudge every round is the nag it
+        exists to prevent.
+        """
+        for tag in ("2026-10-22T10-00-00Z", "2026-10-22T10-15-00Z"):
+            self.round(tag, [entry("aaaaaaaa", "unverifiable")])
+        acted, _ = self.round("2026-10-22T10-30-00Z", [entry("aaaaaaaa", "unverifiable")])
+        self.assertEqual(acted, [])
+        self.assertEqual(self.ledger_entries()["aaaaaaaa"]["unverifiable_streak"], 3)
+
+
+class TestActionChoice(Replay):
+    def test_unreadable_pane_escalates(self):
+        self.round("2026-10-22T10-00-00Z", [entry("aaaaaaaa", "unverifiable")])
+        ledger, _ = drive_unverifiable.read_ledger()
+        payload = {"round": "2026-10-22T10-15-00Z", "entries": [entry("aaaaaaaa", "unverifiable")]}
+        acted, _ = drive_unverifiable.plan(
+            payload["entries"],
+            ledger,
+            payload["round"],
+            self.pane_for,
+            lambda pane: None,
+            lambda pane: "/supervisor:jump %s" % pane,
+        )
+        self.assertEqual(acted[0][1]["action"], "escalation")
+        self.assertIn("unreadable", acted[0][1]["pane_line"])
+        self.assertIn("Unverifiable for 2 consecutive rounds", acted[0][1]["text"])
+
+    def test_pane_without_a_closer_escalates(self):
+        self.round("2026-10-22T10-00-00Z", [entry("aaaaaaaa", "unverifiable")])
+        ledger, _ = drive_unverifiable.read_ledger()
+        payload = {"round": "2026-10-22T10-15-00Z", "entries": [entry("aaaaaaaa", "unverifiable")]}
+        acted, _ = drive_unverifiable.plan(
+            payload["entries"],
+            ledger,
+            payload["round"],
+            self.pane_for,
+            lambda pane: "  ⏵⏵ auto mode on\n",
+            lambda pane: "/supervisor:jump %s" % pane,
+        )
+        self.assertEqual(acted[0][1]["action"], "escalation")
+        self.assertIn("no closer line", acted[0][1]["pane_line"])
+
+    def test_no_pane_resolves_is_an_observation_not_a_card(self):
+        """A session with no pane is gone, not silent: name it, card nobody, charge nobody.
+
+        Measured 2026-10-22: 102 of 114 unverifiable rows resolved no pane, so a card for
+        each was a card the operator could not act on. The row is still REPORTED -- the
+        block names it -- but it is not an escalation, and its marker goes to
+        `unverifiable_observation`, never `unverifiable_action` (which `drive-share.py`
+        counts as an action taken and would put in the numerator).
+        """
+        self.round("2026-10-22T10-00-00Z", [entry("aaaaaaaa", "unverifiable")])
+        ledger, _ = drive_unverifiable.read_ledger()
+        payload = {"round": "2026-10-22T10-15-00Z", "entries": [entry("aaaaaaaa", "unverifiable")]}
+        acted, _ = drive_unverifiable.plan(
+            payload["entries"],
+            ledger,
+            payload["round"],
+            lambda sid: "",
+            self.pane_text,
+            lambda pane: "",
+        )
+        self.merge(payload)
+        self.assertEqual(len(acted), 1)
+        self.assertEqual(acted[0][1]["action"], "observation")
+        self.assertEqual(acted[0][1]["text"], "", "an observation carries no card payload")
+        self.assertEqual(self.pane_reads, [], "no pane means no text read")
+
+        out = drive_unverifiable.render(acted)
+        self.assertIn("not actioned: no card, no cap slot", out)
+        self.assertIn("(none)", out.split("UNVERIFIABLE NUDGES", 1)[1])
+        self.assertIn("(none)", out.split("UNVERIFIABLE ESCALATIONS", 1)[1])
+
+        row = self.ledger_entries()["aaaaaaaa"]
+        self.assertEqual(row["unverifiable_observation"], "observation")
+        self.assertEqual(row["unverifiable_action"], "", "an observation is not an action")
+
+    def test_a_pane_less_row_does_not_consume_a_cap_slot(self):
+        """The cap binds, and the pane-less row is not inside it.
+
+        SC1's anti-vacuity guard: the cap is set BELOW the number of candidates, so a
+        build that charges the pane-less row would leave a resolving row held back. With
+        two pane-less and three resolving rows at streak 2 and a cap of 2, both pane-less
+        rows are observed, both cap slots go to resolving rows, and exactly one resolving
+        row is held.
+        """
+        sids = ("aaaaaaaa", "bbbbbbbb", "cccccccc", "ffffffff", "99999999")
+        self.round("2026-10-22T10-00-00Z", [entry(s, "unverifiable") for s in sids])
+        acted, out = self.round(
+            "2026-10-22T10-15-00Z",
+            [entry(s, "unverifiable") for s in sids],
+            max_actions=2,
+        )
+        by_action = {}
+        for row_entry, decision in acted:
+            by_action.setdefault(decision["action"], []).append(row_entry["session_id"])
+        self.assertEqual(
+            sorted(by_action.get("observation", [])),
+            ["99999999", "ffffffff"],
+            "both pane-less rows are observed",
+        )
+        self.assertEqual(
+            len(by_action.get("nudge", [])),
+            2,
+            "the cap is fully spent on pane-resolving rows",
+        )
+        self.assertEqual(len(self.pane_reads), 2, "one text read per acted resolving row")
+
+        tail = out.split("UNVERIFIABLE HELD BACK", 1)
+        self.assertEqual(len(tail), 2, "one resolving row is held back")
+        held_lines = [line for line in tail[1].splitlines() if line.startswith("  ")]
+        self.assertEqual(len(held_lines), 1)
+        self.assertNotIn("99999999", tail[1], "an observation is never held back")
+        self.assertNotIn("ffffffff", tail[1], "an observation is never held back")
+
+    def test_an_observed_row_is_not_observed_again_next_round(self):
+        """The observation marker suppresses the repeat, like the action marker does."""
+        sids = ("ffffffff",)
+        self.round("2026-10-22T10-00-00Z", [entry(s, "unverifiable") for s in sids])
+        acted, _ = self.round("2026-10-22T10-15-00Z", [entry(s, "unverifiable") for s in sids])
+        self.assertEqual([d["action"] for _, d in acted], ["observation"])
+        acted, _ = self.round("2026-10-22T10-30-00Z", [entry(s, "unverifiable") for s in sids])
+        self.assertEqual(acted, [], "the second round must not re-observe")
+        self.assertEqual(
+            self.ledger_entries()["ffffffff"]["unverifiable_streak"],
+            3,
+            "the streak keeps advancing behind the observation",
+        )
+
+    def test_an_observed_row_still_acts_once_its_pane_resolves(self):
+        """An observation took no action, so it must not spend the row's one action.
+
+        The observation marker stops a REPEAT observation only. A row that was pane-less
+        and later resolves a pane is a session the manager can finally read, so it gets its
+        nudge -- the action marker, not the observation marker, is what bounds that to once.
+        """
+        sids = ("ffffffff",)
+        self.round("2026-10-22T10-00-00Z", [entry(s, "unverifiable") for s in sids])
+        acted, _ = self.round("2026-10-22T10-15-00Z", [entry(s, "unverifiable") for s in sids])
+        self.assertEqual([d["action"] for _, d in acted], ["observation"])
+        self.assertEqual(self.pane_reads, [])
+
+        # The pane now resolves: the row acts.
+        self.pane_for = lambda sid: "705" if sid == "ffffffff" else ""
+        acted, _ = self.round("2026-10-22T10-30-00Z", [entry(s, "unverifiable") for s in sids])
+        self.assertEqual([d["action"] for _, d in acted], ["nudge"])
+        self.assertEqual(self.pane_reads, ["705"], "exactly one text read, on the acting round")
+        self.assertEqual(
+            self.ledger_entries()["ffffffff"]["unverifiable_action"], "nudge"
+        )
+
+
+class TestCloserExtraction(unittest.TestCase):
+    def test_last_closer_wins_and_a_mid_line_quote_does_not_match(self):
+        text = (
+            "  pick — 1. X · 2. Y\n"
+            "  The task page says `👤 You: nothing` in prose.\n"
+            "  approve: start subtask 3\n"
+            "  ⏵⏵ auto mode on\n"
+        )
+        self.assertEqual(drive_unverifiable.last_closer(text), "approve: start subtask 3")
+
+    def test_no_closer(self):
+        self.assertEqual(drive_unverifiable.last_closer("nothing here\n"), "")
+
+
+class TestLedgerFields(unittest.TestCase):
+    def test_merge_refuses_a_non_int_streak(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        prior = os.environ.get("SUPERVISOR_DRIVE_LEDGER")
+        os.environ["SUPERVISOR_DRIVE_LEDGER"] = os.path.join(tmp, "ledger.json")
+
+        def restore():
+            if prior is None:
+                os.environ.pop("SUPERVISOR_DRIVE_LEDGER", None)
+            else:
+                os.environ["SUPERVISOR_DRIVE_LEDGER"] = prior
+
+        self.addCleanup(restore)
+        payload = {
+            "round": "2026-10-22T10-00-00Z",
+            "entries": [dict(entry("aaaaaaaa", "unverifiable"), unverifiable_streak="two")],
+        }
+        out = subprocess.run(
+            [sys.executable, str(LEDGER), "merge"],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(out.returncode, 2, out.stdout)
+        self.assertIn("unverifiable_streak", out.stderr)
+        self.assertFalse(os.path.exists(os.environ["SUPERVISOR_DRIVE_LEDGER"]))
+
+
+class TestHandleCommand(unittest.TestCase):
+    def test_handle_writes_the_patched_entries_and_renders(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        prior = os.environ.get("SUPERVISOR_DRIVE_LEDGER")
+        os.environ["SUPERVISOR_DRIVE_LEDGER"] = os.path.join(tmp, "ledger.json")
+
+        def restore():
+            if prior is None:
+                os.environ.pop("SUPERVISOR_DRIVE_LEDGER", None)
+            else:
+                os.environ["SUPERVISOR_DRIVE_LEDGER"] = prior
+
+        self.addCleanup(restore)
+        entries_path = os.path.join(tmp, "round.json")
+        out_path = os.path.join(tmp, "patched.json")
+        with open(entries_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "round": "2026-10-22T10-00-00Z",
+                    "entries": [entry("aaaaaaaa", "unverifiable")],
+                },
+                handle,
+            )
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = drive_unverifiable.main(
+                [
+                    "handle",
+                    "--entries",
+                    entries_path,
+                    "--json-out",
+                    out_path,
+                ]
+            )
+        self.assertEqual(rc, 0)
+        self.assertIn("UNVERIFIABLE —", buf.getvalue())
+        with open(out_path, encoding="utf-8") as handle:
+            patched = json.load(handle)
+        self.assertEqual(patched["entries"][0]["unverifiable_streak"], 1)
+        self.assertEqual(patched["entries"][0]["unverifiable_round"], "2026-10-22T10-00-00Z")
+
+
+class TestPerRoundCap(Replay):
+    """The cap: at most N rows act per round, and the rest are named, not dropped."""
+
+    SIDS = ("aaaaaaaa", "bbbbbbbb", "cccccccc", "dddddddd", "eeeeeeee")
+
+    def seed_streak_one(self):
+        self.round(
+            "2026-10-22T10-00-00Z",
+            [entry(sid, "unverifiable") for sid in self.SIDS],
+        )
+        self.assertEqual(self.pane_reads, [], "round 1 must act on nothing")
+
+    def test_cap_acts_on_n_and_names_the_rest(self):
+        self.seed_streak_one()
+        acted, out = self.round(
+            "2026-10-22T10-15-00Z",
+            [entry(sid, "unverifiable") for sid in self.SIDS],
+            max_actions=2,
+        )
+        self.assertEqual(len(acted), 2, "exactly the cap acts")
+        self.assertEqual(len(self.pane_reads), 2, "one pane read per acted row, no more")
+        self.assertIn("UNVERIFIABLE HELD BACK", out)
+        tail = out.split("UNVERIFIABLE HELD BACK", 1)[1]
+        held_lines = [line for line in tail.splitlines() if line.startswith("  ")]
+        self.assertEqual(len(held_lines), 3, "every held-back row is named")
+
+    def test_held_back_row_still_acts_on_a_later_round(self):
+        """The design point: a held row's streak keeps advancing past 2.
+
+        An `== 2` trigger would never match it again and it would be acted on never. The
+        action marker, not the count, is what stops a repeat.
+        """
+        self.seed_streak_one()
+        self.round(
+            "2026-10-22T10-15-00Z",
+            [entry(sid, "unverifiable") for sid in self.SIDS],
+            max_actions=2,
+        )
+        # Round 3, uncapped: the three held rows are now at streak 3 and act; the two
+        # already acted on do not act again.
+        acted, _ = self.round(
+            "2026-10-22T10-30-00Z",
+            [entry(sid, "unverifiable") for sid in self.SIDS],
+            max_actions=10,
+        )
+        self.assertEqual(len(acted), 3, "the held-back three act now, the acted-on two do not")
+        acted_sids = {row[0]["session_id"] for row in acted}
+        rows = self.ledger_entries()
+        already = {sid for sid in self.SIDS if rows[sid]["unverifiable_action"]} - acted_sids
+        self.assertEqual(len(already), 2)
+        for sid in acted_sids:
+            self.assertIn(rows[sid]["unverifiable_action"], ("nudge", "escalation"))
+            self.assertEqual(rows[sid]["unverifiable_streak"], 3)
+
+    def test_an_acted_row_never_acts_again_while_it_stays_unverifiable(self):
+        self.seed_streak_one()
+        self.round("2026-10-22T10-15-00Z", [entry("aaaaaaaa", "unverifiable")])
+        self.assertEqual(len(self.pane_reads), 1)
+        acted, _ = self.round("2026-10-22T10-30-00Z", [entry("aaaaaaaa", "unverifiable")])
+        self.assertEqual(acted, [])
+        self.assertEqual(len(self.pane_reads), 1, "no second pane read")
+
+    def test_recovery_clears_the_marker_so_a_later_silence_acts_again(self):
+        self.seed_streak_one()
+        self.round("2026-10-22T10-15-00Z", [entry("aaaaaaaa", "unverifiable")])
+        self.round("2026-10-22T10-30-00Z", [entry("aaaaaaaa", "revive")])
+        self.assertEqual(self.ledger_entries()["aaaaaaaa"]["unverifiable_action"], "")
+        # Two more silent rounds reach the threshold again and act a second time.
+        self.round("2026-10-22T10-45-00Z", [entry("aaaaaaaa", "unverifiable")])
+        self.round("2026-10-22T11-00-00Z", [entry("aaaaaaaa", "unverifiable")])
+        self.assertEqual(len(self.pane_reads), 2, "acted once before and once after recovery")
+
+
+    def test_the_block_reports_the_effective_cap_not_the_default(self):
+        """The header must name the cap that ran, or it lies about what happened."""
+        self.seed_streak_one()
+        _, out = self.round(
+            "2026-10-22T10-15-00Z",
+            [entry(sid, "unverifiable") for sid in self.SIDS],
+            max_actions=2,
+        )
+        self.assertIn("per-round cap of 2", out)
+        self.assertNotIn("per-round cap of 3", out)
+
+    def test_an_acted_row_reports_its_own_streak_not_the_threshold(self):
+        """A row held back and acted at streak 3 must not be told it waited 2 rounds."""
+        self.seed_streak_one()
+        self.round(
+            "2026-10-22T10-15-00Z",
+            [entry(sid, "unverifiable") for sid in self.SIDS],
+            max_actions=2,
+        )
+        acted, out = self.round(
+            "2026-10-22T10-30-00Z",
+            [entry(sid, "unverifiable") for sid in self.SIDS],
+            max_actions=10,
+        )
+        self.assertEqual(len(acted), 3)
+        self.assertIn("streak 3", out)
+        self.assertIn("unverifiable for 3 consecutive rounds", out)
+
+
+class TestEmptyRound(unittest.TestCase):
+    """SC2: a round with nothing unverifiable says so explicitly, never by omission.
+
+    Without this the two readings are identical -- "no block" and "nothing found" -- which
+    is the false negative the round-`T1358` defect produced.
+    """
+
+    def test_an_empty_round_renders_every_block_with_an_explicit_none(self):
+        out = drive_unverifiable.render([], [])
+        for heading in (
+            "UNVERIFIABLE —",
+            "UNVERIFIABLE NUDGES —",
+            "UNVERIFIABLE ESCALATIONS —",
+        ):
+            self.assertIn(heading, out, "the block heading must render even with zero rows")
+        self.assertEqual(out.count("  (none)"), 3, out)
+        self.assertNotIn("UNVERIFIABLE HELD BACK", out, "no held rows when nothing reached the cap")
+
+
+class TestDigestMirror(unittest.TestCase):
+    """The block reaches BOTH of the round's artifacts, and a re-run does not stack copies."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.digest = os.path.join(self.tmp, "round.digest")
+        with open(self.digest, "w", encoding="utf-8") as handle:
+            handle.write(
+                "DIGEST 20261029T135800Z · 1 sessions · snapshot written: 2026-10-29T13:58:00Z\n"
+                "CLASSIFICATION  1 classified · progressing=0 · stalled=0 · parked=0 · finished=0\n"
+                "  Task aaaaaaaa [aaaaaaaa] · idle · 12m · parked · Task aaaaaaaa.md · 2\n"
+                "BLOCKED (feed, raised — not verified open)\n  (none)\n"
+            )
+
+    def test_the_mirror_lands_inside_the_markers(self):
+        block = drive_unverifiable.render([], [])
+        self.assertTrue(drive_unverifiable.write_digest(self.digest, block))
+        with open(self.digest, encoding="utf-8") as handle:
+            body = handle.read()
+        self.assertIn(drive_unverifiable.DIGEST_BEGIN, body)
+        self.assertIn(drive_unverifiable.DIGEST_END, body)
+        self.assertIn("UNVERIFIABLE ESCALATIONS —", body)
+        mirrored = body.split(drive_unverifiable.DIGEST_BEGIN, 1)[1].split(
+            drive_unverifiable.DIGEST_END, 1
+        )[0]
+        self.assertEqual(mirrored.strip(), block.strip())
+
+    def test_a_re_run_replaces_the_mirror_rather_than_stacking_it(self):
+        drive_unverifiable.write_digest(self.digest, "UNVERIFIABLE — first\n  (none)")
+        drive_unverifiable.write_digest(self.digest, "UNVERIFIABLE — second\n  (none)")
+        with open(self.digest, encoding="utf-8") as handle:
+            body = handle.read()
+        self.assertEqual(body.count(drive_unverifiable.DIGEST_BEGIN), 1)
+        self.assertIn("UNVERIFIABLE — second", body)
+        self.assertNotIn("UNVERIFIABLE — first", body)
+
+    def test_a_two_pair_digest_collapses_to_one(self):
+        """A digest that already carries two mirrors must end with exactly one.
+
+        `strip_mirror` removing only the FIRST pair kept the stale one; the gate reads the
+        first pair, so every later round would compare a stale digest block against a fresh
+        `.drive` and fail permanently. Found in review on PR #544.
+        """
+        with open(self.digest, "w", encoding="utf-8") as handle:
+            handle.write(
+                "DIGEST x\n"
+                + drive_unverifiable.DIGEST_BEGIN
+                + "\nUNVERIFIABLE — stale one\n  (none)\n"
+                + drive_unverifiable.DIGEST_END
+                + "\n"
+                + drive_unverifiable.DIGEST_BEGIN
+                + "\nUNVERIFIABLE — stale two\n  (none)\n"
+                + drive_unverifiable.DIGEST_END
+                + "\n"
+            )
+        self.assertTrue(drive_unverifiable.write_digest(self.digest, "UNVERIFIABLE — fresh\n  (none)"))
+        with open(self.digest, encoding="utf-8") as handle:
+            body = handle.read()
+        self.assertEqual(body.count(drive_unverifiable.DIGEST_BEGIN), 1)
+        self.assertIn("UNVERIFIABLE — fresh", body)
+        self.assertNotIn("stale", body)
+
+    def test_a_missing_digest_raises_so_the_round_fails_loudly(self):
+        """A lost mirror must not be a stderr line and exit 0.
+
+        The block is printed to stdout before the mirror is attempted, so raising here
+        costs nothing the agent needs -- and it is what makes `handle` exit
+        `MIRROR_FAILED` so the round says `unverifiable: mirror failed` instead of reading
+        a lost digest mirror as a quiet round.
+        """
+        missing = os.path.join(self.tmp, "absent.digest")
+        with self.assertRaises(OSError):
+            drive_unverifiable.write_digest(missing, "UNVERIFIABLE — x\n  (none)")
+
+    def test_handle_exits_mirror_failed_when_the_digest_cannot_be_written(self):
+        entries = os.path.join(self.tmp, "round.json")
+        with open(entries, "w", encoding="utf-8") as handle:
+            json.dump({"round": "2026-10-29T14-00-00Z", "entries": []}, handle)
+        missing = os.path.join(self.tmp, "absent.digest")
+        buf = io.StringIO()
+        err = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(err):
+            rc = drive_unverifiable.main(
+                ["handle", "--entries", entries, "--json-out", entries, "--digest", missing]
+            )
+        self.assertEqual(rc, drive_unverifiable.MIRROR_FAILED)
+        self.assertIn("UNVERIFIABLE ESCALATIONS —", buf.getvalue(), "the block still printed")
+        self.assertIn("digest not mirrored", err.getvalue())
+
+
+class TestFixtureRound(unittest.TestCase):
+    """SC1: a controllable fixture round, never a wait on live fleet state.
+
+    One session at the script's own THRESHOLD streak, a pane that resolves and renders no
+    closer (the escalation branch), driven through `handle` twice. The fixture asserts the
+    block reaches BOTH artifacts and that `check-drive-unverifiable-paste.py --digest
+    --drive` passes on the pair -- the same gate the round runs.
+    """
+
+    SID = "aaaaaaaa"
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.prior_ledger = os.environ.get("SUPERVISOR_DRIVE_LEDGER")
+        os.environ["SUPERVISOR_DRIVE_LEDGER"] = os.path.join(self.tmp, "ledger.json")
+
+        def restore():
+            if self.prior_ledger is None:
+                os.environ.pop("SUPERVISOR_DRIVE_LEDGER", None)
+            else:
+                os.environ["SUPERVISOR_DRIVE_LEDGER"] = self.prior_ledger
+
+        self.addCleanup(restore)
+        # The fixture's panes: one resolves, renders no closer -> escalation.
+        self._saved = (
+            drive_unverifiable.resolve_pane,
+            drive_unverifiable.pane_text,
+            drive_unverifiable.render_link,
+        )
+        drive_unverifiable.resolve_pane = lambda sid: "700" if sid == self.SID else ""
+        drive_unverifiable.pane_text = lambda pane: "  ⏵⏵ auto mode on\n"
+        drive_unverifiable.render_link = lambda pane: "/supervisor:jump %s" % pane
+
+        def restore_seams():
+            (
+                drive_unverifiable.resolve_pane,
+                drive_unverifiable.pane_text,
+                drive_unverifiable.render_link,
+            ) = self._saved
+
+        self.addCleanup(restore_seams)
+        self.digest = os.path.join(self.tmp, "20261029T135800Z.digest")
+        with open(self.digest, "w", encoding="utf-8") as handle:
+            handle.write(
+                "DIGEST 20261029T135800Z · 1 sessions · snapshot written: 2026-10-29T13:58:00Z\n"
+                "CLASSIFICATION  1 classified · progressing=0 · stalled=0 · parked=1 · finished=0\n"
+                "  Task aaaaaaaa [aaaaaaaa] · idle · 12m · parked · Task aaaaaaaa.md · 2\n"
+                "BLOCKED (feed, raised — not verified open)\n  (none)\n"
+            )
+        self.entries = os.path.join(self.tmp, "round.json")
+
+    def run_handle(self, tag, entries):
+        with open(self.entries, "w", encoding="utf-8") as handle:
+            json.dump({"round": tag, "entries": entries}, handle)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = drive_unverifiable.main(
+                [
+                    "handle",
+                    "--entries",
+                    self.entries,
+                    "--json-out",
+                    self.entries,
+                    "--digest",
+                    self.digest,
+                ]
+            )
+        self.assertEqual(rc, 0)
+        # `handle` advances the streak in the payload; step 7 is what persists it. The
+        # fixture runs both halves, or round 2 would see the same streak-1 ledger and act
+        # on nothing -- the replay's own merge does the same thing.
+        with open(self.entries, encoding="utf-8") as handle:
+            patched = json.load(handle)
+        merged = subprocess.run(
+            [sys.executable, str(LEDGER), "merge"],
+            input=json.dumps(patched),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(merged.returncode, 0, merged.stderr)
+        return buf.getvalue()
+
+    def test_the_fixture_round_carries_the_block_in_both_artifacts(self):
+        # Round 1: streak 1, nothing acts, the digest still carries the explicit `(none)`.
+        out1 = self.run_handle("2026-10-29T13-43-00Z", [entry(self.SID, "unverifiable")])
+        self.assertIn("UNVERIFIABLE ESCALATIONS —", out1)
+        self.assertIn("(none)", out1.split("UNVERIFIABLE ESCALATIONS", 1)[1])
+
+        # Round 2: streak 2, the pane resolves and renders no closer -> escalation.
+        out2 = self.run_handle("2026-10-29T13-58-00Z", [entry(self.SID, "unverifiable")])
+        self.assertIn("streak 2", out2)
+        self.assertIn("escalation", out2)
+        self.assertIn("UNVERIFIABLE ESCALATIONS —", out2)
+
+        # The agent pastes the script's block VERBATIM into the payload -- so the fixture's
+        # `.drive` carries exactly what `handle` printed, which is what the gate compares.
+        block = out2
+        drive = os.path.join(self.tmp, "20261029T135800Z.drive")
+        with open(drive, "w", encoding="utf-8") as handle:
+            handle.write(
+                "fleet-drive — 1 candidates (0 retained from the ledger) · 0 finished (reaped) "
+                "· 0 revive (0 routine continue) · 0 blocked · 1 unverifiable\n"
+                "ESCALATION — grouped by cause\n"
+                "  unverifiable for 2 or more consecutive rounds\n"
+                "    Task aaaaaaaa [aaaaaaaa] · pane 700 · /supervisor:jump 700\n"
+                + block
+                + "\nREAPS\n  (none)\nNUDGES\n  (none)\n"
+            )
+
+        with open(self.digest, encoding="utf-8") as handle:
+            digest_body = handle.read()
+        with open(drive, encoding="utf-8") as handle:
+            drive_body = handle.read()
+        self.assertGreater(digest_body.count("UNVERIFIABLE"), 0, "the .digest carries no block")
+        self.assertGreater(drive_body.count("UNVERIFIABLE"), 0, "the .drive carries no block")
+
+        gate = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / "check-drive-unverifiable-paste.py"),
+                "--digest",
+                self.digest,
+                "--drive",
+                drive,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(gate.returncode, 0, gate.stderr + gate.stdout)
+
+
+class TestDuplicateEntries(Replay):
+    """A session can arrive twice: it is in step 0's retained set AND the digest's candidates.
+
+    Two entries for one session cost two pane reads and two identical nudge lines -- and,
+    worse, `drive-ledger.py merge` REFUSES a payload carrying a session twice, so the whole
+    round's ledger write would be lost. Measured 2026-10-22T13:15Z: two sessions' nudge
+    lines appeared twice in one round's stdout block.
+    """
+
+    def test_a_session_arriving_twice_acts_once_and_merges(self):
+        # The merge inside self.round() asserts exit 0 -- with a duplicate entry and no
+        # dedupe it would refuse, so this test fails on the ledger write, not just a line.
+        self.round(
+            "2026-10-22T10-00-00Z",
+            [entry("aaaaaaaa", "unverifiable"), entry("aaaaaaaa", "unverifiable")],
+        )
+        self.assertEqual(list(self.ledger_entries()), ["aaaaaaaa"])
+        acted, out = self.round(
+            "2026-10-22T10-15-00Z",
+            [entry("aaaaaaaa", "unverifiable"), entry("aaaaaaaa", "unverifiable")],
+        )
+        self.assertEqual(len(acted), 1, "one action for one session")
+        self.assertEqual(self.pane_reads, ["700"], "one pane read, not two")
+        self.assertEqual(out.count("TO: Task aaaaaaaa"), 1, "one nudge line, not two")
+
+    def test_the_merged_copy_keeps_step_zeros_reprobe_key(self):
+        """The digest copy can precede the retained one; the reprobe_* pair must survive.
+
+        Losing it makes the row re-signal PARKED on the next round, because step 0's dedup
+        key is that pair and an entry written without it reads as a first observation.
+        """
+        digest_copy = entry("aaaaaaaa", "unverifiable")
+        retained_copy = entry(
+            "aaaaaaaa", "unverifiable", reprobe_verdict="needs-step-4", reprobe_probe="stub"
+        )
+        self.round("2026-10-22T10-00-00Z", [digest_copy, retained_copy])
+        row = self.ledger_entries()["aaaaaaaa"]
+        self.assertEqual(row["reprobe_verdict"], "needs-step-4")
+        self.assertEqual(row["reprobe_probe"], "stub")
+
+
+if __name__ == "__main__":
+    unittest.main()

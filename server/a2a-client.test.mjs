@@ -372,6 +372,35 @@ test('every field the controller validates is required, and a missing one refuse
   assert.match(a2aSendRequestFor({ ...CALL, request: null }).error, /non-null object/)
 })
 
+// ⚠️ The controller moved to a2a-go v2.7.0 at v0.17.0, where an ABSENT version header defaults to
+// "0.3" and is refused — every control call, `create` included, answered `-32009 … requested
+// "0.3", served "1.0"` (measured 2026-10-22). So the version the controller advertises has to
+// reach the wire on THIS plane too, not only on the turn plane.
+test('the control call carries the version the controller advertises', () => {
+  const { headers } = a2aSendRequestFor({
+    endpoint: 'http://localhost:8080/a2a',
+    contextId: 'ctx-1',
+    request: { operation: 'create', task: 't' },
+    token: 'not-a-real-token',
+    messageId: 'msg-1',
+    protocolVersion: '1.0',
+  })
+  assert.equal(headers['a2a-version'], '1.0')
+})
+
+test('the control call sends no version header when the card named none', () => {
+  // The pre-negotiation behaviour, and what a controller with no version check at all still
+  // accepts — so a failed or versionless card read degrades rather than breaks.
+  const { headers } = a2aSendRequestFor({
+    endpoint: 'http://localhost:8080/a2a',
+    contextId: 'ctx-1',
+    request: { operation: 'list' },
+    token: 'not-a-real-token',
+    messageId: 'msg-1',
+  })
+  assert.equal(headers['a2a-version'], undefined)
+})
+
 // --- the controller-facing half: the reply ---------------------------------------------------
 
 const CONTROL_REPLY = (response) => ({
@@ -673,4 +702,73 @@ test('list and stop refuse a declaration rather than dropping it', () => {
 test('declaredCreateArguments returns an empty declaration rather than undefined keys', () => {
   assert.deepEqual(declaredCreateArguments({}), { declared: {} })
   assert.deepEqual(declaredCreateArguments({ mounts: [], secrets: [] }), { declared: {} })
+})
+
+// --- the negotiated protocol version ---------------------------------------------------------
+//
+// ⚠️ AN ABSENT `A2A-Version` HEADER IS NOT "NO VERSION" — IT IS `0.3`. Measured 2026-10-22
+// against a2a-go v2.7.0 (`a2asrv/intercepted_handler.go` `checkProtocolVersion`): a request
+// carrying none has its client version defaulted to `"0.3"` and is refused with
+// `-32009 … requested "0.3", served "1.0"` by any service serving 1.0 — inside a well-formed
+// HTTP 200 envelope, so every transport check passes while nothing ran.
+//
+// These cases pin BOTH directions, because only the pair rules out the two ways to get it wrong:
+// a hardcoded `"1.0"` (which breaks the first peer serving anything else) and a hardcoded
+// `"0.3"` (which is today's defect, written down deliberately).
+
+test("the endpoint carries the card's protocolVersion beside its url", () => {
+  const card = {
+    supportedInterfaces: [{ url: 'http://localhost:9091/a2a', protocolVersion: '1.0' }],
+  }
+  assert.deepEqual(resolveA2AEndpoint(card), {
+    url: 'http://localhost:9091/a2a',
+    protocolVersion: '1.0',
+  })
+})
+
+test('a card naming no protocolVersion yields no version — never a default', () => {
+  const card = { supportedInterfaces: [{ url: 'http://localhost:9091/a2a' }] }
+  const resolved = resolveA2AEndpoint(card)
+  assert.equal(resolved.url, 'http://localhost:9091/a2a')
+  assert.equal('protocolVersion' in resolved, false, 'an absent version must stay absent, not default to 0.3')
+})
+
+test('the turn sends the negotiated version, not a constant', () => {
+  const call = a2aStreamRequestFor({ ...REQUEST, protocolVersion: '0.3' })
+  assert.equal(call.headers['a2a-version'], '0.3')
+})
+
+test('the turn sends no A2A-Version header when the card named none', () => {
+  const call = a2aStreamRequestFor({ ...REQUEST })
+  assert.equal('a2a-version' in call.headers, false)
+})
+
+test('both push-config calls carry the same negotiated version as the turn', () => {
+  // ⚠️ These reach the worker's own JSONRPC handler and run the same version gate, so omitting
+  // the header here refuses the registration with the identical -32009 while the turn succeeds.
+  // The symptom is silent rather than loud: the status channel never carries anything.
+  const push = { url: 'https://receiver.example/hook', token: 'push-token' }
+  const created = a2aPushConfigCallFor({
+    endpoint: REQUEST.endpoint,
+    taskId: 'task-1',
+    push,
+    token: REQUEST.token,
+    protocolVersion: '0.3',
+  })
+  const listed = a2aPushConfigListCallFor({
+    endpoint: REQUEST.endpoint,
+    taskId: 'task-1',
+    token: REQUEST.token,
+    protocolVersion: '0.3',
+  })
+  assert.equal(created.headers['a2a-version'], '0.3')
+  assert.equal(listed.headers['a2a-version'], '0.3')
+})
+
+test('both push-config calls send no A2A-Version header when none was negotiated', () => {
+  const push = { url: 'https://receiver.example/hook', token: 'push-token' }
+  const created = a2aPushConfigCallFor({ endpoint: REQUEST.endpoint, taskId: 'task-1', push, token: REQUEST.token })
+  const listed = a2aPushConfigListCallFor({ endpoint: REQUEST.endpoint, taskId: 'task-1', token: REQUEST.token })
+  assert.equal('a2a-version' in created.headers, false)
+  assert.equal('a2a-version' in listed.headers, false)
 })

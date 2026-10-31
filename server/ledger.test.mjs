@@ -311,3 +311,24 @@ test('an adopted stop carries only the stop field, because the merge is the stor
   assert.deepEqual(stoppedPatch({ at: '2026-10-17T14:05:00.000Z' }), { stopped_at: '2026-10-17T14:05:00.000Z' })
   assert.deepEqual(Object.keys(stoppedPatch()), ['stopped_at'])
 })
+
+// ── wrapper_session_id: persisted because nothing else can recover it ────────────────────────
+// The wrapper is the only holder of a wrapper-backed worker's parked prompt. A server that
+// restarts and loses this id can neither report the park (`pending_question`) nor answer it
+// (`answer_permission`), so a genuinely parked worker would read as "not parked" for the rest
+// of its life — the exact false negative this path exists to remove.
+test('a wrapper-backed spawn persists its wrapper session id', () => {
+  const record = spawnRecord({ wrapperSessionId: 'w-1' })
+  assert.equal(record.wrapper_session_id, 'w-1')
+  // Absence means "not wrapper-backed", the same absence-means-default the sibling fields use.
+  assert.equal(spawnRecord().wrapper_session_id, null)
+})
+
+test('the wrapper session id survives a completion patch', () => {
+  // The patch arrives minutes later from a call site that never saw the spawn edge, so a merge
+  // that dropped this field would lose the only route back to the wrapper at the moment the
+  // worker's outcome is recorded.
+  const merged = mergeRecord(spawnRecord({ wrapperSessionId: 'w-1' }), { status: 'done', result: 'ok' })
+  assert.equal(merged.wrapper_session_id, 'w-1')
+  assert.equal(merged.status, 'done')
+})

@@ -1,0 +1,1751 @@
+#!/usr/bin/env python3
+"""Tests for scripts/incident-ledger.py.
+
+The property this file exists to protect: **an incident closes on a verified resume,
+never on a card close.** Everything else here is in service of that one rule, because
+the defect it replaces is silent -- a blocker whose card was cleared read as resolved
+while the worker sat frozen, and nothing anywhere recorded the difference.
+
+Three things are load-bearing, and each is a way the suite could be plausibly wrong:
+
+- **The unanswered-but-answered case.** `test_answered_but_not_resumed_counts_in_
+  denominator_only` is the whole point: an incident that received an answer and never
+  resumed must stay `pending`, appear in `total`, and appear in NO numerator. A suite
+  that only exercises the happy path would pass on an implementation whose `share`
+  counts every non-pending outcome as resolved.
+
+- **The caller stamp.** `test_escalate_stamps_the_round` and
+  `test_escalate_without_a_round_stamps_manual` are a pair on purpose. The criterion
+  they serve -- "escalated by the periodic caller, not typed" -- is only observable
+  because a hand-run stamps something a round cannot. Testing one direction would
+  leave the discriminator unproven in exactly the direction that matters.
+
+- **The negative controls.** A check that fires on everything satisfies the positive
+  case while catching nothing, so: an incident before its deadline must NOT escalate,
+  an incident with no evidence must NOT close, a corrupt ledger must NOT read as
+  empty, and `--dry-run` must NOT write.
+
+- **The card id.** `test_escalate_persists_the_id_the_poster_printed` runs the real
+  `post_card` against a stubbed subprocess and reads the record back from DISK. The
+  field was empty on every escalated incident for as long as the ledger existed, and
+  the failure mode of the fix is a value captured and dropped one line later -- which
+  an in-memory assertion cannot see.
+
+`post_card` is stubbed in the escalate cases, and only its subprocess in the capture
+cases (`TestCardIdCapture`). The real one shells out to `attention-ask.py` and
+would reach the operator's attention service from a unit test -- a test that posts a
+board card is a test that needs the operator, which is the opposite of what this is.
+
+Run: python3 -m unittest discover -s scripts/tests -v
+"""
+
+import contextlib
+import datetime
+import importlib.util
+import io
+import json
+import os
+import tempfile
+import unittest
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SCRIPT = os.path.join(os.path.dirname(_HERE), "incident-ledger.py")
+
+_spec = importlib.util.spec_from_file_location("incident_ledger", _SCRIPT)
+il = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(il)
+
+SESSION = "11111111-2222-3333-4444-555555555555"
+OTHER_SESSION = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+OWNER = "manager-session-1"
+
+#: What the store mints for an item id: 32 lowercase hex characters. Used as the
+#: stubbed poster's answer so a test can assert the id the escalation RECORDS.
+CARD_ID = "0123456789abcdef0123456789abcdef"
+
+
+class _Run:
+    """A `subprocess.run` result stand-in: only the three fields `post_card` reads."""
+
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def iso(delta=None):
+    when = datetime.datetime.now(datetime.timezone.utc)
+    if delta is not None:
+        when = when + delta
+    return when.strftime(il.TS_FORMAT)
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        # LEDGER and LOCK are redirected so no test can touch the real ledger.
+        # LOCK is derived from LEDGER at import, so both must move together.
+        self._ledger, self._lock = il.LEDGER, il.LOCK
+        il.LEDGER = os.path.join(self.tmp, "ledger.json")
+        il.LOCK = il.LEDGER + ".lock"
+        self._env = dict(os.environ)
+        os.environ.pop("SUPERVISOR_INCIDENT_DEADLINE_SECONDS", None)
+        os.environ.pop("SUPERVISOR_INCIDENT_STALL_ROUNDS", None)
+        # Neutralised HERE, not per class: any class that inherits `Base` and reaches
+        # `escalate` would otherwise read the host's value, so its verdict would depend
+        # on the operator's shell -- green on a host with a large budget, red on a host
+        # with none. A class that wants a specific budget sets it in its own `setUp`.
+        os.environ.pop("SUPERVISOR_INCIDENT_STALL_BUDGET", None)
+        # The real post_card would post a board card from a unit test.
+        self._post_card = il.post_card
+        self.posted = []
+        il.post_card = self._stub_post
+
+    def _stub_post(self, incident):
+        self.posted.append(incident["dedup_key"])
+        return CARD_ID
+
+    def tearDown(self):
+        il.LEDGER, il.LOCK = self._ledger, self._lock
+        il.post_card = self._post_card
+        os.environ.clear()
+        os.environ.update(self._env)
+
+    def run_cli(self, *argv):
+        """Run a subcommand in-process, returning (rc, stdout)."""
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = il.main(list(argv))
+        return rc, out.getvalue()
+
+    def open_incident(self, session=SESSION, kind="permission", **over):
+        argv = ["open", "--session", session, "--kind", kind, "--owner", OWNER]
+        if over.get("detected_by"):
+            argv += ["--detected-by", over["detected_by"]]
+        if over.get("card_id"):
+            argv += ["--card-id", over["card_id"]]
+        if over.get("deadline_seconds") is not None:
+            argv += ["--deadline-seconds", str(over["deadline_seconds"])]
+        return self.run_cli(*argv)
+
+    def answer(self, session=SESSION, kind="permission", by="manager"):
+        rc, out = self.run_cli(
+            "answer", "--session", session, "--kind", kind, "--by", by
+        )
+        self.assertEqual(rc, 0)
+        return out
+
+    def ledger(self):
+        # An absent file is the ordinary "nothing has been written yet" state, not
+        # an error: several tests assert that nothing was opened, and they must be
+        # able to ask without the ask itself failing.
+        try:
+            with open(il.LEDGER, encoding="utf-8") as handle:
+                return json.load(handle)
+        except FileNotFoundError:
+            return {"version": 1, "incidents": []}
+
+    def records(self):
+        return self.ledger()["incidents"]
+
+
+class TestOpen(Base):
+    def test_open_populates_every_field(self):
+        self.open_incident(detected_by="card:item-42", card_id="item-42")
+        record = self.records()[0]
+        self.assertEqual(record["dedup_key"], "incident:%s:permission" % SESSION)
+        self.assertEqual(record["session_id"], SESSION)
+        self.assertEqual(record["kind"], "permission")
+        self.assertEqual(record["owner"], OWNER)
+        self.assertEqual(record["outcome"], il.PENDING)
+        self.assertIsNone(record["closed_at"])
+        self.assertEqual(record["detected_by"], "card:item-42")
+        self.assertEqual(record["card_id"], "item-42")
+        self.assertIsNone(record["escalated_by"])
+        self.assertTrue(record["opened_at"])
+        self.assertTrue(record["deadline"])
+
+    def test_deadline_is_opened_at_plus_the_default(self):
+        self.open_incident()
+        record = self.records()[0]
+        opened = il.parse_ts(record["opened_at"])
+        deadline = il.parse_ts(record["deadline"])
+        self.assertEqual(int((deadline - opened).total_seconds()), 900)
+
+    def test_deadline_seconds_override_is_honoured(self):
+        self.open_incident(deadline_seconds=30)
+        record = self.records()[0]
+        opened = il.parse_ts(record["opened_at"])
+        deadline = il.parse_ts(record["deadline"])
+        self.assertEqual(int((deadline - opened).total_seconds()), 30)
+
+    def test_env_deadline_is_honoured(self):
+        os.environ["SUPERVISOR_INCIDENT_DEADLINE_SECONDS"] = "45"
+        self.open_incident()
+        record = self.records()[0]
+        opened = il.parse_ts(record["opened_at"])
+        deadline = il.parse_ts(record["deadline"])
+        self.assertEqual(int((deadline - opened).total_seconds()), 45)
+
+    def test_a_stall_gets_no_card_id_and_a_drive_detector(self):
+        # A stall is a duration, not an event: nothing posts a card for it. A
+        # fabricated card id here would be a join that never resolves.
+        self.open_incident(kind="stall")
+        record = self.records()[0]
+        self.assertEqual(record["card_id"], "")
+        self.assertTrue(record["detected_by"].startswith("drive:"))
+
+    def test_reopening_the_same_blocker_does_not_duplicate_it(self):
+        self.open_incident()
+        rc, out = self.open_incident()
+        self.assertEqual(rc, 0)
+        self.assertIn("already open", out)
+        self.assertEqual(len(self.records()), 1)
+
+    def test_a_closed_incident_lets_a_new_episode_open(self):
+        # Episodes are counted, not sessions: a session that blocks twice and
+        # resolves twice is two incidents, and a share over one session must not
+        # read as one.
+        self.open_incident()
+        self.answer()
+        self.run_cli(
+            "close", "--session", SESSION, "--kind", "permission",
+            "--outcome", "manager", "--resume-evidence", "tool call after answer",
+        )
+        self.open_incident()
+        self.assertEqual(len(self.records()), 2)
+        self.assertEqual(
+            [r["outcome"] for r in self.records()], ["manager", il.PENDING]
+        )
+
+
+class TestClose(Base):
+    def test_close_requires_resume_evidence(self):
+        # The defect: a card close is a CLEAR, not an answer, so a close with no
+        # resume would record a resolution nobody earned.
+        self.open_incident()
+        with self.assertRaises(SystemExit) as caught:
+            self.run_cli(
+                "close", "--session", SESSION, "--kind", "permission",
+                "--outcome", "manager", "--resume-evidence", "   ",
+            )
+        self.assertEqual(caught.exception.code, il.REFUSED)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+
+    def test_close_refuses_timed_out(self):
+        # `timed-out` is an escalation and an escalated incident never resumed;
+        # letting `close` write it would make the two paths indistinguishable.
+        self.open_incident()
+        with self.assertRaises(SystemExit) as caught:
+            self.run_cli(
+                "close", "--session", SESSION, "--kind", "permission",
+                "--outcome", "timed-out", "--resume-evidence", "x",
+            )
+        self.assertEqual(caught.exception.code, il.REFUSED)
+
+    def test_close_records_outcome_and_evidence(self):
+        self.open_incident()
+        self.answer()
+        self.run_cli(
+            "close", "--session", SESSION, "--kind", "permission",
+            "--outcome", "manager", "--resume-evidence", "next tool call at 14:31",
+        )
+        record = self.records()[0]
+        self.assertEqual(record["outcome"], "manager")
+        self.assertEqual(record["resume_evidence"], "next tool call at 14:31")
+        self.assertTrue(record["closed_at"])
+
+    def test_answer_is_not_a_close(self):
+        # The gap between the two stamps is the whole measurement: an answered
+        # incident that never resumed is the case SC4 exists for, and it can only
+        # be seen if answering does not itself resolve anything.
+        self.open_incident()
+        self.answer(by="manager")
+        record = self.records()[0]
+        self.assertEqual(record["answered_by"], "manager")
+        self.assertTrue(record["answered_at"])
+        self.assertEqual(record["outcome"], il.PENDING)
+        self.assertIsNone(record["closed_at"])
+
+    def test_close_refuses_without_a_recorded_answer(self):
+        """The core rule: a resume with no answer is not a resolution."""
+        self.open_incident()
+        with self.assertRaises(SystemExit) as caught:
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.run_cli(
+                    "close", "--session", SESSION, "--kind", "permission",
+                    "--outcome", "manager", "--resume-evidence", "tool call",
+                )
+        self.assertEqual(caught.exception.code, il.REFUSED)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+
+    def test_close_derives_the_outcome_from_who_answered(self):
+        self.open_incident()
+        self.answer(by="operator")
+        self.run_cli(
+            "close", "--session", SESSION, "--kind", "permission",
+            "--resume-evidence", "tool call",
+        )
+        self.assertEqual(self.records()[0]["outcome"], "operator")
+
+    def test_self_cleared_needs_no_answer(self):
+        # A blocker that cleared itself is one nobody answered. Requiring an
+        # answer here would push it into `manager` and inflate the one number the
+        # goal reads.
+        self.open_incident()
+        self.run_cli(
+            "close", "--session", SESSION, "--kind", "permission",
+            "--outcome", "self-cleared", "--resume-evidence", "cleared on its own",
+        )
+        self.assertEqual(self.records()[0]["outcome"], "self-cleared")
+
+    def test_close_refuses_skipped_gone(self):
+        """`skipped-gone` is the ledger's own retirement, not a verified resume."""
+        self.open_incident()
+        with self.assertRaises(SystemExit) as caught:
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.run_cli(
+                    "close", "--session", SESSION, "--kind", "permission",
+                    "--outcome", il.SKIPPED_GONE, "--resume-evidence", "tool call",
+                )
+        self.assertEqual(caught.exception.code, il.REFUSED)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+
+    def test_close_of_an_absent_incident_is_a_no_op(self):
+        rc, out = self.run_cli(
+            "close", "--session", OTHER_SESSION, "--kind", "question",
+            "--outcome", "operator", "--resume-evidence", "task change",
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("no open incident", out)
+
+
+class TestShare(Base):
+    def share(self, days=1):
+        rc, out = self.run_cli("share", "--days", str(days))
+        self.assertEqual(rc, 0)
+        return out
+
+    def test_answered_but_not_resumed_counts_in_denominator_only(self):
+        """The criterion this ledger exists for, in one test.
+
+        An incident that received an answer and never resumed must be open, must
+        be in `total`, and must be in no numerator. An implementation that counts
+        every non-pending outcome as resolved fails here and nowhere else.
+        """
+        self.open_incident()
+        out = self.share()
+        self.assertIn("total: 1", out)
+        self.assertIn("resolved-by-manager: 0", out)
+        self.assertIn("share: 0.0%", out)
+        self.assertIn("pending      1", out)
+
+    def test_pending_is_never_resolved(self):
+        self.open_incident()
+        self.open_incident(session=OTHER_SESSION, kind="question")
+        out = self.share()
+        self.assertIn("total: 2", out)
+        self.assertIn("resolved-by-manager: 0", out)
+
+    def test_manager_outcome_counts(self):
+        self.open_incident()
+        self.answer()
+        self.run_cli(
+            "close", "--session", SESSION, "--kind", "permission",
+            "--outcome", "manager", "--resume-evidence", "tool call",
+        )
+        out = self.share()
+        self.assertIn("total: 1", out)
+        self.assertIn("resolved-by-manager: 1", out)
+        self.assertIn("share: 100.0%", out)
+
+    def test_operator_and_self_cleared_do_not_count_as_manager(self):
+        self.open_incident()
+        self.answer(by="operator")
+        self.run_cli(
+            "close", "--session", SESSION, "--kind", "permission",
+            "--outcome", "operator", "--resume-evidence", "tool call",
+        )
+        self.open_incident(session=OTHER_SESSION, kind="question")
+        self.run_cli(
+            "close", "--session", OTHER_SESSION, "--kind", "question",
+            "--outcome", "self-cleared", "--resume-evidence", "task change",
+        )
+        out = self.share()
+        self.assertIn("total: 2", out)
+        self.assertIn("resolved-by-manager: 0", out)
+        self.assertIn("operator     1", out)
+        self.assertIn("self-cleared 1", out)
+
+    def test_an_empty_window_says_so(self):
+        # 0/0/0% must never read as a 0% resolution rate; it is an empty population.
+        out = self.share()
+        self.assertIn("total: 0", out)
+        self.assertIn("0 / 0 / 0%", out)
+
+    def test_the_window_excludes_older_incidents(self):
+        self.open_incident()
+        data = self.ledger()
+        data["incidents"][0]["opened_at"] = iso(datetime.timedelta(days=-10))
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        out = self.share(days=1)
+        self.assertIn("total: 0", out)
+
+
+class TestEscalate(Base):
+    def setUp(self):
+        super().setUp()
+        # The liveness probe is stubbed so a stall test's verdict does not depend on
+        # which sessions happen to be running on the host. The default is "these
+        # sessions are live"; the gone cases set it themselves.
+        #
+        # ⚠️ **Retargeted to `live_states`.** `cmd_escalate` reads the per-row
+        # `(status, state)` pair now, so a `live_sessions` stub would be inert and the
+        # leg would fall through to the host's real fleet. The cases below still assign
+        # a plain SET to `self.live` — the stub adapts it, so each reads as "these ids
+        # are live and parked", which is what every one of them means.
+        self._live_states = il.live_states
+        self.live = {SESSION, SESSION[:8], OTHER_SESSION, OTHER_SESSION[:8]}
+        il.live_states = lambda: (
+            None if self.live is None else {sid: ("idle", "idle") for sid in self.live}
+        )
+        # `test_escalate_persists_the_id_the_poster_printed` stubs the poster's
+        # subprocess instead of `post_card`; restored here so no later case in this
+        # class can shell out to the real attention store.
+        self._run = il.subprocess.run
+
+    def tearDown(self):
+        il.live_states = self._live_states
+        il.subprocess.run = self._run
+        super().tearDown()
+
+    def make_overdue(self, session=SESSION, kind="permission"):
+        self.open_incident(session=session, kind=kind, deadline_seconds=1)
+        data = self.ledger()
+        for record in data["incidents"]:
+            if record["session_id"] == session and record["kind"] == kind:
+                record["deadline"] = iso(datetime.timedelta(seconds=-5))
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+
+    def test_escalate_stamps_the_round(self):
+        self.make_overdue()
+        self.run_cli("escalate", "--round-id", "2026-10-22T14:00:00Z")
+        record = self.records()[0]
+        self.assertEqual(record["outcome"], il.TIMED_OUT)
+        self.assertEqual(record["escalated_by"], "round:2026-10-22T14:00:00Z")
+        self.assertEqual(self.posted, [record["dedup_key"]])
+
+    def test_escalate_without_a_round_stamps_manual(self):
+        """The discriminator, other direction.
+
+        A hand-run must be distinguishable from a round's run, or the criterion
+        "escalated by the periodic caller" could never fail.
+        """
+        self.make_overdue()
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "typed-by-me"
+        self.run_cli("escalate")
+        record = self.records()[0]
+        self.assertEqual(record["escalated_by"], "manual:typed-by-me")
+
+    def test_an_incident_before_its_deadline_is_left_alone(self):
+        self.open_incident()
+        self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+        self.assertEqual(self.posted, [])
+
+    def test_dry_run_writes_nothing(self):
+        self.make_overdue()
+        rc, out = self.run_cli("escalate", "--round-id", "r1", "--dry-run")
+        self.assertEqual(rc, 0)
+        self.assertIn("would escalate", out)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+        self.assertEqual(self.posted, [])
+
+    def test_a_failed_post_leaves_the_incident_pending(self):
+        # Stamping after a failed post would record an escalation that never
+        # reached the board -- the same class of false green the ledger exists for.
+        #
+        # ⚠️ `None` is `post_card`'s "nothing was posted". The empty string is a
+        # DIFFERENT answer -- posted, id unread -- and it must still stamp (see the
+        # next case), so this stub cannot use a falsy value interchangeably.
+        self.make_overdue()
+        il.post_card = lambda incident: None
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+        self.assertEqual(self.records()[0]["card_id"], "")
+
+    def test_a_post_that_prints_no_id_still_escalates_with_an_empty_card_id(self):
+        """The honest degradation: a posted card is never left `pending`.
+
+        A poster that exits 0 but prints nothing parseable has still posted the
+        card, so the row is stamped with `card_id` empty -- the pre-fix state, which
+        `post_card` names on stderr. Leaving it pending instead would re-post it
+        next round and duplicate the escalation.
+        """
+        self.make_overdue()
+        il.post_card = lambda incident: ""
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.run_cli("escalate", "--round-id", "r1")
+        record = self.records()[0]
+        self.assertEqual(record["outcome"], il.TIMED_OUT)
+        self.assertEqual(record["card_id"], "")
+
+    def test_an_existing_handle_is_replaced_and_the_replacement_is_named(self):
+        """A `timed-out` row must join on the ESCALATION's card, and the move is loud.
+
+        `open --card-id` supplies a handle for the blocker card; the escalation posts
+        a different one, whose `dedup_key` is the incident's own. Moving the field to
+        it is what makes the join checkable, and the warning is what keeps the
+        replacement from being silent.
+        """
+        self.open_incident(card_id="blk-1")
+        self.make_overdue()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(self.records()[0]["card_id"], CARD_ID)
+        self.assertIn("blk-1", err.getvalue())
+        self.assertIn(CARD_ID, err.getvalue())
+
+    def test_an_unread_id_does_not_blank_an_existing_handle(self):
+        """The negative control for the case above: an empty capture erases nothing.
+
+        Blanking the field would destroy a real join to record nothing at all, so a
+        poster that printed no id leaves the row's own handle in place.
+        """
+        self.open_incident(card_id="blk-1")
+        self.make_overdue()
+        il.post_card = lambda incident: ""
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.run_cli("escalate", "--round-id", "r1")
+        record = self.records()[0]
+        self.assertEqual(record["outcome"], il.TIMED_OUT)
+        self.assertEqual(record["card_id"], "blk-1", "a real handle is not erased")
+
+    def test_escalate_persists_the_id_the_poster_printed(self):
+        """SC1 + SC2 end to end inside the unit: the poster's line reaches the FILE.
+
+        `post_card` is the REAL one and only the subprocess is stubbed, so this
+        covers the capture and the write together -- a stub returning an id would
+        prove neither, and reading the record back from disk is the point: the
+        defect is a value captured and then dropped one line later.
+        """
+        self.make_overdue()
+        il.post_card = self._post_card
+        il.subprocess.run = lambda command, **kwargs: _Run(
+            stdout="ITEM_ID: %s\nPOLL: python3 attention-ask.py poll %s\n"
+            % (CARD_ID, CARD_ID)
+        )
+        self.run_cli("escalate", "--round-id", "r1")
+        record = self.records()[0]
+        self.assertEqual(record["card_id"], CARD_ID, "the id never reached the record")
+        self.assertEqual(record["outcome"], il.TIMED_OUT)
+
+    def test_escalate_is_idempotent(self):
+        self.make_overdue()
+        self.run_cli("escalate", "--round-id", "r1")
+        self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(len(self.posted), 1)
+
+    # --- the gone-session leg -------------------------------------------------
+    def make_overdue_stall(self, session=SESSION):
+        self.open_incident(session=session, kind="stall", deadline_seconds=1)
+        data = self.ledger()
+        for record in data["incidents"]:
+            if record["session_id"] == session and record["kind"] == "stall":
+                record["deadline"] = iso(datetime.timedelta(seconds=-5))
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+
+    def test_a_failed_probe_warns_and_still_posts(self):
+        """SC1: the leg that POSTS the card says so when it cannot judge.
+
+        `cmd_stall` already warned; `cmd_escalate` skipped the gate for the whole run
+        in silence, so a probe outage disabled the gate in the leg that posts and the
+        only visible effect was the absence of a skip line.
+        """
+        il.live_states = lambda: None
+        self.make_overdue_stall()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertIn("warning: session liveness unavailable", err.getvalue())
+        self.assertEqual(len(self.posted), 1, "an outage must not suppress the card")
+        self.assertEqual(self.records()[0]["outcome"], il.TIMED_OUT)
+
+    def test_a_gone_stall_incident_is_retired_not_left_pending(self):
+        """SC2: a skip is a terminal state, and it is NOT `timed-out`."""
+        self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
+        self.make_overdue_stall()
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertIn("gone sessions", out)
+        record = self.records()[0]
+        self.assertEqual(record["outcome"], il.SKIPPED_GONE)
+        self.assertNotEqual(record["outcome"], il.TIMED_OUT, "a skip is not an escalation")
+        self.assertEqual(self.posted, [])
+
+    def test_a_retired_incident_is_not_re_listed_next_round(self):
+        """SC2, second half: the next round must print no skip line for it."""
+        self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
+        self.make_overdue_stall()
+        self.run_cli("escalate", "--round-id", "r1")
+        key = self.records()[0]["dedup_key"]
+        rc, second = self.run_cli("escalate", "--round-id", "r2")
+        self.assertEqual(rc, 0)
+        self.assertNotIn(key, second)
+
+    def test_a_retired_incident_leaves_the_share_denominator(self):
+        """SC2, third half: an incident with no possible numerator is no denominator."""
+        self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
+        self.make_overdue_stall()
+        self.run_cli("escalate", "--round-id", "r1")
+        rc, out = self.run_cli("share", "--days", "1")
+        self.assertEqual(rc, 0)
+        self.assertIn("total: 0", out)
+        self.assertIn("retired 1 gone-session incident(s)", out)
+
+    def test_a_dry_run_says_would_retire(self):
+        """A dry run must not claim a state change it did not make.
+
+        `would escalate` and `would close` already follow this rule; `retired` on a
+        run that never calls `write_ledger` would be indistinguishable from a real
+        one in its own output — the false signal this ledger exists to remove.
+        """
+        self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
+        self.make_overdue_stall()
+        rc, out = self.run_cli("escalate", "--round-id", "r1", "--dry-run")
+        self.assertEqual(rc, 0)
+        self.assertIn("would retire 1", out)
+        self.assertNotIn("retired 1", out)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+
+    def test_a_retired_incident_carries_the_probe_time(self):
+        """The record names WHEN the judgement was made, not just that it was made."""
+        self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
+        self.make_overdue_stall()
+        self.run_cli("escalate", "--round-id", "r1")
+        evidence = self.records()[0]["resume_evidence"]
+        self.assertIn("liveness probe taken at", evidence)
+        self.assertIn("round:r1", evidence)
+
+    def test_bounded_names_at_exactly_the_limit_has_no_remainder(self):
+        """The no-remainder branch: five names, no `(+N more)` tail."""
+        self.assertEqual(il.bounded_names(["a", "b", "c", "d", "e"]), "a, b, c, d, e")
+        self.assertEqual(
+            il.bounded_names(["a", "b", "c", "d", "e", "f"]), "a, b, c, d, e, … (+1 more)"
+        )
+
+    def test_the_skip_line_is_bounded(self):
+        """SC4: 120 gone rows must not render as 120 names on one line."""
+        self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
+        sessions = ["%08x-aaaa-bbbb-cccc-dddddddddddd" % i for i in range(120)]
+        for sid in sessions:
+            self.open_incident(session=sid, kind="stall", deadline_seconds=0)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        line = [row for row in out.splitlines() if "gone sessions" in row][0]
+        self.assertIn("(+115 more)", line)
+        self.assertEqual(line.count("incident:"), 5, "five names, then a count")
+
+    def test_a_malformed_session_id_fails_open(self):
+        """SC5: one bad row must not abort the round with `AttributeError`."""
+        self.make_overdue_stall()
+        data = self.ledger()
+        data["incidents"][0]["session_id"] = 12345
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertIn("malformed session_id", err.getvalue())
+        self.assertEqual(len(self.posted), 1, "an unjudgeable id escalates, not retires")
+
+    def test_the_probe_is_not_paid_when_nothing_is_due(self):
+        """SC6: a probe with nothing to judge is a subprocess plus an HTTP call for nothing."""
+        calls = []
+        il.live_states = lambda: calls.append(1) or {SESSION: ("idle", "idle")}
+        self.open_incident(kind="stall")  # still before its deadline
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [])
+
+    # --- the per-round budget ------------------------------------------------
+    def make_due_stalls(self, count, reverse=False):
+        """`count` overdue stall incidents, one per distinct live session.
+
+        ⚠️ **Deadlines are spread across distinct past hours, and `reverse` moves the
+        INSERTION order without moving the deadlines.** That is the whole point of the
+        parameter: with a shared deadline the selection order would be whatever
+        `data["incidents"]` happened to hold, so a `due[:budget]` slice would satisfy
+        the cap and still pick the wrong three. Session `i` is always `count - i` hours
+        overdue, so session 0 is the oldest no matter which order it was written in.
+
+        The sessions are live AND parked (`setUp` stubs `live_states` to
+        `("idle", "idle")`, which `parked_on_a_human` reads as "a card is owed"), so
+        the liveness gate cannot retire the fixture before the budget is consulted --
+        the same trap the end-to-end seed must avoid.
+        """
+        sessions = ["%08x-aaaa-bbbb-cccc-dddddddddddd" % i for i in range(count)]
+        self.live = set(sessions) | {sid[:8] for sid in sessions}
+        for sid in (reversed(sessions) if reverse else sessions):
+            self.open_incident(session=sid, kind="stall", deadline_seconds=1)
+        data = self.ledger()
+        hours_past = {sid: -(count - index) for index, sid in enumerate(sessions)}
+        for record in data["incidents"]:
+            record["deadline"] = iso(
+                datetime.timedelta(hours=hours_past[record["session_id"]])
+            )
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        return sessions
+
+    def escalated_keys(self, out):
+        return [
+            row.split()[1] for row in out.splitlines() if row.startswith("escalated ")
+        ]
+
+    def test_the_round_escalates_at_most_the_budget(self):
+        """10 due, budget 3 — three cards, seven still pending."""
+        sessions = self.make_due_stalls(10)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.escalated_keys(out)), il.incident_budget())
+        pending = [r for r in self.records() if r["outcome"] == il.PENDING]
+        self.assertEqual(len(pending), 7)
+        self.assertEqual(
+            self.posted,
+            [il.dedup_key(sid, "stall") for sid in sessions[:3]],
+            "in selection order, not merely the same three",
+        )
+
+    def test_the_held_back_line_is_bounded(self):
+        """Seven held back renders as five names plus a remainder, not seven."""
+        self.make_due_stalls(10)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        line = [row for row in out.splitlines() if "past their deadline:" in row][0]
+        self.assertIn("held back 7", line)
+        self.assertIn("(+2 more)", line)
+        self.assertEqual(line.count("incident:"), 5, "five names, then a count")
+        # A real run must not borrow the dry-run's wording: `would hold back` also
+        # contains `held back`, so the positive assertion alone would pass either way.
+        self.assertNotIn("would hold back", out)
+
+    def test_the_env_override_caps_the_round(self):
+        """The knob the stall leg uses is the knob that caps this leg."""
+        self.make_due_stalls(10)
+        os.environ["SUPERVISOR_INCIDENT_STALL_BUDGET"] = "1"
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.escalated_keys(out)), 1)
+        self.assertIn("held back 9", out)
+
+    def test_a_zero_override_cannot_disable_the_cap(self):
+        """`0` falls back to the default 3 — it is not "unlimited"."""
+        self.make_due_stalls(10)
+        os.environ["SUPERVISOR_INCIDENT_STALL_BUDGET"] = "0"
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(self.escalated_keys(out)), 3)
+
+    def test_a_dry_run_matches_the_applied_set(self):
+        """A preview that promises 10 cards the run will not post is a lie."""
+        self.make_due_stalls(10)
+        rc, dry = self.run_cli("escalate", "--round-id", "r1", "--dry-run")
+        self.assertEqual(rc, 0)
+        would = [r.split()[2] for r in dry.splitlines() if r.startswith("would escalate")]
+        self.assertEqual(len(would), 3)
+        self.assertIn("would hold back 7", dry)
+        self.assertIn("(+2 more)", dry)
+        self.assertEqual(self.posted, [], "a dry run posts nothing")
+        # Same selection, not merely the same count.
+        rc, real = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(would, self.escalated_keys(real))
+
+    def test_the_oldest_blockers_are_chosen(self):
+        """The selection is the three most overdue, in deadline order."""
+        sessions = self.make_due_stalls(10)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            self.escalated_keys(out),
+            [il.dedup_key(sid, "stall") for sid in sessions[:3]],
+            "the three most overdue, in deadline order",
+        )
+
+    def test_the_choice_survives_a_reversed_insertion_order(self):
+        """Same deadlines written backwards — the same three, in the same order.
+
+        This is the case a `due[:budget]` slice fails: it would post whichever three
+        rows happened to be written first, so the cap would hold while the selection
+        was arbitrary.
+        """
+        sessions = self.make_due_stalls(10, reverse=True)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            self.escalated_keys(out),
+            [il.dedup_key(sid, "stall") for sid in sessions[:3]],
+        )
+        line = [row for row in out.splitlines() if "past their deadline:" in row][0]
+        self.assertIn(
+            ", ".join(il.dedup_key(sid, "stall") for sid in sessions[3:8]), line
+        )
+
+    def test_the_budget_is_spent_after_the_liveness_gate(self):
+        """Mid-command rows are skipped without spending a slot.
+
+        With six mid-command and four parked rows due and a budget of three, a round
+        that capped the RAW due set would post nothing: all three slots would go to
+        rows it then skips. Moving the budget check above the mid-command branch is
+        the regression this case exists to catch.
+        """
+        mid = ["%08x-bbbb-cccc-dddd-eeeeeeeeeeee" % i for i in range(6)]
+        parked = ["%08x-cccc-dddd-eeee-ffffffffffff" % i for i in range(4)]
+        states = {sid: ("idle", "idle") for sid in parked}
+        for sid in mid:
+            states[sid] = ("shell", "busy")
+        il.live_states = lambda: states
+        for sid in mid + parked:
+            self.open_incident(session=sid, kind="stall", deadline_seconds=1)
+        data = self.ledger()
+        for record in data["incidents"]:
+            record["deadline"] = iso(datetime.timedelta(hours=-1))
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            len(self.escalated_keys(out)), 3, "all three slots went to parked rows"
+        )
+        self.assertIn("held back 1", out)
+        self.assertIn("skipped 6 stall incident(s) for sessions mid-command", out)
+
+    def test_the_budget_is_the_same_function_on_both_legs(self):
+        """One function, reached from both legs.
+
+        A duplicated guard — a second constant, or a re-derived `due[:3]` — passes the
+        env-override cases above and fails here. A grep for the call site cannot show
+        *nesting*, so this asserts the call instead of its spelling.
+
+        `live_sessions` is stubbed for the `stall` half: an unstubbed run would answer
+        from the host's real fleet, which is the trap `TestStall` documents.
+        """
+        calls = []
+        real_budget = il.incident_budget
+        real_sessions = il.live_sessions
+        il.incident_budget = lambda: calls.append(1) or real_budget()
+        il.live_sessions = lambda: {SESSION, SESSION[:8]}
+        try:
+            self.make_overdue()
+            rc, _ = self.run_cli("escalate", "--round-id", "r1")
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(calls), 1, "cmd_escalate consults the shared budget")
+
+            del calls[:]
+            path = os.path.join(self.tmp, "drive.json")
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    {
+                        "round": iso(),
+                        "entries": [
+                            {
+                                "session_id": SESSION,
+                                "verdict": "unverifiable",
+                                "unverifiable_streak": 5,
+                                "unverifiable_round": iso(),
+                            }
+                        ],
+                    },
+                    handle,
+                )
+            rc, _ = self.run_cli("stall", "--drive-ledger", path, "--round-id", "r1")
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(calls), 1, "cmd_stall consults the same budget")
+        finally:
+            il.incident_budget = real_budget
+            il.live_sessions = real_sessions
+
+
+class TestCardIdCapture(Base):
+    """`post_card` reads the id the poster prints, and refuses anything else.
+
+    The poster is stubbed at `subprocess.run`, never invoked: the real one reaches
+    the operator's attention store, which is the opposite of what a unit test may do.
+    `Base` has already replaced `post_card` itself, so the ORIGINAL is held in
+    `self._post_card` and that is what these cases call.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._run = il.subprocess.run
+        self.incident = {
+            "dedup_key": "incident:%s:stall" % SESSION,
+            "session_id": SESSION,
+            "kind": "stall",
+            "owner": OWNER,
+            "opened_at": "2026-10-29T10:00:00Z",
+            "deadline": "2026-10-29T10:15:00Z",
+            "detected_by": "drive:unverifiable@r1",
+        }
+
+    def tearDown(self):
+        il.subprocess.run = self._run
+        super().tearDown()
+
+    def post(self, **result):
+        il.subprocess.run = lambda command, **kwargs: _Run(**result)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            card_id = self._post_card(self.incident)
+        return card_id, err.getvalue()
+
+    def test_the_item_id_line_is_what_is_captured(self):
+        card_id, err = self.post(
+            stdout="ITEM_ID: %s\nPOLL: python3 attention-ask.py poll %s\n"
+            % (CARD_ID, CARD_ID)
+        )
+        self.assertEqual(card_id, CARD_ID)
+        self.assertEqual(err, "", "a clean post says nothing")
+
+    def test_a_candidate_that_is_not_a_store_id_is_refused(self):
+        """Shape, not existence: the store mints 32 hex characters.
+
+        A truncated id or another script's display id would 404 at poll time and
+        read as "the card is gone", so it is refused here rather than recorded.
+        """
+        candidates = (
+            "0123456789abcdef",  # truncated by hand
+            "0123456789abcdef0123456789abcdeZ",  # 32 characters, not hex
+            "",  # the poster printed the label and no value
+        )
+        for candidate in candidates:
+            with self.subTest(candidate=candidate):
+                card_id, err = self.post(stdout="ITEM_ID: %s\n" % candidate)
+                self.assertEqual(card_id, "")
+                self.assertIn("printed no ITEM_ID", err)
+
+    def test_a_failed_post_returns_none_and_says_why(self):
+        card_id, err = self.post(returncode=1, stderr="store unreachable")
+        self.assertIsNone(card_id, "a failed post is not an empty id")
+        self.assertIn("could not post escalation", err)
+
+    def test_stdout_that_is_empty_is_not_an_id(self):
+        card_id, _ = self.post(stdout="")
+        self.assertEqual(card_id, "")
+
+
+class TestRefusal(Base):
+    def test_a_corrupt_ledger_is_refused_not_read_as_empty(self):
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            handle.write("{ this is not json")
+        with self.assertRaises(SystemExit) as caught:
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.run_cli("list")
+        self.assertEqual(caught.exception.code, il.REFUSED)
+
+    def test_a_corrupt_ledger_is_not_overwritten(self):
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            handle.write("{ this is not json")
+        with self.assertRaises(SystemExit):
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.open_incident()
+        with open(il.LEDGER, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "{ this is not json")
+
+
+class TestPrune(Base):
+    def test_open_incidents_are_never_pruned(self):
+        # Age is not a resolution: the record a reader most needs is the one that
+        # never closed.
+        self.open_incident()
+        data = self.ledger()
+        data["incidents"][0]["opened_at"] = iso(datetime.timedelta(days=-90))
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        self.run_cli("prune", "--max-age-hours", "1")
+        self.assertEqual(len(self.records()), 1)
+
+    def test_old_terminal_incidents_are_pruned(self):
+        self.open_incident()
+        self.answer()
+        self.run_cli(
+            "close", "--session", SESSION, "--kind", "permission",
+            "--outcome", "manager", "--resume-evidence", "tool call",
+        )
+        data = self.ledger()
+        data["incidents"][0]["closed_at"] = iso(datetime.timedelta(days=-90))
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        self.run_cli("prune", "--max-age-hours", "1")
+        self.assertEqual(self.records(), [])
+
+    def test_a_skipped_gone_incident_is_pruned_on_the_same_clock(self):
+        """SC2: the retirement is TERMINAL, so `prune` drops it like any other.
+
+        `cmd_prune` keeps only `PENDING`, so this works by construction — the test is
+        here because the docstring now claims it and nothing pinned it.
+        """
+        self.open_incident(kind="stall", deadline_seconds=0)
+        data = self.ledger()
+        data["incidents"][0]["outcome"] = il.SKIPPED_GONE
+        data["incidents"][0]["closed_at"] = iso(datetime.timedelta(days=-90))
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        self.run_cli("prune", "--max-age-hours", "1")
+        self.assertEqual(self.records(), [])
+
+
+class TestStall(Base):
+    """The round-based stall — the one blocker that is a duration, not an event.
+
+    ⚠️ **The streak is the drive leg's, and this suite exists mostly to prove it is
+    READ rather than recounted.** `scripts/drive-unverifiable.py` owns
+    `unverifiable_streak`; a second counter here would be a second answer to the
+    same question and the two would drift. `test_the_streak_is_read_not_recounted`
+    is the discriminator: it calls `stall` twice against an unchanged streak of 1,
+    which a self-counting implementation turns into 2 and opens on.
+
+    ⚠️ **The liveness probe is stubbed, and the default is "these sessions are
+    live".** `live_sessions()` shells out to `session-liveness.py`, so an unstubbed
+    run would answer from the host's real fleet — a test whose verdict depends on
+    which sessions happen to be running. The default set keeps the pre-existing
+    cases on the filter's happy path, and the gone/absent cases set it themselves.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # The budget must not depend on the operator's shell: a host value larger
+        # than the fixture population would make the cap test unfalsifiable.
+        os.environ.pop("SUPERVISOR_INCIDENT_STALL_BUDGET", None)
+        self._live_sessions = il.live_sessions
+        self.live = {SESSION, SESSION[:8], OTHER_SESSION, OTHER_SESSION[:8]}
+        il.live_sessions = lambda: self.live
+
+    def tearDown(self):
+        il.live_sessions = self._live_sessions
+        super().tearDown()
+
+    def write_drive(self, rows, legacy=False):
+        """`rows` is {session_id: (verdict, streak)}."""
+        path = os.path.join(self.tmp, "drive.json")
+        if legacy:
+            data = {
+                sid[:8]: {"sid": sid, "verdict": v}
+                for sid, (v, _) in rows.items()
+            }
+        else:
+            data = {
+                "round": iso(),
+                "entries": [
+                    {
+                        "session_id": sid,
+                        "verdict": verdict,
+                        "unverifiable_streak": streak,
+                        "unverifiable_round": iso(),
+                    }
+                    for sid, (verdict, streak) in rows.items()
+                ],
+            }
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        return path
+
+    def stall(self, path, round_id="r1"):
+        rc, out = self.run_cli("stall", "--drive-ledger", path, "--round-id", round_id)
+        self.assertEqual(rc, 0)
+        return out
+
+    def test_a_streak_below_the_threshold_opens_nothing(self):
+        path = self.write_drive({SESSION: ("unverifiable", 1)})
+        out = self.stall(path)
+        self.assertIn("no session has stalled", out)
+        self.assertEqual(self.records(), [])
+
+    def test_a_streak_at_the_threshold_opens(self):
+        path = self.write_drive({SESSION: ("unverifiable", 2)})
+        out = self.stall(path)
+        self.assertIn("opened", out)
+        record = self.records()[0]
+        self.assertEqual(record["kind"], "stall")
+        self.assertEqual(record["observations"], 2)
+        self.assertTrue(record["opened_at"])
+        self.assertTrue(record["deadline"])
+        self.assertEqual(record["card_id"], "", "a stall issues no card")
+
+    def test_the_streak_is_read_not_recounted(self):
+        """The discriminator for the rework: two runs, one unchanged streak.
+
+        An implementation that kept its own counter would read 1, then 2, and open
+        on the second call — filing a blocker for a session the drive leg still
+        calls one round in.
+        """
+        path = self.write_drive({SESSION: ("unverifiable", 1)})
+        self.stall(path, "r1")
+        self.stall(path, "r2")
+        self.assertEqual(self.records(), [])
+
+    def test_the_threshold_override_opens_at_a_streak_of_one(self):
+        os.environ["SUPERVISOR_INCIDENT_STALL_ROUNDS"] = "1"
+        path = self.write_drive({SESSION: ("unverifiable", 1)})
+        out = self.stall(path)
+        self.assertIn("opened", out)
+
+    def test_a_legacy_flat_row_carries_no_streak_and_opens_nothing(self):
+        # The legacy shape predates the streak field; absence reads as 0, never as
+        # a threshold met.
+        path = self.write_drive({SESSION: ("unverifiable", 0)}, legacy=True)
+        out = self.stall(path)
+        self.assertIn("no session has stalled", out)
+
+    def test_non_unverifiable_verdicts_are_ignored(self):
+        path = self.write_drive({
+            SESSION: ("revive", 5),
+            OTHER_SESSION: ("finished", 9),
+        })
+        out = self.stall(path)
+        self.assertIn("no session has stalled", out)
+        self.assertEqual(self.records(), [])
+
+    def test_reopening_does_not_duplicate_the_incident(self):
+        path = self.write_drive({SESSION: ("unverifiable", 3)})
+        self.stall(path, "r1")
+        self.stall(path, "r2")
+        self.assertEqual(len(self.records()), 1)
+
+    def test_a_corrupt_drive_ledger_is_refused(self):
+        path = os.path.join(self.tmp, "drive.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("{ not json")
+        with self.assertRaises(SystemExit) as caught:
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.run_cli("stall", "--drive-ledger", path, "--round-id", "r1")
+        self.assertEqual(caught.exception.code, il.REFUSED)
+
+    def test_a_missing_drive_ledger_is_not_an_error(self):
+        rc, out = self.run_cli(
+            "stall", "--drive-ledger", os.path.join(self.tmp, "nope.json"),
+            "--round-id", "r1",
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("no session has stalled", out)
+
+    def test_a_gone_session_opens_nothing(self):
+        """A session absent from the heartbeat store is gone, not stalled.
+
+        Measured 2026-10-22: 117 incidents opened in one round, every one of them
+        for a session that no longer existed, and every one became a board card the
+        operator could not act on.
+        """
+        self.live = set()
+        path = self.write_drive({SESSION: ("unverifiable", 5)})
+        out = self.stall(path)
+        self.assertIn("gone session(s) past the threshold", out)
+        self.assertNotIn("no session has stalled", out, "the skip line already says why")
+        self.assertEqual(self.records(), [])
+
+    def test_a_gone_session_does_not_block_a_live_one(self):
+        """Negative control: the filter must drop only the gone row.
+
+        Without it, a change that opened nothing at all would satisfy the case
+        above while silently retiring the whole incident class.
+        """
+        self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
+        path = self.write_drive({
+            SESSION: ("unverifiable", 9),
+            OTHER_SESSION: ("unverifiable", 2),
+        })
+        out = self.stall(path)
+        self.assertIn("gone session(s) past the threshold", out)
+        records = self.records()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["session_id"], OTHER_SESSION)
+
+    def test_a_drive_row_keyed_on_the_eight_char_handle_still_opens(self):
+        """The pin for the key-space mismatch — the defect the bot caught in #506.
+
+        The drive ledger keys `session_id` on the **8-char display handle**
+        (`agents/fleet-drive.md:44`, `scripts/drive-ledger.py:108`), while
+        `--list --json` returns **full UUIDs**. Comparing a full-UUID live set
+        against 8-char keys classifies EVERY row as gone: the stall incident class
+        is silently disabled and each round prints a plausible skip line per row —
+        the mirror of the bug this change exists to fix, and invisible to a fixture
+        that uses one id shape on both sides.
+        """
+        self.live = {SESSION, SESSION[:8]}
+        path = self.write_drive({SESSION[:8]: ("unverifiable", 2)})
+        out = self.stall(path)
+        self.assertIn("opened", out)
+        self.assertEqual(len(self.records()), 1)
+
+    def test_an_eight_char_row_absent_from_the_live_set_is_skipped(self):
+        """The negative control for the prefix join: an unmatched handle is gone."""
+        self.live = {OTHER_SESSION, OTHER_SESSION[:8]}
+        path = self.write_drive({SESSION[:8]: ("unverifiable", 2)})
+        out = self.stall(path)
+        self.assertIn("gone session(s) past the threshold", out)
+        self.assertEqual(self.records(), [])
+
+    def test_the_round_opens_at_most_the_budget(self):
+        """One round cannot open an incident per eligible session.
+
+        Measured 2026-10-22: 117 eligible sessions produced 117 incidents, and 116
+        of them became board cards in one burst, because the drive leg's per-round
+        cap had no counterpart here.
+        """
+        sessions = ["%08x-aaaa-bbbb-cccc-dddddddddddd" % i for i in range(117)]
+        self.live = set(sessions)
+        rows = {sid: ("unverifiable", 2) for sid in sessions}
+        rows[sessions[-1]] = ("unverifiable", 7)
+        path = self.write_drive(rows)
+        out = self.stall(path)
+        records = self.records()
+        budget = il.incident_budget()
+        self.assertEqual(len(records), budget)
+        self.assertEqual(out.count("held back"), 117 - budget)
+        # Longest streak first, so a backlog drains oldest-first rather than in
+        # session-id order, which would starve the oldest row behind any trickle.
+        self.assertEqual(records[0]["session_id"], sessions[-1])
+        self.assertEqual(records[0]["observations"], 7)
+
+    def test_a_failed_liveness_probe_fails_open(self):
+        """An unreachable store must not read as "every session is dead".
+
+        Suppressing the whole incident class on an outage is the false-empty
+        `read_drive_ledger` refuses for a corrupt drive ledger, one store over.
+        """
+        il.live_sessions = lambda: None
+        path = self.write_drive({SESSION: ("unverifiable", 2)})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, out = self.run_cli("stall", "--drive-ledger", path, "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertIn("liveness unavailable", err.getvalue())
+        self.assertEqual(len(self.records()), 1)
+
+
+class TestLiveSessions(Base):
+    """`live_sessions()`'s own parsing — the seam every stall test stubs past.
+
+    ⚠️ **This suite exists because the stall tests stub `live_sessions` wholesale**,
+    so the parse had no coverage at all. That is the worst place to have none: a
+    change in `session-liveness.py`'s output shape makes the function return `None`,
+    the caller fails OPEN, and the gate is silently off while every other test stays
+    green.
+
+    ⚠️ **The `rows=… registry_live=… degraded=…` header is written to STDERR, not
+    stdout** (measured 2026-10-22: with stderr discarded, stdout begins at `[`). The
+    real contract is therefore "stdout is the JSON array, stderr carries the human
+    line", and `test_the_real_shape_parses` pins exactly that. The stdout-header case
+    is kept as a separate tolerance test rather than as the fixture — asserting the
+    tolerance as if it were the shape would pass for the wrong reason and stop
+    covering the contract that actually holds.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._run = il.subprocess.run
+
+    def tearDown(self):
+        il.subprocess.run = self._run
+        super().tearDown()
+
+    def stub_run(self, stdout, stderr="", returncode=0):
+        result = type("Result", (), {})()
+        result.stdout = stdout
+        result.stderr = stderr
+        result.returncode = returncode
+        il.subprocess.run = lambda *args, **kwargs: result
+
+    def test_the_real_shape_parses_and_returns_both_key_forms(self):
+        """stdout is the array; the header rides stderr; both id forms come back.
+
+        ⚠️ Both forms, because the drive ledger keys on the 8-char display handle
+        while `--list` returns full UUIDs — see
+        `TestStall.test_a_drive_row_keyed_on_the_eight_char_handle_still_opens`.
+        """
+        self.stub_run(
+            '[\n  {"sessionId": "%s"},\n  {"sessionId": "%s"}\n]\n'
+            % (SESSION, OTHER_SESSION),
+            stderr="rows=2 registry_live=2 degraded=0\n",
+        )
+        self.assertEqual(
+            il.live_sessions(),
+            {SESSION, SESSION[:8], OTHER_SESSION, OTHER_SESSION[:8]},
+        )
+
+    def test_a_header_on_stdout_is_tolerated(self):
+        """Tolerance, not the shape: the header moving to stdout must not fail open."""
+        self.stub_run(
+            "rows=2 registry_live=2 degraded=0\n"
+            '[\n  {"sessionId": "a"},\n  {"sessionId": "b"}\n]\n'
+        )
+        self.assertEqual(il.live_sessions(), {"a", "b"})
+
+    def test_a_row_without_a_session_id_is_dropped(self):
+        self.stub_run('[{"sessionId": "a"}, {"nope": 1}]')
+        self.assertEqual(il.live_sessions(), {"a"})
+
+    def test_a_non_zero_exit_reads_as_unavailable(self):
+        self.stub_run("[]", returncode=1)
+        self.assertIsNone(il.live_sessions())
+
+    def test_an_unparseable_body_reads_as_unavailable(self):
+        self.stub_run("[ not json", stderr="rows=1 registry_live=1 degraded=0\n")
+        self.assertIsNone(il.live_sessions())
+
+    def test_a_body_with_no_array_reads_as_unavailable(self):
+        self.stub_run("", stderr="rows=0 registry_live=0 degraded=0\n")
+        self.assertIsNone(il.live_sessions())
+
+    def test_live_states_carries_both_readings_over_both_key_forms(self):
+        """The projection `cmd_escalate` reads, over the same dual key space.
+
+        ⚠️ Both forms, for the same reason `live_sessions()` returns both: an
+        incident keyed on the 8-char handle must still join to its row.
+        """
+        self.stub_run(
+            '[{"sessionId": "%s", "status": "shell", "state": "busy"}]' % SESSION
+        )
+        self.assertEqual(
+            il.live_states(),
+            {
+                SESSION: ("shell", "busy"),
+                SESSION[:8]: ("shell", "busy"),
+            },
+        )
+
+    def test_live_states_defaults_a_missing_reading_to_empty(self):
+        # The producer substitutes `unstamped` / `live` itself, but an absent key
+        # must still yield a comparable pair rather than raising.
+        self.stub_run('[{"sessionId": "a"}]')
+        self.assertEqual(il.live_states(), {"a": ("", "")})
+
+    def test_live_states_is_none_on_a_failed_probe(self):
+        """Never `{}`: an empty mapping reads as "every session is gone"."""
+        self.stub_run("[]", returncode=1)
+        self.assertIsNone(il.live_states())
+
+    def test_live_states_drops_a_row_without_a_session_id(self):
+        self.stub_run('[{"sessionId": "a", "status": "idle"}, {"nope": 1}]')
+        self.assertEqual(il.live_states(), {"a": ("idle", "")})
+    def test_an_empty_probe_is_unavailable_not_an_empty_fleet(self):
+        """SC3: `[]` at exit 0 with `degraded=0` must not read as "everything is gone".
+
+        Returning an empty set made every eligible row read as gone, so the whole
+        stall class went quiet behind a plausible skip line -- the same silent-off
+        reached from the fail-closed side.
+        """
+        self.stub_run("[]\n", stderr="rows=0 registry_live=0 degraded=0\n")
+        self.assertIsNone(il.live_sessions())
+
+    def test_a_degraded_but_non_empty_probe_is_still_usable(self):
+        """`degraded=` marks uncorroborated rows, not missing ones — so it cannot veto.
+
+        Measured 2026-10-29 on a healthy fleet: `rows=45 registry_live=43 degraded=7`.
+        Treating `degraded > 0` as "unavailable" therefore returned None every round,
+        warned every round, and never retired anything — the gone gate was silently
+        off in the leg that posts the cards. A session ABSENT from a non-empty set is
+        still absent; only an EMPTY set is unusable.
+
+        The header is the shape the producer can actually emit: `degraded` is set only
+        on REGISTRY rows, so `registry_live >= degraded` always holds. `rows=1
+        registry_live=0 degraded=1` is impossible and would pin a synthetic case.
+        """
+        self.stub_run(
+            '[{"sessionId": "a"}]', stderr="rows=1 registry_live=1 degraded=1\n"
+        )
+        self.assertEqual(il.live_sessions(), {"a"})
+
+    def test_an_all_degraded_probe_is_unavailable(self):
+        """No corroborated row means the set may be registry-only, so it cannot decide.
+
+        The producer names this state: during a partial rollout the endpoint holds no
+        `live: true` row while the registry still lists sessions. A cluster/a2a worker
+        lives ONLY in the endpoint, so it would read as absent and its stall incident
+        would be retired `skipped-gone` — terminally — for a session that is alive.
+        """
+        self.stub_run(
+            '[{"sessionId": "a", "degraded": true}, '
+            '{"sessionId": "b", "degraded": true}]',
+            stderr="rows=2 registry_live=2 degraded=2\n",
+        )
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertIsNone(il.live_sessions())
+        # The branch must say WHICH fail-open fired: the callers' shared warning is
+        # one line for every unavailable read, so a partial rollout would otherwise
+        # be indistinguishable from an empty probe or a subprocess failure.
+        self.assertIn("corroborated none of them", err.getvalue())
+        self.assertIn("2 session(s)", err.getvalue())
+
+    def test_one_corroborated_row_makes_the_probe_usable(self):
+        """The negative control: a single endpoint-corroborated row restores the gate."""
+        self.stub_run(
+            '[{"sessionId": "a", "degraded": true}, '
+            '{"sessionId": "b", "degraded": false}]',
+            stderr="rows=2 registry_live=1 degraded=1\n",
+        )
+        self.assertEqual(il.live_sessions(), {"a", "b"})
+
+    def test_an_unreadable_degraded_header_does_not_change_the_verdict(self):
+        """A header this reader cannot parse is ignored, not read as a veto."""
+        self.stub_run(
+            '[{"sessionId": "a"}]', stderr="rows=1 registry_live=1 degraded=many\n"
+        )
+        self.assertEqual(il.live_sessions(), {"a"})
+
+    def test_a_row_with_a_non_string_session_id_is_dropped(self):
+        self.stub_run('[{"sessionId": "a"}, {"sessionId": 42}]')
+        self.assertEqual(il.live_sessions(), {"a"})
+
+
+class TestIncidentBudget(Base):
+    """`incident_budget()`'s env parsing.
+
+    ⚠️ The FALLBACK is the property under test, not the override: `0` parsed
+    literally would mean "open nothing", so a typo'd override would silently disable
+    the stall incident class — the same silent-off failure mode the cap exists to
+    prevent, one input further out.
+    """
+
+    def test_the_default_is_three(self):
+        os.environ.pop("SUPERVISOR_INCIDENT_STALL_BUDGET", None)
+        self.assertEqual(il.incident_budget(), 3)
+
+    def test_a_valid_override_is_honoured(self):
+        os.environ["SUPERVISOR_INCIDENT_STALL_BUDGET"] = "7"
+        self.assertEqual(il.incident_budget(), 7)
+
+    def test_a_non_numeric_override_falls_back(self):
+        os.environ["SUPERVISOR_INCIDENT_STALL_BUDGET"] = "many"
+        self.assertEqual(il.incident_budget(), 3)
+
+    def test_a_zero_or_negative_override_falls_back(self):
+        for raw in ("0", "-2"):
+            os.environ["SUPERVISOR_INCIDENT_STALL_BUDGET"] = raw
+            self.assertEqual(il.incident_budget(), 3)
+
+
+class TestEscalateSkipsGoneStallIncidents(Base):
+    """The CARD is posted by `escalate`, not by `stall`, so the gate belongs there too.
+
+    `cmd_stall` gates creation, but an incident that already exists still reaches the
+    board through `cmd_escalate` — which is the leg the CHANGELOG measures ("116 open
+    board cards in 41 seconds"). A creation-only gate would leave the stated harm
+    untouched for everything already in the ledger.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._live_states = il.live_states
+        # ⚠️ A MAPPING now, not a set: `cmd_escalate` reads the per-row (status,
+        # state) pair, so a set stub would be inert and the leg would fall through
+        # to the host's real fleet. Empty means "every session absent".
+        self.live = {}
+        il.live_states = lambda: self.live
+
+    def tearDown(self):
+        il.live_states = self._live_states
+        super().tearDown()
+
+    def test_a_gone_stall_incident_posts_no_card_and_is_retired(self):
+        """No card, and NOT left pending: a pending skip re-lists and re-probes forever.
+
+        Left `pending` it sat in `share`'s all-time denominator with no possible
+        numerator, permanently depressing the one metric this ledger reports.
+        """
+        self.open_incident(kind="stall", deadline_seconds=0)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertIn("gone sessions", out)
+        self.assertEqual(self.posted, [])
+        self.assertEqual(
+            self.records()[0]["outcome"], il.SKIPPED_GONE, "a skip is not an escalation"
+        )
+
+    def test_a_live_stall_incident_still_escalates(self):
+        """Negative control: the gate must not disable escalation generally."""
+        self.live = {
+            SESSION: ("idle", "idle"),
+            SESSION[:8]: ("idle", "idle"),
+        }
+        self.open_incident(kind="stall", deadline_seconds=0)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        self.assertIn("escalated", out)
+        self.assertEqual(len(self.posted), 1)
+        self.assertEqual(self.records()[0]["outcome"], il.TIMED_OUT)
+
+
+class TestEscalateMidCommandPredicate(Base):
+    """A session that is PRESENT is not necessarily a session PARKED on a human.
+
+    `live_sessions()` answers only "is the session listed", so a session that is
+    present but mid-command passed the gone-gate and got a card for a blocker it had
+    already moved past — measured 2026-10-29, roughly two thirds of a live fleet
+    reads `shell` or `busy` at any moment.
+
+    ⚠️ **The `H` and `I` rows are the reason this suite exists.** They make the
+    registry `status` and the heartbeat `state` disagree in BOTH directions, so no
+    single-field predicate satisfies the set: a status-only reading suppresses `H`,
+    a state-only reading suppresses `E`. Without them the heartbeat half of the
+    predicate could ship untested and every other case would still pass.
+    """
+
+    A = "aaaa0000-1111-2222-3333-444444444444"
+    B = "bbbb0000-1111-2222-3333-444444444444"
+    C = "cccc0000-1111-2222-3333-444444444444"
+    D = "dddd0000-1111-2222-3333-444444444444"
+    E = "eeee0000-1111-2222-3333-444444444444"
+    F = "ffff0000-1111-2222-3333-444444444444"
+    G = "99990000-1111-2222-3333-444444444444"
+    H = "88880000-1111-2222-3333-444444444444"
+    I = "77770000-1111-2222-3333-444444444444"
+
+    def setUp(self):
+        super().setUp()
+        # This class proves the mid-command PREDICATE, not the per-round cap. Its
+        # largest fixture has six due rows of which five must escalate in ONE round,
+        # so the default budget of 3 would fail it for a reason it is not testing.
+        os.environ["SUPERVISOR_INCIDENT_STALL_BUDGET"] = "10"
+        self._live_states = il.live_states
+        self.states = {}
+        il.live_states = lambda: self.states
+
+    def tearDown(self):
+        il.live_states = self._live_states
+        super().tearDown()
+
+    def due_stall(self, sessions):
+        for sid in sessions:
+            self.open_incident(session=sid, kind="stall", deadline_seconds=0)
+
+    def escalated(self):
+        """The round's escalated set, as session ids — the criterion's observable."""
+        return sorted(key.split(":")[1] for key in self.posted)
+
+    def run_round(self):
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        self.assertEqual(rc, 0)
+        return out
+
+    def test_a_mid_command_session_is_not_escalated_but_a_parked_one_is(self):
+        """SC1: `shell` suppressed, absent suppressed, `waiting-on-operator` escalated."""
+        self.due_stall([self.A, self.B, self.C])
+        self.states = {
+            self.A: ("shell", "busy"),           # mid-command
+            # self.B absent from the store entirely
+            self.C: ("", "waiting-on-operator"),  # parked via the heartbeat
+        }
+        self.run_round()
+        self.assertEqual(self.escalated(), [self.C])
+
+    def test_the_disposition_follows_the_reading_not_the_incidents_age(self):
+        """SC2: same incident, same registry status, only `state` changes.
+
+        ⚠️ The registry status stays `shell` in BOTH rounds on purpose. A fixture
+        that rewrote the whole row would be satisfied by an implementation that reads
+        only the registry; this one is not.
+        """
+        self.due_stall([self.A])
+        self.states = {self.A: ("shell", "busy")}
+        self.run_round()
+        self.assertEqual(self.escalated(), [], "mid-command must not escalate")
+
+        self.posted.clear()
+        self.states = {self.A: ("shell", "waiting-on-operator")}
+        self.run_round()
+        self.assertEqual(self.escalated(), [self.A], "the same row, now parked")
+
+    def test_busy_does_not_fall_through_and_every_parked_reading_escalates(self):
+        """SC3: the two-field precedence, which no single-field predicate satisfies."""
+        self.due_stall([self.D, self.E, self.F, self.G, self.H, self.I])
+        self.states = {
+            self.D: ("busy", "busy"),                  # mid-command
+            self.E: ("", "unstamped"),                 # no reading -> fail OPEN
+            self.F: ("waiting", ""),                   # registry parked, no state
+            self.G: ("", "waiting-on-operator"),       # heartbeat parked, no status
+            self.H: ("busy", "waiting-on-operator"),   # heartbeat BEATS a busy status
+            self.I: ("waiting", "busy"),               # parked status BEATS a busy state
+        }
+        self.run_round()
+        self.assertEqual(
+            self.escalated(),
+            sorted([self.E, self.F, self.G, self.H, self.I]),
+            "only the mid-command row is suppressed",
+        )
+
+    def test_a_failed_probe_escalates_unfiltered(self):
+        """An unreadable store is not evidence that anyone is mid-command.
+
+        ⚠️ **EVERY due incident escalates, including the absent one.** During an
+        outage the gate cannot tell a gone session from a working one, so it does
+        not judge at all — the same fail-open `live_sessions()` holds one function
+        up. That is also why this leg is a stronger discriminator than "the
+        mid-command row is escalated": an implementation that coerced `None` to `{}`
+        would escalate `A` and `C` but suppress `B`, and one that treated `None` as
+        "everything absent" would suppress all three.
+        """
+        il.live_states = lambda: None
+        self.due_stall([self.A, self.B, self.C])
+        self.run_round()
+        self.assertEqual(self.escalated(), sorted([self.A, self.B, self.C]))
+
+    def test_a_mid_command_incident_stays_pending_for_rejudgement(self):
+        """The suppression is a skip, not a retirement.
+
+        A mid-command session still exists, so its incident must be re-judged next
+        round. Retiring it (the gone-session outcome) would drop a live worker's
+        blocker permanently.
+        """
+        self.due_stall([self.A])
+        self.states = {self.A: ("shell", "busy")}
+        out = self.run_round()
+        self.assertIn("mid-command", out)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+        self.assertIsNone(self.records()[0]["escalated_by"])
+
+
+class TestResume(Base):
+    """The automatic close: a tool call the WORKER made after its answer.
+
+    This is the observer SC2's "let the worker act, confirm it closes" depends on,
+    and the pairing is the point — a tool call BEFORE the answer must not close the
+    incident, or every incident on an active worker would close on the first poll
+    and the answer would be credited with a resume it never caused.
+    """
+
+    def write_transcript(self, session=SESSION, calls=None):
+        root = os.path.join(self.tmp, "projects")
+        directory = os.path.join(root, "-some-cwd")
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, session[:8] + "-abcd.jsonl")
+        with open(path, "w", encoding="utf-8") as handle:
+            for stamp, name in calls or []:
+                handle.write(json.dumps({
+                    "type": "assistant",
+                    "timestamp": stamp,
+                    "message": {"content": [
+                        {"type": "tool_use", "id": "t1", "name": name, "input": {}}
+                    ]},
+                }) + "\n")
+        return root
+
+    def resume(self, root, dry_run=False):
+        argv = ["resume", "--projects-root", root]
+        if dry_run:
+            argv.append("--dry-run")
+        rc, out = self.run_cli(*argv)
+        self.assertEqual(rc, 0)
+        return out
+
+    def answered_incident(self, by="manager"):
+        self.open_incident()
+        self.answer(by=by)
+
+    def after_answer(self, seconds=30):
+        """A transcript stamp strictly after the recorded answer.
+
+        Derived rather than taken from `now()`: the answer and the transcript would
+        otherwise land in the same second, `stamp <= since` would be true, and the
+        test would fail while asserting the opposite of what it means to.
+        """
+        answered = il.parse_ts(self.records()[0]["answered_at"])
+        return (answered + datetime.timedelta(seconds=seconds)).strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z"
+        )
+
+    def test_a_tool_call_after_the_answer_closes_it(self):
+        self.answered_incident()
+        root = self.write_transcript(calls=[(self.after_answer(), "Bash")])
+        out = self.resume(root)
+        self.assertIn("closed", out)
+        closed = self.records()[0]
+        self.assertEqual(closed["outcome"], "manager")
+        self.assertIn("Bash", closed["resume_evidence"])
+        self.assertTrue(closed["closed_at"])
+
+    def test_a_tool_call_BEFORE_the_answer_does_not_close_it(self):
+        # The negative control. A worker that was already working when the answer
+        # landed has not resumed — crediting that would close every incident on an
+        # active worker at the first poll.
+        self.answered_incident()
+        earlier = (il.parse_ts(self.records()[0]["answered_at"])
+                   - datetime.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        root = self.write_transcript(calls=[(earlier, "Bash")])
+        out = self.resume(root)
+        self.assertIn("no verified resumes", out)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+
+    def test_an_answered_incident_with_no_tool_call_stays_open(self):
+        self.answered_incident()
+        root = self.write_transcript(calls=[])
+        out = self.resume(root)
+        self.assertIn("no verified resumes", out)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+
+    def test_an_unanswered_incident_is_untouched(self):
+        # No answer, no close, however busy the worker is.
+        self.open_incident()
+        root = self.write_transcript(calls=[(iso(), "Bash")])
+        self.resume(root)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+
+    def test_a_missing_answerer_is_left_open_not_defaulted(self):
+        # Crediting `manager` for an incident whose answerer nobody recorded is
+        # exactly the inflation this ledger exists to prevent.
+        self.open_incident()
+        data = self.ledger()
+        answered_at = iso()
+        data["incidents"][0]["answered_at"] = answered_at
+        data["incidents"][0]["answered_by"] = None
+        with open(il.LEDGER, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        later = (il.parse_ts(answered_at)
+                 + datetime.timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        root = self.write_transcript(calls=[(later, "Bash")])
+        self.resume(root)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+
+    def test_the_outcome_follows_who_answered(self):
+        self.answered_incident(by="operator")
+        root = self.write_transcript(calls=[(self.after_answer(), "Bash")])
+        self.resume(root)
+        self.assertEqual(self.records()[0]["outcome"], "operator")
+
+    def test_dry_run_writes_nothing_and_does_not_contradict_itself(self):
+        self.answered_incident()
+        root = self.write_transcript(calls=[(self.after_answer(), "Bash")])
+        out = self.resume(root, dry_run=True)
+        self.assertIn("would close", out)
+        # `closed` stays 0 on a dry run, so the tail used to print "no verified
+        # resumes" directly under the "would close" lines it had just emitted.
+        self.assertNotIn("no verified resumes", out)
+        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
+
+    def test_the_transcript_is_resolved_by_id_prefix(self):
+        # The watcher's own join; a full-uuid filename match would miss every
+        # transcript whose directory is named from a munged cwd.
+        self.answered_incident()
+        root = self.write_transcript(calls=[(iso(), "Bash")])
+        found = il.transcript_for(root, SESSION)
+        self.assertIsNotNone(found)
+        self.assertTrue(found.endswith(".jsonl"))
+
+    def test_a_missing_transcript_is_not_an_error(self):
+        self.answered_incident()
+        out = self.resume(os.path.join(self.tmp, "no-such-root"))
+        self.assertIn("no verified resumes", out)
+
+
+if __name__ == "__main__":
+    unittest.main()

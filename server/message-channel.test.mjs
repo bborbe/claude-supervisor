@@ -65,6 +65,20 @@ test('an A2A worker resolves to its own endpoint, token and conversation', () =>
   assert.deepEqual(resolveMessageChannel(a), { channel: 'a2a', endpoint: 'http://localhost:9093/a2a', token: 'not-a-real-token', contextId: 'ctx-1' })
 })
 
+test('the channel carries the protocol version the worker advertised, so a follow-up speaks it', () => {
+  // ⚠️ A follow-up is a fresh request to the same worker, and the worker's version gate does not
+  // remember the first turn — so the version must travel on the channel, not be re-read or dropped.
+  const a = agent({
+    status: 'docker',
+    paneId: null,
+    a2aUrl: 'http://localhost:9093/a2a',
+    workerToken: 'not-a-real-token',
+    contextId: 'ctx-1',
+    protocolVersion: '1.0',
+  })
+  assert.equal(resolveMessageChannel(a).protocolVersion, '1.0')
+})
+
 test('a re-adopted A2A row holds no token and is refused, never sent unauthenticated', () => {
   const { error } = resolveMessageChannel(agent({ status: 'k8s', paneId: null, a2aUrl: 'http://w/a2a', workerToken: undefined, contextId: 'ctx-1' }))
   assert.match(error, /does not hold/)

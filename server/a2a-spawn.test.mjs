@@ -7,6 +7,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
   A2A_ACK_TIMEOUT_MS,
   A2A_DEFAULT_CLUSTER,
@@ -23,6 +24,7 @@ import {
   collectWorkerTurn,
   configuredA2AClusters,
   createWorkerOnController,
+  fetchControllerProtocolVersion,
   fetchWorkerCard,
   isA2ATarget,
   ledgerModeForStatus,
@@ -1591,4 +1593,175 @@ test('with no onTaskId the whole-body path is used, even on a stream body', asyn
   res.text = async () => body
   const outcome = await collectWorkerTurn({ res })
   assert.equal(outcome.state, 'TASK_STATE_COMPLETED')
+})
+
+// --- the card→builder path, which is where the version must actually be negotiated -------------
+//
+// ⚠️ ASSERTED THROUGH `fetchWorkerCard`, NOT AT THE BUILDER. A builder-only test passes a version
+// straight in, so a hardcoded default inside the card reader would still satisfy it — and the
+// worker would then speak the wrong protocol while every test stayed green. The criterion this
+// pair satisfies is the one that makes a hardcoded default fail.
+
+const cardFetch = (card) => stubFetch(JSON.stringify(card))
+
+test("a card advertising 0.3 makes the turn send A2A-Version: 0.3", async () => {
+  const card = await fetchWorkerCard({
+    a2aUrl: 'http://localhost:9093/a2a',
+    fetchImpl: cardFetch({
+      supportedInterfaces: [{ url: 'http://localhost:9093/a2a', protocolVersion: '0.3' }],
+    }),
+  })
+  assert.equal(card.protocolVersion, '0.3', 'the card reader must surface the version it read')
+
+  let sentHeaders
+  await openWorkerTurn({
+    endpoint: card.endpoint,
+    contextId: 'ctx-1',
+    text: 'do the thing',
+    token: TOKEN,
+    messageId: 'msg-1',
+    protocolVersion: card.protocolVersion,
+    fetchImpl: async (url, init) => {
+      sentHeaders = init.headers
+      return turnFetch(turnFrames())(url, init)
+    },
+  })
+  assert.equal(sentHeaders['a2a-version'], '0.3')
+})
+
+test('a card naming no version makes the turn send no A2A-Version header', async () => {
+  const card = await fetchWorkerCard({
+    a2aUrl: 'http://localhost:9093/a2a',
+    fetchImpl: cardFetch({ supportedInterfaces: [{ url: 'http://localhost:9093/a2a' }] }),
+  })
+  assert.equal(card.protocolVersion, undefined, 'no version on the card means no version, not a default')
+
+  let sentHeaders
+  await openWorkerTurn({
+    endpoint: card.endpoint,
+    contextId: 'ctx-1',
+    text: 'do the thing',
+    token: TOKEN,
+    messageId: 'msg-1',
+    protocolVersion: card.protocolVersion,
+    fetchImpl: async (url, init) => {
+      sentHeaders = init.headers
+      return turnFetch(turnFrames())(url, init)
+    },
+  })
+  assert.equal('a2a-version' in sentHeaders, false)
+})
+
+// --- the WIRING, which the tests above cannot reach -------------------------------------------
+//
+// ⚠️ THE CASES ABOVE HAND THE VERSION TO THE BUILDERS, so they mirror the call sites instead of
+// exercising them. Dropping `protocolVersion` from any one of them leaves every test above green
+// while restoring the exact -32009 this change exists to remove — the resolver is pinned, the
+// wiring is not. `supervisor.mjs` starts an MCP server at import and cannot be imported
+// behaviourally, so the call sites are pinned by reading its text, the same remedy
+// `spawn-mode.test.mjs`, `cluster-spawn.test.mjs` and `attention-poll.test.mjs` already use.
+
+// Every `name({ … })` call in `src`, brace-balanced so the argument object is read whole.
+function callSites(src, name) {
+  const sites = []
+  let from = 0
+  for (;;) {
+    const at = src.indexOf(`${name}({`, from)
+    if (at === -1) return sites
+    const open = src.indexOf('(', at)
+    let depth = 0
+    let i = open
+    for (; i < src.length; i++) {
+      if (src[i] === '(') depth += 1
+      else if (src[i] === ')') {
+        depth -= 1
+        if (depth === 0) break
+      }
+    }
+    sites.push(src.slice(at, i + 1))
+    from = i + 1
+  }
+}
+
+test('every worker-facing A2A call site in supervisor.mjs passes the negotiated version', () => {
+  const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+
+  const required = ['openWorkerTurn', 'registerPushCallbackOnWorker', 'readPushCallbackFromWorker']
+  const missing = []
+  for (const name of required) {
+    const sites = callSites(src, name)
+    assert.ok(sites.length > 0, `${name} must have at least one call site to pin`)
+    sites.forEach((site, index) => {
+      if (!/protocolVersion\s*:/.test(site)) missing.push(`${name} call #${index + 1}`)
+    })
+  }
+
+  // `a2aWorkerRecord` is the exception, and it is deliberate rather than an omission: it is called
+  // once for a worker whose card was READ and once from `recordUnreachableWorker`, where the card
+  // never answered — so there is no version to record and inventing one would be the guess this
+  // whole change refuses. The spawn site must still carry it.
+  const recordSites = callSites(src, 'a2aWorkerRecord')
+  assert.equal(recordSites.length, 2, 'both record builders must still exist')
+  assert.ok(
+    recordSites.some((site) => /protocolVersion\s*:/.test(site)),
+    'the record built from a read card must carry the version',
+  )
+
+  assert.deepEqual(
+    missing,
+    [],
+    'a call site that drops the version silently restores the -32009 refusal this change removes',
+  )
+})
+
+// The same guard as the worker-facing one above, on the CONTROL plane. The controller moved to
+// a2a-go v2.7.0 at v0.17.0, where an absent header defaults to "0.3" and is refused, so a control
+// call site that drops the version silently restores `-32009 … requested "0.3", served "1.0"` on
+// `create`, `list` and `stop` — the refusal this change exists to remove.
+test('every controller-facing control call site passes the negotiated version', () => {
+  const src = readFileSync(new URL('./a2a-spawn.mjs', import.meta.url), 'utf8')
+
+  const sites = callSites(src, 'a2aSendRequestFor')
+  assert.ok(sites.length > 0, 'the control plane must have call sites to pin')
+
+  const missing = []
+  sites.forEach((site, index) => {
+    if (!/protocolVersion/.test(site)) missing.push(`a2aSendRequestFor call #${index + 1}`)
+  })
+
+  assert.deepEqual(
+    missing,
+    [],
+    'a control call site that drops the version restores the -32009 refusal on create, list and stop',
+  )
+})
+
+// ⚠️ The controller guards its WHOLE surface, the agent card included: an unauthenticated GET
+// answers 401 (measured 2026-10-22). A card read that omitted the bearer therefore returned no
+// version, sent no `A2A-Version`, and the controller defaulted the absent header to "0.3" and
+// refused — the exact `-32009` the negotiation exists to prevent, reproduced THROUGH the fix.
+test('the controller card is read with the bearer, so a version is actually found', async () => {
+  let sawAuth
+  const version = await fetchControllerProtocolVersion({
+    endpoint: 'https://controller.example/a2a',
+    token: 'controller-bearer',
+    fetchImpl: async (url, init) => {
+      sawAuth = init.headers.authorization
+      return {
+        ok: true,
+        json: async () => ({ supportedInterfaces: [{ protocolVersion: '1.0' }] }),
+      }
+    },
+  })
+  assert.equal(version, '1.0')
+  assert.equal(sawAuth, 'Bearer controller-bearer')
+})
+
+test('a 401 card read yields no version, which is the path that reproduces the refusal', async () => {
+  const version = await fetchControllerProtocolVersion({
+    endpoint: 'https://controller.example/a2a',
+    token: 'controller-bearer',
+    fetchImpl: async () => ({ ok: false, status: 401 }),
+  })
+  assert.equal(version, undefined)
 })

@@ -259,7 +259,122 @@ PARK_AGE_THRESHOLDS = (15, 60)
 # because it was filed from a registry-`waiting` incident; its stated guarantee —
 # *even when the store is lossy, a tracked worker's park must not go unescalated*
 # — is not limited to the reasons that incident happened to show.
+#
+# ⚠️ **`registry:waiting` is also how a verb-carrying `🔴 BLOCKED` closer arrives**
+# since `stuck_reason` stopped reading that panel as a stall: such a worker is
+# parked on its own closer, so the gate falls through to the registry branch and
+# this set picks it up — which is what makes the closer's own card the only one it
+# gets (the re-post is suppressed while that card is open).
 PARKED_REASONS = ("registry:waiting", "busy+parked-modal", "headless+closer")
+
+# Which incident kind a raised gate records. EVERY reason that can reach `NEW GATE`
+# appears here or in `STALL_REASON_PREFIXES`; an unmapped one records nothing rather
+# than defaulting to `question`, because a wrong kind is a record that reads as
+# evidence while answering a different question.
+#
+# ⚠️ `registry:waiting` is `permission`, and that is a decision rather than a
+# measurement: the registry reports *blocked on input*, which is the SUPERSET of a
+# permission prompt and a question (`CLAUDE.md` § Reading a worker, `awaiting_input`).
+# The kind that can be proven from this read is "the worker is parked on a tool gate";
+# a question the worker asked is read from its closer line, which is
+# `headless+closer`'s shape. Splitting `registry:waiting` further would need the
+# pending tool name, which this watcher does not read.
+INCIDENT_KIND_BY_REASON = {
+    "registry:waiting": "permission",
+    "busy+parked-modal": "permission",
+    "headless+closer": "question",
+    "closer-unknown": "question",
+}
+
+#: `stuck:` is a headless worker, `stuck-tab:` a registered one — both are a stall:
+#: the worker is not moving, which is a duration rather than a gate someone can answer.
+#:
+#: ⚠️ **A `blocked-closer` cause reaches here only when the closer was VERBLESS**
+#: (`stuck_reason`). A `🔴 BLOCKED` panel carrying an answerable `👤 You:` verb is a
+#: park, so it arrives as `registry:waiting` (records `permission`) or `idle+closer`
+#: (records nothing) instead of a `stall`. That matters because a stall has no
+#: answer path and therefore no close path — filing a settled park as one made the
+#: record escalate-only. `stream-closed` and `permission-failures` are untouched: a
+#: dead channel is a stall whoever wrote the last panel.
+STALL_REASON_PREFIXES = ("stuck:", "stuck-tab:")
+
+
+def incident_kind(reason):
+    """The incident kind for a gate reason, or None when the reason records nothing."""
+    if reason in INCIDENT_KIND_BY_REASON:
+        return INCIDENT_KIND_BY_REASON[reason]
+    if reason.startswith(STALL_REASON_PREFIXES):
+        return "stall"
+    return None
+
+
+def open_incident(session_id, reason):
+    """Record a blocker incident for a gate this watcher just raised.
+
+    Shells out rather than importing: `incident-ledger.py` carries a hyphen in its
+    name so it cannot be imported by name, and this script ships as a plugin artifact
+    that must run with no sibling on the import path — the same reason `_ENTITY` and
+    `LIVE_WINDOW` are copied rather than imported.
+
+    ⚠️ Fires on the NEW GATE TRANSITION only, never on every poll: one subprocess per
+    gate, not per tick. `open` is idempotent on the dedup key, so a gate that is
+    re-raised cannot double-count in the denominator.
+
+    ⚠️ A failure here is SWALLOWED, deliberately. The watcher's job is to report
+    gates; a ledger that cannot be written must not take the watcher down and leave
+    every gate in the fleet unreported — the larger failure by far. The record is
+    the durable half, and a missing one is visible as a missing row.
+    """
+    kind = incident_kind(reason)
+    if kind is None:
+        return
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "incident-ledger.py")
+    if not os.path.exists(script):
+        return
+    command = [
+        sys.executable,
+        script,
+        "open",
+        "--session",
+        session_id,
+        "--kind",
+        kind,
+        "--owner",
+        session_id,
+        "--detected-by",
+        "gate:%s" % reason,
+    ]
+    try:
+        subprocess.run(command, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def resume_observer(projects_root):
+    """Close incidents whose worker acted after its answer.
+
+    One subprocess per poll, not per incident: the ledger owns the scan (which
+    transcript to read, what counts as a resume, which outcome to stamp) and this
+    watcher only supplies the projects root. Duplicating that scan here would put
+    the definition of "resumed" in two files, which is how the two readers of the
+    same fact start disagreeing.
+
+    ⚠️ Swallowed on failure for the same reason `open_incident` is: a ledger that
+    cannot be read must not take the watcher down and leave every gate in the fleet
+    unreported. A missed close is visible as an incident still open.
+    """
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "incident-ledger.py")
+    if not os.path.exists(script):
+        return
+    try:
+        subprocess.run(
+            [sys.executable, script, "resume", "--projects-root", projects_root],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def tracked_ids(tracked_path, tasks_dir):
@@ -684,12 +799,28 @@ def stuck_reason(text, tail):
     `blocked-closer` matches the state line as a line PREFIX: the phrase also occurs
     mid-line in a worker's prose about it, and a substring match would fire on a
     worker that is merely discussing a block.
+
+    ⚠️ **`blocked-closer` is the VERBLESS closer, and that is the discriminator.**
+    A `🔴 BLOCKED` line accompanied by an answerable `👤 You:` verb is a worker
+    that reached its own closer and told the operator where to answer — parked,
+    not stuck — so it deliberately does NOT match here, and the gate falls through
+    to the registry branch (`registry:waiting` / `idle+closer`), a park reason
+    that already exists and already routes to the operator. Only a closer whose
+    panel reads `nothing` (or carries no `👤 You:` line at all) means nobody was
+    told, and only that one keeps this cause and keeps escalating.
+
+    ⚠️ **`stream-closed` and `permission-failures` are unaffected**, and their
+    positions on either side of this limb are what says so: a dead channel and an
+    exhausted retry run are stuck whoever wrote the last panel, so a verb-carrying
+    closer sitting on a three-failure run still reads `permission-failures`.
     """
     outcomes = permission_outcomes(tail)
     run = trailing_failures(outcomes)
     if run and any(sc for _, sc in outcomes[len(outcomes) - run:]):
         return "stream-closed"
-    if text and any(l.strip().startswith(BLOCKED_PREFIX) for l in text.splitlines()):
+    if (text
+            and any(l.strip().startswith(BLOCKED_PREFIX) for l in text.splitlines())
+            and not is_ask(closer_body(text))):
         return "blocked-closer"
     if run >= STUCK_PERM_FAILURES:
         return "permission-failures"
@@ -1315,7 +1446,7 @@ def aged_events(ages, now, thresholds=PARK_AGE_THRESHOLDS):
     return out
 
 
-def post_repost(sid8, full, label, script_dir=None, timeout=30):
+def post_repost(sid8, full, label, reason="", script_dir=None, timeout=30):
     """Post one re-registered card via `attention-ask.py post`. True on success.
 
     Shelled out rather than re-implemented: that script owns the dedup key, the
@@ -1323,17 +1454,41 @@ def post_repost(sid8, full, label, script_dir=None, timeout=30):
     would be a second place for all three to drift — with the store's pruning
     rule turning a wrong `liveness_ref` into a silently deleted card rather than
     an error anyone would see.
+
+    ⚠️ **The card's SHAPE follows the park, and a native permission modal gets a
+    card that offers no answer.** A re-registered park used to be posted as a
+    `message` item unconditionally, which the board renders with a free-text
+    field. For a session parked on a native permission modal that field is a lie:
+    a typed answer reaches the store and nothing else — the modal is answered by
+    a keystroke in its own pane, and a `permission` card would not fix it either,
+    because the release path reads `resolved_by`, which only an arm writes and
+    the board never sends (`attention-ask.py`'s `POSTABLE_MECHANISMS` records the
+    same rule from the poster's side). So a permission-class park is posted as an
+    `ack`: it renders the text and no control at all, and the text says where the
+    gate actually lives and how to get there.
+
+    A question-class park keeps the `message` shape — its free-text field IS the
+    answer path, and narrowing it would remove the only way to answer a parked
+    closer line from the board.
     """
     script = os.path.join(
         script_dir or os.path.dirname(os.path.abspath(__file__)),
         "attention-ask.py")
     cmd = [sys.executable, script, "post",
            "--producer-id", full,
-           "--dedup-key", f"park:{sid8}",
-           "--payload",
-           f"{label}: this session is parked on the operator and the attention "
-           f"store holds no open item for it. Re-registered by the tracked-set "
-           f"watcher — answer it and the session can continue."]
+           "--dedup-key", f"park:{sid8}"]
+    if INCIDENT_KIND_BY_REASON.get(reason) == "permission":
+        cmd += ["--mechanism", "ack", "--payload",
+                f"{label}: this session is parked on a prompt in its own pane. "
+                f"Answer it in the pane — a board answer cannot release a "
+                f"prompt raised in another session."
+                + _jump_sentence(full, label, script_dir)]
+    else:
+        cmd += ["--payload",
+                f"{label}: this session is parked on the operator and the "
+                f"attention store holds no open item for it. Re-registered by "
+                f"the tracked-set watcher — answer it and the session can "
+                f"continue."]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except Exception as exc:
@@ -1346,6 +1501,156 @@ def post_repost(sid8, full, label, script_dir=None, timeout=30):
               file=sys.stderr, flush=True)
         return False
     return True
+
+
+# ⚠️ **Not a fixed glyph list.** The pane title carries BOTH WezTerm's status
+# glyph and the `⚙ ` session marker a manager-spawned tab is named with
+# (`-n '⚙ <label>'`), so `✳ ⚙ MDM split command` has to normalise to the same
+# thing as the registry's `⚙ MDM split command` AND as a bare `MDM split
+# command`. Enumerating the glyphs fixes only the first of those — the exact
+# bug `who-needs-me.py`'s `strip_status_glyph` had to fix, measured there as 17
+# of 27 rows disagreeing on the leading `⚙` alone. Stripping any leading
+# non-alphanumeric run handles every marker without a list to keep current.
+#
+# ⚠️ **A trailing ` (N)` is NOT decoration and is never stripped.**
+# `server/liveness.mjs`'s `uniqueTabName` appends it so two sessions never answer
+# to one name, and that suffixed name is what reaches both the tab's `-n` and the
+# registry `name` read here. Collapsing `⚙ foo (2)` to `foo` would make a
+# suffixed session's card match its unsuffixed sibling's pane — a jump target
+# that looks resolved and goes to the wrong session.
+
+
+def _norm_title(title):
+    """A pane or registry title reduced to the part two sides can agree on.
+
+    Leading decoration (status glyphs, the `⚙`/`✳` markers) is dropped and
+    whitespace is collapsed, so a pane title and a registry name compare on the
+    words alone. The trailing ` (N)` uniqueness suffix is deliberately KEPT —
+    see the comment above.
+    """
+    text = re.sub(r"^\W+", "", (title or "").strip(), flags=re.UNICODE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def registry_name_for_session(session_id):
+    """The registry `name` for a full session id, or None.
+
+    ⚠️ **This is the join the re-post actually needs.** `tracked_entries` yields
+    the TASK NAME, and a manager-spawned tab is titled with the session's own
+    registry name — the two are routinely different (`Register an Unmerge
+    Command on …` vs `⚙ MDM split command`). Matching a pane title against the
+    task name therefore finds nothing, and the card silently loses the jump
+    target it advertises. The registry is the one place the session's real name
+    lives, so it is read here rather than guessed from the label.
+
+    `None` on any failure, for the same reason `pane_for_session_name` returns
+    it: a failed read proves nothing, and the caller degrades rather than
+    suppressing the card.
+    """
+    if not session_id:
+        return None
+    try:
+        entries = os.listdir(SESSIONS_DIR)
+    except OSError:
+        return None
+    for entry in entries:
+        if not entry.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(SESSIONS_DIR, entry), encoding="utf-8") as fh:
+                record = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        if record.get("sessionId") != session_id:
+            continue
+        name = record.get("name")
+        return name if isinstance(name, str) and name.strip() else None
+    return None
+
+
+def pane_for_session_name(name):
+    """The pane whose title is this session's name, or None.
+
+    Best-effort and non-fatal by construction: the card is still worth posting
+    without a jump target, so every failure path returns None and the payload
+    degrades to naming the pane-less fact. ⚠️ `None` never means "no pane
+    exists" — a failed `wezterm cli list` cannot prove that — so callers must
+    treat it as "not resolved", never as "there is none".
+    """
+    wanted = _norm_title(name)
+    if not wanted:
+        return None
+    try:
+        proc = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
+                              capture_output=True, text=True, timeout=5)
+        if proc.returncode != 0:
+            return None
+        panes = json.loads(proc.stdout)
+    except Exception:
+        return None
+    hits = []
+    for pane in panes if isinstance(panes, list) else []:
+        if not isinstance(pane, dict):
+            continue
+        if _norm_title(pane.get("title")) != wanted:
+            continue
+        # ⚠️ `str(pane.get("pane_id"))` is NOT enough: a pane dict without the
+        # key yields the literal string "None", which is truthy, so the caller
+        # would emit `Jump to pane None: /supervisor:jump None` — a jump target
+        # that looks resolved and goes nowhere. Guard the key itself.
+        pane_id = pane.get("pane_id")
+        if pane_id is None:
+            continue
+        hits.append(str(pane_id))
+    # ⚠️ **Exactly one match, or nothing.** Returning the first of two is the
+    # rule `who-needs-me.py:pane_for` states and this join now follows: *"the
+    # wrong answer wearing the appearance of a resolved one … is strictly worse
+    # than a blank"*. Two panes can normalise to one key (a title truncated by
+    # WezTerm, a hand-renamed pane), and a card that jumps to a sibling's pane
+    # is worse than a card with no jump button at all — the operator presses it
+    # and lands in a different session's modal.
+    return hits[0] if len(hits) == 1 else None
+
+
+def _jump_sentence(full, label, script_dir=None):
+    """The trailing sentence naming where to answer, empty when no pane resolves.
+
+    ⚠️ **The join goes through the REGISTRY name, never the task label.** The
+    caller supplies `label` — the tracked task's name — and a manager-spawned
+    tab is titled with the session's own registry name; those differ routinely
+    (`Register an Unmerge Command on …` vs `⚙ MDM split command`). Matching the
+    pane against the label therefore finds nothing and the card silently loses
+    the jump target it advertises, which is a control that looks present in the
+    code and is absent on every real card. The label is used only as a fallback
+    when the registry cannot name the session at all.
+
+    ⚠️ Shelled to `jump-link.py` for the same reason the post is shelled to
+    `attention-ask.py`: that script owns whether a clickable URL is available
+    and its own fallback, and re-deriving either here would be a second copy of
+    a rule that already has one home. It honours the same `script_dir` seam as
+    the post, so a caller that redirects one sibling does not silently get the
+    other from `__file__`.
+    """
+    name = registry_name_for_session(full) or label
+    pane = pane_for_session_name(name)
+    if not pane:
+        return ""
+    script = os.path.join(
+        script_dir or os.path.dirname(os.path.abspath(__file__)),
+        "jump-link.py")
+    target = ""
+    try:
+        proc = subprocess.run([sys.executable, script, pane],
+                              capture_output=True, text=True, timeout=5)
+        if proc.returncode == 0:
+            target = proc.stdout.strip()
+    except Exception:
+        target = ""
+    if not target:
+        target = f"/supervisor:jump {pane}"
+    return f" Jump to pane {pane}: {target}"
 
 
 def answer_covers_current_park(row, since):
@@ -1387,11 +1692,20 @@ def answer_covers_current_park(row, since):
     return stamp.timestamp() >= since
 
 
-def repost_empty_parks(parked, entries, log_path, post=None, park_since=None):
+def repost_empty_parks(parked, entries, log_path, post=None, park_since=None,
+                       reasons=None):
     """Re-post a card for every parked session the store no longer holds.
 
-    Returns the `sid8`s re-posted. `post(sid8, full, label)` is injectable, so
-    the tests assert the call without a live store.
+    Returns the `sid8`s re-posted. `post(sid8, full, label, reason=...)` is
+    injectable, so the tests assert the call without a live store.
+
+    ⚠️ **`reasons` decides the card's SHAPE, and omitting it silently falls back
+    to the question shape.** It maps `sid8` to the `is_gated` reason this poll
+    observed; a permission-class reason (`INCIDENT_KIND_BY_REASON`) makes
+    `post_repost` emit an `ack` card with no input field, because the park is a
+    native permission modal that no board answer can release. A caller that
+    passes none gets the pre-change `message` card, which is the shape the
+    incident's defect was reported against — so the caller here always passes it.
 
     ⚠️ **The producer is the WORKER, not this watcher's manager.** A store item's
     session is its `producer_id` (`who-needs-me.py:268`), so posting as the
@@ -1474,7 +1788,8 @@ def repost_empty_parks(parked, entries, log_path, post=None, park_since=None):
                       f"answer={row.get('answer')!r}) — the operator already "
                       f"answered it, so this is not a store fault; not re-posted")
             continue
-        if not post(sid8, full, name or sid8):
+        if not post(sid8, full, name or sid8,
+                    reason=(reasons or {}).get(sid8, "")):
             continue
         out.append(sid8)
         log_event(log_path, "REPOST", sid8, name,
@@ -1599,6 +1914,12 @@ def main(argv=None):
             state = probe(args.tracked, args.tasks_dir, args.projects_root,
                           args.sessions_dir, warned, args.live_dir,
                           tracked={s: n for s, (n, _) in entries.items()})
+            # The one transition this watcher RECORDS rather than reports: a worker
+            # that acted after its answer has resolved its blocker, and nothing else
+            # proves that. Runs every poll because a resume can land at any point
+            # between ticks, and a poll that skipped it would leave the incident open
+            # until the next tick after the worker had already moved on.
+            resume_observer(args.projects_root)
             key = gated_keys(state)
             # Counted every poll, not only under `--once`: the liveness record
             # reports both halves, and a HELD session is exactly what makes a
@@ -1645,6 +1966,13 @@ def main(argv=None):
                         print(f"NEW GATE  {sid8}  {label[:46]}  ::  {detail}",
                               flush=True)
                         prev[sid8] = content_key(state[sid8][2], state[sid8][1])
+                        # The FULL id, not `sid8`: the ledger keys on the session, and
+                        # an eight-character prefix is a collision waiting for two
+                        # sessions that share one. `tracked_entries` already holds it,
+                        # and falls back to the prefix only when it does not — which
+                        # the incident then records rather than inventing.
+                        open_incident(entries.get(sid8, (None, ""))[1] or sid8,
+                                      state[sid8][2])
                     elif kind == "HELD":
                         prev.pop(sid8, None)
                     else:
@@ -1733,7 +2061,13 @@ def main(argv=None):
             # newest forever and silence every later lost park on that session.
             repost_empty_parks(
                 parked, entries, log_path,
-                park_since={s: r.get("since") for s, r in park_ages.items()})
+                park_since={s: r.get("since") for s, r in park_ages.items()},
+                # The reason decides the card's SHAPE: a permission-class park is
+                # posted as an `ack` with no input field, because the modal is
+                # answerable only in the pane. Read from the same `state` the
+                # `parked` set came from, so the two can never disagree about
+                # which park this card is about.
+                reasons={s: state[s][2] for s in parked if s in state})
             # tmp + os.replace, same convention and same reason as the gated-set
             # write above: a truncated park file restarts every clock, and the
             # read path cannot tell that from a first run.

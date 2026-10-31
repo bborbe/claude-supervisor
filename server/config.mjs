@@ -141,6 +141,67 @@ function collectPrefixed(env, prefix) {
   return out
 }
 
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
+
+// A dotted-quad in 127/8. WHATWG normalisation collapses the decimal and hex spellings
+// (`2130706433`, `0x7f000001`, `127.1`) onto `127.0.0.1` before `url.hostname` is read, so
+// this only ever sees dotted-decimal.
+//
+// ⚠️ The octet range check is DEFENCE IN DEPTH, not the live guard: Node's URL parser rejects
+// an out-of-range octet outright (`new URL('http://127.0.0.256:1')` throws ERR_INVALID_URL),
+// so such an input is refused by the `catch` above and never reaches this function. The check
+// stays because a parser that instead fell back to domain parsing would hand `127.0.0.256`
+// here as an opaque host, and then only this line would stop it. Exported so the check is
+// exercised directly rather than only through a path that cannot reach it.
+export function isLoopbackV4(host) {
+  const m = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
+  return m !== null && [m[1], m[2], m[3]].every((o) => Number(o) <= 255)
+}
+
+// Resolve the wrapper origin, refusing anything that is not loopback.
+//
+// The wrapper's API is unauthenticated by design — it is a local control plane — and a spawn
+// sends it the whole inherited environment, credentials included. So the one thing that must
+// not be configurable is pointing it off this machine.
+//
+// ⚠️ A bad value is RETURNED as a refusal, not thrown. This module's contract is that
+// refusals are surfaced so the whole surface stays enumerable and testable, with
+// `supervisor.mjs` acting on them at boot — the same shape `claudeHomeRefusal` uses. Throwing
+// here would make `config.mjs` unimportable, so one mistyped environment variable would take
+// down tab workers, the attention surface and everything else at load, in a deployment that
+// may never spawn a wrapper-backed worker at all.
+export function resolveWrapperUrl(raw) {
+  const fallback = 'http://localhost:18090'
+  const value = typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : fallback
+  let url
+  try {
+    url = new URL(value)
+  } catch {
+    // ⚠️ Never echo the raw value: a malformed URL can carry userinfo, and this string reaches
+    // the spawn reply and the log.
+    return { url: fallback, refusal: 'SUPERVISOR_WRAPPER_URL is not a URL' }
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return { url: fallback, refusal: `SUPERVISOR_WRAPPER_URL must be http(s), got ${url.protocol}` }
+  }
+  if (!LOOPBACK.has(url.hostname) && !isLoopbackV4(url.hostname)) {
+    return {
+      url: fallback,
+      refusal:
+        `SUPERVISOR_WRAPPER_URL must point at loopback: the wrapper API is unauthenticated ` +
+        `and a spawn sends the inherited environment to it. Got host ${url.hostname}`,
+    }
+  }
+  // ⚠️ The ORIGIN, not the trimmed string. A value carrying a path, query or fragment
+  // (`http://localhost:18090/base`) passed the host check and was then returned verbatim, so
+  // `baseOf()` concatenated `/base/api/1.0/...` and every wrapper call silently 404'd. The
+  // origin is the only thing the comment above claims to enforce, and `url.origin` also drops
+  // any userinfo, which is what kept a credential out of the reply and the log.
+  return { url: url.origin, refusal: null }
+}
+
+const wrapperResolution = resolveWrapperUrl(ENV.SUPERVISOR_WRAPPER_URL)
+
 export const config = Object.freeze({
   // stderr is the transport-safe log channel — stdout carries MCP frames — so a file
   // log is opt-in and nothing depends on a machine-local path by default.
@@ -355,6 +416,22 @@ export const config = Object.freeze({
 
   claudeCmd: ENV.SUPERVISOR_CLAUDE_CMD || null,
   mcpConfig: ENV.SUPERVISOR_MCP_CONFIG || null,
+
+  // Where claude-wrapper listens. The headless spawn path starts its children THERE rather
+  // than in this process, because a permission park belongs to whoever holds the child's
+  // stdin — and a park held here is answerable only by this server, then dies with it.
+  // Same default as the wrapper's own `--listen`, so an unconfigured machine works.
+  //
+  // ⚠️ LOOPBACK ONLY, and the check is not decoration. A spawn sends the whole inherited
+  // environment — `baseEnv` below, including `ANTHROPIC_BASE_URL` and any credential riding
+  // in it — to this URL in cleartext, on every spawn; and no wrapper call sends an auth
+  // header. A non-loopback value therefore turns the spawn/message/answer control plane into
+  // an unauthenticated endpoint that receives the fleet's credentials.
+  wrapperUrl: wrapperResolution.url,
+  // Non-null when SUPERVISOR_WRAPPER_URL was refused. `wrapperUrl` then holds the loopback
+  // default, so nothing silently points elsewhere; `supervisor.mjs` refuses the spawn and
+  // says why. Same shape as `claudeHomeRefusal`.
+  wrapperUrlRefusal: wrapperResolution.refusal,
 
   // The process environment, handed wholesale to a spawned worker so it inherits the
   // launcher's env — PATH, HOME and ANTHROPIC_BASE_URL among it. Here rather than read at

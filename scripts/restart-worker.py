@@ -70,6 +70,12 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# The exit-record writer, which sits beside this script. Passed to the spawned pane as an
+# absolute path through `env`, because the pane inherits wezterm's mux-server environment
+# and cannot resolve `$CLAUDE_PLUGIN_ROOT` for a script this file already knows the
+# location of.
+RECORD_SCRIPT = os.path.join(HERE, "session-exit-record.py")
+
 # The registry. `SUPERVISOR_SESSIONS_DIR` first so a drill can point at a fixture tree;
 # never a hardcoded home path in committed content.
 SESSIONS_DIR = os.path.expanduser(
@@ -393,16 +399,22 @@ def resolve_launcher(sid, cwd, fb, subject=None):
     process came back without `--mcp-config` and without its `a2a` server.
 
     Precedence mirrors the spawn path (`server/spawn-cwd.mjs` `resolveTaskLauncher`): the
-    task bound to this session (`claude_session_id`) names a `launcher:`, else its goals
-    agree on one, else the vault's `claude_script`. The vault is the one whose path holds
-    the session's cwd. A bare name resolves beside the vault launcher. Anything that cannot
-    be resolved to an existing file answers `None` — the caller refuses before the kill.
+    task bound to this session (`claude_session_id`) names a `launcher:`, else the vault's
+    configured WORKER default (`worker_launcher`, reported as `worker-default`), else the
+    vault's `claude_script`. The vault is the one whose path holds the session's cwd. A bare
+    name resolves beside the vault launcher. Anything that cannot be resolved to an existing
+    file answers `None` — the caller refuses before the kill.
     `SUPERVISOR_LAUNCHER` overrides the whole resolution, for drills and tests.
+
+    ⚠️ A GOAL's `launcher:` is NOT consulted, and dropping it is the fix this carries. A goal
+    states how its MANAGER runs; inheriting it here resumed every worker under such a goal on
+    its manager's Opus launcher (measured 2026-10-22: 12 private-personal goals). Goal
+    frontmatter is now inert for workers on both the spawn and the resume path.
 
     A MANAGER (`subject` = `(kind, title)` from `manager_subject()`) takes the manager rule
     instead, mirroring `resolveManagerLauncher` in `server/spawn-cwd.mjs`: the subject page's
-    `manager_launcher:`, else the vault launcher's `-claude` sibling when it exists, else the
-    vault's `claude_script`.
+    `manager_launcher:`, else the vault's configured `manager_launcher` (`manager-default`),
+    else the `-claude` sibling for a vault-cli too old to emit that key, else `claude_script`.
     """
     override = os.environ.get("SUPERVISOR_LAUNCHER")
     if override:
@@ -438,7 +450,17 @@ def resolve_launcher(sid, cwd, fb, subject=None):
         subdirs = fb.TOPIC_SUBDIRS if kind == "topic" else fb.GOAL_SUBDIRS
         page = next((p for p in fb._pages(root, subdirs)
                      if os.path.basename(p)[:-3].lower() == str(title).strip().lower()), None)
-        return load_sibling("manager-launcher.py").resolve(vault_launcher, page)
+        # A bare configured name resolves beside the vault's own launcher, exactly as a bare
+        # `launcher:` does below — `manager-launcher.py` receives one path and has no directory
+        # to resolve against, so the join happens here or the file check fails on a valid value.
+        # Provenance travels with it: `manager-default` when the value came from the config key,
+        # `vault` when it is `claude_script` and the sibling rule is the one deciding.
+        manager_default = str(vault.get("manager_launcher") or "").strip()
+        if not manager_default:
+            return load_sibling("manager-launcher.py").resolve(vault_launcher, page, "vault")
+        if "/" not in manager_default:
+            manager_default = os.path.join(os.path.dirname(vault_launcher), manager_default)
+        return load_sibling("manager-launcher.py").resolve(manager_default, page, "manager-default")
 
     # The task bound to this session, matched on the row's WHOLE id set —
     # `claude_session_id` plus every `metrics_sessions[].session_id`, read through
@@ -457,28 +479,22 @@ def resolve_launcher(sid, cwd, fb, subject=None):
         names = ", ".join(os.path.basename(p)[:-3] for p, _ in claimants)
         return None, f"{len(claimants)} task pages claim session {sid} ({names})"
 
-    own, goal_values = "", []
+    # Only the task's OWN `launcher:` is read. Its goals are deliberately not consulted: a
+    # goal's `launcher:` describes its manager, and inheriting it resumed every worker under
+    # such a goal on the manager's Opus launcher (measured 2026-10-22, 12 private-personal
+    # goals). The worker default comes from the vault config instead.
+    own = ""
     if claimants:
-        path, fm = claimants[0]
-        own = _launcher_field(path)
-        if not own:
-            for goal in fb.frontmatter_links(fm, "goals"):
-                for gpath in fb._pages(root, fb.GOAL_SUBDIRS):
-                    if os.path.basename(gpath)[:-3].lower() == goal.strip().lower():
-                        value = _launcher_field(gpath)
-                        if value:
-                            goal_values.append(value)
+        own = _launcher_field(claimants[0][0])
 
-    for value in [own, *goal_values]:
+    worker_default = str(vault.get("worker_launcher") or "").strip()
+    for value in [own, worker_default]:
         if value and (not SAFE_LAUNCHER.match(value) or ".." in value.split("/")):
             return None, f"launcher {value!r} is not a plain script name or path"
-    goal_set = sorted(set(goal_values))
     if own:
         name, source = own, "task"
-    elif len(goal_set) > 1:
-        return None, f"the task's goals name different launchers ({', '.join(goal_set)})"
-    elif goal_set:
-        name, source = goal_set[0], "goal"
+    elif worker_default:
+        name, source = worker_default, "worker-default"
     else:
         name, source = vault_launcher, "vault"
     if "/" not in name:
@@ -572,15 +588,39 @@ def resume_command(sid, title, chip, cwd, launcher):
     manager relaunched as a worker on 2026-09-18. The quotes are dropped here, deliberately.
     """
     script = launcher
+    # ⚠️ NO `exec`, and the trap is why. `exec` replaces the pane's shell with the launcher,
+    # so no process is left to `waitpid` and the session's exit status stops existing — a
+    # SIGKILLed worker then leaves no record anywhere, which is the whole gap
+    # `session-exit-record.py` closes. Measured 2026-10-27 on this shape: as a child with
+    # `trap _sx EXIT`, a `kill -9` records `rc=137`; behind `exec`, the trap cannot fire.
+    # The writer path travels as an `env` assignment because a spawned pane inherits
+    # wezterm's mux-server environment, not this process's.
+    #
+    # The observer is started BEFORE the trap and BEFORE the launcher, and it detaches into
+    # its own session, so it outlives a kill of this whole process group. It watches `$$`
+    # — this shell — because the shell outlives the launcher and dies exactly when the group
+    # is killed, which is the case the trap cannot record. Its own `append` call writes the
+    # spawn marker first so a record that begins at `kind=spawn` proves the writer was wired.
+    trap = (
+        '_sx() { rc=$?; "$SESSION_EXIT_RECORD" append --session "'
+        + sid
+        + '" --pid $$ --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn '
+        '--session "'
+        + sid
+        + '" --pid $$ || true; "$SESSION_EXIT_RECORD" observe --pid $$ --session "'
+        + sid
+        + '" || true; trap _sx EXIT; '
+    )
     inner = (
         "unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN "
         "CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; "
-        f'exec "{script}" --resume {sid} -n "{title}" "/color {chip}"'
+        + trap
+        + f'"{script}" --resume {sid} -n "{title}" "/color {chip}"'
     )
     argv = ["wezterm", "cli", "spawn"]
     if cwd:
         argv += ["--cwd", cwd]
-    return argv + ["--", "bash", "-lc", inner]
+    return argv + ["--", "env", f"SESSION_EXIT_RECORD={RECORD_SCRIPT}", "bash", "-lc", inner]
 
 
 HOLDS_PATH = os.path.expanduser(
@@ -829,7 +869,8 @@ def main():
     if role == "manager":
         print(
             "   ↪ manager: tell the resumed session it was restarted and must RE-ARM its "
-            "loop (`/supervisor:manager-loop <subject>`, or `/supervisor:fleet-loop`) — a "
+            "loop (`/supervisor:goal-loop <subject>` or `/supervisor:topic-loop <subject>`, "
+            "or `/supervisor:fleet-loop`) — a "
             f"killed session's scheduled jobs die with it. Changed: {describe_changed(changed)}"
         )
     else:

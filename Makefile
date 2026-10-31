@@ -61,6 +61,9 @@ check-gate-class-order:
 check-step-when:
 	@python3 scripts/check-step-when.py
 
+check-checkbox-regex-drift:
+	@python3 scripts/check-checkbox-regex-drift.py
+
 check-handback-keys:
 	@python3 scripts/check-handback-keys.py
 
@@ -73,10 +76,19 @@ check-drive-ledger-writes:
 check-drive-audit-budget:
 	@python3 scripts/check-drive-audit-budget.py
 
-check:
+check-drive-unverifiable-paste:
+	@python3 scripts/check-drive-unverifiable-paste.py
+
+check: check-manager-allowlist
 	@for f in server/*.mjs scripts/*.mjs; do case "$$f" in *.test.mjs) continue ;; esac; node --check "$$f" || exit 1; done; echo "  server + scripts modules parse"
-	@python3 -c "import json;[json.load(open(f)) for f in ['.claude-plugin/plugin.json','.claude-plugin/marketplace.json','server/package.json','server/policy.json']]" && echo "  manifests parse"
+	@python3 -c "import json;[json.load(open(f)) for f in ['.claude-plugin/plugin.json','.claude-plugin/marketplace.json','server/package.json','server/policy.json','server/manager-allowlist.json']]" && echo "  manifests parse"
 	@test -f .mcp.json && test -f README.md && echo "  plugin files present"
+
+# Two artifacts, one policy: `server/manager-allowlist.json` is what the server matches against,
+# `docs/permission-allowlist.md` is what a human reads. Without this check they drift silently and
+# in the worst direction — the doc is the half a reader trusts, the JSON is the half that decides.
+check-manager-allowlist:
+	@node scripts/check-manager-allowlist.mjs
 
 # ⚠️ The guard the suite's own failure cannot give you, and the reason it is a target rather
 # than another paragraph of the note below. With `server/node_modules` absent, `node --test`
@@ -121,6 +133,6 @@ test: check check-server-deps
 # a reader following the wrong directory gets no feedback that they did. `server/package.json`'s
 # own `start` script is `bun install --no-summary && node supervisor.mjs`, so `bun install`
 # inside `server/` works too.
-precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-target check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check-drive-ledger-writes check-drive-audit-budget test
+precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-target check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-checkbox-regex-drift check-handback-keys check-round-overlap check-drive-ledger-writes check-drive-audit-budget check-drive-unverifiable-paste test
 
-.PHONY: default check-versions check-changelog check-changelog-size changelog-archive check-spawn-mode check-spawn-target check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check-drive-audit-budget check check-server-deps test precommit
+.PHONY: default check-versions check-changelog check-changelog-size changelog-archive check-spawn-mode check-spawn-target check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-checkbox-regex-drift check-handback-keys check-round-overlap check-drive-audit-budget check-drive-unverifiable-paste check-manager-allowlist check check-server-deps test precommit

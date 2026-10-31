@@ -6,7 +6,7 @@ Audience split follows `coding/docs/readme-guide.md`: README answers *"can a new
 
 ## Session tiers
 
-Every command's prefix names the tier of the session that runs it: `fleet-*` for the fleet manager, `topic-*` for a topic manager, `goal-*` for a goal manager, `worker-*` for a worker; `jump`, `who-needs-me`, `read-guides`, `attention-next`, `close` and `ready` are cross-tier. The tiers form a **strict tree** — each level manages only the level directly below it, and `<tier>-spawn` starts that level: `topic-spawn` starts a goal manager, `goal-spawn` a worker. A worker never opens or spawns sessions (`/supervisor:open` is manager-only) and routes anything out of scope to its manager. The full command → tier table, with "never run from" guidance, is [`docs/session-tiers.md`](docs/session-tiers.md) — the single source; run `/supervisor:read-guides` to load it.
+Every command's prefix names the tier of the session that runs it: `fleet-*` for the fleet manager, `topic-*` for a topic manager, `goal-*` for a goal manager, `worker-*` for a worker; `jump`, `who-needs-me`, `read-guides`, `attention-next`, `close` and `ready` are cross-tier. The tiers form a **tree**, and the operator's hierarchy (2026-10-23) names what each level may open: the fleet manager is top of everything — it opens topic managers, goal managers and workers, each when no lower-tier manager owns the subject; a topic manager opens goal managers and workers; a goal manager opens workers; a worker opens nothing. The `<tier>-spawn` verbs are narrower than their tier: `topic-spawn` starts a goal manager, `goal-spawn` a worker, and a worker opened from the topic tier goes through `/supervisor:open --task`. A worker never opens or spawns sessions (`/supervisor:open` is manager-only) and routes anything out of scope to its manager. The full command → tier table, with "never run from" guidance, is [`docs/session-tiers.md`](docs/session-tiers.md) — the single source; run `/supervisor:read-guides` to load it.
 
 ## How it works
 
@@ -114,6 +114,26 @@ Measured 2026-09-14: the live registry held 13 entries against 13 live processes
 
 ⚠️ **`permissionMode: 'auto'` bypasses supervision entirely** — the hook never fires and `canUseTool` is never called. Measured: the same `kubectl create secret` that parked for approval under `'default'` ran with **zero** permission requests under `'auto'`. Leave it unset.
 
+## The incident ledger
+
+Every worker blocker — a permission prompt, a question, a stall — is a record at `~/.claude/state/incidents/ledger.json`, written only by `scripts/incident-ledger.py` (`open | close | escalate | share | list | prune`). Override with `SUPERVISOR_INCIDENTS_LEDGER`.
+
+**An incident closes on a verified resume, never on a card close.** That is the whole point of the store, and it is why `close` requires `--resume-evidence`. A close is not a resolution: the attention store records `open` → `closed` as CLEARED with `answered_at` and `decision` unset and no answer routed (`attention-controller` `pkg/attention-store-attempt.go`), and `manager-attention-watch.py` emits `CLEARED` on a settle at `idle`, which is a transcript shape rather than proof the worker acted.
+
+| store | keyed by | lifetime | says |
+|---|---|---|---|
+| `scripts/asked-ledger.py` | blocked session | pruned by age + liveness | who was **asked**, and who resolved the ask |
+| `scripts/drive-ledger.py` | session | per round | nudged / reaped / unverifiable **this round** |
+| **the incident ledger** | `incident:<session>:<kind>` | permanent | **which blocker, whose, since when, its deadline, and how it ended** |
+
+`asked-ledger.py` does carry `resolved_by`, but only when the resolver differs from the asker, and neither it nor `drive-ledger.py` carries an outcome or a deadline — so neither can say whether the worker ever resumed. That gap, not a missing field, is why this is a third store.
+
+⚠️ **A stall is a duration, not an event, and it issues no attention card.** Its `detected_by` is the drive verdict that named it (`drive:<verdict>@<round>`), its `card_id` is empty at detection, and `SUPERVISOR_INCIDENT_STALL_ROUNDS` (default 2) is the threshold. Do not fabricate a card id to fill the field — a fabricated id is a join that never resolves and it reads as provenance.
+
+⚠️ **`escalated_by` is the discriminator, not decoration.** `escalate --round-id <id>` stamps `round:<id>`; a hand-run without it stamps `manual:<session>`. That is what makes "escalated by the periodic caller" an observation instead of an assertion, so a periodic caller must pass its own round id rather than letting the default apply.
+
+`SUPERVISOR_INCIDENT_DEADLINE_SECONDS` (default 900) pins the deadline so `escalate` has one reproducible clock.
+
 ## Layout
 
 ```
@@ -128,7 +148,7 @@ commands/attention-next.md + scripts/attention-answer.py  answer an attention it
 commands/{fleet-loop,fleet-status}.md            fleet surface — many sessions; the loop's arm and its read-only snapshot
 commands/fleet-drive.md                          fleet surface — the loop's round, dispatched on every wakeup and runnable by hand
 commands/{topic-loop,topic-status}.md    one TOPIC — the loop's arm and its read-only goal snapshot
-commands/topic-drive.md                  one TOPIC — the loop's round: keep goal managers alive, start what the ranking admits
+commands/topic-drive.md                  one TOPIC — the loop's round: keep goal managers alive, start only goals the operator flagged
 commands/topic-spawn.md                  one TOPIC — start ONE goal manager; holds no spawn tool, delegates to /supervisor:open --goal
 commands/topic-verify.md                 topic manager — verify one topic, suggest fixes
 commands/{goal-loop,goal-status}.md      one GOAL — the loop's arm and its read-only task snapshot
@@ -149,6 +169,7 @@ commands/ready.md                                ready ONE named task to the bar
 commands/stop.md                                 stand that loop down
 commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
 docs/fleet-surface.md                            spawn shape + fleet table render spec (canonical)
+docs/closer-classes.md                           the CLOSERS class vocabulary, the routine-continue table and the digest join rule (canonical)
 docs/sweep-output.md                             the manager sweep's output frame — columns, widths, icons (canonical)
 docs/session-tiers.md                            session tiers + command → tier table (canonical)
 docs/subject-resolution.md                      the four-source subject chain the eight manager commands share
@@ -161,9 +182,11 @@ scripts/manager-predispatch.py                   the pre-dispatch gate both mana
 scripts/plugin-version-census.py                 the fleet reading of the plugin-install probe — who is stale, and `--reload` the lever that moves them
 scripts/approved-not-started.py                  the approved-but-unstarted reading both loops print (tick = 30 min constant; `unknown`, never `0`, on an unreadable registry)
 scripts/adopt-orphans.py                         adopts an exited manager's live workers into the ownership-claim store (/fleet-loop Step 3a) — successor-by-subject, else the tick session
-scripts/gate-owner-filter.py                     the ownership-scoped attention arm — drops gates a live peer manager owns (state: ~/.claude/state/gate-feed/<self-session-id>.json)
+scripts/gate-owner-filter.py                     the ownership-scoped attention arm — drops gates a live peer manager owns, excludes gates the vault says belong to another goal (state: ~/.claude/state/gate-feed/<self-session-id>.json)
+scripts/session-scope.py                         that arm's durable ownership input — which goal a session belongs to, from the vault's page stamps (not a live store)
 commands/read-guides.md                          load every guide in docs/
 scripts/{jump,who-needs-me}.py                   their helpers
+scripts/declared-wait.py                         the shared `⏰ Ends:` reader — one home for the slot `fleet-board.py`, `manager-predispatch.py` and the fleet sweep all key on (the "fourth definition of idle" guard)
 agents/goal-wrangler.md                routine approval loop over headless workers
 agents/topic-sweep-reader.md            the TOPIC sweep's read half — goal rows and their managers (called by topic-loop/topic-status)
 agents/topic-drive.md                   the TOPIC sweep's act leg — keep-alive and the ranked start hand-over

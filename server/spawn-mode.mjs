@@ -13,6 +13,8 @@
 //
 // Nothing here reads the filesystem, the environment, or the clock.
 
+import { SHIPPING_MODE_ENV } from './shipping-settings.mjs'
+
 export const SPAWN_MODES = ['interactive', 'headless']
 
 // The per-call argument is still a boolean, because that is the shape the MCP tool has
@@ -720,7 +722,16 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 // silences that worker's attention-store relay. REFUSED on both paths rather than silently
 // outranked on one, so the rule reads the same wherever it is found. Found by the PR review
 // (round 2), which caught that the stated invariant held on only one of the two paths.
-const RESERVED_ENV_NAMES = new Set([WORKER_MODE_ENV, WORKER_MODE_SOURCE_ENV])
+// ⚠️ `PERMISSION_MODE` is the second such name, and it arrived with the tab path's shipping
+// carrier. The launchers now DEFAULT the variable (`${PERMISSION_MODE:-auto}`) rather than
+// assigning it, so a caller-supplied value reaches `--permission-mode` on ANY tab — not only
+// a shipping one. Left unreserved, `spawn_agent(interactive: true, env: {PERMISSION_MODE:
+// "bypassPermissions"})` starts a worker with every approval gate disabled, which is exactly
+// the mode the shipping design exists to refuse, and the export outlives the pane so a nested
+// `claude` or `cc-*` launched from that tab inherits it too. The server owns this one: only
+// `shippingTabEnv` may set it, and only to `acceptEdits`. Found by the PR review, which
+// caught that the shipping merge protected one branch and left every other tab open.
+const RESERVED_ENV_NAMES = new Set([WORKER_MODE_ENV, WORKER_MODE_SOURCE_ENV, SHIPPING_MODE_ENV])
 
 // Validates and normalises a caller's `env` object.
 //
@@ -755,13 +766,20 @@ export function resolveEnvOverrides({ env } = {}) {
       }
     }
     if (RESERVED_ENV_NAMES.has(name)) {
-      return {
-        error:
-          `env cannot set ${name}: the server owns a worker's spawn mode and hands it to the worker ` +
-          `itself. A caller setting it would tell a TAB worker it is headless — and ` +
-          `scripts/permission-answer-poll.py returns early on that value, so the worker's ` +
-          `attention-store relay would go silent. Omit it; the mode is not the caller's to declare.`,
-      }
+      // ⚠️ Branched by NAME: the three reserved names are refused for different reasons, and a
+      // caller sent to the wrong subsystem debugs the wrong thing. `PERMISSION_MODE` is the
+      // tab path's shipping carrier, so its risk is a WIDER mode — not a mislabelled spawn.
+      const why =
+        name === SHIPPING_MODE_ENV
+          ? `the server owns a worker's permission mode and sets it only for a shipping spawn. ` +
+            `A caller setting it could widen a worker past the server's \`acceptEdits\` — ` +
+            `\`bypassPermissions\` would start a tab worker with every approval gate disabled, ` +
+            `and the export outlives the pane for anything launched from it.`
+          : `the server owns a worker's spawn mode and hands it to the worker itself. ` +
+            `A caller setting it would tell a TAB worker it is headless — and ` +
+            `scripts/permission-answer-poll.py returns early on that value, so the worker's ` +
+            `attention-store relay would go silent.`
+      return { error: `env cannot set ${name}: ${why} Omit it; it is not the caller's to declare.` }
     }
     if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
       // Stringified here so both paths agree. The SDK's `env` wants strings and the tab path

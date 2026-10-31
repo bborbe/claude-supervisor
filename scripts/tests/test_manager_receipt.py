@@ -34,6 +34,15 @@ ATTENTION_WATCH = os.path.join(SCRIPTS, "manager-attention-watch.py")
 
 NEEDS_YOU_OK = "Needs you (0)\n\nNothing needs you.\n"
 
+# The shape `scripts/round-readings.py` writes: the four verdict families per row.
+READINGS_OK = json.dumps({
+    "subject": "a subject",
+    "recorded_at": 1792578804.9,
+    "feed_state": "read",
+    "rows": {"A task": {"liveness": "LIVE", "in_flight": "quiet",
+                        "feed": "clear", "external_wait": "none"}},
+})
+
 
 def load(receipt_dir, liveness_dir):
     os.environ["MANAGER_RECEIPT_STATE_DIR"] = receipt_dir
@@ -143,7 +152,8 @@ class Receipt(unittest.TestCase):
         ny = self.artifact("needs-you.txt", NEEDS_YOU_OK)
         sw = self.artifact("sweep.json", SWEEP_OK)
         ev = self.events_log("events.jsonl", [time.time()])
-        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev)):
+        rd = self.artifact("readings.json", READINGS_OK)
+        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev), ("readings", rd)):
             self.record(step, p)
 
     # --- the red/green property ------------------------------------------------
@@ -368,7 +378,8 @@ class Receipt(unittest.TestCase):
             fh.write("not json at all\n")              # garbage
             fh.write("\n")                             # blank line
             fh.write(json.dumps({"kind": "LIVENESS", "ts": time.time()}) + "\n")
-        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev)):
+        rd = self.artifact("readings.json", READINGS_OK)
+        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev), ("readings", rd)):
             self.record(step, p)
         rc, out = self.check()
         self.assertEqual(rc, 0, out)
@@ -545,6 +556,228 @@ class Receipt(unittest.TestCase):
         ml = self.m.liveness()
         self.assertEqual(limit, ml.observed_period("goal--recurring-operator-gates") + ml.SLACK)
 
+    def test_an_already_prefixed_slug_is_not_prefixed_again(self):
+        """A fleet round puts its own branch on the receipt slug, so the period must come
+        from `fleet--<base>` — the record the arm step actually wrote.
+
+        Covers the fleet tier's observed basis end to end; no other test reaches it.
+        The early return in `liveness_slug()` that skips re-probing an already-prefixed
+        slug is clarity, not a fix: without it the bad probes find nothing and the
+        fallback returns the same name, so this test does not discriminate on it.
+        """
+        now = 1_700_000_000.0
+        gap = 1200
+        self._history("fleet--fleet-manager", now, [gap, gap, gap], cadence=300)
+
+        fleet_slug = self.m.slug("Fleet Manager", "fleet")
+        self.assertEqual(fleet_slug, "fleet--fleet-manager")
+        self.assertEqual(self.m.liveness_slug(fleet_slug), "fleet--fleet-manager")
+
+        with open(self.m.path(fleet_slug), "w", encoding="utf-8") as fh:
+            json.dump({"topic": "Fleet Manager", "round_started_at": now - 10, "fields": {}}, fh)
+        _, limit, basis = self.m.window(fleet_slug, now)
+        self.assertEqual(limit, gap + 180)
+        self.assertEqual(basis, f"period={gap}s(observed,1x+180)")
+
+
+
+FLEET_SUBJECT = "Fleet Manager"
+FLEET_SLUG = "fleet--fleet-manager"
+
+
+class FleetTier(unittest.TestCase):
+    """SC2a — the fleet round's own two steps, and the slug that makes them readable.
+
+    The fleet round writes its liveness under `fleet--fleet-manager` (the slug
+    `manager-liveness.py:101` builds from `--branch fleet`), so a receipt keyed on the
+    bare `fleet-manager` reads a file the arm step never wrote and reports
+    `skipped: re-arm` on a round that armed perfectly. Both halves are pinned here.
+
+    Measured 2026-10-30: the fleet round ran its arm step twelve times across a window
+    in which no digest was written at all, and nothing on that round's own tail said so.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.live = tempfile.TemporaryDirectory()
+        self.arts = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name, self.live.name)
+
+    def tearDown(self):
+        for t in (self.tmp, self.live, self.arts):
+            t.cleanup()
+        os.environ.pop("MANAGER_RECEIPT_STATE_DIR", None)
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    # --- helpers ---------------------------------------------------------------
+
+    def artifact(self, name, text, age=0.0):
+        p = os.path.join(self.arts.name, name)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        if age:
+            t = time.time() - age
+            os.utime(p, (t, t))
+        return p
+
+    def cli(self, *argv):
+        out, err, old = io.StringIO(), io.StringIO(), sys.argv
+        sys.argv = ["manager-receipt.py", *argv]
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        return rc, out.getvalue()
+
+    def start(self):
+        return self.cli("--start", "--subject", FLEET_SUBJECT, "--branch", "fleet")
+
+    def record(self, step, path):
+        return self.cli("--record", "--subject", FLEET_SUBJECT, "--branch", "fleet",
+                        "--step", step, "--path", path)
+
+    def check(self):
+        return self.cli("--check", "--subject", FLEET_SUBJECT, "--branch", "fleet")
+
+    def arms(self, epochs):
+        """An `.arms` ring in `manager-liveness.py`'s own format: one epoch per line."""
+        return self.artifact("fleet--fleet-manager.arms",
+                             "".join("%.0f\n" % e for e in epochs))
+
+    def digest(self, text=None, name="20261030T232317.digest"):
+        """A digest in the sweep reader's rendered shape — its real first line."""
+        return self.artifact(
+            name,
+            text if text is not None else
+            "DIGEST 20261030T232317 · 39 sessions · snapshot written: "
+            "2026-10-30T23:26:50Z\n",
+        )
+
+    def full_round(self):
+        self.start()
+        self.record("re-arm", self.arms([time.time()]))
+        self.record("digest", self.digest())
+
+    # --- the slug --------------------------------------------------------------
+
+    def test_fleet_slug_carries_the_branch(self):
+        self.assertEqual(self.m.slug(FLEET_SUBJECT, "fleet"), FLEET_SLUG)
+        # The unprefixed slug is what every goal/topic receipt already uses, unchanged.
+        self.assertEqual(self.m.slug("Recurring Operator Gates"), "recurring-operator-gates")
+
+    def test_fleet_receipt_lands_under_the_branch_slug(self):
+        self.start()
+        self.assertTrue(os.path.exists(os.path.join(self.tmp.name, FLEET_SLUG + ".json")))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "fleet-manager.json")))
+
+    # --- green -----------------------------------------------------------------
+
+    def test_full_fleet_round_is_green(self):
+        self.full_round()
+        rc, out = self.check()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out, "")
+
+    # --- the two steps this tier owes ------------------------------------------
+
+    def test_missing_arm_is_red(self):
+        self.start()
+        self.record("digest", self.digest())
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: re-arm", out)
+
+    def test_missing_digest_is_red(self):
+        self.start()
+        self.record("re-arm", self.arms([time.time()]))
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: digest", out)
+
+    def test_arm_ring_with_no_epoch_inside_the_window_is_red(self):
+        # The ring survived from an earlier round. Its existence proves nothing; only
+        # an epoch inside THIS round does.
+        self.start()
+        self.record("re-arm", self.arms([time.time() - 7200, time.time() - 5400]))
+        self.record("digest", self.digest())
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: re-arm", out)
+
+    def test_wiped_arm_ring_is_red(self):
+        # `manager-liveness.py:345` empties `prior` at the first arm after a stand-down,
+        # so an empty ring is the real shape of "the arm step did not run this round".
+        self.start()
+        self.record("re-arm", self.arms([]))
+        self.record("digest", self.digest())
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: re-arm", out)
+
+    def test_stub_digest_is_red(self):
+        self.start()
+        self.record("re-arm", self.arms([time.time()]))
+        self.record("digest", self.digest("ok\n"))
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: digest", out)
+
+    def test_digest_outside_the_round_window_is_red(self):
+        self.start()
+        self.record("re-arm", self.arms([time.time()]))
+        p = self.digest()
+        t = time.time() - 7200
+        os.utime(p, (t, t))
+        self.record("digest", p)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: digest", out)
+
+    # --- the regression guard --------------------------------------------------
+
+    def test_goal_tier_still_owes_only_its_own_steps(self):
+        # Adding the fleet steps to the goal/topic tuple would make every such round
+        # report a permanent `skipped: digest` — a false red on a healthy round.
+        self.assertNotIn("re-arm", self.m.STEPS)
+        self.assertNotIn("digest", self.m.STEPS)
+        self.assertEqual(self.m.steps_for(""), self.m.STEPS)
+        self.assertEqual(self.m.steps_for("fleet"), ("re-arm", "digest"))
+
+    def test_topic_and_branch_together_select_the_fleet_tier(self):
+        # `--topic` is the older spelling of `--subject`; combined with `--branch` it
+        # must resolve the fleet slug, not silently fall back to the unprefixed one.
+        self.cli("--start", "--topic", FLEET_SUBJECT, "--branch", "fleet")
+        self.assertTrue(os.path.exists(os.path.join(self.tmp.name, FLEET_SLUG + ".json")))
+
+    def test_an_unknown_branch_is_refused(self):
+        # manager-liveness.py validates its branch before building the slug; this module
+        # claims parity, and an unvalidated branch interpolates into the state path.
+        with self.assertRaises(ValueError):
+            self.m.slug(FLEET_SUBJECT, "fleet/../../etc")
+
+    def test_an_unknown_branch_is_a_usage_error_not_a_traceback(self):
+        # The library guard alone would surface as an uncaught ValueError (exit 1 with a
+        # traceback); the CLI owes an argparse usage error.
+        with self.assertRaises(SystemExit) as caught:
+            self.cli("--check", "--subject", FLEET_SUBJECT, "--branch", "fleet/../../etc")
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_a_fleet_step_cannot_be_recorded_on_a_goal_receipt(self):
+        # `steps_for("")` never looks for `digest`, so recording one there would be a
+        # dead field the tail silently ignores.
+        self.cli("--start", "--topic", "Recurring Operator Gates")
+        with self.assertRaises(SystemExit) as caught:
+            self.cli("--record", "--topic", "Recurring Operator Gates",
+                     "--step", "digest", "--path", "/tmp/whatever")
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_topic_check_never_reports_fleet_steps(self):
+        self.cli("--start", "--topic", "Recurring Operator Gates")
+        rc, out = self.cli("--check", "--topic", "Recurring Operator Gates")
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertNotIn("skipped: re-arm", out)
+        self.assertNotIn("skipped: digest", out)
 
 
 if __name__ == "__main__":
