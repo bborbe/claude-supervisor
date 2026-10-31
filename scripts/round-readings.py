@@ -442,7 +442,12 @@ def compute(subject, tracked_path, vault, interval, now=None,
         # The round this file belongs to, so a later reader can tell a fresh reading
         # from one the previous round left behind without opening the receipt.
         "round_started_at": _round_started_at(subject),
-        "park_threshold_seconds": interval,
+        # The park cell's threshold is 2x the cadence, NOT 1x -- the runbook's rule,
+        # and what sweep-gate.py's park_threshold_seconds() derives. The frozen
+        # threshold above is the 1x one; the two are different cells and reading this
+        # field as the frozen threshold (or the reverse) is how the sweep reader ends
+        # up reconciling two sources on every round.
+        "park_threshold_seconds": 2 * interval,
         "feed_state": feed_state,
         "rows": out_rows,
     }
