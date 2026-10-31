@@ -18,7 +18,25 @@ Measured 2026-10-30: the fleet round ran `manager-liveness.py --arm` twelve time
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --check --subject "Fleet Manager" --branch fleet
 ```
 
-It prints `skipped: <step> — <why>` for every field that does not resolve to an artifact produced **this round**, and exits **11**; a full round prints nothing and exits **0**.
+It prints `INCOMPLETE ROUND — skipped: <step> — <why>` for every field that does not resolve to an artifact produced **this round**, and exits **11**; a full round prints nothing and exits **0**.
+
+⚠️ **The line is positive on purpose.** The rounds measured on 2026-10-31 that skipped their digest had *already* dropped `Snapshot written` from their render, so an absence-based signal would have passed on exactly the rounds this exists to catch. Only a string that cannot exist at the pre-change revision discriminates — which is why the sentinel comes from the script rather than from a sentence a model is asked to remember.
+
+## The debt — what makes the verdict outlive its round
+
+The sentinel reports on the round that printed it, and it dies with that round: `--start` clears `fields`, so one round later nothing records that a step was skipped. Measured 2026-10-31: **five of twelve** post-deploy rounds armed and never wrote a digest. One printed the line (11:50); four never ran this check at all (10:42, 11:00, 13:11, 13:27); and the 13:27 round rendered a whole-round closer ending `⏰ Next: the 13:43 fleet round` with no digest behind it. The evidence was gone by the next round in every case.
+
+So `--check` also writes the skipped steps to `<slug>.debt` beside the receipt, and **`--start` deliberately does not touch that file**:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --debt --subject "Fleet Manager" --branch fleet
+```
+
+It prints `debt: <step>` per open step and exits **12** while any step is owed, **0** when clear. The three non-sweep legs chain it — `--debt && <leg>` in `commands/steps/drive.md`, `commands/steps/keepalive.md` and `commands/steps/flagged-open.md` — so a round that owes a sweep cannot spend itself on the cheap legs instead. The debt is rewritten on every check, so a round that does its work pays it simply by passing.
+
+`--abandon --step <step>` is the single recovery verb: it removes one step from the debt, records it timestamped in `<slug>.abandoned` — honoured by `check()` only for the round it was paid in, so an old abandonment cannot excuse the step forever — and prints `abandoned <slug> <step>`. Use it when the round genuinely will not do that step.
+
+⚠️ **Never block the arm instead.** `fleet-keeper.py` (launchd, `StartInterval` 60 s) reads the digest ledger and resumes a round it sees as lapsed, so a refused arm becomes a crash loop rather than a recovery. The guard sits where the round *reads*, not where it arms.
 
 ⚠️ **`--branch fleet` is load-bearing, not decoration.** The fleet round writes its liveness under `fleet--fleet-manager` (the slug `manager-liveness.py` builds from `--branch fleet`); a receipt keyed on the bare `fleet-manager` reads a file the arm step never wrote, so every round would report `skipped: re-arm` whether or not it armed. The same flag is what makes `--start` / `--record` write the receipt this check reads — a round that records under one slug and checks under another reports `skipped: receipt`.
 
@@ -34,5 +52,6 @@ It prints `skipped: <step> — <why>` for every field that does not resolve to a
 
 - **Catches: a round that opened its receipt and skipped a step.** The arm missing → `skipped: re-arm`; the digest missing → `skipped: digest`. That is the measured 2026-10-30 shape and the reason this row exists.
 - **Catches: a round whose receipt is older than its own window** — reported as `skipped: receipt`, because `--check` refuses a round that started more than `2 × period + 60 s` ago.
+- **Catches, one round late: a skipped step that nothing read.** `<slug>.debt` is a file, not a render, so `--debt` fires on a round that never ran this check — the 13:11 and 13:27 shape — and on every round after it until the step is done or abandoned. It does not require this tail to have run, which is the property a printed line cannot have.
 - **Does NOT catch: a round that skipped `--start` itself.** The previous round's `round_started_at` and `fields` survive, the new arm and digest are recorded into that stale receipt, and both predicates resolve against the *previous* window — so one such round can read green. It is bounded: the stale window lapses within `2 × period + 60 s` (≈31 min at a 15-minute cadence), so at most one round is masked before `skipped: receipt` starts firing. Closing it needs a witness outside the receipt — a per-round id compared against the `.arms` ring — and a wrong guess there produces a false red on a healthy round, which is the failure this whole check exists to prevent. Named here rather than fixed blind.
 - **Does NOT catch: a round that never ran at all** — a hand-assembled substitute never reads this router table, so no tail row fires. That shape is `scripts/fleet-digest.py --check`'s job: it ages the newest digest independently of any round, and re-fires while the age keeps rising (`scripts/fleet-digest.py` § `--check`). Neither check substitutes for the other.

@@ -8,6 +8,15 @@ user-invocable: false
 
 When: every tick
 
+⚠️ **Gate this leg on the round's debt — chain it, do not merely read it.** A round that skipped a step owes it, and running the easier legs ahead of what it owes is exactly how the 2026-10-31 rounds came to read as whole ones:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --debt --subject "Fleet Manager" --branch fleet \
+  && <dispatch this leg>
+```
+
+Exit **12** means a step is still owed: print the `debt:` lines, skip this leg, and let the round end having paid nothing but its re-arm. Exit **0** means no debt — run the leg. ⚠️ **The exit code is the gate, never the printed line:** `--debt` prints `debt: <step>` while open and nothing when clear, so a leg that reads only the text is satisfied by an empty read of a file it never checked. ⚠️ **This is not a brake on the arm.** The re-arm still runs first and unconditionally — `fleet-keeper.py` reads the digest ledger and would resurrect a round that refused to arm, turning one skipped step into a crash loop.
+
 ## Step 3b — Drive: dispatch the drive leg
 
 Reap is the drive leg's: **reap runs before drive**, which is why the dispatch sits after the sweep and never before it.

@@ -74,6 +74,17 @@ LIVENESS_STATE_DIR = os.path.expanduser(
 SLACK = 60  # seconds: covers the tick's own runtime before the re-arm lands
 ARMS_KEEP = 12
 EXIT_SKIPPED = 11
+# The debt's own code, distinct from EXIT_SKIPPED so a leg chained `--debt && <leg>`
+# is stopped by a debt it owes rather than by a verdict it cannot act on.
+EXIT_DEBT_OPEN = 12
+
+# The positive marker a skipped round prints.
+#
+# It is POSITIVE on purpose. The rounds measured on 2026-10-31 that skipped their
+# digest already omitted `Snapshot written` from their render, so an absence-based
+# signal would have passed on exactly the rounds this one exists to catch. This
+# string cannot exist at the pre-change revision, which is what makes it evidence.
+SENTINEL = "INCOMPLETE ROUND"
 
 # The steps whose artifacts the receipt must name. Order is the print order.
 #
@@ -155,6 +166,62 @@ def read_receipt(s: str) -> dict:
     except (OSError, ValueError):
         return {}
     return d if isinstance(d, dict) else {}
+
+
+# --- the debt -----------------------------------------------------------------
+#
+# The debt lives BESIDE the receipt, never in it. `start()` clears `fields`, so a
+# debt stored there would be wiped by the very round that must pay it — the carry
+# would be unimplementable, and a round could skip the same step forever while every
+# individual receipt read clean. A separate file is what makes the skip outlive the
+# round that caused it, and it is what lets `--debt` fire on a round that never ran
+# its tail at all (measured: two of the five 2026-10-31 skips never ran `--check`).
+
+
+def debt_path(s: str) -> str:
+    return os.path.join(STATE_DIR, f"{s}.debt")
+
+
+def abandoned_path(s: str) -> str:
+    return os.path.join(STATE_DIR, f"{s}.abandoned")
+
+
+def read_debt(s: str) -> list:
+    try:
+        with open(debt_path(s), encoding="utf-8") as fh:
+            return [ln.strip() for ln in fh if ln.strip()]
+    except OSError:
+        return []
+
+
+def write_debt(s: str, steps) -> None:
+    """Replace the debt with `steps`; an empty set removes the file entirely."""
+    steps = list(dict.fromkeys(steps))
+    if not steps:
+        try:
+            os.unlink(debt_path(s))
+        except OSError:
+            pass
+        return
+    write_atomic(debt_path(s), "\n".join(steps) + "\n")
+
+
+def read_abandoned(s: str) -> list:
+    """`[(epoch, step), …]` — when each step was paid, and which."""
+    try:
+        with open(abandoned_path(s), encoding="utf-8") as fh:
+            out = []
+            for line in fh:
+                parts = line.split()
+                if len(parts) != 2:
+                    continue
+                try:
+                    out.append((float(parts[0]), parts[1]))
+                except ValueError:
+                    continue
+            return out
+    except OSError:
+        return []
 
 
 def start(topic: str, branch: str = "") -> int:
@@ -443,17 +510,29 @@ def check(topic: str, branch: str = "", now: float = None) -> int:
     started, limit, basis = window(s, now)
 
     if started is None:
-        print(f"skipped: receipt — no receipt for {s}; the round did not write one")
+        print(f"{SENTINEL} — skipped: receipt — no receipt for {s}; the round did not write one")
         return EXIT_SKIPPED
     if (now - started) > limit:
         # The round's own window lapsed: every field is unjudgeable, so name the
         # window rather than each step — a stale receipt fails all of them at once.
-        print(f"skipped: receipt — round started {int(now - started)}s ago, limit {limit}s {basis}")
+        print(f"{SENTINEL} — skipped: receipt — round started {int(now - started)}s ago, limit {limit}s {basis}")
         return EXIT_SKIPPED
 
+    # A paid step is satisfied only for the round it was paid in. The record is
+    # timestamped for that reason: an abandonment that survived every later round
+    # would silently excuse the step forever, which is the same permanent-green
+    # failure a debt stored in `fields` would have had in the other direction.
+    # `int(started)`, not `started`: the record stores a float, but a payment made in
+    # the same wall-clock second the round opened can read fractionally below a
+    # fractional `round_started_at`. Flooring the start is the same one-second cost
+    # `rearm_shape` documents, and the alternative is a recovery that silently fails
+    # whenever the operator is fast.
+    abandoned = {step for ts, step in read_abandoned(s) if ts >= int(started)}
     fields = d.get("fields") or {}
     skipped = []
     for step in steps_for(branch):
+        if step in abandoned:
+            continue
         artifact = fields.get(step)
         if not artifact:
             skipped.append((step, "no artifact recorded"))
@@ -491,17 +570,73 @@ def check(topic: str, branch: str = "", now: float = None) -> int:
         if not ok:
             skipped.append((step, f"not the producer's shape ({artifact})"))
 
+    # The debt is rewritten on EVERY check, not appended to: a round that did its
+    # work pays the previous round's debt simply by passing, and a round that skips
+    # again re-opens it. `--start` deliberately does not touch this file.
+    write_debt(s, [step for step, _ in skipped])
+
     for step, why in skipped:
-        print(f"skipped: {step} — {why}")
+        print(f"{SENTINEL} — skipped: {step} — {why}")
     return EXIT_SKIPPED if skipped else 0
 
 
+def debt(topic: str, branch: str = "") -> int:
+    """Print the open debt; exit EXIT_DEBT_OPEN while any step is unpaid.
+
+    A read of the file, never of the tail's output — which is the whole point. The
+    rounds that skipped and never ran `--check` (13:11 and 13:27 on 2026-10-31) left
+    no tail line to read, and this still fires on them.
+    """
+    s = slug(topic, branch)
+    steps = read_debt(s)
+    for step in steps:
+        print(f"debt: {step}")
+    return EXIT_DEBT_OPEN if steps else 0
+
+
+def abandon(topic: str, branch: str, step: str) -> int:
+    """Pay ONE skipped step: drop it from the debt, record when it was paid.
+
+    This is the task's single recovery verb. It is deliberately not a way to silence
+    the arm: blocking the arm is what makes `fleet-keeper.py` (launchd, 60 s) see a
+    false lapse and resurrect the round, so the recovery has to be an explicit,
+    recorded statement that this step will not be done — never a refusal to re-arm.
+    """
+    s = slug(topic, branch)
+    steps = read_debt(s)
+    if step not in steps:
+        print(f"no open debt for {step} on {s}", file=sys.stderr)
+        return 2
+    write_debt(s, [x for x in steps if x != step])
+    with open(abandoned_path(s), "a", encoding="utf-8") as fh:
+        fh.write("%.3f %s\n" % (time.time(), step))
+    print(f"abandoned {s} {step}")
+    return 0
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Per-round receipt for manager loops.")
+    ap = argparse.ArgumentParser(
+        description="Per-round receipt for manager loops.",
+        epilog=(
+            "A skipped round prints `INCOMPLETE ROUND — skipped: <step> — <why>` and "
+            "exits 11, and the skipped steps are written to `<slug>.debt` beside the "
+            "receipt. `--debt` exits 12 while that file is non-empty, so a leg chained "
+            "`--debt && <leg>` cannot run ahead of the step that is owed. `--start` "
+            "does not clear it: the debt outlives the round that caused it. "
+            "`--abandon --step <step>` is the one recovery verb — it pays a step the "
+            "round genuinely will not do, records it in `<slug>.abandoned`, and lets "
+            "the next `--check` exit 0."
+        ),
+    )
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--start", action="store_true", help="begin a round (manager, tick head)")
     mode.add_argument("--record", action="store_true", help="record a step's artifact")
     mode.add_argument("--check", action="store_true", help="validate the round (manager, tail)")
+    mode.add_argument("--debt", action="store_true",
+                      help="print the open debt; exits 12 while any step is unpaid, 0 when clear")
+    mode.add_argument("--abandon", action="store_true",
+                      help="pay ONE skipped step (needs --step): removes it from the debt "
+                           "and records it in <slug>.abandoned, which --check treats as satisfied")
     ap.add_argument("--topic")
     ap.add_argument("--subject", help="alias for --topic; the fleet tier's name for it")
     ap.add_argument("--branch", default="",
@@ -517,11 +652,16 @@ def main() -> int:
         ap.error(f"--branch must be one of {BRANCHES}, got {a.branch!r}")
     if a.step and a.step not in steps_for(a.branch):
         ap.error(f"--step {a.step!r} is not a {a.branch or 'goal/topic'} step")
-    if a.check:
-        return check(subject, a.branch) if subject else (
-            ap.error("--check requires --topic or --subject") or 2)
     if not subject:
-        ap.error("--topic or --subject is required with --start/--record")
+        ap.error("--topic or --subject is required with every mode")
+    if a.check:
+        return check(subject, a.branch)
+    if a.debt:
+        return debt(subject, a.branch)
+    if a.abandon:
+        if not a.step:
+            ap.error("--abandon needs --step")
+        return abandon(subject, a.branch, a.step)
     if a.start:
         return start(subject, a.branch)
     if not a.step or not a.path:

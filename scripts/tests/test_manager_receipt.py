@@ -670,5 +670,166 @@ class FleetTier(unittest.TestCase):
         self.assertNotIn("skipped: digest", out)
 
 
+class FleetDebt(unittest.TestCase):
+    """The fleet tier's incomplete-round sentinel, and the debt it carries.
+
+    On `origin/master` the tail prints `skipped: <step> — <why>` and nothing else, and
+    the skip dies with the receipt: `--start` clears `fields`, so one round later the
+    evidence is gone and a round that skipped is indistinguishable from one that did
+    not. These pin the three properties that close that gap — a positive sentinel, a
+    debt that outlives the receipt, and exactly one documented way to pay it.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.live = tempfile.TemporaryDirectory()
+        self.arts = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name, self.live.name)
+
+    def tearDown(self):
+        for t in (self.tmp, self.live, self.arts):
+            t.cleanup()
+        os.environ.pop("MANAGER_RECEIPT_STATE_DIR", None)
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    # --- helpers ---------------------------------------------------------------
+
+    def artifact(self, name, text):
+        p = os.path.join(self.arts.name, name)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return p
+
+    def cli(self, *argv):
+        out, err, old = io.StringIO(), io.StringIO(), sys.argv
+        sys.argv = ["manager-receipt.py", *argv]
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        return rc, out.getvalue()
+
+    def start(self):
+        return self.cli("--start", "--subject", FLEET_SUBJECT, "--branch", "fleet")
+
+    def record(self, step, path):
+        return self.cli("--record", "--subject", FLEET_SUBJECT, "--branch", "fleet",
+                        "--step", step, "--path", path)
+
+    def check(self):
+        return self.cli("--check", "--subject", FLEET_SUBJECT, "--branch", "fleet")
+
+    def debt(self):
+        return self.cli("--debt", "--subject", FLEET_SUBJECT, "--branch", "fleet")
+
+    def abandon(self, step):
+        return self.cli("--abandon", "--subject", FLEET_SUBJECT, "--branch", "fleet",
+                        "--step", step)
+
+    def arms(self, epochs):
+        return self.artifact("fleet--fleet-manager.arms",
+                             "".join("%.0f\n" % e for e in epochs))
+
+    def digest(self):
+        return self.artifact(
+            "20261030T232317.digest",
+            "DIGEST 20261030T232317 · 39 sessions · snapshot written: "
+            "2026-10-30T23:26:50Z\n",
+        )
+
+    def skipped_round(self):
+        """The measured defect: the arm ran, the digest never did."""
+        self.start()
+        self.record("re-arm", self.arms([time.time()]))
+
+    def clean_round(self):
+        self.start()
+        self.record("re-arm", self.arms([time.time()]))
+        self.record("digest", self.digest())
+
+    # --- the sentinel ----------------------------------------------------------
+
+    def test_a_round_that_armed_and_never_digested_prints_the_sentinel(self):
+        # A POSITIVE line, not an absence: the pre-change rounds already omitted
+        # `Snapshot written` (measured 2026-10-31), so an absence discriminates nothing.
+        self.skipped_round()
+        rc, out = self.check()
+        self.assertEqual(rc, 11, out)
+        self.assertIn("INCOMPLETE ROUND — skipped: digest", out)
+
+    def test_the_sentinel_names_digest_as_the_only_skipped_step(self):
+        self.skipped_round()
+        rc, out = self.check()
+        self.assertEqual(rc, 11, out)
+        self.assertEqual(out.count("skipped:"), 1, out)
+
+    def test_a_clean_round_prints_no_sentinel(self):
+        # The control: without it the sentinel could be a constant and every other
+        # test in this class would still pass.
+        self.clean_round()
+        rc, out = self.check()
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("INCOMPLETE ROUND", out)
+        self.assertEqual(out, "")
+
+    # --- the debt outlives the receipt -----------------------------------------
+
+    def test_the_debt_outlives_the_next_round_start(self):
+        # `--start` clears `fields`, which is why the debt lives in its own file. A
+        # debt stored in the receipt is wiped by the very round that must pay it.
+        self.skipped_round()
+        self.check()
+        rc, out = self.debt()
+        self.assertEqual(rc, 12, out)
+        self.assertIn("digest", out)
+
+        self.start()  # the next round opens; the receipt is cleared
+        rc, out = self.debt()
+        self.assertEqual(rc, 12, out)
+        self.assertIn("digest", out)
+
+    def test_a_clean_round_opens_no_debt(self):
+        # The other half of read-vs-constant: a clear debt prints nothing and exits 0.
+        self.clean_round()
+        self.check()
+        rc, out = self.debt()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.strip(), "")
+
+    # --- the one recovery verb --------------------------------------------------
+
+    def test_abandon_pays_the_debt_and_leaves_the_next_check_green(self):
+        self.skipped_round()
+        self.check()
+        rc, out = self.abandon("digest")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("abandoned", out)
+
+        rc, out = self.debt()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.strip(), "")
+
+        rc, out = self.check()
+        self.assertEqual(rc, 0, out)
+
+    def test_abandon_records_the_step_it_paid(self):
+        self.skipped_round()
+        self.check()
+        self.abandon("digest")
+        p = os.path.join(self.tmp.name, FLEET_SLUG + ".abandoned")
+        self.assertTrue(os.path.exists(p))
+        with open(p, encoding="utf-8") as fh:
+            self.assertIn("digest", fh.read())
+
+    def test_abandon_refuses_a_step_the_receipt_did_not_skip(self):
+        # The recovery verb is scoped to a step this round actually skipped; paying a
+        # debt nobody owes turns the ledger into a place to write anything.
+        self.clean_round()
+        self.check()
+        rc, _ = self.abandon("digest")
+        self.assertEqual(rc, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
