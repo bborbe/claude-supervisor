@@ -35,6 +35,17 @@ def page(front, body=""):
     return "---\n%s\n---\n%s" % (front, body)
 
 
+#: `~/.cache/wezterm-role-map.json`'s live shape, as of 2026-10-31. `Hold` is present
+#: and is NOT a role target — its chip is null — which is why the resolver reads
+#: `commands/open.md` § 3.0's table rather than this map for the enum.
+ROLE_MAP = {
+    "Managers": {"chip": "orange", "window_id": 0},
+    "Direct": {"chip": "cyan", "window_id": 1},
+    "Agents": {"chip": "pink", "window_id": 4},
+    "Hold": {"chip": None, "window_id": 3},
+}
+
+
 class FlagPredicate(unittest.TestCase):
     """The predicate differs by kind, and the difference is live in the vault."""
 
@@ -89,37 +100,52 @@ class RoleResolution(unittest.TestCase):
 
     def setUp(self):
         self.root = tempfile.mkdtemp()
+        # The real shape: `frontmatter:` is INDENTED under `spec.template`.
         write(os.path.join(self.root, "start-day.yaml"),
-              "spec:\n  name: start-day\nfrontmatter:\n  role: human\n  mode: interactive\n")
+              "spec:\n  name: start-day\n  template:\n    body: |-\n      x\n"
+              "    frontmatter:\n      role: human\n      mode: interactive\n")
+
+    def role(self, text):
+        return fr.resolve_role(fr.open_queue.frontmatter(text), text, self.root)
 
     def test_template_wins_over_a_disagreeing_on_disk_role(self):
         # The live Start Day case: a writer flipped the instance to `agent`.
-        block = page("role: agent",
-                     "# Source\n\nGenerated from `bborbe/nuke/task/"
-                     "recurring-schedules/prod/start-day.yaml`.\n")
-        self.assertEqual(fr.resolve_role(block, self.root), ("human", "template"))
+        self.assertEqual(
+            self.role(page("role: agent",
+                           "# Source\n\nGenerated from `bborbe/nuke/task/"
+                           "recurring-schedules/prod/start-day.yaml`.\n")),
+            ("human", "template"))
+
+    def test_the_footer_is_read_from_the_body_not_the_frontmatter(self):
+        # The `# Source` line is in the body; searching the frontmatter block alone
+        # can never match, which is what made `template` unreachable.
+        text = page("role: agent",
+                    "Generated from `bborbe/nuke/task/recurring-schedules/prod/"
+                    "start-day.yaml`.\n")
+        self.assertNotIn("bborbe/nuke", fr.open_queue.frontmatter(text))
+        self.assertEqual(self.role(text), ("human", "template"))
 
     def test_on_disk_role_when_no_template(self):
-        self.assertEqual(fr.resolve_role(page("role: agent"), self.root),
-                         ("agent", "on-disk"))
+        self.assertEqual(self.role(page("role: agent")), ("agent", "on-disk"))
 
     def test_body_when_neither(self):
-        self.assertEqual(fr.resolve_role(page("status: in_progress"), self.root),
-                         ("agent", "body"))
+        self.assertEqual(self.role(page("status: in_progress")), ("agent", "body"))
 
     def test_missing_template_falls_back_to_on_disk(self):
-        block = page("role: agent",
-                     "# Source\n\n`bborbe/nuke/task/recurring-schedules/prod/absent.yaml`\n")
-        self.assertEqual(fr.resolve_role(block, self.root), ("agent", "on-disk"))
+        self.assertEqual(
+            self.role(page("role: agent",
+                           "# Source\n\n`bborbe/nuke/task/recurring-schedules/prod/"
+                           "absent.yaml`\n")),
+            ("agent", "on-disk"))
 
 
 class BranchPartition(unittest.TestCase):
     """The ordered predicate list — first match wins, so the set is a partition."""
 
     def branch(self, kind="task", role="agent", sid=None, live="none", pane=None,
-               owner=None, owner_live=None, block=None):
-        return fr.resolve_branch(kind, role, sid, live, pane,
-                                 owner or fr.FLEET, owner_live, block or page("role: agent"))
+               chain_live=None, block=None):
+        return fr.resolve_branch(kind, role, sid, live, pane, chain_live,
+                                 block or page("role: agent"))
 
     def test_unknown_outranks_everything(self):
         for verdict in ("UNKNOWN", "AMBIGUOUS", "MALFORMED"):
@@ -143,9 +169,14 @@ class BranchPartition(unittest.TestCase):
             self.assertEqual(refused, ["manager-row"])
 
     def test_sessionless_topic_is_open_manager_not_create(self):
-        owner = {"kind": "topic", "name": "Some Topic"}
-        self.assertEqual(self.branch(kind="topic", live="none", owner=owner,
-                                     owner_live=None)[0], "open-manager")
+        # `chain_live is False` — the subject has no live manager, proven.
+        self.assertEqual(self.branch(kind="topic", live="none", chain_live=False)[0],
+                         "open-manager")
+
+    def test_an_unanswerable_manager_probe_does_not_open_a_manager(self):
+        # `None` is not `False`: the same fold `unknown` rejects.
+        self.assertNotEqual(self.branch(kind="topic", live="none", chain_live=None)[0],
+                            "open-manager")
 
     def test_live_with_pane_jumps(self):
         self.assertEqual(self.branch(live="LIVE", sid="s1", pane="p1")[0], "jump")
@@ -161,36 +192,113 @@ class BranchPartition(unittest.TestCase):
 
 
 class OwnerResolution(unittest.TestCase):
-    """`docs/fleet-surface.md` § Which manager owns a subject, via manager_on_chain."""
+    """`docs/fleet-surface.md` § Which manager owns a subject — the rungs, in order.
+
+    Liveness is seeded into the cache rather than probed: `subject_liveness` reads it
+    first, so these fixtures never touch the live fleet.
+    """
+
+    def ctx(self, topic_map=None, managers=()):
+        # `no_liveness` is False so `subject_live` reads `managers`; it is an explicit
+        # set, so nothing shells out.
+        return {"topic_map": topic_map or {}, "subjects": {}, "no_liveness": False,
+                "managers": set(managers), "liveness_cache": {}}
+
+    def owner(self, kind, name, block, topic_map=None, managers=()):
+        return fr.resolve_owner(kind, name, block, self.ctx(topic_map, managers), "v")
 
     def test_managed_by_outranks_goals(self):
         block = page("managed_by: '[[A Topic]]'\ngoals:\n    - '[[A Goal]]'")
-        owner, _ = fr.resolve_owner("task", "T", block, {}, {"A Goal"}, False)
-        self.assertEqual(owner, {"kind": "goal", "name": "A Topic"})
+        self.assertEqual(
+            self.owner("task", "T", block, managers={"A Topic", "A Goal"}),
+            {"kind": "goal", "name": "A Topic"})
 
-    def test_second_goal_wins_when_it_has_the_manager(self):
+    def test_the_first_goal_with_a_live_manager_wins(self):
         block = page("goals:\n    - '[[First]]'\n    - '[[Second]]'")
-        owner, live = fr.resolve_owner("task", "T", block, {}, {"Second"}, False)
-        self.assertEqual(owner, {"kind": "goal", "name": "Second"})
-        self.assertTrue(live)
+        self.assertEqual(self.owner("task", "T", block, managers={"Second"}),
+                         {"kind": "goal", "name": "Second"})
+
+    def test_a_dead_first_goal_does_not_win(self):
+        block = page("goals:\n    - '[[First]]'\n    - '[[Second]]'")
+        self.assertEqual(self.owner("task", "T", block, managers={"Other"}), fr.FLEET)
+
+    def test_a_goal_less_task_falls_to_its_own_topic(self):
+        # The task_title rung: named directly in a topic's `## Goals`.
+        self.assertEqual(
+            self.owner("task", "T", page("status: in_progress"),
+                       {"T": "A Topic"}, {"A Topic"}),
+            {"kind": "topic", "name": "A Topic"})
 
     def test_no_rung_falls_to_the_fleet_sentinel(self):
-        owner, live = fr.resolve_owner("task", "T", page("status: in_progress"), {}, set(), False)
-        self.assertEqual(owner, fr.FLEET)
-        self.assertIsNone(live)
+        self.assertEqual(self.owner("task", "T", page("status: in_progress")), fr.FLEET)
 
-    def test_goal_uses_the_topic_page_index(self):
-        owner, _ = fr.resolve_owner("goal", "G", page(""), {"G": "A Topic"}, set(), False)
-        self.assertEqual(owner, {"kind": "topic", "name": "A Topic"})
+    def test_a_goal_owning_a_live_manager_owns_itself(self):
+        self.assertEqual(self.owner("goal", "G", page(""), {"G": "A Topic"}, {"G"}),
+                         {"kind": "goal", "name": "G"})
+
+    def test_a_managerless_goal_under_a_live_topic_is_owned_by_that_topic(self):
+        # Tier 4: the topic manager is ranked to start the goal's manager.
+        self.assertEqual(self.owner("goal", "G", page(""), {"G": "A Topic"}, {"A Topic"}),
+                         {"kind": "topic", "name": "A Topic"})
+
+    def test_a_managerless_goal_under_a_dead_topic_falls_to_the_fleet(self):
+        self.assertEqual(self.owner("goal", "G", page(""), {"G": "A Topic"}), fr.FLEET)
 
     def test_goal_absent_from_every_index_falls_to_the_fleet(self):
-        owner, _ = fr.resolve_owner("goal", "G", page(""), {}, set(), False)
-        self.assertEqual(owner, fr.FLEET)
+        self.assertEqual(self.owner("goal", "G", page("")), fr.FLEET)
 
-    def test_topic_row_owns_itself(self):
-        owner, live = fr.resolve_owner("topic", "T", page(""), {}, {"T"}, True)
-        self.assertEqual(owner, {"kind": "topic", "name": "T"})
-        self.assertTrue(live)
+    def test_topic_row_owns_itself_when_its_manager_is_live(self):
+        self.assertEqual(self.owner("topic", "T", page(""), managers={"T"}),
+                         {"kind": "topic", "name": "T"})
+
+    def test_a_managerless_topic_falls_to_the_fleet_sentinel(self):
+        self.assertEqual(self.owner("topic", "T", page("")), fr.FLEET)
+
+
+class OwnerLiveness(unittest.TestCase):
+    """SC9: `true` / `false` when `--check` answers, `null` when it cannot."""
+
+    def ctx(self, live=None, managers=("Fleet Manager",), no_liveness=True, fleet=None):
+        cache = dict(live or {})
+        if fleet is not None:
+            cache[fr.FLEET_KEY] = fleet
+        return {"topic_map": {}, "subjects": {}, "no_liveness": no_liveness,
+                "managers": set(managers), "liveness_cache": cache, "fleet_sid": None}
+
+    def test_a_live_owner_reads_true(self):
+        ctx = self.ctx({("v", "goal", "G"): True})
+        self.assertIs(fr.owner_liveness({"kind": "goal", "name": "G"}, "task", "T", ctx, "v")[0],
+                      True)
+
+    def test_a_dead_owner_reads_false_not_null(self):
+        ctx = self.ctx({("v", "goal", "G"): False})
+        self.assertIs(fr.owner_liveness({"kind": "goal", "name": "G"}, "task", "T", ctx, "v")[0],
+                      False)
+
+    def test_an_unanswerable_probe_reads_null(self):
+        ctx = self.ctx({("v", "goal", "G"): None})
+        self.assertIsNone(
+            fr.owner_liveness({"kind": "goal", "name": "G"}, "task", "T", ctx, "v")[0])
+
+    def test_the_fleet_sentinel_reads_the_fleet_managers_liveness(self):
+        live, chain = fr.owner_liveness(fr.FLEET, "task", "T", self.ctx(fleet=True), "v")
+        self.assertIs(live, True)
+        self.assertIsNone(chain)
+
+    def test_a_managerless_topic_chains_to_false(self):
+        # The fleet owns it, but the ROW's subject has no manager — that is what
+        # `open-manager` keys on.
+        ctx = self.ctx(managers=("Fleet Manager",), no_liveness=False, fleet=True)
+        live, chain = fr.owner_liveness(fr.FLEET, "topic", "T", ctx, "v")
+        self.assertIs(live, True)
+        self.assertIs(chain, False)
+
+    def test_a_goal_under_a_live_topic_does_not_chain_to_open_manager(self):
+        # Tier 4: the topic manager is ranked to start the goal's manager.
+        ctx = self.ctx(managers=("A Topic",), no_liveness=False)
+        ctx["topic_map"] = {"G": "A Topic"}
+        _, chain = fr.owner_liveness(fr.FLEET, "goal", "G", ctx, "v")
+        self.assertIs(chain, True)
 
 
 class Discovery(unittest.TestCase):
@@ -250,6 +358,177 @@ class TopicIndex(unittest.TestCase):
         self.assertIsNone(fr.topic_index(root).get("An Unlisted Goal"))
 
 
+class LauncherResolution(unittest.TestCase):
+    """`/supervisor:open`'s rule, both arms — never a bare frontmatter copy."""
+
+    def cfg(self, **keys):
+        base = {"worker_launcher": "/opt/l/cc-v", "manager_launcher": "/opt/l/cc-m",
+                "claude_script": "/opt/l/cc"}
+        base.update(keys)
+        return {k: v for k, v in base.items() if v is not None}
+
+    def test_a_tasks_own_launcher_beats_the_worker_default(self):
+        self.assertEqual(
+            fr.resolve_launcher("task", "agent", page("launcher: /srv/cc-x"), self.cfg()),
+            ("/srv/cc-x", "task"))
+
+    def test_a_bare_name_resolves_beside_the_vault_launcher(self):
+        # fleet-surface: "A bare name resolves beside the vault's own launcher."
+        self.assertEqual(fr.resolve_launcher("task", "agent", page("launcher: cc-x"), self.cfg()),
+                         ("/opt/l/cc-x", "task"))
+
+    def test_an_absolute_path_is_used_as_given(self):
+        self.assertEqual(
+            fr.resolve_launcher("task", "agent", page("launcher: /srv/cc-x"), self.cfg()),
+            ("/srv/cc-x", "task"))
+
+    def test_no_override_falls_to_the_worker_default(self):
+        self.assertEqual(fr.resolve_launcher("task", "agent", page("status: x"), self.cfg()),
+                         ("/opt/l/cc-v", "worker-default"))
+
+    def test_a_vault_with_no_worker_default_reports_vault(self):
+        self.assertEqual(
+            fr.resolve_launcher("task", "agent", page("status: x"),
+                                self.cfg(worker_launcher=None)),
+            ("/opt/l/cc", "vault"))
+
+    def test_a_goal_uses_the_manager_arm_even_though_it_is_a_goal(self):
+        # A goal states how its MANAGER runs; it is never a worker launcher.
+        self.assertEqual(fr.resolve_launcher("goal", "agent", page("status: x"), self.cfg()),
+                         ("/opt/l/cc-m", "manager-default"))
+
+    def test_a_manager_row_uses_the_manager_arm(self):
+        self.assertEqual(fr.resolve_launcher("task", "manager", page("status: x"), self.cfg()),
+                         ("/opt/l/cc-m", "manager-default"))
+
+    def test_a_subject_override_outranks_the_configured_manager_launcher(self):
+        self.assertEqual(
+            fr.resolve_launcher("goal", "manager", page("manager_launcher: cc-z"), self.cfg()),
+            ("/opt/l/cc-z", "subject"))
+
+    def test_a_workers_own_launcher_is_ignored_on_the_manager_arm(self):
+        # `launcher:` is a worker field. A goal carrying one is not a manager override.
+        self.assertEqual(
+            fr.resolve_launcher("goal", "manager", page("launcher: cc-x"), self.cfg()),
+            ("/opt/l/cc-m", "manager-default"))
+
+    def test_nothing_configured_is_unresolved_not_a_guess(self):
+        self.assertEqual(
+            fr.resolve_launcher("task", "agent", page("status: x"),
+                                {"worker_launcher": None, "claude_script": None}),
+            (None, "unresolved"))
+
+
+class ModeAndRoleNormalisation(unittest.TestCase):
+    """A value the fleet cannot honour is normalised and REPORTED, never copied."""
+
+    def test_an_absent_mode_is_not_an_anomaly(self):
+        # open.md line 259: a row with no `mode:` opens per fleet config.
+        self.assertEqual(fr.resolve_mode(page("status: x"), "interactive"),
+                         ("interactive", None))
+
+    def test_an_on_disk_mode_is_kept(self):
+        self.assertEqual(fr.resolve_mode(page("mode: headless"), "interactive"),
+                         ("headless", None))
+
+    def test_non_interactive_is_normalised_and_reported(self):
+        # Live on eight pages; not a value `server/spawn-mode.mjs` accepts.
+        self.assertEqual(fr.resolve_mode(page("mode: non_interactive"), "interactive"),
+                         ("interactive", "non_interactive"))
+
+    def test_a_known_role_is_kept(self):
+        self.assertEqual(fr.normalise_role("human"), ("human", None))
+
+    def test_an_unknown_role_normalises_to_agent_and_reports(self):
+        self.assertEqual(fr.normalise_role("robot"), ("agent", "robot"))
+
+    def test_an_unresolvable_launcher_skips_the_row(self):
+        root = tempfile.mkdtemp()
+        tasks = os.path.join(root, "25 Tasks")
+        write(os.path.join(tasks, "A Task.md"),
+              page("page_type: task\nflag: true\nstatus: in_progress"))
+        ctx = {"today": "2026-10-31", "role_map": {}, "template_root": None,
+               "no_liveness": True, "managers": set(), "topic_map": {},
+               "mode_default": "interactive", "normalised": [],
+               "subjects": {}, "liveness_cache": {}}
+        row, reason = fr.row_for("v", {"tasks_dir": "25 Tasks", "path": root}, "task",
+                                 os.path.join(tasks, "A Task.md"), ctx)
+        self.assertIsNone(row)
+        self.assertEqual(reason, "no launcher resolved")
+
+
+class StartDayRow(unittest.TestCase):
+    """One row cloned from the real `Start Day - 2026-10-31` page.
+
+    The only fixture that exercises template + on-disk + role + mode together: a
+    `# Source` footer naming the schedule YAML, an on-disk `role: human` that AGREES
+    with it, and `mode: interactive` on disk. The live page is `status: completed`, so
+    the fixture flips only that — everything else is the real shape.
+    """
+
+    #: The live page's frontmatter, minus the fields that make it ineligible.
+    FRONT = """approved_by: operator
+assignee: bborbe
+category: deep-work
+flag: true
+flag_set_by: operator
+launcher: cc-private-claude
+mode: interactive
+page_type: task
+phase: execution
+priority: 1
+role: human
+status: in_progress"""
+
+    FOOTER = ("\nGenerated by [[recurring-task-creator]] from "
+              "`bborbe/nuke/task/recurring-schedules/prod/start-day.yaml`.\n")
+
+    def row(self):
+        root = tempfile.mkdtemp()
+        templates = tempfile.mkdtemp()
+        # The real shape: `frontmatter:` is INDENTED under `spec.template`.
+        write(os.path.join(templates, "start-day.yaml"),
+              "spec:\n  title: Start Day\n  template:\n    body: |-\n      hello\n"
+              "    frontmatter:\n      launcher: cc-private-claude\n"
+              "      mode: interactive\n      # Human-only: the operator drives this.\n"
+              "      role: human\n      priority: 1\n")
+        tasks = os.path.join(root, "25 Tasks")
+        page_path = os.path.join(tasks, "Start Day - 2026-10-31.md")
+        write(page_path, page(self.FRONT, self.FOOTER))
+        cfg = {"tasks_dir": "25 Tasks", "path": root,
+               "worker_launcher": "/opt/l/cc-v", "claude_script": "/opt/l/cc"}
+        ctx = {"today": "2026-10-31", "role_map": ROLE_MAP, "template_root": templates,
+               "no_liveness": True, "managers": set(), "topic_map": {},
+               "mode_default": "interactive", "normalised": [],
+               "subjects": {}, "liveness_cache": {}}
+        row, reason = fr.row_for("v", cfg, "task", page_path, ctx)
+        self.assertIsNone(reason)
+        return row
+
+    def test_the_row_reads_template_role_and_on_disk_mode_together(self):
+        row = self.row()
+        self.assertEqual(row["role"], "human")
+        self.assertEqual(row["role_source"], "template")
+        self.assertEqual(row["mode"], "interactive")
+
+    def test_a_human_row_routes_to_the_direct_window_with_the_cyan_chip(self):
+        row = self.row()
+        self.assertEqual(row["window"], "Direct")
+        self.assertEqual(row["chip"], "cyan")
+        self.assertEqual(row["branch"], "direct")
+
+    def test_the_tasks_own_launcher_wins_over_the_worker_default(self):
+        row = self.row()
+        self.assertEqual(row["launcher"], "/opt/l/cc-private-claude")
+        self.assertEqual(row["launcher_source"], "task")
+
+    def test_the_row_is_eligible_and_unrefused(self):
+        row = self.row()
+        self.assertEqual(row["name"], "Start Day - 2026-10-31")
+        self.assertEqual(row["blocked_by"], [])
+        self.assertEqual(row["refused"], [])
+
+
 class RowShape(unittest.TestCase):
     """Every row carries all 19 fields, and none is silently absent."""
 
@@ -262,14 +541,19 @@ class RowShape(unittest.TestCase):
         tasks = os.path.join(root, "25 Tasks")
         write(os.path.join(tasks, "A Task.md"),
               page("page_type: task\nflag: true\nstatus: in_progress\nrole: agent"))
-        cfg = {"tasks_dir": "25 Tasks", "path": root}
+        cfg = {"tasks_dir": "25 Tasks", "path": root, "worker_launcher": "/opt/l/cc-v"}
         ctx = {"today": "2026-10-31", "role_map": {}, "template_root": None,
-               "no_liveness": True, "managers": set(), "topic_map": {}}
+               "no_liveness": True, "managers": set(), "topic_map": {},
+               "mode_default": "interactive", "normalised": [],
+               "subjects": {}, "liveness_cache": {}}
         row, reason = fr.row_for("v", cfg, "task", os.path.join(tasks, "A Task.md"), ctx)
         self.assertIsNone(reason)
         self.assertEqual(set(row), set(self.FIELDS))
         self.assertEqual(row["name"], "A Task")
         self.assertEqual(row["kind"], "task")
+        self.assertEqual(row["launcher"], "/opt/l/cc-v")
+        self.assertEqual(row["launcher_source"], "worker-default")
+        self.assertEqual(row["mode"], "interactive")
 
 
 if __name__ == "__main__":
