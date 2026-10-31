@@ -539,14 +539,18 @@ def cmd_daily(args):
     if not rows:
         print("no end records in the store")
         return 0
+    # Every end kind gets a column, including `closed-tab`, which no writer emits today.
+    # Dropping it would leave the columns not summing to `total` the day one appears —
+    # a table that quietly under-reports is worse than one carrying a zero column.
     print(
-        f"{'day':<12}{'exited':>8}{'signalled':>11}{'unknown-end':>13}"
-        f"{'total':>8}{'unknown%':>10}"
+        f"{'day':<12}{'exited':>8}{'signalled':>11}{'closed-tab':>12}"
+        f"{'unknown-end':>13}{'total':>8}{'unknown%':>10}"
     )
     for row in rows:
         print(
             f"{row['day']:<12}{row[KIND_EXITED]:>8}{row[KIND_SIGNALLED]:>11}"
-            f"{row[KIND_UNKNOWN]:>13}{row['total']:>8}{row['unknown_end_pct']:>10}"
+            f"{row[KIND_CLOSED_TAB]:>12}{row[KIND_UNKNOWN]:>13}"
+            f"{row['total']:>8}{row['unknown_end_pct']:>10}"
         )
     return 0
 

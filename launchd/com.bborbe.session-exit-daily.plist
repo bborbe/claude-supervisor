@@ -20,6 +20,12 @@
   reconstruct. `RunAtLoad` still fires one on install, so the metric has a baseline the
   moment it is wired rather than the next evening.
 
+  ⚠️ **Every path here is absolute, and that is a launchd requirement, not an oversight.**
+  launchd does not expand `~`, does not inherit the shell's `PATH`, and does not resolve a
+  relative interpreter — so a plist carrying `~/…` is a plist that silently never runs.
+  The same is true of `launchd/com.bborbe.fleet-keeper.plist` beside this file. This is the
+  one place in the repo where a machine-local path is the correct value.
+
   The script path is the marketplace clone, not a version-pinned cache dir: a cache path
   would pin the agent to one release and silently run stale code after every upgrade.
 
