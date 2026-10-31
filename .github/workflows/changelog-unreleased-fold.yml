@@ -1,0 +1,30 @@
+name: Changelog Unreleased Fold Precheck
+
+# The PR-time half of the changelog fold guard.
+#
+# A release cut renames the top `## Unreleased` to `## vX.Y.Z`. A PR branched
+# before the cut still carries `## Unreleased`, and the forge's merge resolution
+# matches the bullet list rather than the heading — so the PR's new bullets are
+# spliced into the already-released section. The merge is clean, nothing warns,
+# and the changelog claims work the tag does not contain.
+#
+# `changelog-fold.yml` catches that AFTER it has landed, on the push to master.
+# That is why the repo went red for 91 consecutive master runs on 2026-10-30/31,
+# one failure mail each. This workflow asks the same question BEFORE the merge:
+# it checks out the PR head and lets the guard compute the merge itself with
+# `git merge-tree`, then fails the PR when a pending bullet would land under a
+# released heading.
+#
+# `@master` rather than a pinned tag is deliberate, matching `changelog-fold.yml`:
+# the guard is one tool with one source of truth, and a stale pin would silently
+# keep an older check running.
+#
+# The guard tool ships from bborbe/coding; this file is only the wiring.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  changelog-unreleased-fold:
+    uses: bborbe/coding/.github/workflows/changelog-unreleased-fold-guard.yml@master
