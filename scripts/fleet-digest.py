@@ -36,7 +36,8 @@ Verbs, one file each, all under STATE_DIR:
               RECOVERED  digest=<ts> age=<s> limit=<s>
               UNOBSERVED gap=<s> — this watcher did not run across the gap; baseline reset
 
-            Exit 10 on the STALE **transition** only. The notified marker holds the
+            Exit 10 on each STALE report — once per lapse interval, not once per
+            transition. The notified marker holds the
             baseline it reported and the lapse interval reached, so a FLAT age notifies
             once and the following healthy round clears it (exit 0, RECOVERED). A
             RISING age re-fires once per further LIMIT — a lapse that never recovers is
