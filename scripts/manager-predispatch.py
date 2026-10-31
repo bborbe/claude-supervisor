@@ -47,7 +47,7 @@ is worth keeping because it cuts both ways:
   `sweep-gate-classify.py` keeps its own `liveness -> parked` trigger (a different gate
   with a different job). ⚠️ **Recorded HERE and not only in `docs/fleet-surface.md`,
   because this block is the digest contract's declared single home** —
-  `commands/manager-status.md` step 1 reads it rather than restating it, so a stale
+  `commands/goal-status.md` step 1 reads it rather than restating it, so a stale
   agreement here is what a reader would take as current.
 
   IT LACKS the rendered table, and it has no member list. The no-change branch must
@@ -155,7 +155,7 @@ graded on. A worker dying changes session liveness; a digest over `status`/`phas
 alone would see the dead worker's task as unchanged and replay the stored table straight
 over the death. Liveness is therefore computed HERE, in the gate — never inside the
 dispatched `manager-sweep-reader` agent, which is forbidden to probe liveness
-(`agents/manager-sweep-reader.md`) and could not see it anyway.
+(`agents/goal-sweep-reader.md`) and could not see it anyway.
 
 ⚠️ **But only its DEATH half belongs in the digest, and the two must not be conflated.**
 "Liveness is in the digest" is true of the death transition and false of the churn: a
@@ -1286,7 +1286,7 @@ def parked_names(tracked: list[dict]) -> list[str]:
     the drift the `roster_owner` comment above warns against.
 
     ⚠️ **This is the Status cell, not the Session cell, and the difference is the whole
-    reason this function exists.** `agents/manager-sweep-reader.md:136` makes a *parked*
+    reason this function exists.** `agents/goal-sweep-reader.md:136` makes a *parked*
     row render `⌛ waiting-on-human` whatever its bucket, while a live one keeps its
     ordinary bucket — so a `live` <-> `parked` flip moves the Status cell. The Session
     cell does NOT move with it: step 7 is explicit that `parked` is ALIVE and therefore
@@ -1297,7 +1297,7 @@ def parked_names(tracked: list[dict]) -> list[str]:
 
     ⚠️ **This reads THIS script's `liveness_of`, while the cell it protects is rendered by
     the caller's sweep reader from a different input** — `session-liveness.py --check` over
-    the row's id set (`agents/manager-sweep-reader.md` input 10). The repo's two-renderer
+    the row's id set (`agents/goal-sweep-reader.md` input 10). The repo's two-renderer
     rule keeps those two verdicts independent on purpose, and this clause does not close
     that gap: a row the reader renders `⌛ waiting-on-human` while the gate reads `live`
     moves the cell with the parked set unchanged, and the replay is still served. Named
@@ -1355,11 +1355,11 @@ def digest_of(tracked: list[dict]) -> str:
     ⚠️ **That split NARROWS THIS DOCSTRING'S OWN CONTRACT, and the narrowing is named
     here rather than left to be rediscovered.** "What the sweep would render" no longer
     holds for one cell: `parked` is what makes a row render `⌛ waiting-on-human`
-    (`agents/manager-sweep-reader.md:136`), so a worker newly opening a gate no longer
+    (`agents/goal-sweep-reader.md:136`), so a worker newly opening a gate no longer
     moves the digest.
 
     ⚠️ **The narrowing is REAL and is covered ONE LEVEL UP, not here.** The exit-0 replay
-    path (`commands/manager-status.md` step 1, `commands/manager-drive.md` step 2) would
+    path (`commands/goal-status.md` step 1, `commands/goal-drive.md` step 2) would
     otherwise reproduce the stored table with whatever cell the row last had, so
     `evaluate` carries a separate `parked_set_moved` clause that refuses the replay on
     exactly that transition. ⚠️ **It is deliberately NOT a term in this function**:
@@ -1370,7 +1370,7 @@ def digest_of(tracked: list[dict]) -> str:
     set.
 
     ⚠️ **The cell that goes stale is the STATUS cell, never the Session cell** — named
-    because the two were conflated in the caveats that clause replaced. `agents/manager-sweep-reader.md`
+    because the two were conflated in the caveats that clause replaced. `agents/goal-sweep-reader.md`
     step 7 makes a parked session take the LIVE-shaped `[<sid8>]` delimiter, and
     `session-liveness.py` never reads the registry's `status` field, so a `live` <-> `parked`
     flip renders the SAME Session cell on both sides. The Session cell's own stale routes
@@ -1379,7 +1379,7 @@ def digest_of(tracked: list[dict]) -> str:
 
     ⚠️ **`/manager-loop` is NOT one of the replaying surfaces and is NOT a mitigation:**
     it never calls `--print` or `--check`, so it never consults this digest at all, and
-    its attention-feed read is step 4's first bullet (`commands/manager-loop.md:186`),
+    its attention-feed read is step 4's first bullet (`commands/goal-loop.md:186`),
     which runs before any verdict. The independent surfacing that does hold is step 7's
     `manager-attention-watch.py` / feed-Monitor arms, which fire `NEW GATE` off the
     registry and the feed rather than off this digest.
@@ -1554,6 +1554,75 @@ def verdicts_path(subject: str) -> str:
     (`VERDICTS_NEEDING_REASON`), because a cache hit has no dispatch to quote from.
     """
     return os.path.join(STATE_DIR, f"{slug(subject)}.verdicts.json")
+
+
+#: The four frontmatter fields the content key excludes — the fields a tick writes whose
+#: value the audit does not read. ⚠️ **`status:` and `phase:` are deliberately NOT here.**
+#: A tick writes six fields, and excluding all six would freeze a row's verdict label
+#: across an approval: `phase` moving `todo → planning` is precisely what turns
+#: `✅ Ready for approval` into `🚀 Ready`.
+CONTENT_KEY_EXCLUDED = ("mode", "last_auto_resume", "claude_session_id", "metrics_sessions")
+
+#: The key's truncation. ⚠️ **A constant, not a literal at the call site** — a formula
+#: without a stated truncation is a formula each caller finishes itself. Measured
+#: 2026-10-06, the caches on disk carried three lengths (2 at 12 hex, 7 at 16, 3 at 64),
+#: each cache internally uniform, which is the signature of a derivation invented per
+#: caller rather than read.
+CONTENT_KEY_HEX = 16
+
+
+def content_key(row_path: str) -> str:
+    """The verdicts cache's key for one row file — **the single implementation.**
+
+    ⚠️ **This function exists because the derivation used to live only as PROSE**, in
+    `agents/goal-drive.md` clause (1). The drive leg is an agent, so every leg
+    re-implemented the formula and they disagreed. A leg's own `Audit` block on
+    **2026-10-12T15:49:30Z** reported it verbatim: *"CACHE-KEY DRIFT (report, do not fix):
+    the 8 stored entries reproduce under a `mode:`-only exclusion, NOT the clause's
+    four-field derivation."* The writer and the reader keyed the same row differently, so
+    the row read as cold on every tick — the caches stayed under-covered while the audits
+    kept dispatching. `scripts/check-content-key-formula.py` predicted exactly this in its
+    own docstring (*"it cannot prove the leg computes the key this way"*): a prose-shape
+    check cannot hold a computation. So the computation lives here, the writer and the
+    reader both call it, and the clause points at it instead of restating it.
+
+    The derivation, unchanged from the clause it replaces:
+
+    - `sha256` over the row file's **raw bytes**, with `CONTENT_KEY_EXCLUDED` removed —
+      each field **together with its continuation block**, every following line indented
+      deeper than the key line. ⚠️ **The block half is load-bearing, not tidiness:**
+      `metrics_sessions` is written as a multi-line YAML block, so dropping only its key
+      line leaves the indented `- session_id: <uuid>` entries in the key, and those uuids
+      change on every worker run — the key would churn per tick and the exclusion buy
+      nothing.
+    - **No YAML parse, no re-serialisation, no newline normalisation.** Raw byte deletion
+      and a parse-and-re-serialise route disagree on CRLF, on the blank line a deleted
+      entry leaves behind, on quoted and multi-line values, and on a trailing newline.
+    - Truncated to the first `CONTENT_KEY_HEX` hex.
+    """
+    with open(row_path, "rb") as fh:
+        lines = fh.read().split(b"\n")
+    kept: list[bytes] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        name = (
+            line.split(b":", 1)[0].strip().decode("utf-8", "replace") if b":" in line else ""
+        )
+        if name in CONTENT_KEY_EXCLUDED:
+            indent = len(line) - len(line.lstrip())
+            i += 1
+            while i < len(lines):
+                nxt = lines[i]
+                if not nxt.strip():
+                    break
+                if (len(nxt) - len(nxt.lstrip())) <= indent:
+                    break
+                i += 1
+            continue
+        kept.append(line)
+        i += 1
+    return hashlib.sha256(b"\n".join(kept)).hexdigest()[:CONTENT_KEY_HEX]
 
 
 def payload_path(subject: str) -> str:
@@ -2392,6 +2461,15 @@ def main(argv: list[str]) -> int:
         help="persist the drive leg's Audit block (JSON on stdin) to <slug>.verdicts.json",
     )
     mode.add_argument(
+        "--content-keys",
+        action="store_true",
+        help=(
+            "print `<content_key>\\t<path>` for every row-file path on stdin — the single "
+            "home of the verdicts cache's key derivation, so no leg finishes the formula "
+            "itself"
+        ),
+    )
+    mode.add_argument(
         "--write-payload",
         action="store_true",
         help="write the rendered table (on stdin) to <slug>.table, for --save to read",
@@ -2432,6 +2510,32 @@ def main(argv: list[str]) -> int:
         # is told the argument was wrong instead of being handed a fail-open sweep.
         print(vault_error, file=sys.stderr)
         return EXIT_USAGE
+
+    if args.content_keys:
+        # The single home of the derivation clause (1) used to carry as prose. The leg is an
+        # agent, so a prose formula is re-implemented per leg and the implementations
+        # disagree — measured 2026-10-12, a leg's own `Audit` block reported that its stored
+        # keys reproduced under a `mode:`-only exclusion while the clause named four fields.
+        # Writer and reader therefore keyed the same row differently and the row read as
+        # cold on every tick. Routed through this script for the same transport reason
+        # `--write-verdicts` is: the manager commands grant `Bash(python3:*)` and no
+        # `Write`, so a heredoc into `python3` is the one shape that raises no prompt.
+        #
+        # ⚠️ **One line per input path, in the order given, and a path that cannot be read
+        # is reported rather than skipped** — a silently dropped row is indistinguishable,
+        # to the caller, from one that was never passed, which is the omission this mode
+        # exists to remove.
+        rc = 0
+        for raw in sys.stdin.read().splitlines():
+            row_path = raw.strip()
+            if not row_path:
+                continue
+            try:
+                print(f"{content_key(row_path)}\t{row_path}")
+            except OSError as exc:
+                print(f"UNREADABLE: {row_path}: {exc}", file=sys.stderr)
+                rc = EXIT_USAGE
+        return rc
 
     if args.write_tracked:
         # The caller's OWN scan is the only producer of this file — it is never derived
@@ -2740,7 +2844,7 @@ def main(argv: list[str]) -> int:
         # own frontmatter read, which is nondeterministic — measured 2026-10-02, four
         # misreads across eleven relevant ticks, and reproduced again 2026-10-03 18:44 on
         # two rows whose first entry had shipped and whose later entries had not. The
-        # warning against exactly that read has sat in `agents/manager-sweep-reader.md`
+        # warning against exactly that read has sat in `agents/goal-sweep-reader.md`
         # since v0.96.4 and did not prevent it, so the decision moves to code and the
         # agent renders the bucket from the answer.
         #

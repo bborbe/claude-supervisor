@@ -27,7 +27,9 @@ Print the output verbatim, then stop. Each item shows its `item_id`, its questio
    - `ANSWERED:` then `TARGET: <name>` → call `SendMessage` with `to` = `<name>` exactly, and `message` = `Operator answer, via attention stack (item <ITEM_ID>): <ANSWER>`. Report the item id and the recipient.
    - `ANSWERED:` then `DELIVERY: supervisor poll` → do **not** send anything. Report: the verdict is recorded and the spawning supervisor server will settle the parked prompt. **There is no session to message here**, and messaging one would be a relay — a session cannot release another session's parked gate.
    - `ANSWERED:` then `UNDELIVERABLE: <reason>` → do **not** send. Report: the item is answered in the store, but the answer was not delivered — `<reason>`.
-   - `LOST:` → do **not** send; another arm already answered. Report it.
+   - `ALREADY_ANSWERED:` → do **not** send; another arm's verdict landed first. Report it.
+   - `ITEM_CLOSED:` → do **not** send. The card left the queue before this answer arrived and **no verdict was recorded** — the gate was **not** released. ⚠️ **Do not name a cause.** The store does not record why it left: a cleared card, a withdrawn one and one whose producer exited all leave the same no-actor record, so the line says the cause is not recorded and a report must repeat that rather than pick one. Report it.
+   - `LOST:` → do **not** send; the store refused the write with a 409 whose body carried no code this arm could read, **or none it knows**, so which of the two above happened is **unknown**. Report it.
    - `REFUSED:` / `FAILED:` → report the line verbatim; do not send.
 
 3. **Record the attempt — this command is the arm that ATTEMPTS delivery, so this is where the trail is written.** Run exactly:
@@ -44,12 +46,12 @@ Print the output verbatim, then stop. Each item shows its `item_id`, its questio
    | `TARGET:` and `SendMessage` **errored** | `failed` | A carrier looked and could not deliver. |
    | `UNDELIVERABLE: <reason>` | `failed` | The attempt failed at target resolution; nothing was sent. |
    | `DELIVERY: supervisor poll` | **nothing** | The supervisor server delivers the verdict and records its own attempt. Posting here would record an attempt by an arm that delivered nothing. |
-   | `LOST:` / `REFUSED:` / `FAILED:` | **nothing** | No attempt happened — another arm won the compare-and-set, or the answer was refused before any delivery was tried. ⚠️ Recording `failed` here would claim a carrier tried and could not deliver, which is a different and false statement. |
+   | `ALREADY_ANSWERED:` / `ITEM_CLOSED:` / `LOST:` / `REFUSED:` / `FAILED:` | **nothing** | No attempt happened — another arm won the compare-and-set, the card had already left the queue, or the answer was refused before any delivery was tried. ⚠️ Recording `failed` here would claim a carrier tried and could not deliver, which is a different and false statement. |
 
    ⚠️ **Never record at answer time.** An attempt is a fact about the carrier, so writing it where the *answer* is recorded would make every answer read as attempted — the exact defect this trail exists to close. The store stamps the attempt's time from its own clock, so this command cannot date its own attempt.
 
    ⚠️ **Requires attention-controller ≥ `v0.30.0`**, which adds the attempt endpoint. Against an older store the `attempt` call fails with `FAILED:`; that is a missing endpoint, not a failed delivery, so report it as such and do not retry the delivery.
 
-The store is written **before** the message is sent, and only the arm that wins the store's compare-and-set sends — so two arms answering the same item deliver exactly one answer. Never retry a `LOST`, and never guess a recipient for an `UNDELIVERABLE` item: a bare name shared by two sessions reaches the wrong one.
+The store is written **before** the message is sent, and only the arm that wins the store's compare-and-set sends — so two arms answering the same item deliver exactly one answer. Never retry an `ALREADY_ANSWERED`, an `ITEM_CLOSED` or a `LOST`, and never guess a recipient for an `UNDELIVERABLE` item: a bare name shared by two sessions reaches the wrong one.
 
 Only the operator's own words go into `ANSWER`. This command relays an operator answer; it is not a channel for a manager's own decisions. A `permission` item is answered here with an **explicit verdict** and is delivered by the **supervisor server polling the store**, never by this command — a relay is permission laundering even when the action looks small, so this command never messages a session about a permission item.

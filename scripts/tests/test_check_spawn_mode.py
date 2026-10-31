@@ -11,6 +11,7 @@ prompt too — `spawn_agent(prompt="<the answer>", resume="<session-id>", intera
 in `commands/fleet-loop.md` — so a check keyed on `prompt=` alone would demand the mode
 decision of a resume. That is the one way this check could be plausibly wrong.
 """
+import importlib.util
 import pathlib
 import shutil
 import subprocess
@@ -19,6 +20,22 @@ import tempfile
 import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-spawn-mode.py"
+
+
+def spawn_sites():
+    """The checker's own `SPAWN_SITES`, loaded from it rather than copied.
+
+    ⚠️ **Derived, never hand-listed.** A second copy of the site list is exactly the drift the
+    checker exists to catch, and this fixture held one until 2026-10-17: `commands/open-a2a.md`
+    joined `SPAWN_SITES` and the fixture still listed the old five, so the checker reported the
+    new site as "listed but does not exist" — and the failure surfaced as three tests asserting
+    the CHECKER was wrong. The fixture's job is to build a tree the checker accepts, so it must
+    agree with the checker by construction rather than by a list someone remembers to update.
+    """
+    spec = importlib.util.spec_from_file_location("check_spawn_mode", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.SPAWN_SITES
 
 #: A wired site: references the home AND carries the binding in both directions.
 SITE = (
@@ -39,10 +56,12 @@ SITE_NO_BINDING = (
     "See `docs/fleet-surface.md` § Spawn a worker item 6 for the rule.\n"
     "Never pass `interactive` here.\n"
 )
+#: The home fixture carries BOTH of the checker's pins, and the pair moved with the rule on
+#: 2026-10-22 — the closed list, and its exhaustiveness. A fixture left on the superseded
+#: phrases would keep this test green against a tree the checker now rejects.
 HOME = (
-    "6. Decide the mode before you spawn.\n\n"
-    "Ask: does finishing this task raise questions mid-flight that only a human can settle?\n\n"
-    "`interactive` is a floor, not a tie-break.\n"
+    "6. Decide the mode before you spawn — a `role: agent` task defaults to `headless`.\n\n"
+    "**The five watch-need signals, and the list is exhaustive — no sixth, no `etc.`**\n"
 )
 #: A resume: both keys present, so NOT a new-worker site.
 RESUME_CALL = 'mcp__supervisor__spawn_agent(prompt="<the answer>", resume="<sid>", interactive=false)\n'
@@ -51,7 +70,7 @@ NEW_WORKER_CALL = 'mcp__supervisor__spawn_agent(\n  prompt="/vault-cli:work-on-t
 
 
 #: A resume-only file that GRANTS the spawn tool. Its prose shows no spawn call at all, which
-#: is exactly how `agents/manager-drive.md` opened two workers directly on 2026-09-24 while
+#: is exactly how `agents/goal-drive.md` opened two workers directly on 2026-09-24 while
 #: its own text said to route through `/supervisor:open` — a site defined by a grant, not text.
 GRANT_NO_ANCHOR = (
     "---\nallowed-tools:\n  - mcp__supervisor__spawn_agent\n---\n"
@@ -70,8 +89,7 @@ class CheckSpawnModeTest(unittest.TestCase):
         (pathlib.Path(self.dir) / "scripts").mkdir()
         shutil.copy(SCRIPT, pathlib.Path(self.dir) / "scripts" / "check-spawn-mode.py")
         self.write("docs/fleet-surface.md", HOME)
-        for site in ("commands/open.md", "commands/manager-loop.md", "commands/manager-spawn.md",
-                     "commands/manager-drive.md", "agents/manager-drive.md"):
+        for site in spawn_sites():
             self.write(site, SITE)
 
     def write(self, relpath, text):
@@ -88,7 +106,7 @@ class CheckSpawnModeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_site_without_the_reference_fails(self):
-        self.write("commands/manager-loop.md", SITE_NO_ANCHOR)
+        self.write("commands/steps/goal-spawn.md", SITE_NO_ANCHOR)
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("no reference to the rule's home", result.stderr)
@@ -96,7 +114,7 @@ class CheckSpawnModeTest(unittest.TestCase):
     def test_site_without_the_binding_fails(self):
         """A pointer with no binding is the shape this check exists to reject: the site
         names the home but never passes the argument, so the rule stays unreachable."""
-        self.write("commands/manager-spawn.md", SITE_NO_BINDING)
+        self.write("commands/goal-spawn.md", SITE_NO_BINDING)
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("binding", result.stderr)
@@ -104,7 +122,7 @@ class CheckSpawnModeTest(unittest.TestCase):
     def test_one_directional_site_fails(self):
         """Passing only `interactive=false` leaves `mode: interactive` inert — the defect
         this check gained a second assertion for on 2026-09-24."""
-        self.write("commands/manager-loop.md", SITE_ONE_DIRECTION)
+        self.write("commands/steps/goal-spawn.md", SITE_ONE_DIRECTION)
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("interactive=true", result.stderr)
@@ -126,7 +144,7 @@ class CheckSpawnModeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_raw_wezterm_spawn_grant_is_also_a_spawn_route(self):
-        """The second surface of the same class, found 2026-09-25. `agents/manager-drive.md`
+        """The second surface of the same class, found 2026-09-25. `agents/goal-drive.md`
         had its supervisor grant removed and still granted `Bash(wezterm cli spawn:*)` — a raw
         terminal spawn the tool-only pattern could not see, and the exact bypass the change
         existed to close. The grant dimension enumerates the routes, so a file granting either
@@ -162,6 +180,20 @@ class CheckSpawnModeTest(unittest.TestCase):
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("no longer defines it", result.stderr)
+
+    def test_home_must_state_the_list_is_exhaustive(self):
+        """The second pin is load-bearing on its own: a home naming the signals but leaving
+        the list open-ended passes the first pin and is exactly the shape that grows a sixth
+        signal on the first edge case someone meets."""
+        self.write(
+            "docs/fleet-surface.md",
+            "6. Decide the mode before you spawn.\n\n"
+            "**The five watch-need signals** keep a `role: agent` row interactive.\n",
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no longer defines it", result.stderr)
+        self.assertIn("no sixth", result.stderr)
 
     def test_missing_home_fails_cleanly(self):
         (pathlib.Path(self.dir) / "docs" / "fleet-surface.md").unlink()

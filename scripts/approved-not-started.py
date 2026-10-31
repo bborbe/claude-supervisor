@@ -20,7 +20,7 @@ by `vault-cli task approve` — and only by it — in every vault, so it is the 
 record of the operator's approval rather than a proxy inferred from `status`/`phase`.
 
 ⚠️ **This is deliberately NOT the runbook's "approved and unowned" clause.**
-`agents/manager-sweep-reader.md` forbids hard-coding *that* predicate, because the two
+`agents/goal-sweep-reader.md` forbids hard-coding *that* predicate, because the two
 vaults' runbooks disagree about it (the primary vault reads `status: next`, the other is
 phase-based) — it decides which rows a manager may **spawn** on. This script answers a
 different question, and answers it from the approval's own record, so that disagreement
@@ -134,10 +134,18 @@ def format_age(seconds):
 def read_live(registry_dir=None, heartbeat_dir=None):
     """The live session records, or None when the liveness read failed.
 
-    Delegates to `session-liveness.py --list --json`, whose exit code is the three-state
-    answer: 0 means both halves were read, non-zero means at least one could not be — and
-    a partial list presented as complete reads as "this session is not live" for every
-    session in the half that failed. `None` preserves that; it is never collapsed to `[]`.
+    Delegates to `session-liveness.py --list --json`, whose exit code is the two-state
+    answer: 0 means the list was produced, non-zero means it could not be — and a partial
+    list presented as complete reads as "this session is not live" for every session in
+    the half that failed. `None` preserves that; it is never collapsed to `[]`.
+
+    ⚠️ **Exit 0 no longer means "every session was stamped", and this caller needs no
+    change for that.** Since 2026-10-18 the list DEGRADES per row: a registry-live session
+    with no live heartbeat row is carried with `degraded: true` rather than withholding the
+    whole list, which is the shape this caller wants — it asks for every registry-live
+    session, and those rows now arrive where exit 2 previously returned `None` for the
+    entire fleet. A caller that needs the distinction reads the field; the branch below is
+    unchanged because `returncode != 0` is false on the degraded path, not true.
     """
     cmd = [sys.executable, SESSION_LIVENESS, "--list", "--json"]
     if registry_dir:
@@ -157,19 +165,32 @@ def read_live(registry_dir=None, heartbeat_dir=None):
     return records if isinstance(records, list) else None
 
 
-def manager_for(goals, live_by_name):
+def _manager_named(subject, live_by_name):
+    """The live manager session whose registry name matches `subject`, or None."""
+    title = subject.strip().strip("[]").strip()
+    for candidate in (title, title + " Manager"):
+        if live_by_name.get(candidate.lower()):
+            return candidate
+    return None
+
+
+def manager_for(goals, live_by_name, managed_by=None):
     """The live manager session for a row, or None.
 
-    Convention, not invention: a session whose registry name matches a goal title (a
+    The order is the one `docs/fleet-surface.md` § *Which manager owns a subject* states,
+    and this function reads tier 1: a row's own `managed_by` subject is tried before its
+    `goals:`. The field is hand-authored — nothing writes it automatically — so an absent
+    or unresolvable value is not an error; it falls through to `goals:`.
+
+    Convention, not invention: a session whose registry name matches a subject title (a
     `<X> Manager` suffix allowed) is that subject's manager — the same rule
     `fleet-board.py` uses to place a session under its parent. A row whose goal has no
     live manager reads `unmanaged`, which is a fact about the fleet, not a failure.
     """
-    for goal in goals:
-        title = goal.strip().strip("[]").strip()
-        for candidate in (title, title + " Manager"):
-            if live_by_name.get(candidate.lower()):
-                return candidate
+    for subject in ([managed_by] if managed_by else []) + list(goals):
+        found = _manager_named(subject, live_by_name)
+        if found:
+            return found
     return None
 
 
@@ -211,7 +232,8 @@ def collect(tasks_dir, live, now):
                 "name": entry[:-3],
                 "approved_at": approved.isoformat(),
                 "age_seconds": (now - approved).total_seconds(),
-                "manager": manager_for(list_field(block, "goals"), live_by_name),
+                "manager": manager_for(list_field(block, "goals"), live_by_name,
+                                       field(block, "managed_by")),
             }
         )
     rows.sort(key=lambda r: r["age_seconds"], reverse=True)

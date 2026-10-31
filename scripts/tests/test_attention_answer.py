@@ -9,6 +9,15 @@ Covers the two decisions that make an answer safe to route:
   * the answer gate -- only the arm that wins the store's compare-and-set may
     print a TARGET. A 409 must never be followed by a route, and an `ack` item
     must be refused before the store is written at all.
+  * the 409 itself -- the status covers more than one failure, so the body's
+    `error.code` names which: ITEM_CLOSED (the card left the queue, so no arm
+    can answer it) must read differently from ALREADY_ANSWERED (another arm's
+    verdict landed first). A code the arm cannot read falls back to the generic
+    line, because a body it cannot parse is not evidence of either.
+    ⚠️ **ITEM_CLOSED names no cause** — the store does not record why a card
+    left, so the line states that rather than picking one; only
+    ALREADY_ANSWERED claims a specific fact, and that fact is the verdict's
+    existence, which the code does establish.
   * the permission branch -- a permission-class item needs an explicit
     --decision. Without one it is refused rather than defaulted, because
     neither an implicit allow nor an implicit deny is safe; with one it prints
@@ -27,6 +36,7 @@ Covers the two decisions that make an answer safe to route:
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import http.client
 import importlib.util
 import io
 import json
@@ -47,6 +57,19 @@ _spec.loader.exec_module(aa)
 
 def _session(sid, name):
     return {"sessionId": sid, "name": name}
+
+
+def _conflict(code=None):
+    """A 409 the way the store sends one, with `code` in the body.
+
+    `code=None` builds the body-less shape (an empty body, `fp=None`), which is
+    kept reachable on purpose: a body this arm cannot read must fall back to the
+    generic line rather than to one of the named ones.
+    """
+    body = {} if code is None else {"error": {"code": code}}
+    return urllib.error.HTTPError(
+        "u", 409, "conflict", {}, io.BytesIO(json.dumps(body).encode())
+    )
 
 
 class ResolveTargetTest(unittest.TestCase):
@@ -149,6 +172,101 @@ class AnswerGateTest(unittest.TestCase):
         rc, out, _ = self._run(item, post=err, decision="allow")
         self.assertEqual(rc, 1)
         self.assertIn("LOST:", out)
+        self.assertNotIn("DELIVERY", out)
+
+    def test_item_closed_does_not_pick_a_cause(self):
+        item = {"item_id": "i1", "answer_mechanism": "message", "producer_id": "p1"}
+        rc, out, _ = self._run(item, post=_conflict("ITEM_CLOSED"))
+        self.assertEqual(rc, 1)
+        self.assertIn("ITEM_CLOSED:", out)
+        self.assertNotIn("LOST:", out)
+        # ⚠️ The whole point of the split is that a reader who sees only this
+        # line learns no verdict was recorded — NOT which cause produced it. The
+        # line used to offer "the card was cleared, or its producer exited" as
+        # if the record had settled which; it cannot. An empty-body close comes
+        # from the dead-session sweep, the compact-crossing clear, a forwarded
+        # SessionEnd and `close_session_approval`, and the last is not a
+        # producer exit at all. Naming one member of that set would be a claim
+        # the record does not support, so the line must name the ambiguity.
+        self.assertIn("no verdict was recorded", out)
+        self.assertIn("the store does not record why", out)
+        self.assertNotIn("producer exited;", out)
+        self.assertNotIn("TARGET", out)
+
+    def test_already_answered_names_the_lost_race(self):
+        item = {"item_id": "i1", "answer_mechanism": "message", "producer_id": "p1"}
+        rc, out, _ = self._run(item, post=_conflict("ALREADY_ANSWERED"))
+        self.assertEqual(rc, 1)
+        self.assertIn("ALREADY_ANSWERED:", out)
+        self.assertNotIn("LOST:", out)
+        self.assertIn("verdict from another arm", out)
+        self.assertNotIn("TARGET", out)
+
+    def test_body_less_409_falls_back_to_the_generic_line(self):
+        item = {"item_id": "i1", "answer_mechanism": "message", "producer_id": "p1"}
+        rc, out, _ = self._run(item, post=_conflict())
+        self.assertEqual(rc, 1)
+        self.assertIn("LOST:", out)
+        self.assertNotIn("ITEM_CLOSED:", out)
+        # ⚠️ This branch fires on a code the arm could not read at all, so it
+        # carries strictly LESS evidence than ITEM_CLOSED carries — and it used
+        # to assert "already answered or no longer open", two specific causes
+        # drawn from zero information. It must now say it cannot tell which.
+        self.assertIn("cannot read", out)
+        self.assertIn("cannot say whether", out)
+        self.assertNotIn("already answered or no longer open", out)
+        self.assertNotIn("ALREADY_ANSWERED:", out)
+
+    def test_unknown_code_falls_back_to_the_generic_line(self):
+        item = {"item_id": "i1", "answer_mechanism": "message", "producer_id": "p1"}
+        rc, out, _ = self._run(item, post=_conflict("VALIDATION_ERROR"))
+        self.assertEqual(rc, 1)
+        self.assertIn("LOST:", out)
+        self.assertNotIn("ITEM_CLOSED:", out)
+        self.assertNotIn("ALREADY_ANSWERED:", out)
+
+    def test_non_object_body_falls_back_to_the_generic_line(self):
+        # `{"error": ...}` is the store's shape, but nothing guarantees a proxy or
+        # a future store keeps it, so a list or a string body must not raise.
+        item = {"item_id": "i1", "answer_mechanism": "message", "producer_id": "p1"}
+        err = urllib.error.HTTPError(
+            "u", 409, "conflict", {}, io.BytesIO(b'["not", "an", "object"]')
+        )
+        rc, out, _ = self._run(item, post=err)
+        self.assertEqual(rc, 1)
+        self.assertIn("LOST:", out)
+
+    def test_truncated_body_falls_back_instead_of_raising(self):
+        # A 409 whose body is cut short against its Content-Length is what a proxy
+        # or a mid-body reset produces. http.client.IncompleteRead is neither a
+        # ValueError nor an OSError, so without it in the handler's tuple the arm
+        # raises where the caller expects a label -- a path the pre-fix arm could
+        # not reach at all, because it never read the 409 body.
+        item = {"item_id": "i1", "answer_mechanism": "message", "producer_id": "p1"}
+
+        class _Truncated(io.BytesIO):
+            def read(self, *args, **kwargs):
+                raise http.client.IncompleteRead(b'{"error":')
+
+        err = urllib.error.HTTPError("u", 409, "conflict", {}, _Truncated())
+        rc, out, _ = self._run(item, post=err)
+        self.assertEqual(rc, 1)
+        self.assertIn("LOST:", out)
+
+    def test_item_closed_on_a_permission_card_never_delivers(self):
+        item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1"}
+        rc, out, _ = self._run(item, post=_conflict("ITEM_CLOSED"), decision="allow")
+        self.assertEqual(rc, 1)
+        self.assertIn("ITEM_CLOSED:", out)
+        self.assertIn("do not deliver", out)
+        self.assertNotIn("DELIVERY", out)
+
+    def test_already_answered_on_a_permission_card_never_delivers(self):
+        item = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1"}
+        rc, out, _ = self._run(item, post=_conflict("ALREADY_ANSWERED"), decision="allow")
+        self.assertEqual(rc, 1)
+        self.assertIn("ALREADY_ANSWERED:", out)
+        self.assertIn("do not deliver", out)
         self.assertNotIn("DELIVERY", out)
 
     def test_ack_item_is_still_refused(self):

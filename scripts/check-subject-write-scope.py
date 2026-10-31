@@ -17,10 +17,13 @@ Three assertions, all required:
       two non-writers do not
   (b) every command the table calls a non-writer still **points at** the section, so its
       silence reads as a stated carve-out rather than a missing step
-  (c) the two writers' invocation paragraphs are identical apart from the step they run
-      before (`the sweep` / `the gate`) — the same fold-then-compare discipline
-      `check-recording-step.py` applies to the recording step, so a third divergence
-      cannot appear silently
+  (c) the writers' invocation paragraphs are identical apart from the step they run
+      before — the same fold-then-compare discipline `check-recording-step.py` applies to
+      the recording step, so a further divergence cannot appear silently. ⚠️ **Since
+      2026-10-11 both writers resolve through `commands/steps/goal-resolve.md`, so there
+      is one paragraph and this comparison is a no-op today**; it is retained for the
+      third-writer case, and the assertions that actually catch a silent loss are (a) and
+      (b) below, which run per row exactly as before.
 
 **What this check does not prove.** A command file is prose — there is no function to call
 and no return value to thread. So it proves the table and the bodies cannot drift apart
@@ -34,7 +37,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 DOC = "docs/subject-resolution.md"
-TABLE_ROW = re.compile(r"^\|\s*`/(manager-[a-z]+)`\s*\|\s*yes\s*\|\s*\*\*(yes|no)\*\*(.*)$", re.M)
+# ⚠️ The tier prefix is part of the name: since the 2026-10-20 topic/goal split the table
+# enumerates eight resolving commands — four per tier — and a `manager-`-only class would
+# match none of them and report a table of zero rows.
+TABLE_ROW = re.compile(r"^\|\s*`/(?:supervisor:)?((?:manager|goal|topic)-[a-z]+)`\s*\|\s*yes\s*\|\s*\*\*(yes|no)\*\*(.*)$", re.M)
 FRONTMATTER = re.compile(r"\A---\r?\n(.*?)\r?\n---", re.S)
 
 # The imperative the writers carry. Deliberately the full phrase: a bare mention of the
@@ -46,6 +52,27 @@ REASONS = ("holds no `Bash(vault-cli:*)`", "read-only by its own contract")
 # The binaries § Reconcile the subject's status guarantees every writer is granted. `awk` reads
 # the page and `vault-cli` writes it; the section states both, so both are asserted.
 WRITER_GRANTS = ("Bash(awk:*)", "Bash(vault-cli:*)")
+
+#: Commands whose subject-resolution body moved into a step file when the loop was
+#: restructured into a router on 2026-10-11. The doc's table names the *command* — and the
+#: command still resolves a subject — but the reconcile paragraph now lives in the step file
+#: that does the resolving, so the body check follows the rule rather than the file it used
+#: to sit in. Keyed by the table's own name, so a row for a command with no relocation is
+#: unaffected.
+#:
+#: ⚠️ **Both writers now resolve through the SAME step file, and that is the honest state
+#: of the tree rather than a loss to paper over.** `manager-loop` became the arm and
+#: `commands/goal-drive.md` became the loop's per-round router, so neither carries the
+#: paragraph itself; both reach `commands/steps/goal-resolve.md`. The cross-copy
+#: comparison below is therefore a no-op today — it is kept so a third writer added with its
+#: own paragraph must still match — while the *presence*, *pointer* and *grant* assertions,
+#: which are the ones that catch a silent loss, run exactly as before.
+RELOCATED = {
+    "goal-loop": "commands/steps/goal-resolve.md",
+    "goal-drive": "commands/steps/goal-resolve.md",
+    "topic-loop": "commands/steps/topic-resolve.md",
+    "topic-drive": "commands/steps/topic-resolve.md",
+}
 PARAGRAPH_MARKER = "**⚠️ Reconcile the subject's status — a step to run, not a reference to follow.**"
 STEP_SLOT = re.compile(r"before the (sweep|gate)\b")
 
@@ -81,11 +108,11 @@ def main() -> int:
     # Compare the parsed *rows*, not the name-keyed dict: a duplicated row collapses in the
     # dict, so a table naming one command twice would pass a dict-length check. Both halves
     # are needed — the row count catches an added row, the distinct-name count a swapped one.
-    if len(table) != 4 or len(rows) != len(table):
+    if len(table) != 8 or len(rows) != len(table):
         failures.append(
             f"{DOC}: the write-scope table has {len(table)} row(s) naming {len(rows)} distinct "
-            f"command(s), expected 4 of each — a table that does not enumerate every resolving "
-            f"command exactly once cannot be checked"
+            f"command(s), expected 8 of each (four per tier) — a table that does not enumerate "
+            f"every resolving command exactly once cannot be checked"
         )
 
     # Derived from the *table*, not from the loop's survivors: the cross-copy equality check
@@ -94,16 +121,16 @@ def main() -> int:
     # this guard exists to prevent. Asserting it here also keeps the count independent of any
     # writer-level failure recorded above.
     writer_rows = [name for name, verdict, _tail in table if verdict == "yes"]
-    if len(writer_rows) != 2:
+    if len(writer_rows) != 4:
         failures.append(
-            f"{DOC}: the write-scope table names {len(writer_rows)} writer(s), expected 2 — the "
-            f"cross-copy paragraph comparison is gated on two, so one writer means it compares "
-            f"nothing while this run reports green"
+            f"{DOC}: the write-scope table names {len(writer_rows)} writer(s), expected 4 (one "
+            f"loop and one drive per tier) — the cross-copy paragraph comparison is gated on "
+            f"more than one, so fewer means it compares nothing while this run reports green"
         )
 
     writers: dict[str, str] = {}
     for name, verdict in rows.items():
-        rel = f"commands/{name}.md"
+        rel = RELOCATED.get(name, f"commands/{name}.md")
         path = REPO / rel
         if not path.is_file():
             failures.append(f"{rel}: named in the table but missing")

@@ -342,15 +342,20 @@ class TestGroupingRules(unittest.TestCase):
         self.assertEqual(g.role_of(_sid(6)), "manager")
         self.assertIsNone(g.subject_of(_sid(6)), "orange proves a manager, not its scope")
 
-    def test_rule_2_the_goal_chain_nests_a_worker_under_its_manager(self):
-        """goal -> topic listing that goal -> the live manager for that topic."""
+    def test_a_worker_whose_goal_has_no_manager_falls_to_the_root_not_its_topic(self):
+        """A topic manager never manages a worker.
+
+        `_sid(2)` is the live topic manager for "Manager Layer", which lists
+        "Sample Goal A"; `_sid(3)`'s task names that goal, and no goal manager is
+        live. The worker must fall to the fleet manager, not to the topic manager.
+        """
         g = _grouping()
         self.assertEqual(g.role_of(_sid(3)), "worker")
-        self.assertEqual(g.parent_of(_sid(3)), _sid(2))
+        self.assertEqual(g.parent_of(_sid(3)), _sid(9))
 
-    def test_rule_2_a_manager_whose_subject_is_the_goal_beats_the_topic(self):
-        """Both a goal-subject manager and its topic's manager exist; the goal is
-        the more specific parent and must win."""
+    def test_rule_2_a_goal_manager_wins_over_its_topic(self):
+        """Both a goal-subject manager and its topic's manager exist; the worker is
+        parented to the goal manager, because the topic is not a rung for a worker."""
         g = _grouping()
         self.assertEqual(g.parent_of(_sid(8)), _sid(7))
 
@@ -365,6 +370,112 @@ class TestGroupingRules(unittest.TestCase):
         without = {k: v for k, v in GROUP_REGISTRY.items() if k != _sid(2)}
         g = fb.build_grouping(without, _group_index(), GROUP_COLOURS, set(), GROUP_TITLES)
         self.assertEqual(g.role_of(_sid(3)), "worker")
+        self.assertEqual(g.parent_of(_sid(3)), _sid(9))
+
+    def test_tier_1_managed_by_beats_the_goals_order(self):
+        """The doc's tier 1: a task's own `managed_by` subject is tried before its
+        `goals:`, so a two-goal task resolves to the manager it names rather than to
+        the first goal that resolves."""
+        index = fb.VaultIndex(
+            goals=["Sample Goal A", "Sample Goal B"],
+            task_titles=["Some Task"],
+            task_goals={"some task": ["Sample Goal A", "Sample Goal B"]},
+            task_managed_by={"some task": "Sample Goal B"},
+        )
+        registry = {
+            _sid(9): {"status": "idle", "name": "Fleet Manager", "cwd": CWD},
+            _sid(10): {"status": "idle", "name": "Sample Goal A", "cwd": CWD},
+            _sid(7): {"status": "idle", "name": "Sample Goal B", "cwd": CWD},
+            _sid(3): {"status": "busy", "name": "Some Task", "cwd": CWD},
+        }
+        g = fb.build_grouping(registry, index, {}, set(), {_sid(3): ["Some Task"]})
+        self.assertEqual(g.parent_of(_sid(3)), _sid(7))
+
+    def test_tier_1_absent_managed_by_falls_through_to_goals(self):
+        """The field is hand-authored, so absent is the common case and never an
+        error — the task's `goals:` order still decides."""
+        index = fb.VaultIndex(
+            goals=["Sample Goal A", "Sample Goal B"],
+            task_titles=["Some Task"],
+            task_goals={"some task": ["Sample Goal A", "Sample Goal B"]},
+        )
+        registry = {
+            _sid(9): {"status": "idle", "name": "Fleet Manager", "cwd": CWD},
+            _sid(10): {"status": "idle", "name": "Sample Goal A", "cwd": CWD},
+            _sid(7): {"status": "idle", "name": "Sample Goal B", "cwd": CWD},
+            _sid(3): {"status": "busy", "name": "Some Task", "cwd": CWD},
+        }
+        g = fb.build_grouping(registry, index, {}, set(), {_sid(3): ["Some Task"]})
+        self.assertEqual(g.parent_of(_sid(3)), _sid(10))
+
+    def test_tier_1_unresolvable_managed_by_falls_through_to_goals(self):
+        """A `managed_by` naming a subject with no live manager is not an error and
+        must not strand the worker — the chain continues at tier 2."""
+        index = fb.VaultIndex(
+            goals=["Sample Goal A"],
+            task_titles=["Some Task"],
+            task_goals={"some task": ["Sample Goal A"]},
+            task_managed_by={"some task": "Nobody Is Live Here"},
+        )
+        registry = {
+            _sid(9): {"status": "idle", "name": "Fleet Manager", "cwd": CWD},
+            _sid(10): {"status": "idle", "name": "Sample Goal A", "cwd": CWD},
+            _sid(3): {"status": "busy", "name": "Some Task", "cwd": CWD},
+        }
+        g = fb.build_grouping(registry, index, {}, set(), {_sid(3): ["Some Task"]})
+        self.assertEqual(g.parent_of(_sid(3)), _sid(10))
+
+    def test_managed_by_naming_a_topic_still_parents_to_that_topic(self):
+        """Tier 1 is the operator's own declaration: a `managed_by` naming a topic
+        keeps that topic manager as the worker's parent."""
+        index = fb.VaultIndex(
+            topics=["Manager Layer"],
+            task_titles=["Some Task"],
+            task_managed_by={"some task": "Manager Layer"},
+        )
+        registry = {
+            _sid(9): {"status": "idle", "name": "Fleet Manager", "cwd": CWD},
+            _sid(2): {"status": "idle", "name": "Manager Layer", "cwd": CWD},
+            _sid(3): {"status": "busy", "name": "Some Task", "cwd": CWD},
+        }
+        g = fb.build_grouping(registry, index, {}, set(), {_sid(3): ["Some Task"]})
+        self.assertEqual(g.parent_of(_sid(3)), _sid(2))
+
+    def test_a_task_listed_directly_under_a_topic_resolves_to_that_topic(self):
+        """F4 — the design's nearest-ancestor case.
+
+        A task named as an entry in a topic's `## Goals` carries no `goals:` and no
+        `managed_by`, so before `task_topics` existed the goal chain was empty and
+        the task fell straight to the root — the fleet manager claimed work the
+        topic manager owns.
+        """
+        index = fb.VaultIndex(
+            topics=["Manager Layer"],
+            goals=[],
+            task_titles=["Some Task"],
+            task_topics={"some task": ["Manager Layer"]},
+        )
+        registry = {
+            _sid(9): {"status": "idle", "name": "Fleet Manager", "cwd": CWD},
+            _sid(10): {"status": "idle", "name": "Manager Layer", "cwd": CWD},
+            _sid(3): {"status": "busy", "name": "Some Task", "cwd": CWD},
+        }
+        g = fb.build_grouping(registry, index, {}, set(), {_sid(3): ["Some Task"]})
+        self.assertEqual(g.parent_of(_sid(3)), _sid(10))
+
+    def test_a_task_under_no_topic_still_falls_to_the_root(self):
+        """The control that keeps the new rung from claiming every task."""
+        index = fb.VaultIndex(
+            topics=["Manager Layer"],
+            goals=[],
+            task_titles=["Some Task"],
+        )
+        registry = {
+            _sid(9): {"status": "idle", "name": "Fleet Manager", "cwd": CWD},
+            _sid(10): {"status": "idle", "name": "Manager Layer", "cwd": CWD},
+            _sid(3): {"status": "busy", "name": "Some Task", "cwd": CWD},
+        }
+        g = fb.build_grouping(registry, index, {}, set(), {_sid(3): ["Some Task"]})
         self.assertEqual(g.parent_of(_sid(3)), _sid(9))
 
     def test_rule_4_no_task_file_is_unmanaged(self):
@@ -386,7 +497,7 @@ class TestManagerSubject(unittest.TestCase):
     def test_source_one_resolves_through_the_loop_record(self):
         """A name that matches no page still resolves when the loop's slug does."""
         self.assertEqual(
-            fb.manager_subject("Manager-Layer", _group_index(), {"manager-layer"}),
+            fb.manager_subject("Manager-Layer", _group_index(), {"topic--manager-layer"}),
             ("topic", "Manager Layer"),
         )
 
@@ -434,7 +545,7 @@ class TestTree(unittest.TestCase):
         self.assertTrue(self.tree[1][0].startswith("├ "), self.tree[1][0])
 
     def test_a_grandchild_carries_its_parents_continuation_bar(self):
-        cell = self.cell(_sid(3))
+        cell = self.cell(_sid(8))
         self.assertTrue(cell.startswith("│   └ "), cell)
 
     def test_the_last_child_uses_the_closing_glyph(self):
@@ -918,6 +1029,41 @@ class TestDeclaredWait(unittest.TestCase):
     def test_the_default_is_empty_so_callers_are_not_broken(self):
         self.assertEqual(fb.unblocks_for(_sid(1), self.IDLE, self.META, frozenset()),
                          fb.UNBLOCKS_NUDGE)
+
+class TestSessionTaskTitle(unittest.TestCase):
+    """A `sessions` entry names the task its row resolved to, or says why it has none.
+
+    `build_rows` renders the resolved title into `cells[2]`, but the `sessions`
+    projection used to drop it. A consumer reading the documented structure then
+    got a registry label and nothing to match it against, so a row whose label
+    differs from its task title read as an unresolvable session — which is what
+    happened to `77f7ff67` on 2026-10-20. The fixtures make both halves
+    observable: a resolved title must reach the entry, and each distinct absence
+    must carry its own wording rather than one shared sentence.
+    """
+
+    def _by_sid(self):
+        return {s["session_id"]: s for s in fb.build_sessions(_group_rows()[1])}
+
+    def test_a_worker_row_carries_its_resolved_task_title(self):
+        entry = self._by_sid()[_sid(3)]
+        self.assertEqual(entry["task_title"], "Some Task")
+        self.assertIsNone(entry["task_title_reason"], "a resolved row needs no reason")
+
+    def test_a_manager_row_carries_its_own_reason(self):
+        entry = self._by_sid()[_sid(9)]
+        self.assertIsNone(entry["task_title"], "a manager manages a page, not a task")
+        self.assertEqual(entry["task_title_reason"], fb.TASK_TITLE_NO_MANAGER)
+
+    def test_an_unmanaged_row_carries_a_different_reason(self):
+        entry = self._by_sid()[_sid(5)]
+        self.assertIsNone(entry["task_title"])
+        self.assertEqual(entry["task_title_reason"], fb.TASK_TITLE_NO_TASK_FILE)
+
+    def test_every_absence_has_its_own_wording(self):
+        reasons = {fb.TASK_TITLE_NO_MANAGER, fb.TASK_TITLE_NO_TASK_FILE,
+                   fb.TASK_TITLE_NO_BINDING}
+        self.assertEqual(len(reasons), 3, "one wording per distinct absence, never shared")
 
 
 if __name__ == "__main__":

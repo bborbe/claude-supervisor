@@ -9,7 +9,7 @@ in `task_identifier`, a uuid of exactly the same shape carried by nearly every t
 which hands a task with no session a **phantom owner** and silently drops it out of
 `ready-to-start`.
 
-`commands/manager-loop.md` forbade the shape match in prose on 2026-10-05. Prose is
+`commands/goal-loop.md` forbade the shape match in prose on 2026-10-05. Prose is
 executed by the same model the rule constrains, so it holds only while the model
 remembers to apply it — that is not a check. **This script is the check, and the probe
 calls it for the set instead of extracting in prose.** The extraction leaves the model's
@@ -36,7 +36,7 @@ Two refusals, both `REJECTED:` on stderr and exit 1. It REFUSES; it never merely
 Neither the manager nor the sweep reader may fall back to a hand-read set — a hand read is
 exactly the prose extraction this call replaces, and it is the one that gets the phantom
 shape wrong. Report the row with no id set and say the script refused. The command files
-carry the same rule (`commands/manager-loop.md`, `commands/manager-status.md`), so the
+carry the same rule (`commands/goal-loop.md`, `commands/goal-status.md`), so the
 enforced behaviour and the stated rule agree rather than each holding half.
 
 ⚠️ **The extractor is imported, never re-implemented.** `session_id_set()` in
@@ -58,7 +58,7 @@ import sys
 
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 
-# The field set the probe may read, named here so `commands/manager-loop.md`'s guard
+# The field set the probe may read, named here so `commands/goal-loop.md`'s guard
 # bullet can name the same set this script enforces. `task_identifier` is deliberately
 # ABSENT — its absence is the whole point, and a reader should see the field the guard is
 # about without having to read the extractor.

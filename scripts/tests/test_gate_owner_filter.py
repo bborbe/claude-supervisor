@@ -32,13 +32,19 @@ defect the filter has actually shipped or would ship:
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
+
+import endpoint_fixture  # noqa: E402
+from endpoint_fixture import FixtureEndpoint, dead_url, ledger_row  # noqa: E402
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "gate-owner-filter.py")
@@ -50,6 +56,12 @@ _spec.loader.exec_module(gf)
 ME = "92de43c3-bd91-409d-a33e-824a61e5706a"
 PEER = "64b4a415-906d-457f-81f9-48a842007b88"
 GATED = "33333333-3333-4333-8333-333333333333"
+
+# A one-row feed carrying pane 372, in `who-needs-me.py`'s own render. `--pane` filters
+# the feed rather than manufacturing a gate, so every test that names a pane supplies
+# one -- and supplying it explicitly is also what keeps the suite off the live store,
+# since a bare `--pane` produces the feed by running the real producer.
+FEED_372 = "[ 372]  3m  ⚙ some task — awaiting-operator\n"
 
 # Distinct from None, which is a MEANINGFUL value here (unknown liveness).
 _UNSET = object()
@@ -427,8 +439,14 @@ class UnreadableSourcesAreUnknown(unittest.TestCase):
     reasoning error that produced the wrong conclusion at Manager Session:517.
     """
 
-    def test_missing_ledger_dir_is_empty_dict(self):
-        self.assertEqual(gf.load_ledger("/nonexistent/ledger"), {})
+    def test_unreadable_ledger_store_is_empty_dict(self):
+        """⚠️ **The collapse is this module's contract, not an oversight.** The filter fails
+        OPEN, so an unreadable store and an empty one both answer `{}` and every gate is kept
+        — the safe direction, since an unreadable ledger resolves every spawner as a manager.
+        `load_ledger_checked` is where the distinction survives, and `adopt-orphans.py` calls
+        that one precisely because it must REFUSE rather than fail open.
+        """
+        self.assertEqual(gf.load_ledger(dead_url()), {})
 
     def test_missing_registry_dir_is_none_not_empty_set(self):
         self.assertIsNone(gf.live_ids("/nonexistent/registry"))
@@ -440,16 +458,87 @@ class UnreadableSourcesAreUnknown(unittest.TestCase):
 
 class LoadLedger(unittest.TestCase):
     def test_keys_by_session_id(self):
-        with tempfile.TemporaryDirectory() as d:
-            with open(os.path.join(d, "s.json"), "w", encoding="utf-8") as handle:
-                json.dump({"session_id": "abc", "parent_session": "mgr"}, handle)
-            self.assertEqual(gf.load_ledger(d)["abc"]["parent_session"], "mgr")
+        """⚠️ Keyed by the row's own `session_id`, never `agent_id` — that field is a
+        per-process counter that restarts at 0 on every reconnect, and 215 of the 1891 ledger
+        rows claim `agent_1`, so a map keyed on it would keep one row and drop the rest."""
+        with FixtureEndpoint(ledger_rows=[ledger_row("abc", spawner_session_id="mgr")]) as fx:
+            self.assertEqual(gf.load_ledger(fx.url)["abc"]["spawner_session_id"], "mgr")
 
-    def test_malformed_record_is_skipped(self):
-        with tempfile.TemporaryDirectory() as d:
-            with open(os.path.join(d, "bad.json"), "w", encoding="utf-8") as handle:
-                handle.write("{not json")
-            self.assertEqual(gf.load_ledger(d), {})
+    def test_a_non_object_row_is_skipped(self):
+        """`null`, a list and a scalar are all valid JSON, so the store can serve one and the
+        reader must skip it rather than raise on the next `.get`. ⚠️ Served as ROWS, which is
+        the only shape the endpoint has — the file-era version of this case wrote a malformed
+        `.json` file, and that fixture no longer reaches the reader at all."""
+        with FixtureEndpoint(ledger_rows=[None, "not-a-row", 7]) as fx:
+            self.assertEqual(gf.load_ledger(fx.url), {})
+
+
+class CorruptRecordsFailOpen(unittest.TestCase):
+    """A record that parses but is not an object must be SKIPPED, never raise.
+
+    `null`, a list and a scalar are all valid JSON, so `json.load` returns them
+    happily and the next `.get` raises `AttributeError` out of `main()`. The
+    module's central contract is fail-open -- an unresolvable input keeps the
+    gate -- and a crash is the opposite of that: it takes the whole filter down
+    for every pane, not just the one record. Three readers had the shape
+    (`load_ledger`, `live_ids`, `log_items`), which is why this class tests the
+    class rather than the single surface the report named.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.state = os.path.join(self.dir, "state")
+        self.registry = os.path.join(self.dir, "registry")
+        # ⚠️ The ledger half is a fixture ENDPOINT; only the registry is still a directory.
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
+        for path in (self.state, self.registry):
+            os.makedirs(path)
+        with open(os.path.join(self.state, "a.events.jsonl"), "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "type": "open", "item_id": "1", "pane": "372", "session_id": GATED,
+            }) + "\n")
+
+    def write(self, directory, name, text):
+        with open(os.path.join(directory, name), "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def run_filter(self):
+        # `--pane` FILTERS the feed, so it needs one: a call naming a pane the feed does
+        # not carry now yields no gate at all. Passing the feed explicitly also keeps the
+        # suite off the live store -- `--pane` alone produces the feed itself.
+        return subprocess.run(
+            [sys.executable, _SCRIPT, "--feed", "--pane", "372", "--self", ME, "--explain",
+             "--state-dir", self.state, "--registry-dir", self.registry,
+             "--endpoint", self.endpoint.url],
+            input=FEED_372, capture_output=True, text=True,
+        )
+
+    def test_a_null_ledger_row_exits_zero(self):
+        """SC3's probe, end to end: pointed at a store serving `null` as a row, the filter
+        exits 0 and omits that record rather than raising `AttributeError`."""
+        self.endpoint.add_ledger_row(None)
+        result = self.run_filter()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("AttributeError", result.stderr)
+
+    def test_a_null_ledger_row_is_omitted(self):
+        self.endpoint.add_ledger_row(None)
+        self.assertEqual(gf.load_ledger(self.endpoint.url), {})
+
+    def test_a_null_registry_entry_is_skipped(self):
+        """The registry is Claude Code's own file, not ours, so a shape this reader did
+        not anticipate is a live possibility rather than a hypothetical."""
+        self.write(self.registry, "null.json", "null")
+        self.assertEqual(gf.live_ids(self.registry), set())
+
+    def test_a_null_event_line_is_skipped(self):
+        """The event log is append-only and shared, so one such line would otherwise take
+        the whole pane->session hop down and fail the filter open for every gate."""
+        self.write(self.state, "b.events.jsonl", "null\n")
+        self.assertEqual([i["item_id"] for i in gf.log_items(self.state)], ["1"])
 
 
 class Evaluate(unittest.TestCase):
@@ -673,6 +762,12 @@ class ClaimsFilePath(unittest.TestCase):
         self.dir = self._tmp.name
         self.state = os.path.join(self.dir, "state")
         self.registry = os.path.join(self.dir, "registry")
+        # ⚠️ An EMPTY fixture store, deliberately — not the real one. The file-era version
+        # pointed `--ledger-dir` at a path that did not exist, which read as an empty ledger;
+        # switching to the endpoint without this would make these cases read the MACHINE's
+        # fleet, and the verdicts below would then depend on whoever happens to be running.
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
         os.makedirs(self.state)
         os.makedirs(self.registry)
         with open(os.path.join(self.state, "a.events.jsonl"), "w", encoding="utf-8") as handle:
@@ -688,11 +783,12 @@ class ClaimsFilePath(unittest.TestCase):
             json.dump({"claims": {GATED: {"session": GATED, "manager": PEER}}}, handle)
 
     def run_filter(self, *extra, env=None):
+        # See the sibling helper above: `--pane` filters a feed, so the feed is passed.
         return subprocess.run(
-            [sys.executable, _SCRIPT, "--pane", "372", "--self", ME, "--explain",
+            [sys.executable, _SCRIPT, "--feed", "--pane", "372", "--self", ME, "--explain",
              "--state-dir", self.state, "--registry-dir", self.registry,
-             "--ledger-dir", os.path.join(self.dir, "ledger"), *extra],
-            capture_output=True, text=True, env=env,
+             "--endpoint", self.endpoint.url, *extra],
+            input=FEED_372, capture_output=True, text=True, env=env,
         )
 
     def test_claims_file_flag_drops_a_claimed_pane(self):
@@ -734,15 +830,16 @@ class FeedEmitCarriesTheReplayMark(unittest.TestCase):
         self.dir = self._tmp.name
         self.state = os.path.join(self.dir, "state")
         self.registry = os.path.join(self.dir, "registry")
-        self.ledger = os.path.join(self.dir, "ledger")
-        for path in (self.state, self.registry, self.ledger):
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
+        for path in (self.state, self.registry):
             os.makedirs(path)
 
     def emit(self, feed):
         return subprocess.run(
             [sys.executable, _SCRIPT, "--feed", "--self", ME,
              "--state-dir", self.state, "--registry-dir", self.registry,
-             "--ledger-dir", self.ledger,
+             "--endpoint", self.endpoint.url,
              "--claims-file", os.path.join(self.dir, "no-claims.json")],
             input=feed, capture_output=True, text=True,
         )
@@ -786,8 +883,13 @@ class SummaryLine(unittest.TestCase):
         self.dir = self._tmp.name
         self.state = os.path.join(self.dir, "state")
         self.registry = os.path.join(self.dir, "registry")
-        self.ledger = os.path.join(self.dir, "ledger")
-        for path in (self.state, self.registry, self.ledger):
+        # ⚠️ **The ledger is a fixture ENDPOINT now, not a directory.** `spawn-ledger.py`
+        # reads `GET /api/1.0/session-ledger`, so a directory-shaped fixture would leave this
+        # run with an EMPTY ledger — and hop 3b's branch would then cover both panes, which
+        # reads as `dropped(peer-manager-own): 2` and still looks like a working filter.
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
+        for path in (self.state, self.registry):
             os.makedirs(path)
         # Two panes off one live manager: its OWN gate (no ledger record at all,
         # so hop 3b's branch) and its worker's (a ledger record, so hop 3's).
@@ -800,15 +902,17 @@ class SummaryLine(unittest.TestCase):
             ) + "\n")
         with open(os.path.join(self.registry, "p.json"), "w", encoding="utf-8") as handle:
             json.dump({"sessionId": "own-mgr"}, handle)
-        with open(os.path.join(self.ledger, "w1.json"), "w", encoding="utf-8") as handle:
-            json.dump({"session_id": "w1", "parent_session": "own-mgr"}, handle)
+        self.endpoint.add_ledger_row(ledger_row("w1", spawner_session_id="own-mgr"))
 
     def test_each_drop_bucket_is_counted_under_its_own_reason(self):
         result = subprocess.run(
-            [sys.executable, _SCRIPT, "--pane", "10", "--pane", "11", "--self", ME,
+            [sys.executable, _SCRIPT, "--feed", "--pane", "10", "--pane", "11",
+             "--self", ME,
              "--state-dir", self.state, "--registry-dir", self.registry,
-             "--ledger-dir", self.ledger,
+             "--endpoint", self.endpoint.url,
              "--claims-file", os.path.join(self.dir, "no-claims.json")],
+            input="[ 10]  3m  ⚙ task a — awaiting-operator\n"
+                  "[ 11]  4m  ⚙ task b — awaiting-operator\n",
             capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -849,15 +953,22 @@ class EmptyFeedIsNotAUsageError(unittest.TestCase):
         self.dir = self._tmp.name
         self.state = os.path.join(self.dir, "state")
         self.registry = os.path.join(self.dir, "registry")
-        self.ledger = os.path.join(self.dir, "ledger")
-        for path in (self.state, self.registry, self.ledger):
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
+        for path in (self.state, self.registry):
             os.makedirs(path)
+        # A stand-in for `who-needs-me.py`, so a bare `--pane` (which now produces the
+        # feed itself) is exercised without reaching the operator's live store.
+        self.producer_script = os.path.join(self.dir, "feed.py")
+        with open(self.producer_script, "w", encoding="utf-8") as handle:
+            handle.write("import sys\nsys.stdout.write(%r)\n" % FEED_372)
+        self.producer = f"{sys.executable} {self.producer_script}"
 
     def invoke(self, *argv, feed=None):
         return subprocess.run(
             [sys.executable, _SCRIPT,
              "--state-dir", self.state, "--registry-dir", self.registry,
-             "--ledger-dir", self.ledger,
+             "--endpoint", self.endpoint.url,
              "--claims-file", os.path.join(self.dir, "no-claims.json"), *argv],
             input=feed, capture_output=True, text=True,
         )
@@ -886,11 +997,35 @@ class EmptyFeedIsNotAUsageError(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stdout)
         self.assertIn("pass --pane, --feed, or both", result.stderr)
 
-    def test_pane_alone_is_still_a_source(self):
-        """`--pane` is the guard's other half and must keep working."""
-        result = self.invoke("--pane", "372", "--self", ME)
+    def test_pane_alone_is_still_a_source_and_now_reads_the_feed(self):
+        """`--pane` is the guard's other half, and it now FILTERS rather than invents.
+
+        Measured 2026-10-16: `--self beac5fd0 --pane 1832 --explain` read `gates: 1
+        emit: 1  reason: own-worker` while the authoritative path over the same pane
+        read `gates: 0  emit: 0`. The flag still stands alone as a source -- the guard
+        is unchanged -- but the panes now come from the feed it consults.
+        """
+        result = self.invoke(
+            "--pane", "372", "--self", ME, "--explain", "--producer", self.producer
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("gates: 1", result.stderr, result.stderr)
+        self.assertNotIn("no feed gate", result.stdout)
+
+    def test_a_named_pane_absent_from_the_feed_yields_no_gate(self):
+        """The defect this flag carried: `--explain` answered "yes" for ANY pane.
+
+        A named pane the feed does not carry now yields nothing and says so, which is
+        what makes "the feed does not carry it" distinguishable from "the feed was
+        never consulted" -- a distinction the manufacturing build could not express.
+        """
+        result = self.invoke(
+            "--pane", "999", "--self", ME, "--explain", "--producer", self.producer
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("gates: 0", result.stderr, result.stderr)
+        self.assertIn("emit: 0", result.stderr, result.stderr)
+        self.assertIn("no feed gate for pane 999", result.stdout)
 
 
 class UpstreamRefusalFailsLoudly(unittest.TestCase):
@@ -926,15 +1061,16 @@ class UpstreamRefusalFailsLoudly(unittest.TestCase):
         self.dir = self._tmp.name
         self.state = os.path.join(self.dir, "state")
         self.registry = os.path.join(self.dir, "registry")
-        self.ledger = os.path.join(self.dir, "ledger")
-        for path in (self.state, self.registry, self.ledger):
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
+        for path in (self.state, self.registry):
             os.makedirs(path)
 
     def invoke(self, *argv, feed=None):
         return subprocess.run(
             [sys.executable, _SCRIPT,
              "--state-dir", self.state, "--registry-dir", self.registry,
-             "--ledger-dir", self.ledger,
+             "--endpoint", self.endpoint.url,
              "--claims-file", os.path.join(self.dir, "no-claims.json"), *argv],
             input=feed, capture_output=True, text=True,
         )
@@ -1029,8 +1165,9 @@ class PollModeEmitsOnlyNewKeptPanes(unittest.TestCase):
         self.dir = self._tmp.name
         self.state = os.path.join(self.dir, "state")
         self.registry = os.path.join(self.dir, "registry")
-        self.ledger = os.path.join(self.dir, "ledger")
-        for path in (self.state, self.registry, self.ledger):
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
+        for path in (self.state, self.registry):
             os.makedirs(path)
         self.counter = os.path.join(self.dir, "count")
 
@@ -1069,10 +1206,19 @@ class PollModeEmitsOnlyNewKeptPanes(unittest.TestCase):
         return f"{sys.executable} {script}"
 
     def invoke(self, *argv):
+        # ⚠️ `--feed-state-dir` is REQUIRED here, not optional hygiene. The arm's
+        # memory defaults to a real, shared `~/.claude/state/gate-feed/<self>.json`,
+        # and every test in this class passes the same `ME` — so without this the
+        # suite reads and writes ONE file across all of them, in the developer's
+        # home, and the second test to run sees the first one's panes as already
+        # emitted. Measured 2026-10-12: 4 failures in this class, all of them a
+        # pane that should have been news being suppressed by a sibling test's
+        # leftover entry.
         return subprocess.run(
             [sys.executable, _SCRIPT,
              "--state-dir", self.state, "--registry-dir", self.registry,
-             "--ledger-dir", self.ledger,
+             "--endpoint", self.endpoint.url,
+             "--feed-state-dir", os.path.join(self.dir, "feed-state"),
              "--claims-file", os.path.join(self.dir, "no-claims.json"), *argv],
             capture_output=True, text=True,
         )
@@ -1253,7 +1399,7 @@ class PollModeEmitsOnlyNewKeptPanes(unittest.TestCase):
         result = subprocess.run(
             [sys.executable, _SCRIPT,
              "--state-dir", self.state, "--registry-dir", self.registry,
-             "--ledger-dir", self.ledger,
+             "--endpoint", self.endpoint.url,
              "--claims-file", os.path.join(self.dir, "no-claims.json"),
              "--feed", "--self", ME],
             input=self.ONE, capture_output=True, text=True,
@@ -1261,6 +1407,526 @@ class PollModeEmitsOnlyNewKeptPanes(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.split(), ["98765"], result.stdout)
         self.assertNotIn("LIVENESS", result.stderr)
+
+
+class FeedStateSurvivesTheReArm(unittest.TestCase):
+    """The arm's memory — what it has already surfaced crosses the re-arm.
+
+    `poll()` was a change-detector WITHIN an arm and had no memory ACROSS one:
+    `previous = None` opened every arm, so the first poll of each treated every
+    held gate as newly entered. A `Monitor` is bounded at 30 min and re-armed, so
+    a held gate cost a full manager turn every arm for as long as it stayed open.
+    Measured 2026-10-12 on the Fleet Manager: panes 1065, 1151, 1175, 1094, 1193,
+    1191, 1196 re-reported ~8 times over a ~600k-token context each, for no state
+    change.
+
+    ⚠️ Every test here drives a SEPARATE arm, and that is the whole point: each
+    `poll()` is a new process with its own producer counter, so the state file is
+    the ONLY thing that crosses between them. A test that reused one process would
+    re-prove the in-process detector that already worked.
+
+    ⚠️ The backstop tests exist because the fix removes one. The re-arm used to be
+    what retried a wake the manager never saw; once the emit is persisted, nothing
+    does — dedup plus event-only delivery, a permanent silent stall. So a held gate
+    is re-emitted once its entry expires, and both directions are pinned below.
+    """
+
+    ONE = "  [ 98765] 0m  first gate\n"
+    TWO = "  [ 98765] 0m  first gate\n  [ 98766] 0m  second gate\n"
+    EMPTY = "Needs you (0)\nNothing needs you.\n"
+    SID = "55555555-5555-4555-8555-555555555555"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.state = os.path.join(self.dir, "state")
+        self.registry = os.path.join(self.dir, "registry")
+        # ⚠️ The ledger half is a fixture ENDPOINT now; only the registry is still a
+        # directory. An empty store is the right default here — the gates in these cases are
+        # decided by the feed state and the registry, and reading the MACHINE's fleet instead
+        # would make every verdict depend on whoever happens to be running.
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
+        self.feed_state = os.path.join(self.dir, "feed-state")
+        for path in (self.state, self.registry):
+            os.makedirs(path)
+        self.arm = 0
+        self.ts = 0
+
+    # --- fixtures ------------------------------------------------------------
+
+    def gate(self, pane, detail):
+        """APPEND an event-log item for `pane` — the record the fingerprint reads.
+
+        The gate's own text lives here, not on the feed line: the feed renders an
+        AGE (`0m`, `5h49m`) beside every row, so a fingerprint taken off the line
+        would differ on every poll and re-emit everything. `detail` is the stable
+        identity, and `notify-gate.py` keys its own dedup on the same field.
+
+        Appends rather than rewrites: `log_items` folds the log by `item_id` and
+        `newest_item_for_pane` picks the newest by `ts`, so a second call for one
+        pane must be a NEWER record and a call for another pane must not erase it.
+        """
+        self.ts += 1
+        with open(
+            os.path.join(self.state, f"{self.SID}.events.jsonl"), "a", encoding="utf-8"
+        ) as handle:
+            handle.write(
+                json.dumps({
+                    "item_id": f"item-{pane}-{self.ts}", "session_id": self.SID,
+                    "pane": pane, "type": "open", "detail": detail, "ts": self.ts,
+                }) + "\n"
+            )
+
+    def producer(self, frames, counter, tag):
+        frames_path = os.path.join(self.dir, f"frames-{tag}.json")
+        with open(frames_path, "w", encoding="utf-8") as handle:
+            json.dump(list(frames), handle)
+        script = os.path.join(self.dir, f"producer-{tag}.py")
+        with open(script, "w", encoding="utf-8") as handle:
+            handle.write(
+                "import json, sys\n"
+                f"FRAMES = json.load(open({frames_path!r}))\n"
+                "try:\n"
+                f"    n = int(open({counter!r}).read())\n"
+                "except Exception:\n"
+                "    n = 0\n"
+                "n += 1\n"
+                f"open({counter!r}, 'w').write(str(n))\n"
+                "sys.stdout.write(FRAMES[min(n - 1, len(FRAMES) - 1)])\n"
+            )
+        return f"{sys.executable} {script}"
+
+    def invoke(self, *argv, feed_state_dir=None, stdin_text=""):
+        return subprocess.run(
+            [sys.executable, _SCRIPT,
+             "--state-dir", self.state, "--registry-dir", self.registry,
+             "--endpoint", self.endpoint.url,
+             "--feed-state-dir", feed_state_dir or self.feed_state,
+             "--claims-file", os.path.join(self.dir, "no-claims.json"), *argv],
+            input=stdin_text, capture_output=True, text=True,
+        )
+
+    def poll(self, frames, polls=None, feed_state_dir=None, reemit_after=None):
+        """ONE arm of the loop — a fresh process and a fresh producer counter."""
+        self.arm += 1
+        counter = os.path.join(self.dir, f"count-{self.arm}")
+        argv = ["--feed", "--self", ME, "--interval", "0",
+                "--max-polls", str(polls if polls is not None else len(frames)),
+                "--producer", self.producer(frames, counter, f"arm{self.arm}")]
+        if reemit_after is not None:
+            argv += ["--reemit-after", str(reemit_after)]
+        return self.invoke(*argv, feed_state_dir=feed_state_dir)
+
+    def stored(self):
+        with open(
+            os.path.join(self.feed_state, f"{ME}.json"), encoding="utf-8"
+        ) as handle:
+            return json.load(handle)
+
+    def age_the_store(self, seconds):
+        """Push every stored entry's clock back, as a lost wake's arm would."""
+        path = os.path.join(self.feed_state, f"{ME}.json")
+        data = self.stored()
+        for entry in data["gates"].values():
+            entry["emitted_at"] -= seconds
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+
+    # --- SC1: one entry per open gate ----------------------------------------
+
+    def test_the_store_holds_one_entry_per_open_gate(self):
+        self.gate("98765", "first gate")
+        self.gate("98766", "second gate")
+        result = self.poll([self.TWO], polls=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        gates = self.stored()["gates"]
+        self.assertEqual(sorted(gates), ["98765", "98766"], gates)
+        for pane, entry in gates.items():
+            self.assertTrue(entry["fingerprint"], (pane, entry))
+            self.assertGreater(entry["emitted_at"], 0, (pane, entry))
+
+    def test_the_store_is_keyed_on_the_self_session(self):
+        self.gate("98765", "first gate")
+        self.poll([self.ONE], polls=1)
+        self.assertTrue(os.path.exists(os.path.join(self.feed_state, f"{ME}.json")))
+
+    # --- SC2: a re-arm is silent; a changed question is news -----------------
+
+    def test_a_re_arm_with_unchanged_gates_emits_nothing(self):
+        """The defect itself: the first poll of EVERY arm re-emitted the kept set."""
+        self.gate("98765", "first gate")
+        self.gate("98766", "second gate")
+        first = self.poll([self.TWO], polls=2)
+        self.assertEqual(first.stdout.split(), ["98765", "98766"], first.stdout)
+        second = self.poll([self.TWO], polls=2)
+        self.assertEqual(second.stdout.split(), [], second.stdout)
+        self.assertIn("new: 0  no change", second.stderr)
+
+    def test_a_changed_question_on_one_pane_emits_only_that_pane(self):
+        self.gate("98765", "first gate")
+        self.gate("98766", "second gate")
+        self.poll([self.TWO], polls=1)
+        self.gate("98766", "second gate, re-worded")
+        result = self.poll([self.TWO], polls=1)
+        self.assertEqual(result.stdout.split(), ["98766"], result.stdout)
+
+    def test_a_re_render_of_the_same_question_is_not_news(self):
+        """`normalise()` collapses whitespace, so re-wrapping keeps one identity."""
+        self.gate("98765", "first gate")
+        self.poll([self.ONE], polls=1)
+        self.gate("98765", "first   gate")
+        result = self.poll([self.ONE], polls=1)
+        self.assertEqual(result.stdout.split(), [], result.stdout)
+
+    # --- SC3: a closed gate is pruned, a reopened one is news again ----------
+
+    def test_a_closed_gate_is_pruned_from_the_store(self):
+        self.gate("98765", "first gate")
+        self.poll([self.ONE], polls=1)
+        self.assertIn("98765", self.stored()["gates"])
+        self.poll([self.EMPTY], polls=1)
+        self.assertNotIn("98765", self.stored()["gates"])
+
+    def test_a_reopened_gate_is_emitted_again(self):
+        self.gate("98765", "first gate")
+        self.poll([self.ONE], polls=1)
+        self.poll([self.EMPTY], polls=1)
+        result = self.poll([self.ONE], polls=1)
+        self.assertEqual(result.stdout.split(), ["98765"], result.stdout)
+
+    # --- the backstop: a lost wake must not become a permanent silence -------
+
+    def test_a_held_gate_is_re_emitted_once_its_entry_expires(self):
+        """Without this, dedup plus event-only delivery is a permanent silent stall."""
+        self.gate("98765", "first gate")
+        self.poll([self.ONE], polls=1)
+        self.assertEqual(self.poll([self.ONE], polls=1).stdout.split(), [])
+        self.age_the_store(3600)
+        result = self.poll([self.ONE], polls=1)
+        self.assertEqual(result.stdout.split(), ["98765"], result.stdout)
+
+    def test_reemit_after_zero_disables_the_backstop(self):
+        self.gate("98765", "first gate")
+        self.poll([self.ONE], polls=1)
+        self.age_the_store(10 ** 7)
+        result = self.poll([self.ONE], polls=1, reemit_after=0)
+        self.assertEqual(result.stdout.split(), [], result.stdout)
+
+    # --- an absent or corrupt store is FIRST RUN, never "unchanged" ----------
+
+    def test_a_missing_store_emits_every_kept_gate(self):
+        self.gate("98765", "first gate")
+        result = self.poll([self.ONE], polls=1)
+        self.assertEqual(result.stdout.split(), ["98765"], result.stdout)
+
+    def test_a_corrupt_store_reads_as_first_run_not_as_no_change(self):
+        """Reading it as 'nothing changed' would silently suppress every gate."""
+        self.gate("98765", "first gate")
+        os.makedirs(self.feed_state, exist_ok=True)
+        with open(
+            os.path.join(self.feed_state, f"{ME}.json"), "w", encoding="utf-8"
+        ) as handle:
+            handle.write("{ not json at all")
+        result = self.poll([self.ONE], polls=1)
+        self.assertEqual(result.stdout.split(), ["98765"], result.stdout)
+
+    # --- the write itself ----------------------------------------------------
+
+    def test_the_store_is_written_atomically_leaving_no_tmp(self):
+        self.gate("98765", "first gate")
+        self.poll([self.ONE], polls=2)
+        leftovers = [f for f in os.listdir(self.feed_state) if f.endswith(".tmp")]
+        self.assertEqual(leftovers, [], leftovers)
+
+    def test_an_unwritable_store_is_reported_once_and_fails_open(self):
+        """A store that cannot be written must not leave the arm looking fixed.
+
+        Fail-open means the PRE-fix behaviour — every kept pane re-emitted on every
+        poll — which is a wake rather than a silence. The warning is what keeps that
+        degradation visible instead of reading as a fixed arm.
+        """
+        blocker = os.path.join(self.dir, "blocker")
+        with open(blocker, "w", encoding="utf-8") as handle:
+            handle.write("not a directory")
+        result = self.poll(
+            [self.ONE, self.ONE, self.ONE],
+            feed_state_dir=os.path.join(blocker, "feed-state"),
+        )
+        self.assertEqual(result.stderr.count("STATE  unwritable"), 1, result.stderr)
+        self.assertEqual(result.stdout.split(), ["98765"] * 3, result.stdout)
+
+    # --- the flag is required, because without it the fix is a no-op ---------
+
+    def test_interval_without_self_is_a_usage_error(self):
+        """Without a key there is no store, so the arm would silently stay unfixed."""
+        result = self.invoke("--feed", "--interval", "5", "--max-polls", "1")
+        self.assertEqual(2, result.returncode, result.stdout)
+        self.assertIn("--self", result.stderr)
+
+    def test_the_one_shot_shape_writes_no_store(self):
+        self.gate("98765", "first gate")
+        result = self.invoke("--feed", "--self", ME, stdin_text=self.ONE)
+        self.assertEqual(result.stdout.split(), ["98765"], result.stdout)
+        self.assertFalse(os.path.exists(self.feed_state), os.listdir(self.dir))
+
+
+class _FakeScope:
+    """The narrowest stand-in for `session-scope.Scope`: one answer per session id."""
+
+    def __init__(self, answers):
+        self.answers = answers
+
+    def exclusion(self, session_id, self_id):
+        return self.answers.get(session_id, (False, ""))
+
+
+class ScopeExclusion(unittest.TestCase):
+    """The third verdict, branch by branch.
+
+    It may only turn a NON-EXCLUDE verdict into an EXCLUDE -- never a pane this watcher
+    spawned (`own-worker`), never its own session (`self`), and never one it adopted
+    (`own-claim`). The `DROP` case is why it is "non-exclude" rather than "EMIT": the
+    scope SUPERSEDES a spawn-edge drop too.
+    """
+
+    LEDGER = {"worker-1": {"session_id": "worker-1", "parent_session": "manager-x"}}
+    LIVE = {"worker-1", "manager-x", "manager-y"}
+
+    def call(self, session_id, spawner, scope, ledger=_UNSET, live=_UNSET, claims=_UNSET):
+        return gf.verdict(
+            session_id,
+            spawner,
+            self.LEDGER if ledger is _UNSET else ledger,
+            self.LIVE if live is _UNSET else live,
+            ME,
+            None if claims is _UNSET else claims,
+            scope,
+        )
+
+    def test_a_foreign_session_is_excluded_and_names_its_goal(self):
+        scope = _FakeScope({"w": (True, "foreign-goal:Some Other Goal")})
+        self.assertEqual(self.call("w", "nobody", scope),
+                         (gf.EXCLUDE, "foreign-goal:Some Other Goal"))
+
+    def test_an_owner_unknown_session_is_excluded_too(self):
+        scope = _FakeScope({"w": (True, "owner-unknown")})
+        self.assertEqual(self.call("w", "nobody", scope), (gf.EXCLUDE, "owner-unknown"))
+
+    def test_a_scoped_own_session_falls_through_to_the_spawner_path(self):
+        """Own is not a verdict — it leaves every existing rule exactly as it was.
+
+        Asserted against the UNSCOPED answer for the same inputs, so the pin is the property
+        rather than a ledger row this test happens to carry.
+        """
+        scope = _FakeScope({})
+        for session_id, spawner in (("w", "manager-y"), ("worker-1", "manager-x"), ("w", None)):
+            self.assertEqual(
+                self.call(session_id, spawner, scope),
+                self.call(session_id, spawner, None),
+                (session_id, spawner),
+            )
+
+    def test_no_scope_changes_nothing(self):
+        self.assertEqual(self.call("w", "manager-y", None), (gf.DROP, "peer-manager"))
+
+    def test_a_pane_this_watcher_spawned_is_never_excluded(self):
+        """`own-worker` returns above the scope check: these are the panes it EXISTS to see."""
+        scope = _FakeScope({"w": (True, "foreign-goal:Some Other Goal")})
+        self.assertEqual(self.call("w", ME, scope), (gf.EMIT, "own-worker"))
+
+    def test_the_asking_session_is_never_excluded(self):
+        scope = _FakeScope({ME: (True, "foreign-goal:Some Other Goal")})
+        self.assertEqual(self.call(ME, "manager-y", scope), (gf.EMIT, "self"))
+
+    def test_the_scope_outranks_a_spawn_edge_drop_for_a_foreign_pane(self):
+        """The durable answer wins, and it is the only one that names the real owner."""
+        scope = _FakeScope({"w": (True, "foreign-goal:Some Other Goal")})
+        self.assertEqual(self.call("w", "manager-y", scope),
+                         (gf.EXCLUDE, "foreign-goal:Some Other Goal"))
+
+    def test_an_adopted_pane_is_never_excluded_by_the_scope(self):
+        """A gate this manager undertook to route is one it EXISTS to see.
+
+        The scope block sits ABOVE the claims path, so without the `adopted_by_self`
+        guard the durable answer silenced exactly the pane the claim was recorded for --
+        the fleet-silence direction `session-scope.py` names as the dangerous one. Hop 3b
+        already carries this guard; the scope block above it did not.
+        """
+        scope = _FakeScope({"w": (True, "foreign-goal:Some Other Goal")})
+        self.assertEqual(self.call("w", None, scope, claims={"w": ME}),
+                         (gf.EMIT, "own-claim"))
+
+    def test_the_claim_outranks_the_scope_and_only_the_claim_does(self):
+        """The precedence pinned in both directions, so neither half can drift alone.
+
+        An own claim wins over the scope; the SAME foreign scope with no claim still
+        excludes. Asserting only the first half would pass on a build that dropped the
+        scope check entirely, and only the second would pass on the bug.
+        """
+        scope = _FakeScope({"w": (True, "foreign-goal:Some Other Goal")})
+        self.assertEqual(self.call("w", None, scope, claims={"w": ME}),
+                         (gf.EMIT, "own-claim"))
+        self.assertEqual(self.call("w", None, scope, claims={}),
+                         (gf.EXCLUDE, "foreign-goal:Some Other Goal"))
+
+
+class ScopeCli(unittest.TestCase):
+    """The scope CLI seam, end to end through `_session_scope()` / `main()`.
+
+    Every other scope case in this file drives `_FakeScope`, so nothing pinned the real
+    `spec_from_file_location("session_scope", …)` + `load(self_id, vault_paths)` seam, nor
+    the two flags that reach it, nor the `SCOPE  unresolved:` line the FILTER emits. A
+    rename of the loaded module or a signature drift on `load` would have passed the suite.
+
+    The fixture's own vault, state and registry are used, so the pane→session mapping is the
+    real one; only the ledger endpoint is stubbed, which keeps the test offline.
+    """
+
+    #: The fixture's manager stamp — `replay.py`'s `SELF`, not this file's `ME`.
+    SELF = "49b471f1-a8a6-48b0-b2b2-14b9cb2437e3"
+    BASE = os.path.join(_HERE, "fixtures", "gate-owner-foreign-goal")
+
+    def run_filter(self, *argv):
+        """`(rc, stdout, stderr)` from `main()` with `argv`, ledger stubbed."""
+        with open(os.path.join(self.BASE, "feed.txt"), encoding="utf-8") as handle:
+            feed = handle.read()
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "argv", ["gate-owner-filter.py"] + list(argv)), \
+             mock.patch.object(sys, "stdin", io.StringIO(feed)), \
+             mock.patch.object(gf, "load_ledger", return_value={}), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = gf.main()
+        return rc, out.getvalue(), err.getvalue()
+
+    def common(self):
+        return [
+            "--state-dir", os.path.join(self.BASE, "state"),
+            "--registry-dir", os.path.join(self.BASE, "registry"),
+            "--claims-file", os.path.join(self.BASE, "claims.json"),
+            "--feed", "--explain",
+        ]
+
+    def test_the_importlib_seam_reaches_the_real_session_scope(self):
+        """A rename of the module, or a changed `load` signature, fails here."""
+        scope_mod = gf._session_scope()
+        scope = scope_mod.load(self.SELF, [os.path.join(self.BASE, "vault")])
+        self.assertTrue(scope.resolved, scope.reason)
+        # The fixture's own task — the CONTROL pane's page — must land in the own set, or
+        # the scope would exclude the very pane the fixture exists to protect.
+        self.assertIn("Own Worker Control Task", scope.own_titles)
+
+    def test_scope_vault_excludes_the_foreign_panes(self):
+        rc, out, err = self.run_filter(
+            "--self", self.SELF,
+            "--scope-vault", os.path.join(self.BASE, "vault"),
+            *self.common(),
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("excluded(foreign-goal): 3", err)
+        self.assertIn("excluded(owner-unknown): 2", err)
+        self.assertIn("emit: 1", err)
+        self.assertIn("exclude foreign-goal:", out)
+
+    def test_no_scope_emits_every_row(self):
+        """The flag disables the read entirely — the pre-scope behaviour, pinned."""
+        rc, out, err = self.run_filter("--self", self.SELF, "--no-scope", *self.common())
+        self.assertEqual(rc, 0)
+        self.assertIn("emit: 6", err)
+        self.assertIn("excluded(foreign-goal): 0", err)
+        self.assertNotIn("SCOPE  unresolved:", err)
+        self.assertNotIn("exclude ", out)
+
+    def test_an_unresolved_scope_announces_the_filters_own_line(self):
+        """`session-scope.py` emits a same-prefixed line, so the SUFFIX is what pins this one."""
+        rc, _out, err = self.run_filter(
+            "--self", self.SELF,
+            "--scope-vault", "/nonexistent-vault-for-this-test",
+            *self.common(),
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("SCOPE  unresolved:", err)
+        self.assertIn("— no row is excluded", err)
+        self.assertIn("emit: 6", err)
+
+
+class ForeignGoalFixture(unittest.TestCase):
+    """The five measured foreign firings, replayed end to end through the CLI.
+
+    Fixture: `scripts/tests/fixtures/gate-owner-foreign-goal/`. The stub registry holds only
+    this manager, so every foreign spawner reads `dead-manager` — the firing-time shape, where
+    the live ownership chain does not resolve and the filter used to emit every foreign gate.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util as ilu
+
+        path = os.path.join(_HERE, "fixtures", "gate-owner-foreign-goal", "replay.py")
+        spec = ilu.spec_from_file_location("foreign_goal_replay", path)
+        cls.replay = ilu.module_from_spec(spec)
+        spec.loader.exec_module(cls.replay)
+        cls.scoped = cls.replay.run(scope=True)
+        cls.unscoped = cls.replay.run(scope=False)
+
+    def rows(self, result="json"):
+        return json.loads(self.scoped[result].stdout)
+
+    def by_pane(self):
+        return {row["pane"]: row for row in self.rows()}
+
+    def test_the_five_foreign_panes_leave_the_feed(self):
+        self.assertEqual(self.scoped["feed"].stdout.split(), [self.replay.CONTROL],
+                         self.scoped["feed"].stdout)
+
+    def test_the_own_worker_control_still_emits(self):
+        """Without this the fixture would pass on a filter that excludes everything."""
+        self.assertEqual(self.by_pane()[self.replay.CONTROL]["verdict"], gf.EMIT)
+        self.assertEqual(self.by_pane()[self.replay.CONTROL]["reason"], "own-worker")
+
+    def test_all_six_rows_survive_in_json(self):
+        """A pane missing from `--json` is a FAIL: a silent drop is what a fixed row looks like."""
+        self.assertEqual(
+            set(self.by_pane()),
+            set(self.replay.FOREIGN) | {self.replay.CONTROL},
+        )
+
+    def test_each_foreign_row_names_its_owner(self):
+        expected = {
+            "269": "foreign-goal:PR Reviews Return a Verdict Within Minutes, Not Hours",
+            "260": "foreign-goal:All Octopus Builds Green on Dev, Staging, and Master",
+            "272": "owner-unknown",
+            "278": "foreign-goal:Every Recurring Task Is Structurally Valid and Linked to a Runbook",
+            "279": "owner-unknown",
+        }
+        rows = self.by_pane()
+        for pane, reason in expected.items():
+            self.assertEqual(rows[pane]["verdict"], gf.EXCLUDE, rows[pane])
+            self.assertEqual(rows[pane]["reason"], reason, rows[pane])
+
+    def test_counts_line_reports_an_exclusion_apart_from_a_drop(self):
+        stderr = self.scoped["feed"].stderr
+        self.assertIn("excluded(foreign-goal): 3", stderr)
+        self.assertIn("excluded(owner-unknown): 2", stderr)
+        self.assertIn("dropped(peer-manager): 0", stderr)
+        self.assertIn("emit: 1", stderr)
+
+    def test_without_the_scope_input_every_row_is_emitted(self):
+        """The before-reading, pinned in-tree: the same fixture, the pre-fix path."""
+        self.assertEqual(
+            self.unscoped["feed"].stdout.split(),
+            list(self.replay.FOREIGN) + [self.replay.CONTROL],
+            self.unscoped["feed"].stdout,
+        )
+        self.assertIn("emit: 6", self.unscoped["feed"].stderr)
+        self.assertIn("excluded(foreign-goal): 0", self.unscoped["feed"].stderr)
+
+    def test_the_pre_fix_path_prints_the_same_five_the_task_measured(self):
+        """5 of 5 — not "at least one", and not a single case."""
+        printed = self.unscoped["feed"].stdout.split()
+        self.assertEqual([pane for pane in printed if pane in self.replay.FOREIGN],
+                         list(self.replay.FOREIGN))
 
 
 if __name__ == "__main__":

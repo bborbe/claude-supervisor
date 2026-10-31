@@ -25,9 +25,12 @@ import {
   workerEnvFor,
   SPAWN_MODES,
   SPAWN_TARGETS,
+  IMPLEMENTED_SPAWN_TARGETS,
+  spawnTargetImplementationRefusal,
   WORKER_MODE_ENV,
   WORKER_MODE_SOURCE_ENV,
 } from './spawn-mode.mjs'
+import { SHIPPING_MODE_ENV } from './shipping-settings.mjs'
 
 const file = (mode) => ({ spawn: { mode } })
 
@@ -385,6 +388,39 @@ test('concurrentLimitRefusal: an uncountable store refuses rather than reading a
   assert.match(refusal, /unknown/)
 })
 
+test('concurrentLimitRefusal: a fresh stale count decides, and the message says so', () => {
+  // ⚠️ A count from the last minute is a real measurement; refusing on it is what lost spawns on
+  // 2026-10-19. The decision uses it, and the message names its age and the live failure.
+  const refusal = concurrentLimitRefusal({
+    limits: PAIR,
+    liveCount: null,
+    staleCount: 30,
+    staleAgeMs: 5000,
+    countError: 'timeout',
+  })
+  assert.match(refusal, /30 live/)
+  assert.match(refusal, /last successful count, 5 s old/)
+  assert.match(refusal, /the live read failed: timeout/)
+})
+
+test('concurrentLimitRefusal: a fresh stale count below the cap opens', () => {
+  assert.equal(
+    concurrentLimitRefusal({ limits: PAIR, liveCount: null, staleCount: 29, staleAgeMs: 1000 }),
+    null,
+  )
+})
+
+test('concurrentLimitRefusal: no stale count keeps the refusal', () => {
+  const refusal = concurrentLimitRefusal({
+    limits: PAIR,
+    liveCount: null,
+    staleCount: null,
+    staleAgeMs: null,
+  })
+  assert.match(refusal, /could not be/)
+  assert.doesNotMatch(refusal, /last successful count/)
+})
+
 test('concurrentLimitRefusal: the off switch and a resolver error pass straight through', () => {
   const off = { limit: null, hardLimit: null, source: 'config', hardSource: 'config' }
   assert.equal(concurrentLimitRefusal({ limits: off, liveCount: 999 }), null)
@@ -400,8 +436,101 @@ test('a spawn with no target is local', () => {
 })
 
 test('an explicit target is taken from the argument', () => {
-  assert.deepEqual(resolveSpawnTarget({ target: 'cluster' }), { target: 'cluster', source: 'argument' })
   assert.deepEqual(resolveSpawnTarget({ target: 'local' }), { target: 'local', source: 'argument' })
+  // The A2A worker-controller targets. Listing them here is what makes the CALL well-formed;
+  // whether the spawn can be CARRIED OUT is `IMPLEMENTED_SPAWN_TARGETS`' question, asserted
+  // separately below. Both answers are needed — without the first, a caller is told "not a
+  // spawn target" for a target that is one, which names the wrong problem.
+  assert.deepEqual(resolveSpawnTarget({ target: 'docker' }), { target: 'docker', source: 'argument' })
+  assert.deepEqual(resolveSpawnTarget({ target: 'k8s' }), { target: 'k8s', source: 'argument' })
+  // A cluster-named target is a well-formed call too. The CLUSTER itself is validated by the
+  // resolver that knows the configuration; this function only decides the shape.
+  assert.deepEqual(resolveSpawnTarget({ target: 'k8s:nukedev' }), { target: 'k8s:nukedev', source: 'argument' })
+  assert.deepEqual(resolveSpawnTarget({ target: 'k8s:octopus-dev' }), { target: 'k8s:octopus-dev', source: 'argument' })
+})
+
+test('the retired `cluster` target is refused by name, and the refusal lists the survivors', () => {
+  // ⚠️ The refusal's TEXT is asserted here rather than at a live call site, and that is a
+  // consequence of retiring the target rather than a shortcut: `cluster` is gone from the
+  // `spawn_agent` tool schema's enum too, so a live call is rejected CLIENT-SIDE by Claude Code
+  // and never reaches this server — there is no server-side refusal string left to read from a
+  // live probe. This assertion is what carries the wording.
+  //
+  // ⚠️ A bare `assert.ok(error)` does NOT satisfy this. It passes while the message says nothing
+  // about `cluster` or about which targets survive, which is exactly the state a botched
+  // retirement produces: the target refuses, but the caller is told nothing actionable. Both
+  // clauses below are load-bearing — the first pins that the rejected VALUE is named, the second
+  // that the caller is pointed at the targets that still work.
+  const { error } = resolveSpawnTarget({ target: 'cluster' })
+  assert.ok(error, 'cluster must be refused once retired')
+  assert.match(error, /"cluster"/, 'the refusal must name the rejected value')
+  assert.match(error, /Valid values: local, docker, k8s/, 'the refusal must list the surviving targets')
+  // ⚠️ The retired name may appear once as the rejected value and once inside the accepted
+  // `k8s:<cluster>` grammar — but never as a value of its own. An unqualified
+  // `!/cluster/.test(error)` would now fail on the grammar, so the assertion is on the quoted
+  // form, which is how a value is named in these messages.
+  assert.equal(
+    (error.match(/"cluster"/g) ?? []).length,
+    1,
+    'cluster must be named only as the rejected value, never offered',
+  )
+})
+
+test('the published tool schema lists exactly the spawn targets, so the two cannot drift', () => {
+  // ⚠️ THIS IS THE DEFECT THE RETIREMENT NEARLY SHIPPED WITH. The `spawn_agent` tool schema
+  // carries its own HARDCODED `enum` — `supervisor.mjs` imports only `A2A_SPAWN_TARGETS`, never
+  // `SPAWN_TARGETS` — so removing `cluster` from the list alone would have left the published
+  // surface still OFFERING a target the server refuses, while every other test in this file
+  // stayed green. A caller reading the schema is the population that matters and nothing else
+  // in the suite reads it.
+  //
+  // Pinned by reading supervisor.mjs's text rather than importing it: it starts an MCP server
+  // at import, so it cannot be imported behaviourally. Same remedy, same reason, as
+  // `cluster-spawn.test.mjs` and `attention-poll.test.mjs`.
+  const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  // Two steps, and the split is what keeps this from failing for the wrong reason.
+  //
+  // 1. Slice out the `target:` PROPERTY OBJECT, brace-balanced, so the `enum` is read from the
+  //    right place. The file carries four enums (`role`, the target, and two `behavior` pairs),
+  //    so an unanchored `enum: [` silently reads the wrong one and passes while asserting nothing
+  //    about the surface a caller sees — which is how this test first shipped broken.
+  const open = src.indexOf('target: {')
+  assert.ok(open > 0, 'the target property must exist in the tool schema')
+  let depth = 0
+  let end = -1
+  for (let i = src.indexOf('{', open); i < src.length; i += 1) {
+    if (src[i] === '{') depth += 1
+    else if (src[i] === '}') {
+      depth -= 1
+      if (depth === 0) { end = i; break }
+    }
+  }
+  assert.ok(end > open, 'the target property object must be brace-balanced')
+  const targetBlock = src.slice(open, end)
+  // 2. Read the PATTERN from inside it WITHOUT coupling to the surrounding property order. It was
+  //    an `enum` until 2026-10-20; the cluster names are the operator's configuration, so a closed
+  //    enum would publish a list the server does not own. The pattern still bounds the shape a
+  //    caller may send, which is the part a schema CAN state — and it must accept every kind in
+  //    `SPAWN_TARGETS` plus the `k8s:<cluster>` grammar, while still refusing the retired name.
+  const patternMatch = targetBlock.match(/pattern: '([^']+)'/)
+  assert.ok(patternMatch, 'the target pattern must exist in the tool schema')
+  const published = new RegExp(patternMatch[1])
+  for (const t of SPAWN_TARGETS) {
+    assert.ok(published.test(t), `the published pattern must accept the spawn target "${t}"`)
+  }
+  assert.ok(published.test('k8s:nukedev'), 'the pattern must accept a cluster-named target')
+  assert.ok(published.test('k8s:octopus-dev'), 'the pattern must accept a hyphenated cluster name')
+  assert.ok(!published.test('k8s:'), 'the pattern must refuse an empty cluster name')
+  assert.ok(!published.test('k8s:NukeDev'), 'the pattern must refuse a name the server would refuse')
+  assert.ok(!published.test('cluster'), 'the retired target must not be offered')
+  // And the retired target must not survive in the description either, which is the other half
+  // of the surface a caller reads. `local` appears there legitimately (it is the default), so
+  // this asserts on the retired name alone.
+  const descStart = src.indexOf("'WHERE the worker is created.")
+  assert.ok(descStart > 0, 'the target description must exist')
+  const desc = src.slice(descStart, src.indexOf("',\n", descStart))
+  assert.match(desc, /`cluster` was RETIRED/, 'the description must record the retirement')
+  assert.ok(!/target: "cluster"` (starts|is|requires)/.test(desc), 'the description must not present cluster as usable')
 })
 
 test('cluster is NOT a SPAWN_MODES value', () => {
@@ -412,9 +541,26 @@ test('cluster is NOT a SPAWN_MODES value', () => {
   // not in that list, so a config of `cluster` is refused loudly today; this test is what
   // keeps that true after someone "helpfully" adds the third mode.
   assert.ok(!SPAWN_MODES.includes('cluster'))
-  assert.ok(SPAWN_TARGETS.includes('cluster'))
+  // ⚠️ `cluster` is ALSO no longer a spawn target as of 2026-10-15 — retired, because the
+  // deferral that held it (the goal's `# Non-goals`: *"retirement is a follow-up once SC3 is
+  // proven"*) expired when SC3 was met on 2026-10-14. Asserted here so a later reader cannot
+  // re-add it to the target list on the strength of the SPAWN_MODES argument alone.
+  assert.ok(!SPAWN_TARGETS.includes('cluster'))
   assert.match(resolveSpawnMode({ env: 'cluster' }).error, /not a spawn mode/)
   assert.match(resolveSpawnMode({ file: { spawn: { mode: 'cluster' } } }).error, /not a spawn mode/)
+})
+
+test('docker and k8s are targets but NOT SPAWN_MODES values', () => {
+  // The same rule as `cluster`, extended 2026-10-13 with the A2A worker-controller targets. A
+  // target reachable from SUPERVISOR_SPAWN_MODE or `spawn.mode` would let one config edit
+  // default the whole fleet somewhere, which is exactly what "per-call only" forbids — so
+  // this asserts the absence on both sources, not just membership in the target list.
+  for (const t of ['docker', 'k8s']) {
+    assert.ok(SPAWN_TARGETS.includes(t), `${t} should be a spawn target`)
+    assert.ok(!SPAWN_MODES.includes(t), `${t} must not be a spawn mode`)
+    assert.match(resolveSpawnMode({ env: t }).error, /not a spawn mode/)
+    assert.match(resolveSpawnMode({ file: { spawn: { mode: t } } }).error, /not a spawn mode/)
+  }
 })
 
 test('an unknown target refuses rather than falling back to local', () => {
@@ -426,6 +572,46 @@ test('an unknown target refuses rather than falling back to local', () => {
     assert.ok(error, `expected ${JSON.stringify(bad)} to be refused`)
     assert.match(error, /not a spawn target/)
   }
+})
+
+test('a listed target with no client refuses rather than falling through to local', () => {
+  // ⚠️ The load-bearing guard, and the reason `IMPLEMENTED_SPAWN_TARGETS` exists at all.
+  // `supervisor.mjs` dispatches each target with a client and then falls through to the LOCAL
+  // path for everything else — so a target present in `SPAWN_TARGETS` with no dispatch branch of
+  // its own would open an ordinary local worker and report success. A `docker` call answered by a local
+  // tab is precisely the "looks exactly like a working call" failure this module refuses an
+  // UNKNOWN target to avoid; this asserts the same refusal for a KNOWN one.
+  for (const t of SPAWN_TARGETS) {
+    const refusal = spawnTargetImplementationRefusal({ target: t })
+    if (IMPLEMENTED_SPAWN_TARGETS.includes(t)) {
+      assert.equal(refusal, null, `${t} is implemented and must be allowed`)
+    } else {
+      assert.match(refusal, /has no client yet/, `${t} is unimplemented and must refuse`)
+    }
+  }
+  // Both directions, so neither list can drift alone: every implemented target is also a known
+  // target, and the difference between the two lists is exactly the unimplemented set.
+  //
+  // ⚠️ THE DIFFERENCE IS EMPTY AS OF 2026-10-13, and that is the point rather than a reason to
+  // delete the guard. `docker` and `k8s` joined `IMPLEMENTED_SPAWN_TARGETS` in the same change
+  // as the dispatch branch that creates their worker, so no known target is unimplemented now —
+  // but the guard is what makes the NEXT target's author do the same, and removing it would
+  // restore the silent fall-through the moment someone widened `SPAWN_TARGETS` alone.
+  for (const t of IMPLEMENTED_SPAWN_TARGETS) {
+    assert.ok(SPAWN_TARGETS.includes(t), `${t} is implemented but is not a known spawn target`)
+  }
+  assert.deepEqual(
+    SPAWN_TARGETS.filter((t) => !IMPLEMENTED_SPAWN_TARGETS.includes(t)),
+    [],
+  )
+  // The refusal still fires for a value the list does not carry — the second line of defence
+  // behind `resolveSpawnTarget`, which is what would normally have refused this. Asserted so the
+  // guard is exercised rather than merely present, and because the message must keep naming the
+  // fall-through it prevents: a version that only said "not implemented" would leave the next
+  // reader free to conclude the safe answer was to open a local worker.
+  const refusal = spawnTargetImplementationRefusal({ target: 'some-future-target' })
+  assert.match(refusal, /not implemented/)
+  assert.match(refusal, /falling\s+through to the local path/)
 })
 
 // --- the per-call environment ---------------------------------------------------------
@@ -594,6 +780,24 @@ test('a caller cannot declare a worker\'s spawn mode', () => {
   })
 })
 
+// ⚠️ The tab path's shipping carrier is what made this name dangerous. The launchers now
+// DEFAULT `PERMISSION_MODE` instead of assigning it, so a caller-supplied value reaches
+// `--permission-mode` on ANY tab — and `bypassPermissions` would start a worker with every
+// approval gate disabled, the exact mode the shipping design exists to refuse, with the
+// export outliving the pane for any nested `claude` or `cc-*` launched from it. The server
+// owns it: only `shippingTabEnv` may set it, and only to `acceptEdits`. Found by the PR
+// review, which caught that the shipping merge protected one branch and left every other tab
+// open.
+test('a caller cannot choose a tab worker\'s permission mode', () => {
+  const { error } = resolveEnvOverrides({ env: { [SHIPPING_MODE_ENV]: 'bypassPermissions' } })
+  assert.ok(error, `expected ${SHIPPING_MODE_ENV} to be refused`)
+  assert.match(error, /cannot set/)
+  // The refusal is about the NAME — the same value on a lookalike key is ordinary.
+  assert.deepEqual(resolveEnvOverrides({ env: { [`${SHIPPING_MODE_ENV}_X`]: 'bypassPermissions' } }).env, {
+    [`${SHIPPING_MODE_ENV}_X`]: 'bypassPermissions',
+  })
+})
+
 test('the tab path quoting survives a real shell for every metacharacter', () => {
   // The claim the tab path rests on is that `shellQuote` is airtight for EVERY shell
   // metacharacter — a single-quoted context is literal for all of them — but only the quote
@@ -619,10 +823,21 @@ test('both spawn paths are wired — the claim no pure-helper test can reach', (
   // the same stated reason: a text scan cannot prove the wiring RUNS, but it does prove a
   // call site cannot silently omit it. Found by the PR review.
   const source = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  // The tab path carries the caller's env either directly or spread into the shipping
+  // merge — both keep the claim (the call site cannot silently omit it), and the second
+  // is the shipping path, so the two assertions below cover each half.
   assert.match(
     source,
-    /spawnInteractiveAgent\(\{[^}]*env: envOverrides/,
+    /spawnInteractiveAgent\(\{[^}]*env: (?:envOverrides|tabShippingEnv \? \{ \.\.\.envOverrides)/,
     'the tab path must be handed envOverrides',
+  )
+  // ⚠️ The tab path's shipping carrier, asserted for the same reason as the env itself:
+  // a shipping tab spawn that omitted this would pass every pure-helper test in
+  // `shipping-settings.test.mjs` and still park on the operator's mode switch.
+  assert.match(
+    source,
+    /spawnInteractiveAgent\(\{[^}]*\.\.\.tabShippingEnv/,
+    'the tab path must be handed the shipping env',
   )
   assert.match(
     source,

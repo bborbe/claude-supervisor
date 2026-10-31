@@ -8,15 +8,29 @@ instead of blocking its whole turn on AskUserQuestion.
   post   POST /api/1.0/attention, then print the item id it created
   poll   GET /api/1.0/attention/{ITEM_ID}, print the answer, or OPEN
 
-**Three poll terminals, not two.** `OPEN` means still unanswered, and
-`ANSWERED:` means the item carries client evidence that is not positively
-flagged as automated. A third, `NOT_OPERATOR_ANSWERED:`, covers the item that
-moved on evidence the operator did not supply — no `answered_client` on the
-record, or a client that reported `automation: true`. A caller gating on this
-must read that the way it reads `OPEN`: **the gate is not released.** Reading
-only `ANSWERED` is the defect this terminal exists to narrow — the board's
-controls post a caller-declared `answered_by` and nothing in the request
-separates a pointer event from a synthesised one.
+**Five poll terminals, and exactly four of them are states of the card.** The
+operator's ruling fixes the state vocabulary: *"the rest api is able to tell the
+session what the state is — accepted, declined, skipped/hidden or not answered —
+one of these 4"*. So:
+
+  OPEN       still unanswered
+  ANSWERED   accepted — the operator picked an option or typed an answer
+  DECLINED   the bottom Dismiss: a deliberate decline, and NOT an acceptance
+  HIDDEN     the corner X: handled elsewhere, nothing routed back
+
+The fifth, `NOT_OPERATOR_ANSWERED:`, is not a state of the card — it is a
+refusal to treat the card's movement as the operator's answer, covering an item
+that moved on evidence the operator did not supply (no `answered_client` on the
+record, or a client that reported `automation: true`). A caller gating on it, on
+`OPEN`, on `DECLINED` or on `HIDDEN` must read all four the same way: **the gate
+is not released.** Only `ANSWERED:` releases one. Reading only `ANSWERED` is the
+defect these terminals exist to narrow — the board's controls post a
+caller-declared `answered_by` and nothing in the request separates a pointer
+event from a synthesised one.
+
+⚠️ `DECLINED` was added 2026-10-20 and is a behaviour change, not a rename: a
+dismissed card used to arrive as `ANSWERED: declined (no answer given)`, so
+every caller gating on `ANSWERED:` treated a decline as a release.
 
 ⚠️ **`ANSWERED:` is not proof the operator answered, and this arm does not claim
 it is.** A Playwright/CDP-driven browser reports `navigator.webdriver === false`
@@ -63,15 +77,18 @@ is a real case rather than a bug, and it is refused rather than posted: an item
 with no producer can never be polled back by anyone, so it would be a question
 asked into a void.
 
-`--closer` is the one declaration that is OPTIONAL. It names the `👤 You:` line
+`--closer` is the one declaration that is OPTIONAL at the CLI — but REQUIRED
+whenever the closer repeats the card's ask, which is the common case for a
+manager relaying a worker's gate. It names the `👤 You:` line
 this card answers, and it exists because a session that posts a card and then
 ends its turn with the same ask on that line put ONE ask on the board twice: the
 deliberate card declares a `dedup_key` slug while the hook's echo derives
 sha256(sid:kind:detail), and those two keys can never collide. Passing it writes
 <sid>.posted.json, which the hook's `Stop` branch and the feed's `reclassify_idle`
 both read to decline the echo. Omitted, nothing is recorded and the echo is
-raised exactly as before — the mechanism is opt-in, so the board stays dirty
-until a poster passes it.
+raised exactly as before — so omitting it is correct only when the closer asks
+something *else*. A closer that repeats the card's ask must pass it, or the
+board carries one question twice.
 
 Run: python3 attention-ask.py post --dedup-key KEY --payload "..." [--option L]... [--closer "..."]
      python3 attention-ask.py post-batch --dedup-key KEY --task "..." [--task "..."]...
@@ -182,13 +199,31 @@ def _positive_float_env(name, default):
 
 
 # Local store; a hung one must cost a clear failure, never a stalled loop tick.
+#
+# ⚠️ 10 s, and the raise is measured rather than defensive. The store's create
+# path is O(items): `Push` walks the whole items bucket on every push, and it
+# queues behind the read path on one BoltDB write lock
+# (`attention-controller` `pkg/attention-store-impl.go:1845`; 38,194 items when
+# this was measured). Measured 2026-10-12: 0.10–0.19 s idle, 0.42–1.11 s under 6
+# concurrent readers, 2.26 s peak under 20 — under 1.5x headroom at the old 3 s,
+# and a gate lost to a timeout is worse than a gate that arrives late. 10 s is
+# the value two siblings already use (`attention-card-lookup.py`,
+# `answered-watch.py`).
+#
+# ⚠️ The repo therefore reads this variable with TWO defaults, and that is stated
+# rather than hidden — it is the condition the note below sets. `attention-answer.py`,
+# `pod-attention.py`, `manager-attention-watch.py`, `who-needs-me.py` and
+# `notify-gate.py` still take 3 s, and unifying the policy is its own change.
+# `post` is the deliberate exception: it raises a gate the OPERATOR answers, so it
+# is the one call where paying latency beats losing the card.
+#
 # ⚠️ Deliberately left as the bare `float(...)` form rather than routed through
 # `_positive_float_env`, and that is a scope decision, not an oversight: the same
 # variable is read the same bare way by `pod-attention.py` and `answered-watch.py`,
 # so hardening one of the three would leave the repo reading one env var two
 # different ways with nothing saying which was intended. Hardening all three
 # belongs in its own change.
-STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
+STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "10"))
 
 # How long a posted ask stays on the board before it expires. ⚠️ This exists
 # because the `owner:` liveness default makes a card outlive the session that
@@ -261,12 +296,27 @@ def is_store_item_id(candidate):
     return len(candidate) == STORE_ITEM_ID_LEN and all(c in _HEX_DIGITS for c in candidate)
 
 
-# The answer mechanisms this script posts. It asks questions, so `message` is
-# the only one it offers: a `permission` item is approve-shaped and only the
-# operator may answer it, in the session that raised it, and an `ack` item asks
-# nothing. Offering either here would let a manager post a gate it cannot
-# legally answer.
+# The answer mechanism this script posts by default. It asks questions, so
+# `message` is the default.
 MECHANISM = "message"
+
+# The mechanisms a caller may select with `--mechanism`.
+#
+# ⚠️ **`permission` is deliberately absent, and the omission is the rule rather
+# than an unfinished enum.** A `permission` item is approve-shaped: its verdict
+# is `decision`, it carries no options, and the release path reads `resolved_by`
+# — a field only an ARM writes, never the board (`attention-answer.py` records
+# why, and `attention-store-impl.go` permits the arm's second write for exactly
+# this class). A poster that minted one here would be creating a gate whose
+# Allow/Deny the operator can click and which releases nothing, which is the
+# defect this script must not be able to express.
+#
+# `ack` IS offered because it is the honest shape for a card that reports a
+# condition and asks nothing: it renders no input field and no Allow/Deny, so it
+# cannot offer an action it does not have. The re-registered-park arm uses it for
+# a session parked on a native permission modal — the modal is answerable only in
+# that session's pane, so a card there must say so and offer no field.
+POSTABLE_MECHANISMS = (MECHANISM, "ack")
 
 
 # The producer kinds the store accepts. It validates this field against a closed
@@ -275,7 +325,12 @@ MECHANISM = "message"
 # is — the failure reads as a store fault rather than a bad argument. Pinning the
 # enum here lets argparse reject it before the request is sent, and list the
 # accepted values in `--help`.
-PRODUCER_KINDS = ("session", "agent", "cron", "dark-factory")
+PRODUCER_KINDS = ("session", "manager", "agent", "cron", "dark-factory")
+# The three levels the store's schema declares for `risk`. It is a producer
+# declaration, stored unchanged; the board may render HIGHER than it and never
+# lower, so a poster that under-declares still cannot make a destructive card
+# render green. See [[Attention Item Schema]] § Fields.
+RISKS = ("routine", "decision", "risk")
 
 
 def resolved_session_id(environ=None):
@@ -361,6 +416,102 @@ def build_options(labels, recommended):
     return options
 
 
+GUARD = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                     "manager-menu-guard.py")
+# ⚠️ `manager-menu-corpus.py` carries a `_load(module_name, filename)` helper for
+# this same guard. Kept separate rather than shared: both are standalone scripts,
+# and importing one from the other drags its argparse into this path.
+
+
+def _warn(msg):
+    """Record a fail-open on stderr. stdout carries ITEM_ID / REFUSED only."""
+    print(f"attention-ask: {msg}", file=sys.stderr)
+
+
+def manager_guard():
+    """The canonical predicate module, or None when it cannot be loaded.
+
+    Loaded, never mirrored. `manager-menu-guard.py`'s docstring records that the
+    naive ONE-CLAUSE predicate — a bare word-boundary match on any option label —
+    was MEASURED WRONG on 2026-10-16, and that its two-clause
+    `names_manager_owned_action` is the corrected form. The corrected form is
+    what is loaded here.
+    """
+    try:
+        spec = importlib.util.spec_from_file_location("manager_menu_guard", GUARD)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod if hasattr(mod, "names_manager_owned_action") else None
+    except Exception as err:
+        _warn(f"manager guard unavailable ({err}) — manager-owned check skipped")
+        return None
+
+
+def is_manager_session(guard, producer_id):
+    """True when `producer_id` is a manager arm, by the guard's own rule.
+
+    ⚠️ **Load-bearing scope, and the first draft of this rule got it wrong.** The
+    guard's `evaluate()` refuses a manager-owned menu ONLY for a session that is
+    a manager; a worker offering one is explicitly allowed (`REASON_NON_MANAGER`,
+    verbs recorded so the occurrence stays visible), because a worker cannot take
+    the action itself. Refusing a worker's card would tell it to do something it
+    is not allowed to do.
+    """
+    if not producer_id:
+        return False
+    try:
+        entry = guard.registry_entry(producer_id)
+        if not entry:
+            return False
+        topics, goals = guard.vault_page_names()
+        return guard.manager_arm(entry, topics, goals) is not None
+    except Exception as err:
+        _warn(f"manager scoping failed ({err}) — card allowed")
+        return False
+
+
+def manager_settleable_only(options, producer_id=""):
+    """True when EVERY option names a manager-owned action AND the asker is a manager.
+
+    The board-noise task's **class 2**: a card whose every choice is a move the
+    asking session could have taken itself is a decision already made, and the
+    operator spends a click ratifying it.
+
+    ⚠️ Distinct from `~/.claude/hooks/attention-log.py`'s `manager_settleable`,
+    which judges only the RECOMMENDED option. There an operator-owned
+    alternative may still sit beside it, so the card is a real question. Here
+    there is none.
+
+    ⚠️ **`all`, not `any`.** The guard has one-option false positives — its
+    proper-noun fallback makes `Open IntelliJ` manager-owned. With `any`, one
+    misclassification would refuse a card that carries a genuine operator
+    option; with `all`, it cannot.
+
+    ⚠️ **Fails OPEN everywhere.** No guard, no registry entry, no manager arm, or
+    any raise all return False, so the card posts — and every one of those paths
+    writes a stderr line, because a rule that dies silently reads exactly like a
+    rule that is working. Refusing a real question strands the asking session,
+    which is strictly worse than one low-value card: the same trade the
+    `Stop`-closer rule already refuses to make.
+
+    ⚠️ An option-less card is never settleable: it carries no recommendation to
+    judge, and `kind: text` is a legitimate answer shape for it.
+    """
+    labels = [o.get("label") or "" for o in (options or []) if isinstance(o, dict)]
+    if not labels:
+        return False
+    guard = manager_guard()
+    if guard is None:
+        return False
+    if not is_manager_session(guard, producer_id):
+        return False
+    try:
+        return all(guard.names_manager_owned_action(label) for label in labels)
+    except Exception as err:
+        _warn(f"manager-owned check raised ({err}) — card allowed")
+        return False
+
+
 def build_batch_payload(tasks):
     """Return the ONE batched card's payload, or raise ValueError naming the bad input.
 
@@ -396,10 +547,12 @@ def post_question(
     liveness_ref,
     dedup_key,
     interrupt_class,
+    risk,
     payload,
     context,
     options,
     expires_at,
+    mechanism=MECHANISM,
 ):
     body = {
         "producer_id": producer_id,
@@ -408,12 +561,17 @@ def post_question(
         "dedup_key": dedup_key,
         "interrupt_class": interrupt_class,
         "payload": payload,
-        "answer_mechanism": MECHANISM,
+        "answer_mechanism": mechanism,
     }
     # Omitted rather than sent empty. The schema treats an absent `context` and
     # an absent `expires_at` as pre-change/optional values, while "" would be a
     # *present* field holding nothing — the same distinction attention-answer.py
     # draws for resolved_by and decision.
+    # Omitted rather than sent empty, for the reason `context` below gives: an
+    # absent `risk` is the schema's "declared nothing" and renders `decision`,
+    # while "" would be a present field holding an undeclared value.
+    if risk:
+        body["risk"] = risk
     if context:
         body["context"] = context
     if options:
@@ -595,7 +753,64 @@ def _expires_at_or_default(args):
     return (datetime.now(timezone.utc) + timedelta(hours=_ask_ttl_hours())).isoformat()
 
 
-def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
+def _report_transport_failure(reason, item_may_exist, out):
+    """Print a transport failure, naming a timeout as a timeout. Returns 1.
+
+    ⚠️ **A timeout is not an unreachable store, and one `except` clause used to
+    say it was.** `socket.timeout` is an alias of `TimeoutError`, which subclasses
+    `OSError`, so a single `except (urllib.error.URLError, OSError)` swallowed
+    both and printed "unreachable at <url>" for a store that had accepted the
+    connection and was merely slow. Measured 2026-10-12 against a listener that
+    accepts and never answers: `FAILED: attention store unreachable at
+    http://127.0.0.1:18099 (timed out)` — the timeout was the fact, the store was
+    reachable, and the message sent the reader to the network instead.
+
+    ⚠️ Nor is reachability decidable from the error, which is why the old wording
+    was never something this branch could know: an unroutable host raises a
+    `URLError` whose `reason` is a `TimeoutError` — a connect that TIMED OUT, not
+    one that was refused — so only the timeout is observable. A genuinely refused
+    connection arrives as `URLError(reason=ConnectionRefusedError)` and keeps the
+    unreachable wording; that is the negative control the tests pin, because a
+    blanket relabel of every transport failure would pass the positive probe
+    while making the message useless in the case it was written for.
+
+    ⚠️ **On `post` the timeout also leaves the item's existence UNKNOWN, and the
+    message has to say so.** The store may have committed the card while this
+    client gave up waiting for the response, so a bare "failed" reads as "nothing
+    happened" when a live card may be sitting on the board. Measured 2026-10-12:
+    at a 0.15 s timeout against a store whose create path takes ~0.13 s, the
+    client printed `FAILED` and the store had committed the item. The retry is
+    safe and non-duplicating — the store suppresses a re-push on the same
+    `producer_id` + `dedup_key` — so the message names that rather than leaving
+    the caller to guess.
+
+    ⚠️ That is why `item_may_exist` is a PARAMETER and not a property of the
+    error: it is a fact about the CALLER, not about the failure. `poll` writes
+    nothing, so the same timeout there carries no ambiguity and must not claim
+    one.
+    """
+    if isinstance(reason, TimeoutError):
+        print(
+            f"FAILED: attention store at {STORE} did not answer within "
+            f"{STORE_TIMEOUT:g}s (timed out — which is NOT proof the store is "
+            "unreachable).",
+            file=out,
+        )
+        if item_may_exist:
+            print(
+                "  ⚠️ The item's existence is UNKNOWN: the store may have created "
+                "the card before this client gave up waiting. Re-post the SAME "
+                "--dedup-key to retry — the store suppresses a duplicate push on "
+                "the same producer_id + dedup_key, so the retry cannot post twice.",
+                file=out,
+            )
+        return 1
+    print(f"FAILED: attention store unreachable at {STORE} ({reason})", file=out)
+    return 1
+
+
+def _post_and_report(args, producer_id, liveness_ref, payload, options, out,
+                     mechanism=MECHANISM):
     """POST one item and print its id and poll line. Returns the exit code."""
     # ⚠️ Resolved BEFORE the store call, and reported HERE rather than raised out
     # of the helper, so a bad `$ATTENTION_ASK_TTL_HOURS` follows the file's own
@@ -616,31 +831,104 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
             liveness_ref=liveness_ref,
             dedup_key=args.dedup_key,
             interrupt_class=args.interrupt_class,
+            risk=args.risk,
             payload=payload,
             context=args.context,
             options=options,
             expires_at=expires_at,
+            mechanism=mechanism,
         )
     except urllib.error.HTTPError as err:
         detail = err.read().decode(errors="replace")
         print(f"FAILED: store returned {err.code} for the push -- {detail}", file=out)
         return 1
+    except urllib.error.URLError as err:
+        # ⚠️ `HTTPError` is a `URLError` subclass, so its clause must stay ABOVE
+        # this one. A timeout can arrive either way and both are one fact:
+        # `urlopen` wraps an `OSError` raised around the request write, so a
+        # connect that timed out reaches here as `URLError(reason=TimeoutError)`,
+        # while a response read that timed out raises a bare `TimeoutError` past
+        # the wrapper.
+        #
+        # `item_may_exist=True` — this is the POST path, and that is the whole
+        # reason the parameter exists. See `_report_transport_failure`.
+        return _report_transport_failure(err.reason, True, out)
+    except TimeoutError as err:
+        return _report_transport_failure(err, True, out)
+    except OSError as err:
+        return _report_transport_failure(err, True, out)
     record_posted_closer(producer_id, getattr(args, "closer", ""), args.dedup_key)
     print(f"ITEM_ID: {item.get('item_id')}", file=out)
     print(f"POLL: python3 attention-ask.py poll {item.get('item_id')}", file=out)
     return 0
 
 
+def _mechanism_or_default(args):
+    """`args.mechanism`, the default when the caller supplied none, else a refusal.
+
+    ⚠️ Not a bare `getattr(args, "mechanism", MECHANISM)`. `getattr` only falls
+    back when the ATTRIBUTE is absent, and callers that build their args from a
+    mock or a hand-made namespace carry one that is not a legal mechanism — which
+    is how a test fixture's placeholder reached the request body and made the
+    store's own field unserialisable. A placeholder is silently defaulted.
+
+    ⚠️ **A real string outside the set is REFUSED, not defaulted.** argparse
+    already rejects every bad typed value, so reaching here with one means a
+    programmatic caller — and silently downgrading `"ack "` or `"ACK"` to
+    `message` would post exactly the misleading question card this change
+    exists to remove, with no error anywhere. A value that is not a string at
+    all is a placeholder and takes the default.
+    """
+    mechanism = getattr(args, "mechanism", MECHANISM)
+    if mechanism in POSTABLE_MECHANISMS:
+        return mechanism, None
+    if isinstance(mechanism, str) and mechanism.strip():
+        return None, (
+            f"--mechanism {mechanism!r} is not one of "
+            f"{', '.join(POSTABLE_MECHANISMS)}")
+    return MECHANISM, None
+
+
 def cmd_post(args, out=sys.stdout):
     producer = _producer_or_refuse(args, out)
     if producer is None:
+        return 2
+    mechanism, refusal = _mechanism_or_default(args)
+    if refusal:
+        print(f"REFUSED: {refusal}", file=out)
+        return 2
+    if mechanism == "ack" and (args.option or args.recommend):
+        # The store rejects `options` on an `ack` item (the schema gives the
+        # mechanism no choices), so the refusal has to land here where it reads
+        # as a bad argument rather than a store fault.
+        print(
+            "REFUSED: --mechanism ack asks nothing, so --option and --recommend "
+            "are not allowed — post the card with no choices, or drop the "
+            "--mechanism flag to ask a message question.",
+            file=out)
         return 2
     try:
         options = build_options(args.option, args.recommend)
     except ValueError as err:
         print(f"REFUSED: {err}", file=out)
         return 2
-    return _post_and_report(args, *producer, args.payload, options, out)
+    # Class 2 of the board-noise task: every choice is a manager-owned action, so
+    # the card asks the operator to ratify a decision already made. Refused by
+    # default for a MANAGER asker only (see `is_manager_session`); `--force`
+    # keeps a deliberate card postable.
+    if not getattr(args, "force", False) and manager_settleable_only(
+            options, producer[0]):
+        print(
+            "REFUSED: every --option names a manager-owned action, so this card "
+            "asks the operator to ratify a decision the asking session could "
+            "have taken itself. Take the action; if you need the operator to "
+            "CHOOSE between manager-owned actions (a priority call), post it "
+            "with no --option and let the answer be free text; or re-run with "
+            "--force if the card is deliberate.",
+            file=out)
+        return 2
+    return _post_and_report(args, *producer, args.payload, options, out,
+                            mechanism=mechanism)
 
 
 def cmd_post_batch(args, out=sys.stdout):
@@ -694,22 +982,59 @@ def cmd_poll(item_id, out=sys.stdout):
             detail = err.read().decode(errors="replace")
             print(f"FAILED: store returned {err.code} for {item_id} -- {detail}", file=out)
         return 1
+    except urllib.error.URLError as err:
+        # `item_may_exist=False`, and the asymmetry with `_post_and_report` is the
+        # point: a poll writes nothing, so a timeout here carries no ambiguity
+        # about what the store holds. The timeout itself is still named as one —
+        # measured 2026-10-12, `poll` printed the same `unreachable … (timed out)`
+        # misreport that the post path printed.
+        return _report_transport_failure(err.reason, False, out)
+    except TimeoutError as err:
+        return _report_transport_failure(err, False, out)
+    except OSError as err:
+        return _report_transport_failure(err, False, out)
     verdict, reason = attribution.classify(item)
     described = describe_answer(item)
     # `OPEN` is the one terminal that means "still unanswered", and it is
-    # reached only when the record carries neither an answer nor an act. An
-    # item that moved but whose mover cannot be attributed falls through to
-    # NOT_OPERATOR_ANSWERED rather than being read as open — failing closed in
-    # that direction is what keeps a re-ask from looking like a lost gate.
+    # reached only when the record is still open AND carries neither an answer
+    # nor an act. An item that moved but whose mover cannot be attributed falls
+    # through to NOT_OPERATOR_ANSWERED rather than being read as open — failing
+    # closed in that direction is what keeps a re-ask from looking like a lost
+    # gate.
     #
-    # ⚠️ **This branch is deliberately NOT keyed on `state`, and 2026-09-27 is
-    # why it was checked.** A `closed` item that carries an actor still classifies
-    # as an act and falls through to NOT_OPERATOR_ANSWERED — the item moved, and
-    # saying "open" would invite a manager to keep waiting on a card that is
-    # gone. Only a record with no actor at all — the reaped close — reaches OPEN
-    # here, which is what makes a reap and an acknowledgement distinguishable in
-    # the terminal rather than collapsed into one word.
-    if verdict == attribution.NOTHING and described is None:
+    # ⚠️ **This branch IS keyed on `state`, and the 2026-09-27 note it replaces
+    # is why.** That note argued the opposite: a record with no actor at all —
+    # the reaped close — should reach OPEN, so a reap and an acknowledgement
+    # stay distinguishable in the terminal. The reasoning holds; the terminal it
+    # picked does not. A reap is not the only record with no actor. Every one of
+    # these posts an empty body and lands here with no `answered_by`:
+    # `sweep_dead_sessions` (attention-watcher.py:668), the compact-crossing
+    # clear (:1327), a forwarded `SessionEnd` (:2991), and
+    # `close_session_approval` (:1213) — and the last is not a producer exit at
+    # all. So "no actor" cannot stand in for "open", and printing OPEN for it
+    # made a reaped close read exactly like a live gate: measured 2026-10-27,
+    # `poll` and `answer` disagreed about one card seconds apart because of it.
+    #
+    # The separation the old note protected survives, but on a different field,
+    # and saying so plainly is the point of this paragraph. A reaped close now
+    # falls through to NOT_OPERATOR_ANSWERED — and so does an acknowledgement,
+    # the actor-carrying close (`state: closed` + `answered_by`, no
+    # `answered_at`), which `answered-attribution.py` deliberately does not
+    # treat as a release (pinned by
+    # `test_ack_close_with_no_client_is_not_operator_answered`). The two stay
+    # distinguishable by `ANSWERED_BY:` — an acknowledgement carries an actor
+    # and a reap carries none — not by the terminal word. What the old branch
+    # actually bought was a word that also meant "a live gate is waiting", and
+    # that overload is what this change gives up. `state` is the only field that
+    # can carry the open/not-open distinction: the store refuses an arm-caused
+    # close of an open `permission` gate (attention-store-impl.go:1498-1506),
+    # so the reaped record has no `answered_by` to read. A record whose `state`
+    # is unreadable is not claimed as open either; failing closed is the point.
+    if (
+        verdict == attribution.NOTHING
+        and described is None
+        and item.get("state") == "open"
+    ):
         print("OPEN", file=out)
         return 0
     answered_by = item.get("answered_by") or ""
@@ -719,6 +1044,26 @@ def cmd_poll(item_id, out=sys.stdout):
     content = described or f"(no answer content recorded; item is {item.get('state')})"
     if verdict == attribution.ATTRIBUTED:
         print(f"ANSWERED: {content}", file=out)
+        if answered_by:
+            print(f"ANSWERED_BY: {answered_by}", file=out)
+        return 0
+    # ⚠️ Two terminals of their own, from 2026-10-20. Both are answers the
+    # operator GAVE, so neither is `NOT_OPERATOR_ANSWERED`, and neither is
+    # `ANSWERED` — a decline is not an acceptance and a hidden close carries no
+    # answer at all. The operator's ruling fixes the vocabulary at four: *"the
+    # rest api is able to tell the session what the state is — accepted,
+    # declined, skipped/hidden or not answered — one of these 4"*.
+    #
+    # ⚠️ Neither releases a gate, and a caller must read them the way it reads
+    # `OPEN`. `DECLINED` used to arrive as `ANSWERED: declined (no answer
+    # given)`, which every command gating on `ANSWERED:` treated as a release.
+    if verdict == attribution.DECLINED:
+        print(f"DECLINED: {content}", file=out)
+        if answered_by:
+            print(f"ANSWERED_BY: {answered_by}", file=out)
+        return 0
+    if verdict == attribution.HIDDEN:
+        print("HIDDEN", file=out)
         if answered_by:
             print(f"ANSWERED_BY: {answered_by}", file=out)
         return 0
@@ -741,8 +1086,25 @@ def main(argv=None):
     post.add_argument("--dedup-key", required=True)
     post.add_argument("--payload", required=True)
     post.add_argument("--context", default="")
+    post.add_argument(
+        "--mechanism",
+        default=MECHANISM,
+        choices=POSTABLE_MECHANISMS,
+        help="how this item is answered; default message. `ack` reports a "
+             "condition and asks nothing (no input field, no options). "
+             "`permission` is not offered: a permission gate is released only "
+             "by an arm answer carrying resolved_by, which the board never "
+             "sends, so a card minted here could not release one.",
+    )
     post.add_argument("--option", action="append", default=[])
     post.add_argument("--recommend", default="")
+    post.add_argument(
+        "--force",
+        action="store_true",
+        help="post even when every --option names a manager-owned action "
+             "(refused by default: such a card asks the operator to ratify a "
+             "decision the asking session could have taken itself)",
+    )
     post.add_argument(
         "--producer-id",
         default="",
@@ -755,6 +1117,12 @@ def main(argv=None):
         help="<model>:<value> deciding whether the store prunes this item; default owner:<producer-id>",
     )
     post.add_argument("--interrupt-class", default="pick")
+    # The producer's declaration of how much care this deserves. Optional:
+    # omitted, nothing is recorded and the board renders `decision`, which is
+    # what every card posted before this flag existed reads as. The board may
+    # render higher than whatever is passed here and never lower, so this is a
+    # convenience for the poster rather than the safety rule itself.
+    post.add_argument("--risk", default="", choices=("",) + RISKS)
     post.add_argument(
         "--expires-at",
         default="",
@@ -782,6 +1150,11 @@ def main(argv=None):
         help="<model>:<value> deciding whether the store prunes this item; default owner:<producer-id>",
     )
     batch.add_argument("--interrupt-class", default="pick")
+    # Carried here as well as on `post`, because both reach the same
+    # `_post_and_report` and therefore the same `post_question`: a flag on one
+    # subcommand and not the other would leave the shared helper reading an
+    # attribute half its callers never set.
+    batch.add_argument("--risk", default="", choices=("",) + RISKS)
     batch.add_argument(
         "--expires-at",
         default="",
@@ -807,9 +1180,24 @@ def main(argv=None):
         # from an AttributeError, not a defect in the shipped path.
         print(f"FAILED: store returned {err.code}")
         return 1
-    except (urllib.error.URLError, OSError) as err:
-        print(f"FAILED: attention store unreachable at {STORE} ({err})")
-        return 1
+    except urllib.error.URLError as err:
+        # The backstop. `_post_and_report` and `cmd_poll` catch their own
+        # transport failures, so reaching here means the failure predates the
+        # store call — and a caller that never reached the store cannot know
+        # whether an item was involved, so this claims no ambiguity. That is the
+        # honest default: `item_may_exist=True` is a fact about the POST path,
+        # and only the two commands that own that fact pass it.
+        #
+        # ⚠️ `HTTPError` is a `URLError` subclass and its clause above must stay
+        # first, or every store rejection would be reported as a transport
+        # failure. `TimeoutError` is not a `URLError`, so it needs its own clause
+        # below — it is an `OSError`, and the ordering is what keeps the timeout
+        # out of the unreachable wording.
+        return _report_transport_failure(err.reason, False, sys.stdout)
+    except TimeoutError as err:
+        return _report_transport_failure(err, False, sys.stdout)
+    except OSError as err:
+        return _report_transport_failure(err, False, sys.stdout)
 
 
 if __name__ == "__main__":

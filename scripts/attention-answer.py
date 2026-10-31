@@ -53,6 +53,7 @@ Run: python3 attention-answer.py next | answer ITEM_ID [--by ARM] [--decision al
 
 import argparse
 import glob
+import http.client
 import json
 import os
 import sys
@@ -147,6 +148,86 @@ def post_answer(item_id, answered_by, resolved_by="", decision=""):
         return json.load(resp)
 
 
+# The answer endpoint returns HTTP 409 for more than one failure, and the status
+# alone cannot tell them apart -- only the `error.code` in the body can. The two
+# this arm can meet are different facts about the gate, so each gets its own
+# line: ITEM_CLOSED means the card left the queue before the answer arrived and
+# no arm can answer it now -- ⚠️ **and it does not say why, because the record
+# does not.** A cleared card, a withdrawn one and one whose producer exited
+# leave the same `closed` row with no actor, so naming any of them would be a
+# claim the store cannot support; the line says so instead.
+# ALREADY_ANSWERED means another arm's verdict landed first. Neither is a retry.
+STORE_CODE_ITEM_CLOSED = "ITEM_CLOSED"
+STORE_CODE_ALREADY_ANSWERED = "ALREADY_ANSWERED"
+
+
+def store_error_code(err):
+    """The store's `error.code` from a failed response, or "" when unreadable.
+
+    Returns "" rather than a guess. A body this arm cannot read is not evidence
+    of either failure, and naming one would report a cleared card as a lost race
+    or the reverse -- exactly the conflation reading the body exists to end. A
+    pre-code store, a body a proxy stripped, and a body carrying a code this arm
+    does not know all land here.
+
+    ⚠️ `http.client.IncompleteRead` is in the tuple because it is neither a
+    ValueError nor an OSError -- a 409 whose body is truncated against its
+    Content-Length is what a proxy or a mid-body reset produces, and it would
+    otherwise escape as a traceback where the caller expects a label. Before this
+    read existed the arm never touched the 409 body and could not fail here.
+    """
+    try:
+        return json.load(err).get("error", {}).get("code", "")
+    except (ValueError, OSError, AttributeError, http.client.HTTPException):
+        return ""
+
+
+def answer_conflict_line(item_id, err, verb):
+    """The line for a 409 on an answer, named by the store's own code.
+
+    `verb` is the act this branch must not take next -- "send" for a message
+    item, "deliver" for a permission one -- so each branch keeps its own word for
+    what it is refusing. An unreadable or unknown code falls back to the generic
+    line rather than to either named one: a code this arm cannot read is not
+    evidence of which failure happened.
+
+    ⚠️ **`ITEM_CLOSED` does NOT name a cause, and that is deliberate.** It used
+    to read "the card was cleared, or its producer exited" -- two causes offered
+    as if the record settled which. It cannot. A `permission` gate that leaves
+    the queue with no verdict carries no `answered_by` (the store refuses an
+    arm-caused close of an open gate, so there is no actor to read) and that
+    same no-actor close is produced by a producer exit, by a compact-crossing
+    clear and by a forwarded `SessionEnd` -- so the record establishes that the
+    gate was never answered, and establishes nothing about why. Saying so is the
+    honest line; picking one cause would invent a fact.
+
+    ⚠️ The `LOST:` fallback must not merge its two causes either. It fires on a
+    code this arm could not read at all, which is strictly LESS evidence than
+    `ITEM_CLOSED` carries -- so a line asserting "already answered or no longer
+    open" claims two specific causes from zero information.
+    """
+    code = store_error_code(err)
+    if code == STORE_CODE_ITEM_CLOSED:
+        return (
+            f"ITEM_CLOSED: {item_id} left the queue before this answer arrived and no "
+            f"verdict was recorded; the store does not record why -- the dead-session "
+            f"sweep, the compact-crossing clear, a forwarded SessionEnd and the "
+            f"compact-approval clear all leave the same closed row with no actor, and "
+            f"one of them is not a producer exit at all, so no arm can establish the "
+            f"cause and none can answer it now; do not {verb}"
+        )
+    if code == STORE_CODE_ALREADY_ANSWERED:
+        return (
+            f"ALREADY_ANSWERED: {item_id} already has a verdict from another arm; "
+            f"do not {verb}"
+        )
+    return (
+        f"LOST: {item_id} was not answered by this arm -- the store refused it with a code "
+        f"this arm cannot read, so it cannot say whether the card already had a verdict or "
+        f"had left the queue; do not {verb}"
+    )
+
+
 def cmd_next(registry, out=sys.stdout):
     items = fetch_open()
     if not items:
@@ -182,9 +263,9 @@ def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None,
         answered = post_answer(item_id, answered_by, resolved_by)
     except urllib.error.HTTPError as err:
         if err.code == 409:
-            # 409 covers both a lost compare-and-set and an item no longer open;
-            # either way this arm did not win, so it must not route.
-            print(f"LOST: {item_id} already answered or no longer open -- do not send", file=out)
+            # 409 covers more than one failure; only the body's code says which,
+            # and either way this arm did not win, so it must not route.
+            print(answer_conflict_line(item_id, err, "send"), file=out)
         else:
             print(f"FAILED: store returned {err.code} for {item_id}", file=out)
         return 1
@@ -220,7 +301,7 @@ def cmd_answer_permission(item, answered_by, resolved_by, decision, out=sys.stdo
         answered = post_answer(item_id, answered_by, resolved_by, decision)
     except urllib.error.HTTPError as err:
         if err.code == 409:
-            print(f"LOST: {item_id} already answered or no longer open -- do not deliver", file=out)
+            print(answer_conflict_line(item_id, err, "deliver"), file=out)
         else:
             print(f"FAILED: store returned {err.code} for {item_id}", file=out)
         return 1

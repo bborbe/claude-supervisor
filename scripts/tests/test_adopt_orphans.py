@@ -34,6 +34,9 @@ import sys
 import tempfile
 import unittest
 
+import endpoint_fixture  # noqa: E402
+from endpoint_fixture import FixtureEndpoint, ledger_row  # noqa: E402
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "adopt-orphans.py")
 
@@ -62,22 +65,40 @@ SUBJECT = "Manager Layer"
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="adopt-orphans-test-")
-        self.ledger_dir = os.path.join(self.tmp, "sessions")
+        # ⚠️ **The ledger is a fixture ENDPOINT now, not a directory.** `spawn-ledger.py`
+        # reads `GET /api/1.0/session-ledger`, so a case that still planted `<sid>.json` in a
+        # temp dir would assert against a ledger the script never opens — and would pass on a
+        # round that found nothing. The other three stores (registry, heartbeat, subjects)
+        # stay files, because none of them moved.
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
         self.registry_dir = os.path.join(self.tmp, "registry")
         self.heartbeat_dir = os.path.join(self.tmp, "heartbeat")
         self.subjects_dir = os.path.join(self.tmp, "worker-manager")
-        for path in (self.ledger_dir, self.registry_dir, self.heartbeat_dir, self.subjects_dir):
+        for path in (self.registry_dir, self.heartbeat_dir, self.subjects_dir):
             os.makedirs(path)
         self.claims_file = os.path.join(self.tmp, "ownership-claims.json")
         self._pids = 0
 
     def spawn(self, session_id, parent=None, role=None):
-        """A spawn ledger record. `role` is written only when given."""
-        record = {"session_id": session_id, "parent_session": parent, "label": session_id[:8]}
+        """A spawn ledger row. `role` is written only when given.
+
+        ⚠️ **A WIRE row on the fixture, not a file record.** The spawn edge is
+        `spawner_session_id` on the wire and was `parent_session` in the file, and the row is
+        written with the wire name because that is what the store serves — a case that planted
+        the old spelling would exercise the reader's back-compat arm instead of the path the
+        fleet actually takes.
+        """
+        record = ledger_row(session_id, label=session_id[:8], spawner_session_id=parent or "")
         if role:
             record["role"] = role
-        with open(os.path.join(self.ledger_dir, session_id + ".json"), "w", encoding="utf-8") as fh:
-            json.dump(record, fh)
+        else:
+            # ⚠️ ABSENT, not `agent`. The filter's `is_manager` excludes only an explicit
+            # `manager`, so both read the same there — but the cases below say what they mean,
+            # and `ledger_row`'s `agent` default would quietly replace "no role field at all"
+            # with a declared one, which is the shape the pre-field records have.
+            record.pop("role", None)
+        self.endpoint.add_ledger_row(record)
 
     def live(self, session_id):
         """A registry entry -- the liveness channel that answers for an interactive session."""
@@ -103,8 +124,8 @@ class Base(unittest.TestCase):
                 _SCRIPT,
                 "--self",
                 ME,
-                "--ledger-dir",
-                self.ledger_dir,
+                "--endpoint",
+                self.endpoint.url,
                 "--registry-dir",
                 self.registry_dir,
                 "--heartbeat-dir",
@@ -251,21 +272,27 @@ class AdopterResolution(Base):
 class Refusal(Base):
     """Unknown is not empty. Never move ownership on evidence nobody has."""
 
-    def test_unreadable_ledger_directory_refuses(self):
+    def test_unreadable_ledger_store_refuses(self):
         """The third exit-1 arm, and the one whose mechanism is least obvious.
 
-        `os.path.isdir` is False for a permission-denied directory and for a broken mount
-        as well as for a missing one, so an unreadable ledger takes the same refusal as an
-        absent one -- while a ledger that is PRESENT and empty exits 0 as a real answer.
-        The rendering contract says only the registry/heartbeat arm is a liveness-unknown
-        reading; without this case that distinction is enforced by prose alone, and a
-        regression swapping the two arms would pass a green suite.
+        The reader answers `None` for a store it could not read and `{}` for one it read that
+        holds nothing, and this script must not collapse them: adopting on spawn edges it
+        never read would move ownership on no evidence, while an empty store is a real answer
+        that exits 0. The rendering contract says only the registry/heartbeat arm is a
+        liveness-unknown reading; without this case that distinction is enforced by prose
+        alone, and a regression swapping the two arms would pass a green suite.
+
+        ⚠️ **Driven through the store's own failure mode — a 500 on the ledger route — not a
+        chmodded directory.** The ledger is an endpoint now, so a path-shaped fixture would
+        exercise nothing the script reads and this case would pass on a script that never
+        consulted the store at all.
         """
         self.spawn(WORKER, parent=EXITED)
         self.live(WORKER)
-        proc = self.run_script("--ledger-dir", os.path.join(self.tmp, "no-such-ledger"))
+        self.endpoint.ledger_status = 500
+        proc = self.run_script()
         self.assertEqual(proc.returncode, 1)
-        self.assertIn("spawn ledger directory unreadable", proc.stderr)
+        self.assertIn("spawn ledger endpoint unreadable", proc.stderr)
         self.assertEqual(self.holders(), {})
 
     def test_empty_ledger_is_a_clean_round_not_a_refusal(self):
@@ -290,8 +317,8 @@ class Refusal(Base):
             [
                 sys.executable,
                 _SCRIPT,
-                "--ledger-dir",
-                self.ledger_dir,
+                "--endpoint",
+                self.endpoint.url,
                 "--registry-dir",
                 self.registry_dir,
                 "--heartbeat-dir",
@@ -337,8 +364,8 @@ class Claiming(Base):
                     [
                         "--self",
                         ME,
-                        "--ledger-dir",
-                        self.ledger_dir,
+                        "--endpoint",
+                        self.endpoint.url,
                         "--registry-dir",
                         self.registry_dir,
                         "--heartbeat-dir",
@@ -410,14 +437,17 @@ class Claiming(Base):
         self.assertIn("1 workers adopted from exited manager %s" % EXITED[:8], proc.stdout)
         self.assertEqual(self.holders(), {})
 
-    def test_parent_session_is_never_rewritten(self):
+    def test_spawn_edge_is_never_rewritten(self):
         """Adoption is a claim, not a re-parent -- the filter documents re-parenting as
-        falsifying provenance, so the ledger record must survive the adoption intact."""
+        falsifying provenance, so the ledger row must survive the adoption intact.
+
+        ⚠️ **The row is read back from the STORE, which is the same claim the file version
+        made** — and a stronger one: the store is what every reader consults now, so a
+        re-parent that edited only a local copy would be invisible here and visible to the
+        fleet.
+        """
         self.run_script()
-        with open(
-            os.path.join(self.ledger_dir, WORKER + ".json"), encoding="utf-8"
-        ) as fh:
-            self.assertEqual(json.load(fh)["parent_session"], EXITED)
+        self.assertEqual(self.endpoint.ledger_by_id[WORKER]["spawner_session_id"], EXITED)
 
 
 class Counting(Base):

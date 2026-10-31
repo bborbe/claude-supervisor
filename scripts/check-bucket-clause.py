@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""The per-bucket shape clause must be byte-identical in all three commands that carry it.
+"""The per-bucket shape clause must be byte-identical in every command that carries it.
 
 The clause telling a sweep reader what `--write-buckets` will accept lives in
-`commands/manager-loop.md`, `commands/manager-drive.md` and `commands/manager-status.md`
-— one contract, carried three times because each command is read on its own and a
-pointer alone is what `docs/subject-resolution.md` § Recording already records as the
-liability. But a contract with several call sites drifts unless something checks it:
-this clause was amended by hand in all three on 2026-10-03 (the vocabulary half) and
-again on 2026-10-04 (the shape half), and both times the copies were compared by eye.
+`commands/steps/goal-sweep.md` and `commands/goal-status.md` — one contract, carried
+at each call site because each command is read on its own and a pointer alone is what
+`docs/subject-resolution.md` § Recording already records as the liability. But a contract
+with several call sites drifts unless something checks it: this clause was amended by hand
+at every site on 2026-10-03 (the vocabulary half) and again on 2026-10-04 (the shape half),
+and both times the copies were compared by eye.
 
 Same shape as `check-recording-step.py` and `check-spawn-mode.py`, for the same reason.
 
@@ -15,13 +15,13 @@ Anchored on the clause's own opening words, never on a line number: the two decl
 this clause sits beside both moved by one line inside a single day (measured 2026-10-03),
 and a line-anchored read would have reported drift that was really an offset.
 
-**What this proves, and what it does not.** It proves the three copies cannot silently
-diverge — a lockstep edit that reaches two of them fails here. It cannot prove the clause
-is *true* of `bucket_shape_error()`; that is the writer's own tests' job. The two are
-deliberately separate: this is the drift guard, not the semantics.
+**What this proves, and what it does not.** It proves the copies cannot silently diverge —
+a lockstep edit that reaches one of them fails here. It cannot prove the clause is *true*
+of `bucket_shape_error()`; that is the writer's own tests' job. The two are deliberately
+separate: this is the drift guard, not the semantics.
 
-Indentation is compared stripped, so the three files may indent the paragraph to their
-own nesting depth; everything else must match exactly.
+Indentation is compared stripped, so the files may indent the paragraph to their own
+nesting depth; everything else must match exactly.
 """
 
 import sys
@@ -31,9 +31,19 @@ REPO = Path(__file__).resolve().parent.parent
 
 START = "Both doors into the record share one shape check"
 COMMANDS = (
-    "commands/manager-loop.md",
-    "commands/manager-drive.md",
-    "commands/manager-status.md",
+    # ⚠️ `commands/goal-loop.md` was replaced by `commands/steps/goal-sweep.md` on 2026-10-11,
+    # when the loop was restructured into a router with per-round step files. The clause
+    # describes what `--write-buckets` and `--save` accept, and both calls are made by the
+    # sweep step — so the clause moved with the calls. The check follows the rule, not the
+    # file it used to sit in.
+    "commands/steps/goal-sweep.md",
+    # ⚠️ `commands/goal-drive.md` left this set on 2026-10-11, when it became the loop's
+    # per-round router (`commands/goal-loop.md` is the arm). A router carries no
+    # executable rule — the clause's only in-tree call site is the sweep step above — so
+    # leaving it there would be the second home this guard exists to prevent. The clause
+    # still has two carriers, and a third appearing anywhere is caught by the same
+    # byte-identity comparison below.
+    "commands/goal-status.md",
 )
 
 
@@ -69,7 +79,7 @@ def main() -> int:
         if line != ref_line:
             print(
                 f"bucket-clause FAILED: {name} and {ref_name} disagree — the clause is "
-                f"carried three times and must be byte-identical in all three",
+                f"carried at more than one call site and must be byte-identical in all of them",
                 file=sys.stderr,
             )
             return 1

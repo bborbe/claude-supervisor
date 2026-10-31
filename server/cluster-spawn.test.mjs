@@ -9,13 +9,17 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { createServer } from 'node:http'
+import { Agent } from 'undici'
 import {
   CLUSTER_ANSWER_MAX,
   CLUSTER_SESSION_ID_PATTERN,
   DEFAULT_TIMEOUT_MS,
   PROMPT_PATH,
   SESSION_HEADER,
+  TRANSPORT_TIMEOUT_SLACK_MS,
   classifyClusterAnswer,
+  clusterTransportDispatcher,
   newSessionId,
   resolveAuthToken,
   resolveClusterBaseUrl,
@@ -279,39 +283,311 @@ test('the default timeout is bounded', () => {
   assert.ok(Number.isFinite(DEFAULT_TIMEOUT_MS) && DEFAULT_TIMEOUT_MS > 0)
 })
 
+test('a connection failure names its cause rather than only fetch failed', async () => {
+  // The shape undici ACTUALLY throws, which is the one the module used to flatten: a bare
+  // `TypeError: fetch failed` with the real reason on `cause`. Reporting `error.message` alone
+  // is why a cluster spawn could fail three times in a row (2026-10-11, 19:30–20:05) and say
+  // nothing a reader could act on.
+  const { error } = await startClusterSession({
+    baseUrl: 'http://host:30090',
+    prompt: 'x',
+    sessionId: UUID,
+    authToken: TOKEN,
+    sleepImpl: async () => {},
+    fetchImpl: async () => {
+      const failure = new TypeError('fetch failed')
+      failure.cause = { code: 'ECONNREFUSED', address: '192.168.178.34', port: 443 }
+      throw failure
+    },
+  })
+  assert.match(error, /could not reach the cluster service/)
+  assert.match(error, /ECONNREFUSED 192\.168\.178\.34:443/)
+  assert.doesNotMatch(error, new RegExp(TOKEN), 'the failure text must not carry the credential')
+})
+
+test('a transient connection failure is retried, and a refusal is not', async () => {
+  let attempts = 0
+  const backoffs = []
+  const recovered = await startClusterSession({
+    baseUrl: 'http://host:30090',
+    prompt: 'x',
+    sessionId: UUID,
+    authToken: TOKEN,
+    sleepImpl: async (ms) => {
+      backoffs.push(ms)
+    },
+    fetchImpl: async () => {
+      attempts += 1
+      if (attempts < 3) {
+        const failure = new TypeError('fetch failed')
+        failure.cause = { code: 'ECONNREFUSED' }
+        throw failure
+      }
+      return ok('recovered')()
+    },
+  })
+  // The count is asserted, not the outcome alone: an implementation that swallowed the failures
+  // and answered without ever reaching the service would satisfy the outcome by itself.
+  assert.equal(attempts, 3, 'two connection failures then a success is three attempts')
+  // The delay is asserted too, not merely injected. Every other assertion here passes against a
+  // no-op `sleepImpl`, so an implementation that retried with no backoff at all would otherwise
+  // go unnoticed — which is exactly what injecting a no-op sleep makes easy to ship.
+  assert.deepEqual(backoffs, [250, 500], 'the backoff must step by CLUSTER_CONNECT_BACKOFF_MS * attempt')
+  assert.equal(recovered.answer, 'recovered')
+
+  // A refusal is a settled answer. Retrying it would turn one honest 401 into three identical
+  // ones and triple the wait — the failure the narrow predicate exists to prevent.
+  let refusals = 0
+  const refused = await startClusterSession({
+    baseUrl: 'http://host:30090',
+    prompt: 'x',
+    sessionId: UUID,
+    authToken: TOKEN,
+    sleepImpl: async () => {},
+    fetchImpl: async () => {
+      refusals += 1
+      return { ok: false, status: 401, text: async () => 'unauthorized\n' }
+    },
+  })
+  assert.equal(refusals, 1, 'a 401 must not be retried')
+  assert.match(refused.error, /HTTP 401/)
+})
+
+test('every pre-delivery connection code in the documented set is retried', async () => {
+  // ⚠️ Deliberately NOT imported from cluster-spawn.mjs, and the reason is the gap this test
+  // closes rather than a style preference.
+  //
+  // `CONNECTION_ERROR_CODES` is not exported, and until this test the suite's only retry case
+  // exercised `ECONNREFUSED` alone: the four post-delivery codes are pinned as NOT retried,
+  // while six of the seven retryable ones were pinned by nothing. An edit dropping
+  // `UND_ERR_CONNECT_TIMEOUT`, or `EAI_AGAIN`, from the set would therefore have left every
+  // existing test green — the classification losing an error class silently, which is the
+  // failure mode this guard exists to make impossible.
+  //
+  // The list is restated from the module's own documented decision (`cluster-spawn.mjs`
+  // § CONNECTION_ERROR_CODES): each of these is a PRE-DELIVERY failure — the request never
+  // reached the service — so a retry sends it for the first time. Restating it here means a
+  // change to the set has to be made in two places, deliberately, rather than one.
+  const RETRYABLE = [
+    'ECONNREFUSED',
+    'EHOSTUNREACH',
+    'ENETUNREACH',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'ETIMEDOUT',
+    'UND_ERR_CONNECT_TIMEOUT',
+  ]
+  for (const code of RETRYABLE) {
+    let attempts = 0
+    const backoffs = []
+    const { error } = await startClusterSession({
+      baseUrl: 'http://host:30090',
+      prompt: 'x',
+      sessionId: UUID,
+      authToken: TOKEN,
+      sleepImpl: async (ms) => {
+        backoffs.push(ms)
+      },
+      fetchImpl: async () => {
+        attempts += 1
+        const failure = new TypeError('fetch failed')
+        failure.cause = { code }
+        throw failure
+      },
+    })
+    // The count, not the outcome alone: an implementation that answered without ever reaching
+    // the service would satisfy any outcome-shaped assertion by itself.
+    assert.equal(attempts, 3, `${code} is a pre-delivery failure and must be retried`)
+    // The delay too, for the reason the sibling test states: every assertion here passes against
+    // a no-op `sleepImpl`, so a retry with no backoff at all would otherwise go unnoticed.
+    assert.deepEqual(backoffs, [250, 500], `${code} must back off between attempts`)
+    assert.match(error, new RegExp(code), `${code} must be named in the final error`)
+  }
+})
+
+test('the classification reads the code from the error itself, not only from its cause', async () => {
+  // `isConnectionFailure` reads `error.code ?? error.cause?.code`. Every other test here sets the
+  // code on the CAUSE, exercising only the right-hand side of that `??` — so dropping the
+  // left-hand read would leave the suite green while an error carrying its code on itself stopped
+  // being retried. This pins that branch by putting the code where undici's own `TypeError` does
+  // not.
+  let attempts = 0
+  const { error } = await startClusterSession({
+    baseUrl: 'http://host:30090',
+    prompt: 'x',
+    sessionId: UUID,
+    authToken: TOKEN,
+    sleepImpl: async () => {},
+    fetchImpl: async () => {
+      attempts += 1
+      const failure = new TypeError('fetch failed')
+      failure.code = 'ECONNREFUSED'
+      throw failure
+    },
+  })
+  assert.equal(attempts, 3, 'a code carried on the error itself must be retried')
+  // Deliberately NOT asserted against the message: with no `cause` there is no detail for
+  // `describeConnectionCause` to render, so the reported string is the bare wrapper. Asserting
+  // the code here would pin the opposite of what the module documents.
+  assert.match(error, /fetch failed/)
+})
+
+test('an AbortError timeout is not retried', async () => {
+  // `AbortError` is this module's own timeout firing, not a transient connection blip.
+  // Retrying it would spend three ten-minute windows to learn the same thing.
+  let attempts = 0
+  const { error } = await startClusterSession({
+    baseUrl: 'http://host:30090',
+    prompt: 'x',
+    sessionId: UUID,
+    authToken: TOKEN,
+    timeoutMs: 5,
+    sleepImpl: async () => {},
+    fetchImpl: async () => {
+      attempts += 1
+      const aborted = new Error('aborted')
+      aborted.name = 'AbortError'
+      throw aborted
+    },
+  })
+  assert.equal(attempts, 1, 'an AbortError must not be retried')
+  assert.match(error, /no answer within 5ms/)
+})
+
+test('a fetch failure with no connection code is not retried', async () => {
+  // The trap this pins: undici throws `TypeError: fetch failed` for EVERY transport failure,
+  // permanent ones included. Matching that wrapper alone retries a settled answer — measured
+  // 2026-10-11 against a blocked port, whose real message is `fetch failed — bad port`, where a
+  // wrapper-keyed predicate spent three attempts and 750 ms reaching the same verdict. Only an
+  // identifiable connection code is retried; anything else is reported on the first attempt.
+  let attempts = 0
+  const { error } = await startClusterSession({
+    baseUrl: 'http://host:30090',
+    prompt: 'x',
+    sessionId: UUID,
+    authToken: TOKEN,
+    sleepImpl: async () => {},
+    fetchImpl: async () => {
+      attempts += 1
+      const failure = new TypeError('fetch failed')
+      failure.cause = new Error('bad port')
+      throw failure
+    },
+  })
+  assert.equal(attempts, 1, 'a failure carrying no connection code must not be retried')
+  assert.match(error, /fetch failed — bad port/)
+})
+
+test('a post-delivery connection failure is not retried, because POST /prompt is not idempotent', async () => {
+  // The request may already have started a turn when the socket dies, and the response carries
+  // nothing that would reveal a second one — so a retry here can silently run the turn twice.
+  // That is not hypothetical: the 16:1x failure on this path was exactly that shape, with the
+  // pod log showing `prompt intake: bytes=81` while the client saw a failure. Each of these
+  // codes is reachable AFTER delivery, so none of them may be retried.
+  for (const code of ['ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_HEADERS_TIMEOUT']) {
+    let attempts = 0
+    const { error } = await startClusterSession({
+      baseUrl: 'http://host:30090',
+      prompt: 'x',
+      sessionId: UUID,
+      authToken: TOKEN,
+      sleepImpl: async () => {},
+      fetchImpl: async () => {
+        attempts += 1
+        const failure = new TypeError('fetch failed')
+        failure.cause = { code }
+        throw failure
+      },
+    })
+    assert.equal(attempts, 1, `${code} is reachable after delivery and must not be retried`)
+    assert.match(error, new RegExp(code))
+  }
+})
+
 // --- resolveClusterTarget: which source each cluster value comes from ----------------------
 
-test('the env var wins over the config file for both cluster values', () => {
+test('the env var wins over the config file for the cluster URL', () => {
   const r = resolveClusterTarget({
     envUrl: 'https://from-env.example',
     envToken: 'env-token',
-    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+    file: { cluster: { url: 'https://from-file.example' } },
   })
   assert.equal(r.url, 'https://from-env.example')
   assert.equal(r.token, 'env-token')
 })
 
-test('the config file supplies a value the env does not', () => {
+test('the config file supplies a URL the env does not', () => {
   const r = resolveClusterTarget({
     envUrl: null,
-    envToken: null,
-    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+    envToken: 'env-token',
+    file: { cluster: { url: 'https://from-file.example' } },
   })
   assert.equal(r.url, 'https://from-file.example')
-  assert.equal(r.token, 'file-token')
+  assert.equal(r.token, 'env-token')
 })
 
-test('an empty env string falls through to the file rather than counting as set', () => {
+test('an empty env string falls through to the file URL rather than counting as set', () => {
   // resolveClusterBaseUrl and resolveAuthToken both treat '' as unset, so counting it as set
   // here would hand them a value they immediately refuse — a server that reads as configured
   // and refuses every spawn.
   const r = resolveClusterTarget({
     envUrl: '',
-    envToken: '',
-    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+    envToken: 'env-token',
+    file: { cluster: { url: 'https://from-file.example' } },
   })
   assert.equal(r.url, 'https://from-file.example')
-  assert.equal(r.token, 'file-token')
+  assert.equal(r.token, 'env-token')
+})
+
+// --- the plaintext token the migration removes ----------------------------------------------
+
+test('a plaintext cluster.token REFUSES, naming the key and the file to delete it from', () => {
+  // The refusal IS the migration: reading the file value would leave the plaintext token
+  // working silently, which is the exposure this change exists to remove. Exercised with the
+  // repo's placeholder token, so no real credential is ever needed to reach the path.
+  const r = resolveClusterTarget({
+    envUrl: 'https://x.example',
+    envToken: 'env-token',
+    file: { cluster: { url: 'https://x.example', token: TOKEN } },
+    path: '/etc/sup.json',
+  })
+  assert.match(r.error, /"cluster\.token" is set/)
+  assert.match(r.error, /\/etc\/sup\.json/, 'must name the file to edit')
+  assert.match(r.error, /Delete the "cluster\.token" key/, 'must name the fix')
+  assert.equal(r.token, undefined, 'must not resolve a token at all')
+})
+
+test('the plaintext refusal fires even when the env token is set and would win', () => {
+  // ⚠️ The case that makes this a guard rather than a nicety. Env-first precedence means the
+  // file value never WINS here — so a check placed at the point of use would never see it, and
+  // the plaintext token would sit in the file indefinitely while every spawn kept working.
+  // The refusal is on PRESENCE, not on which source wins.
+  const r = resolveClusterTarget({
+    envUrl: 'https://x.example',
+    envToken: 'env-token',
+    file: { cluster: { url: 'https://x.example', token: TOKEN } },
+  })
+  assert.ok(r.error, 'a plaintext token must refuse even when the env var would win')
+})
+
+test('the plaintext refusal never echoes the token it refuses', () => {
+  const r = resolveClusterTarget({
+    envUrl: 'https://x.example',
+    envToken: 'env-token',
+    file: { cluster: { url: 'https://x.example', token: TOKEN } },
+  })
+  assert.ok(!r.error.includes(TOKEN), 'the refused value must not travel back to the client')
+})
+
+test('an emptied cluster.token is absence, not a plaintext token', () => {
+  // `''` is how this repo spells absence everywhere else (see `set`), so a key emptied rather
+  // than deleted must not refuse — otherwise the refusal has no reachable way out.
+  const r = resolveClusterTarget({
+    envUrl: 'https://x.example',
+    envToken: 'env-token',
+    file: { cluster: { url: 'https://x.example', token: '' } },
+  })
+  assert.equal(r.token, 'env-token')
 })
 
 test('neither source set refuses HERE, naming the config file the server actually read', () => {
@@ -438,33 +714,36 @@ test('the answer bound is the number the spawn slices with', () => {
   assert.equal(CLUSTER_ANSWER_MAX, 4000)
 })
 
-test('url and token resolve INDEPENDENTLY — a mixed pair takes each from its own source', () => {
-  // The whole point of the feature is per-value resolution, and both precedence tests above set
-  // BOTH values from the SAME source — so a future edit routing them through one shared loop
-  // would keep them green. These two cases pin the independence in both directions.
+test('the url and the token resolve INDEPENDENTLY — the url may come from the file, the token may not', () => {
+  // The point of per-value resolution, and both precedence tests above set BOTH values from the
+  // SAME source — so a future edit routing them through one shared loop would keep them green.
+  // ⚠️ Only the url half can come from the file now: a file-sourced TOKEN is refused outright
+  // (see the plaintext-refusal cases below), so the mirror-image case this test used to carry has
+  // no reachable state left to describe.
   const urlFromFile = resolveClusterTarget({
     envUrl: null,
     envToken: 'env-token',
-    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+    file: { cluster: { url: 'https://from-file.example' } },
   })
   assert.equal(urlFromFile.url, 'https://from-file.example')
   assert.equal(urlFromFile.token, 'env-token')
 
-  const tokenFromFile = resolveClusterTarget({
+  const urlFromEnv = resolveClusterTarget({
     envUrl: 'https://from-env.example',
-    envToken: null,
-    file: { cluster: { url: 'https://from-file.example', token: 'file-token' } },
+    envToken: 'env-token',
+    file: { cluster: { url: 'https://from-file.example' } },
   })
-  assert.equal(tokenFromFile.url, 'https://from-env.example')
-  assert.equal(tokenFromFile.token, 'file-token')
+  assert.equal(urlFromEnv.url, 'https://from-env.example')
+  assert.equal(urlFromEnv.token, 'env-token')
 })
 
-test('a file-sourced bad TOKEN names the token key, not the url key', () => {
-  // The mirror of the bad-URL case above, and unasserted until now: swapping the two `label`
-  // strings in resolveClusterTarget's source arrays kept the suite green.
-  const r = resolveClusterTarget({ envUrl: null, envToken: null, file: { cluster: { token: 1234567890 } } })
-  assert.match(r.error, /"cluster\.token" in the supervisor config/)
-  assert.ok(!r.error.includes('"cluster.url"'), 'must not name the url key for a token value')
+test('the plaintext refusal names the TOKEN key, not the url key, and echoes no value', () => {
+  // The label-swap guard the old file-sourced-token case carried, restated for the refusal that
+  // replaced it: a refusal naming `cluster.url` here would send the operator to edit the wrong
+  // key while the plaintext token stayed exactly where it is.
+  const r = resolveClusterTarget({ envUrl: null, envToken: 'env-token', file: { cluster: { token: 1234567890 } } })
+  assert.match(r.error, /"cluster\.token" is set/)
+  assert.ok(!r.error.includes('"cluster.url"'), 'must not name the url key for a token problem')
   assert.ok(!r.error.includes('1234567890'), 'and must not echo the value')
 })
 
@@ -474,16 +753,14 @@ test('a credential in a url userinfo is redacted before the refusal echoes it', 
   assert.ok(!r.error.includes('secret'), 'the userinfo must not ride out in the message')
 })
 
-test('a whitespace-only env token WINS and is refused, rather than falling through to the file', () => {
+test('a whitespace-only env token is refused, not trimmed and not treated as unset', () => {
   // The asymmetry with '' is deliberate and argued at length in the source: '' is absence, so it
-  // falls through; ' ' is a value the operator put there, and trimming it would silently repair
-  // a value the service compares exactly. That cost is real — a trailing newline in an exported
-  // env value shadows a perfectly good `cluster.token` — so it is pinned rather than left to the
-  // comment: a future change making whitespace fall through would otherwise stay green.
-  const r = resolveClusterTarget({ envToken: ' ', file: { cluster: { token: 'file-token' } } })
+  // falls through; ' ' is a value the operator put there, and trimming it would silently repair a
+  // value the service compares exactly. Pinned rather than left to the comment: a future change
+  // making whitespace fall through would otherwise stay green.
+  const r = resolveClusterTarget({ envToken: ' ', file: { cluster: { url: 'https://x.example' } } })
   assert.match(r.error, /INTERACTIVE_AUTH_TOKEN/)
   assert.match(r.error, /whitespace/)
-  assert.ok(!r.error.includes('cluster.token'), 'must not fall through to the file value')
 })
 
 test('a non-string token reports its TYPE and never echoes the value', () => {
@@ -499,4 +776,119 @@ test('a non-string token reports its TYPE and never echoes the value', () => {
   const numeric = resolveAuthToken(1234567890)
   assert.match(numeric.error, /not a token string/)
   assert.ok(!numeric.error.includes('1234567890'), 'the value must not be echoed')
+})
+
+// --- The 300 s transport ceiling (2026-10-12) ---------------------------------------------
+//
+// The defect: `startClusterSession` armed its own ten-minute `AbortController`, but the request
+// went through Node's global `fetch` -- undici -- whose `headersTimeout` defaults to 300 000 ms.
+// `POST /prompt` sends no response headers until the turn ends, so undici aborted a HEALTHY long
+// turn at 300 s, and the client's disconnect then cancelled the turn in the pod
+// (`prompt intake failed: turn cancelled: context canceled`). Measured 2026-10-12 against a stub
+// holding its headers 310 s: 300 931 ms on Node 26.11.1 / undici 8.11.2 and 300 966 ms on Node
+// 22.22.3 / undici 6.24.1. The module's own bound never fired.
+//
+// **Why this test is shaped this way, and why the obvious alternative proves nothing.**
+// Every other timeout test in this file injects `fetchImpl`, so it exercises the module's own
+// `AbortController` and can NEVER observe undici's transport bound -- a fake fetch has no
+// `headersTimeout` to fire. And a test that merely asserted "the options object carries a
+// dispatcher" would pin the SHAPE of the fix, passing against any implementation that passed the
+// key -- including the one measured below, where a package agent handed to the GLOBAL fetch is
+// not a raised timeout but a broken request. So this drives the REAL transport, against a real
+// socket, and injects only the dispatcher, whose bound is what the assertion is about.
+//
+// **The injected bound is small rather than 300 s, and undici's granularity sets the stub hold.**
+// undici enforces `headersTimeout` on a coarse timer: measured here, a 200 ms bound let a 600 ms
+// response through and fired at ~1008 ms. Two consequences, and they pull in opposite directions:
+//
+// - The hold must sit ABOVE that tick, or the stub answers first, the request succeeds, and the
+//   test passes on the fixed code too -- reading as a broken fix.
+// - The hold is also the failure path's duration, so it cannot simply be made enormous.
+//
+// 4000 ms gives ~3 s of headroom over the measured ~1008 ms tick. That margin is deliberate: if
+// the tick fires LATE under load, the stub answers first and the test reports a false failure --
+// the one direction that costs a debugging session. On the fixed code the request still fails at
+// the tick, so the wider hold costs the passing path nothing.
+
+const TRANSPORT_TEST_BOUND_MS = 200
+const TRANSPORT_TEST_HOLD_MS = 4000
+
+// Accepts the request and holds its RESPONSE HEADERS, which is the shape the real service has on a
+// long turn. Server-side timeouts are disabled so the stub can never be the thing that closes the
+// connection -- otherwise the test would measure the stub rather than the client.
+function headersHoldingStub(holdMs) {
+  const server = createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      setTimeout(() => {
+        try {
+          res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' })
+          res.end('late answer')
+        } catch {
+          // The client is expected to have gone by now; that is the behaviour under test.
+        }
+      }, holdMs)
+    })
+  })
+  server.requestTimeout = 0
+  server.headersTimeout = 0
+  server.keepAliveTimeout = 0
+  return server
+}
+
+test('a long turn is bounded by the injected dispatcher, not by the transport default', async () => {
+  const server = headersHoldingStub(TRANSPORT_TEST_HOLD_MS)
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const dispatcher = new Agent({
+    headersTimeout: TRANSPORT_TEST_BOUND_MS,
+    bodyTimeout: TRANSPORT_TEST_BOUND_MS,
+  })
+  try {
+    const started = Date.now()
+    const { error, outcome } = await startClusterSession({
+      baseUrl: `http://127.0.0.1:${server.address().port}`,
+      prompt: 'x',
+      sessionId: UUID,
+      authToken: TOKEN,
+      dispatcher,
+    })
+    const elapsed = Date.now() - started
+    // On the pre-fix code the injected dispatcher is ignored, the global fetch's 300 s default
+    // applies, the stub answers at 2500 ms and this call SUCCEEDS -- so `error` is undefined and
+    // this is the assertion that fails, for the right reason.
+    assert.match(error ?? '', /UND_ERR_HEADERS_TIMEOUT/)
+    assert.equal(outcome, undefined, 'a timed-out spawn must not report an outcome')
+    // The bound that fired is the DISPATCHER's -- not the module's ten minutes, and not the
+    // transport default the whole change exists to get out from under.
+    assert.ok(
+      elapsed < TRANSPORT_TEST_HOLD_MS,
+      `expected the transport bound to fire before the stub answered; took ${elapsed} ms`,
+    )
+  } finally {
+    await dispatcher.destroy()
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('the spawn fetches through undici own fetch, never the global one', () => {
+  // The pairing this pins, and why it is not cosmetic: a dispatcher is honoured only by the fetch
+  // sharing its undici copy, and Node exposes no `node:undici` builtin. Measured on Node 26, a
+  // package `Agent` handed to the GLOBAL fetch fails with `InvalidArgumentError: invalid
+  // onRequestStart method` (`UND_ERR_INVALID_ARG`) -- not a raised timeout, a broken request. So
+  // the import and the default have to move together, and a future edit that reverts one alone
+  // silently restores the 300 s ceiling.
+  const src = readFileSync(new URL('./cluster-spawn.mjs', import.meta.url), 'utf8')
+  assert.match(src, /import \{ Agent, fetch as undiciFetch \} from 'undici'/)
+  assert.match(src, /fetchImpl = undiciFetch/)
+  assert.match(src, /dispatcher,\n/)
+})
+
+test('the transport bound sits above the module deadline, and is one shared instance', () => {
+  // Above, not equal: this module's own `AbortController` must stay the authority, because it is
+  // what produces the readable `no answer within <timeoutMs>ms`. Equal bounds would make which one
+  // fires a race.
+  assert.ok(TRANSPORT_TIMEOUT_SLACK_MS > 0, 'the backstop must sit above the deadline')
+  // One instance, not one per spawn: an `Agent` owns a connection pool, so a fresh one per call
+  // would leak a socket per spawn. Identity is the only observable that pins it.
+  assert.equal(clusterTransportDispatcher(), clusterTransportDispatcher())
 })

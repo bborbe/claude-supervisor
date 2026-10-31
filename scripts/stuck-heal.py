@@ -35,9 +35,16 @@ A parked JUDGEMENT gate is not a death and is never healed: it is reported, and
 `answer_permission` is never called. Auto-answering a judgement gate is out of
 scope for this task and would be the worst possible direction — it settles a
 question the operator was asked, on their behalf, silently.
+
+⚠️ A `🔴 BLOCKED` closer carrying an answerable `👤 You:` verb is that same parked
+shape and does not arrive here at all: the watcher files it as a park reason
+(`registry:waiting` / `idle+closer`), not as a `stuck-tab:` cause. Only the
+VERBLESS closer — `👤 You: nothing`, where no card was minted and nobody was told —
+still reaches `--kind blocked-closer`, and it stays report-only like any other
+non-`stream-closed` kind.
 """
 import argparse
-import json
+import importlib.util
 import os
 import sys
 
@@ -49,10 +56,26 @@ ACTION_REPORT_ONLY = "report-only"
 # docstring — and an unrecognised kind is reported rather than guessed at.
 KIND_STREAM_CLOSED = "stream-closed"
 
-# Resolved as `server/config.mjs:167` does.
-LEDGER_DIR = os.environ.get("SUPERVISOR_LEDGER_DIR") or os.path.join(
-    os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
-    "claude-supervisor", "sessions")
+_SPAWN_LEDGER = None
+
+
+def _spawn_ledger():
+    """Import `spawn-ledger.py` (hyphenated filename -> importlib) — the ONE ledger reader.
+
+    ⚠️ **The ledger moved to the attention store's endpoint on 2026-10-14, and this file
+    delegates rather than resolving a directory of its own.** It used to mirror
+    `server/config.mjs`'s resolution a third time; a second copy of a store's address is what
+    drifts, and this one drifts silently in the direction that answers "never resumed" for a
+    session that has in fact been resumed — which resumes it again.
+    """
+    global _SPAWN_LEDGER
+    if _SPAWN_LEDGER is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spawn-ledger.py")
+        spec = importlib.util.spec_from_file_location("spawn_ledger", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _SPAWN_LEDGER = mod
+    return _SPAWN_LEDGER
 
 
 def decide(kind, deaths):
@@ -74,7 +97,7 @@ def decide(kind, deaths):
     return ACTION_REOPEN_INTERACTIVE
 
 
-def deaths_from_ledger(session_id, ledger_dir=LEDGER_DIR):
+def deaths_from_ledger(session_id, endpoint=None):
     """How many times `session_id` has already been resumed.
 
     Read from the spawn ledger, which is the only store that keeps this: the
@@ -86,22 +109,18 @@ def deaths_from_ledger(session_id, ledger_dir=LEDGER_DIR):
     "resume headless", which is the first rung — the recoverable direction. The
     opposite default would skip straight to reporting a worker that has never been
     resumed.
+
+    ⚠️ **The store is the attention store's endpoint now, and the rows arrive as a map keyed
+    by session id** — the shape this scan already wanted, where the file version had to
+    rebuild it from a directory listing.
     """
-    try:
-        names = os.listdir(ledger_dir)
-    except OSError:
-        return 0
+    ledger = _spawn_ledger().read_ledger(endpoint) or {}
     n = 0
-    for name in names:
-        if not name.endswith(".json"):
-            continue
-        try:
-            with open(os.path.join(ledger_dir, name)) as fh:
-                rec = json.load(fh)
-        except (OSError, ValueError):
-            continue
+    for rec in ledger.values():
         if not isinstance(rec, dict):
-            # Well-formed JSON that is not a record — skip it, never crash on it.
+            # Well-formed JSON that is not a record — skip it, never crash on it. The shared
+            # reader already drops a non-dict row, so this is a belt-and-braces guard rather
+            # than the only one.
             continue
         # ⚠️ A PREFIX is a legal lookup and is the form a manager actually holds:
         # the watcher prints 8 chars, so an exact match would silently count 0 and
@@ -168,17 +187,38 @@ def main(argv=None):
     # caller that forgot it into a headless resume — the one rung that acts.
     # Constrained, so a mistyped or un-split value (`stuck:stream-closed`) is an
     # error rather than a silent report-only that reads like a real verdict.
+    #
+    # ⚠️ **`blocked-closer` here means the VERBLESS closer only** — a `🔴 BLOCKED`
+    # panel whose `👤 You:` line says `nothing` (or is absent). A closer carrying an
+    # answerable verb is a park, not a death, so the watcher files it as
+    # `registry:waiting` / `idle+closer` and it never reaches this script as a
+    # `stuck-tab:` cause. The choice stays because the verbless class still exists,
+    # and `decide()` already reports it rather than resuming or answering it.
     ap.add_argument("--kind", required=True,
                     choices=(KIND_STREAM_CLOSED, "blocked-closer", "permission-failures"),
-                    help="the stuck cause: the reason after `stuck:`")
-    ap.add_argument("--ledger-dir", default=LEDGER_DIR)
+                    help="the stuck cause: the reason after `stuck:` (`blocked-closer` "
+                         "is the VERBLESS closer — a verb-carrying one is a park, "
+                         "not a stuck cause)")
+    ap.add_argument("--endpoint", default=None, help="override the attention store base URL")
+    ap.add_argument("--ledger-dir", default=None,
+                    help="ACCEPTED AND IGNORED — the ledger comes from the endpoint")
     args = ap.parse_args(argv)
+    # ⚠️ Kept and IGNORED rather than removed, the same call `worker-sessions.py` made for
+    # `--dir` / `--heartbeat-dir`: the manager's own call sites pass it, so removing it breaks
+    # them, while accepting it in silence would let a caller believe it had redirected a read
+    # that still went to the endpoint — and the read it would have redirected is the one that
+    # decides whether a worker is resumed again.
+    if args.ledger_dir:
+        sys.stderr.write(
+            "warning: --ledger-dir is accepted and IGNORED — the ledger is read from the "
+            "session-ledger endpoint; use --endpoint to point at the store\n"
+        )
     args.session = args.session.strip()
     if len(args.session) < 8:
         # A short or empty id prefix-matches every ledger record.
         ap.error("--session must be at least 8 characters of the session id")
 
-    deaths = deaths_from_ledger(args.session, args.ledger_dir)
+    deaths = deaths_from_ledger(args.session, args.endpoint)
     action = decide(args.kind, deaths)
     # The decision only. The manager holds the tools that perform it; printing the
     # action is how the two halves meet, and it keeps this script runnable on a

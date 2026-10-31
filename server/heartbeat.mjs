@@ -45,6 +45,16 @@
 // This is the same hazard the state directory avoids by being a sibling: everything in ONE
 // directory being read as one kind of thing. Here the directory is genuinely shared, so the
 // discriminator has to be explicit rather than structural.
+//
+// ⚠️ **One session id had TWO writers, and that is a different defect from the one above.** A
+// headless worker's session inherits the `supervisor` MCP server from its launcher, so the
+// worker's own session starts a server that runs THIS self-stamp — while the server that spawned
+// the worker stamps the same session id from the outside. Both target one file, keyed on the
+// session id alone (`stampPath`), so the last writer won: the self-stamp destroyed the `mode`
+// discriminator this header depends on, and it OUTLIVED the worker — the owner clears the stamp
+// when the turn ends, and this timer re-created it one tick later, reporting a finished worker as
+// live for a further TTL. The self-stamp therefore stands down for a session another writer owns;
+// see `selfStampRefusal`.
 
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -104,10 +114,16 @@ export function stampRecord(dir, { sessionId, pid, mode, source, task, vault, lo
   }
   if (location !== undefined) record.location = location
   // ⚠️ `activity`, NOT `state` — the name `state` on a stamp is reserved by the liveness
-  // verdict four readers synthesize. They gate on `stamp.get("state", "live") != "live"`
-  // (`worker-sessions.py:166`, `fleet-board.py:1096`, `adopt-orphans.py:139`,
-  // `session-liveness.py:663/693/803`), where a MISSING key must read as `live` rather than
-  // vanish.
+  // verdict two readers synthesize. They gate on `stamp.get("state", "live") != "live"`
+  // (`fleet-board.py:1096`, `adopt-orphans.py:145`), where a MISSING key must read as `live`
+  // rather than vanish.
+  //
+  // ⚠️ **The list was FOUR readers and is now two, corrected 2026-10-09.** It also cited
+  // `worker-sessions.py:166` and `session-liveness.py:663/693/803`; both files have since left
+  // the raw-stamp path entirely — `worker-sessions.py` reads the session-heartbeat endpoint and
+  // no longer parses a stamp at all, and `session-liveness.py`'s verdict is the endpoint's. The
+  // reservation still holds and is still worth the rename; the citations are what rotted, which
+  // is why this list is checked against the grep rather than carried forward.
   //
   // ⚠️ **No reader consumes a raw stamp's `state` today, and this comment first claimed one
   // did** — asserting that a `busy` written here "reads as NOT-live" and frees a duplicate
@@ -123,6 +139,24 @@ export function stampRecord(dir, { sessionId, pid, mode, source, task, vault, lo
   fs.writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`)
   fs.renameSync(tmp, path)
   return path
+}
+
+// The production stamp for an A2A worker's liveness poll — the callback `pollA2A` is given.
+//
+// ⚠️ **Exported so the poll's only injectable inputs are the ledger records and the controller
+// list.** `pollA2A` takes `stamp` as a parameter, so a test that supplies its own callback can
+// assert whatever it likes while the production call site writes something else entirely. Naming
+// the real callback here means `supervisor.mjs`'s timer and the test share ONE function, and a
+// test can drive `pollA2A` with a fake list while the stamping stays the shipped one.
+//
+// ⚠️ `location: 'pod'` is what makes the row readable as a pod-located session. An A2A worker is
+// created by the controller on `docker` or `k8s` — never on this host — so `pod` is a property of
+// the path rather than something the record has to carry. `mode`/`source` are unchanged: the
+// readers key their A2A rules on those, and `location` answers a different question (where it
+// runs). See `docs/session-heartbeat-pod-hook.md` in attention-controller for the wire contract.
+export function a2aStamp({ dir = heartbeatDir } = {}) {
+  return (sessionId) =>
+    stampRecord(dir, { sessionId, pid: null, mode: 'a2a', source: 'a2a', location: 'pod' })
 }
 
 // What a session is doing, as last recorded by a state hook. `null` when no hook has fired.
@@ -190,7 +224,14 @@ export function readLive(sessionId, { dir = heartbeatDir, ttlMs = HEARTBEAT_TTL_
   }
   // `ageMs` is carried so a caller that needs the age does not have to stat the path a second
   // time. A second stat is not merely wasteful: it is unguarded, so a stamp unlinked between
-  // the two calls throws out of the caller — and `listLive` is on the spawn path now.
+  // the two calls throws out of the caller.
+  //
+  // ⚠️ **The reason is no longer "the spawn path".** Until 2026-10-09 this read "and `listLive`
+  // is on the spawn path now", because `workerSessions()` read the store; that counter now reads
+  // the session-heartbeat endpoint, so `listLive` is reached only through `liveness.mjs`'s
+  // `liveSessionIds` — `registry-rehydrate.mjs`'s startup rehydration and `supervisor.mjs`'s own
+  // roster. The guard is still right, and the note is corrected rather than left to describe a
+  // caller that no longer exists.
   if (age < ttlMs) return { live: true, ageMs: age, reason: `heartbeat stamped ${Math.round(age / 1000)}s ago` }
   return { live: false, ageMs: age, reason: `heartbeat stale by ${Math.round((age - ttlMs) / 1000)}s` }
 }
@@ -231,8 +272,11 @@ export function listLive({ dir = heartbeatDir, ttlMs = HEARTBEAT_TTL_MS, now = D
     }
     // The age comes from the verdict `readLive` already took, never a second bare `statSync`:
     // that stat was unguarded, so a stamp unlinked between the two calls would throw ENOENT
-    // out of `listLive` — and `listLive` is on the spawn path now, via `workerSessions()` and
-    // `concurrentLimitError()`, where an uncaught throw is a failed spawn rather than a count.
+    // out of `listLive` — reached from `registry-rehydrate.mjs`'s startup rehydration and
+    // `supervisor.mjs`'s roster, where an uncaught throw is a failed rehydration rather than a
+    // count. ⚠️ It was reached from the spawn path via `workerSessions()` until 2026-10-09;
+    // that counter reads the session-heartbeat endpoint now, so the caller named here changed
+    // while the guard did not.
     live.push({ sessionId, ageMs: verdict.ageMs, ...meta })
   }
   return live
@@ -276,6 +320,41 @@ export function sweepStale({ dir = heartbeatDir, ttlMs = HEARTBEAT_TTL_MS, now =
   return removed
 }
 
+// Whether THIS server should stamp the session it runs inside — a reason string when it must
+// not, `null` when it should.
+//
+// ⚠️ **A headless worker's session already has a writer, and it is not this one.** The server
+// that SPAWNED the worker stamps it every 30 s (`supervisor.mjs`'s `heartbeat.stamp`, `mode:
+// 'headless'`) and CLEARS that stamp when the turn ends (`agent-loop.mjs`'s `finally` →
+// `clearStamp`). This server runs inside that same session, so both writers target ONE file,
+// keyed on the session id alone, and the last writer wins. Measured 2026-10-15 on session
+// `4d0f1d11`: the ledger read `status: done` with `ended_at 12:14:50.538Z` while this timer
+// re-created the deleted stamp at 12:15:10 and again at 12:15:40 — so every reader, `checkLiveness`
+// and the store's own endpoint included, was told a finished worker was still running.
+//
+// ⚠️ The `mode` discriminator is NOT the repair here, and cannot be: this timer wrote `local`
+// over `headless` within one 30 s tick, so a reader filtering `mode === 'headless'` could not
+// find a live headless worker at all — and once the owner's clear has run, a fresh `local` row is
+// indistinguishable from an interactive session's own stamp. Standing down is the only shape that
+// survives the clear: a merge, a second filename or a mode-preserving write all leave this timer
+// free to write AFTER it, which is the whole defect.
+//
+// ⚠️ `headless` ONLY, and the narrowness is load-bearing. A tab worker's session is stamped by
+// nobody else — `heartbeat.start` is reached from `agent-loop.mjs` alone, which is the SDK path —
+// so standing down there would make every tab worker read dead. And an ABSENT value is not "a
+// worker" either: it is the operator's own session, a session opened by hand, or a path-B resume
+// that goes through no server, which is exactly the case this stamp exists for.
+export function selfStampRefusal({ workerMode } = {}) {
+  if (workerMode === 'headless') {
+    return (
+      'this session was spawned as a headless worker, so the server that spawned it owns the ' +
+      'heartbeat and clears the stamp when the turn ends — a self-stamp here would re-create ' +
+      'that deleted stamp and report a finished worker as live'
+    )
+  }
+  return null
+}
+
 // The session this server runs INSIDE — stamped on the same interval as the workers.
 //
 // ⚠️ Lives HERE rather than in `supervisor.mjs` because this module owns the stamp, and the
@@ -298,13 +377,20 @@ export function sweepStale({ dir = heartbeatDir, ttlMs = HEARTBEAT_TTL_MS, now =
 // Returns `null` for a missing session id, so a server started outside a session stamps
 // nothing rather than stamping under an invented key — a row under a made-up id would be a
 // permanent phantom reading Live until its TTL, with no session able to clear it.
+//
+// ⚠️ Returns `null` for a SECOND reason, and it is the load-bearing one: this session is a
+// headless worker whose stamp another server owns. The guard is here rather than only at the call
+// site because a rule that lives only in `supervisor.mjs` ships uncovered — that module connects a
+// stdio server at load, so no test can import it. See `selfStampRefusal`.
 export function startSelfStamp(sessionId, {
   dir = heartbeatDir,
   intervalMs = HEARTBEAT_INTERVAL_MS,
   readActivity = readState,
+  workerMode = null,
   onError = () => {},
 } = {}) {
   if (!sessionId) return null
+  if (selfStampRefusal({ workerMode })) return null
   const write = () => {
     try {
       stampRecord(dir, {

@@ -12,62 +12,119 @@ for in-process workers (`server/supervisor.mjs` writes `mode: 'headless'`, from
   --list    one line per live worker session: `<session-id>  <status>  <label>`
   --count   just the number of live worker sessions, and nothing else on stdout
 
-**The definition takes one identity store and two liveness channels.** A worker session is
-one that is
+**The definition takes one identity store and one liveness source.** A worker session is one
+that is
 
-  (a) present in the **supervisor spawn ledger** (`~/.local/state/claude-supervisor/sessions/`)
-      — which is what makes it a session the supervisor opened, rather than a manager or one
+  (a) present in the **supervisor spawn ledger**, which the **session-ledger endpoint**
+      serves — what makes it a session the supervisor opened, rather than a manager or one
       of the operator's own; and
-  (b) **live**, which the registry OR the heartbeat store answers.
+  (b) **live**, which the **session-heartbeat endpoint** answers.
 
-Neither liveness channel answers alone, and the reason is structural rather than historical:
+⚠️ **The liveness source is the endpoint, and the join survived the move.** Until 2026-10-09
+this read two channels — the registry (`~/.claude/sessions/<pid>.json`, pid-keyed and
+local-only, its entry deleted on exit) and the heartbeat store — as a UNION, because neither
+answered alone: the registry saw every session holding a socket and was structurally blind to a
+worker with no pid of its own (a headless worker is an in-process SDK `query()` inside the
+server; a cluster worker is a process on another machine), while the store covered exactly
+those. The endpoint holds BOTH populations in one store — it serves `source: cluster` and
+`source: mcp-timer` rows beside local ones — so two channels collapse into one read and the
+composition rule goes with them. **Operator ruling 2026-10-09: keep the ledger join, move only
+the liveness source.**
 
-  * The **registry** (`~/.claude/sessions/<pid>.json`) is pid-keyed and local-only. It sees
-    every session holding a socket — every interactive tab — and its entry is deleted on
-    exit, which is what makes absence meaningful. It cannot see a worker with no pid of its
-    own: a headless worker is an in-process SDK `query()` inside the server, and a cluster
-    worker is a process on another machine.
-  * The **heartbeat store** is what covers those. `server/supervisor.mjs` stamps a headless
-    worker from its agent loop, and `server/cluster-heartbeat.mjs`'s `pollCluster()` mirrors
-    cluster sessions into the same store on the server's own timer.
-
-⚠️ **The union is a correction, and the shape of the defect is worth keeping.** Until
-2026-10-05 the count was *registry ∩ ledger* alone — itself a fix, because the instrument
-before it read the heartbeat store only, which is stamped for headless workers, so it
-answered **0 while 11 interactive workers were live**. That fix traded one blindness for
-another: it restored the tabs and lost every worker with no registry entry, which is both
-headless and cluster. Two populations cannot be recovered by fixing one channel.
+⚠️ **The count legitimately goes UP, and that is the point of the move.** The registry was
+blind to headless workers, so a fleet that was silently under-counting now counts what it was
+rendering dead. Measured 2026-10-09 on this host: **11** under the registry join, **22** under
+the endpoint. `docs/fleet-surface.md` § Spawn a worker item 5 already carries the warning —
+re-read `spawn.maxConcurrent` before the first sweep after upgrading, because the first tick
+can read **at or over** the target with no error on either side.
 
   * The **ledger's own `status` is not a liveness source.** Measured 2026-10-01: 824 of its
     1075 entries read `running` against 26 live registry sessions. It is the durable half —
     who started this, in what mode, from which manager — never the live one.
-  * The **registry has no name field**, so "is this a worker" is not derivable from it. Its
-    entries carry `pid`, `sessionId`, `cwd`, `kind`, `entrypoint`, `status` and nothing that
-    identifies a role.
+  * **`status` in the output is the store row's `source`** — `mcp-timer` for a session posting
+    its own heartbeat, `cluster` for a mirrored cluster session. It is no longer the registry's
+    own status nor a stamp's `mode`, because the endpoint is the only channel that answers.
 
-⚠️ **A manager ever opened through `spawn_agent` would be counted**, because it would have a
-ledger record like any worker. The one live example found, "Attention Routing", is a
-2026-09-23 ledger entry whose session is long gone, so the liveness join filters it — but the
-limit is real and is stated rather than hidden. Managers are normally started by hand, which
-is why all four measured here had zero ledger entries.
+⚠️ **A ledger record is not by itself proof of "worker".** `spawn_agent(role="manager")` writes
+a record exactly like a worker's, so presence in the ledger alone counts a manager against the
+fleet-wide cap unless the record's own `role` excludes it — which is what the exclusion in
+`live_workers` now does. ⚠️ **ONLY an explicit `manager` excludes**: a record with no `role`
+(every record written before v0.110.3) reads as a worker, because defaulting the other way
+would flip every pre-field worker into a manager and shrink the population the cap exists to
+bound. Managers started by hand — `/supervisor:open` in a plain wezterm tab — write no record
+at all.
 
-⚠️ **An unreadable store is UNKNOWN, never 0.** Both stores are read before any verdict, and
-either failing exits 2 with its message on **stderr** — so `$(… --count)` captures nothing and
-a caller must consult the exit code. Folding an I/O error into "no workers" is how a broken
-instrument reads as an idle fleet, which is the failure this file exists to correct.
+⚠️ **An unreadable store is UNKNOWN, never 0.** The ledger endpoint and the heartbeat endpoint
+are both read before any verdict — and since 2026-10-14 both are the SAME attention store, so one
+unreachable controller fails both reads and there is no longer a half-answer to fall back on. Either failing exits 2 with its message on **stderr** — so `$(… --count)` captures
+nothing and a caller must consult the exit code. Folding an I/O error into "no workers" is how
+a broken instrument reads as an idle fleet, which is the failure this file exists to correct.
 """
 import argparse
 import importlib.util
 import json
 import os
 import sys
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+_SPAWN_LEDGER = None
+
+# The last successful count, shared with the server. See `server/worker-sessions.mjs` for why it is
+# a FILE: this process exits after printing, so an in-memory cache could never outlive it.
+#
+# ⚠️ **The window is 60 s and the fallback is labelled.** A count from minutes ago is not evidence
+# about the fleet now; past the window the refusal stands. It is never a fabricated `0` — the cache
+# holds a real earlier count, and an absent or unreadable cache is a refusal.
+_CACHE_TTL_S = 60
+_CACHE_FILE = "last-worker-count.json"
+
+
+def _state_dir():
+    home = os.environ.get("XDG_STATE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "state"
+    )
+    return os.path.join(home, "claude-supervisor")
+
+
+def _cache_path():
+    return os.path.join(_state_dir(), _CACHE_FILE)
+
+
+def _read_count_cache():
+    """`(count, age_seconds)` when the cache holds a fresh-enough count, else `None`."""
+    try:
+        with open(_cache_path(), encoding="utf-8") as fh:
+            parsed = json.load(fh)
+        count = parsed.get("count")
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return None
+        at = datetime.fromisoformat(str(parsed.get("at")).replace("Z", "+00:00"))
+        age = (datetime.now(timezone.utc) - at).total_seconds()
+        if age < 0 or age > _CACHE_TTL_S:
+            return None
+        return count, age
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def _write_count_cache(count):
+    """Best-effort: a cache that cannot be written must never fail the count it records."""
+    try:
+        os.makedirs(_state_dir(), exist_ok=True)
+        with open(_cache_path(), "w", encoding="utf-8") as fh:
+            json.dump(
+                {"count": count, "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")},
+                fh,
+            )
+    except OSError:
+        pass
 
 
 def _load(module_name, filename):
     """Import a hyphenated sibling script by path — the same idiom `session-liveness.py`
-    uses for `live-workers.py`, so neither store gains a second reader."""
+    uses for `live-workers.py`, so the endpoint gains no second reader."""
     path = os.path.join(HERE, filename)
     spec = importlib.util.spec_from_file_location(module_name, path)
     module = importlib.util.module_from_spec(spec)
@@ -75,100 +132,69 @@ def _load(module_name, filename):
     return module
 
 
-def ledger_dir():
-    """The spawn ledger's path, resolved as `fleet-sessions.py` and `config.mjs` do.
+def _ledger():
+    """Import `spawn-ledger.py` (hyphenated filename -> importlib) — the spawn-ledger reader.
 
-    A reader that resolved a different path than the writer would report an empty fleet,
-    and the empty answer is the dangerous direction.
+    ⚠️ **Extracted, and the extraction is load-bearing rather than tidiness.** This file
+    used to hold the only copy of the reader, while `session-liveness.py`'s `unstamped()`
+    guard needs the same ledger and this file reaches `session-liveness.py` through `_load`
+    — so the guard could not import the ledger from here without closing a cycle. One
+    module both consumers point at leaves the dependency direction one-way.
     """
-    override = os.environ.get("SUPERVISOR_LEDGER_DIR")
-    if override:
-        return override
-    state = os.environ.get("XDG_STATE_HOME") or os.path.join(os.path.expanduser("~"), ".local", "state")
-    return os.path.join(state, "claude-supervisor", "sessions")
+    global _SPAWN_LEDGER
+    if _SPAWN_LEDGER is None:
+        _SPAWN_LEDGER = _load("spawn_ledger", "spawn-ledger.py")
+    return _SPAWN_LEDGER
 
 
-def read_ledger(directory):
-    """Every session id the ledger knows, mapped to its full record — or None when unreadable.
+def _cause(failures):
+    """` — <cause>` when a reader named one, else the empty string.
 
-    None and `{}` are different answers and must stay so: `{}` is "read it, nobody is
-    recorded", None is "could not read it". Collapsing them turns a permissions error into
-    a confident empty fleet.
-
-    ⚠️ **The whole record, not just its label.** The filter below needs `resumed_from`, and a
-    map that keeps only the label cannot express it — the caller would have to reopen every
-    file to answer a question the read already had in hand. The mjs twin returns the record
-    for the same reason, and the two must stay in step or the pair stops being one definition.
+    The readers log their own line; this carries the same text into the UNKNOWN message so the
+    exit-2 line an operator (or a caller's captured stderr) reads is self-contained.
     """
-    try:
-        names = os.listdir(directory)
-    except FileNotFoundError:
-        return {}
-    except OSError:
-        return None
-
-    known = {}
-    for name in names:
-        if not name.endswith(".json"):
-            continue
-        try:
-            with open(os.path.join(directory, name), encoding="utf-8") as handle:
-                record = json.load(handle)
-        except (OSError, ValueError):
-            continue
-        session_id = record.get("session_id")
-        if session_id:
-            known[session_id] = record
-    return known
+    return (" — %s" % "; ".join(failures)) if failures else ""
 
 
-def live_workers(registry_dir=None, ledger=None, heartbeat_dir=None, now=None):
+def live_workers(endpoint=None, ledger=None, on_failure=None):
     """Live worker sessions as `[{session_id, status, label}]`, or None when a store failed.
 
-    The ledger supplies the worker identity; the registry and the heartbeat store supply
-    liveness, as a UNION. A session in either liveness channel but not the ledger is a manager
-    or one of the operator's own; a session in the ledger and in neither channel has exited.
+    The ledger supplies the worker identity; the **session-heartbeat endpoint** supplies
+    liveness. A session live at the endpoint but not in the ledger is a manager or one of the
+    operator's own; a session in the ledger and not live at the endpoint has exited.
 
-    `status` names whichever channel answered: the registry's own `status` for a session
-    holding a socket, the stamp's `mode` for a headless or cluster worker. Descriptive only —
-    nothing decides on it.
+    ⚠️ **The endpoint replaced the registry AND the heartbeat store, and the join survived
+    both.** Until 2026-10-09 this read the registry ∪ the store directly; the endpoint holds
+    both populations in one store (it serves `source: cluster` and `source: mcp-timer` rows
+    beside local ones), so two channels collapse into one read. The *unit* is deliberately
+    unchanged — still ledger ∩ live — because that is what makes this a count of **workers**
+    rather than of every session on the machine. Operator ruling 2026-10-09: keep the join,
+    move only the liveness source.
+
+    `status` names the store row's `source` — `mcp-timer` for a session posting its own
+    heartbeat, `cluster` for a mirrored cluster session. Descriptive only — nothing decides
+    on it.
     """
-    identity = _load("session_identity", "session-identity.py")
-    registry = identity.read_registry(registry_dir) if registry_dir else identity.read_registry()
-    if registry is None:
-        return None
-    # The heartbeat half still reads through `session-liveness.py`; only the registry reader's
-    # home changed, so the union below is the same union over the same two stores.
     liveness = _load("session_liveness", "session-liveness.py")
-    heartbeats = liveness.read_heartbeats(heartbeat_dir, now=now)
-    if heartbeats is None:
+    rows = liveness.read_endpoint(endpoint, on_failure=on_failure)
+    if rows is None:
         return None
     if ledger is None:
         return None
 
-    # The union, built once rather than per ledger entry — `resolve()` answers for a single id
-    # and re-reads its sources on every call, which over a ~1000-record ledger is a directory
-    # listing per record.
+    # The endpoint's live set, built once rather than per ledger entry. A row is live only on
+    # an explicit `live: true` — a renamed or missing key must never be read as liveness, and
+    # a malformed row is skipped rather than allowed to crash the count.
     live = {}
-    for session_id, record in registry.items():
-        # Presence is the claim, and this channel's rule is deliberately UNCHANGED by the
-        # union: the registry's entry is deleted on exit, so its existence is what the counter
-        # has always read. `read_registry`'s three-state `alive` is a stronger check the resume
-        # paths use, and tightening this to `alive is True` would be a second, silent change to
-        # the population this fix is not about.
-        live[session_id] = record.get("status")
-    for stamp in heartbeats:
-        session_id = stamp.get("session_id")
-        if not session_id or session_id in live:
-            # The registry wins where both speak: a session holding a socket is the case the
-            # readers already understood, and its `status` is the richer descriptor.
+    for row in rows:
+        if not isinstance(row, dict):
             continue
-        # `state` defaults to `live` for a stamp written before the field existed; `unknown`
-        # is a cluster stamp whose own store could not be read, which is "cannot tell" and
-        # never liveness.
-        if stamp.get("state", "live") != "live":
+        session_id = row.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
             continue
-        live[session_id] = stamp.get("mode")
+        if row.get("live") is not True:
+            continue
+        live[session_id] = row.get("source")
 
     workers = []
     for session_id, record in ledger.items():
@@ -178,10 +204,18 @@ def live_workers(registry_dir=None, ledger=None, heartbeat_dir=None, now=None):
         # crash-loop cap, and counting them here would leave a sweep that revived two dead
         # workers unable to start any new one (docs/fleet-surface.md § Spawn a worker item 5).
         # The marker is the ledger record's `resumed_from`, the same field
-        # `check-spawn-ledger.py` reads. See the mjs twin for why this filter is written down
-        # for the first time rather than inherited: the exclusion used to hold by accident,
-        # because every auto-resume is headless and a headless worker held no registry entry.
+        # `check-spawn-ledger.py` reads.
         if record.get("resumed_from"):
+            continue
+        # A manager is not a worker. `spawn_agent(role="manager")` writes a ledger record
+        # exactly like a worker's, so presence in the ledger alone would count a manager
+        # against the cap and push the fleet toward refusing ordinary spawns. ⚠️ **ONLY an
+        # explicit `manager` excludes** — never `role != "agent"`: a record with no `role` is
+        # one written before the field existed, and those are workers and managers alike, so
+        # treating absence as "manager" would drop every pre-field worker out of the count this
+        # cap exists to enforce. The same rule, and the same reason, is in
+        # `gate-owner-filter.py`'s `is_manager`.
+        if record.get("role") == "manager":
             continue
         workers.append(
             {
@@ -197,21 +231,68 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Count live worker sessions.")
     parser.add_argument("--list", action="store_true", help="print every live worker session")
     parser.add_argument("--count", action="store_true", help="print only the number of live worker sessions")
-    parser.add_argument("--dir", default=None, help="override the registry path")
-    parser.add_argument("--ledger-dir", default=None, help="override the spawn-ledger path")
-    parser.add_argument("--heartbeat-dir", default=None, help="override the heartbeat-store path")
+    parser.add_argument("--endpoint", default=None, help="override the attention store base URL")
+    parser.add_argument("--ledger-dir", default=None, help="ACCEPTED AND IGNORED — the ledger comes from the endpoint")
+    parser.add_argument("--dir", default=None, help="ACCEPTED AND IGNORED — the registry left the liveness path")
+    parser.add_argument("--heartbeat-dir", default=None, help="ACCEPTED AND IGNORED — the endpoint computes freshness")
     args = parser.parse_args(argv)
 
-    directory = args.ledger_dir or ledger_dir()
-    ledger = read_ledger(directory)
-    if ledger is None:
-        print(f"UNKNOWN — cannot read the spawn ledger at {directory}", file=sys.stderr)
+    # ⚠️ All three flags are kept and ignored rather than removed, the same call
+    # `session-liveness.py` made: callers pass them (`approved-not-started.py` passes one), so
+    # removing them breaks those callers, while accepting them in silence would let a reader
+    # believe a path or a window is in force when neither is. `--ledger-dir` joins them for the
+    # same reason — the ledger is the attention store's now, and a caller that set the directory
+    # would otherwise believe it had redirected a read that still went to the endpoint.
+    for flag, value, reason in (
+        ("--ledger-dir", args.ledger_dir, "the ledger is read from the session-ledger endpoint"),
+        ("--dir", args.dir, "liveness comes from the session-heartbeat endpoint, which resolves the registry"),
+        (
+            "--heartbeat-dir",
+            args.heartbeat_dir,
+            "liveness comes from the session-heartbeat endpoint, which resolves the store and its own window",
+        ),
+    ):
+        if value:
+            print(f"warning: {flag} is accepted and IGNORED — {reason}", file=sys.stderr)
+
+    # ⚠️ **The causes are collected so the UNKNOWN line NAMES them.** Until 2026-10-19 the line
+    # said only which endpoint failed, so a timeout, a refused socket and an unparseable body were
+    # one indistinguishable message — measured on 2026-10-19, when `--count` returned UNKNOWN at
+    # 21:49 and succeeded 20/20 at 22:07 with no cause captured for the gap.
+    def failed(message):
+        """The refusal — or, for `--count`, the last successful count when it is fresh enough.
+
+        ⚠️ **The stale path is labelled on stderr and the integer still goes to stdout**, so
+        `$(… --count)` keeps its contract and a reader can tell a live count from a stale one.
+        `--list` cannot fall back: a count has no rows to list, and inventing them would be worse
+        than the refusal.
+        """
+        if args.count:
+            stale = _read_count_cache()
+            if stale is not None:
+                count, age = stale
+                print(
+                    "STALE — using the last successful count (%d s old): %s" % (age, message),
+                    file=sys.stderr,
+                )
+                print(count)
+                return 0
+        print(message, file=sys.stderr)
         return 2
 
-    workers = live_workers(args.dir, ledger, args.heartbeat_dir)
+    failures = []
+    ledger = _ledger().read_ledger(args.endpoint, on_failure=failures.append)
+    if ledger is None:
+        return failed(
+            "UNKNOWN — cannot read the session-ledger endpoint at %s%s"
+            % (_ledger().endpoint_base(args.endpoint), _cause(failures))
+        )
+
+    workers = live_workers(args.endpoint, ledger, on_failure=failures.append)
     if workers is None:
-        print("UNKNOWN — cannot read the session registry or the heartbeat store", file=sys.stderr)
-        return 2
+        return failed("UNKNOWN — cannot read the session-heartbeat endpoint%s" % _cause(failures))
+
+    _write_count_cache(len(workers))
 
     if args.count:
         # The integer and nothing else — `$(… --count)` goes straight into a comparison.

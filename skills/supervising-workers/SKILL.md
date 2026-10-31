@@ -46,7 +46,7 @@ Pass `interactive: false` when the point is that **you** answer the prompts — 
 
 `spawn_agent` → `agent_status` / `send_agent_message` → read the tab
 
-The slash commands wrap the same calls: `/supervisor:manager-spawn`, `/supervisor:fleet-workers`, `/supervisor:manager-answer`, and `/supervisor:manager-drain` for bulk approvals. The approval *policy* lives in the `manager-wrangler` agent — do not restate it here.
+The slash commands wrap the same calls: `/supervisor:goal-spawn`, `/supervisor:fleet-workers`, `/supervisor:goal-answer`, and `/supervisor:goal-drain` for bulk approvals. The approval *policy* lives in the `goal-wrangler` agent — do not restate it here.
 
 `spawn_agent` takes `prompt` (required) plus optional `cwd`, `label`, `interactive` and `resume`. `await_permission(timeout_ms)` blocks until a **headless** worker asks; it returns `null` on timeout, so treat a null as "nothing to do", never as an approval.
 
@@ -68,5 +68,5 @@ Routine approvals are yours. Escalate to the human when the request is outside t
 
 - Cost figures the server reports are priced from Anthropic's table and mean nothing when traffic is routed elsewhere — never quote them.
 - An unanswered permission auto-denies after 15 minutes — **headless workers only**. A tab worker's prompt waits for its tab indefinitely.
-- A headless worker is single-shot: one prompt, one conversation. A tab worker takes follow-ups through `send_agent_message`.
+- A headless worker is single-shot: one prompt, one conversation. A tab worker takes follow-ups through `send_agent_message` (typed into its pane, stealing focus), and so does a **cluster** worker — there the same tool posts one more turn on the session id that worker already holds and blocks until the pod answers.
 - A headless worker is invisible to the **session roster** (`/fleet-status`, the `●` set) — it has no socket — so a roster-only sweep reads its task as unowned and may spawn a duplicate onto it. `list_agents` does show it; check there before concluding a task has no owner.

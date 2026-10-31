@@ -23,7 +23,7 @@ The server runs on **bun** (installs its own node dependencies on first start) a
 Spawn a worker, then answer its permission prompt without leaving your manager session:
 
 ```
-> /supervisor:manager-spawn Run the test suite and fix any failures
+> /supervisor:goal-spawn Run the test suite and fix any failures
 
 Spawned agent_1 (interactive) — pane 1714
 ```
@@ -31,14 +31,14 @@ Spawned agent_1 (interactive) — pane 1714
 The worker runs in its own wezterm tab. When it needs approval, the prompt parks for **you** instead of the tab:
 
 ```
-> /supervisor:manager-answer
+> /supervisor:goal-answer
 
 1 pending — agent_1
   Bash: go test ./...
   allow / deny ?
 ```
 
-Answer it and the worker carries on. That is the whole loop: `/supervisor:manager-spawn` reports the `agent_id`, the mode it chose, and — for a tab worker — the `pane_id`; `/supervisor:manager-answer` drains whatever is waiting.
+Answer it and the worker carries on. That is the whole loop: `/supervisor:goal-spawn` reports the `agent_id`, the mode it chose, and — for a tab worker — the `pane_id`; `/supervisor:goal-answer` drains whatever is waiting.
 
 For a worker whose prompts you intend to answer yourself rather than letting its tab handle them, spawn it headless with `interactive=false` — that is the only mode the approval loop serves.
 
@@ -48,23 +48,29 @@ For a worker whose prompts you intend to answer yourself rather than letting its
 |---|---|
 | MCP server `supervisor` | spawns and owns the workers; parks their permission prompts |
 | skill `supervising-workers` | when to spawn a worker instead of doing the work yourself |
-| `/supervisor:manager-spawn` `/supervisor:fleet-workers` `/supervisor:manager-answer` `/supervisor:manager-drain` | the operator surface |
-| agent `manager-wrangler` | runs the routine approval loop on a cheap model, escalating only real forks |
+| `/supervisor:goal-spawn` `/supervisor:fleet-workers` `/supervisor:goal-answer` `/supervisor:goal-drain` | the operator surface |
+| agent `goal-wrangler` | runs the routine approval loop on a cheap model, escalating only real forks |
 | `/supervisor:jump` `/supervisor:who-needs-me` | find the sessions blocked on you, and jump to their pane |
+| `/supervisor:who-needs-my-help` | the full sweep in one pass — what every live session is parked on and why, the operator-bound gates handed over with jump links and recommended answers, and the blockers that keep recurring root-caused. Report-only: it answers no gate and drives no modal |
 | `/supervisor:attention-next` | what's next on the attention stack — answer an item in chat, delivered to the session that asked |
 | `/supervisor:inbox` | the operator's approval queue — every live task at `phase: todo` across every vault, plus the three verbs that move one (approve / reject / later). The command never picks a row; each verb resolves its vault through `scripts/inbox.py --resolve`, which refuses on ambiguity |
 | `scripts/jump-link.py` | render a pane's jump target as a clickable link (falls back to `/supervisor:jump <N>` when the local fleet-jump server is not configured) |
-| `scripts/restart-worker.py` | restart ONE stale idle worker session under a narrow allow rule — seven registry-guarded refusals, never a manager, never a broad `kill` |
-| `scripts/manager-predispatch.py` | the **pre-dispatch gate** `/supervisor:manager-drive` and `/supervisor:manager-status` run first — when the tracked tree has not moved it replays the stored table and dispatches **no agent**; a worker dying counts as movement, because session liveness is in the digest |
-| `/supervisor:fleet-loop` `/supervisor:fleet-status` | watch every session on the machine; one stateful loop, one read-only snapshot |
-| `/supervisor:fleet-drive` | one-shot by hand, and dispatched by `/supervisor:fleet-loop` every round: nudge idle sessions with open work and no verified blocker; escalate the rest grouped by cause |
+| `scripts/restart-worker.py` | restart ONE stale idle session — **worker or manager** — under a narrow allow rule: seven registry-guarded refusals, never a broad `kill` |
+| `scripts/manager-launcher.py` | print the launcher a **manager** session opens on and which rule chose it (`subject` / `claude-sibling` / `vault`) — rule in `docs/fleet-surface.md` § Which launcher a manager opens on |
+| `scripts/drive-ledger.py` | the fleet-drive ledger's **one writer** — `read` normalises the file's two shapes (flat `sid` rows and an `entries` list) to one canonical shape, and `merge` takes **only this round's entries**, so a round cannot shrink the ledger by omission. A corrupt ledger is refused rather than read as empty, and `.bak` is the pre-merge copy |
+| `scripts/manager-predispatch.py` | the **pre-dispatch gate** `/supervisor:goal-drive` and `/supervisor:goal-status` run first — when the tracked tree has not moved it replays the stored table and dispatches **no agent**; a worker dying counts as movement, because session liveness is in the digest |
+| `scripts/resolve-folders.py` | resolve the three folders a subject command reads — `topics_dir`, `goals_dir`, `tasks_dir` — from `vault-cli config list`, matching the session's cwd **or its nearest ancestor**. Prints `TOPICS_DIR\|GOALS_DIR\|TASKS_DIR\|VAULT_NAME` — absolute paths plus the **registered** vault name, never the directory basename — or `UNKNOWN <reason>`; a missing key is reported, never defaulted |
+| `/supervisor:fleet-loop` `/supervisor:fleet-status` | watch every session on the machine; one stateful loop (the **arm**, invoked once), one read-only snapshot |
+| `/supervisor:fleet-drive` | the loop's **round** — one full fleet round, dispatched by `/supervisor:fleet-loop` on every wakeup and runnable by hand: nudge idle sessions with open work and no verified blocker; escalate the rest grouped by cause |
 | `/supervisor:fleet-verify` | read-only: verify the fleet layer's own contract, ending in a numbered fix list |
-| `/supervisor:manager-loop` `/supervisor:manager-status` | watch ONE goal or topic; its task set, its sessions, what is blocked on you |
-| `/supervisor:manager-verify` | read-only: verify ONE goal or topic and suggest fixes, ending in a numbered fix list |
+| `/supervisor:goal-loop` `/supervisor:goal-status` | watch ONE goal or topic; its task set, its sessions, what is blocked on you |
+| `/supervisor:goal-verify` | read-only: verify ONE goal or topic and suggest fixes, ending in a numbered fix list |
+| `/supervisor:topic-verify` | read-only: verify ONE topic against its own sixteen-row check — eleven disk-backed page-consistency checks, one coverage read and four advisory rows — ending in a numbered fix list. Self-sufficient: it carries the checks itself and resolves the vault's folders from `vault-cli config`, so it needs no vault-local command |
 | `/supervisor:stop` | stand a manager loop down — disarm the model-waking cadence, keep the gate loop and the session |
 | `/supervisor:reset` | re-discover a manager's state from disk — re-resolve the subject, force a full sweep, re-validate the asks ledger without discarding, re-read the tracked set |
 | `/supervisor:worker-drive` | a worker drives its own anchored task to done |
-| `/supervisor:worker-restart` | restart ONE named worker in one verb — kill, resume, and tell it what changed only when that is safe |
+| agent `worker-drive-reader` | the read half of a worker-drive round — the session diagnosis and the drive table, computed in a sub-agent so the reading instructions never re-inject on every run |
+| `/supervisor:restart` | restart ONE named session — **worker or manager** — in one verb: kill, resume in its own role colour, and tell it what changed only when that is safe (a manager is told to re-arm its loop). `/supervisor:worker-restart` is a deprecated alias |
 | `/supervisor:open` | resolve a task, goal or topic by name, then jump to its live session, resume its recorded one, or spawn a new one (manager-only; needs `vault-cli`) |
 | `/supervisor:ready` | ready ONE named task to the spawn bar — audit → repair → re-audit inside a sub-agent — then open it or escalate naming the gap (cross-tier; needs `vault-cli`) |
 | `/supervisor:read-guides` | load every guide in `docs/` — start here to learn which commands your session tier may run |
@@ -86,6 +92,19 @@ For a worker whose prompts you intend to answer yourself rather than letting its
 
 **Choose interactive when you want to see or steer it. Choose headless when you want the manager answering its prompts.** Neither is more capable; the trade is visibility against supervision.
 
+### Where a headless worker's process lives
+
+A headless worker's child process is spawned by **`claude-wrapper`**, not by this server. That is not an implementation detail — it decides who can answer the worker's prompts.
+
+A permission prompt parks with whoever holds the child's stdin. When this server held it, a park was answerable only by this server and died with it; a manager's `answer_permission` reached it only while that process lived. Now the wrapper holds stdin, so a park is released over its REST route — `POST /api/1.0/sessions/{id}/answer` — and the wrapper's session id is what names the target.
+
+Two consequences worth knowing before you spawn:
+
+- **`agent_status` and `list_agents` carry `pending_question`** — the wrapper's own live question record, including the `request_id` that `answer_permission` takes. `wrapper_session_id` sits beside it so a `null` for "not wrapper-backed" is distinguishable from a `null` for "nothing parked" and from an unreadable wrapper. The fleet gate is still `awaiting_input`; `pending_question` is a status field, never a gate.
+- **The policy tier does not run.** `decide()`, the manager allowlist, the carried decision and the 15-minute deny are all gone for these workers, because the wrapper owns the child's single `--permission-prompt-tool` and this server never sees the prompt. A spawn reply carries a `policy_gap` naming each one as not-run; **a successful spawn is not a policed spawn.** Answer parks explicitly with `answer_permission`.
+
+The wrapper is reached at `SUPERVISOR_WRAPPER_URL`, which must be loopback: its API is unauthenticated and a spawn sends it the inherited environment.
+
 ### Setting the fleet default
 
 The mode a worker opens in is a **fleet-wide decision**, so it lives in a file you edit rather than in the instructions each manager reads:
@@ -93,12 +112,13 @@ The mode a worker opens in is a **fleet-wide decision**, so it lives in a file y
 ```json
 // ~/.config/claude-supervisor/config.json   (SUPERVISOR_CONFIG)
 { "spawn": { "mode": "interactive", "maxConcurrent": 30, "maxConcurrentHard": 50 },
-  "cluster": { "url": "https://claude-interactive.<env>.<domain>", "token": "…" } }
+  "a2a": { "url": { "docker": "http://…", "nukedev": "https://…", "octopus-dev": "https://…" },
+           "defaultCluster": "nukedev" } }
 ```
 
-⚠️ `cluster.token` is a **secret**, and the server only ever reads this file — it never writes it, so it sets no permissions. `chmod 600 ~/.config/claude-supervisor/config.json` is yours to do, and worth doing before you put a token in it.
+⚠️ **No token goes in this file.** The A2A tokens are resolved from TeamVault by `scripts/mcp-start.py`, which your MCP entry must name as its `command`; an `"a2a.token"` here is **refused** rather than read. The file still holds `a2a.url`, `cluster.url` and your `notify` endpoints, so `chmod 600 ~/.config/claude-supervisor/config.json` remains worth doing — but a secret in it is now an error rather than a choice.
 
-`cluster.url` and `cluster.token` configure the **cluster spawn target** — `docs/fleet-surface.md` § Spawn a worker item 7. They live here rather than only in the server entry's `env` block for one reason worth knowing: an MCP `env` block is cached at **session start**, so a value added to it reaches no *running* session by any in-session route, while a file the **server** reads at its own start reaches it on a Reconnect. ⚠️ The env var still **wins** when it is set, so remove it once you move to the file — otherwise the file looks inert and nothing refuses.
+`a2a.url` configures the **A2A worker-controller targets** (`docker`, and one entry per k8s cluster) — `docs/fleet-surface.md` § Spawn a worker item 7. A spawn names its target as `docker`, `k8s` (the default cluster) or `k8s:<cluster>`; an unknown or unconfigured cluster is refused, never defaulted. ⚠️ **It is per target rather than one address**, because the docker controller runs on this Mac and every k8s cluster has its own: one address is wrong for all but one, so the tokens are `SUPERVISOR_A2A_TOKEN_<CLUSTER>` (uppercased, `-` → `_`) and a bare-string `a2a.url` is refused rather than read as every target. `a2a.defaultCluster` names what a bare `k8s` resolves to (default `nukedev`); the legacy `a2a.url.k8s` / `SUPERVISOR_A2A_*_K8S` pair is still read for that default cluster only, so a setup predating cluster names keeps working. These live here rather than only in the server entry's `env` block for one reason worth knowing: an MCP `env` block is cached at **session start**, so a value added to it reaches no *running* session by any in-session route, while a file the **server** reads at its own start reaches it on a Reconnect. ⚠️ The per-target env vars (`SUPERVISOR_A2A_URL_<TARGET>`) still **win** when they are set, so remove them once you move to the file — otherwise the file looks inert and nothing refuses. ⚠️ **That caching covers the `command` too**: repointing the entry at `scripts/mcp-start.py` needs a **NEW session**, not a Reconnect. ⚠️ **`cluster.url` is the retired `cluster` spawn target's address** — retired 2026-10-15, so no spawn path reads it any more; it is kept only for the follow-up path that addresses an already-running `claude-interactive` session, and can be removed once none are left.
 
 `mode` is `interactive` or `headless`. Four sources, highest first:
 
@@ -121,7 +141,7 @@ The file is read **once at server start**, so a `/mcp` → `supervisor` → **Re
 
 Operator's ruling of 2026-10-04, verbatim: *"lets start with 30 = soft cap and 50 = hard cap."* It **reinstates** the fleet-wide limit the 2026-09-27 ruling removed — *"These limits are artificial and should be removed … For now there is no global limit"* — as a pair of thresholds rather than unbounded, so a reader who finds only the 2026-09-27 note concludes the fleet is unbounded, which is no longer true. ⚠️ **30/50 is the operator's CONFIGURED pair, not the shipped default** — the ruling quotes his config, and the code ships its own numbers, which the home states. Taking one for the other is how the first draft of this section went wrong.
 
-**The count is live worker sessions — not live sessions, and not the heartbeat store.** It is the session registry joined to the spawn ledger, so the operator's own sessions and the managers are excluded. ⚠️ **Not the heartbeat store:** it is stamped only for in-process (headless) workers, so it answered **0 while 11 interactive workers were live** (measured 2026-10-01), and a target that reads 0 on a busy fleet is inert.
+**The count is live worker sessions — not live sessions, and not the heartbeat store.** The spawn ledger supplies the identity — which is what makes a session one the supervisor opened rather than the operator's own — and liveness comes from the **session-heartbeat endpoint**, which holds local and cluster sessions in one store. The operator's own sessions are excluded because they hold no ledger record; a manager is excluded by its record's `role`, and ⚠️ **only an explicit `role: "manager"` excludes** — a record written before that field existed still counts as a worker. ⚠️ **Not the heartbeat store alone:** it is stamped only for in-process (headless) workers, so it answered **0 while 11 interactive workers were live** (measured 2026-10-01), and a target that reads 0 on a busy fleet is inert.
 
 An unusable value — a negative number, a fraction, a stray boolean — **refuses every spawn** and names the file, on the same reasoning as the mode refusals above: `Number(true)` is `1`, so a blind coercion would read a stray `true` as "one worker at a time" and never say so. A hard cap **below** the soft one also refuses, because a ceiling beneath its own floor would empty the operator-named band. An unreadable store also refuses, rather than opening past a limit it cannot count.
 
@@ -213,13 +233,14 @@ The same boundary applies the other way: a tool the worker's own settings alread
 
 | Tool | Purpose |
 |---|---|
-| `spawn_agent(prompt, cwd?, label?, interactive?, resume?, policy?, env?)` | start a worker — a real session in a tab by default, or headless with `interactive: false`. `policy` gives this one worker its own rules; headless only. `env` sets environment variables for **this worker only**, on both paths — how one session is pointed at a non-production backend without redirecting every session in a vault. Refused with `target: "cluster"`, which creates no local process to set one on |
-| `send_agent_message(agent_id, message)` | type a follow-up into a running **tab** worker and submit it |
-| `list_agents()` | every worker with status and pending-permission count |
-| `agent_status(agent_id)` | one worker: status, last message, **the current tool call and how long it has been held**, result, plus `session_status` / `awaiting_input`. `result.total_cost_usd` appears **only when the worker reached Anthropic itself** — under a router the SDK still prices from Anthropic's list, so the figure would describe a billing model the traffic never touched and it is omitted rather than disclaimed |
+| `spawn_agent(prompt, cwd?, label?, interactive?, resume?, policy?, env?, target?)` | start a worker — a real session in a tab by default, or headless with `interactive: false`. `policy` gives this one worker its own rules; headless only. `env` sets environment variables for **this worker only**, on both paths — how one session is pointed at a non-production backend without redirecting every session in a vault. `target` picks **where** the worker is created: omit for `local`, or `docker` / `k8s` / `k8s:<cluster>` for the A2A worker-controller backends — `k8s` is the default cluster and `k8s:<cluster>` (e.g. `k8s:nukedev`) names one explicitly, refused if unknown. It is **per-call only** — never from a config file — and an unknown value REFUSES rather than falling back. ⚠️ With `docker` / `k8s`, `interactive`, `resume`, `policy` and `env` are **refused**, because the controller creates the worker and there is no local process here to set one on. ⚠️ `target: "cluster"` was **retired 2026-10-15** |
+| `send_agent_message(agent_id, message)` | send a follow-up to a running worker. A **tab** worker: typed into its pane and submitted — it **steals focus**. A **cluster** worker: one more turn on its **existing session id** over HTTP, blocking until the pod answers, with the bearer token resolved inside the server so the caller passes no credential. A headless worker is refused — answer its prompts with `answer_permission` |
+| `stop_agent(agent_id)` | stop an A2A worker (`docker` / `k8s`) — the third of the controller's `create` / `list` / `stop` operations to be reachable from here, so a worker a manager started can also be removed. Calls the controller's `stop` on the **worker id** `create` recorded (never a task name — one task can be spawned again, and a task-keyed stop would remove the successor), so the container, or the pod and its `Config` CR, are removed. ⚠️ It is a **control-plane call to the controller**, authenticated with the controller token — **not** a turn to the worker — so it needs no worker endpoint and no worker token, and it works on a row this server never spawned, **including one re-adopted after a reconnect** (those can be seen but not messaged). Scoped to A2A workers: a tab worker is closed in its tab, a cluster worker is the shared long-lived pod. ⚠️ A `TASK_STATE_FAILED` reply is an **unknown outcome**, not "still running" — the controller's store-copy failure lands after the executor has run, so reconcile against `list_agents` rather than assuming the stop did not happen |
+| `list_agents()` | every worker with status, pending-permission count, and `open_cards` — the worker's open attention-store cards (`{item_id, answer_mechanism, payload, created_at}`). This is where a **parked permission prompt** shows for a worker *this* server did not spawn: `pending_permissions` covers only the parks this process holds. The card's `payload` names the tool as its prefix (`Bash: …`); answer one with `attention-answer.py answer <item_id> --decision allow|deny`, which the spawning server delivers. `open_cards` is `null` (not `[]`) when the store is unreachable — a different fact from "nothing open". Each row also carries `last_status` — the newest **pushed** status from a `docker` / `k8s` worker (`{worker_id, state, text, ts, age_s}`), or `null` when none has arrived — so a sweep shows a remote worker's own mid-turn progress without opening its pane or waiting for its turn to end |
+| `agent_status(agent_id)` | one worker: status, last message, **the current tool call and how long it has been held**, result, plus `session_status` / `awaiting_input`. `result.total_cost_usd` appears **only when the worker reached Anthropic itself** — under a router the SDK still prices from Anthropic's list, so the figure would describe a billing model the traffic never touched and it is omitted rather than disclaimed. It also carries `status_messages` — the `docker` / `k8s` worker's **pushed** A2A status entries (`{worker_id, state, text, ts}`, oldest first) — and `last_status`, the newest of those plus `age_s`. Both are always present and empty for every worker that is not an A2A one, so an empty array means the channel is quiet rather than unwired |
 | `pending_permissions()` | prompts awaiting an answer, across all workers |
 | `await_permission(timeout_ms?)` | block until any worker asks — one call instead of polling |
-| `answer_permission(request_id, behavior, message?)` | `allow` / `deny` — this unblocks the worker. ⚠️ Gated by **your own session's** permission mode, not the worker's: under `auto` the classifier can refuse the outgoing call (measured 2026-09-19). Fix with Shift+Tab → `accept edits`, then retry — never by changing the worker's mode |
+| `answer_permission(request_id, behavior, message?)` | `allow` / `deny` — this unblocks the worker. ⚠️ Only for a park **this** server holds: a request parked by another manager's server is refused, and the refusal names the worker, its spawning session, and the `attention-answer.py` route that manager's server settles it by — a cross-session `answer_permission` cannot release another server's park. ⚠️ Gated by **your own session's** permission mode, not the worker's: under `auto` the classifier can refuse the outgoing call (measured 2026-09-19). Fix with Shift+Tab → `accept edits`, then retry — never by changing the worker's mode |
 
 ## Adopting an existing session
 
@@ -252,6 +273,7 @@ spawn_agent({ prompt, resume: "<session-id>", interactive: false })
 - [Subject resolution](docs/subject-resolution.md) — the four-source subject chain the manager commands share
 - [Pane reads](docs/pane-reads.md) — reading a worker's pane
 - [Restart a worker](docs/restart-worker.md) — the kill-and-resume procedure
+- [Orphan recovery](docs/orphan-recovery.md) — stop + recreate a remote worker whose container or pod is gone (canonical)
 
 Architecture, the spawn ledger and the known gaps are documented in [CLAUDE.md](CLAUDE.md) — that file is for agents working in the tree, not for using the plugin.
 

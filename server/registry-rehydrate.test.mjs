@@ -36,23 +36,40 @@ import { join } from 'node:path'
 
 import { stampRecord } from './heartbeat.mjs'
 import { isFinished } from './resume-guard.mjs'
-import {
-  liveSessionIds,
-  rehydratableAgents,
-  rehydratedStatus,
-  toAgentRecord,
-} from './registry-rehydrate.mjs'
+import { liveSessionIds, rehydratableAgents, rehydratedStatus, toAgentRecord, unionRoster } from './registry-rehydrate.mjs'
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'registry-rehydrate-'))
   const dirs = {
     root,
     registryDir: join(root, 'registry'),
-    ledgerDir: join(root, 'ledger'),
     heartbeatDir: join(root, 'heartbeats'),
+    // ⚠️ The ledger is now the ENDPOINT, so its fixture is a row array served in-process
+    // rather than a directory of files. The suite still dials nothing — the transport is
+    // injected — and `rows` is the whole store, so a spec that wants an unreadable ledger
+    // fails the transport instead of pointing at a missing directory.
+    rows: [],
   }
-  for (const key of ['registryDir', 'ledgerDir', 'heartbeatDir']) mkdirSync(dirs[key])
+  for (const key of ['registryDir', 'heartbeatDir']) mkdirSync(dirs[key])
   return dirs
+}
+
+// The endpoint as the suite sees it: one row array, served from memory.
+function serving(dir) {
+  return async () => ({ status: 200, json: async () => dir.rows })
+}
+
+// The roster, read the way `supervisor.mjs` reads it — from the endpoint, with the registry and
+// heartbeat channels still supplying liveness. Every spec goes through here so the read has ONE
+// spelling and a change to its shape cannot leave half the suite asserting the old one.
+function roster(dir, overrides = {}) {
+  return rehydratableAgents({
+    endpoint: 'http://fixture.invalid',
+    fetchImpl: serving(dir),
+    registryDir: dir.registryDir,
+    heartbeatDir: dir.heartbeatDir,
+    ...overrides,
+  })
 }
 
 // A pid that cannot be running. macOS caps pids well below this, so `pidIsAlive` answers
@@ -71,31 +88,28 @@ function register(dir, sessionId, { pid = process.pid, status = 'busy' } = {}) {
 // A durable ledger record. `status: 'running'` is the default because that is what a record
 // reads when its server died without observing the outcome — the whole hazard.
 function ledger(dir, sessionId, { agentId = `agent_${sessionId}`, mode = 'interactive', ...extra } = {}) {
-  writeFileSync(
-    join(dir.ledgerDir, `${sessionId}.json`),
-    JSON.stringify({
-      session_id: sessionId,
-      agent_id: agentId,
-      label: `label-${sessionId}`,
-      mode,
-      spawned_at: '2026-10-06T00:00:00.000Z',
-      status: 'running',
-      ...extra,
-    }),
-  )
+  dir.rows.push({
+    session_id: sessionId,
+    agent_id: agentId,
+    label: `label-${sessionId}`,
+    mode,
+    spawned_at: '2026-10-06T00:00:00.000Z',
+    status: 'running',
+    ...extra,
+  })
 }
 
 function beat(dir, sessionId, { mode = 'headless' } = {}) {
   stampRecord(dir.heartbeatDir, { sessionId, pid: process.pid, mode })
 }
 
-test('adopts a live worker the ledger carries — the roster rebuilds on a fresh process', (t) => {
+test('adopts a live worker the ledger carries — the roster rebuilds on a fresh process', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   register(dir, 's-tab')
   ledger(dir, 's-tab', { agentId: 'agent_1' })
 
-  const agents = rehydratableAgents(dir)
+  const agents = await roster(dir)
 
   assert.equal(agents.length, 1)
   assert.equal(agents[0].id, 'agent_1')
@@ -103,17 +117,17 @@ test('adopts a live worker the ledger carries — the roster rebuilds on a fresh
   assert.equal(agents[0].rehydrated, true)
 })
 
-test('a ledger record with no liveness in either channel is NOT adopted — dead stays unknown', (t) => {
+test('a ledger record with no liveness in either channel is NOT adopted — dead stays unknown', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   // The ledger's own `status: running` is the trap: nothing closes a record whose server
   // went away, so this row is exactly the one a naive rehydrate would resurrect.
   ledger(dir, 's-dead', { agentId: 'agent_dead' })
 
-  assert.deepEqual(rehydratableAgents(dir), [])
+  assert.deepEqual(await roster(dir), [])
 })
 
-test('a registry entry whose pid is DEAD is not adopted — presence is not liveness', (t) => {
+test('a registry entry whose pid is DEAD is not adopted — presence is not liveness', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   // The file is still on disk because the session crashed rather than exited, which is
@@ -122,43 +136,43 @@ test('a registry entry whose pid is DEAD is not adopted — presence is not live
   register(dir, 's-crashed', { pid: DEAD_PID })
   ledger(dir, 's-crashed', { agentId: 'agent_crashed' })
 
-  assert.deepEqual(rehydratableAgents(dir), [])
+  assert.deepEqual(await roster(dir), [])
 })
 
-test('the heartbeat store alone is enough — a headless worker has no registry entry', (t) => {
+test('the heartbeat store alone is enough — a headless worker has no registry entry', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   ledger(dir, 's-headless', { agentId: 'agent_h', mode: 'headless' })
   beat(dir, 's-headless', { mode: 'headless' })
 
-  const agents = rehydratableAgents(dir)
+  const agents = await roster(dir)
 
   assert.equal(agents.length, 1)
   assert.equal(agents[0].id, 'agent_h')
   assert.equal(agents[0].status, 'running')
 })
 
-test('a resumed worker IS adopted, unlike the cap counter which filters it out', (t) => {
+test('a resumed worker IS adopted, unlike the cap counter which filters it out', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   register(dir, 's-resumed')
   ledger(dir, 's-resumed', { agentId: 'agent_r', resumed_from: 's-original' })
 
-  const agents = rehydratableAgents(dir)
+  const agents = await roster(dir)
 
   assert.equal(agents.length, 1, 'a roster must not inherit workerSessions() resumed_from filter')
   assert.equal(agents[0].resumedFrom, 's-original')
 })
 
-test('a registry session with no ledger record is not a worker — the operator and managers stay out', (t) => {
+test('a registry session with no ledger record is not a worker — the operator and managers stay out', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   register(dir, 's-operator')
 
-  assert.deepEqual(rehydratableAgents(dir), [])
+  assert.deepEqual(await roster(dir), [])
 })
 
-test('a duplicate agent_id keeps BOTH workers addressable — the loser is disambiguated, not dropped', (t) => {
+test('a duplicate agent_id keeps BOTH workers addressable — the loser is disambiguated, not dropped', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   // `supervisor.mjs` mints ids from a per-process counter, so a reconnect restarts it and two
@@ -171,7 +185,7 @@ test('a duplicate agent_id keeps BOTH workers addressable — the loser is disam
   ledger(dir, 'bbbbbbbb-2222-4222-8222-222222222222', { agentId: 'agent_1' })
   const logged = []
 
-  const agents = rehydratableAgents({ ...dir, log: (line) => logged.push(line) })
+  const agents = await roster(dir, { log: (line) => logged.push(line) })
 
   assert.equal(agents.length, 2, 'a live worker must not become unaddressable')
   assert.equal(agents[0].id, 'agent_1')
@@ -182,44 +196,47 @@ test('a duplicate agent_id keeps BOTH workers addressable — the loser is disam
   assert.match(logged[0], /share agent id agent_1/)
 })
 
-test('an unreadable ledger answers null, never an empty roster', (t) => {
+test('an unreadable ledger endpoint answers null, never an empty roster', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   register(dir, 's-tab')
   ledger(dir, 's-tab')
-  // A ledger path that exists but is a FILE, not a directory — readLedger reports the error
-  // rather than treating it as "nobody was ever spawned".
-  writeFileSync(join(dir.root, 'not-a-dir'), 'x')
+  // ⚠️ A store OUTAGE, not an empty store: the endpoint refuses to answer, which is a
+  // different fact from "nobody was ever spawned" — `[]` — and collapsing the two would let a
+  // permissions error read as a fleet with no workers.
+  const fetchImpl = async () => {
+    throw new Error('connect ECONNREFUSED')
+  }
 
-  assert.equal(rehydratableAgents({ ...dir, ledgerDir: join(dir.root, 'not-a-dir') }), null)
+  assert.equal(await roster(dir, { fetchImpl }), null)
 })
 
-test('an unreadable registry answers null — the other store a permissions error takes', (t) => {
+test('an unreadable registry answers null — the other store a permissions error takes', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   ledger(dir, 's-tab')
   writeFileSync(join(dir.root, 'registry-file'), 'x')
 
-  assert.equal(rehydratableAgents({ ...dir, registryDir: join(dir.root, 'registry-file') }), null)
+  assert.equal(await roster(dir, { registryDir: join(dir.root, 'registry-file') }), null)
 })
 
-test('an unreadable heartbeat store answers null — the third store, and the one headless needs', (t) => {
+test('an unreadable heartbeat store answers null — the third store, and the one headless needs', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   register(dir, 's-tab')
   ledger(dir, 's-tab')
   writeFileSync(join(dir.root, 'beat-file'), 'x')
 
-  assert.equal(rehydratableAgents({ ...dir, heartbeatDir: join(dir.root, 'beat-file') }), null)
+  assert.equal(await roster(dir, { heartbeatDir: join(dir.root, 'beat-file') }), null)
 })
 
-test('a rehydrated record carries the arrays agentView dereferences unconditionally', (t) => {
+test('a rehydrated record carries the arrays agentView dereferences unconditionally', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   register(dir, 's-tab')
   ledger(dir, 's-tab', { agentId: 'agent_1' })
 
-  const [agent] = rehydratableAgents(dir)
+  const [agent] = await roster(dir)
 
   // agentView does `a.transcript.length` and `a.permissions.filter(...)` with no guard, so an
   // absent field takes the WHOLE roster down rather than one row.
@@ -227,16 +244,13 @@ test('a rehydrated record carries the arrays agentView dereferences unconditiona
   assert.ok(Array.isArray(agent.permissions))
 })
 
-test('a record with no agent_id is skipped rather than adopted under a synthesised id', (t) => {
+test('a record with no agent_id is skipped rather than adopted under a synthesised id', async (t) => {
   const dir = fixture()
   t.after(() => rmSync(dir.root, { recursive: true, force: true }))
   register(dir, 's-noid')
-  writeFileSync(
-    join(dir.ledgerDir, 's-noid.json'),
-    JSON.stringify({ session_id: 's-noid', label: 'no agent id', mode: 'interactive' }),
-  )
+  dir.rows.push({ session_id: 's-noid', label: 'no agent id', mode: 'interactive' })
 
-  assert.deepEqual(rehydratableAgents(dir), [])
+  assert.deepEqual(await roster(dir), [])
 })
 
 test('liveSessionIds pid-checks the registry half, and unions in the heartbeat store', (t) => {
@@ -290,6 +304,16 @@ test('status maps from the ledger mode, so a rehydrated row reads like a spawned
   assert.equal(rehydratedStatus({ mode: 'interactive' }), 'interactive')
   assert.equal(rehydratedStatus({ mode: 'cluster' }), 'cluster')
   assert.equal(rehydratedStatus({ mode: 'headless' }), 'running')
+  // An A2A row re-adopts as its target's name, mirroring cluster; a pre-field record falls back.
+  assert.equal(rehydratedStatus({ mode: 'a2a', target: 'docker' }), 'docker')
+  assert.equal(rehydratedStatus({ mode: 'a2a', target: 'k8s' }), 'k8s')
+  assert.equal(rehydratedStatus({ mode: 'a2a' }), 'running')
+})
+
+test('a re-adopted A2A row keeps its worker id, so the liveness mirror still stamps it', () => {
+  const agent = toAgentRecord({ session_id: 's-1', agent_id: 'agent_1', mode: 'a2a', target: 'docker', worker_id: 'w-1' })
+  assert.equal(agent.status, 'docker')
+  assert.equal(agent.workerId, 'w-1')
 })
 
 test('none of the three rehydrated statuses is terminal — which is why liveness, not the status, decides', () => {
@@ -308,20 +332,118 @@ test('supervisor.mjs actually adopts the roster and guards the rehydrated rows',
   // supervisor.mjs's text — the remedy this repo already uses in cluster-spawn.test.mjs and
   // attention-poll.test.mjs, because supervisor.mjs starts an MCP server at import.
   const src = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
-  assert.match(src, /rehydratableAgents\(\{ log \}\)/)
+  assert.match(src, /await rehydratableAgents\(\{ log \}\)/)
   assert.match(src, /for \(const agent of rehydrated\) agents\.set\(agent\.id, agent\)/)
   assert.match(src, /function pruneRehydratedAgents\(\)/)
-  // Called before both readers answer, so a worker that died after boot leaves the roster.
-  assert.match(src, /case 'list_agents':\n\s+pruneRehydratedAgents\(\)/)
-  assert.match(src, /case 'agent_status': \{\n\s+pruneRehydratedAgents\(\)/)
+  // ⚠️ **Both readers answer from the REQUEST-TIME roster, not the in-process Map.** The boot
+  // adoption above is a snapshot that can never gain a row, so a reader that went back to
+  // `agents.values()`/`agents.get()` would restore the exact defect this change closes while
+  // every other assertion here stayed green. The Map-only shape is asserted ABSENT for that
+  // reason, not for tidiness.
+  // ⚠️ The property is that the roster is built from `currentRoster()`; the exact expression
+  // moved when `list_agents` gained `open_cards`, so this tracks the binding rather than the
+  // single-line return it used to be. Pinning the old literal would have made a legitimate
+  // feature look like a revert.
+  assert.match(src, /case 'list_agents': \{[\s\S]{0,400}?const roster = \[\.\.\.\(await currentRoster\(\)\)\.values\(\)\]/)
+  assert.match(src, /case 'agent_status': \{[\s\S]{0,400}?const agent = \(await currentRoster\(\)\)\.get\(args\.agent_id\)/)
+  assert.match(src, /case 'send_agent_message': \{[\s\S]{0,900}?const agent = \(await currentRoster\(\)\)\.get\(args\.agent_id\)/)
+  assert.ok(!/case 'list_agents':\n\s+pruneRehydratedAgents\(\)/.test(src), 'the Map-only list_agents must not come back')
+  assert.ok(!/case 'agent_status': \{\n\s+pruneRehydratedAgents\(\)/.test(src), 'the Map-only agent_status must not come back')
+  // And the union itself: a request-time read, deduped on `session_id`, with this process's own
+  // row winning — an endpoint row carries identity alone and must never displace a live one.
+  assert.match(src, /async function currentRoster\(\)/)
+  assert.match(src, /const fresh = await rehydratableAgents\(\{ log \}\)/)
+  // ⚠️ The store-outage branch must BOTH keep the roster AND say so. A bare `return roster` is
+  // indistinguishable from a healthy answer to the manager reading `list_agents`, and it threw
+  // away the `null`-vs-`[]` distinction `readSessionLedger` deliberately preserves.
+  assert.match(src, /if \(fresh === null\) \{[\s\S]{0,700}?log\('WARNING: the ledger endpoint could not be read[\s\S]{0,250}?return new Map\(agents\)/)
+  // ⚠️ **The union itself lives in `registry-rehydrate.mjs`, because it can be TESTED there and
+  // `supervisor.mjs` cannot be imported.** Pinning it by regex over THIS file's text is what let
+  // the id-shadowing defect through: a regex asserts the source's SHAPE, never its behaviour.
+  // The behavioural cases are the `unionRoster` tests at the end of this file; what is asserted
+  // HERE is only that this call site still goes through it rather than re-inlining the loop.
+  assert.match(src, /return unionRoster\(agents, fresh\)/)
+  assert.ok(!/takenIds/.test(src), 'the union must not be re-inlined in supervisor.mjs')
+  // ⚠️ **The last two ledger READS are pinned for the same reason as the roster above.** The
+  // park read on the resume path and the A2A liveness mirror were the final two
+  // `config.ledgerDir` readers; a revert would leave every behavioural test green while the
+  // store those readers consult is the file again — and the park read is what decides whether
+  // an operator's answer is carried into a resumed worker at all.
+  assert.match(src, /const record = await readSessionLedgerRow\(resume\)/)
+  assert.match(src, /\(\(await readSessionLedger\(\)\) \?\? \[\]\)\.filter\(/)
+  // ⚠️ **And the FILE LEDGER is gone outright, not merely unused.** The two READS above were its
+  // last readers, so the WRITE went with them: `config.ledgerDir` — the one place the sessions
+  // directory was ever named — must appear nowhere in the supervisor, and neither may the two file
+  // helpers it called. A revert that re-added the write would leave every behavioural test in this
+  // repo green, because nothing else exercises the spawn path's durable half at all.
+  assert.ok(
+    !/config\.ledgerDir/.test(src),
+    'the file ledger directory must be gone from the supervisor entirely',
+  )
+  assert.ok(
+    !/updateRecord\(|writeRecord\(/.test(src),
+    'the file-ledger write helpers must not come back — the endpoint is the only durable write',
+  )
+  // ⚠️ **The merge source is the in-memory record held on the agent, and the park depends on it.**
+  // The park is written when a gate opens and the result when the turn ends; merging into a re-read
+  // row would reintroduce the read-modify-write window, and merging the PATCH alone would drop the
+  // spawn edge. Both halves are pinned — the call, and the assignment that keeps the record.
+  assert.match(src, /const merged = mergeRecord\(agent\.ledgerRecord, patch\)/)
+  assert.match(src, /agent\.ledgerRecord = record/)
+  const rehydrateSrc = readFileSync(new URL('./registry-rehydrate.mjs', import.meta.url), 'utf8')
+  assert.match(rehydrateSrc, /export function unionRoster\(inProcess, fresh\)/)
+  // ⚠️ **A foreign row's id is a function of the ROW ALONE.** Deriving it from `takenIds` —
+  // seeded from this process's own Map — made an endpoint row answer as bare `agent_1` only
+  // while this process held no such id, so a spawn between a manager's `list_agents` and its
+  // `send_agent_message` flipped that row to `agent_1~<sid8>` and handed `agent_1` to the NEW
+  // local worker: the message reached the WRONG pane, silently. `agent_1` is the common case —
+  // 215 of the 1891 ledger rows claim it.
+  assert.match(rehydrateSrc, /let id = `\$\{agent\.id\}~\$\{agent\.sessionId\.slice\(0, 8\)\}`/)
+  assert.ok(!/if \(takenIds\.has\(id\)\) id = /.test(rehydrateSrc), 'the Map-derived id must not come back')
   // ⚠️ The resume path must PRUNE and then guard on EVERY row — never filter rehydrated rows
   // out. Filtering fixed the dead-worker deadlock by breaking the live case: a rehydrated row
   // whose worker still runs must keep blocking a resume, or two writers land on one
   // conversation.
-  assert.match(src, /pruneRehydratedAgents\(\)\n\s+const holder = findLiveHolder\(agents\.values\(\), resume\)/)
+  //
+  // ⚠️ The guard's BODY moved into `resume-guard.mjs` on 2026-10-29 (`resumeRefusal`), so it
+  // could be exercised behaviourally — `supervisor.mjs` starts an MCP server at module load and
+  // cannot be imported. What is pinned HERE is unchanged in intent and narrower in shape: this
+  // path still prunes first, still hands over EVERY row unfiltered, and now also passes `live`
+  // (the one fact that separates a dead tab from a live headless worker). The release itself and
+  // the safety property that must survive it are asserted in `resume-guard.test.mjs`.
+  //
+  // ⚠️ This pins the CALL'S TEXT, which is the price of a seam that cannot be imported: it can
+  // prove a variable named `live` is passed, not that the variable is the one `checkLiveness`
+  // produced. Renaming that binding breaks this test without a behaviour change, and the fix is
+  // to update the regex — not to loosen it, since the whole point is that the argument cannot
+  // silently become a literal or a different binding.
+  assert.match(src, /pruneRehydratedAgents\(\)\n(?:\s*\/\/[^\n]*\n)*\s+const refusal = resumeRefusal\(\{ agentRecords: agents\.values\(\), sessionId: resume, live \}\)/)
   assert.ok(!/findLiveHolder\(\[\.\.\.agents\.values\(\)\]\.filter/.test(src), 'the rehydrated filter must not come back')
+  assert.ok(!/agentRecords: \[\.\.\.agents\.values\(\)\]\.filter/.test(src), 'the rehydrated filter must not come back')
   // Not stamped on shutdown — that record belongs to the server that spawned the worker.
   assert.match(src, /if \(agent\.rehydrated\) continue/)
+  // ⚠️ And the WRITER routes every write through the DECISION, so the single-writer guarantee is
+  // a property of `writeLedger` rather than a `continue` each call site has to remember. This is
+  // load-bearing now that `send_agent_message` looks its agent up in `currentRoster()`: the
+  // cluster arm writes `{ result }` onto whatever it found, and the endpoint's `Post` REPLACES
+  // a row rather than merging one, so an unguarded write from a second server would blank the
+  // owner's row rather than lose a single field.
+  //
+  // ⚠️ **The DECISION itself moved out of this file on 2026-10-17 and is tested directly** — see
+  // `ledger.test.mjs`'s `ledgerWriteRoute` cases, which assert the behaviour rather than this
+  // shape. What is pinned HERE is that the writer still consults it: a revert that inlined the
+  // guard again would leave every behavioural test green while the routing silently reverted, and
+  // a wrong route is a dropped stop rather than an error.
+  assert.match(src, /const route = ledgerWriteRoute\(agent, patch\)/)
+  assert.match(src, /publishLedgerPatch\(agent\.sessionId, patch\)/)
+  // ⚠️ And an adopted row must NOT gain a local record on the way through. This process holds no
+  // copy of one, so a record built from the patch alone would be PARTIAL — and the next wholesale
+  // publish of it would blank the owner's fields, which is the exact damage the route exists to
+  // avoid, deferred by one write instead of prevented.
+  assert.ok(
+    !/if \(route === 'patch'\) \{[^}]*agent\.ledgerRecord =/.test(src),
+    'an adopted row must not be stored locally — a partial record would be published wholesale later',
+  )
   // ⚠️ The MINT must never land on an adopted id. `seq` restarts at 0 on every reconnect, so
   // without this loop the first spawn_agent after a reconnect overwrites a live worker's
   // rehydrated row — reproducing the exact `unknown agent` symptom this PR closes.
@@ -329,4 +451,68 @@ test('supervisor.mjs actually adopts the roster and guards the rehydrated rows',
   // And the marker must REACH a caller: `agentView` is the only surface an MCP client sees,
   // and without this field a boot-time row is indistinguishable from a live one.
   assert.match(src, /rehydrated: a\.rehydrated === true,/)
+})
+
+// The union is the heart of this change and it had no behavioural test at all: it lived inline
+// in `supervisor.mjs`'s `currentRoster`, which cannot be imported (it starts an MCP server at
+// module load), so it was pinned only by regexes over the source text. A regex cannot catch a
+// behavioural regression, and one got through — see the first case below.
+const foreign = (id, sessionId) => ({ id, sessionId, label: id, rehydrated: true })
+const OWN_A1 = { id: 'agent_1', sessionId: 'bbbb2222-0000-0000-0000-000000000000', label: 'mine' }
+const FAR_A1 = 'aaaa1111-0000-0000-0000-000000000000'
+
+test('a foreign row keeps ONE id, whatever this process happens to hold', () => {
+  // ⚠️ THE regression this pins. With the id derived from a set seeded by the LOCAL Map, the
+  // same endpoint row answered as bare `agent_1` on one call and `agent_1~<sid8>` on the next,
+  // so a manager that read `list_agents` and then called `send_agent_message` with an id from
+  // it reached whichever worker happened to hold that id — silently, and in the wrong pane.
+  // `agent_1` is the common case: 215 of the 1891 ledger rows claim it.
+  const alone = unionRoster(new Map(), [foreign('agent_1', FAR_A1)])
+  const afterLocalSpawn = unionRoster(new Map([['agent_1', OWN_A1]]), [foreign('agent_1', FAR_A1)])
+  const idAlone = [...alone.keys()].find((k) => k.startsWith('agent_1'))
+  const idAfter = [...afterLocalSpawn.keys()].find((k) => k.startsWith('agent_1~'))
+  assert.equal(idAlone, 'agent_1~aaaa1111')
+  assert.equal(idAfter, 'agent_1~aaaa1111')
+  // And the local worker still answers under its own bare id.
+  assert.equal(afterLocalSpawn.get('agent_1').sessionId, OWN_A1.sessionId)
+})
+
+test("this process's own row wins on a session_id collision", () => {
+  // An in-process agent carries the live transcript, the park queue and the permission rules;
+  // an endpoint row carries identity alone. The fresh row must never displace it.
+  const roster = unionRoster(new Map([['agent_1', OWN_A1]]), [foreign('agent_9', OWN_A1.sessionId)])
+  assert.equal(roster.size, 1)
+  assert.equal(roster.get('agent_1').label, 'mine')
+})
+
+test('two foreign rows sharing an agent_id are both kept, under distinct ids', () => {
+  // The collapse `agentsFromRecords` refuses within one read, refused here too: dropping a
+  // collision drops live workers.
+  const roster = unionRoster(new Map(), [
+    foreign('agent_1', FAR_A1),
+    foreign('agent_1', 'dddd4444-0000-0000-0000-000000000000'),
+  ])
+  assert.equal(roster.size, 2)
+  assert.deepEqual(
+    [...roster.values()].map((a) => a.sessionId).sort(),
+    [FAR_A1, 'dddd4444-0000-0000-0000-000000000000'],
+  )
+})
+
+test('the in-process map is not mutated', () => {
+  const inProcess = new Map([['agent_1', OWN_A1]])
+  unionRoster(inProcess, [foreign('agent_1', FAR_A1)])
+  assert.equal(inProcess.size, 1)
+  assert.equal(inProcess.get('agent_1').label, 'mine')
+})
+
+// A silent field loss here is the class this module's own comments warn about: the ledger
+// carries `wrapper_session_id`, and a mapping that does not read it leaves an adopted row
+// unable to see or answer a park the wrapper is holding for it.
+test('an adopted row keeps the wrapper session it was spawned under', () => {
+  const agent = toAgentRecord({ session_id: 's-1', agent_id: 'agent_1', mode: 'headless', wrapper_session_id: 'w-1' })
+  assert.equal(agent.wrapperSessionId, 'w-1')
+  // A pre-field record and a genuinely non-wrapper worker are the same absence on the ledger —
+  // which is why `rehydrated` marks the row rather than this field trying to say which it is.
+  assert.equal(toAgentRecord({ session_id: 's-1', agent_id: 'agent_1', mode: 'headless' }).wrapperSessionId, null)
 })

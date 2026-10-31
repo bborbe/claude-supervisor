@@ -111,6 +111,20 @@ CAP = 20
 # fallback would read as a working store and hide the outage.
 SOURCE_NOTE = None
 
+# Whether the last `needs_source()` store read SUCCEEDED -- True when the store
+# answered (even with zero items), False when it raised and the event log carried
+# the read. `board_flags()` reads it: an unreachable store must emit NO
+# board-card flag, because "the store did not answer" and "the store answered and
+# holds no card" are different facts and only the second is `board-card-missing`.
+STORE_OK = None
+
+# The event-log records the last `needs_source()` read folded. Held so
+# `board_missing_gates()` can ask which gates the store did NOT carry without a
+# SECOND `load_events()` -- that call globs and reads every session's log, and the
+# two reads could disagree about what is open. `None` when the fallback carried the
+# read, which is also when `board_missing_gates()` returns [].
+STORE_EVENTS = None
+
 # session_id -> enrichment record. One file per session, many items per session.
 _ENRICHED_CACHE = {}
 
@@ -294,10 +308,12 @@ def needs_source():
     print: a fallback that announced nothing would be indistinguishable from a
     healthy store, which is the failure this exists to prevent.
     """
-    global SOURCE_NOTE
+    global SOURCE_NOTE, STORE_OK, STORE_EVENTS
     try:
         items = store_items()
     except StoreUnreachable:
+        STORE_OK = False
+        STORE_EVENTS = None
         SOURCE_NOTE = "store unreachable — reading event log"
         # Stamp every row this fallback produced, so the ROW says where it came from.
         # The note above is printed once, before any row, and every row then renders
@@ -311,7 +327,9 @@ def needs_source():
             rec["replayed"] = True
         return replayed
     SOURCE_NOTE = None
-    events = {r.get("item_id"): r for r in load_events()}
+    STORE_OK = True
+    STORE_EVENTS = load_events()
+    events = {r.get("item_id"): r for r in STORE_EVENTS}
     out = []
     for item in items:
         rec = normalize_store_item(item, events)
@@ -591,7 +609,7 @@ def session_transcript_age(sid):
     `last_message_ts()`, which prefers the last transcript line's embedded
     `timestamp`, this reads the transcript file's own mtime — so `touch` moves this
     reading and not that one. The two answer different questions on purpose, and the
-    idle check in `agents/manager-drive.md` reads this one. An absent transcript
+    idle check in `agents/goal-drive.md` reads this one. An absent transcript
     returns `inf` so it reads as stale, which is the honest answer: nothing has been
     written for a session with no transcript.
 
@@ -723,13 +741,25 @@ def turn_after_closer(rec):
     `False` when the transcript is unreadable -- the same rule as the registry reads: an
     absent probe proves nothing, so the row is kept rather than dropped.
     """
+    return closer_turn_state(rec) is True
+
+
+def closer_turn_state(rec):
+    """`True` superseded · `False` the turn ended on the closer · `None` cannot tell.
+
+    The three-state form of `turn_after_closer()`, for a caller that must not read
+    "cannot tell" as "the turn ended": a `busy` session is parked only on positive
+    evidence that its last closer is the last thing it did, because reading a stale
+    closer off a running session would hand the operator a question it already left.
+    `None` covers an unreadable transcript AND a tail window holding no closer at all.
+    """
     sid = rec.get("session_id")
     path = rec.get("transcript")
     if not path and sid:
         path = next(iter(glob.glob(os.path.expanduser(
             f"~/.claude/projects/*/{sid}.jsonl"))), None)
     if not path or not os.path.exists(path):
-        return False
+        return None
     closer_at = -1
     superseded = False
     try:
@@ -753,7 +783,9 @@ def turn_after_closer(rec):
                 elif kind == "user" and closer_at >= 0:
                     superseded = True
     except Exception:
-        return False
+        return None
+    if closer_at < 0:
+        return None
     return superseded
 
 
@@ -851,28 +883,40 @@ def last_assistant_text(rec):
     return text
 
 
+# Widening tail windows: most transcripts end their last assistant text inside the
+# first 200 KB, but records written after a closer can outgrow it — pane 955's
+# `later (on …)` closer sat behind ~260 KB of `attachment` records on 2026-10-19 and
+# read as `transcript unreadable`. A window is widened only when it held no assistant
+# text at all; the cap keeps a multi-GB transcript from being read whole.
+_TAIL_WINDOWS = (200_000, 2_000_000, 20_000_000)
+
+
 def _read_last_assistant_text(rec):
     path = rec.get("transcript") or next(iter(glob.glob(os.path.expanduser(
         f"~/.claude/projects/*/{rec['session_id']}.jsonl"))), None)
     if not path or not os.path.exists(path):
         return ""
-    last = ""
     try:
+        size = os.path.getsize(path)
         with open(path, "rb") as f:
-            f.seek(max(0, os.path.getsize(path) - 200_000))
-            for line in f.read().decode("utf-8", "replace").splitlines():
-                if '"type":"assistant"' not in line and '"type": "assistant"' not in line:
-                    continue
-                try:
-                    j = json.loads(line)
-                except Exception:
-                    continue
-                for c in j.get("message", {}).get("content", []):
-                    if isinstance(c, dict) and c.get("type") == "text":
-                        last = c["text"]
+            for window in _TAIL_WINDOWS:
+                f.seek(max(0, size - window))
+                last = ""
+                for line in f.read().decode("utf-8", "replace").splitlines():
+                    if '"type":"assistant"' not in line and '"type": "assistant"' not in line:
+                        continue
+                    try:
+                        j = json.loads(line)
+                    except Exception:
+                        continue
+                    for c in j.get("message", {}).get("content", []):
+                        if isinstance(c, dict) and c.get("type") == "text":
+                            last = c["text"]
+                if last or window >= size:
+                    return last
     except Exception:
         pass
-    return last
+    return ""
 
 
 def closer_from_transcript(rec):
@@ -880,6 +924,64 @@ def closer_from_transcript(rec):
     lines = [l.strip() for l in last_assistant_text(rec).splitlines() if l.strip()]
     you = [l for l in lines if l.startswith("👤 You:")]
     return normalize_closer(you[-1].split(":", 1)[1]) if you else ""
+
+
+#: The four shapes a session's turn can end on, as the digest's `CLOSERS` class
+#: token. Only `ask` is a question for the operator; the other three exist so a
+#: consumer can tell "this session asked nothing" from "nothing was captured".
+#: `agents/fleet-drive.md` step 4a fail-closes a candidate with no `CLOSERS` row to
+#: `unverifiable`, and without these classes a routine turn end is indistinguishable
+#: from an uncaptured one.
+CLOSER_CLASSES = ("ask", "routine", "parked-wait", "none")
+
+#: The destructive verbs the routine-continue table's test 3 blacklists, applied to a
+#: `routine` row as well. A `nothing …` closer is never promoted to a `BLOCKED` row
+#: (`reclassify_idle` leaves it `idle`, and `is_open_gate` needs kind
+#: permission/question), so step 4a test 4 can never fire on one and test 3 would
+#: otherwise be skipped entirely — `nothing — approve: deploy prod` would reach
+#: `revive` with no text test at all. Substring matching over-matches on purpose
+#: (`produce` trips `prod`); the direction is fail-closed, an over-match is `ask`.
+_DESTRUCTIVE = ("push", "merge", "deploy", "release", "tag", "apply", "buca",
+                "kubectl", "delete", "rm ", "trade", "session-close", "prod")
+
+
+def closer_class(rec):
+    """What this session's last turn ended on — `ask` | `routine` | `parked-wait` | `none`.
+
+    Deliberately a SECOND question from `is_open_gate()`, never a replacement for it.
+    `is_open_gate` answers "is the operator being asked something" — the feed's
+    question, and the one that keeps a routine closer out of `Needs you`. This answers
+    "what did the turn end on" — the digest's question, and the one `CLOSERS` needs in
+    order to be read at all. Measured 2026-10-29 on round `2026-10-29T08-28-15Z`: 7
+    parked rows, 4 `CLOSERS` rows, and the three uncaptured parked rows split across
+    every class this function names — `nothing — I continue …` (routine), `later (on …)`
+    (parked-wait), and no closer line at all (none) — so a consumer reading only
+    "row present / row absent" could not tell a routine turn end from a lost capture.
+
+    The split reuses the two filters `reclassify_idle()` already applies rather than
+    re-deriving them: `startswith("nothing")` and `is_parked_verb()` are exactly the
+    classes the digest must never nudge, and a second copy of the test here would let
+    the two drift apart.
+
+    ⚠️ **`ask` is a catch-all, not a verb list.** It is every closer that is neither a
+    routine turn end nor a clock-bound park — including a plain status line
+    (`👤 You: done — all green`, `waiting for CI`), which is not a question at all.
+    That is deliberate and it is the safe direction: an unrecognised closer reaches the
+    drive leg as `blocked`, never as `revivable`, and step 4a's routine-continue table
+    is what re-admits the ones that only look like asks. Narrowing this to the
+    documented verbs would make every unlisted closer `revivable`, which is the
+    fail-open direction the `CLOSERS` fail-closed rule exists to prevent.
+    """
+    ask = closer_from_transcript(rec)
+    if not ask:
+        return "none"
+    if is_parked_verb(ask):
+        return "parked-wait"
+    if ask.startswith("nothing"):
+        # A `nothing …` closer that still names a destructive verb is self-
+        # contradictory, and no later test can catch it — see `_DESTRUCTIVE`.
+        return "ask" if any(v in ask.lower() for v in _DESTRUCTIVE) else "routine"
+    return "ask"
 
 
 def current_closer(rec):
@@ -1170,6 +1272,339 @@ def rendered_panels(records, open_panes=frozenset(), task_status=None,
                   key=lambda r: r["ts"])
 
 
+# --- Cause classification ---------------------------------------------------
+#
+# The feed answers "is a gate open". This answers "WHY is this pane parked" -- a
+# SECOND AXIS, not a rival to the runbook's A-E gate triage classes
+# (`65 Runbooks/Manager Session.md` § Gate triage -- who clears what). A-E says who
+# may CLEAR a gate; this says why the pane is PARKED. The two co-occur on one pane
+# -- a pane can be class D and `board-card-expired` at once -- so folding either
+# into the other would drop a dimension rather than simplify.
+#
+# One cause class per parked pane, first match wins. Board flags are orthogonal and
+# layer on top.
+
+CAUSE_OPERATOR = "awaiting-operator"
+CAUSE_TASK = "waiting-on-task"
+CAUSE_CLOCK = "waiting-on-clock"
+CAUSE_CAP = "cap-blocked"
+CAUSE_UNKNOWN = "unknown"
+CAUSE_CLASSES = (CAUSE_OPERATOR, CAUSE_TASK, CAUSE_CLOCK, CAUSE_CAP, CAUSE_UNKNOWN)
+
+FLAG_CARD_MISSING = "board-card-missing"
+FLAG_CARD_EXPIRED = "board-card-expired"
+
+CAUSE_STATE_DIR = os.environ.get("WHO_NEEDS_ME_STATE_DIR") or os.path.expanduser(
+    "~/.claude/state/who-needs-me"
+)
+CAUSE_STATE_PATH = os.path.join(CAUSE_STATE_DIR, "causes.json")
+
+# Distinct DAYS a class must recur before "no owning task" is worth raising. One
+# run is one invocation, deduped per calendar day, so the attention watcher's
+# polling cannot inflate the count -- without the dedup, a class seen on three
+# consecutive sweeps of one afternoon would read as recurring.
+OWNER_TASK_THRESHOLD = 3
+
+# The supervisor's spawn-cap refusal, as the manager's own transcript records it.
+# `maxManagersHard` is the manager cap (`docs/fleet-surface.md` § Spawn a worker
+# item 5); `maxConcurrent` is the fleet one.
+_CAP_REFUSAL = re.compile(r"maxManagersHard|maxConcurrent", re.I)
+
+_TRIGGER = re.compile(r"later\s*\(on\s+([^)]+)\)", re.I)
+
+
+def cause_class(rec, open_panes=frozenset(), task_status=None):
+    """Why this pane is parked -- one class from `CAUSE_CLASSES`.
+
+    Order is load-bearing: it mirrors `is_open_gate`'s own exclusions, so the two
+    cannot disagree about which rows are gates.
+
+      1. `is_parked_verb` FIRST -- a `later (on <trigger>):` closer. Checked before
+         the gate test because `is_open_gate` already excludes it; classifying it
+         `awaiting-operator` would invent a gate the feed does not list.
+      2. a peer-gate restatement -- the session waits on ANOTHER pane's decision.
+         Today `is_open_gate` suppresses these rows entirely; naming them here is
+         the point of the class, not a leak.
+      3. `is_open_gate` -- the pane holds a decision only the operator can make.
+      4. the spawn cap.
+    """
+    if is_parked_verb(rec.get("detail")):
+        return CAUSE_CLOCK
+    if names_peer_gate(rec, open_panes):
+        return CAUSE_TASK
+    if is_open_gate(rec, open_panes=open_panes, task_status=task_status,
+                    include_panels=True):
+        return CAUSE_OPERATOR
+    if _cap_blocked(rec):
+        return CAUSE_CAP
+    return CAUSE_UNKNOWN
+
+
+def _cap_blocked(rec):
+    """A manager whose spawn the cap refused.
+
+    Read from the TRANSCRIPT, not from the live config: the config says what the
+    cap IS, the transcript says whether THIS session hit it, and only the second is
+    a reason a pane is parked. A config-only test would label every manager
+    `cap-blocked` whenever the fleet merely sits at the cap.
+    """
+    if (rec.get("role") or "").lower() != "manager":
+        return False
+    return bool(_CAP_REFUSAL.search(last_assistant_text(rec) or ""))
+
+
+def cause_label(rec, cause, peers=None, pmap=None, registry=None):
+    """The class plus its parameter: `waiting-on-clock 2026-10-15`.
+
+    A class whose parameter does not resolve renders BARE rather than with a
+    placeholder -- `waiting-on-task` with no resolvable peer is still true, and
+    inventing a name for it is the stale join `pane_for()` warns about.
+    """
+    if cause == CAUSE_CLOCK:
+        m = _TRIGGER.search(rec.get("detail") or "")
+        return f"{cause} {m.group(1).strip()}" if m else cause
+    if cause == CAUSE_TASK:
+        peer = _peer_pane(rec, peers or [])
+        if peer:
+            return f"{cause} {name_of(peer, pmap or {}, registry)}"
+    return cause
+
+
+def _peer_pane(rec, peers):
+    """The peer record this closer restates, or None."""
+    mine = str(rec.get("pane"))
+    named = set(_PANE_REF.findall(rec.get("detail") or "")) - {mine}
+    for r in peers:
+        if str(r.get("pane")) in named:
+            return r
+    return None
+
+
+def board_flags(rec, cause, carded=None, store_ok=True):
+    """Board-hygiene flags for a pane, orthogonal to its cause class.
+
+    `carded` is the set of session_ids the STORE returned this run -- the set a
+    board card exists for. It is passed in rather than re-derived here, so a
+    caller cannot accidentally compute it from a list that has already been
+    filtered.
+
+    ⚠️ **A FAILED STORE READ EMITS NO FLAG.** `store_items()` raises
+    `StoreUnreachable`; collapsing that to "no card" would mark every parked pane
+    `board-card-missing` during an outage -- the `docs/pane-reads.md` rule ("Return
+    None on failure -- never {} / [] / 0; callers must not re-collapse with
+    `or {}`"). `store_ok=False` is that distinction, and it is why the parameter is
+    a boolean rather than the caller passing an empty set.
+    """
+    if cause != CAUSE_OPERATOR or not store_ok:
+        return []
+    sid = rec.get("session_id")
+    if sid in (carded or set()):
+        return []
+    # A card was posted and is no longer open: expired, not never-created. The
+    # distinction is the whole reason `posted_closer` is consulted rather than the
+    # store alone -- an empty store is otherwise the same shape either way.
+    return [FLAG_CARD_EXPIRED] if posted_closer(sid) else [FLAG_CARD_MISSING]
+
+
+def store_session_ids(records):
+    """The session_ids the STORE returned this run -- the set a card exists for.
+
+    `store_vouched` is the marker `needs_source()` stamps on a row the store
+    itself produced, so this reads the provenance rather than re-asking the store
+    (which would be a second read, and the two could disagree).
+    """
+    return {r.get("session_id") for r in records if r.get("store_vouched")}
+
+
+def board_missing_gates(records, open_panes=frozenset(), task_status=None,
+                        busy_ids=frozenset(), resumed_ids=frozenset()):
+    """Open gates the EVENT LOG holds and the STORE did not return.
+
+    These are the panes the board hid: the session is parked, the hook logged the
+    gate, and no card is open for it. They are deliberately NOT folded into
+    `Needs you`, and the separation is the design rather than a convenience:
+
+      * the store read resolves the producer's liveness **server-side** and drops
+        dead askers as a side effect of that read, which is why `store_vouched`
+        exists and why `quiet_session_ids()` declines to re-judge a store row.
+        Measured 2026-09-28 on pane 2555: a session blocked on a gate writes
+        nothing, its transcript ages past `LIVE_WINDOW`, and this reader called a
+        LIVE gate `provably finished` and dropped the row the operator was being
+        waited on. Folding event-log rows into `blocked` would re-admit exactly
+        those rows.
+      * so they get their own section, where a mis-judged row costs one visible
+        extra line instead of a wrong block count. Callers still pass these
+        through `is_live()` -- the re-judgment is kept, it is just kept where it
+        cannot corrupt the count.
+
+    ⚠️ **Returns [] unless a store read SUCCEEDED.** With the store unreachable
+    the event log is the PRIMARY source, every row is store-less by construction,
+    and "no card" would be asserted about every pane on the machine -- the
+    `docs/pane-reads.md` rule again. `STORE_OK` is that distinction.
+    """
+    if STORE_OK is not True:
+        return []
+    carded = store_session_ids(records)
+    return sorted(
+        [r for r in (STORE_EVENTS or [])
+         if r.get("session_id") not in carded
+         and not is_superseded(r, busy_ids, resumed_ids)
+         and is_open_gate(r, open_panes=open_panes, task_status=task_status)],
+        key=lambda r: r["ts"],
+    )
+
+
+def cause_cell(rec, peers, pmap, registry, carded):
+    """The `cause · flags` prefix a row renders ahead of its kind."""
+    cause = cause_class(rec, {str(p.get("pane")) for p in peers},
+                        task_status_from_closer)
+    label = cause_label(rec, cause, peers, pmap, registry)
+    flags = board_flags(rec, cause, carded, store_ok=STORE_OK is True)
+    return f"{label} [{' '.join(flags)}] · " if flags else f"{label} · "
+
+
+def _empty_state():
+    return {"version": 1, "days": {}, "counts": {}, "owners": {}}
+
+
+def read_causes(path=None):
+    """The tally, or an empty one. A corrupt file is treated as absent.
+
+    Fails OPEN: the tally is a diagnostic, and refusing the feed because its own
+    counter is unreadable would make the counter's failure indistinguishable from
+    the defect it counts.
+    """
+    try:
+        with open(path or CAUSE_STATE_PATH, encoding="utf-8") as f:
+            state = json.load(f)
+    except Exception:
+        return _empty_state()
+    if not isinstance(state, dict):
+        return _empty_state()
+    for key in ("days", "counts", "owners"):
+        if not isinstance(state.get(key), dict):
+            state[key] = {}
+    state.setdefault("version", 1)
+    return state
+
+
+def write_causes(state, path=None):
+    """Persist the tally atomically. Never raises.
+
+    Temp-file + `os.replace` because two sessions can sweep at once, and a
+    truncated `causes.json` reads as an empty tally -- a silent reset of every
+    count, which is the failure mode a plain `open(..., "w")` produces.
+    """
+    path = path or CAUSE_STATE_PATH
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = "%s.tmp.%d" % (path, os.getpid())
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def record_causes(classes, path=None, today=None):
+    """Fold this run's classes into the tally; return the new state.
+
+    One run is one invocation, DEDUPED PER CALENDAR DAY: a class's count rises by
+    exactly 1 on the first run of a date that sees it, and a second run the same
+    date adds nothing.
+    """
+    today = today or time.strftime("%Y-%m-%d")
+    state = read_causes(path)
+    seen = set(state["days"].get(today) or [])
+    changed = False
+    for cause in classes:
+        if cause in seen:
+            continue
+        seen.add(cause)
+        state["counts"][cause] = state["counts"].get(cause, 0) + 1
+        changed = True
+    if not changed:
+        # Nothing new today -- skip the write. A manager's attention watcher polls
+        # this command on `--section needs-you`, so an unconditional write would
+        # rewrite the file on every tick to produce byte-identical content.
+        return state
+    state["days"][today] = sorted(seen)
+    write_causes(state, path)
+    return state
+
+
+def unowned_causes(state, threshold=None):
+    """Classes at or over the threshold that no task owns.
+
+    Reads the `owners` map only -- no subprocess, no network. The feed runs inside
+    a manager's sweep, and `vault-cli task search` loads a sentence-transformer
+    model (~10s, and it writes its INFO logs to stdout as JSON array elements), so
+    resolving owners inline would make this command slow AND its output
+    unparseable. Owner RESOLUTION is the separate, opt-in pass below; this is the
+    read.
+    """
+    threshold = OWNER_TASK_THRESHOLD if threshold is None else threshold
+    return sorted(c for c, n in state.get("counts", {}).items()
+                  if n >= threshold and not state.get("owners", {}).get(c))
+
+
+def resolve_owners(causes, path=None, timeout=30):
+    """Best-effort: fill `owners` for classes from `vault-cli task search`.
+
+    Opt-in (`--resolve-owners`), never on the render path -- see
+    `unowned_causes`. A class the search cannot resolve is left UNMAPPED, which is
+    the same state as "no owning task": the flag names a gap in the map, and the
+    operator closes it. Deliberately not recorded as resolved-but-empty, so a
+    failed search cannot silently suppress the flag it exists to raise.
+    """
+    state = read_causes(path)
+    changed = False
+    for cause in causes:
+        if state["owners"].get(cause):
+            continue
+        name = _search_owner(cause, timeout)
+        if name:
+            state["owners"][cause] = name
+            changed = True
+    if changed:
+        write_causes(state, path)
+    return state
+
+
+def _search_owner(cause, timeout=30):
+    """The top task `vault-cli task search <cause>` names, or None.
+
+    The search interleaves its own INFO log lines with the results, so entries
+    carrying log markers are skipped rather than returned as a task name.
+    """
+    try:
+        out = subprocess.run(
+            ["vault-cli", "task", "search", cause, "--output", "json"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        hits = json.loads(out.stdout or "[]")
+    except ValueError:
+        return None
+    if not isinstance(hits, list):
+        return None
+    for hit in hits:
+        if isinstance(hit, dict):
+            for key in ("name", "title", "task", "identifier"):
+                if hit.get(key):
+                    return str(hit[key])
+            continue
+        text = str(hit).strip()
+        if text and not re.search(r"\b(INFO|WARNING|httpx|sentence_transformers)\b", text):
+            return text
+    return None
+
+
 def age(ts):
     m = int((time.time() - ts) // 60)
     return f"{m}m" if m < 60 else f"{m // 60}h{m % 60:02d}m"
@@ -1423,6 +1858,7 @@ def answer_handover(rec):
 
 def row(rec, pmap, what, registry=None):
     pane = rec.get("pane")
+    headless = False
     if pane and is_routable(rec, pmap, registry):
         jump = f"wezterm cli activate-pane --pane-id {pane}"
     else:
@@ -1437,6 +1873,15 @@ def row(rec, pmap, what, registry=None):
         # is untouched and keeps the single jump line it has always rendered.
         answer = answer_handover(rec)
         if answer:
+            if not pane:
+                # A headless worker owns no pane by construction (`owned_pane()`
+                # refuses an unprovable pane, so the hook records `pane: ""`), so the
+                # row is answerable with no jump to offer. Calling it unroutable made
+                # it read as an exited session and it went unacted on — measured
+                # 2026-10-24, four such gates in one sweep, each cleared only by a
+                # manager reading the store directly.
+                headless = True
+                jump = "headless — no pane to jump to; answer with the command below"
             jump = f"{jump}\n         {answer}"
     # A replayed row says so ON THE ROW, in the scan position a manager reads first.
     # The marker is EMPTY when the store answered, so a live read renders
@@ -1444,7 +1889,14 @@ def row(rec, pmap, what, registry=None):
     # a responsive store's output is unchanged, and a marker that was always present
     # would fail it. `replayed` is set by `needs_source()` on the fallback branch.
     mark = "⟳replay  " if rec.get("replayed") else ""
-    return (f"  [{pane or '?':>4}] {age(rec['ts']):>6}  {mark}"
+    # `hst` is scoped exactly like the jump relabel above — it marks a row we can
+    # route to an answer, not merely one with no pane. A pane-less row with nothing
+    # to answer (a replayed log row, or one kept because the pane list was
+    # unreadable) may be an exited session, so it keeps `?`: claiming a live
+    # headless worker there would be the same overstatement this change removes
+    # one branch up. Column width is unchanged, so the table does not shift.
+    pane_col = pane if pane else ("hst" if headless else "?")
+    return (f"  [{pane_col:>4}] {age(rec['ts']):>6}  {mark}"
             f"{name_of(rec, pmap, registry)[:50]:<50}  {what[:60]}\n"
             f"         {provenance_of(rec)}\n"
             f"         {jump}")
@@ -1563,9 +2015,16 @@ def pane_for(session_id):
     return 1
 
 
-# The five sections this feed renders, in render order. `--section` names them;
-# a manager's attention watcher arms on `needs-you` alone.
-SECTIONS = ("needs-you", "rendered-panels", "stuck", "reapable", "idle")
+# The seven sections this feed can render, in render order. `--section` names them;
+# a manager's attention watcher arms on `needs-you` alone. The first six are the
+# default render; `last-closers` is opt-in and never prints without `--section`.
+#
+# `board-missing` is its own section rather than a member of `needs-you`
+# deliberately -- see `board_missing_gates()`: those rows have NOT had their
+# liveness decided by the store, so counting them as blocks would put a
+# re-judged row into the number a manager triages by.
+SECTIONS = ("needs-you", "board-missing", "rendered-panels", "stuck", "reapable",
+            "idle", "last-closers")
 
 
 def section_filter(names):
@@ -1690,10 +2149,17 @@ def main():
         "--section",
         action="append",
         choices=SECTIONS,
-        help="render only this section (repeatable); the default renders all five. "
-        "A manager's attention watcher arms on `--section needs-you`: the other four "
-        "are not gates, and an unscoped feed makes that watcher fire on every peer's "
-        "rendered closer.",
+        help="render only this section (repeatable); the default renders the feed's "
+        "six and never `last-closers`, which is opt-in because its rows are not "
+        "gates and no watcher should arm on them. A manager's attention watcher arms "
+        "on `--section needs-you`: the others are not gates either, and an unscoped "
+        "feed makes that watcher fire on every peer's rendered closer.",
+    )
+    ap.add_argument(
+        "--resolve-owners",
+        action="store_true",
+        help="fill the `owners` map in causes.json via `vault-cli task search`. "
+        "Slow — the search loads a model — and never on the default path.",
     )
     ap.add_argument("--jump", metavar="PANE", help="activate this WezTerm pane and exit")
     ap.add_argument(
@@ -1782,11 +2248,27 @@ def main():
                        and is_reapable(r, task_status_from_closer)], key=lambda r: r["ts"])
     stuck = sorted([r for r in tools if time.time() - r["ts"] > a.stuck_min * 60], key=lambda r: r["ts"])
     idle = sorted([r for r in needs if r["kind"] == "idle" and not answered(r)], key=lambda r: r["ts"])
+    # Every live record's last-turn closer, WITH its class. This is the digest's input,
+    # not the feed's: `panels` answers "is the operator being asked something" and
+    # therefore carries real asks only, while `CLOSERS` in the sweep digest has to say
+    # what each parked session's turn ended on — `agents/fleet-drive.md` step 4a
+    # fail-closes a candidate with no row to `unverifiable`, so a class-less absence
+    # reads the same whether the turn ended on `nothing` or was never captured.
+    # Rendered only on request (see below); the six default sections are read by the
+    # manager's watchers and a row here is not a gate.
+    # One row per SESSION, not per open item. `needs` holds one record per open item,
+    # so a session carrying both a permission prompt and a question would otherwise
+    # render twice and spend the digest's 40-line payload cap on a duplicate. The
+    # newest record per session wins, since the sort is oldest-first.
+    _by_session = {}
+    for r in sorted([r for r in needs if not answered(r)], key=lambda r: r["ts"]):
+        _by_session[r.get("session_id") or id(r)] = r
+    last_closers = list(_by_session.values())
 
     # Say which source answered, once, before any row. A silent fallback would
     # be indistinguishable from a healthy store — which is the whole failure
     # this note exists to prevent.
-    # `--section` scopes the render to the named sections; with no flag all five
+    # `--section` scopes the render to the named sections; with no flag all six
     # render, byte-for-byte as before. The scoping exists because the consumer,
     # `gate-owner-filter.py`'s `panes_from_feed`, matches `[<pane>]` on ANY line
     # regardless of the section header above it — so a whole-feed arm fires on every
@@ -1797,6 +2279,14 @@ def main():
 
     if SOURCE_NOTE:
         print(SOURCE_NOTE)
+    # The gates the store did not carry -- see `board_missing_gates()`. Computed
+    # here, after `live`/`busy`/`resumed` exist and before any render, so the
+    # section and each row's flag cannot disagree about which rows are uncarded.
+    carded = store_session_ids(needs)
+    board_missing = [r for r in board_missing_gates(needs, open_panes,
+                                                    task_status_from_closer,
+                                                    busy, resumed) if live(r)]
+
     if wanted("needs-you"):
         print(f"Needs you ({len(blocked)})")
         # Capped: the manager reads a summary. A reader that prints thirty
@@ -1804,13 +2294,29 @@ def main():
         # count of what it omitted is what keeps the cap honest rather than silent.
         shown, withheld = capped(blocked, a.all)
         for r in shown:
-            print(row(r, pmap, f"{r['kind']}: {r['detail']}", registry))
+            print(row(r, pmap, f"{cause_cell(r, blocked, pmap, registry, carded)}"
+                              f"{r['kind']}: {r['detail']}", registry))
         if withheld:
             print(f"{withheld} more — pass --all")
+    if wanted("board-missing"):
+        print(f"\nBoard card missing ({len(board_missing)})"
+              f"  — parked, but the board carries no card")
+        for r in board_missing:
+            print(row(r, pmap, f"{cause_cell(r, board_missing, pmap, registry, carded)}"
+                              f"{r['kind']}: {r['detail']}", registry))
     if wanted("rendered-panels"):
         print(f"\nRendered panels ({len(panels)})  — a closer line, not a parked gate")
         for r in panels:
             print(row(r, pmap, r["detail"], registry))
+    # Opt-in only: `a.section` is required, so the no-flag render keeps its six
+    # sections byte-for-byte. A consumer that asks for it gets every live session's
+    # last-turn closer and its class — the digest's `CLOSERS` source.
+    if a.section and wanted("last-closers"):
+        print(f"\nLast closers ({len(last_closers)})"
+              f"  — last-turn closer and class (ask | routine | parked-wait | none)")
+        for r in last_closers:
+            print(row(r, pmap, f"{closer_class(r)}: "
+                               f"{closer_from_transcript(r) or 'no closer line'}", registry))
     if wanted("stuck"):
         print(f"\nProbably stuck > {a.stuck_min}m ({len(stuck)})")
         for r in stuck:
@@ -1823,6 +2329,17 @@ def main():
         print(f"\nIdle, turn ended: {len(idle)}")
     if wanted("needs-you") and not blocked and not stuck:
         print("\nNothing needs you.")
+    if wanted("needs-you"):
+        # The tally records the BLOCKED set only: it answers "which cause keeps
+        # recurring", and the uncarded rows above are already a board defect
+        # rather than a distinct reason a pane is parked.
+        state = record_causes({cause_class(r, open_panes, task_status_from_closer)
+                               for r in blocked})
+        if a.resolve_owners:
+            state = resolve_owners(sorted(unowned_causes(state)))
+        for cause in unowned_causes(state):
+            print(f"\n⚠ recurring cause with no owning task: {cause} "
+                  f"({state['counts'][cause]} days) — map it in {CAUSE_STATE_PATH}")
 
 
 if __name__ == "__main__":

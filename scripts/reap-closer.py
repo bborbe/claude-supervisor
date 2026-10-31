@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Has this session already run its close? The reap test's fourth read.
 
-The drive leg's reap test (`agents/manager-drive.md` <process> step 1) decides that a task is
+The drive leg's reap test (`agents/goal-drive.md` <process> step 1) decides that a task is
 finished from three disk facts: `status: completed`, `phase: done`, zero open boxes. Those facts
 say nothing about the SESSION, so a worker that has already run its close and is merely still
 open reads exactly like one parked on the close gate. Measured 2026-09-27: one Manager Layer tick
@@ -11,13 +11,22 @@ still held `pick — 1. /vault-cli:session-close`, so its notice was correct.
 This script reads the session's last closer: the last `👤 You:` line in its latest assistant
 message carrying one, found in the transcript by session id.
 
-  <session-id>   CLOSED (exit 0) / OPEN (exit 1) / UNREADABLE (exit 2)
+  <session-id>   CLOSED (exit 0) / OPEN (exit 1) / UNREADABLE (exit 2) / PARKED (exit 3)
 
 Prints one line: `closer: <VERDICT> <timestamp> <line>`, or `closer: UNREADABLE (<why>)`.
 
-⚠️ **Only CLOSED may withhold a reap.** OPEN and UNREADABLE both mean "reap as before". A read
-that fails must never suppress a notice, which is why UNREADABLE is its own exit code rather than
-a flavour of CLOSED.
+⚠️ **Only CLOSED and PARKED may withhold a reap.** OPEN and UNREADABLE both mean "reap as before".
+A read that fails must never suppress a notice, which is why UNREADABLE is its own exit code rather
+than a flavour of CLOSED.
+
+⚠️ **PARKED is a standing `approve:`/`pick` gate — a session parked on the operator's own
+decision.** Operator ruling **2026-10-20** (attention card `92f0e524bdd5c9c0b09c063b06363575`,
+`ANSWERED: option: stop reaping`): the gate's own attention card already reaches the operator, so
+a reap notice is redundant, the session can only refuse it, and the refusal trains sessions to
+discount the reap channel. ⚠️ **PARKED is not CLOSED** — one is "the close has run", the other is
+"the operator has not answered yet" — so the caller must render them differently even though both
+withhold the reap. ⚠️ **It is not a repeat-count either:** the suppression keys on the closer's
+*kind*, first time and every time.
 
 ⚠️ **Assistant messages only.** User turns carry injected command bodies (`/vault-cli:session-close`
 prints its own closer templates), and a naive grep matches those.
@@ -36,9 +45,13 @@ import os
 import re
 import sys
 
-CLOSED, OPEN, UNREADABLE = 0, 1, 2
-WINDOW = 262144  # bytes read from the tail; a closed session is idle, so its closer is at the end
+CLOSED, OPEN, UNREADABLE, PARKED = 0, 1, 2, 3
+WINDOW = 262144  # bytes per backward chunk, not the whole read — see `last_closer`
+MAX_SCAN = 4194304  # hard bound on the backward scan, so a hook never reads a whole transcript
 CLOSED_RE = re.compile(r"👤 You:\s*`?nothing — session closed")
+# A standing operator gate: the closer's own line carries `pick` or `approve`. Matched
+# after CLOSED, so a `nothing — session closed` line can never reach here.
+PARKED_RE = re.compile(r"👤 You:\s*`?(pick|approve)\b")
 
 
 def find_transcript(session_id, projects_dir):
@@ -49,15 +62,50 @@ def find_transcript(session_id, projects_dir):
     return sorted(paths)
 
 
-def last_closer(path):
+def tail_lines(path, max_bytes=MAX_SCAN):
+    """Yield the transcript's lines newest-first, scanning backwards in `WINDOW` chunks.
+
+    ⚠️ **A fixed tail window is not enough, and the failure is silent.** Measured
+    2026-10-19: a `Stop` hook called `last_closer` on a 15 MB session transcript 44 ms
+    after the closer was written, and it returned `None` — the harness writes large
+    `api-request-blob` entries after the assistant message, so the closer sat ~758 KB
+    from EOF and a 256 KB read never reached it. The same defect reproduces with one
+    400 KB entry after the closer. The scan is bounded (`max_bytes`) so a pathological
+    transcript cannot turn a hook into a full-file read.
+    """
+    size = os.path.getsize(path)
+    end = size
+    carry = b""
     with open(path, "rb") as f:
-        size = os.path.getsize(path)
-        f.seek(max(0, size - WINDOW))
-        tail = f.read().decode("utf-8", "replace")
-    last = None
-    for line in tail.splitlines():
+        while end > 0 and size - end < max_bytes:
+            # ⚠️ The FIRST chunk is clamped to the remaining budget: reading a full
+            # `WINDOW` regardless would make `max_bytes` a no-op on the first iteration.
+            chunk = min(WINDOW, max_bytes - (size - end))
+            start = max(0, end - chunk)
+            f.seek(start)
+            data = f.read(end - start) + carry
+            lines = data.split(b"\n")
+            if start > 0:
+                # The first line is the tail of one whose head is in the next chunk.
+                carry = lines[0]
+                lines = lines[1:]
+            else:
+                carry = b""
+            for raw in reversed(lines):
+                if raw.strip():
+                    yield raw
+            end = start
+
+
+def last_closer(path, max_bytes=MAX_SCAN):
+    """`(timestamp, line)` for the transcript's last `👤 You:` line, or `None`.
+
+    Scans backwards from EOF and returns at the first assistant message carrying a
+    closer, so the common case (closer at the end) costs one `WINDOW` read.
+    """
+    for raw in tail_lines(path, max_bytes):
         try:
-            d = json.loads(line)
+            d = json.loads(raw)
         except ValueError:
             continue
         if d.get("type") != "assistant":
@@ -71,8 +119,8 @@ def last_closer(path):
             )
         you = [ln.strip() for ln in text.splitlines() if "👤 You:" in ln]
         if you:
-            last = (d.get("timestamp") or "?", you[-1])
-    return last
+            return d.get("timestamp") or "?", you[-1]
+    return None
 
 
 def classify(session_id, projects_dir):
@@ -91,6 +139,8 @@ def classify(session_id, projects_dir):
     ts, line = last
     if CLOSED_RE.search(line):
         return CLOSED, f"closer: CLOSED {ts} {line}"
+    if PARKED_RE.search(line):
+        return PARKED, f"closer: PARKED {ts} {line}"
     return OPEN, f"closer: OPEN {ts} {line}"
 
 

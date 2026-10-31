@@ -2,7 +2,7 @@
 """Resolve a dedup key to its latest-answered attention card.
 
 The gap this closes: the drive leg's hold line must name the card the operator
-already answered for a held row — `agents/manager-drive.md` says "quote the
+already answered for a held row — `agents/goal-drive.md` says "quote the
 existing `item-id` instead" — but a dedup key can carry SEVERAL cards. The
 store's suppression is open-scoped, so once an item is answered the same key
 writes a NEW row rather than returning the old one. Quoting an arbitrary member

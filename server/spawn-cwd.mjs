@@ -103,7 +103,15 @@ export function resolveWorkerTarget({ cwd, vault, vaults, serverCwd } = {}) {
           'one or the other, not both, since a worker cannot run in a directory its launcher does not belong to.',
       }
     }
-    return { cwd: match.path, vault: match.name, launcher: match.claude_script }
+    return {
+      cwd: match.path,
+      vault: match.name,
+      launcher: match.claude_script,
+      // The role defaults, already resolved by vault-cli (which owns the sibling fallback).
+      // Absent on an older vault-cli — the resolvers below then fall back visibly.
+      workerLauncher: match.worker_launcher,
+      managerLauncher: match.manager_launcher,
+    }
   }
 
   // `cwd` only. The LONGEST matching path wins, so a vault nested inside another resolves
@@ -124,7 +132,139 @@ export function resolveWorkerTarget({ cwd, vault, vaults, serverCwd } = {}) {
   }
   if (!match.claude_script) return { error: noLauncher(`cwd ${JSON.stringify(cwd)} (vault ${JSON.stringify(match.name)})`) }
 
-  return { cwd, vault: match.name, launcher: match.claude_script }
+  return {
+    cwd,
+    vault: match.name,
+    launcher: match.claude_script,
+    workerLauncher: match.worker_launcher,
+    managerLauncher: match.manager_launcher,
+  }
+}
+
+// The launcher a task's worker opens with, or `{ error }`.
+//
+// A task may carry a `launcher:` frontmatter field naming a launcher script, so that e.g. one
+// row opens on `cc-private-claude` while the vault's worker default stays cheaper. Precedence is
+// **task > the vault's configured worker default**. A goal is NOT in that chain.
+//
+// ⚠️ The goal rung used to be, and removing it is the point of this rule. A goal's `launcher:`
+// said "this goal's sessions run on X", which is a MANAGER statement — managers read
+// `manager_launcher:` and never this field (operator decision 2026-10-19). Letting it reach the
+// workers meant every task under a goal opened on the manager's Opus launcher: measured
+// 2026-10-22, 12 goals in private-personal carried `launcher: cc-private-claude` and every
+// worker beneath them ran Opus. Goal frontmatter is therefore inert for workers, and the value
+// still present on those 12 pages is deliberately left alone — rewriting another author's goal
+// pages is not this rule's business.
+//
+// `workerLauncher` is the vault's resolved worker default, read from `vault-cli config list`
+// (`worker_launcher`, itself defaulting to the `-deepseek` sibling of `claude_script`). When it
+// is absent — an older vault-cli that does not emit the key — the vault's `claude_script` is
+// used unchanged and the source says `vault`, so the fallback is visible rather than assumed.
+//
+// A bare name (`cc-private-claude`) resolves in the same directory as the vault's own
+// launcher — the cc-* scripts live side by side — and a value containing `/` is used as
+// given. The value is deliberately NOT checked against a list of known launchers (operator
+// decision 2026-10-09): a typo surfaces as an unreadable `model: null` on the spawn
+// response, which is the observable this module already reports.
+//
+// The value IS checked for shape, though, because it is a trust-boundary change: before the
+// field existed the launcher came only from operator-controlled vault-cli config; now it comes
+// from task frontmatter, which supervised workers can write, and the tab path execs it
+// inside `bash -lc`. Anything but a plain path — shell metacharacters, whitespace, a `..`
+// segment — is REFUSED rather than quoted or stripped, so a hostile or mistyped value never
+// reaches a shell at all.
+const SAFE_LAUNCHER = /^[A-Za-z0-9._/-]+$/
+
+export function resolveTaskLauncher({ vaultLauncher, workerLauncher, taskLauncher } = {}) {
+  const clean = (v) => (typeof v === 'string' ? v.trim() : '')
+  const unsafe = (v) => v && (!SAFE_LAUNCHER.test(v) || v.split('/').includes('..'))
+  const toPath = (name) => {
+    if (name.includes('/')) return name
+    const slash = typeof vaultLauncher === 'string' ? vaultLauncher.lastIndexOf('/') : -1
+    return slash === -1 ? name : `${vaultLauncher.slice(0, slash)}/${name}`
+  }
+
+  const own = clean(taskLauncher)
+  if (unsafe(own)) {
+    return {
+      error:
+        `launcher ${JSON.stringify(own)} is not a plain script name or path — refusing to spawn, since the ` +
+        'value is executed by a shell and frontmatter is writable by workers. Use letters, digits, `.`, `_`, `-` and `/` only.',
+    }
+  }
+  if (own) return { launcher: toPath(own), source: 'task' }
+
+  // The config-sourced default is checked the same way. It is operator-edited rather than
+  // worker-writable, so the threat differs, but a stray `;` in a config file would reach
+  // `bash -lc` exactly as a hostile frontmatter value would — refuse and name the key.
+  const workerDefault = clean(workerLauncher)
+  if (unsafe(workerDefault)) {
+    return {
+      error:
+        `the vault's configured \`worker_launcher\` ${JSON.stringify(workerDefault)} is not a plain script name or ` +
+        'path — refusing to spawn, since the value is executed by a shell. Use letters, digits, `.`, `_`, `-` and `/` only.',
+    }
+  }
+  if (workerDefault) return { launcher: toPath(workerDefault), source: 'worker-default' }
+
+  return { launcher: vaultLauncher, source: 'vault' }
+}
+
+// The launcher a MANAGER session opens with, or `{ error }`.
+//
+// Managers do not take the worker rule. Operator decision 2026-10-19: a topic or goal manager
+// runs on the vault's Claude launcher (Opus at low effort) rather than the vault's
+// `claude_script`, which is typically a cheaper `-deepseek` backend. Precedence:
+//   1. the subject's own `manager_launcher:` frontmatter (topic or goal page);
+//   2. the vault's configured manager default (`manager_launcher` in vault-cli config, itself
+//      defaulting to the `-claude` sibling of `claude_script`);
+//   3. the `-claude` sibling of the vault's `claude_script`, when that script exists — the
+//      compatibility rung for an older vault-cli that emits no `manager_launcher`;
+//   4. the vault's `claude_script` unchanged.
+//
+// Rung 2 is the one that reports `manager-default`. Rung 3 stays because the value reaching
+// this function is only as new as the INSTALLED `vault-cli` binary: a stale one emits no
+// `manager_launcher`, and dropping the sibling would silently move every manager in that vault
+// onto the cheaper worker launcher — the failure this whole rule exists to prevent. The two
+// rungs report different sources on purpose, so "the config decided this" and "a naming
+// convention decided this" are never confused in a spawn response.
+//
+// Pure: `exists` is injected so the function is testable without a filesystem. The frontmatter
+// value passes the same shape check as `launcher:`, for the same reason.
+export function managerLauncherSibling(vaultLauncher) {
+  if (typeof vaultLauncher !== 'string' || !vaultLauncher) return null
+  const slash = vaultLauncher.lastIndexOf('/')
+  const base = vaultLauncher.slice(slash + 1).replace(/-deepseek$/, '')
+  if (base.endsWith('-claude')) return vaultLauncher
+  return `${vaultLauncher.slice(0, slash + 1)}${base}-claude`
+}
+
+export function resolveManagerLauncher({
+  vaultLauncher,
+  managerLauncher,
+  managerDefault,
+  exists = () => false,
+} = {}) {
+  const own = typeof managerLauncher === 'string' ? managerLauncher.trim() : ''
+  if (own) {
+    const r = resolveTaskLauncher({ vaultLauncher, taskLauncher: own })
+    return r.error ? r : { launcher: r.launcher, source: 'subject' }
+  }
+  const configured = typeof managerDefault === 'string' ? managerDefault.trim() : ''
+  if (configured) {
+    if (!SAFE_LAUNCHER.test(configured) || configured.split('/').includes('..')) {
+      return {
+        error:
+          `the vault's configured \`manager_launcher\` ${JSON.stringify(configured)} is not a plain script name or ` +
+          'path — refusing to spawn, since the value is executed by a shell. Use letters, digits, `.`, `_`, `-` and `/` only.',
+      }
+    }
+    const r = resolveTaskLauncher({ vaultLauncher, taskLauncher: configured })
+    return r.error ? r : { launcher: r.launcher, source: 'manager-default' }
+  }
+  const sibling = managerLauncherSibling(vaultLauncher)
+  if (sibling && exists(sibling)) return { launcher: sibling, source: 'claude-sibling' }
+  return { launcher: vaultLauncher, source: 'vault' }
 }
 
 // The model a launcher script starts its session with, or `null` when it cannot be read.

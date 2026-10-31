@@ -56,7 +56,7 @@
 // roster for complete would be wrong about exactly these two rows.
 import { config } from './config.mjs'
 import { liveSessionIds as liveSessionIdsFromLiveness, pidIsAlive } from './liveness.mjs'
-import { readLedger } from './worker-sessions.mjs'
+import { ledgerBySessionId, readSessionLedger } from './session-ledger.mjs'
 
 // The live session ids, as a Map — or `null` when a channel could not be read.
 //
@@ -109,13 +109,27 @@ export function toAgentRecord(record, id = record.agent_id) {
     modeSource: record.mode_source ?? null,
     paneId: record.pane_id ?? null,
     launcher: record.launcher ?? null,
-    parentSession: record.parent_session ?? null,
+    // ⚠️ **Both names, because the file and the endpoint spell it differently.** The file
+    // ledger writes `parent_session`; the endpoint serves `spawner_session_id` (one name for
+    // one thing on the wire). The WRITE side already maps one onto the other, so reading only
+    // `parent_session` made every adopted row's `parentSession` null — a silent field loss
+    // introduced by moving the read source, and one-directional by construction.
+    parentSession: record.parent_session ?? record.spawner_session_id ?? null,
     createdAt: record.spawned_at ?? null,
     transcript: [],
     permissions: [],
     carriedDecision: null,
     shipping: false,
     result: record.result ?? null,
+    // The A2A worker id, so a re-adopted row is still the one the liveness mirror stamps. The
+    // worker TOKEN is not on the ledger and so cannot be restored: a re-adopted A2A row can be
+    // seen live, but cannot be sent another turn by this process.
+    workerId: record.worker_id ?? null,
+    // The wrapper session this worker's child runs under. Null for a pre-field record AND for
+    // a worker that is genuinely not wrapper-backed — the two are the same absence on the
+    // ledger, which is why `rehydrated` already marks the row: a caller must not read a null
+    // here on an adopted row as proof the worker has no wrapper park.
+    wrapperSessionId: record.wrapper_session_id ?? null,
     error: null,
     // Observable rather than inferred, and load-bearing at two call sites in
     // `supervisor.mjs`: a rehydrated row must not be stamped on shutdown
@@ -144,11 +158,19 @@ export function toAgentRecord(record, id = record.agent_id) {
 export function rehydratedStatus(record) {
   if (record.mode === 'interactive') return 'interactive'
   if (record.mode === 'cluster') return 'cluster'
+  // An A2A worker's status is its TARGET's name (`docker` / `k8s`), mirroring `cluster`, so a
+  // reconnect re-adopts it as the same kind of row it was spawned as. A record written before
+  // `target` was persisted carries none — `running` is then the honest fallback, not a guess.
+  if (record.mode === 'a2a') return record.target ?? 'running'
   return 'running'
 }
 
-// Every live worker the ledger knows, as agent records — or `null` when a store could not be
-// read.
+// The agent records for a set of ledger records, filtered to the live ones.
+//
+// This is the whole of the adoption RULE, and it is deliberately separated from the read that
+// feeds it: the records now arrive from the endpoint, but the rule — live-only, keyed on
+// `session_id`, `agent_id` disambiguated rather than dropped — is unchanged, and it must stay
+// one implementation so a request-time read and a boot-time one cannot answer differently.
 //
 // A record with no `agent_id` is skipped rather than adopted under a synthesised id — the id
 // is what `agent_status` and `send_agent_message` are keyed on, so an invented one would be
@@ -159,25 +181,14 @@ export function rehydratedStatus(record) {
 // rather than a no-op — the duplicate-`agent_id` branch exists so a manager can tell why a
 // worker answers under `agent_1~<sid8>`, and a silent default would lose exactly that for any
 // caller that forgot the argument.
-export function rehydratableAgents({
-  registryDir,
-  ledgerDir = config.ledgerDir,
-  heartbeatDir,
-  now,
-  log = console.warn,
-} = {}) {
-  const ledger = readLedger(ledgerDir)
-  if (ledger === null) return null
-  const live = liveSessionIds({ registryDir, heartbeatDir, now })
-  if (live === null) return null
-
-  // Sorted, so the adoption order is a property of the data rather than of `readdirSync`.
-  // It matters only for the collision branch below, but an order that varies run to run
-  // would make that branch's "first wins" undecidable after the fact.
+export function agentsFromRecords(records, { live, log = console.warn } = {}) {
+  // Sorted, so the adoption order is a property of the data rather than of the read that
+  // supplied it. It matters only for the collision branch below, but an order that varies
+  // run to run would make that branch's "first wins" undecidable after the fact.
   const agents = []
   const claimed = new Map() // agent_id -> session_id
-  for (const sessionId of Object.keys(ledger).sort()) {
-    const record = ledger[sessionId]
+  for (const sessionId of [...records.keys()].sort()) {
+    const record = records.get(sessionId)
     if (!record?.agent_id) continue
     if (!live.has(sessionId)) continue
     const prior = claimed.get(record.agent_id)
@@ -199,4 +210,61 @@ export function rehydratableAgents({
     agents.push(toAgentRecord(record))
   }
   return agents
+}
+
+// Every live worker the ledger knows, as agent records — or `null` when a store could not be
+// read.
+//
+// ⚠️ **This reads the ENDPOINT, and that is the fix rather than a refactor.** The roster used
+// to be built once, at import, from the ledger gated on liveness at that instant, and the only
+// later mutation could delete but never insert — so a session not in `live` when the server
+// started stayed invisible to that process for its whole life, however live it became. A read
+// here happens at REQUEST time and cannot freeze; see `session-ledger.mjs`.
+//
+// ⚠️ **`null` still means "could not read it", from either store.** The caller must be able to
+// tell a store outage from a fleet with no workers, and collapsing the two is the direction
+// that hides live workers.
+export async function rehydratableAgents({
+  endpoint,
+  registryDir,
+  heartbeatDir,
+  now,
+  fetchImpl,
+  log = console.warn,
+} = {}) {
+  const rows = await readSessionLedger({ endpoint, fetchImpl })
+  if (rows === null) return null
+  const live = liveSessionIds({ registryDir, heartbeatDir, now })
+  if (live === null) return null
+  return agentsFromRecords(ledgerBySessionId(rows), { live, log })
+}
+
+// The roster AS OF NOW, given this process's own workers and a fresh endpoint read.
+//
+// ⚠️ **Extracted so it can be TESTED, and that is the reason rather than tidiness.** It lived
+// inline in `supervisor.mjs`'s `currentRoster`, which cannot be imported (it starts an MCP
+// server at module load), so the heart of this change was pinned only by regexes over the
+// source text — and a regex cannot catch a behavioural regression. One did get through: the
+// foreign row's id was derived from a set seeded by the LOCAL Map, so a spawn landing between
+// a manager's `list_agents` and its `send_agent_message` flipped that row's id and handed the
+// message to the wrong worker, silently. The id is now a function of the ROW ALONE.
+//
+// ⚠️ **This process's own row WINS on a `session_id` collision**, and the direction is
+// deliberate rather than incidental: an in-process agent carries the live transcript, the park
+// queue and the permission rules, while an endpoint row carries identity alone. Letting the
+// fresh row win would replace a working worker's record with a hollow one.
+export function unionRoster(inProcess, fresh) {
+  const roster = new Map(inProcess)
+  const own = new Set([...roster.values()].map((a) => a.sessionId))
+  const takenIds = new Set(roster.keys())
+  for (const agent of fresh) {
+    if (own.has(agent.sessionId)) continue
+    // ⚠️ A function of the ROW ALONE — see the note above. Suffixing EVERY foreign row is what
+    // makes the id stable across calls, so it can never be shadowed by a later local mint.
+    let id = `${agent.id}~${agent.sessionId.slice(0, 8)}`
+    while (takenIds.has(id)) id = `${id}~`
+    takenIds.add(id)
+    roster.set(id, { ...agent, id })
+  }
+  return roster
 }

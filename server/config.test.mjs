@@ -12,10 +12,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { config } from './config.mjs'
+import { config, isLoopbackV4, resolveWrapperUrl } from './config.mjs'
 
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url))
 
@@ -58,6 +58,7 @@ test('the config object is a frozen, complete surface', () => {
     'configDir',
     'stateDir',
     'claudeHome',
+    'claudeHomeRefusal',
     'userPolicy',
     'permissionLog',
     'anthropicBaseUrl',
@@ -74,6 +75,9 @@ test('the config object is a frozen, complete surface', () => {
     'heartbeatDir',
     'heartbeatStateDir',
     'sessionId',
+    // ⚠️ The spawn's own handover, read here so `heartbeat.mjs` need not consult the environment:
+    // a server running inside a headless worker stands its self-stamp down on this value.
+    'workerMode',
   ]) {
     assert.ok(key in config, `config.${key} is missing — the surface must be enumerable`)
   }
@@ -178,6 +182,87 @@ test('a cost figure is only meaningful when the traffic reaches Anthropic', asyn
   }
 })
 
+// --- the Claude config home --------------------------------------------------
+//
+// The defect these guard against is silent in both directions: a server started from a
+// parent carrying a different `CLAUDE_CONFIG_DIR` reads its session registry and transcript
+// root from the wrong place, then runs normally while reporting a `transcript_dir` no fleet
+// reader can see. Measured 2026-10-09 — `cc-private` handed `~/.claude-verify` (the openbrain
+// scenario test dir) straight to the server, and every worker it spawned was invisible.
+
+const withEnv = async (vars, tag) => {
+  const before = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]))
+  for (const [k, v] of Object.entries(vars)) {
+    if (v === undefined) delete process.env[k]
+    else process.env[k] = v
+  }
+  try {
+    return { config: (await import(`./config.mjs?${tag}`)).config }
+  } finally {
+    for (const [k, v] of Object.entries(before)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  }
+}
+
+test('an inherited CLAUDE_CONFIG_DIR that disagrees with the home refuses the server', async () => {
+  const { config: fresh } = await withEnv(
+    { CLAUDE_CONFIG_DIR: '/tmp/not-this-servers-claude-home', SUPERVISOR_CLAUDE_CONFIG_DIR: undefined },
+    'inherited-config-dir=leaked',
+  )
+  assert.ok(fresh.claudeHomeRefusal, 'a leaked parent must refuse rather than fall back')
+  assert.match(fresh.claudeHomeRefusal, /CLAUDE_CONFIG_DIR/)
+  assert.match(fresh.claudeHomeRefusal, /SUPERVISOR_CLAUDE_CONFIG_DIR/, 'the refusal must name the opt-in')
+  assert.equal(
+    fresh.claudeHome,
+    join(homedir(), '.claude'),
+    'and the inherited path must never become the home the registry hangs off',
+  )
+})
+
+test('an inherited CLAUDE_CONFIG_DIR equal to the home is accepted', async () => {
+  // The healthy case, and the one the whole fleet is in: the `cc-*` launchers pin the
+  // variable to `$HOME/.claude` (bborbe/scripts 69d41cc), which equals the default. A guard
+  // that fired here would refuse every correctly-pinned server — an outage, not a fix.
+  const { config: fresh } = await withEnv(
+    { CLAUDE_CONFIG_DIR: join(homedir(), '.claude'), SUPERVISOR_CLAUDE_CONFIG_DIR: undefined },
+    'inherited-config-dir=pinned',
+  )
+  assert.equal(fresh.claudeHomeRefusal, null)
+  assert.equal(fresh.claudeHome, join(homedir(), '.claude'))
+})
+
+test('a trailing slash is the same home, not a refusal', async () => {
+  // Compared after resolve(): a guard that fires on spelling is one the operator learns to
+  // ignore, which is worse than having none.
+  const { config: fresh } = await withEnv(
+    { CLAUDE_CONFIG_DIR: `${join(homedir(), '.claude')}/`, SUPERVISOR_CLAUDE_CONFIG_DIR: undefined },
+    'inherited-config-dir=slash',
+  )
+  assert.equal(fresh.claudeHomeRefusal, null)
+})
+
+test('SUPERVISOR_CLAUDE_CONFIG_DIR is the deliberate opt-in and is honoured', async () => {
+  // The escape hatch, and the reason the refusal is not a dead end: an operator who wants the
+  // server on another home declares it here. Declaring the home also settles an inherited
+  // variable, because the home is then explicit rather than ambient.
+  const { config: fresh } = await withEnv(
+    {
+      SUPERVISOR_CLAUDE_CONFIG_DIR: '/tmp/supervisor-declared-home',
+      CLAUDE_CONFIG_DIR: '/tmp/not-this-servers-claude-home',
+    },
+    'own-config-dir=set',
+  )
+  assert.equal(fresh.claudeHome, '/tmp/supervisor-declared-home')
+  assert.equal(
+    fresh.sessionsDir,
+    '/tmp/supervisor-declared-home/sessions',
+    'the registry must hang off the declared home, not the inherited one',
+  )
+  assert.equal(fresh.claudeHomeRefusal, null, 'an explicitly declared home is not an inherited one')
+})
+
 // --- the config file ---------------------------------------------------------
 //
 // Read at load and frozen, like everything else here, so these tests write a file, point
@@ -238,4 +323,99 @@ test('SUPERVISOR_SPAWN_MODE is carried raw for spawn-mode.mjs to validate', asyn
     if (before === undefined) delete process.env.SUPERVISOR_SPAWN_MODE
     else process.env.SUPERVISOR_SPAWN_MODE = before
   }
+})
+
+// ── SUPERVISOR_WRAPPER_URL: the credential boundary ──────────────────────────────────────────
+// This guard is the only thing standing between a mistyped host and the whole inherited
+// environment — `ANTHROPIC_BASE_URL` and any credential riding in it — being posted to an
+// unauthenticated endpoint in cleartext on every spawn. It had no test at all, which is the
+// one kind of security control that must not rely on a comment.
+test('a loopback wrapper URL is accepted', () => {
+  for (const raw of ['http://localhost:18090', 'http://127.0.0.1:18090', 'https://127.0.0.2:1', 'http://[::1]:18090']) {
+    const out = resolveWrapperUrl(raw)
+    assert.equal(out.refusal, null, `${raw} must be accepted`)
+    assert.ok(out.url.startsWith('http'), raw)
+  }
+})
+
+test('the default is the wrapper own listen address', () => {
+  assert.deepEqual(resolveWrapperUrl(undefined), { url: 'http://localhost:18090', refusal: null })
+  assert.deepEqual(resolveWrapperUrl(''), { url: 'http://localhost:18090', refusal: null })
+  assert.deepEqual(resolveWrapperUrl('   '), { url: 'http://localhost:18090', refusal: null })
+})
+
+test('a non-loopback host is refused, not accepted with a warning', () => {
+  for (const raw of ['http://10.0.0.5:18090', 'http://evil.example.com', 'http://192.168.1.1:18090']) {
+    const out = resolveWrapperUrl(raw)
+    assert.ok(out.refusal, `${raw} must be refused`)
+    // The fallback keeps every other surface working; nothing silently points off-box.
+    assert.equal(out.url, 'http://localhost:18090')
+  }
+})
+
+// `@evil.com` and `localhost.evil.com` are the two shapes a naive string check accepts.
+test('userinfo and suffix tricks are refused', () => {
+  for (const raw of ['http://localhost@evil.com:18090', 'http://localhost.evil.com:18090', 'http://evil.com#localhost']) {
+    assert.ok(resolveWrapperUrl(raw).refusal, `${raw} must be refused`)
+  }
+})
+
+// WHATWG normalisation collapses the decimal/hex/short forms onto 127.0.0.1, so they are
+// accepted — and an out-of-range octet is NOT loopback even though it looks like one.
+test('alternate loopback spellings normalise, an invalid octet does not', () => {
+  for (const raw of ['http://2130706433:18090', 'http://0x7f000001:18090', 'http://127.1:18090']) {
+    assert.equal(resolveWrapperUrl(raw).refusal, null, `${raw} normalises to loopback`)
+  }
+  assert.ok(resolveWrapperUrl('http://127.0.0.256:18090').refusal, '127.0.0.256 is not loopback')
+})
+
+test('a non-http scheme and a non-URL are refused', () => {
+  for (const raw of ['ftp://localhost:18090', 'file:///etc/passwd', 'not-a-url']) {
+    assert.ok(resolveWrapperUrl(raw).refusal, `${raw} must be refused`)
+  }
+})
+
+// A trailing slash would produce `//api/1.0/sessions` once joined with a path.
+test('a trailing slash is stripped', () => {
+  assert.equal(resolveWrapperUrl('http://localhost:18090///').url, 'http://localhost:18090')
+})
+
+// ⚠️ The refusal is RETURNED, never thrown: this module stays importable so one mistyped
+// variable cannot take down tab workers and the attention surface at load. `supervisor.mjs`
+// acts on `config.wrapperUrlRefusal` at the spawn.
+test('a refused URL leaves the module importable', () => {
+  const out = resolveWrapperUrl('http://evil.example.com')
+  assert.equal(typeof out.refusal, 'string')
+  assert.ok(config !== undefined)
+})
+
+// ⚠️ A path, query or fragment passed the host check and was then returned VERBATIM, so
+// `baseOf()` built `/base/api/1.0/...` and every wrapper call 404'd silently. The origin is
+// the only shape the guard claims to enforce.
+test('a path, query or fragment is dropped to the origin', () => {
+  for (const raw of ['http://localhost:18090/base', 'http://localhost:18090/?x=1', 'http://localhost:18090/#frag']) {
+    assert.deepEqual(resolveWrapperUrl(raw), { url: 'http://localhost:18090', refusal: null }, raw)
+  }
+})
+
+// The refusal text reaches the spawn reply and the log, so a credential must never ride in it.
+test('a refusal never echoes userinfo or the raw value', () => {
+  const out = resolveWrapperUrl('http://user:s3cret@evil.example.com:18090')
+  assert.ok(out.refusal)
+  assert.ok(!out.refusal.includes('s3cret'), 'the password must not reach the refusal text')
+  assert.ok(!out.refusal.includes('user:'), 'the userinfo must not reach the refusal text')
+  assert.ok(out.refusal.includes('evil.example.com'), 'the host is what a caller needs')
+})
+
+// ⚠️ Exercised DIRECTLY, because the public path cannot reach it: Node's URL parser rejects an
+// out-of-range octet and `resolveWrapperUrl` refuses it in the `catch`, so a test through the
+// public entry point pins the throw path, not this check. It stays as defence in depth for a
+// parser that fell back to domain parsing instead of failing.
+test('isLoopbackV4 rejects an out-of-range octet and a non-127 range', () => {
+  assert.equal(isLoopbackV4('127.0.0.1'), true)
+  assert.equal(isLoopbackV4('127.1.2.3'), true)
+  assert.equal(isLoopbackV4('127.0.0.256'), false)
+  assert.equal(isLoopbackV4('128.0.0.1'), false)
+  assert.equal(isLoopbackV4('localhost'), false)
+  assert.equal(isLoopbackV4('127.0.0'), false)
 })

@@ -34,6 +34,7 @@ test('a successful poll stamps each session with source=cluster', async () => {
   const record = JSON.parse(readFileSync(join(dir, 'a1b2c3d4-1111.json'), 'utf8'))
   assert.equal(record.source, 'cluster', 'the readers key their cluster staleness rule on this field')
   assert.equal(record.mode, 'cluster')
+  assert.equal(record.location, 'pod', 'every cluster-store entry was published by a pod on another machine')
 })
 
 test('a successful poll refreshes the reachability marker', async () => {

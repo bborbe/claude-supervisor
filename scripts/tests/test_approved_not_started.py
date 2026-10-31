@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 # Side effect only: points the start-time cache at an isolated per-run store, in one shared
 # home so five suites cannot each assign the same key and leave only the last standing.
 import start_cache_isolation  # noqa: E402,F401
+from endpoint_fixture import FixtureEndpoint, row as heartbeat_row  # noqa: E402
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "approved-not-started.py")
@@ -121,6 +122,20 @@ class ManagerFor(unittest.TestCase):
 
     def test_no_goals_is_none(self):
         self.assertIsNone(ans.manager_for([], {"manager layer": "sid-1"}))
+
+    def test_managed_by_beats_the_goals_order(self):
+        """The doc's tier 1 — the row's own `managed_by` subject wins over its `goals:`."""
+        live = {"goal a manager": "sid-1", "goal b manager": "sid-2"}
+        self.assertEqual(ans.manager_for(["[[Goal A]]"], live, "[[Goal B]]"), "Goal B Manager")
+
+    def test_absent_managed_by_falls_through_to_goals(self):
+        live = {"goal a manager": "sid-1"}
+        self.assertEqual(ans.manager_for(["[[Goal A]]"], live), "Goal A Manager")
+        self.assertEqual(ans.manager_for(["[[Goal A]]"], live, None), "Goal A Manager")
+
+    def test_unresolvable_managed_by_falls_through_to_goals(self):
+        live = {"goal a manager": "sid-1"}
+        self.assertEqual(ans.manager_for(["[[Goal A]]"], live, "[[Nobody]]"), "Goal A Manager")
 
 
 class Collect(unittest.TestCase):
@@ -249,14 +264,31 @@ class UnreadableRegistry(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         task_file(self.dir, "Waiting", "approved_at: 2026-10-01T21:00:00Z\nstatus: next")
-        # A readable registry holding one live session (our own pid, so the pid check
-        # passes), plus an empty heartbeat store -- `session-liveness.py` reports a list
-        # only when BOTH halves were read. The heartbeat dir is isolated so a real headless
-        # worker on this machine cannot turn an assertion into a false positive.
+        # A readable identity registry holding one session, plus a fixture endpoint holding one
+        # LIVE row — `session-liveness.py --list` reports a list only when BOTH the endpoint
+        # (liveness) and the registry (names) were read. ⚠️ **The endpoint row is not decoration:
+        # an EMPTY endpoint no longer requires the registry** — `session-liveness.py` decides the
+        # empty case before it reads the registry, so a readable-but-empty store returns a clean
+        # `[]` whatever the registry does. The registry-unreadable path this class probes is only
+        # reachable while the endpoint actually holds a live row, which is why the fixture carries
+        # one. The endpoint is a fixture on an ephemeral port pointed at through
+        # `$ATTENTION_STORE_URL`, so the real store on this machine cannot turn the clean-run
+        # assertion below into a failure when the store is down.
         self.registry = tempfile.mkdtemp()
         with open(os.path.join(self.registry, "%d.json" % os.getpid()), "w", encoding="utf-8") as handle:
             json.dump({"pid": os.getpid(), "sessionId": "live-session-1", "name": "Live"}, handle)
         self.heartbeat = tempfile.mkdtemp()
+        self._endpoint = FixtureEndpoint([heartbeat_row("live-session-1")])
+        self._endpoint.__enter__()
+        self._prior_url = os.environ.get("ATTENTION_STORE_URL")
+        os.environ["ATTENTION_STORE_URL"] = self._endpoint.url
+
+    def tearDown(self):
+        if self._prior_url is None:
+            os.environ.pop("ATTENTION_STORE_URL", None)
+        else:
+            os.environ["ATTENTION_STORE_URL"] = self._prior_url
+        self._endpoint.__exit__(None, None, None)
 
     def test_read_live_returns_none_not_an_empty_list(self):
         self.assertIsNone(ans.read_live("/nonexistent-registry-dir-xyz"))

@@ -2,9 +2,11 @@
 """Tests for scripts/restart-worker.py.
 
 The load-bearing property is that every refusal fires *before* anything is signalled:
-a manager, a busy target, a headless worker, an ambiguous pid and a load path that
+a busy target, a headless worker, an ambiguous pid, a held session and a load path that
 would reload identical code must each stop the script with its own reason token and
-exit 1, and no code path may reach `os.kill` on a target it has not cleared. The
+exit 1, and no code path may reach `os.kill` on a target it has not cleared. A manager
+is deliberately NOT among them — it is restarted like a worker, which the manager case
+pins. The
 integration cases drive the real CLI against a fixture registry, so they assert the
 exit code and the token a caller actually branches on — not an internal helper's
 return value.
@@ -154,12 +156,12 @@ class ResumeCommand(unittest.TestCase):
     """
 
     def test_cwd_is_passed(self):
-        argv = rw.resume_command("sid", "title", "pink", "/some/dir")
+        argv = rw.resume_command("sid", "title", "pink", "/some/dir", "/l/cc")
         self.assertIn("--cwd", argv)
         self.assertEqual(argv[argv.index("--cwd") + 1], "/some/dir")
 
     def test_no_cwd_flag_when_empty(self):
-        self.assertNotIn("--cwd", rw.resume_command("sid", "title", "pink", ""))
+        self.assertNotIn("--cwd", rw.resume_command("sid", "title", "pink", "", "/l/cc"))
 
     def test_colour_chip_carries_no_literal_quotes(self):
         """The shell quotes in `open.md`'s recipe are syntax, not value.
@@ -172,14 +174,67 @@ class ResumeCommand(unittest.TestCase):
         cue, so a restarted worker that should be pink is exactly the mis-coloured session
         that nearly got a manager relaunched as a worker on 2026-09-18.
         """
-        inner = rw.resume_command("sid", "title", "pink", "/d")[-1]
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")[-1]
         self.assertIn('"/color pink"', inner)
         self.assertNotIn("'/color", inner)
         self.assertNotIn("pink'", inner)
 
+    def test_resumes_through_the_given_launcher_not_bare_claude(self):
+        """Regression 2026-10-10: a bare-`claude` resume dropped `--mcp-config` and `a2a`."""
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc-private-claude")[-1]
+        self.assertIn('"/l/cc-private-claude" --resume sid', inner)
+
+    def test_no_exec_so_the_exit_status_survives(self):
+        """`exec` makes a SIGKILLed worker leave no record anywhere — the whole point.
+
+        Measured 2026-10-27: `bash -lc 'exec bash -c "kill -9 $$"'` reports 137 to its own
+        caller but leaves nothing to run a trap; the same child run *without* `exec`, behind
+        `trap _sx EXIT`, records `rc=137`. A test that only checked the launcher path would
+        pass with `exec` still in place and silently re-open the gap.
+        """
+        argv = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")
+        inner = argv[-1]
+        self.assertNotIn("exec ", inner)
+        self.assertNotIn("exec ", " ".join(argv))
+        self.assertIn("trap _sx EXIT", inner)
+        self.assertIn("rc=$?", inner)
+
+    def test_the_writer_path_rides_as_an_env_assignment(self):
+        """A spawned pane inherits wezterm's mux-server environment, not this process's."""
+        argv = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")
+        self.assertIn("--", argv)
+        assignments = [a for a in argv if a.startswith("SESSION_EXIT_RECORD=")]
+        self.assertEqual(len(assignments), 1)
+        self.assertTrue(assignments[0].endswith("/scripts/session-exit-record.py"))
+
+    def test_a_spawn_marker_is_written_before_the_launcher_runs(self):
+        """Without it an empty record cannot be told from an unwired writer."""
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")[-1]
+        self.assertIn("--kind spawn --session \"sid\"", inner)
+        self.assertLess(inner.index("--kind spawn"), inner.index('--resume sid'))
+
+    def test_the_observer_watches_this_shell(self):
+        """`$$` outlives the launcher and dies exactly when the group is killed.
+
+        That is the death the trap cannot record, so it is the one the out-of-group observer
+        exists for; watching anything else would leave the group kill unattributed.
+        """
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")[-1]
+        self.assertIn('observe --pid $$ --session "sid"', inner)
+
+    def test_the_observer_starts_before_the_launcher(self):
+        """Started after the launcher would be started after the first kill can land."""
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")[-1]
+        self.assertLess(inner.index(" observe "), inner.index('--resume sid'))
+
+    def test_the_trap_and_the_marker_both_carry_the_pid(self):
+        """A record without a pid cannot be joined to the process it describes."""
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")[-1]
+        self.assertEqual(inner.count("--pid $$"), 3)
+
     def test_resume_target_and_unset_list_intact(self):
         """The copied recipe's own invariants must survive the --cwd addition."""
-        inner = rw.resume_command("sid", "title", "pink", "/d")[-1]
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")[-1]
         self.assertIn("--resume sid", inner)
         self.assertIn("-n \"title\"", inner)
         for var in (
@@ -189,6 +244,210 @@ class ResumeCommand(unittest.TestCase):
             "CLAUDE_CODE_CHILD_SESSION",
         ):
             self.assertIn(var, inner)
+
+
+class ResolveLauncher(unittest.TestCase):
+    """The resume runs the worker's OWN launcher: task > vault worker default > `claude_script`.
+
+    ⚠️ A goal is NOT in that chain, and the cases named for it pin its absence. A goal's
+    `launcher:` is a manager statement; inheriting it resumed every worker under such a goal on
+    its manager's Opus launcher (measured 2026-10-22: 12 private-personal goals).
+
+    The fixture config deliberately carries only `claude_script` — the shape an older vault-cli
+    emits — so the compatibility rung is exercised here; `configure()` adds the role keys for
+    the cases that need them.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = self.tmp.name
+        self.vault = os.path.join(d, "vault")
+        self.scripts = os.path.join(d, "scripts")
+        for sub in ("25 Tasks", "24 Goals"):
+            os.makedirs(os.path.join(self.vault, sub))
+        os.makedirs(self.scripts)
+        for name in ("cc-private", "cc-private-claude", "cc-private-deepseek", "cc-private-glm", "cc-goal"):
+            open(os.path.join(self.scripts, name), "w").close()
+        cfg = os.path.join(d, "vaults.json")
+        with open(cfg, "w") as fh:
+            json.dump([{"name": "v", "path": self.vault,
+                        "claude_script": os.path.join(self.scripts, "cc-private")}], fh)
+        self._env = {k: os.environ.get(k) for k in ("SUPERVISOR_VAULT_CONFIG", "SUPERVISOR_LAUNCHER")}
+        os.environ["SUPERVISOR_VAULT_CONFIG"] = cfg
+        os.environ.pop("SUPERVISOR_LAUNCHER", None)
+        self.fb = rw.load_sibling("fleet-board.py")
+
+    def tearDown(self):
+        for k, v in self._env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self.tmp.cleanup()
+
+    def page(self, sub, title, fm):
+        with open(os.path.join(self.vault, sub, f"{title}.md"), "w") as fh:
+            fh.write(f"---\n{fm}\n---\nbody\n")
+
+    def configure(self, **extra):
+        """Rewrite the vault config with the role keys a current vault-cli emits."""
+        entry = {"name": "v", "path": self.vault,
+                 "claude_script": os.path.join(self.scripts, "cc-private")}
+        entry.update(extra)
+        with open(os.environ["SUPERVISOR_VAULT_CONFIG"], "w") as fh:
+            json.dump([entry], fh)
+
+    def test_task_launcher_wins(self):
+        self.page("25 Tasks", "T", "claude_session_id: s1\nlauncher: cc-private-claude")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "task"))
+
+    def test_goal_launcher_is_not_inherited(self):
+        """The regression lock: a goal's `launcher:` must never reach its workers."""
+        self.page("24 Goals", "G", "launcher: cc-goal")
+        self.page("25 Tasks", "T", "claude_session_id: s1\ngoals:\n    - '[[G]]'")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual(source, "vault")
+        self.assertEqual(path, os.path.join(self.scripts, "cc-private"))
+
+    def test_worker_default_wins_when_the_task_names_none(self):
+        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"))
+        self.page("24 Goals", "G", "launcher: cc-goal")
+        self.page("25 Tasks", "T", "claude_session_id: s1\ngoals:\n    - '[[G]]'")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-deepseek"), "worker-default"))
+
+    def test_a_bare_configured_worker_launcher_resolves_beside_the_vault_launcher(self):
+        self.configure(worker_launcher="cc-private-deepseek")
+        self.page("25 Tasks", "T", "claude_session_id: s1")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-deepseek"), "worker-default"))
+
+    def test_task_launcher_still_beats_the_worker_default(self):
+        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"))
+        self.page("25 Tasks", "T", "claude_session_id: s1\nlauncher: cc-private-claude")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "task"))
+
+    def test_unsafe_configured_worker_launcher_is_none(self):
+        self.configure(worker_launcher="cc;rm -rf")
+        self.page("25 Tasks", "T", "claude_session_id: s1")
+        self.assertIsNone(rw.resolve_launcher("s1", self.vault, self.fb)[0])
+
+    def test_vault_default_for_an_unbound_session_on_an_older_vault_cli(self):
+        """No `worker_launcher` in config (old vault-cli): the compatibility rung, visibly."""
+        path, source = rw.resolve_launcher("nobody", os.path.join(self.vault, "25 Tasks"), self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private"), "vault"))
+
+    def test_manager_takes_the_claude_sibling(self):
+        path, source = rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "claude-sibling"))
+
+    def test_manager_takes_the_configured_manager_default(self):
+        self.configure(manager_launcher=os.path.join(self.scripts, "cc-private-claude"))
+        path, source = rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "manager-default"))
+
+    def test_a_configured_manager_launcher_need_not_end_in_claude(self):
+        """Provenance, not the filename, decides the source — a glm manager stays `manager-default`."""
+        self.configure(manager_launcher="cc-private-glm")
+        path, source = rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-glm"), "manager-default"))
+
+    def test_an_old_vault_cli_with_a_claude_script_is_still_the_sibling_rung(self):
+        """No `manager_launcher` in config: the naming convention decided, and it must say so."""
+        with open(os.environ["SUPERVISOR_VAULT_CONFIG"], "w") as fh:
+            json.dump([{"name": "v", "path": self.vault,
+                        "claude_script": os.path.join(self.scripts, "cc-private-claude")}], fh)
+        path, source = rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "claude-sibling"))
+
+    def test_an_unsafe_configured_manager_launcher_is_refused_before_any_exec(self):
+        self.configure(manager_launcher='cc-x"; rm -rf /')
+        self.assertIsNone(rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))[0])
+
+    def test_a_bare_configured_manager_launcher_resolves_beside_the_vault_launcher(self):
+        """A config value with no slash is a name, not a relative path — join it, never fail."""
+        self.configure(manager_launcher="cc-private-claude")
+        path, source = rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "manager-default"))
+
+    def test_manager_subject_manager_launcher_wins(self):
+        os.makedirs(os.path.join(self.vault, "23 Topics"))
+        self.page("23 Topics", "Fleet", "manager_launcher: cc-goal")
+        path, source = rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-goal"), "subject"))
+
+    def test_manager_keeps_vault_launcher_without_sibling(self):
+        os.remove(os.path.join(self.scripts, "cc-private-claude"))
+        path, source = rw.resolve_launcher("m1", self.vault, self.fb, ("goal", "G"))
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private"), "vault"))
+
+    def test_manager_sibling_strips_deepseek(self):
+        ml = rw.load_sibling("manager-launcher.py")
+        self.assertEqual(ml.sibling("/s/cc-seibert-deepseek"), "/s/cc-seibert-claude")
+        self.assertEqual(ml.sibling("/s/cc-private-claude"), "/s/cc-private-claude")
+
+    def test_manager_unsafe_manager_launcher_is_none(self):
+        os.makedirs(os.path.join(self.vault, "23 Topics"))
+        self.page("23 Topics", "Fleet", "manager_launcher: cc;rm -rf")
+        self.assertIsNone(rw.resolve_launcher("m1", self.vault, self.fb, ("topic", "Fleet"))[0])
+
+    def test_cwd_outside_every_vault_is_none(self):
+        self.assertIsNone(rw.resolve_launcher("s1", "/nowhere", self.fb)[0])
+
+    def test_unsafe_launcher_is_none(self):
+        self.page("25 Tasks", "T", "claude_session_id: s1\nlauncher: cc;rm -rf")
+        self.assertIsNone(rw.resolve_launcher("s1", self.vault, self.fb)[0])
+
+    def test_metrics_sessions_only_binding_is_matched(self):
+        self.page("25 Tasks", "T", "launcher: cc-private-claude\nmetrics_sessions:\n    - session_id: s9\n      started_at: x")
+        self.assertEqual(rw.resolve_launcher("s9", self.vault, self.fb)[1], "task")
+
+    def test_two_claimants_is_none(self):
+        self.page("25 Tasks", "A", "claude_session_id: s1")
+        self.page("25 Tasks", "B", "claude_session_id: s1")
+        path, reason = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertIsNone(path)
+        self.assertIn("2 task pages", reason)
+
+    def test_goals_naming_different_launchers_no_longer_refuse(self):
+        """Goal values are inert, so a disagreement between them cannot block a resume."""
+        self.page("24 Goals", "G1", "launcher: cc-goal")
+        self.page("24 Goals", "G2", "launcher: cc-private-claude")
+        self.page("25 Tasks", "T", "claude_session_id: s1\ngoals:\n    - '[[G1]]'\n    - '[[G2]]'")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual(source, "vault")
+        self.assertEqual(path, os.path.join(self.scripts, "cc-private"))
+
+    def test_unreadable_vault_config_is_none(self):
+        os.environ["SUPERVISOR_VAULT_CONFIG"] = os.path.join(self.tmp.name, "absent.json")
+        self.assertIsNone(rw.resolve_launcher("s1", self.vault, self.fb)[0])
+
+    def test_non_dict_config_element_is_skipped_not_raised(self):
+        with open(os.environ["SUPERVISOR_VAULT_CONFIG"], "w") as fh:
+            json.dump(["junk", {"name": "v", "path": self.vault,
+                                "claude_script": os.path.join(self.scripts, "cc-private")}], fh)
+        self.assertEqual(rw.resolve_launcher("x", self.vault, self.fb)[1], "vault")
+
+    def test_config_entry_without_path_claims_no_cwd(self):
+        with open(os.environ["SUPERVISOR_VAULT_CONFIG"], "w") as fh:
+            json.dump([{"name": "empty", "path": "", "claude_script": "/x/cc"}], fh)
+        self.assertIsNone(rw.resolve_launcher("s1", os.getcwd(), self.fb)[0])
+
+    def test_launcher_survives_long_frontmatter(self):
+        filler = "\n".join(f"    - session_id: f{i}\n      started_at: x" for i in range(200))
+        self.page("25 Tasks", "T", f"claude_session_id: s1\nmetrics_sessions:\n{filler}\nlauncher: cc-private-claude")
+        self.assertEqual(rw.resolve_launcher("s1", self.vault, self.fb)[1], "task")
+
+    def test_override_bypasses_shape_and_file_checks(self):
+        """Deliberate: the override is the drill/test lever, set by the caller itself."""
+        os.environ["SUPERVISOR_LAUNCHER"] = "/no/such/launcher"
+        self.assertEqual(rw.resolve_launcher("s1", "/nowhere", self.fb), ("/no/such/launcher", "override"))
+
+    def test_missing_launcher_file_is_none(self):
+        self.page("25 Tasks", "T", "claude_session_id: s1\nlauncher: cc-absent")
+        self.assertIsNone(rw.resolve_launcher("s1", self.vault, self.fb)[0])
 
 
 class LoadPathSelection(unittest.TestCase):
@@ -240,6 +499,147 @@ class LoadPathSelection(unittest.TestCase):
         self.assertEqual(rw.newest_load_path(), (None, None))
 
 
+class WorkerArgv(unittest.TestCase):
+    """The live `ps` read and the input comparison, without the CLI override."""
+
+    def setUp(self):
+        self._env = os.environ.pop("SUPERVISOR_WORKER_ARGV", None)
+        self._run = rw.subprocess.run
+
+    def tearDown(self):
+        rw.subprocess.run = self._run
+        if self._env is not None:
+            os.environ["SUPERVISOR_WORKER_ARGV"] = self._env
+
+    def stub(self, returncode=0, stdout="", raises=False):
+        class Out:
+            pass
+
+        def run(*_a, **_k):
+            if raises:
+                raise OSError("no ps")
+            out = Out()
+            out.returncode, out.stdout = returncode, stdout
+            return out
+
+        rw.subprocess.run = run
+
+    def test_populated_read(self):
+        self.stub(stdout="claude --mcp-config=/x.json\n")
+        self.assertEqual(rw.worker_argv(1), "claude --mcp-config=/x.json")
+
+    def test_failed_query_is_none(self):
+        self.stub(returncode=1)
+        self.assertIsNone(rw.worker_argv(1))
+
+    def test_raising_query_is_none(self):
+        self.stub(raises=True)
+        self.assertIsNone(rw.worker_argv(1))
+
+    def test_flag_followed_by_flag_is_not_a_path(self):
+        self.assertEqual(rw.mcp_config_paths("claude --mcp-config --strict-mcp-config"), [])
+
+    def test_no_load_path_accepts_on_newer_mcp_config(self):
+        with tempfile.NamedTemporaryFile() as fh:
+            changed = rw.changed_inputs(None, None, f"claude --mcp-config={fh.name}", None, 0.0)
+        self.assertEqual([label for label, _ in changed], ["MCP config"])
+
+    def test_none_argv_contributes_nothing(self):
+        self.assertEqual(rw.changed_inputs(None, None, None, None, 0.0), [])
+
+
+class DescribeChanged(unittest.TestCase):
+    """Regression 2026-10-10: an f-string followed by `"; ".join(...)` concatenated the two
+    literals into the separator, so the hand-off line read `plugin version (…)   ↪ tell …: ; MCP config (…)`."""
+
+    def test_joins_each_input_once(self):
+        self.assertEqual(
+            rw.describe_changed([("plugin version", "0.1.0"), ("MCP config", "/p")]),
+            "plugin version (0.1.0); MCP config (/p)",
+        )
+
+    def test_handoff_line_is_built_from_it(self):
+        with open(SCRIPT, encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertIn("what changed: {describe_changed(changed)}", src)
+
+
+class McpSource(unittest.TestCase):
+    """The launch-source report (SC3).
+
+    The two versions must be READ LIVE, never hardcoded: the warning exists to catch a
+    restart that reloads stale server code and reads as a success, so a printed version
+    has to be evidence. The control case — equal versions print no warning — is what
+    makes a hardcoded warning unable to pass.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def checkout(self, version):
+        root = os.path.join(self.dir, "checkout")
+        os.makedirs(os.path.join(root, ".claude-plugin"), exist_ok=True)
+        with open(os.path.join(root, ".claude-plugin", "plugin.json"), "w") as fh:
+            json.dump({"version": version}, fh)
+        os.makedirs(os.path.join(root, "scripts"), exist_ok=True)
+        return root
+
+    def config(self, args, name="mcp.json"):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as fh:
+            json.dump({"mcpServers": {"supervisor": {"command": "python3", "args": args}}}, fh)
+        return path
+
+    def test_reads_root_and_version_live(self):
+        root = self.checkout("0.1.0")
+        cfg = self.config([os.path.join(root, "scripts", "mcp-start.py")])
+        got_root, got_version, _ = rw.mcp_source(f"claude --mcp-config={cfg}")
+        self.assertEqual(got_root, root)
+        self.assertEqual(got_version, "0.1.0")
+
+    def test_plugin_version_missing_file_is_none(self):
+        self.assertIsNone(rw.plugin_version(self.dir))
+
+    def test_no_supervisor_entry_is_unknown(self):
+        cfg = self.config(["/somewhere/else/other.py"])
+        self.assertIsNone(rw.mcp_source(f"claude --mcp-config={cfg}")[0])
+
+    def test_no_argv_and_no_config_are_unknown(self):
+        self.assertIsNone(rw.mcp_source(None)[0])
+        self.assertIsNone(rw.mcp_source("claude --strict-mcp-config")[0])
+
+    def test_unreadable_config_is_unknown_not_a_crash(self):
+        path = os.path.join(self.dir, "broken.json")
+        with open(path, "w") as fh:
+            fh.write("{not json")
+        self.assertIsNone(rw.mcp_source(f"claude --mcp-config={path}")[0])
+
+    def test_no_warning_when_versions_match(self):
+        """The control case: a hardcoded warning cannot pass this."""
+        lines = rw.describe_source("/checkout", "0.1.0", "0.1.0")
+        self.assertEqual(len(lines), 1, lines)
+        self.assertFalse(lines[0][1])
+
+    def test_warning_when_source_lags_installed(self):
+        lines = rw.describe_source("/checkout", "0.1.0", "0.2.0")
+        self.assertEqual(len(lines), 2, lines)
+        self.assertTrue(lines[1][1])
+        self.assertIn("0.1.0", lines[1][0])
+        self.assertIn("0.2.0", lines[1][0])
+
+    def test_unreadable_version_is_reported_and_never_warns(self):
+        lines = rw.describe_source("/checkout", None, "0.2.0")
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("unreadable", lines[0][0])
+
+    def test_unknown_source_says_so(self):
+        self.assertIn("unknown", rw.describe_source(None, None, "0.2.0")[0][0])
+
+
 class RefusalCode(unittest.TestCase):
     """Pin the exit code every refusal routes through.
 
@@ -275,6 +675,7 @@ class Cli(unittest.TestCase):
     def run_cli(self, sid, *extra):
         env = dict(os.environ)
         env["SUPERVISOR_LOAD_PATH"] = self.load
+        env["SUPERVISOR_LAUNCHER"] = os.path.join(self.dir, "loadpath")
         out = subprocess.run(
             [sys.executable, SCRIPT, sid, "--sessions-dir", self.reg, "--dry-run", *extra],
             capture_output=True, text=True, env=env,
@@ -306,9 +707,14 @@ class Cli(unittest.TestCase):
         self.write(1, entry("hl", kind="headless"))
         self.assert_refusal("hl", "headless-target")
 
-    def test_manager_target(self):
+    def test_manager_is_restarted_not_refused(self):
+        """Regression 2026-10-18: the `manager-target` refusal is gone. A manager is
+        restarted like a worker — the role selects the colour and the re-arm note, and
+        only `role-undetermined` still stops on a role."""
         self.write(1, entry("mgr", name="Fleet Manager"))
-        self.assert_refusal("mgr", "manager-target")
+        code, lines = self.run_cli("mgr")
+        self.assertEqual(code, 0, lines)
+        self.assertIn("role: manager", lines[1], lines)
 
     def test_role_undetermined(self):
         self.write(1, entry("anon", name=""))
@@ -318,6 +724,91 @@ class Cli(unittest.TestCase):
         """A session started after the load path would reload identical code."""
         self.write(1, entry("fresh", name="Some Worker", startedAt="2099-01-01T00:00:00Z"))
         self.assert_refusal("fresh", "stale-load-path")
+
+    def run_with(self, sid, argv=None, launcher=None):
+        """Drive the CLI with a fixture worker argv and launcher."""
+        env = dict(os.environ)
+        env["SUPERVISOR_LOAD_PATH"] = self.load
+        if argv is not None:
+            env["SUPERVISOR_WORKER_ARGV"] = argv
+        # A stale launcher by default, so the fixture — never the real vault config or
+        # a real launcher's mtime — decides the case.
+        env["SUPERVISOR_LAUNCHER"] = launcher or self.stale(self.touch("cc-default"))
+        out = subprocess.run(
+            [sys.executable, SCRIPT, sid, "--sessions-dir", self.reg, "--dry-run"],
+            capture_output=True, text=True, env=env,
+        )
+        return out.returncode, out.stdout.strip().splitlines()
+
+    def touch(self, name):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as fh:
+            fh.write("x")
+        return path
+
+    def stale(self, path):
+        os.utime(path, (946684800, 946684800))  # 2000-01-01, before every fixture start
+        return path
+
+    def fresh_session(self, sid):
+        """A session started after the load path but before files touched now."""
+        os.utime(os.path.join(self.load, "9.9.9"), (946684800, 946684800))
+        self.write(1, entry(sid, name="Some Worker", startedAt="2020-01-01T00:00:00Z"))
+
+    def test_accepts_when_only_mcp_config_is_newer(self):
+        self.fresh_session("mcp")
+        cfg = self.touch("mcp.json")
+        code, lines = self.run_with("mcp", argv=f"claude --mcp-config={cfg} --strict-mcp-config")
+        self.assertEqual(code, 0, lines)
+        self.assertIn("MCP config", "\n".join(lines))
+
+    def test_accepts_spaced_mcp_config_form(self):
+        self.fresh_session("mcp2")
+        cfg = self.touch("mcp.json")
+        code, lines = self.run_with("mcp2", argv=f"claude --mcp-config {cfg}")
+        self.assertEqual(code, 0, lines)
+
+    def test_accepts_when_only_launcher_is_newer(self):
+        self.fresh_session("lau")
+        script = self.touch("cc-launcher")
+        code, lines = self.run_with("lau", argv="claude", launcher=script)
+        self.assertEqual(code, 0, lines)
+        self.assertIn("launcher", "\n".join(lines))
+
+    def test_refuses_when_all_three_are_older(self):
+        self.fresh_session("old")
+        cfg = self.stale(self.touch("mcp.json"))
+        script = self.stale(self.touch("cc-launcher"))
+        code, lines = self.run_with("old", argv=f"claude --mcp-config={cfg}", launcher=script)
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "stale-load-path", lines)
+        self.assertIn(cfg, "\n".join(lines))
+
+    def test_no_mcp_config_falls_back_to_load_path_check(self):
+        """No --mcp-config and a stale launcher: only the (stale) load path decides."""
+        self.fresh_session("noargv")
+        code, lines = self.run_with("noargv", argv="")
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "stale-load-path", lines)
+
+    def test_unresolved_launcher_refuses_before_the_kill(self):
+        """No override, cwd under no vault: exit 1 with an error line, nothing signalled."""
+        self.write(1, entry("nolauncher", name="Some Worker"))
+        cfg = os.path.join(self.dir, "vaults.json")
+        with open(cfg, "w") as fh:
+            json.dump([{"name": "v", "path": os.path.join(self.dir, "elsewhere"),
+                        "claude_script": "/x/cc"}], fh)
+        env = dict(os.environ)
+        env.pop("SUPERVISOR_LAUNCHER", None)
+        env["SUPERVISOR_LOAD_PATH"] = self.load
+        env["SUPERVISOR_VAULT_CONFIG"] = cfg
+        out = subprocess.run(
+            [sys.executable, SCRIPT, "nolauncher", "--sessions-dir", self.reg],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("no launcher could be resolved", out.stdout)
+        self.assertNotIn("killed pid", out.stdout)
 
     def test_happy_path_dry_run_signals_nothing(self):
         """Cleared target: the dry run reports what it WOULD do and exits 0."""

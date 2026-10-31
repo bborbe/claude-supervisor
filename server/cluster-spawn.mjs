@@ -28,6 +28,7 @@
 // Nothing here reads the filesystem, the environment, or the clock.
 
 import { randomUUID } from 'node:crypto'
+import { Agent, fetch as undiciFetch } from 'undici'
 
 // Verbatim from `interactive/session-id.go` (`sessionIDPattern`): one to 64 characters, the
 // first of which is not `-`. A `randomUUID` satisfies it; a hand-built id may not, which is
@@ -66,6 +67,141 @@ export const AUTH_SCHEME = 'Bearer '
 // to wait for. Bounded rather than unbounded so a wedged pod costs one error, not a manager
 // session stuck inside a tool call.
 export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000
+
+// ⚠️ **Without this the module's 10-minute bound is unreachable and the real ceiling is 5.**
+//
+// Node's `fetch` IS undici, whose `headersTimeout` defaults to 300 000 ms. `POST /prompt` sends
+// no response headers until the turn ends, so undici aborts a HEALTHY long turn at 300 s and the
+// caller sees `UND_ERR_HEADERS_TIMEOUT` — measured 2026-10-12 against a local stub that held its
+// headers 310 s: 300 931 ms on Node 26.11.1 (undici 8.11.2) and 300 966 ms on Node 22.22.3
+// (undici 6.24.1). The client's disconnect then cancels the turn in the pod
+// (`prompt intake failed: turn cancelled: context canceled`), so the answer AND the work are lost.
+//
+// The bound sits ABOVE `DEFAULT_TIMEOUT_MS` on purpose: this module's own `AbortController` stays
+// the authority, because it produces the readable `no answer within <timeoutMs>ms`, while
+// undici's is a backstop for a socket that dies without a signal. Equal bounds would make which
+// one fires a race.
+export const TRANSPORT_TIMEOUT_SLACK_MS = 5 * 1000
+
+// The dispatcher every spawn sends through, created on first use and reused.
+//
+// ⚠️ **`fetch` and `Agent` must come from the SAME copy of undici**, which is why this module
+// imports both from the package instead of using the global `fetch`. A dispatcher is honoured
+// only by the fetch sharing its undici instance, and Node exposes no `node:undici` builtin — so a
+// package `Agent` handed to the global fetch mixes majors on whichever runtime bundles a
+// different one. This fleet is split: 24 of 33 live supervisor servers run Node 26 (bundled
+// undici 8.11.2) and 9 run Node 22 (bundled 6.24.1), chosen by the launching session's PATH
+// because `package.json`'s `start` script calls bare `node`.
+//
+// One instance rather than one per request: an `Agent` owns a connection pool, so a per-request
+// agent leaks a socket per spawn unless destroyed — and both the retry loop and the body read
+// need it alive anyway.
+let clusterDispatcher
+
+// The dispatcher for a spawn, created on first use.
+//
+// Sized from `DEFAULT_TIMEOUT_MS`, which is what every production caller uses. A caller that
+// raises `timeoutMs` above it MUST inject its own `dispatcher`, or undici's bound would fall
+// below the deadline it exists to sit above — reintroducing this very defect.
+export function clusterTransportDispatcher() {
+  clusterDispatcher ??= new Agent({
+    headersTimeout: DEFAULT_TIMEOUT_MS + TRANSPORT_TIMEOUT_SLACK_MS,
+    bodyTimeout: DEFAULT_TIMEOUT_MS + TRANSPORT_TIMEOUT_SLACK_MS,
+  })
+  return clusterDispatcher
+}
+
+// How many times one spawn tries the service when the failure is a CONNECTION failure, and how
+// long it waits between tries.
+//
+// ⚠️ **This exists because the failure it retries was observed and then stopped reproducing.**
+// On 2026-10-11 a cluster spawn failed three times in a row with `fetch failed` between 19:30
+// and 20:05, while every shell probe to the same host, port and path answered in under 10 ms —
+// and at 20:24 the identical call succeeded twice, full round trip. An intermittent connection
+// failure that kills the spawn outright is the wrong shape for a path a manager relies on, and
+// the caller cannot tell it from a permanent refusal: undici reports both as one opaque
+// `TypeError: fetch failed`.
+//
+// The retry is deliberately NARROW. Only a connection-level failure is retried; an `AbortError`
+// (this module's own timeout) and every HTTP response — 401 above all — return on the first
+// attempt. A retry around a refusal would turn one honest "the token does not match" into three
+// identical refusals and three times the wait, which is the failure this bound exists to avoid
+// causing rather than to cause.
+export const CLUSTER_CONNECT_ATTEMPTS = 3
+export const CLUSTER_CONNECT_BACKOFF_MS = 250
+
+// The codes worth a second try — and every one of them is a PRE-DELIVERY failure: the request
+// never reached the service, so a retry sends it for the first time.
+//
+// ⚠️ **The post-delivery codes are deliberately absent, and that is the load-bearing decision
+// here.** `POST /prompt` is not idempotent — it runs a turn — so a connection that dies AFTER
+// the request was delivered may already have started one, and a retry would run a SECOND turn on
+// the same session id, silently and with nothing in the response to reveal it. That is not
+// hypothetical: the 16:1x failure on this path is exactly that shape, with the pod log showing
+// `prompt intake: bytes=81` while the client saw a failure. `ECONNRESET`, `EPIPE`,
+// `UND_ERR_SOCKET` ("other side closed") and `UND_ERR_HEADERS_TIMEOUT` are all reachable after
+// delivery, so none is retried: a duplicate turn is worse than one honest failure the caller can
+// re-issue itself.
+//
+// ⚠️ **`UND_ERR_HEADERS_TIMEOUT` is excluded for the post-delivery reason above, and NOT because
+// a header-less server is necessarily wedged** — that reading was wrong, and is corrected here.
+// This service holds response headers for the whole turn by design, so this code is exactly what
+// a HEALTHY long turn used to produce at undici's 300 s default; see `TRANSPORT_TIMEOUT_SLACK_MS`.
+// It stays unretried because it is reachable only after delivery and `POST /prompt` is not
+// idempotent. With the transport bound now raised above `DEFAULT_TIMEOUT_MS` it should not fire
+// at all — and if it does, the pod itself has stopped answering.
+//
+// `ETIMEDOUT` stays because at this layer it is the OS connect timeout — the SYN never got an
+// answer, so nothing was delivered. `EAI_AGAIN` is in on purpose: a resolver that did not answer
+// in time is exactly the transient case, while a permanent `ENOTFOUND` costs two extra attempts
+// (250 ms + 500 ms) and still fails.
+const CONNECTION_ERROR_CODES = new Set([
+  'ECONNREFUSED',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ETIMEDOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+])
+
+// Whether this error is worth another attempt.
+//
+// Keyed on the CODE, never on undici's wrapper. `TypeError: fetch failed` is thrown for every
+// transport failure including permanent ones, so matching that wrapper alone retries a settled
+// answer: a request to a blocked port reports `fetch failed — bad port`, and a predicate that
+// matched the wrapper spent three attempts and 750 ms reaching the same verdict (measured
+// 2026-10-11 against `http://127.0.0.1:9`). The code is what makes the question decidable, and
+// an unrecognised one is treated as permanent — the cause is reported either way, so an
+// unidentifiable failure is diagnosable on its next occurrence rather than guessed at here.
+//
+// `AbortError` is excluded first: it is this module's own timeout firing, and retrying a
+// service that did not answer inside ten minutes spends thirty to learn the same thing.
+function isConnectionFailure(error) {
+  if (!error || error.name === 'AbortError') return false
+  // `errno` is deliberately NOT consulted: Node sets it to a number (`-111`) while every member
+  // of the set above is a symbolic name, so a `String(errno)` comparison could never match —
+  // it only read as if it could.
+  const code = error.code ?? error.cause?.code
+  return Boolean(code) && CONNECTION_ERROR_CODES.has(String(code))
+}
+
+// The connection-level detail undici puts on `error.cause` — the detail this module used to
+// discard, and the reason a cluster spawn could fail three times and say only `fetch failed`.
+// Rendered rather than JSON-stringified: this lands in a manager session's context, and
+// `ECONNREFUSED 192.168.178.34:443` is the whole of what it needs.
+//
+// Nothing here can carry the credential: the cause describes the socket, and the token only
+// ever travels in a request header.
+function describeConnectionCause(error) {
+  const cause = error?.cause
+  if (!cause || typeof cause !== 'object') return ''
+  const code = cause.code ?? cause.errno
+  const address = cause.address ? `${cause.address}${cause.port ? `:${cause.port}` : ''}` : ''
+  const detail = [code, address].filter(Boolean).join(' ')
+  if (detail) return detail
+  return typeof cause.message === 'string' && cause.message ? cause.message : ''
+}
 
 // How much of the child's answer travels back to the caller. The answer is a whole turn's
 // text and its reader is a manager session whose context it lands in, so it is bounded
@@ -162,13 +298,33 @@ export function resolveClusterTarget({ envUrl, envToken, file, path = 'the super
   // Each value is validated under its OWN label, so a bad file-sourced value names the file
   // key rather than the env var it never came from — the repo's rule that a refusal names the
   // thing the operator must change.
+  // ⚠️ A plaintext `cluster.token` REFUSES rather than being read, and the refusal IS the
+  // migration. The token reaches the server from TeamVault through the launch wrapper, as
+  // `INTERACTIVE_AUTH_TOKEN`; a copy in this file is the exposure being removed, so reading it
+  // would leave the very thing being deleted working silently. Unconditional by operator
+  // decision (2026-10-14) — the deploy is ordered so this never goes live against a config
+  // that still holds one (see the task's # Sequence).
+  //
+  // `''` is absence, matching `set` below, so an emptied key reads as a deleted key and does
+  // not refuse. The offending VALUE is never echoed: only the key and the file are named.
+  if (section?.token !== undefined && section.token !== null && section.token !== '') {
+    return {
+      error:
+        `"cluster.token" is set in ${path}, and the supervisor no longer reads a cluster token from the ` +
+        'config file. The token now reaches the server from TeamVault through the launch wrapper, as ' +
+        'INTERACTIVE_AUTH_TOKEN (see docs/fleet-surface.md § Spawn a worker item 7). Delete the ' +
+        `"cluster.token" key in ${path}.`,
+    }
+  }
+
   const urlSources = [
     { label: 'SUPERVISOR_CLUSTER_URL', value: envUrl, check: resolveClusterBaseUrl },
     { label: `"cluster.url" in ${path}`, value: section?.url, check: resolveClusterBaseUrl },
   ]
+  // ⚠️ One source, not two: the file's `cluster.token` is refused above, so listing it here
+  // would advertise a source that can never win.
   const tokenSources = [
     { label: 'INTERACTIVE_AUTH_TOKEN', value: envToken, check: resolveAuthToken },
-    { label: `"cluster.token" in ${path}`, value: section?.token, check: resolveAuthToken },
   ]
   // ⚠️ A whitespace-only value counts as SET, deliberately, and the asymmetry with `''` is the
   // point rather than an oversight. `''` is absence — an unset variable that got exported — so
@@ -177,7 +333,7 @@ export function resolveClusterTarget({ envUrl, envToken, file, path = 'the super
   // exactly, so a mis-pasted token would match on this side and stop matching on the other).
   // It therefore wins the source and is refused by resolveAuthToken's whitespace rule, naming
   // the key. The cost is real and worth stating: a trailing newline in an exported env value
-  // shadows a perfectly good `cluster.token`, and the fix is to remove the env value.
+  // is refused rather than trimmed, and the fix is to remove the env value.
   const set = (s) => s.value !== undefined && s.value !== null && s.value !== ''
   for (const { label, value, check } of [...urlSources, ...tokenSources]) {
     if (!set({ value })) continue
@@ -266,12 +422,16 @@ export function resolveAuthToken(raw, label = 'INTERACTIVE_AUTH_TOKEN', configPa
   if (raw === undefined || raw === null || raw === '') {
     return {
       error:
-        'the cluster target has no token: neither INTERACTIVE_AUTH_TOKEN nor "cluster.token" is set. ' +
-        'The claude-interactive service requires `Authorization: Bearer <token>` on POST /prompt and refuses ' +
-        'without it, so a spawn would fail as a 401 naming nothing to fix. Set "cluster.token" in the ' +
-        `supervisor config file (${configPath}) — a /mcp Reconnect picks that up, ` +
-        'because the server re-reads the file at its own start — or set INTERACTIVE_AUTH_TOKEN on the server ' +
-        'entry, which needs a NEW session, since an MCP env block is cached at session start.',
+        'the cluster target has no token: INTERACTIVE_AUTH_TOKEN is not set. The claude-interactive ' +
+        'service requires `Authorization: Bearer <token>` on POST /prompt and refuses without it, so a ' +
+        'spawn would fail as a 401 naming nothing to fix. The token is resolved from TeamVault by ' +
+        'scripts/mcp-start.py, which the supervisor MCP entry must name as its `command`. ⚠️ Changing ' +
+        'that `command` needs a NEW session: Claude Code caches the server definition at session start, ' +
+        'so a /mcp Reconnect re-spawns from the cached one and never sees the edit. Setting ' +
+        'INTERACTIVE_AUTH_TOKEN on the server entry needs a new session for the same reason. A ' +
+        '"cluster.token" in the supervisor config file ' +
+        `(${configPath}) is NOT a fallback: it is refused, because a plaintext token there is the ` +
+        'exposure this change removes.',
     }
   }
   if (typeof raw !== 'string') {
@@ -316,8 +476,18 @@ export async function startClusterSession({
   prompt,
   sessionId,
   authToken,
-  fetchImpl = fetch,
+  // ⚠️ **undici's own fetch, never the global one** — the `dispatcher` below is an `undici`
+  // instance and is honoured only by the fetch that shares its copy. See
+  // `clusterTransportDispatcher` for why that pairing is load-bearing on this fleet.
+  fetchImpl = undiciFetch,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  // Injected by the regression test, which needs a transport bound it can observe inside a test's
+  // lifetime. Defaults to the shared instance above.
+  dispatcher = clusterTransportDispatcher(),
+  // Injected so the retry's backoff costs a test nothing. This is the only clock the function
+  // touches, and a test that had to sit through 250 ms twice would cost more than the
+  // behaviour it pins is worth.
+  sleepImpl = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   const resolved = resolveClusterBaseUrl(baseUrl)
   if (resolved.error) return { error: resolved.error }
@@ -334,25 +504,44 @@ export async function startClusterSession({
   const auth = resolveAuthToken(authToken)
   if (auth.error) return { error: auth.error }
 
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
   let response
-  try {
-    response = await fetchImpl(`${resolved.baseUrl}${PROMPT_PATH}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'text/plain; charset=utf-8',
-        [SESSION_HEADER]: sessionId,
-        [AUTH_HEADER]: `${AUTH_SCHEME}${auth.token}`,
-      },
-      body: prompt,
-      signal: controller.signal,
-    })
-  } catch (error) {
-    const why = error?.name === 'AbortError' ? `no answer within ${timeoutMs}ms` : error?.message || String(error)
-    return { error: `could not reach the cluster service at ${resolved.baseUrl}${PROMPT_PATH}: ${why}` }
-  } finally {
-    clearTimeout(timer)
+  // The retry lives around the fetch alone, never around the body read or the status handling:
+  // a 401 or a malformed body is a settled answer, and re-sending it would spend three
+  // identical refusals to reach the same one.
+  for (let attempt = 1; ; attempt += 1) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      response = await fetchImpl(`${resolved.baseUrl}${PROMPT_PATH}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          [SESSION_HEADER]: sessionId,
+          [AUTH_HEADER]: `${AUTH_SCHEME}${auth.token}`,
+        },
+        body: prompt,
+        signal: controller.signal,
+        // The whole of this change: without a dispatcher undici's own 300 s `headersTimeout`
+        // fires first on any turn longer than five minutes, and the answer is lost.
+        dispatcher,
+      })
+      break
+    } catch (error) {
+      // Cleared here rather than only in the `finally`: this attempt is over, and leaving its
+      // timer armed would abort a controller nothing is waiting on during the backoff.
+      clearTimeout(timer)
+      if (isConnectionFailure(error) && attempt < CLUSTER_CONNECT_ATTEMPTS) {
+        await sleepImpl(CLUSTER_CONNECT_BACKOFF_MS * attempt)
+        continue
+      }
+      const why =
+        error?.name === 'AbortError'
+          ? `no answer within ${timeoutMs}ms`
+          : [error?.message || String(error), describeConnectionCause(error)].filter(Boolean).join(' — ')
+      return { error: `could not reach the cluster service at ${resolved.baseUrl}${PROMPT_PATH}: ${why}` }
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   let body = ''
@@ -369,7 +558,7 @@ export async function startClusterSession({
     // the reader looking at their network for what is a credential mismatch.
     const hint =
       response.status === 401
-        ? ' — the service rejected the credential: check that the token matches the one the service was started with. It comes from INTERACTIVE_AUTH_TOKEN on the server entry or from "cluster.token" in the supervisor config file — and where both are set the env var wins, so a file-sourced token is not the one being sent'
+        ? ' — the service rejected the credential: check that the token matches the one the service was started with. It reaches this process as INTERACTIVE_AUTH_TOKEN, resolved from TeamVault by the launch wrapper — so the two candidates are the TeamVault entry the wrapper reads and the value the service was started with, and a mismatch means one of those two moved'
         : ''
     return {
       error: `the cluster service refused the prompt: HTTP ${response.status}${body.trim() ? ` — ${body.trim()}` : ''}${hint}`,

@@ -20,8 +20,28 @@ success and does nothing.
 
   context-usage.py                 all sessions, highest usage first
   context-usage.py --over 70       only sessions at/over 70%
-  context-usage.py --compactable   over the threshold AND neither blocked nor in a tool call
-  context-usage.py --threshold 60  set the threshold (default 70)
+  context-usage.py --compactable   over the bound AND neither blocked nor in a tool call
+  context-usage.py --threshold 60  set the percentage threshold (default 70; inert
+                                   whenever --threshold-tokens is given)
+  context-usage.py --threshold-tokens 500000
+                                   set the absolute bound: over at/above 500k tokens used
+
+A token bound is a PRECONDITION, not an alternative to the percentage: a session
+below it is under the bound however full its window is. That is load-bearing on a
+small window, where the percentage alone is far below the floor — 70% of 128k is
+90k — and an ORed bound let the percentage fire there on its own. The percentage
+is therefore consulted only when no token bound is given, and the run prints the
+single bound in force so a gate's output names what it actually applied.
+
+The absolute bound is what this fleet runs on: the sessions here use 1M-token
+windows, so 70% is 700k tokens and the percentage gate is unreachable in practice
+(measured 2026-10-13: 85 sessions live in 24h, all 1M windows, 380k–620k used,
+none near 70%).
+
+A record whose `context_window_size` is absent cannot be judged against a token
+bound at all. It is reported as UNKNOWN and withheld from the candidate list —
+never folded to 0 tokens, which would read as "under every bound" and silently drop
+exactly the sessions the bound cannot evaluate.
 """
 import argparse, glob, importlib.util, json, os, time
 
@@ -107,12 +127,61 @@ def is_candidate(r):
             and r["addressable"])
 
 
+def used_tokens(r):
+    """Absolute tokens used, or `None` when the record carries no window size.
+
+    `context_window_size` is absent on some records. Folding that to 0 — which the
+    display path used to do with `or 0` — reads as "tiny, under every bound", so an
+    absolute-token filter built on it would silently drop exactly the sessions it
+    cannot evaluate. UNKNOWN is its own answer, the same rule `pane_state` applies
+    to an unreadable `wezterm cli list`.
+    """
+    size = r["rec"].get("context_window_size")
+    if not size:
+        return None
+    return int(r["pct"] / 100 * size)
+
+
+def bound_verdict(r, threshold, tokens):
+    """`True` over, `False` under, `None` when the record cannot be evaluated.
+
+    A token bound is a PRECONDITION, not an alternative. The two bounds used to
+    be ORed, which let the percentage fire on its own at 70% of a 128k window —
+    90k, far below the 500k floor that must hold on every path. A session below
+    the token bound is therefore under the bound however full its window is, and
+    the percentage is consulted only when no token bound is given.
+
+    `None` is preserved as its own answer: a record with no window size cannot
+    be judged against a token bound, and must not read as "under" it.
+    """
+    if tokens is None:
+        return r["pct"] >= threshold
+    used = used_tokens(r)
+    return None if used is None else used >= tokens
+
+
+def bound_label(threshold, tokens):
+    """The bound as printed — the in-force bound a gate's own output carries.
+
+    Only the bound that can actually fire is named. Printing "70% or 200k
+    tokens" while the percentage cannot fire below the token bound would
+    describe a gate this code does not have — the same defect the label was
+    added to prevent, since a reader would check the percentage half and find
+    it inert.
+    """
+    if tokens is None:
+        return f"{threshold:.0f}%"
+    return f"{tokens / 1000:.0f}k tokens"
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--threshold", type=float, default=70.0)
+    ap.add_argument("--threshold-tokens", type=int, default=None, metavar="N",
+                    help="absolute bound — over at/above N tokens used")
     ap.add_argument("--over", type=float, metavar="PCT", help="only at/over PCT")
     ap.add_argument("--compactable", action="store_true",
-                    help="over threshold AND not blocked AND not in a tool call")
+                    help="over the bound AND not blocked AND not in a tool call")
     a = ap.parse_args()
 
     ctx = load(CONTEXT, "")
@@ -146,8 +215,15 @@ def main():
                      "detail": n.get("detail", "")})
     rows.sort(key=lambda r: -r["pct"])
 
-    limit = a.over if a.over is not None else (a.threshold if (a.compactable or a.over) else None)
-    shown = [r for r in rows if limit is None or r["pct"] >= limit]
+    verdicts = {r["sid"]: bound_verdict(r, a.threshold, a.threshold_tokens) for r in rows}
+    if a.over is not None:
+        shown = [r for r in rows if r["pct"] >= a.over]
+    elif a.compactable or a.threshold_tokens is not None:
+        # An UNKNOWN verdict is shown rather than filtered out — it is the answer the
+        # bound could not produce, and hiding it would read as "under".
+        shown = [r for r in rows if verdicts[r["sid"]] is not False]
+    else:
+        shown = list(rows)
     if a.compactable:
         shown = [r for r in shown if is_candidate(r)]
 
@@ -155,19 +231,22 @@ def main():
         print("⚠️  `wezterm cli list` unreadable — pane ids withheld. A pane that cannot "
               "be checked is UNKNOWN: not live, and not gone either.")
     print(f"Context usage ({len(shown)} of {len(rows)} sessions, highest first)")
+    print(f"Bound in force: {bound_label(a.threshold, a.threshold_tokens)}")
     for r in shown:
         name = (r["rec"].get("session_name") or r["sid"][:8])[:34]
-        size = r["rec"].get("context_window_size") or 0
-        used = int(r["pct"] / 100 * size) if size else 0
+        used = used_tokens(r)
+        toks = (f"{used / 1000:>5.0f}k/{r['rec'].get('context_window_size', 0) / 1000:.0f}k"
+                if used is not None else "    ?k/   ?k")
         flag = "⌛" if r["blocked"] else ("⚙" if r["busy"] else " ")
         print(f" {flag} {r['pct']:>5.0f}%  {bar(r['pct'])}  "
-              f"{used/1000:>5.0f}k/{size/1000:.0f}k  {name:<34}  "
+              f"{toks}  {name:<34}  "
               f"pane {r['pane']:>4}  {age(r['rec'].get('ts'))}")
 
-    over = [r for r in rows if r["pct"] >= a.threshold]
+    over = [r for r in rows if verdicts[r["sid"]] is True]
+    unknown = [r for r in rows if verdicts[r["sid"]] is None]
     cand = [r for r in over if is_candidate(r)]
     if over:
-        print(f"\n⚠️  Over {a.threshold:.0f}%: {len(over)}")
+        print(f"\n⚠️  Over {bound_label(a.threshold, a.threshold_tokens)}: {len(over)}")
         for r in over:
             why = ("this session — never a candidate" if r["self"]
                    else "blocked" if r["blocked"]
@@ -176,6 +255,13 @@ def main():
                    else "pane unverified — not compactable" if not r["addressable"]
                    else "idle — compactable")
             print(f"   {r['pct']:>5.0f}%  {(r['rec'].get('session_name') or r['sid'][:8])[:40]:<40}  pane {r['pane']:>4}  {why}")
+    if unknown:
+        print(f"\n⚠️  Window UNKNOWN — {len(unknown)} session(s) cannot be judged against the "
+              f"{bound_label(a.threshold, a.threshold_tokens)} bound, so none is offered. "
+              f"UNKNOWN is not 'under': the record carries no context_window_size.")
+        for r in unknown:
+            print(f"   {r['pct']:>5.0f}%  {(r['rec'].get('session_name') or r['sid'][:8])[:40]:<40}  "
+                  f"pane {r['pane']:>4}  window unknown")
     if cand:
         print(f"\n♻️  Compaction candidates ({len(cand)}) — idle and over threshold. "
               f"Confirm the composer is empty on the pane before sending.")

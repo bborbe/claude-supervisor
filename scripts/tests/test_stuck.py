@@ -21,6 +21,11 @@ works while being wrong:
   - **`🔴 BLOCKED` matches as a line PREFIX.** The phrase also occurs mid-line in a
     worker's own prose about it; a substring match fires on a worker that is merely
     discussing a block.
+  - **A `🔴 BLOCKED` closer is a stall only when it is VERBLESS.** The discriminator
+    is the closer's own `👤 You:` verb: a worker that named an answerable verb told
+    the operator where to answer, so it is parked, and filing it as a stall routes a
+    settled state into the one incident kind with no answer path and no close path.
+    `👤 You: nothing` is the negative control — no verb, no card, nobody told.
   - **A missing heartbeat is not a dead one.** Every session on a host without the
     store produces no stamp, and the registry half already covers those.
 """
@@ -137,12 +142,50 @@ class ReplayTest(unittest.TestCase):
         self.assertNotIn(SID8, watch.gated_keys(state))
 
     def test_stuck_fixture_without_the_registry_entry_is_still_stuck(self):
-        # The defect's own shape: a headless worker is not in the registry at all.
-        # STUCK must not depend on the registry half, which cannot see it.
-        fx = Fixture(STUCK_FIXTURE, status=None)
+        # A headless worker is not in the registry at all, and STUCK must not
+        # depend on the registry half, which cannot see it.
+        #
+        # ⚠️ The heartbeat IS required, and this fixture used to omit it. A live
+        # headless worker re-stamps every `HEARTBEAT_INTERVAL_MS` (30 s) against a
+        # `HEARTBEAT_TTL_MS` (60 s) read, so one ALWAYS holds a fresh stamp:
+        # `status=None` with no stamp at all is a session that is gone, not a
+        # headless one. Pinning that shape as `stuck:` is what gated a dead
+        # session; the sibling test below is the corrected reading.
+        fx = Fixture(STUCK_FIXTURE, status=None, heartbeat_age_s=5)
         self.addCleanup(fx.cleanup)
         state = fx.probe()
         self.assertEqual(state[SID8][2], "stuck:stream-closed")
+        self.assertIs(state[SID8][3], True)
+
+    def test_a_dead_session_with_a_stuck_tail_is_unregistered_not_gated(self):
+        # THE FIX. A session with no registry entry AND no heartbeat is gone, so a
+        # `stuck` marker left in its frozen tail must not gate it — that gate is
+        # offered to the operator with a heal ladder pointed at a session that no
+        # longer exists, and nothing can answer it. Measured 2026-10-09 on a real
+        # tracked set: this shape rendered `GATED e4fd1919 [stuck:stream-closed]`
+        # against `gated: 1  held: 13`.
+        #
+        # Its positive controls are the tests either side of it: the headless shape
+        # above (status=None + fresh stamp → `stuck:`) and the registered shape
+        # below (status="idle" → `stuck-tab:`). A fix that deletes the `stuck` limb
+        # outright passes this test and fails both of those.
+        fx = Fixture(STUCK_FIXTURE, status=None)
+        self.addCleanup(fx.cleanup)
+        state = fx.probe()
+        self.assertEqual(state[SID8][2], "unregistered")
+        self.assertIsNone(state[SID8][3], "held, never cleared")
+        self.assertEqual(watch.gated_keys(state), [])
+
+    def test_a_registered_worker_with_a_stuck_tail_still_reads_stuck_tab(self):
+        # The second positive control: `stuck-tab:` is what keeps a registered (tab)
+        # worker off the heal ladder's headless-resume rung, and it must survive the
+        # reordering above. The registry decides here, not the heartbeat.
+        fx = Fixture(STUCK_FIXTURE, status="idle")
+        self.addCleanup(fx.cleanup)
+        state = fx.probe()
+        self.assertEqual(state[SID8][2], "stuck-tab:stream-closed")
+        self.assertIs(state[SID8][3], True)
+        self.assertEqual(watch.gated_keys(state), [SID8])
 
 
 class PermissionFailureRunTest(unittest.TestCase):
@@ -229,6 +272,82 @@ class StuckReasonTest(unittest.TestCase):
 
     def test_a_clean_transcript_is_not_stuck(self):
         self.assertIsNone(watch.stuck_reason("👤 You: nothing", ""))
+
+
+BLOCKED_LINE = "🔴 BLOCKED · nothing running · needs intervention"
+
+
+class BlockedCloserParkTest(unittest.TestCase):
+    """A `🔴 BLOCKED` closer is a stall ONLY when nobody was told.
+
+    The discriminator is the closer's own `👤 You:` verb, not the state line: a
+    worker that reached its closer and named an answerable verb has told the
+    operator where to answer, so it is PARKED and must not be filed as a stall —
+    the one incident kind with no answer path and therefore no close path. The
+    verbless closer is the negative control, because it is exactly the shape that
+    mints no card: no verb, nobody told, still stuck.
+    """
+
+    ASK = BLOCKED_LINE + "\n👤 You: approve: merge the PR"
+    NOTHING = BLOCKED_LINE + "\n👤 You: nothing"
+
+    def test_a_verb_carrying_closer_is_not_a_stuck_reason(self):
+        self.assertIsNone(watch.stuck_reason(self.ASK, ""))
+
+    def test_a_verb_carrying_closer_reaches_a_park_reason_not_a_stall(self):
+        # Both destinations ENUMERATED — a `waiting` tab worker and an `idle` one —
+        # because "every reason it returns" is vacuously true if it returns none.
+        # Asserted on `incident_kind`, never on the reason's spelling: the reason is
+        # an internal name, the kind is the record the ledger writes.
+        body = watch.closer_body(self.ASK)
+        stuck = watch.stuck_reason(self.ASK, "")
+        for status, want in (("waiting", "registry:waiting"),
+                             ("idle", "idle+closer")):
+            gated, reason = watch.is_gated(status, body, stuck=stuck)
+            self.assertIs(gated, True, status)
+            self.assertEqual(reason, want, status)
+            self.assertNotEqual(watch.incident_kind(reason), "stall", status)
+
+    def test_a_verb_carrying_closer_on_a_frozen_modal_is_also_a_park(self):
+        # The THIRD destination, and the one the narrowing moves too: the modal limb
+        # sits ahead of the closer read and never consults it, but `stuck` is
+        # checked even earlier — so before the fix this same tail read
+        # `stuck-tab:blocked-closer`, and now it reads a park.
+        stuck = watch.stuck_reason(self.ASK, "")
+        gated, reason = watch.is_gated(
+            "busy", watch.closer_body(self.ASK), stuck=stuck,
+            pending="AskUserQuestion", frozen=True)
+        self.assertIs(gated, True)
+        self.assertEqual(reason, "busy+parked-modal")
+        self.assertEqual(watch.incident_kind(reason), "permission")
+
+    def test_a_verbless_closer_is_still_stuck_and_still_a_stall(self):
+        # The existing `test_blocked_closer_matches_as_a_line_prefix` tail, taken
+        # through to the kind: the cause survives, and it still escalates.
+        self.assertEqual(watch.stuck_reason(self.NOTHING, ""), "blocked-closer")
+        _, reason = watch.is_gated("waiting", watch.closer_body(self.NOTHING),
+                                   stuck=watch.stuck_reason(self.NOTHING, ""))
+        self.assertEqual(reason, "stuck-tab:blocked-closer")
+        self.assertEqual(watch.incident_kind(reason), "stall")
+
+    def test_a_blocked_line_with_no_closer_at_all_is_still_stuck(self):
+        # No `👤 You:` line means no verb either — nothing was said to anyone.
+        self.assertEqual(watch.stuck_reason(BLOCKED_LINE, ""), "blocked-closer")
+
+    def test_a_verb_carrying_closer_on_a_permission_failure_run_is_still_stuck(self):
+        # `permission-failures` is checked AFTER the closer limb, so the narrowing
+        # cannot swallow an exhausted retry run that happens to end on a park panel.
+        other = "Tool permission request failed: Request timed out"
+        tail = "\n".join(json.dumps(result(other, True)) for _ in range(3))
+        self.assertEqual(watch.stuck_reason(self.ASK, tail), "permission-failures")
+        self.assertEqual(watch.incident_kind("stuck-tab:permission-failures"),
+                         "stall")
+
+    def test_stream_closed_is_still_a_stall(self):
+        # Checked BEFORE the closer limb, and unaffected by it.
+        tail = "\n".join(json.dumps(result(STREAM_CLOSED, True)) for _ in range(4))
+        self.assertEqual(watch.stuck_reason(self.ASK, tail), "stream-closed")
+        self.assertEqual(watch.incident_kind("stuck-tab:stream-closed"), "stall")
 
 
 class HeartbeatLiveTest(unittest.TestCase):
@@ -319,7 +438,13 @@ class HeadlessGateTest(unittest.TestCase):
         for status in ("waiting", "idle", "busy"):
             _, reason = watch.is_gated(status, "nothing", stuck="stream-closed")
             self.assertFalse(reason.startswith("stuck:"), status)
-        _, reason = watch.is_gated(None, "nothing", stuck="stream-closed")
+        # The headless contrast: status None WITH a fresh heartbeat is the one
+        # shape that legitimately reads `stuck:` — the heal ladder's own case.
+        # ⚠️ Without the heartbeat this is a DEAD session and reads `unregistered`
+        # instead; see ReplayTest.test_a_dead_session_with_a_stuck_tail_is_unregistered_not_gated
+        # for the reading, and why the heartbeat is the discriminator.
+        _, reason = watch.is_gated(None, "nothing", headless_live=True,
+                                   stuck="stream-closed")
         self.assertEqual(reason, "stuck:stream-closed")
 
 

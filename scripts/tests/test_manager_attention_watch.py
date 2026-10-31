@@ -56,6 +56,36 @@ def load(name, filename):
 
 watch = load("manager_attention_watch", "manager-attention-watch.py")
 
+# ⚠️ MODULE-LEVEL, not per-fixture, and the distinction was measured rather than
+# guessed. `open_incident` shells out to `incident-ledger.py`, which inherits THIS
+# process's environment — so a test that drives the real loop writes a REAL incident
+# into the operator's ledger unless the override is set. A first attempt put the
+# redirect in `Fixture.__init__` and it did not hold: `IncidentReplayTest` and the
+# transition tests drive the loop without ever constructing a `Fixture`, so two
+# fixture records (`aaaa1111`, `15fce333`) reappeared in
+# `~/.claude/state/incidents/ledger.json` on the very next `make precommit`. Module
+# scope covers every test in this file whatever fixture it uses.
+_LEDGER_ENV = None
+_LEDGER_DIR = None
+
+
+def setUpModule():
+    global _LEDGER_ENV, _LEDGER_DIR
+    _LEDGER_ENV = os.environ.get("SUPERVISOR_INCIDENTS_LEDGER")
+    _LEDGER_DIR = tempfile.mkdtemp(prefix="maw-incidents-")
+    os.environ["SUPERVISOR_INCIDENTS_LEDGER"] = os.path.join(
+        _LEDGER_DIR, "ledger.json"
+    )
+
+
+def tearDownModule():
+    if _LEDGER_ENV is None:
+        os.environ.pop("SUPERVISOR_INCIDENTS_LEDGER", None)
+    else:
+        os.environ["SUPERVISOR_INCIDENTS_LEDGER"] = _LEDGER_ENV
+    if _LEDGER_DIR:
+        shutil.rmtree(_LEDGER_DIR, ignore_errors=True)
+
 
 def assistant(text=None, tool=None, thinking=None):
     """One assistant transcript record. `thinking`/`tool` carry NO text block.
@@ -73,6 +103,19 @@ def assistant(text=None, tool=None, thinking=None):
     if tool:
         content.append({"type": "tool_use", "id": "t1", "name": tool, "input": {}})
     return {"type": "assistant", "message": {"content": content}}
+
+
+def user_result(content, is_error):
+    """One `user` record carrying a single `tool_result` block."""
+    return {"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "t1", "is_error": is_error,
+         "content": content}]}}
+
+
+STREAM_CLOSED_ERROR = "Tool permission request failed: AbortError: Stream closed"
+BLOCKED_HEAD = "🔴 BLOCKED · nothing running · needs intervention"
+BLOCKED_ASK = BLOCKED_HEAD + "\n👤 You: approve: merge it"
+BLOCKED_NOTHING = BLOCKED_HEAD + "\n👤 You: nothing"
 
 
 class Fixture:
@@ -1067,16 +1110,38 @@ class RepostTest(unittest.TestCase):
     SID8 = "aaaa1111"
     ENTRIES = {SID8: ("A", SID)}
 
-    def _run(self, open_items, parked=(SID8,)):
+    ANSWERED_ROW = {
+        "item_id": "c0ffee00c0ffee00c0ffee00c0ffee00",
+        "answer": "skip",
+        "answered_at": "2026-10-10T18:10:35.900805Z",
+        # The row's own creation time — what `answer_covers_current_park` dates
+        # the answer against. Present here because a row without it cannot be
+        # dated, and an undateable answer deliberately does not suppress.
+        "created_at": "2026-10-10T18:12:32Z",
+    }
+
+    def _run(self, open_items, parked=(SID8,), answered=None, answered_ok=True,
+             park_since=None):
         posted = []
         with tempfile.TemporaryDirectory() as d:
             with mock.patch.object(watch, "open_store_items",
                                    lambda *a, **kw: open_items):
-                watch.repost_empty_parks(
-                    list(parked), self.ENTRIES,
-                    os.path.join(d, "events.jsonl"),
-                    post=lambda sid8, full, label: (
-                        posted.append((sid8, full)) or True))
+                with mock.patch.object(
+                        watch, "answered_park_keys",
+                        lambda *a, **kw: ((answered or {}) if answered_ok
+                                          else None)):
+                    watch.repost_empty_parks(
+                        list(parked), self.ENTRIES,
+                        os.path.join(d, "events.jsonl"),
+                        post=lambda sid8, full, label, **kw: (
+                            posted.append((sid8, full)) or True),
+                        # Epoch 0 — the park predates every answer row, so the
+                        # answer covers it. Tests that need the opposite pass one.
+                        # ⚠️ `self.SID8`, not a bare `SID8`: inside a method body a
+                        # bare name resolves to the MODULE global (a different
+                        # session id), which silently made the clock cover nothing.
+                        park_since=(park_since if park_since is not None
+                                    else {self.SID8: 0.0}))
         return posted
 
     def test_a_park_the_store_lost_is_re_posted(self):
@@ -1107,8 +1172,108 @@ class RepostTest(unittest.TestCase):
                                    lambda *a, **kw: (set(), set())):
                 out = watch.repost_empty_parks(
                     [self.SID8], self.ENTRIES, os.path.join(d, "events.jsonl"),
-                    post=lambda *a: False)
+                    post=lambda *a, **kw: False)
         self.assertEqual(out, [], "a refused post is not a re-post")
+
+    def test_an_answered_park_is_not_re_posted(self):
+        """SC1 — the key's most recent store record reads ANSWERED.
+
+        The defect this closes: the store's suppression is open-scoped, so an
+        ANSWERED card leaves no open item, and the watcher read that absence as a
+        store fault. Measured 2026-10-10, `park:beeb6128` was re-posted at
+        20:12:32 — two minutes after the operator answered its prior instance.
+        """
+        self.assertEqual(
+            self._run((set(), set()), answered={self.SID8: self.ANSWERED_ROW}),
+            [], "an answered park is an answered question, not a fault")
+
+    def test_a_lost_park_still_re_posts_when_nothing_is_answered(self):
+        """SC3 — the fix suppresses an ANSWER, never a FAULT.
+
+        Pairs with the test above: that one alone is satisfied by a build that
+        suppresses every re-post, and this one alone by a build that re-posts
+        everything. Neither is a fix; the pair is the test.
+        """
+        self.assertEqual(self._run((set(), set()), answered={}),
+                         [(self.SID8, self.SID)])
+
+    def test_an_answered_park_is_logged_naming_the_answered_instance(self):
+        """SC2's positive assertion — the line names the answer, not a fault.
+
+        The absence half (`0 REPOST`) is satisfied by a build that simply stops
+        logging, so the criterion leads with this line existing.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, "events.jsonl")
+            with mock.patch.object(watch, "open_store_items",
+                                   lambda *a, **kw: (set(), set())):
+                with mock.patch.object(
+                        watch, "answered_park_keys",
+                        lambda *a, **kw: {self.SID8: self.ANSWERED_ROW}):
+                    watch.repost_empty_parks(
+                        [self.SID8], self.ENTRIES, log, post=lambda *a, **kw: True,
+                        park_since={self.SID8: 0.0})
+            with open(log, encoding="utf-8") as fh:
+                rows = [json.loads(line) for line in fh if line.strip()]
+        kinds = [r["kind"] for r in rows]
+        self.assertIn("ANSWERED", kinds,
+                      "the suppression must be visible in the durable log")
+        detail = next(r["detail"] for r in rows if r["kind"] == "ANSWERED")
+        self.assertIn("park:" + self.SID8, detail,
+                      "the line names the key, not 'store held no open item'")
+        self.assertIn(self.ANSWERED_ROW["item_id"], detail,
+                      "and it names the answered INSTANCE, not just the key")
+
+    def test_a_failed_answered_read_re_posts_nothing(self):
+        """The `None` contract extends to the second store read.
+
+        A read that FAILED is not a reading that the key was answered. Same
+        direction `open_store_items` already rules: the safe side is the silent
+        one, because a re-post on an unreadable store fires for every parked
+        worker at once.
+        """
+        self.assertEqual(self._run((set(), set()), answered_ok=False), [])
+
+    def test_an_answer_from_a_previous_park_does_not_suppress_a_later_one(self):
+        """⚠️ The predicate that keeps this fix from silencing a FAULT.
+
+        `park:<sid8>` rows have exactly ONE producer — this watcher — so an
+        answered row stays the newest row for its key **forever**: the re-post that
+        would write a newer row is the very thing the answer suppresses. Without
+        the park clock a *later* lost park on the same session is never raised, and
+        the change suppresses a fault as well as an answer. Measured basis: the
+        incident this arm closes re-posted the SAME key four times over ~3h20m, so
+        repeated parks on one session are the normal case, not a corner.
+        """
+        earlier = watch.card_lookup.parse_ts("2026-10-10T15:20:04Z").timestamp()
+        row = dict(self.ANSWERED_ROW)
+        row["created_at"] = "2026-10-10T15:20:04Z"
+        self.assertEqual(
+            self._run((set(), set()), answered={self.SID8: row},
+                      park_since={self.SID8: earlier + 3600}),
+            [(self.SID8, self.SID)],
+            "the answer predates the park in progress, so it is about an earlier "
+            "one and the park must be re-raised")
+        self.assertEqual(
+            self._run((set(), set()), answered={self.SID8: row},
+                      park_since={self.SID8: earlier - 3600}),
+            [],
+            "the same answer DOES cover a park it postdates")
+
+    def test_a_missing_park_clock_re_posts_rather_than_suppressing(self):
+        """An answer that cannot be dated against the park is not evidence the park
+        is answered. The safe side is the noisy one; the arm always supplies the
+        clock, so this branch is only reached by a caller that passed none."""
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(watch, "open_store_items",
+                                   lambda *a, **kw: (set(), set())):
+                with mock.patch.object(
+                        watch, "answered_park_keys",
+                        lambda *a, **kw: {self.SID8: self.ANSWERED_ROW}):
+                    out = watch.repost_empty_parks(
+                        [self.SID8], self.ENTRIES,
+                        os.path.join(d, "events.jsonl"), post=lambda *a, **kw: True)
+        self.assertEqual(out, [self.SID8])
 
 
     def test_a_headless_park_is_parked_too(self):
@@ -1224,6 +1389,144 @@ class OpenStoreItemsTest(unittest.TestCase):
         self.assertIsNone(self._fetch('{"error": "unknown agent"}'))
 
 
+class AnsweredParkKeysTest(unittest.TestCase):
+    """`answered_park_keys` — the one read that can tell ANSWERED from LOST.
+
+    ⚠️ It reads `GET /api/1.0/attention/history`, NOT `GET /api/1.0/attention`.
+    Measured against the live store 2026-10-11: the item read returned 11 items,
+    ALL `open`, and neither `?limit=50000` nor `?state=answered` changed that — so
+    an answered card is absent from it by construction, and relaxing the open-state
+    filter cannot reach one. `attention-card-lookup.py`'s docstring says the same;
+    `open_store_items`'s said the opposite until this change, citing
+    `who-needs-me.py:271`'s defensive else-branch as evidence — which proves
+    nothing about an endpoint's contract.
+
+    ⚠️ The paging rule is the sibling's, deliberately not restated: a key whose
+    cards all predate the page reads as `no record`, which is the false negative
+    that re-posts the very card this read exists to find.
+    """
+
+    SID = "bbbb2222-0000-0000-0000-000000000000"
+    SID8 = "bbbb2222"
+
+    def _read(self, body):
+        resp = mock.MagicMock()
+        resp.read.return_value = body.encode()
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda *a: False
+        with mock.patch("urllib.request.urlopen", lambda *a, **kw: resp):
+            return watch.answered_park_keys([self.SID8])
+
+    def _row(self, state, created_at, sid8=None,
+             answered_at="2026-10-10T18:13:00Z"):
+        return {"dedup_key": f"park:{sid8 or self.SID8}", "state": state,
+                "created_at": created_at, "item_id": f"item-{state}",
+                "answered_at": answered_at}
+
+    def test_a_closed_record_carrying_an_answer_reads_answered(self):
+        out = self._read(json.dumps([self._row("closed", "2026-10-10T18:12:32Z")]))
+        self.assertEqual(list(out), [self.SID8])
+
+    def test_a_closed_record_with_no_answer_does_not_read_answered(self):
+        """⚠️ A `closed` row with no `answered_at` is a CLEAR or a REAP, not an
+        answer — `answered-attribution.py`: `open -> closed` "records that a card
+        was cleared: `answered_at` and `decision` stay unset and no answer is
+        routed, so the asking session stays frozen", and it measures that shape as
+        the DOMINANT one (9,339 of 9,454 rows). Reading the state alone would
+        suppress the re-post for a worker that is still parked and still frozen —
+        a missed escalation, the direction this read must never take."""
+        out = self._read(json.dumps([
+            self._row("closed", "2026-10-10T18:12:32Z", answered_at=None)]))
+        self.assertEqual(out, {})
+
+    def test_a_reaped_key_is_a_candidate_again_once_a_newer_row_exists(self):
+        """The reaped key has a RECORD, so 'no record at all' is the wrong test —
+        the test is 'no answered record'. A cleared row followed by a newer
+        answered one reads answered."""
+        out = self._read(json.dumps([
+            self._row("closed", "2026-10-10T15:20:04Z", answered_at=None),
+            self._row("closed", "2026-10-10T18:12:32Z")]))
+        self.assertEqual(list(out), [self.SID8])
+
+    def test_an_answered_record_reads_answered(self):
+        out = self._read(json.dumps([self._row("answered", "2026-10-10T18:12:32Z")]))
+        self.assertEqual(list(out), [self.SID8])
+
+    def test_the_row_is_carried_so_the_caller_can_name_the_instance(self):
+        """SC1: the event detail names the answered INSTANCE, not just the key."""
+        out = self._read(json.dumps([self._row("closed", "2026-10-10T18:12:32Z")]))
+        self.assertEqual(out[self.SID8]["item_id"], "item-closed")
+
+    def test_an_open_record_does_not_read_answered(self):
+        self.assertEqual(
+            self._read(json.dumps([self._row("open", "2026-10-10T18:12:32Z")])),
+            {})
+
+    def test_the_most_recent_record_decides(self):
+        """SC1's wording is "most recent store record", and it is load-bearing: a
+        key re-parked after an earlier answer carries a NEWER row, so treating any
+        answered row as decisive would suppress a live park."""
+        self.assertEqual(self._read(json.dumps([
+            self._row("closed", "2026-10-10T15:20:04Z"),
+            self._row("open", "2026-10-10T18:12:32Z")])), {})
+
+    def test_a_tie_on_created_at_re_posts_rather_than_picking(self):
+        """⚠️ The sibling REFUSES an undecidable ordering — "never to pick".
+
+        A silent first-seen pick would make this key's ANSWERED/LOST verdict
+        payload-order dependent: an open row first re-posts an already-answered
+        park (the defect this read exists to close), an answered row first
+        suppresses a live one (a missed escalation). Both orders must agree, and
+        the safe side is the noisy one — drop the key, let the caller re-post.
+        """
+        self.assertEqual(self._read(json.dumps([
+            self._row("closed", "2026-10-10T18:12:32Z"),
+            self._row("open", "2026-10-10T18:12:32Z")])), {})
+        self.assertEqual(self._read(json.dumps([
+            self._row("open", "2026-10-10T18:12:32Z"),
+            self._row("closed", "2026-10-10T18:12:32Z")])), {},
+            "the store's row order must not decide it")
+
+    def test_another_keys_records_are_ignored(self):
+        self.assertEqual(self._read(json.dumps([
+            self._row("closed", "2026-10-10T18:12:32Z", sid8="deadbeef")])), {})
+
+    def test_a_non_park_key_for_the_same_session_is_ignored(self):
+        """The `park:` prefix branch. A `stuck:<sid8>` row names the same session
+        but is a different contract on a different key space — `test_another_keys_
+        records_are_ignored` only exercises the `sid8 not in sids` skip, since its
+        key still carries the `park:` prefix."""
+        self.assertEqual(self._read(json.dumps([
+            {"dedup_key": f"stuck:{self.SID8}", "state": "closed",
+             "created_at": "2026-10-10T18:12:32Z", "item_id": "item-stuck",
+             "answered_at": "2026-10-10T18:13:00Z"}])), {})
+
+    def test_a_failed_read_is_none_never_empty(self):
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("boom")):
+            self.assertIsNone(watch.answered_park_keys([self.SID8]))
+
+    def test_a_non_list_body_is_none_not_an_exception(self):
+        """A 200 carrying an error object must not read as an empty page — the
+        false empty would re-post for every parked worker at once."""
+        self.assertIsNone(self._read('{"error": "unknown agent"}'))
+
+    def test_a_non_dict_element_is_skipped_not_raised(self):
+        """⚠️ The strictness must reach one level BELOW the body. A list carrying
+        `[null]` or `["error"]` would raise `AttributeError` out of the poll, and
+        the poll's handler abandons the REST of that poll — `park_ages` unwritten,
+        the gated-set transition uncommitted — for as long as the element stays in
+        the history window."""
+        out = self._read(json.dumps([
+            None, "error", self._row("closed", "2026-10-10T18:12:32Z")]))
+        self.assertEqual(list(out), [self.SID8],
+                         "the good row still resolves; the bad ones are skipped")
+
+    def test_no_sids_does_not_touch_the_store(self):
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=AssertionError("read with nothing to check")):
+            self.assertEqual(watch.answered_park_keys([]), {})
+
+
 class PostRepostArgvTest(unittest.TestCase):
     """The re-post's command line, pinned.
 
@@ -1314,6 +1617,8 @@ class IncidentReplayTest(unittest.TestCase):
                                    lambda *a, **kw: parked), \
                  mock.patch.object(watch, "open_store_items",
                                    lambda *a, **kw: seq_items.pop(0)), \
+                 mock.patch.object(watch, "answered_park_keys",
+                                   lambda *a, **kw: {}), \
                  mock.patch.object(watch, "post_repost",
                                    lambda sid8, full, label, **kw: (
                                        posted.append((sid8, full)) or True)), \
@@ -1330,6 +1635,640 @@ class IncidentReplayTest(unittest.TestCase):
         self.assertEqual(posted, [(self.SID8, self.SID)],
                          "the store losing the card must produce exactly one "
                          "re-post, not one per poll")
+
+
+class ContentChangeReEmissionTest(unittest.TestCase):
+    """SC1–SC4: a gate whose CONTENT changes re-emits; a byte-identical one does not.
+
+    The defect measured 2026-10-06: `transitions()` compared membership only, so a
+    session that stayed in the gated set while its question changed produced no
+    event. Dedup scope is per body hash (SC4) — the exact string `NEW GATE` carries.
+    """
+
+    NEW_CLOSER = "👤 You: pick — 1. gamma · 2. delta"
+    GATED = {"aaaa1111": ("A", "pick — 1. alpha", "idle+closer", True)}
+
+    def _probe(self, closer_line):
+        fx = Fixture([assistant(text=closer_line)], "idle")
+        self.addCleanup(fx.cleanup)
+        return fx
+
+    @staticmethod
+    def _prev(state):
+        return {sid: watch.content_key(v[2], v[1]) for sid, v in state.items()}
+
+    def test_sc1_content_change_reemits_with_the_new_body(self):
+        first = self._probe(CLOSER_LINE).probe()
+        self.assertEqual(watch.gated_keys(first), [SID8])
+        second = self._probe(self.NEW_CLOSER).probe()
+        got = watch.transitions(self._prev(first), watch.gated_keys(second), second)
+        self.assertEqual([k for k, *_ in got], ["NEW GATE"],
+                         "a changed question under the same membership re-emits")
+        _, sid8, _, detail = got[0]
+        self.assertEqual(sid8, SID8)
+        self.assertIn("gamma", detail, "the line carries the NEW body")
+        self.assertNotIn("alpha", detail, "and not the old one")
+
+    def test_sc2_byte_identical_does_not_reemit(self):
+        fx = self._probe(CLOSER_LINE)
+        state = fx.probe()
+        prev = self._prev(state)
+        for _ in range(2):
+            again = fx.probe()
+            self.assertEqual(
+                [k for k, *_ in watch.transitions(prev, watch.gated_keys(again), again)],
+                [], "an unchanged poll must add no NEW GATE")
+
+    def test_sc3_streaming_and_once_share_one_predicate(self):
+        fx = self._probe(CLOSER_LINE)
+        state = fx.probe()
+        prev = self._prev(state)
+        self.assertEqual(
+            [k for k, *_ in watch.transitions(prev, watch.gated_keys(state), state)], [],
+            "streaming: unchanged → no transition")
+        self.assertEqual(
+            watch.gate_transition(prev, SID8, state[SID8][2], state[SID8][1])[0],
+            "UNCHANGED", "--once: unchanged → same verdict")
+        changed = self._probe(self.NEW_CLOSER).probe()
+        self.assertEqual(
+            [k for k, *_ in watch.transitions(prev, watch.gated_keys(changed), changed)],
+            ["NEW GATE"], "streaming: changed → NEW GATE")
+        self.assertEqual(
+            watch.gate_transition(prev, SID8, changed[SID8][2], changed[SID8][1])[0],
+            "NEW GATE", "--once: changed → same verdict")
+
+    def test_sc3_once_cli_marks_new_then_seen(self):
+        fx = self._probe(CLOSER_LINE)
+        state = fx.probe()
+        state_dir = os.path.join(fx.dir, "state")
+        argv = ["--tracked", fx.tracked, "--tasks-dir", fx.tasks,
+                "--projects-root", fx.projects, "--sessions-dir", fx.sessions,
+                "--state", state_dir, "--once"]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(watch.main(argv), 0)
+        self.assertIn("(new)", out.getvalue(),
+                      "a first read with no state file is a new gate")
+        os.makedirs(state_dir, exist_ok=True)
+        with open(watch.state_path_for(state_dir, fx.tracked), "w") as fh:
+            json.dump(self._prev(state), fh)
+        out2 = io.StringIO()
+        with redirect_stdout(out2):
+            self.assertEqual(watch.main(argv), 0)
+        self.assertIn("(seen)", out2.getvalue(),
+                      "the same content against a recorded key is not a new gate")
+
+    def test_sc4_boundary_cases_follow_the_stated_scope(self):
+        prev = {"aaaa1111": watch.content_key("idle+closer", "same body")}
+        self.assertEqual(
+            watch.gate_transition(prev, "aaaa1111", "stuck:stream-closed",
+                                  "same body")[0],
+            "NEW GATE", "reason changes alone → re-emits")
+        self.assertEqual(
+            watch.gate_transition(prev, "aaaa1111", "idle+closer",
+                                  "different body")[0],
+            "NEW GATE", "body changes alone → re-emits")
+        self.assertEqual(
+            watch.gate_transition(prev, "aaaa1111", "idle+closer", "same body")[0],
+            "UNCHANGED", "byte-identical → no re-emit")
+
+    def test_legacy_list_state_records_instead_of_bursting(self):
+        fx = self._probe(CLOSER_LINE)
+        state = fx.probe()
+        self.assertEqual(
+            [k for k, *_ in watch.transitions([SID8], watch.gated_keys(state), state)],
+            [], "a pre-content-key list must not re-emit on upgrade")
+
+    def test_commit_loop_reemits_on_content_change_and_writes_a_dict(self):
+        changed = {"aaaa1111": ("A", "pick — 1. gamma", "idle+closer", True)}
+        seq = [{}, self.GATED, self.GATED, changed, changed]
+        n = len(seq)
+        out = io.StringIO()
+
+        def fake_probe(*a, **kw):
+            return seq.pop(0) if seq else {}
+
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(watch, "probe", fake_probe), \
+                 mock.patch.object(watch.time, "sleep", lambda *_: None), \
+                 redirect_stdout(out):
+                watch.main(["--tracked", os.path.join(d, "t.txt"),
+                            "--tasks-dir", d,
+                            "--state", os.path.join(d, "state"),
+                            "--max-polls", str(n)])
+            with open(watch.state_path_for(os.path.join(d, "state"),
+                                           os.path.join(d, "t.txt"))) as fh:
+                written = json.load(fh)
+        text = out.getvalue()
+        self.assertEqual(text.count("NEW GATE"), 2, text)
+        self.assertIn("gamma", text, "the second line carries the changed body")
+        self.assertIsInstance(written, dict, "the state file is content-keyed")
+        self.assertEqual(written["aaaa1111"],
+                         watch.content_key("idle+closer", "pick — 1. gamma"))
+
+
+class IncidentKindTest(unittest.TestCase):
+    """Which incident kind a raised gate records.
+
+    The mapping is the whole join between "the watcher saw a gate" and "the ledger
+    holds a blocker of kind X", so a wrong entry here is a record that reads as
+    evidence while answering a different question. The `None` cases matter as much
+    as the mapped ones: `unregistered` and `held:*` are HELD, never NEW GATE, and an
+    implementation that defaulted an unmapped reason to `question` would record a
+    blocker the watcher never claimed.
+    """
+
+    def test_the_three_parked_reasons_map_to_their_kinds(self):
+        self.assertEqual(watch.incident_kind("registry:waiting"), "permission")
+        self.assertEqual(watch.incident_kind("busy+parked-modal"), "permission")
+        self.assertEqual(watch.incident_kind("headless+closer"), "question")
+        self.assertEqual(watch.incident_kind("closer-unknown"), "question")
+
+    def test_both_stuck_limbs_are_a_stall(self):
+        # `stuck:` is a headless worker and `stuck-tab:` a registered one; both are
+        # a duration, not a gate, so both are the same kind.
+        self.assertEqual(watch.incident_kind("stuck:stream-closed"), "stall")
+        self.assertEqual(watch.incident_kind("stuck-tab:no-writes"), "stall")
+
+    def test_blocked_closer_is_a_stall_only_for_the_verbless_closer(self):
+        # The cause still maps to `stall` — `stuck_reason` decides WHO reaches it,
+        # and it now hands over only a `👤 You: nothing` tail. A verb-carrying
+        # closer arrives as `registry:waiting` / `idle+closer` and never gets here,
+        # which is what takes a settled park off the answer-less stall path.
+        self.assertEqual(watch.incident_kind("stuck-tab:blocked-closer"), "stall")
+
+    def test_held_reasons_record_nothing(self):
+        for reason in ("unregistered", "held:busy", "held:shell", "headless:no-ask",
+                       "idle:no-ask"):
+            self.assertIsNone(watch.incident_kind(reason), reason)
+
+    def test_every_parked_reason_is_mapped(self):
+        # PARKED_REASONS is the list this arm exists for; a member with no kind
+        # would be a gate the ledger never hears about.
+        for reason in watch.PARKED_REASONS:
+            self.assertIsNotNone(watch.incident_kind(reason), reason)
+
+
+class BlockedCloserGateTest(unittest.TestCase):
+    """A `🔴 BLOCKED` closer carrying an answerable verb is a PARK, end to end.
+
+    `test_stuck.py` pins the predicate; this pins the CONSEQUENCE through a real
+    transcript fixture and the commit loop, which is where the incident is actually
+    written. `--once` returns before that write, so this drives `--max-polls` — the
+    same reason `CommitLoopTest` exists.
+
+    The two controls are the point, not decoration: the discriminator is *someone
+    was told*. A `👤 You: nothing` panel mints no card, so that worker is still
+    stuck and must still escalate; a dead permission channel is stuck whoever wrote
+    the last panel.
+    """
+
+    def _run(self, records, status):
+        fx = Fixture(records, status)
+        self.addCleanup(fx.cleanup)
+        opened, out = [], io.StringIO()
+        with mock.patch.object(watch, "open_incident",
+                               lambda sid, reason: opened.append((sid, reason))), \
+             mock.patch.object(watch, "open_store_items", lambda *a, **kw: None), \
+             mock.patch.object(watch, "resume_observer", lambda *a, **kw: None), \
+             mock.patch.object(watch.time, "sleep", lambda *_: None), \
+             redirect_stdout(out), redirect_stderr(io.StringIO()):
+            rc = watch.main(["--tracked", fx.tracked, "--tasks-dir", fx.tasks,
+                             "--projects-root", fx.projects,
+                             "--sessions-dir", fx.sessions,
+                             "--state", os.path.join(fx.dir, "state"),
+                             "--max-polls", "3"])
+        self.assertEqual(rc, 0)
+        return opened, out.getvalue()
+
+    def test_a_verb_carrying_closer_opens_no_stuck_incident(self):
+        opened, text = self._run([assistant(text=BLOCKED_ASK)], "waiting")
+        self.assertIn("registry:waiting", text)
+        self.assertTrue(opened, "the gate must still be raised: " + text)
+        self.assertEqual([r for _, r in opened if r.startswith("stuck")], [],
+                         "a parked closer must open no stuck incident: %r"
+                         % (opened,))
+        self.assertEqual(watch.incident_kind(opened[0][1]), "permission")
+
+    def test_a_verbless_closer_still_opens_a_stall_incident(self):
+        opened, text = self._run([assistant(text=BLOCKED_NOTHING)], "waiting")
+        self.assertIn("stuck-tab:blocked-closer", text)
+        self.assertEqual([r for _, r in opened], ["stuck-tab:blocked-closer"])
+        self.assertEqual(watch.incident_kind(opened[0][1]), "stall")
+
+    def test_a_stream_closed_worker_still_opens_a_stall_incident(self):
+        opened, text = self._run(
+            [assistant(text="retrying"),
+             user_result(STREAM_CLOSED_ERROR, True),
+             user_result(STREAM_CLOSED_ERROR, True),
+             user_result(STREAM_CLOSED_ERROR, True)], "waiting")
+        self.assertIn("stuck-tab:stream-closed", text)
+        self.assertEqual([r for _, r in opened], ["stuck-tab:stream-closed"])
+
+    def test_the_parked_worker_produces_one_card_not_two(self):
+        # The `Stop` hook already minted the closer's card, produced by the worker's
+        # own session id — the join `repost_empty_parks` reads. So the watcher's gate
+        # must add nothing: one block, one card.
+        fx = Fixture([assistant(text=BLOCKED_ASK)], "waiting")
+        self.addCleanup(fx.cleanup)
+        state = fx.probe()
+        # The fixture reading, straight through `probe()`: a `waiting` worker whose
+        # tail ends on a verb-carrying `🔴 BLOCKED` closer is gated with a reason that
+        # is neither `stuck:` nor `stuck-tab:`, and that reason is not a stall kind.
+        self.assertEqual(state[SID8][2], "registry:waiting")
+        self.assertNotEqual(watch.incident_kind(state[SID8][2]), "stall")
+        parked = watch.parked_keys(state)
+        self.assertEqual(parked, [SID8], "a verb-carrying closer is a PARK")
+        posted = []
+        with mock.patch.object(watch, "open_store_items",
+                               lambda *a, **kw: ({SID}, set())):
+            watch.repost_empty_parks(
+                parked, {SID8: (TASK, SID)},
+                os.path.join(fx.dir, "events.jsonl"),
+                post=lambda *a, **kw: posted.append(a) or True,
+                park_since={SID8: 0.0})
+        self.assertEqual(posted, [], "the closer's own card is already open")
+
+    def test_a_stall_is_not_a_park_so_it_still_escalates(self):
+        # The contrast that makes the one-card assertion meaningful: the genuinely
+        # stuck class keeps the escalate leg, whose card is the only one it gets —
+        # no closer was ever written for it, so no hook card exists to duplicate.
+        state = {SID8: (TASK, "retrying", "stuck-tab:stream-closed", True)}
+        self.assertEqual(watch.parked_keys(state), [])
+        self.assertEqual(watch.incident_kind("stuck-tab:stream-closed"), "stall")
+
+
+class OpenIncidentTest(unittest.TestCase):
+    """The subprocess seam that writes the record.
+
+    Shelling out is deliberate (the ledger's name carries a hyphen, so it cannot be
+    imported by name), which makes the COMMAND SHAPE the thing to pin: a wrong flag
+    or a truncated session id would write a record that looks right and joins to
+    nothing.
+    """
+
+    def test_the_command_carries_the_full_session_id_and_the_kind(self):
+        with mock.patch.object(watch.subprocess, "run") as run:
+            watch.open_incident(SID, "registry:waiting")
+        self.assertEqual(run.call_count, 1)
+        command = run.call_args[0][0]
+        self.assertIn("open", command)
+        self.assertEqual(command[command.index("--session") + 1], SID)
+        self.assertEqual(command[command.index("--kind") + 1], "permission")
+        self.assertEqual(command[command.index("--detected-by") + 1],
+                         "gate:registry:waiting")
+
+    def test_an_unmapped_reason_writes_nothing(self):
+        with mock.patch.object(watch.subprocess, "run") as run:
+            watch.open_incident(SID, "held:busy")
+        run.assert_not_called()
+
+    def test_a_ledger_failure_never_raises(self):
+        # The watcher's job is to report gates. A ledger that cannot be written
+        # must not take it down and leave every gate in the fleet unreported.
+        with mock.patch.object(watch.subprocess, "run",
+                               side_effect=OSError("boom")):
+            watch.open_incident(SID, "headless+closer")
+
+    def test_a_missing_script_writes_nothing(self):
+        with mock.patch.object(watch.os.path, "exists", return_value=False), \
+                mock.patch.object(watch.subprocess, "run") as run:
+            watch.open_incident(SID, "headless+closer")
+        run.assert_not_called()
+
+
+class ParkCardShapeTest(unittest.TestCase):
+    """The re-posted card's SHAPE follows the park it is about.
+
+    ⚠️ **This is the 2026-10-22 board defect, pinned.** The tracked-set watcher
+    re-registered a tab worker parked on a native permission modal (`Ask` rule on
+    `Bash(git push:*)`) as a `message` card, so the board offered a free-text
+    field and a Submit button. A typed answer reaches the store and nothing else:
+    the modal is answered by a keystroke in its own pane. The card has to say so
+    and offer no field at all.
+
+    Both directions are asserted. Narrowing every re-posted card to `ack` would
+    pass a test that only checked the permission case, and would silently remove
+    the board's only way to answer a parked closer line — so the question-class
+    case is asserted to KEEP its input field.
+    """
+
+    FULL = "aaaa1111-0000-0000-0000-000000000000"
+
+    def _run(self, reason, pane=None):
+        captured = {}
+
+        def fake_run(cmd, **kw):
+            captured["cmd"] = cmd
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch.object(watch.subprocess, "run", fake_run), \
+                mock.patch.object(watch, "pane_for_session_name",
+                                  lambda name: pane):
+            ok = watch.post_repost("aaaa1111", self.FULL, "Some Task",
+                                   reason=reason)
+        return ok, captured.get("cmd") or []
+
+    def test_a_permission_modal_park_posts_an_ack_with_no_input(self):
+        ok, cmd = self._run("busy+parked-modal")
+        self.assertTrue(ok)
+        self.assertEqual(cmd[cmd.index("--mechanism") + 1], "ack",
+                         "an ack item renders no input field and no Allow/Deny, "
+                         "which is the only honest shape for a native modal")
+        self.assertNotIn("--option", cmd)
+        payload = cmd[cmd.index("--payload") + 1]
+        self.assertIn("Answer it in the pane", payload)
+        self.assertIn("cannot release a prompt raised in another session", payload,
+                      "the card must say WHY the board cannot answer it, or the "
+                      "operator reads the missing field as a rendering fault")
+
+    def test_a_registry_waiting_park_is_also_permission_class(self):
+        _, cmd = self._run("registry:waiting")
+        self.assertEqual(cmd[cmd.index("--mechanism") + 1], "ack")
+
+    def test_a_closer_park_keeps_its_message_card_and_input(self):
+        ok, cmd = self._run("headless+closer")
+        self.assertTrue(ok)
+        self.assertNotIn("--mechanism", cmd,
+                         "the message default is what gives this card its input "
+                         "field — the answer path for a parked closer line")
+        payload = cmd[cmd.index("--payload") + 1]
+        self.assertIn("parked on the operator", payload)
+
+    def test_a_resolved_pane_puts_a_jump_target_on_the_card(self):
+        _, cmd = self._run("busy+parked-modal", pane="1907")
+        payload = cmd[cmd.index("--payload") + 1]
+        self.assertIn("1907", payload)
+        self.assertTrue("/supervisor:jump 1907" in payload
+                        or "jump?pane=1907" in payload, payload)
+
+    def test_an_unresolved_pane_posts_the_card_anyway(self):
+        ok, cmd = self._run("busy+parked-modal", pane=None)
+        self.assertTrue(ok, "a pane read that fails must never suppress the card")
+        payload = cmd[cmd.index("--payload") + 1]
+        self.assertNotIn("Jump to pane", payload)
+
+    def test_the_reason_reaches_the_post_from_the_park_set(self):
+        seen = []
+
+        def fake_post(sid8, full, label, reason=""):
+            seen.append((sid8, reason))
+            return True
+
+        with mock.patch.object(watch, "open_store_items",
+                               lambda *a, **kw: (set(), set())), \
+                mock.patch.object(watch, "answered_park_keys",
+                                  lambda *a, **kw: {}):
+            watch.repost_empty_parks(
+                ["aaaa1111"],
+                {"aaaa1111": ("Some Task", self.FULL)},
+                "/dev/null",
+                post=fake_post,
+                reasons={"aaaa1111": "busy+parked-modal"})
+        self.assertEqual(seen, [("aaaa1111", "busy+parked-modal")],
+                         "without the reason the post cannot pick a shape and "
+                         "falls back to the card this defect was filed against")
+
+
+class PaneForSessionNameTest(unittest.TestCase):
+    """The pane join that gives a re-registered card its jump target.
+
+    ⚠️ Every case here returns `None` rather than raising, and `None` means
+    "not resolved", never "no pane exists" — a failed `wezterm cli list` cannot
+    prove a pane is gone, and the card is posted either way. What must NOT
+    happen is a *bogus* target: a pane id of the literal string `"None"` is
+    truthy, so the caller would emit `Jump to pane None: /supervisor:jump None`
+    — a control that looks resolved and goes nowhere.
+    """
+
+    NAME = "⚙ MDM split command"
+
+    def _resolve(self, *, stdout="", returncode=0, raises=None):
+        def fake_run(cmd, **kw):
+            if raises:
+                raise raises
+            return mock.Mock(returncode=returncode, stdout=stdout, stderr="")
+
+        with mock.patch.object(watch.subprocess, "run", fake_run):
+            return watch.pane_for_session_name(self.NAME)
+
+    def test_the_status_glyph_is_stripped_before_matching(self):
+        self.assertEqual(
+            self._resolve(stdout=json.dumps([{"pane_id": 1907,
+                                              "title": "✳ " + self.NAME}])),
+            "1907")
+
+    def test_a_pane_without_a_pane_id_is_skipped_not_stringified(self):
+        self.assertIsNone(
+            self._resolve(stdout=json.dumps([{"title": "✳ " + self.NAME}])),
+            "str(None) is 'None' and truthy — that is the defect this pins")
+
+    def test_a_pane_with_a_null_pane_id_is_skipped(self):
+        self.assertIsNone(
+            self._resolve(stdout=json.dumps([{"pane_id": None,
+                                              "title": self.NAME}])))
+
+    def test_a_failed_query_resolves_nothing(self):
+        self.assertIsNone(self._resolve(returncode=1, stdout="boom"))
+
+    def test_malformed_json_resolves_nothing(self):
+        self.assertIsNone(self._resolve(stdout="{not json"))
+
+    def test_a_non_list_payload_resolves_nothing(self):
+        self.assertIsNone(self._resolve(stdout=json.dumps({"panes": []})))
+
+    def test_a_missing_wezterm_resolves_nothing(self):
+        self.assertIsNone(self._resolve(raises=OSError("no wezterm")))
+
+    def test_a_non_dict_element_is_skipped(self):
+        self.assertIsNone(self._resolve(stdout=json.dumps([None, "x", 3])))
+
+    def test_no_title_match_resolves_nothing(self):
+        self.assertIsNone(
+            self._resolve(stdout=json.dumps([{"pane_id": 1, "title": "other"}])))
+
+    def test_two_panes_matching_one_key_resolve_nothing(self):
+        # ⚠️ Not "the first wins". A card that jumps to a sibling's pane is
+        # worse than a card with no jump button — the operator presses it and
+        # lands in a different session's modal. Same rule as
+        # `who-needs-me.py:pane_for` (`len(hits) == 1`).
+        self.assertIsNone(
+            self._resolve(stdout=json.dumps([
+                {"pane_id": 11, "title": self.NAME},
+                {"pane_id": 22, "title": self.NAME}])),
+            "an ambiguous match must degrade to no target, never to one of them")
+
+    def test_a_uniqueness_suffixed_name_does_not_match_the_unsuffixed_pane(self):
+        # `uniqueTabName` appends ` (2)` precisely so two sessions never answer
+        # to one name; collapsing it would point the suffixed session's card at
+        # its sibling's pane.
+        def fake_run(cmd, **kw):
+            return mock.Mock(returncode=0, stderr="", stdout=json.dumps(
+                [{"pane_id": 11, "title": "⚙ MDM split command"}]))
+
+        with mock.patch.object(watch.subprocess, "run", fake_run):
+            self.assertIsNone(
+                watch.pane_for_session_name("⚙ MDM split command (2)"),
+                "a `(2)` name must not match the unsuffixed session's pane")
+            self.assertEqual(
+                watch.pane_for_session_name("⚙ MDM split command"), "11")
+
+
+class ParkReasonJoinTest(unittest.TestCase):
+    """`main` hands `repost_empty_parks` the reason from its own `state` tuple.
+
+    ⚠️ The shape tests all supply `reasons=` directly, so without this the
+    `state[sid8][2]` extraction — and the tuple layout it depends on — is never
+    exercised. The index is correct today (`(label, detail, reason, verdict)`);
+    a reorder would silently select a wrong reason and post the `message` card
+    this change exists to remove, with every other test still green.
+    """
+
+    SID = "aaaa1111-0000-0000-0000-000000000000"
+    SID8 = "aaaa1111"
+
+    def test_the_reason_travels_from_the_probe_state_to_the_repost(self):
+        seen = {}
+
+        def fake_repost(parked, entries, log_path, **kw):
+            seen["parked"] = list(parked)
+            seen["reasons"] = kw.get("reasons")
+            return []
+
+        state = {self.SID8: ("Some Task", "pick — 1. a", "busy+parked-modal", True)}
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "t.txt"), "w") as fh:
+                fh.write("Some Task\n")
+            with mock.patch.object(watch, "probe", lambda *a, **kw: state), \
+                 mock.patch.object(watch, "repost_empty_parks", fake_repost), \
+                 mock.patch.object(watch, "log_event", lambda *a, **kw: None), \
+                 redirect_stdout(out), redirect_stderr(io.StringIO()):
+                watch.main(["--tracked", os.path.join(d, "t.txt"),
+                            "--tasks-dir", d,
+                            "--state", os.path.join(d, "state"),
+                            "--max-polls", "1"])
+        self.assertEqual(seen.get("reasons"),
+                         {self.SID8: "busy+parked-modal"},
+                         "the reason is the THIRD element of the state tuple; a "
+                         "reorder must fail here rather than silently post the "
+                         "wrong card shape")
+
+
+class RegistryNameJoinTest(unittest.TestCase):
+    """The jump target joins through the REGISTRY name, not the task label.
+
+    ⚠️ **This is the defect the first bot review found, and it is the whole
+    reason this class exists.** `post_repost` receives the tracked TASK's name
+    (`Register an Unmerge Command on …`) while a manager-spawned tab is titled
+    with the session's own registry name (`⚙ MDM split command`). Matching the
+    pane title against the task name therefore finds nothing, `_jump_sentence`
+    returns `""`, and every real ack card silently loses the jump target it
+    advertises — while a unit test that passes the registry name by hand stays
+    green. The label survives only as a fallback for a session the registry
+    cannot name.
+    """
+
+    SID = "cef86313-cd45-411c-b4c4-cfbace549112"
+    LABEL = "Register an Unmerge Command on mdm-party-v2 and mdm-contact-v1"
+    REG_NAME = "⚙ MDM split command"
+
+    def _registry(self, d, record):
+        with open(os.path.join(d, "54924.json"), "w") as fh:
+            json.dump(record, fh)
+
+    def test_the_registry_name_is_found_by_session_id(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._registry(d, {"sessionId": self.SID, "name": self.REG_NAME})
+            with mock.patch.object(watch, "SESSIONS_DIR", d):
+                self.assertEqual(watch.registry_name_for_session(self.SID),
+                                 self.REG_NAME)
+
+    def test_an_unknown_session_resolves_no_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._registry(d, {"sessionId": "other", "name": self.REG_NAME})
+            with mock.patch.object(watch, "SESSIONS_DIR", d):
+                self.assertIsNone(watch.registry_name_for_session(self.SID))
+
+    def test_an_unreadable_registry_resolves_no_name(self):
+        with mock.patch.object(watch, "SESSIONS_DIR", "/nonexistent/registry"):
+            self.assertIsNone(watch.registry_name_for_session(self.SID))
+
+    def test_a_corrupt_record_is_skipped_not_raised(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "1.json"), "w") as fh:
+                fh.write("{not json")
+            self._registry(d, {"sessionId": self.SID, "name": self.REG_NAME})
+            with mock.patch.object(watch, "SESSIONS_DIR", d):
+                self.assertEqual(watch.registry_name_for_session(self.SID),
+                                 self.REG_NAME)
+
+    def test_the_pane_is_looked_up_by_registry_name_not_the_task_label(self):
+        asked = []
+
+        def fake_pane(name):
+            asked.append(name)
+            return "1543"
+
+        with tempfile.TemporaryDirectory() as d:
+            self._registry(d, {"sessionId": self.SID, "name": self.REG_NAME})
+            with mock.patch.object(watch, "SESSIONS_DIR", d), \
+                    mock.patch.object(watch, "pane_for_session_name", fake_pane), \
+                    mock.patch.object(watch.subprocess, "run",
+                                      lambda *a, **kw: mock.Mock(
+                                          returncode=1, stdout="", stderr="")):
+                sentence = watch._jump_sentence(self.SID, self.LABEL)
+        self.assertEqual(asked, [self.REG_NAME],
+                         "the join must ask for the session's real name; asking "
+                         "for the task label finds no pane on every real card")
+        self.assertIn("1543", sentence)
+
+    def test_the_label_is_the_fallback_when_the_registry_cannot_name_it(self):
+        asked = []
+
+        def fake_pane(name):
+            asked.append(name)
+            return None
+
+        with mock.patch.object(watch, "SESSIONS_DIR", "/nonexistent/registry"), \
+                mock.patch.object(watch, "pane_for_session_name", fake_pane):
+            sentence = watch._jump_sentence(self.SID, self.LABEL)
+        self.assertEqual(asked, [self.LABEL])
+        self.assertEqual(sentence, "",
+                         "an unresolved pane must degrade to no sentence, never "
+                         "to a target that goes nowhere")
+
+
+class NormTitleTest(unittest.TestCase):
+    """Title normalisation: the markers two sides differ by, and nothing else.
+
+    ⚠️ A fixed glyph list is what made the join fail: it stripped `✳` and left
+    `⚙ `, which the bare registry name does not carry. The normaliser strips any
+    leading decoration instead, so a pane title, a registry name and a bare
+    label all reduce to the same words.
+    """
+
+    def test_status_glyph_and_session_marker_both_strip(self):
+        self.assertEqual(watch._norm_title("✳ ⚙ MDM split command"),
+                         watch._norm_title("⚙ MDM split command"))
+        self.assertEqual(watch._norm_title("⚙ MDM split command"),
+                         watch._norm_title("MDM split command"))
+
+    def test_the_uniqueness_suffix_is_kept(self):
+        # ⚠️ Not decoration: `uniqueTabName` adds it so two sessions never
+        # answer to one name, so it must survive normalisation or two distinct
+        # sessions collapse to one key and a card can point at the wrong pane.
+        self.assertNotEqual(watch._norm_title("MDM split command (2)"),
+                            watch._norm_title("MDM split command"))
+        self.assertEqual(watch._norm_title("✳ ⚙ MDM split command (2)"),
+                         "MDM split command (2)")
+
+    def test_whitespace_is_collapsed(self):
+        self.assertEqual(watch._norm_title("  a   b  "), "a b")
+
+    def test_empty_input_is_empty(self):
+        self.assertEqual(watch._norm_title(""), "")
+        self.assertEqual(watch._norm_title(None), "")
 
 
 if __name__ == "__main__":

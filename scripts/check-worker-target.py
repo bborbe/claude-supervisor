@@ -5,8 +5,8 @@ agrees with the number in the code.
 The constant lives in two places by necessity — a prose default in
 `docs/fleet-surface.md` § Spawn a worker **item 5**, and `DEFAULT_MAX_CONCURRENT` in
 `server/spawn-mode.mjs`. Those two are allowed to exist; a *third* copy is not. The
-repo has shipped that failure before: the cap was restated in `commands/manager-loop.md`,
-`commands/manager-verify.md` and the manager runbook's Guardrail 2 until 2026-09-24, so
+repo has shipped that failure before: the cap was restated in `commands/goal-loop.md`,
+`commands/goal-verify.md` and the manager runbook's Guardrail 2 until 2026-09-24, so
 one cap became four counters the day one home was edited and the others were not — with
 no error and no diff to catch it.
 

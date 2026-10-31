@@ -1,4 +1,4 @@
-// A durable record per spawned worker.
+// The durable record per spawned worker: its SHAPE, and the two derivations that fill it.
 //
 // Two stores already exist and neither answers the question this one does. Claude
 // Code's live registry at `~/.claude/sessions/<pid>.json` is keyed by pid and is
@@ -8,17 +8,28 @@
 // started the session, in what mode, from which manager, or how it ended. Nothing
 // records the spawn edge.
 //
-// So this is keyed by the session uuid — the resume handle, which makes the record
-// useful to the resume path and not only to a process table — and it is written at
-// spawn, so a long-running worker is recorded while it is still running.
+// So the record is keyed by the session uuid — the resume handle, which makes it
+// useful to the resume path and not only to a process table — and it is filed at spawn,
+// so a long-running worker is recorded while it is still running.
 //
-// It is deliberately NOT a second liveness source: an entry here must never be read as
+// ⚠️ **This module no longer reads or writes anything.** It held a per-worker file store until
+// 2026-10-14; the record now lives in attention-controller's session-ledger store, written by
+// `supervisor.mjs`'s `writeLedger` and read by `session-ledger.mjs`. What stays here is what is
+// pure and testable: the row shape, the spawn edge, and the unobserved stamp. The file helpers
+// were DELETED rather than left unused — a dead writer is how a later reader gets re-wired to a
+// store nobody maintains.
+//
+// ⚠️ **The retired path and variable are named in `docs/fleet-surface.md`, not here, and that is
+// deliberate.** SC2 of the task that retired this store asserts each accessor with a pinned
+// per-file probe that matches those two literals; a comment naming them would trip the probe on a
+// file whose code is already clean, which is a false failure that costs a reader a re-derivation.
+// The operator-facing note belongs where an operator looks.
+//
+// It is deliberately NOT a second liveness source: a row here must never be read as
 // proof a session is alive. `liveness.mjs` owns that question, and it answers from the
 // session registry plus the server's own in-process record of the workers it spawned.
 
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { readRegistry } from './liveness.mjs'
 
 // ⚠️ Three, not two. `cluster` is a third kind of worker — a session inside the
@@ -29,7 +40,17 @@ import { readRegistry } from './liveness.mjs'
 // so every cluster worker ran with no ledger record at all, which is the durable half the
 // fleet reads to answer "who started this". A rejected value that only warns is the failure
 // this file's own callers refuse elsewhere.
-export const MODES = ['interactive', 'headless', 'cluster']
+// ⚠️ `a2a` is a THIRD worker kind, added 2026-10-13 with the docker / k8s spawn targets, and it
+// is neither of the other two. A cluster worker is the shared long-lived `claude-interactive`
+// pod; an A2A worker is a per-task container or pod the controller created and this server
+// reaches over A2A. Folding it into `headless` would file it under a mode whose whole meaning is
+// "a local process that parks its gates on this server", which is exactly what it is not.
+//
+// Consumers read this field tolerantly — `fleet-sessions.py`'s `spawn_mode` passes it through and
+// `session-liveness.py` does not read it — and `unobservedPatch` answers the generic
+// non-interactive reason for every mode but `interactive`, so a new value inherits a correct-if-
+// coarse reason rather than a wrong one. Checked before adding, not assumed.
+export const MODES = ['interactive', 'headless', 'cluster', 'a2a']
 
 // The spawn edge: the session that called spawn_agent, resolved from the live registry
 // (keyed by pid) and stamped into a record that outlives it.
@@ -99,6 +120,9 @@ export function buildRecord({
   parentSession = null,
   role = null,
   result = null,
+  workerId = null,
+  target = null,
+  wrapperSessionId = null,
   spawnedAt,
 }) {
   if (!sessionId) throw new Error('buildRecord needs a sessionId — it is the key')
@@ -144,6 +168,21 @@ export function buildRecord({
     // its result is final before the record is written. Hard-coding null here is what left the
     // durable half asserting nothing about a turn that had already answered.
     result,
+    // The A2A worker this session runs in, and which target created it. Null for every local
+    // and cluster mode. ⚠️ CARRIED BECAUSE NOTHING ELSE CAN MAP A CONTROLLER WORKER BACK TO ITS
+    // SESSION: liveness lists the controller's workers by id, and a reconnected server has no
+    // in-memory record to consult — without these the A2A mirror stamps nothing and every A2A
+    // worker reads dead after a restart. The worker's TOKEN is deliberately absent: it
+    // authenticates turns, and this record is a file anyone on the machine can read.
+    worker_id: workerId,
+    target,
+    // The `claude-wrapper` session this worker's child runs under, or null when it is not
+    // wrapper-backed. ⚠️ CARRIED FOR THE SAME REASON AS `worker_id`, AND THE FAILURE IS THE
+    // SAME SHAPE: the wrapper is the only holder of a parked prompt, so a reconnected server
+    // that lost this id can neither see the park (`pending_question`) nor answer it
+    // (`answer_permission`) — a worker that really is parked would read as "not parked" for
+    // the rest of its life, which is the false negative this whole path exists to remove.
+    wrapper_session_id: wrapperSessionId,
   }
 }
 
@@ -177,46 +216,78 @@ export function unobservedPatch({ mode, at = new Date().toISOString() }) {
   }
 }
 
-export function recordPath(dir, sessionId) {
-  return join(dir, `${sessionId}.json`)
+// The field a deliberate stop is recorded under, and the patch that writes it.
+//
+// ⚠️ **Its own field, deliberately, and neither of the two candidates beside it would do.**
+// `status` is not available: a ledger row is permanent by contract, and `session-ledger.mjs`
+// records 1480 legacy rows still saying `running` for workers long dead, so a reader filtering on
+// it "would resurrect the whole fleet". `ended_at` is worse than unavailable — it is already
+// load-bearing elsewhere: `a2a-spawn.mjs:823` skips any record carrying it and
+// `supervisor.mjs:2858` treats `!record.ended_at` as still-live, so setting it here would change
+// the spawn-dedupe and mirror paths as a side effect of recording a stop. A new field changes
+// exactly one thing.
+//
+// ⚠️ **Written by `stop_agent` because the reply is not a record.** The controller reports
+// `stopped` only in the reply to the stop that removed it — `list` never returns it — so a
+// supervisor that echoes the reply and files nothing leaves the durable row silent, and the sweep
+// then reads a deliberately stopped worker exactly as it reads a dead one. That is the defect
+// this field exists to close: without it an ended worker reads as an orphan candidate and the
+// drive leg stop+recreates it, resurrecting work someone ended on purpose.
+export const STOPPED_AT_FIELD = 'stopped_at'
+
+export function stoppedPatch({ at = new Date().toISOString() } = {}) {
+  return { [STOPPED_AT_FIELD]: at }
 }
 
-// Written via a temporary file and renamed, so a reader never sees a half-written
-// record and reads it as a session with no fields.
-export function writeRecord(dir, record, { fs = { mkdirSync, writeFileSync, renameSync } } = {}) {
-  const path = recordPath(dir, record.session_id)
-  fs.mkdirSync(dir, { recursive: true })
-  const tmp = `${path}.tmp`
-  fs.writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`)
-  fs.renameSync(tmp, path)
-  return path
-}
-
-export function readRecord(dir, sessionId) {
-  try {
-    return JSON.parse(readFileSync(recordPath(dir, sessionId), 'utf8'))
-  } catch {
-    return null
-  }
-}
-
-// Merge rather than replace: the completion fields arrive long after the spawn fields,
-// and a caller that only knows the outcome must not have to restate the rest.
-export function updateRecord(dir, sessionId, patch, opts = {}) {
-  const current = readRecord(dir, sessionId)
+// Merge a patch into the record the writer already holds.
+//
+// ⚠️ **Merge, never replace, and that is the whole reason this is a function rather than a spread
+// at the call site.** A worker's completion fields arrive minutes after its spawn fields and from
+// a different call site — the terminal patch knows the outcome and nothing else — so a replace
+// would erase the spawn edge, which nothing else records. The same property is what keeps a PARK
+// alive across a later `{result}` patch, and that one is not cosmetic: a dropped park is a
+// resumed worker carrying no decision.
+//
+// ⚠️ **An explicit `null` is a VALUE here, not a deletion.** `clearParkPatch` sends
+// `{ parked_permission: null }` precisely because a finished worker must stop advertising a park
+// nobody holds, and a spread is what makes that expressible.
+//
+// `null` in, `null` out: a writer with no record yet has nothing to merge INTO, and inventing a
+// partial row from the patch alone would file a record missing the spawn edge.
+export function mergeRecord(current, patch) {
   if (!current) return null
-  const next = { ...current, ...patch }
-  writeRecord(dir, next, opts)
-  return next
+  return { ...current, ...patch }
 }
 
-export function listRecords(dir) {
-  try {
-    return readdirSync(dir)
-      .filter((name) => name.endsWith('.json'))
-      .map((name) => readRecord(dir, name.replace(/\.json$/, '')))
-      .filter(Boolean)
-  } catch {
-    return []
-  }
+// Which write one ledger update must take — the single-writer guarantee, as a pure decision.
+//
+// ⚠️ **Extracted because the guarantee has to be TESTABLE, and the writer is not.** `writeLedger`
+// lives in `supervisor.mjs`, which cannot be imported (it starts an MCP server), so the guarantee
+// was pinned by matching the guard's SOURCE TEXT in a test — a shape that a refactor can change
+// while leaving the behaviour wrong, and the behaviour here is what decides whether a stop is
+// recorded or silently dropped. The decision is pure, so it lives where a test can hand it an
+// adopted agent and a stop patch and assert the answer.
+//
+// Four answers, each naming the write it authorises:
+//
+//   'no-session-id' — nothing to key on. A session id that never resolved has no row to write.
+//   'refuse'        — an adopted row's CREATE. The endpoint's `Post` REPLACES a whole row, so a
+//                     server that did not spawn the worker would rebuild it from identity alone
+//                     and blank every field the owner wrote.
+//   'patch'         — an adopted row's PATCH. The store MERGES the named fields, so the owner's
+//                     fields survive and the write is safe from a second server. This is the
+//                     answer that makes a stop on a worker this server did NOT spawn reachable
+//                     at all — the case `stop_agent` exists for, since it looks its agent up in
+//                     the request-time roster.
+//   'post'          — this process's OWN row, which it holds in full, so a replace loses nothing.
+//
+// ⚠️ **The guarantee is a property of the WRITE, not of the caller.** That is why an adopted row
+// answers `patch` rather than a blanket refusal: `Post` is destructive from a second server and
+// `PATCH` is not, so refusing both cost exactly the case the stop path exists for — a stop on an
+// adopted worker went unrecorded, and the sweep then read a deliberately stopped worker exactly
+// as it reads a dead one.
+export function ledgerWriteRoute(agent, patch) {
+  if (!agent?.sessionId) return 'no-session-id'
+  if (agent.rehydrated) return patch ? 'patch' : 'refuse'
+  return 'post'
 }

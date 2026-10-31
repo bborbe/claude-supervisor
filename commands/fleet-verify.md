@@ -187,7 +187,7 @@ which fixture was used and the artifact the FAIL quoted.
 - **No user prompts during execution** — never `AskUserQuestion` mid-run. There is nothing to
   prompt for: the command only reads and advises.
 - **Name the naming inconsistency in passing, do not fix it here.** `verify-task` and `verify-goal`
-  lead with the verb while `manager-verify` trails it; `verify-<level>` would read better if the
+  lead with the verb while `goal-verify` trails it; `verify-<level>` would read better if the
   family is ever normalised. That is a separate change touching four commands and their callers.
 </constraints>
 
