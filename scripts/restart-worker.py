@@ -842,6 +842,10 @@ def main():
         )
         return 1
 
+    # A machine token, printed BEFORE the signal: a caller that must know whether a failure
+    # came before or after the kill reads this line rather than matching the prose of
+    # whichever refusal follows. `scripts/fleet-keeper.py` arms its cap on it.
+    print(f"   killing-pid {pid}")
     try:
         os.kill(pid, 15)
     except ProcessLookupError:

@@ -114,6 +114,12 @@ HOLD_OFF = 5 * 60
 VERDICT_BY_EXIT = {0: "LIVE", 1: "ABSENT", 2: "UNKNOWN", 3: "AMBIGUOUS", 4: "MALFORMED"}
 KEEPALIVE_EXIT = {"ok": 0, "stale": 10, "unknown": 2}
 PANE = re.compile(r"\(pane (\d+)\)")
+KILL_TOKEN = "killing-pid"  # `restart-worker.py` prints it immediately before `os.kill`
+
+# The marker must sit in the pane's LAST lines. A resumed session renders its old transcript,
+# which already carries this line from every earlier open, so a whole-screen match can pass
+# before the new `/color` has run.
+TAIL_LINES = 15
 
 
 def load_sibling(filename):
@@ -204,11 +210,14 @@ def fleet_session():
 
     ⚠️ **Nothing deletes a registration**, so every fleet manager ever replaced leaves one
     behind. Read raw, that turns the first replacement into a permanent `AMBIGUOUS` and the
-    keeper never acts again. So when more than one record matches, the ones whose session
-    reads `ABSENT` are dropped first — a gone session cannot be the writer a second resume
-    would collide with. Only a dead claimant is dropped: `UNKNOWN` keeps its place, because
-    cannot-tell is never death. If every claimant is gone, the newest record is returned so
-    the `ABSENT` branch reports it rather than this function hiding it.
+    keeper never acts again. So OLDER claimants whose session reads `ABSENT` are dropped — a
+    gone session cannot be the writer a second resume would collide with. Only a dead claimant
+    is dropped: `UNKNOWN` keeps its place, because cannot-tell is never death.
+
+    ⚠️ **The NEWEST registration is never routed around.** If it reads `ABSENT`, it is
+    returned so the `ABSENT` branch reports the death. Falling back to an older claimant that
+    still reads `LIVE` would resurrect a replaced manager in some forgotten tab and leave the
+    real one's death unreported.
     """
     try:
         names = os.listdir(REGISTER_DIR)
@@ -235,14 +244,13 @@ def fleet_session():
     if not matches:
         return None
     matches.sort(reverse=True)  # newest registration first
-    if len(matches) == 1:
-        return matches[0][1], matches[0][2]
-    alive = [m for m in matches if liveness(m[1]) != "ABSENT"]
-    if len(alive) == 1:
-        return alive[0][1], alive[0][2]
-    if not alive:
-        return matches[0][1], matches[0][2]
-    return ("AMBIGUOUS", [(sid, vault) for _, sid, vault in alive])
+    newest, older = matches[0], matches[1:]
+    if not older or liveness(newest[1]) == "ABSENT":
+        return newest[1], newest[2]
+    rivals = [m for m in older if liveness(m[1]) != "ABSENT"]
+    if not rivals:
+        return newest[1], newest[2]
+    return ("AMBIGUOUS", [(sid, vault) for _, sid, vault in [newest, *rivals]])
 
 
 def restart(sid, dry=False):
@@ -270,12 +278,13 @@ def restart(sid, dry=False):
     if out.returncode == 0:
         found = PANE.search(out.stdout or "")
         return "ran", detail, (found.group(1) if found else None)
-    token = lines[0] if lines else ""
-    if token == "busy-target":
-        return "busy", detail, None
-    if token.startswith("❌ error:") or "resume failed" in detail:
-        # An operational failure — `resume failed` is printed AFTER the kill.
+    # ⚠️ Classified by `restart-worker.py`'s `killing-pid` token, never by the prose of the
+    # refusal: a refusal printed after the header has the header as its first line, so a
+    # first-line read cannot tell a pre-kill refusal from a post-kill failure.
+    if any(ln.startswith(KILL_TOKEN) for ln in lines):
         return "failed", detail, None
+    if "busy-target" in lines:
+        return "busy", detail, None
     return "refused", detail, None
 
 
@@ -290,34 +299,59 @@ def wezterm(args):
     return out.returncode, out.stdout or ""
 
 
-def registry_status(sid):
-    """The registry's `status` for `sid` (`idle` / `busy` / …), or `''` when unreadable.
+def registry_records(sid):
+    """Every registry record for `sid` as a list of dicts, or `None` when unreadable.
 
-    Read through `restart-worker.py`'s own reader, so the keeper and the restart agree on what
-    a session's status is.
+    Read through `restart-worker.py`'s own reader — the list accessor, so two records for one
+    session id stay two (the dict accessor would collapse them, and a kill + resume briefly
+    leaves exactly that: the killed process's record beside the new one).
     """
     try:
-        rw = load_sibling("restart-worker.py")
-        entries = rw.registry_entries()
+        entries = load_sibling("restart-worker.py").registry_entries()
     except Exception:
-        return ""
+        return None
     if entries is None:
-        return ""
-    path, rec = rw.find_target(entries, sid)
-    if path in (None, "ambiguous") or not isinstance(rec, dict):
-        return ""
-    return (rec.get("status") or "").strip().lower()
+        return None
+    return [rec for _, rec in entries if isinstance(rec, dict) and rec.get("sessionId") == sid]
 
 
-def rearm(pane, sid, sleep=time.sleep, clock=time.monotonic):
+def registry_pid(sid):
+    """The pid the registry holds for `sid` right now, or `None` when there is not exactly one."""
+    recs = registry_records(sid) or []
+    pids = [r.get("pid") for r in recs if isinstance(r.get("pid"), int)]
+    return pids[0] if len(pids) == 1 else None
+
+
+def new_status(sid, old_pid):
+    """The status of the RESUMED process — the record for `sid` whose pid is not `old_pid`.
+
+    `''` when there is no such record yet, or more than one. ⚠️ Keyed on the pid, never on the
+    session id alone: the killed process's record can still be on disk reading `busy`, and a
+    status read without the pid filter would take that as the new session working.
+    """
+    recs = [r for r in (registry_records(sid) or [])
+            if isinstance(r.get("pid"), int) and r.get("pid") != old_pid]
+    if len(recs) != 1:
+        return ""
+    return (recs[0].get("status") or "").strip().lower()
+
+
+def tail(text, n=TAIL_LINES):
+    return "\n".join([ln for ln in text.splitlines() if ln.strip()][-n:])
+
+
+def rearm(pane, sid, old_pid, sleep=time.sleep, clock=time.monotonic):
     """Re-arm the resumed fleet manager's loop. Returns `(ok, note)`.
 
     `commands/open.md` § 3.2's recipe, applied to a pane THIS tick just spawned:
-      1. wait — bounded — for `Session color set to:`, which proves the colour ran and the
-         session is idle at its prompt (a `sleep` alone is a race);
+      1. wait — bounded — until the session is READY: `Session color set to:` in the pane's
+         last lines AND the new process (pid ≠ the killed one) reading `idle`. Either alone is
+         not enough: the marker can be old transcript a resume re-renders, and `idle` can be
+         read before the `/color` turn has started;
       2. send the command text, then submit with a separate `\\r` — a trailing `\\r` on the
          text is not enough;
-      3. confirm the session left `idle`.
+      3. confirm the NEW process went `busy` after the submit. Because step 1 already saw it
+         `idle` after `/color`, that `busy` is the re-arm's turn, not the colour's.
     """
     if not pane:
         return False, "restart-worker.py named no pane, so there is nowhere to send the re-arm"
@@ -325,10 +359,11 @@ def rearm(pane, sid, sleep=time.sleep, clock=time.monotonic):
     deadline = clock() + READY_TIMEOUT
     while True:
         rc, text = wezterm(["get-text", "--pane-id", pane])
-        if rc == 0 and READY_MARKER in text:
+        if rc == 0 and READY_MARKER in tail(text) and new_status(sid, old_pid) == "idle":
             break
         if clock() >= deadline:
-            return False, f"pane {pane} never showed {READY_MARKER!r} within {READY_TIMEOUT}s"
+            return False, (f"pane {pane} did not reach ready ({READY_MARKER!r} in its last "
+                           f"{TAIL_LINES} lines and the resumed process idle) within {READY_TIMEOUT}s")
         sleep(POLL_INTERVAL)
 
     rc, _ = wezterm(["send-text", "--pane-id", pane, "--no-paste", REARM_COMMAND])
@@ -341,12 +376,12 @@ def rearm(pane, sid, sleep=time.sleep, clock=time.monotonic):
 
     deadline = clock() + WORKING_TIMEOUT
     while True:
-        status = registry_status(sid)
+        status = new_status(sid, old_pid)
         if status and status != "idle":
-            return True, f"{REARM_COMMAND} submitted into pane {pane}; session is {status}"
+            return True, f"{REARM_COMMAND} submitted into pane {pane}; resumed process is {status}"
         if clock() >= deadline:
-            return False, (f"{REARM_COMMAND} sent into pane {pane} but the session still reads "
-                           f"{status or 'unreadable'} after {WORKING_TIMEOUT}s")
+            return False, (f"{REARM_COMMAND} sent into pane {pane} but the resumed process still "
+                           f"reads {status or 'unreadable'} after {WORKING_TIMEOUT}s")
         sleep(POLL_INTERVAL)
 
 
@@ -507,6 +542,9 @@ def main(argv):
         report("restarted", f"dry-run: would resume {sid[:8]} and send {REARM_COMMAND} ({attempt})", now)
         return 0
 
+    # Read BEFORE the kill — afterwards the registry briefly holds two records for this id, and
+    # the re-arm tells the resumed process from the killed one by this pid.
+    old_pid = registry_pid(sid)
     outcome, note, pane = restart(sid)
 
     if outcome == "busy":
@@ -539,7 +577,7 @@ def main(argv):
         report("cannot-tell", f"restart failed after it may have killed {sid[:8]}: {note}{card(item)}", now)
         return 1
 
-    ok, rearm_note = rearm(pane, sid)
+    ok, rearm_note = rearm(pane, sid, old_pid)
     if not ok:
         item = notify(
             "fleet-keeper-rearm-unconfirmed",

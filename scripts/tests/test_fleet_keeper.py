@@ -78,7 +78,8 @@ class FakeCap:
 
 class KeeperBase(unittest.TestCase):
     PATCHED = ("STATE_DIR", "HEARTBEAT", "KEEPER_LOG", "REGISTER_DIR",
-               "verdict", "liveness", "restart", "rearm", "notify", "load_sibling")
+               "verdict", "liveness", "restart", "rearm", "notify", "load_sibling",
+               "registry_pid")
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -113,7 +114,8 @@ class KeeperBase(unittest.TestCase):
         fk.verdict = lambda ledger=None: (self.verdict_word, "detail")
         fk.liveness = lambda sid: self.live.get(sid, "LIVE")
         fk.restart = lambda sid, dry=False: (self.restarts.append((sid, dry)) or self.restart_outcome)
-        fk.rearm = lambda pane, sid: (self.rearms.append((pane, sid)) or self.rearm_result)
+        fk.rearm = lambda pane, sid, old_pid: (self.rearms.append((pane, sid, old_pid)) or self.rearm_result)
+        fk.registry_pid = lambda sid: 4242
         fk.notify = lambda key, payload, options, context="": (self.cards.append(key) or f"item-{key}")
 
     def _restore(self):
@@ -151,7 +153,8 @@ class FleetKeeperTest(KeeperBase):
         self.assertEqual(0, rc)
         self.assertEqual("restarted", out[0])
         self.assertEqual([(SID, False)], self.restarts)
-        self.assertEqual([("404", SID)], self.rearms, "the resumed manager must be re-armed")
+        self.assertEqual([("404", SID, 4242)], self.rearms,
+                         "the resumed manager must be re-armed, told apart by the pre-kill pid")
         self.assertEqual(1, len(self.cap.load_resumes(self.cap.path)))
 
     def test_an_absent_manager_is_reported_and_never_restarted(self):
@@ -321,6 +324,19 @@ class FleetKeeperTest(KeeperBase):
         self.assertEqual("cannot-tell", out[0])
         self.assertEqual([], self.restarts)
 
+    def test_a_dead_newest_registration_is_reported_never_routed_around(self):
+        """If the current manager died while a replaced one is still open in some tab, the
+        keeper must report the death — never resurrect the stale manager."""
+        old = "aaaaaaaa-0000-0000-0000-000000000001"
+        self.register_fleet(old, mtime=NOW - 86400)
+        self.register_fleet(SID, mtime=NOW - 60)
+        self.live[SID] = "ABSENT"
+        self.live[old] = "LIVE"
+        rc, out = self.run_keeper("--now", str(NOW))
+        self.assertEqual("dead", out[0])
+        self.assertIn(SID[:8], out[1])
+        self.assertEqual([], self.restarts, "the stale manager must not be resumed")
+
     def test_when_every_claimant_is_gone_the_newest_is_reported_dead(self):
         old = "aaaaaaaa-0000-0000-0000-000000000001"
         self.register_fleet(old, mtime=NOW - 86400)
@@ -392,12 +408,23 @@ class RestartMappingTest(unittest.TestCase):
         self.assertEqual("refused", outcome)
 
     def test_a_resume_that_failed_after_the_kill_is_failed(self):
-        (outcome, _, _), _ = self.check("unknown-session-id\n❌ unknown-session-id: resume failed (exit 1): boom\n", 1)
+        (outcome, _, _), _ = self.check(
+            "🔄 restart-worker · session ac24db61\n   killing-pid 1\n"
+            "unknown-session-id\n❌ unknown-session-id: resume failed (exit 1): boom\n", 1)
         self.assertEqual("failed", outcome)
 
-    def test_an_operational_error_is_failed(self):
-        (outcome, _, _), _ = self.check("❌ error: pid 1 resolved but cannot be signalled\n", 1)
+    def test_a_signal_error_after_the_token_is_failed(self):
+        (outcome, _, _), _ = self.check(
+            "🔄 restart-worker\n   killing-pid 1\n❌ error: pid 1 resolved but cannot be signalled\n", 1)
         self.assertEqual("failed", outcome)
+
+    def test_a_refusal_printed_after_the_header_but_before_the_kill_is_refused(self):
+        """The header is the first line here, so a first-line read could not classify it —
+        only the absent `killing-pid` token proves nothing was killed."""
+        (outcome, _, _), _ = self.check(
+            "🔄 restart-worker · session ac24db61\n   role: manager\n"
+            "❌ error: no launcher could be resolved — refusing before the kill\n", 1)
+        self.assertEqual("refused", outcome)
 
     def test_a_hang_is_failed_never_busy(self):
         """A timeout can land after `os.kill`, so it must not read as the transient case."""
@@ -407,28 +434,42 @@ class RestartMappingTest(unittest.TestCase):
 
 
 class RearmTest(unittest.TestCase):
-    """`commands/open.md` § 3.2's recipe: wait for the colour line, send, submit separately,
-    confirm the session left idle."""
+    """`commands/open.md` § 3.2's recipe: wait until ready, send, submit separately, confirm the
+    RESUMED process went busy.
+
+    `registry_records` is the seam: each call pops one snapshot of the registry, so a test
+    states exactly what the keeper sees on each poll — including the killed process's record
+    still sitting beside the new one.
+    """
+
+    OLD, NEW = 4242, 5151
+    READY = "…old transcript…\nSession color set to: orange\n╭─────╮\n│ >   │\n╰─────╯"
 
     def setUp(self):
         self.calls = []
         self.screens = []
-        self.statuses = []
+        self.snapshots = []
         self.t = [0.0]
-        self._saved = (fk.wezterm, fk.registry_status)
+        self._saved = (fk.wezterm, fk.registry_records)
         self.addCleanup(self._restore)
 
         def wezterm(args):
             self.calls.append(args)
             if args[0] == "get-text":
-                return 0, (self.screens.pop(0) if self.screens else "")
+                return 0, (self.screens.pop(0) if len(self.screens) > 1 else
+                           (self.screens[0] if self.screens else ""))
             return 0, ""
 
+        def records(_sid):
+            snap = self.snapshots.pop(0) if len(self.snapshots) > 1 else (
+                self.snapshots[0] if self.snapshots else [])
+            return [{"sessionId": SID, "pid": pid, "status": st} for pid, st in snap]
+
         fk.wezterm = wezterm
-        fk.registry_status = lambda sid: (self.statuses.pop(0) if self.statuses else "idle")
+        fk.registry_records = records
 
     def _restore(self):
-        fk.wezterm, fk.registry_status = self._saved
+        fk.wezterm, fk.registry_records = self._saved
 
     def sleep(self, seconds):
         self.t[0] += seconds
@@ -437,14 +478,16 @@ class RearmTest(unittest.TestCase):
         return self.t[0]
 
     def run_rearm(self, pane="77"):
-        return _REAL_REARM(pane, SID, sleep=self.sleep, clock=self.clock)
+        return _REAL_REARM(pane, SID, self.OLD, sleep=self.sleep, clock=self.clock)
 
     def sends(self):
         return [c for c in self.calls if c[0] == "send-text"]
 
-    def test_it_waits_for_the_colour_line_then_sends_and_submits_separately(self):
-        self.screens = ["replaying…", "Session color set to: orange"]
-        self.statuses = ["busy"]
+    def test_it_waits_until_ready_then_sends_and_submits_separately(self):
+        self.screens = ["replaying…", self.READY]
+        self.snapshots = [[(self.NEW, "busy")],          # /color still running
+                          [(self.NEW, "idle")],          # ready
+                          [(self.NEW, "busy")]]          # the re-arm's own turn
         ok, _ = self.run_rearm()
         self.assertTrue(ok)
         sent = self.sends()
@@ -453,22 +496,36 @@ class RearmTest(unittest.TestCase):
         self.assertEqual("\r", sent[1][-1])
         self.assertTrue(all(c[2] == "77" for c in sent), "only the pane this tick spawned")
 
-    def test_nothing_is_sent_before_the_session_is_ready(self):
-        self.screens = []  # the colour line never appears
+    def test_an_old_marker_above_the_tail_is_not_ready(self):
+        """A resume re-renders its transcript, which already holds the marker from every earlier
+        open. Found only above the last lines, it proves nothing about the new `/color`."""
+        stale = "Session color set to: orange\n" + "\n".join(f"history {i}" for i in range(40))
+        self.screens = [stale]
+        self.snapshots = [[(self.NEW, "idle")]]
         ok, note = self.run_rearm()
+        self.assertFalse(ok)
+        self.assertEqual([], self.sends(), "nothing may be typed into a session not yet ready")
+        self.assertIn("did not reach ready", note)
+
+    def test_the_marker_alone_is_not_ready_while_the_new_process_is_busy(self):
+        self.screens = [self.READY]
+        self.snapshots = [[(self.NEW, "busy")]]   # never idle
+        ok, _ = self.run_rearm()
         self.assertFalse(ok)
         self.assertEqual([], self.sends())
-        self.assertIn("never showed", note)
 
-    def test_a_session_that_stays_idle_is_unconfirmed(self):
-        self.screens = ["Session color set to: orange"]
-        self.statuses = []  # idle forever
+    def test_the_killed_processes_busy_record_is_not_the_new_session_working(self):
+        """After the submit the killed process's record still reads `busy`. Without the pid
+        filter that would confirm a re-arm that never ran."""
+        self.screens = [self.READY]
+        self.snapshots = [[(self.OLD, "busy"), (self.NEW, "idle")]]   # forever: new stays idle
         ok, note = self.run_rearm()
         self.assertFalse(ok)
-        self.assertIn("idle", note)
+        self.assertEqual(2, len(self.sends()))
+        self.assertIn("still reads idle", note)
 
     def test_no_pane_means_no_re_arm(self):
-        ok, _ = _REAL_REARM(None, SID, sleep=self.sleep, clock=self.clock)
+        ok, _ = _REAL_REARM(None, SID, self.OLD, sleep=self.sleep, clock=self.clock)
         self.assertFalse(ok)
         self.assertEqual([], self.calls)
 
