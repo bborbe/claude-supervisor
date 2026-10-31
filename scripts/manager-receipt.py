@@ -166,6 +166,15 @@ def liveness_slug(s: str) -> str:
 
     Falls back to `s` — a pre-split record, or none — so `resolve()` can still apply its
     own legacy lookup rather than this function inventing a name.
+
+    ⚠️ **Residual: a name that is both a goal and a topic resolves to `goal--`.** The
+    probe walks `ml.BRANCHES` in order and takes the first record that exists, so a
+    subject present under both prefixes gets `goal--<base>` on the topic tier as well.
+    The arm side uses the same order (`detect_branch`), so the two agree with each
+    other — which is the property this file needs — but `manager-liveness.py --check`
+    classifies both records, so "the receipt's limit is the liveness limit" holds per
+    record, not per subject. Named rather than left to be discovered; it is the same
+    slug ambiguity the branch prefix exists to narrow, and it is not introduced here.
     """
     ml = liveness()
     if any(s.startswith(f"{b}--") for b in ml.BRANCHES if b):
