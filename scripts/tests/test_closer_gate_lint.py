@@ -68,6 +68,7 @@ EXPECTED = {
     "21-partial-tool-result-quoting-a-closer.jsonl": 0,
     "22-partial-quoted-subject-before-admin.jsonl": 0,
     "23-partial-tool-use-quoting-a-closer.jsonl": 0,
+    "24-partial-cut-inside-the-closer.jsonl": 0,
 }
 
 
@@ -205,6 +206,15 @@ class CloserGateLintTest(unittest.TestCase):
         # a closer quoted in a `tool_use` input is not the operator's gate.
         _code, _text, record = self.mod.evaluate(
             self.payload("23-partial-tool-use-quoting-a-closer.jsonl"), environ={})
+        self.assertEqual("no-closer", record["reason"])
+        self.assertIsNone(record["closer"])
+
+    def test_a_closer_cut_mid_command_is_not_recovered(self):
+        # ⚠️ The write can stop INSIDE the closer. `--admi` is not `--admin`, so salvaging
+        # it would let the deny miss and the lint release a branch-protection bypass. A
+        # closer line that runs into an unterminated tail is therefore unrecoverable.
+        _code, _text, record = self.mod.evaluate(
+            self.payload("24-partial-cut-inside-the-closer.jsonl"), environ={})
         self.assertEqual("no-closer", record["reason"])
         self.assertIsNone(record["closer"])
 

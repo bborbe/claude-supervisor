@@ -97,18 +97,21 @@ def tail_lines(path, max_bytes=MAX_SCAN):
             end = start
 
 
-_TYPE_TEXT = re.compile(r'"type"\s*:\s*"text"')
+_TYPE_TEXT = re.compile(r'\{\s*"type"\s*:\s*"text"')
 _TEXT_KEY = re.compile(r'"text"\s*:\s*"')
 _ASSISTANT = re.compile(r'"type"\s*:\s*"assistant"')
 
 
 def _json_string_at(text, start):
-    """The raw body of a JSON string whose opening quote ends at `start`.
+    """`(body, terminated)` for a JSON string whose opening quote ends at `start`.
 
     Stops at the closing quote or at truncation, and **never** mistakes an escaped
     `\\"` for the terminator. Cutting at the first `"` instead — as this did — dropped
     everything after a quoted `--subject`, including a trailing `--admin`, so the
     admin-merge deny check never fired.
+
+    `terminated` is load-bearing: an unterminated body means the harness cut the line,
+    so its tail may be half a command.
     """
     i = start
     while i < len(text):
@@ -116,16 +119,18 @@ def _json_string_at(text, start):
             i += 2
             continue
         if text[i] == '"':
-            return text[start:i]
+            return text[start:i], True
         i += 1
-    return text[start:]
+    return text[start:], False
 
 
 def _text_values(text):
-    """The `text` content blocks of a partial assistant line, in order.
+    """`(body, terminated)` for each `text` content block of a partial assistant line.
 
-    Mirrors the parsed path, which joins only `type == "text"` blocks — a closer
-    quoted in a `tool_use` input or a `thinking` block is not the operator's gate.
+    Mirrors the parsed path, which joins only `type == "text"` blocks — a closer quoted
+    in a `tool_use` input or a `thinking` block is not the operator's gate. The `{`
+    anchor narrows the match to a block start; ⚠️ it does not eliminate the residual
+    where a structured `tool_use` input is itself shaped `{"type": "text", "text": …}`.
     """
     values, pos = [], 0
     while True:
@@ -153,17 +158,28 @@ def _partial_closer(text):
     """
     if not _ASSISTANT.search(text):
         return None
-    body = "\n".join(_text_values(text))
-    idx = body.rfind("👤 You:")
-    if idx < 0:
-        return None
-    # The closer's line ends at the JSON-escaped newline; the string body itself is
-    # already bounded by its closing quote, so no quote handling is needed here.
-    line = body[idx:].split("\\n", 1)[0].strip()
-    if not line:
-        return None
-    ts = re.search(r'"timestamp":\s*"([^"]+)"', text)
-    return (ts.group(1) if ts else "?"), line
+    for body, terminated in reversed(_text_values(text)):
+        idx = body.rfind("👤 You:")
+        if idx < 0:
+            continue
+        tail = body[idx:]
+        if "\\n" in tail:
+            # The closer's own line ended before the cut, so it is complete whatever
+            # follows it.
+            line = tail.split("\\n", 1)[0].strip()
+        elif terminated:
+            # The string closed cleanly: the closer is the message's last line.
+            line = tail.strip()
+        else:
+            # ⚠️ The closer runs into an UNTERMINATED tail, so the harness may have cut
+            # it mid-command — `--admi` must never be read as a whole closer, or the
+            # `--admin` deny misses and the lint releases a branch-protection bypass.
+            return None
+        if not line:
+            return None
+        ts = re.search(r'"timestamp":\s*"([^"]+)"', text)
+        return (ts.group(1) if ts else "?"), line
+    return None
 
 
 def last_closer(path, max_bytes=MAX_SCAN):
