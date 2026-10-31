@@ -204,7 +204,9 @@ server/policy.json                       bundled approval rules (see README § T
 
 ## Changelog fold guard
 
-`.github/workflows/changelog-fold.yml` runs `bborbe/coding`'s reusable guard on every push to master. It fails when a bullet sits under a released section whose tag does not contain its merge.
+The fold is guarded twice. `.github/workflows/changelog-unreleased-fold.yml` runs on every pull request and **predicts** it: it computes the merge with `git merge-tree --write-tree` and fails when a pending `## Unreleased` bullet would land under an already-released heading. `.github/workflows/changelog-fold.yml` runs on every push to master and **detects** it in the real merged tree: it fails when a bullet sits under a released section whose tag does not contain its merge.
+
+The precheck is the one that saves the mail. Between 2026-10-30 and 10-31 the post-merge guard was red for 91 consecutive master runs — 91 detections, not 91 prevented, one failure mail each. Run the precheck locally before pushing: `CHANGELOG_ROOT=$PWD CHANGELOG_BASE_REF=origin/master bash <path-to-bborbe-coding>/scripts/check-changelog-unreleased-fold.sh`.
 
 **A red run on master blocks the next merge.** Owner: the maintainer. Trigger: a `changelog-fold` workflow run concluding `failure` on master. Repair it in the next PR, or in a PR of its own, before merging anything else — an always-red guard cannot distinguish a new fold from a standing backlog, which is how three folds in a row (#398, #405, #406) were each found by hand while the guard sat red and unread.
 
