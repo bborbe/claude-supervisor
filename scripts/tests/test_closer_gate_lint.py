@@ -69,6 +69,7 @@ EXPECTED = {
     "22-partial-quoted-subject-before-admin.jsonl": 0,
     "23-partial-tool-use-quoting-a-closer.jsonl": 0,
     "24-partial-cut-inside-the-closer.jsonl": 0,
+    "25-partial-literal-backslash-before-admin.jsonl": 0,
 }
 
 
@@ -182,9 +183,9 @@ class CloserGateLintTest(unittest.TestCase):
         self.assertIsNone(record["closer"])
 
     def test_a_partial_tool_result_quoting_a_closer_is_not_a_gate(self):
-        # ⚠️ `_partial_closer` requires `"type": "assistant"`, so a tool result that
-        # happens to quote a closer never becomes one — it falls through to the earlier
-        # message instead.
+        # ⚠️ `_partial_closer` requires a `role`/`type` of `assistant`, so a tool result
+        # that happens to quote a closer never becomes one — it falls through to the
+        # earlier message instead.
         _code, _text, record = self.mod.evaluate(
             self.payload("21-partial-tool-result-quoting-a-closer.jsonl"), environ={})
         self.assertEqual("not-a-gate", record["reason"])
@@ -217,6 +218,15 @@ class CloserGateLintTest(unittest.TestCase):
             self.payload("24-partial-cut-inside-the-closer.jsonl"), environ={})
         self.assertEqual("no-closer", record["reason"])
         self.assertIsNone(record["closer"])
+
+    def test_a_literal_backslash_does_not_read_as_a_newline(self):
+        # ⚠️ A literal backslash is `\\` in the raw body, so `C:\new` carries the same
+        # `\n` pair as a real newline escape. Splitting on it truncated the closer before
+        # `--admin`, so the deny never fired.
+        _code, _text, record = self.mod.evaluate(
+            self.payload("25-partial-literal-backslash-before-admin.jsonl"), environ={})
+        self.assertEqual("not-allow-listed", record["reason"])
+        self.assertIn("--admin", record["closer"])
 
     def test_the_message_never_calls_the_step_reversible(self):
         # ⚠️ A merge is irreversible. The old text said "authorise for a reversible,

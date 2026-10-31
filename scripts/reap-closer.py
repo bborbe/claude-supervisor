@@ -146,6 +146,25 @@ def _text_values(text):
         pos = key.end()
 
 
+def _first_line(body):
+    """`(line, ended_at_newline)` for a raw JSON string body.
+
+    Walks backslash-aware: a real newline is the two characters `\\` + `n`, but a literal
+    backslash in the text is `\\\\`, so `--subject C:\\new` contains the same `\\n` pair.
+    A plain `split("\\n")` cut there and dropped a trailing `--admin`, so the deny never
+    fired — the same bypass fixture 22 exists to prevent.
+    """
+    i = 0
+    while i < len(body):
+        if body[i] == "\\":
+            if i + 1 < len(body) and body[i + 1] == "n":
+                return body[:i], True
+            i += 2
+            continue
+        i += 1
+    return body, False
+
+
 def _partial_closer(text):
     """`(timestamp, line)` recovered from a partially-written assistant line, or `None`.
 
@@ -167,18 +186,13 @@ def _partial_closer(text):
         if idx < 0:
             continue
         tail = body[idx:]
-        if "\\n" in tail:
-            # The closer's own line ended before the cut, so it is complete whatever
-            # follows it.
-            line = tail.split("\\n", 1)[0].strip()
-        elif terminated:
-            # The string closed cleanly: the closer is the message's last line.
-            line = tail.strip()
-        else:
+        line, ended = _first_line(tail)
+        if not ended and not terminated:
             # ⚠️ The closer runs into an UNTERMINATED tail, so the harness may have cut
             # it mid-command — `--admi` must never be read as a whole closer, or the
             # `--admin` deny misses and the lint releases a branch-protection bypass.
             return None
+        line = line.strip()
         if not line:
             return None
         ts = re.search(r'"timestamp":\s*"([^"]+)"', text)
