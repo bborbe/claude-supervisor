@@ -236,6 +236,16 @@ class FleetKeeperTest(KeeperBase):
 
     # --- refusals: nothing may be killed --------------------------------------
 
+    def test_an_unreadable_pre_kill_pid_kills_nothing(self):
+        """Without the pre-kill pid the re-arm cannot be confirmed, so nothing is killed."""
+        self.register_fleet()
+        fk.registry_pid = lambda sid: None
+        rc, out = self.run_keeper("--now", str(NOW))
+        self.assertEqual("cannot-tell", out[0])
+        self.assertEqual([], self.restarts)
+        self.assertEqual([], self.cap.load_resumes(self.cap.path))
+        self.assertIn("fleet-keeper-pid-unreadable", self.cards)
+
     def test_a_busy_manager_is_not_a_lapse_and_arms_nothing(self):
         self.register_fleet()
         self.restart_outcome = ("busy", "busy-target", None)
@@ -523,6 +533,22 @@ class RearmTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(2, len(self.sends()))
         self.assertIn("still reads idle", note)
+
+    def test_a_tail_marker_with_only_the_killed_record_is_not_ready(self):
+        """The crash-loop shape: the old `/color` reply sits right above the new prompt, and the
+        new process has not registered yet — only the killed one's `idle` record is there."""
+        self.screens = [self.READY]
+        self.snapshots = [[(self.OLD, "idle")]]
+        ok, _ = self.run_rearm()
+        self.assertFalse(ok)
+        self.assertEqual([], self.sends())
+
+    def test_a_missing_pre_kill_pid_refuses_before_typing(self):
+        self.screens = [self.READY]
+        self.snapshots = [[(self.OLD, "idle")]]
+        ok, _ = _REAL_REARM("77", SID, None, sleep=self.sleep, clock=self.clock)
+        self.assertFalse(ok)
+        self.assertEqual([], self.calls)
 
     def test_no_pane_means_no_re_arm(self):
         ok, _ = _REAL_REARM(None, SID, self.OLD, sleep=self.sleep, clock=self.clock)
