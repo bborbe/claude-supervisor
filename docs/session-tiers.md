@@ -46,7 +46,13 @@ an open creates supervision where none existed. Restarting a broken manager ther
 nothing new, while opening one decides who supervises. Four rules follow:
 
 1. **A crashed or lapsed manager or worker is restarted automatically** — it already owns its
-   subject, so the restart decides nothing new.
+   subject, so the restart decides nothing new. ⚠️ **This binds the fleet tier too, and the
+   fleet tier is the one that needed it most.** `scripts/fleet-keepalive.py` detects a lapsed
+   fleet round; `scripts/fleet-keeper.py` resumes it. Until the keeper existed the fleet tier
+   had a detector and no hands — `fleet-keepalive.py` printed `stale` and the words "Resume the
+   fleet manager", and nothing resumed, so a lapse was measured, announced once, and suppressed
+   for every minute after until a human looked at a screen. A detector that only prints is a
+   watchdog with no hands. The keeper **restarts — it never opens** (rule 4).
 2. **A flagged page is opened automatically by the tier above it** — `flag: true` means
    *"open me"*, and **provenance is not read**. Operator ruling 2026-10-30: *"in the end it
    should not matter how set the flag … if flag, should be open if claude session limit allow
@@ -68,6 +74,13 @@ nothing new, while opening one decides who supervises. Four rules follow:
 ⚠️ **Rule 4 binds every tier.** The fleet tier removed its manager-proposal row on 2026-10-29
 (`commands/fleet-drive.md`: *"No manager-proposal row — the round does not propose managers for
 unmanaged goals"*). No other tier restores that behaviour under another name.
+
+⚠️ **The fleet keeper obeys rule 4 in its sharpest form.** There is exactly one fleet manager,
+so a second would be a double writer over every subject: `scripts/fleet-keeper.py` resumes the
+**recorded session id** through `restart-worker.py --reason lapse` and never spawns a fresh
+one. Two sessions claiming the `Fleet Manager` registration is its own verdict — the keeper
+refuses rather than picks, because resuming one of two restarts the wrong half of the double
+writer.
 
 ⚠️ **`flag` carries one meaning tree-wide.** It marks a page the operator wants opened. A leg
 that reads it as *"parked / waiting-on-human"* and excludes it inverts the operator's mark; the

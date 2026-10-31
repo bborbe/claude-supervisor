@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Fleet keeper — one tick a minute with no Claude session as its parent.
+
+  WHY A LAUNCHD AGENT, and not a detached loop or an in-session `Monitor`:
+
+    * An in-session `Monitor` dies with the session it lives in. The whole point of the
+      keeper is to survive the thing it watches, so a `Monitor` is structurally unable.
+    * A detached loop is the exact failure mode being fixed: one long-lived process that
+      can die silently and take the supervision with it.
+    * `StartInterval` gives a FRESH PROCESS per tick, so there is no loop to die. This is
+      the same shape `com.bborbe.fleet-digest-notify` already uses.
+
+  The keeper's own liveness is a separate instrument — `~/.claude/state/fleet-keeper/heartbeat`,
+  rewritten at the top of every tick. A dead keeper leaves that file ageing while
+  `fleet-keepalive.py` may still read `ok`, which is the distinction the task's SC6 requires.
+
+  Install:
+    cp launchd/com.bborbe.fleet-keeper.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.bborbe.fleet-keeper.plist
+
+  Reload after an upgrade:
+    launchctl kickstart -k gui/$UID/com.bborbe.fleet-keeper
+
+  The script path is the marketplace clone, not a version-pinned cache dir, for the same
+  reason `fleet-digest-notify-tick.sh` uses it: a cache path would pin the agent to one
+  release and silently run stale code after every upgrade.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bborbe.fleet-keeper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/bborbe/.claude/plugins/marketplaces/claude-supervisor/scripts/fleet-keeper.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/bborbe/Library/Logs/fleet-keeper.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/bborbe/Library/Logs/fleet-keeper.log</string>
+</dict>
+</plist>
