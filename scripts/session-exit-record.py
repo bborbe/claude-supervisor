@@ -97,6 +97,7 @@ lists them; the code is the truth.
 
 import argparse
 import datetime
+import datetime
 import json
 import os
 import re
@@ -473,6 +474,141 @@ def cmd_list(args):
     return 0
 
 
+def record_day(line):
+    """The record's calendar day (UTC), or `None` when the line carries no leading timestamp.
+
+    The timestamp is positional — the store's line format is fixed-field-order and `ts` is
+    not a `name=value` field, so `parse_field` cannot reach it. A torn or hand-edited line
+    whose first field is not a date is skipped rather than bucketed under a junk key such as
+    `kind=unkno`, which would surface as a phantom row in the metric.
+    """
+    stamp = line.split("\t", 1)[0][:10]
+    try:
+        datetime.date.fromisoformat(stamp)
+    except ValueError:
+        return None
+    return stamp
+
+
+def _day_rows(counts, days):
+    """One row per day: the days with records, or a zero-filled window of `days` days.
+
+    `days > 0` anchors on today (UTC) and walks back `days - 1` days, so the window is
+    contiguous and a quiet day prints as `ends=0`. `days == 0` returns only the days the
+    store actually holds, which is the right shape for a one-off look at the whole history.
+    """
+    def build(day):
+        bucket = counts.get(day, {})
+        row = {"day": day, "total": 0}
+        for kind in END_KINDS:
+            row[kind] = bucket.get(kind, 0)
+            row["total"] += row[kind]
+        row["unknown_end_pct"] = (
+            round(100.0 * row[KIND_UNKNOWN] / row["total"], 1) if row["total"] else 0.0
+        )
+        return row
+
+    if days > 0:
+        end = datetime.datetime.now(datetime.timezone.utc).date()
+        if counts:
+            latest = max(datetime.date.fromisoformat(day) for day in counts)
+            end = max(end, latest)
+        start = end - datetime.timedelta(days=days - 1)
+        out, day = [], start
+        while day <= end:
+            out.append(build(day.isoformat()))
+            day += datetime.timedelta(days=1)
+        return out
+    return [build(day) for day in sorted(counts)]
+
+
+def cmd_daily(args):
+    """Per-calendar-day counts of every end kind, and the unknown-end share of them.
+
+    A standing metric rather than a one-off query. The rate at which sessions die without a
+    recorded cause is the thing this store exists to make visible, and it stayed invisible
+    for four days after the first jump because seeing it meant remembering to run a shell
+    pipeline. This subcommand is the pipeline; `--line` is the form a monitor or a `grep`
+    reads without parsing a table.
+
+    Only end kinds are counted. `spawn` and `heartbeat` are markers, and folding them in
+    would make the denominator track the fleet's size instead of its deaths — the fraction
+    is meant to answer "of the deaths, how many are unexplained", not "how busy was the
+    machine". A pane with a `spawn` and no end line is a session still running, so it is
+    absent from every count rather than counted as zero.
+
+    ⚠️ **`--days N` zero-fills the window**, and that is the difference between a metric and
+    a report. Emitting only the days that carry records makes a day with no deaths and a day
+    the writer did not run look identical — both simply absent — which is precisely the
+    confusion this store exists to remove. A window therefore always prints N consecutive
+    days, a quiet one as `ends=0`.
+
+    ⚠️ **Days are UTC**, because every record's `ts` is UTC (`now_utc`) and the day is the
+    first ten characters of it. A caller firing at local midnight sees a *provisional*
+    latest row until the UTC day rolls over; the plist states its own offset.
+    """
+    directory = state_dir()
+    counts = {}
+    try:
+        names = sorted(os.listdir(directory))
+    except FileNotFoundError:
+        names = []
+    for name in names:
+        if not (name.startswith("pane-") and name.endswith(".log")):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            # `errors="replace"` rather than a strict decode: one non-UTF-8 byte in any of
+            # the several hundred pane logs would otherwise abort the whole unattended run
+            # and lose that day's reading, since `UnicodeDecodeError` is raised during
+            # iteration and is not an `OSError`.
+            handle = open(path, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                kind = parse_field(line, "kind")
+                if kind not in END_KINDS:
+                    continue
+                day = record_day(line)
+                if day is None:
+                    continue
+                bucket = counts.setdefault(day, {})
+                bucket[kind] = bucket.get(kind, 0) + 1
+
+    rows = _day_rows(counts, args.days)
+
+    if args.json:
+        print(json.dumps({"days": rows}, indent=2))
+        return 0
+    if args.line:
+        for row in rows:
+            print(
+                f"{row['day']} ends={row['total']} unknown_end={row[KIND_UNKNOWN]} "
+                f"unknown_end_pct={row['unknown_end_pct']}"
+            )
+        return 0
+    if not rows:
+        print("no end records in the store")
+        return 0
+    # Every end kind gets a column, including `closed-tab`, which no writer emits today.
+    # Dropping it would leave the columns not summing to `total` the day one appears —
+    # a table that quietly under-reports is worse than one carrying a zero column.
+    print(
+        f"{'day':<12}{'exited':>8}{'signalled':>11}{'closed-tab':>12}"
+        f"{'unknown-end':>13}{'total':>8}{'unknown%':>10}"
+    )
+    for row in rows:
+        print(
+            f"{row['day']:<12}{row[KIND_EXITED]:>8}{row[KIND_SIGNALLED]:>11}"
+            f"{row[KIND_CLOSED_TAB]:>12}{row[KIND_UNKNOWN]:>13}"
+            f"{row['total']:>8}{row['unknown_end_pct']:>10}"
+        )
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Record how a Claude Code pane ended.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -515,6 +651,14 @@ def main(argv=None):
     p_list = sub.add_parser("list", help="list every record in the store")
     p_list.add_argument("--json", action="store_true")
     p_list.set_defaults(func=cmd_list)
+
+    p_daily = sub.add_parser(
+        "daily", help="per-day end-kind counts — the standing unknown-end metric"
+    )
+    p_daily.add_argument("--days", type=int, default=0, help="only the last N days (0 = all)")
+    p_daily.add_argument("--json", action="store_true")
+    p_daily.add_argument("--line", action="store_true", help="one key=value line per day")
+    p_daily.set_defaults(func=cmd_daily)
 
     args = parser.parse_args(argv)
     return args.func(args)
