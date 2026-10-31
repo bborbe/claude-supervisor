@@ -532,7 +532,13 @@ def changed_inputs(load_path, load_mtime, argv, launcher, started):
 
 
 def describe_changed(changed):
-    """`plugin version (0.1.0); MCP config (/p)` — one line naming every changed input."""
+    """`plugin version (0.1.0); MCP config (/p)` — one line naming every changed input.
+
+    Empty means a `--reason lapse` restart: the loop stopped, no input changed. Said out loud
+    rather than left blank, so the caller cannot read an empty string as a missing report.
+    """
+    if not changed:
+        return "nothing — the loop stopped, no input changed (`--reason lapse`)"
     return "; ".join(f"{label} ({what})" for label, what in changed)
 
 
@@ -665,6 +671,12 @@ def main():
     )
     ap.add_argument("session_id", help="the session id to restart")
     ap.add_argument("--dry-run", action="store_true", help="check everything, kill nothing")
+    ap.add_argument("--reason", choices=("code", "lapse"), default="code",
+                    help="why this restart is justified. `code` (default) requires something "
+                         "newer than the session's start to load, which is precondition 4. "
+                         "`lapse` is for a session whose LOOP stopped — a lapsed fleet round "
+                         "writes no file, so no input changed — and skips precondition 4 and "
+                         "nothing else: a held, busy or headless target is still refused")
     ap.add_argument("--sessions-dir", help=f"registry dir (default: {SESSIONS_DIR})")
     args = ap.parse_args()
 
@@ -754,30 +766,38 @@ def main():
     # here, before the kill, because afterwards there is no process left to read.
     load_path, load_mtime = newest_load_path()
     started = parse_started(rec)
-    if started is None:
-        return refuse(
-            "stale-load-path",
-            f"session {sid} carries no parseable start time, so it cannot be shown that "
-            "anything would load differently",
-        )
     argv = worker_argv(pid)
     subject = fb.manager_subject(name, index, slugs) if role == "manager" and index is not None else None
     launcher, launcher_source = resolve_launcher(sid, (rec.get("cwd") or "").strip(), fb, subject)
-    changed = changed_inputs(load_path, load_mtime, argv, launcher, started)
-    if not changed:
-        checked = [
-            f"load path {os.path.basename(load_path)}" if load_path
-            else f"no load path under {LOAD_PATH_ROOT}",
-            "MCP config (unreadable argv)" if argv is None
-            else ", ".join(mcp_config_paths(argv)) or "no --mcp-config",
-            launcher or f"launcher unresolved: {launcher_source}",
-        ]
-        return refuse(
-            "stale-load-path",
-            f"none of plugin version, MCP config or launcher is newer than session "
-            f"{sid}'s start ({'; '.join(checked)}); restarting would reload identical "
-            "code and config",
-        )
+
+    # ⚠️ Precondition 4 applies to a CODE-staleness restart only. `--reason lapse` restarts a
+    # session whose LOOP stopped, not one whose code changed: a lapsed fleet round writes no
+    # file, so requiring a newer input would refuse every legitimate lapse restart and the
+    # keeper that calls this could never act. Everything above and below still applies — a
+    # held, busy, headless or unresumable target is refused exactly as before.
+    changed = []
+    if args.reason == "code":
+        if started is None:
+            return refuse(
+                "stale-load-path",
+                f"session {sid} carries no parseable start time, so it cannot be shown that "
+                "anything would load differently",
+            )
+        changed = changed_inputs(load_path, load_mtime, argv, launcher, started)
+        if not changed:
+            checked = [
+                f"load path {os.path.basename(load_path)}" if load_path
+                else f"no load path under {LOAD_PATH_ROOT}",
+                "MCP config (unreadable argv)" if argv is None
+                else ", ".join(mcp_config_paths(argv)) or "no --mcp-config",
+                launcher or f"launcher unresolved: {launcher_source}",
+            ]
+            return refuse(
+                "stale-load-path",
+                f"none of plugin version, MCP config or launcher is newer than session "
+                f"{sid}'s start ({'; '.join(checked)}); restarting would reload identical "
+                "code and config",
+            )
 
     print(
         f"🔄 restart-worker · session {sid[:8]} · pid {pid} · {name!r}"
@@ -822,6 +842,10 @@ def main():
         )
         return 1
 
+    # A machine token, printed BEFORE the signal: a caller that must know whether a failure
+    # came before or after the kill reads this line rather than matching the prose of
+    # whichever refusal follows. `scripts/fleet-keeper.py` arms its cap on it.
+    print(f"   killing-pid {pid}")
     try:
         os.kill(pid, 15)
     except ProcessLookupError:
