@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.224.3
 - chore: **the changelog fold is now caught before the merge, not after.** `.github/workflows/changelog-unreleased-fold.yml` runs on `pull_request` and calls the new precheck in `bborbe/coding`, which computes the merge with `git merge-tree --write-tree` and fails the PR when a pending `## Unreleased` bullet would land under an already-released heading. The existing `changelog-fold.yml` stays as the post-merge backstop, and its comment no longer claims a pull-request check is structurally blind to the fold — that was true of a heading read, not of a computed merge. The 91 consecutive red master runs of 2026-10-30/31 were 91 detections, not 91 prevented.
 
 ## v0.224.2
