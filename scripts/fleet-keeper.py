@@ -17,6 +17,7 @@ AGREE (`ok`/0, `stale`/10, `unknown`/2); a disagreement is `unknown`, never a re
 Verdicts (first line of stdout), one token:
 
   ok            the round is inside its limit — nothing to do
+  stopped       the fleet loop was stood down with /supervisor:stop — a deliberate stop, left alone
   settling      a resume ran inside the last HOLD_OFF seconds — the manager is still coming up
   restarted     the fleet manager was resumed AND told to re-arm its loop, and it went busy
   dead          the fleet manager's session is ABSENT — reported, **never restarted**
@@ -80,6 +81,8 @@ BRANCH = "fleet"
 KEEPALIVE = os.path.join(HERE, "fleet-keepalive.py")
 LIVENESS = os.path.join(HERE, "session-liveness.py")
 RESTART = os.path.join(HERE, "restart-worker.py")
+MANAGER_LIVENESS = os.path.join(HERE, "manager-liveness.py")
+MANAGER_STATES = ("OK", "STALE", "STOPPED", "UNARMED", "INVALID")
 ATTENTION_ASK = os.path.join(HERE, "attention-ask.py")
 
 STATE_DIR = os.path.expanduser(
@@ -181,6 +184,37 @@ def verdict(ledger=None):
     if KEEPALIVE_EXIT.get(word) != probe.returncode:
         return "unknown", f"fleet-keepalive.py answered {word!r} with exit {probe.returncode}"
     return word, " · ".join(ln.strip() for ln in lines[1:2])
+
+
+def stand_down():
+    """`'STOPPED'` when the fleet loop was stood down on purpose, `'running'` otherwise, or
+    `None` when that cannot be read.
+
+    `/supervisor:stop` writes `<slug>.stopped` precisely so a watcher reads the silence that
+    follows as a STOP, not a lapse (`docs/fleet-surface.md` § Session end). The digest goes
+    stale either way — so without this read the keeper would kill and resume a fleet the
+    operator stood down deliberately, roughly one digest limit after every stop.
+
+    ⚠️ **This SUPPRESSES and never TRIGGERS.** Only the `STOPPED` token is acted on; whether
+    `manager-liveness.py` reads `OK` or `STALE` is ignored, because its staleness is
+    heartbeat-based and reads `OK` throughout a lapsed round. The keeper's staleness input
+    stays `fleet-keepalive.py`'s verdict alone — no second staleness rule.
+
+    `None` when the read fails is deliberate: whether the operator stopped the fleet is
+    exactly what a kill must not guess at.
+    """
+    try:
+        probe = subprocess.run(
+            [sys.executable, MANAGER_LIVENESS, "--state", "--subject", SUBJECT, "--branch", BRANCH],
+            capture_output=True, text=True, timeout=PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    first = (probe.stdout or "").splitlines()
+    token = first[0].split("\t")[0].strip() if first else ""
+    if probe.returncode != 0 or token not in MANAGER_STATES:
+        return None
+    return "STOPPED" if token == "STOPPED" else "running"
 
 
 def liveness(sid):
@@ -449,7 +483,26 @@ def main(argv):
         report("cannot-tell", f"{detail} — reported, never treated as fine{card(item)}", now)
         return 1
 
-    # ---- stale: something must act ----
+    # ---- stale: something must act — unless the operator stood the fleet down ----
+    stood = stand_down()
+    if stood == "STOPPED":
+        report("stopped",
+               "the fleet loop was stood down with /supervisor:stop — a deliberate stop, not a "
+               "lapse; left alone until it is re-armed", now)
+        return 0
+    if stood is None:
+        item = notify(
+            "fleet-keeper-stop-state-unreadable",
+            "The fleet round is stale, but the keeper cannot read whether the fleet was stood "
+            "down on purpose (manager-liveness.py --state did not answer). It will not kill a "
+            "fleet manager the operator may have stopped deliberately.",
+            ["acknowledge"],
+            context=detail,
+        )
+        report("cannot-tell",
+               f"stop state unreadable — not killing a fleet that may be stood down{card(item)}", now)
+        return 1
+
     found = fleet_session()
 
     if found is None:
