@@ -120,12 +120,10 @@ def _partial_closer(raw):
         return None
     seg = text[idx:]
     # The line's JSON is unclosed, so the closer ends at the first escaped newline
-    # (`\n` in the raw bytes) or at the string's closing quote, whichever comes first.
-    for stop in ("\\n", '"'):
-        cut = seg.find(stop)
-        if cut > 0:
-            seg = seg[:cut]
-            break
+    # (`\n` in the raw bytes) or at the string's closing quote — whichever comes first.
+    stops = [p for p in (seg.find("\\n"), seg.find('"')) if p > 0]
+    if stops:
+        seg = seg[: min(stops)]
     ts = re.search(r'"timestamp":\s*"([^"]+)"', text)
     return (ts.group(1) if ts else "?"), seg.strip()
 

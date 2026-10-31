@@ -62,6 +62,10 @@ EXPECTED = {
     # at any scan bound, so these carry an unparseable final line (see the test below).
     "18-partial-write-gh-pr-merge.jsonl": 2,
     "19-partial-write-session-close.jsonl": 2,
+    # Both exit 0, so only their `reason` distinguishes them from a stale fallback —
+    # pinned by the two tests below.
+    "20-unreadable-assistant-no-closer.jsonl": 0,
+    "21-partial-tool-result-quoting-a-closer.jsonl": 0,
 }
 
 
@@ -164,6 +168,24 @@ class CloserGateLintTest(unittest.TestCase):
                 self.assertEqual(2, code)
                 self.assertEqual("allow-listed", record["reason"])
                 self.assertEqual(matched, record["matched"])
+
+    def test_an_unreadable_final_line_never_falls_back_to_an_older_closer(self):
+        # ⚠️ The `return None` branch. Without it the scan falls through to the earlier
+        # `👤 You: nothing` and reports `not-a-gate` — the same stale-closer defect one
+        # line further out. Both outcomes exit 0, so only the reason distinguishes them.
+        _code, _text, record = self.mod.evaluate(
+            self.payload("20-unreadable-assistant-no-closer.jsonl"), environ={})
+        self.assertEqual("no-closer", record["reason"])
+        self.assertIsNone(record["closer"])
+
+    def test_a_partial_tool_result_quoting_a_closer_is_not_a_gate(self):
+        # ⚠️ `_partial_closer` requires `"type": "assistant"`, so a tool result that
+        # happens to quote a closer never becomes one — it falls through to the earlier
+        # message instead.
+        _code, _text, record = self.mod.evaluate(
+            self.payload("21-partial-tool-result-quoting-a-closer.jsonl"), environ={})
+        self.assertEqual("not-a-gate", record["reason"])
+        self.assertIsNone(record["matched"])
 
     def test_the_message_never_calls_the_step_reversible(self):
         # ⚠️ A merge is irreversible. The old text said "authorise for a reversible,
