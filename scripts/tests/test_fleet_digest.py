@@ -320,6 +320,30 @@ class RisingAge(Base):
         self.assertIn("STALE", out)
         self.assertNotIn("SUPPRESSED", out)
 
+    def test_a_zero_or_negative_limit_does_not_crash(self):
+        # The re-fire step divides by LIMIT, so a misconfigured 0 must not become a
+        # ZeroDivisionError where the old code merely reported stale, and a negative
+        # value must not pin every lapse at step 1.
+        self.assertEqual(load(self.digests, self.state, limit=0).LIMIT, 1)
+        self.assertEqual(load(self.digests, self.state, limit=-5).LIMIT, 1)
+
+    def test_a_recovery_then_a_higher_lapse_reports_again(self):
+        self.digest("a.digest", self.ago(4325))  # step 4
+        self.tick(60)
+        rc, out = self.run_check()
+        self.assertEqual(rc, self.m.EXIT_STALE)
+
+        self.digest("b.digest", self.ago(5))  # a healthy round clears the marker
+        self.tick(60)
+        rc, out = self.run_check()
+        self.assertEqual(rc, 0)
+        self.assertIn("RECOVERED", out)
+
+        self.digest("b.digest", self.ago(9000))  # step 8, a fresh lapse
+        self.tick(60)
+        rc, out = self.run_check()
+        self.assertEqual(rc, self.m.EXIT_STALE)
+
     def test_the_refire_does_not_wait_for_a_new_digest(self):
         # The whole point: the epoch never changes in a real lapse, so a re-fire keyed
         # on it alone would stay silent forever.

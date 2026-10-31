@@ -634,6 +634,18 @@ class FleetTier(unittest.TestCase):
         self.assertEqual(self.m.steps_for(""), self.m.STEPS)
         self.assertEqual(self.m.steps_for("fleet"), ("re-arm", "digest"))
 
+    def test_topic_and_branch_together_select_the_fleet_tier(self):
+        # `--topic` is the older spelling of `--subject`; combined with `--branch` it
+        # must resolve the fleet slug, not silently fall back to the unprefixed one.
+        self.cli("--start", "--topic", FLEET_SUBJECT, "--branch", "fleet")
+        self.assertTrue(os.path.exists(os.path.join(self.tmp.name, FLEET_SLUG + ".json")))
+
+    def test_an_unknown_branch_is_refused(self):
+        # manager-liveness.py validates its branch before building the slug; this module
+        # claims parity, and an unvalidated branch interpolates into the state path.
+        with self.assertRaises(ValueError):
+            self.m.slug(FLEET_SUBJECT, "fleet/../../etc")
+
     def test_topic_check_never_reports_fleet_steps(self):
         self.cli("--start", "--topic", "Recurring Operator Gates")
         rc, out = self.cli("--check", "--topic", "Recurring Operator Gates")

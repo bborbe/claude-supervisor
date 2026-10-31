@@ -89,7 +89,11 @@ DIGEST_DIR = os.path.expanduser(
 STATE_DIR = os.path.expanduser(
     os.environ.get("FLEET_DIGEST_STATE_DIR", "~/.claude/state/fleet-digest")
 )
-LIMIT = int(os.environ.get("FLEET_DIGEST_LIMIT", "1080"))
+# Floored at 1: the re-fire step below divides by it, so a misconfigured 0 would raise
+# `ZeroDivisionError` (exit 1, traceback) where the previous code merely reported stale —
+# turning a tuning knob into a crash. A negative value would otherwise pin every lapse at
+# step 1 and suppress the re-fire entirely.
+LIMIT = max(1, int(os.environ.get("FLEET_DIGEST_LIMIT", "1080")))
 TICK = int(os.environ.get("FLEET_DIGEST_TICK", "60"))
 
 HEARTBEAT = "heartbeat"

@@ -17,7 +17,10 @@ This script is that check. The round records the artifact each load-bearing step
 produced; the tail re-arm reads the receipt back and prints `skipped: <step>` for
 every field that does not resolve to an artifact produced THIS round.
 
-Three verbs, one receipt per topic:
+Three verbs, one receipt per subject. `--subject` is an alias for `--topic` (the fleet
+tier's name for it), and `--branch` selects the tier: `""` (the default) is the goal or
+topic round, `fleet` is the fleet round, whose slug carries the branch exactly as
+`manager-liveness.py` writes it (`fleet--fleet-manager`).
 
   --start  --topic T            begin a round: writes `round_started_at` and clears
                                 every field, so a receipt can only ever describe the
@@ -88,6 +91,11 @@ STEPS = ("needs-you", "sweep", "watcher", "readings")
 FLEET_STEPS = ("re-arm", "digest")
 ALL_STEPS = STEPS + FLEET_STEPS
 
+# The branches this receipt knows. `manager-liveness.py:110-112` validates the same set
+# before building its slug, and this module claims parity with it — so it validates too.
+# `""` is the goal/topic tier, which carries no prefix.
+BRANCHES = ("", "fleet")
+
 
 def steps_for(branch: str) -> tuple:
     """The steps a round of `branch` owes. No branch is the goal/topic tier."""
@@ -112,6 +120,8 @@ def slug(subject: str, branch: str = "") -> str:
     `skipped: re-arm` on a round that armed perfectly. Every goal/topic caller passes no
     branch and keeps the unprefixed slug it has always used.
     """
+    if branch not in BRANCHES:
+        raise ValueError(f"branch must be one of {BRANCHES}, got {branch!r}")
     base = base_slug(subject)
     return f"{branch}--{base}" if branch else base
 
