@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the fleet keeper's launchd agent could never restart anything — its `PATH` was missing `vault-cli`.** The plist pinned only the system directories, and launchd gives a job no login shell, so `vault-cli` (`~/Documents/workspaces/go/bin`) was unresolvable. `restart-worker.py` resolves the launcher a resume must run through from `vault-cli config list`, so every tick refused with *"no launcher could be resolved … (vault-cli config could not be read)"* — measured 2026-11-01 after 715 ticks, all refusing, against a genuinely lapsed fleet. The refusal was correct (resuming through bare `claude` would drop the MCP config); the agent was inert. The `PATH` now carries the directories `cc-env.sh` pins for the same reason, restricted to what the keeper's own chain needs, with the failure mode recorded beside it because it presents as a refusal rather than as a broken environment. Proven under launchd's exact environment: `env -i` with the old `PATH` answers `refused`, with the new one `restarted … would resume ac24db61 and send /supervisor:fleet-loop`. Change set: `launchd/com.bborbe.fleet-keeper.plist`, `CHANGELOG.md`.
+
 ## v0.224.3
 - chore: **the changelog fold is now caught before the merge, not after.** `.github/workflows/changelog-unreleased-fold.yml` runs on `pull_request` and calls the new precheck in `bborbe/coding`, which computes the merge with `git merge-tree --write-tree` and fails the PR when a pending `## Unreleased` bullet would land under an already-released heading. The existing `changelog-fold.yml` stays as the post-merge backstop, and its comment no longer claims a pull-request check is structurally blind to the fold — that was true of a heading read, not of a computed merge. The 91 consecutive red master runs of 2026-10-30/31 were 91 detections, not 91 prevented.
 
