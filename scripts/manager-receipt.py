@@ -598,7 +598,12 @@ def _skips(s: str, branch: str, d: dict, started: float, limit: float, now: floa
     # fractional `round_started_at`. Flooring the start is the same one-second cost
     # `rearm_shape` documents, and the alternative is a recovery that silently fails
     # whenever the operator is fast.
-    abandoned = {step for ts, step in read_abandoned(s) if ts >= int(started)}
+    # ⚠️ Bounded on BOTH sides. The lower bound is the round's own start; the upper
+    # bound is now, because a record dated in the future would otherwise excuse the
+    # step on every round until wall-clock caught up — a forward clock jump when
+    # `abandon()` stamped it, or a hand-edited line. `math.isfinite` in
+    # `read_abandoned` rejects inf/nan; this rejects a finite future.
+    abandoned = {step for ts, step in read_abandoned(s) if int(started) <= ts <= now}
     fields = d.get("fields") or {}
     skipped = []
     for step in steps_for(branch):

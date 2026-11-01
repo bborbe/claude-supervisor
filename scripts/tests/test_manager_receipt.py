@@ -1066,6 +1066,19 @@ class FleetDebt(unittest.TestCase):
         self.assertEqual(rc, 11, out)
         self.assertIn("skipped: digest", out)
 
+    def test_a_future_dated_abandonment_is_ignored(self):
+        # The other unbounded direction: a finite timestamp in the future — a
+        # forward clock jump when `abandon()` stamped it, or a hand-edited line —
+        # would otherwise excuse the step on every round until wall-clock caught up.
+        self.skipped_round()
+        self.check()
+        p = os.path.join(self.tmp.name, FLEET_SLUG + ".abandoned")
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write("%.3f digest\n" % (time.time() + 86400))
+        rc, out = self.check()
+        self.assertEqual(rc, 11, out)
+        self.assertIn("skipped: digest", out)
+
     def test_an_abandonment_from_an_earlier_round_is_not_honoured(self):
         # `check()` honours a payment only from the round it was paid in. Without
         # that filter one abandon would excuse the step for the rest of the task's
