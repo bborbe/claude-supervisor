@@ -97,7 +97,7 @@ class ReportOnlyContractTest(KeeperBase):
 
     def test_a_lapse_held_for_40_minutes_is_reported_once(self):
         self.assertEqual("reported", self.stale_run(T0, 40))
-        self.assertEqual(["fleet-keeper-lapse-%d" % int(T0)], self.cards)
+        self.assertEqual(["fleet-keeper-lapse-%d-d0" % int(T0)], self.cards)
         self.assertIn("reported", pathlib.Path(fk.KEEPER_LOG).read_text())
 
     def test_a_slow_healthy_round_is_never_reported(self):
@@ -142,7 +142,7 @@ class ReportOnlyContractTest(KeeperBase):
         fk.STATE_DIR = "/nonexistent-dir-for-fleet-keeper-test"
         rc, out = self.tick(T0)
         self.assertEqual("cannot-tell", out[0])
-        self.assertIn("fleet-keeper-state-unwritable", self.cards)
+        self.assertTrue(any(k.startswith("fleet-keeper-state-unwritable-") for k in self.cards))
 
     def test_a_start_time_in_the_future_restarts_the_timer(self):
         pathlib.Path(fk.LAPSE).write_text(json.dumps({"since": T0 + 3600, "reported": None}))
@@ -189,7 +189,7 @@ class ReportOnlyContractTest(KeeperBase):
         self.addCleanup(lambda: setattr(fk, "clear_lapse", real_clear))
         self.word = "ok"
         self.assertEqual("cannot-tell", self.tick(T0 + 41 * MIN)[1][0])
-        self.assertIn("fleet-keeper-state-unclearable", self.cards)
+        self.assertTrue(any(k.startswith("fleet-keeper-state-unclearable-") for k in self.cards))
 
     def test_an_undecidable_liveness_probe_is_carded_at_once(self):
         self.live = "UNKNOWN"
@@ -331,7 +331,45 @@ class EpisodeTest(KeeperBase):
         self.addCleanup(lambda: setattr(fk, "end_episodes", real))
         self.word = "ok"
         self.assertEqual("cannot-tell", self.tick(T0 + MIN)[1][0])
-        self.assertIn("fleet-keeper-state-unclearable", self.cards)
+        self.assertTrue(any(k.startswith("fleet-keeper-state-unclearable-") for k in self.cards))
+
+    def test_a_lapse_longer_than_a_day_is_raised_again(self):
+        """Cards expire after 24 h. A lapse that outlives its card must be raised again, or a
+        day-long lapse goes silent: the failure this task exists to end."""
+        self.stale_run(T0, 40)
+        self.tick(T0 + 25 * 3600)
+        lapse = [k for k in self.cards if k.startswith("fleet-keeper-lapse-")]
+        self.assertEqual(2, len(lapse))
+        self.assertTrue(lapse[1].endswith("-d1"))
+
+    def test_a_deliberate_stop_ends_open_condition_episodes(self):
+        """An episode left open across a stop would make the next one return the old,
+        acknowledged card and post nothing."""
+        self.live = "ABSENT"
+        self.tick(T0)
+        self.live, self.stood = "LIVE", "STOPPED"
+        self.tick(T0 + MIN)
+        self.stood, self.live = "running", "ABSENT"
+        self.tick(T0 + 2 * MIN)
+        self.assertEqual(2, len([k for k in self.cards if k.startswith("fleet-keeper-absent-")]))
+
+    def test_a_new_manager_dying_before_any_ok_gets_its_own_card(self):
+        self.live = "ABSENT"
+        self.tick(T0)
+        other = "9c0ffee0-0000-0000-0000-000000000000"
+        self.register_fleet(other)
+        os.utime(self.register / f"{other}.json", (T0 + 999999, T0 + 999999))
+        self.tick(T0 + MIN)
+        absent = {k.split("-")[3] for k in self.cards if k.startswith("fleet-keeper-absent-")}
+        self.assertEqual({SID[:8], other[:8]}, absent)
+
+    def test_an_unsaved_episode_record_is_carded(self):
+        real = fk._save_episodes
+        fk._save_episodes = lambda rec: False
+        self.addCleanup(lambda: setattr(fk, "_save_episodes", real))
+        self.live = "ABSENT"
+        self.tick(T0)
+        self.assertTrue(any(k.startswith("fleet-keeper-state-unwritable-") for k in self.cards))
 
 
 class NotifyArgvTest(unittest.TestCase):

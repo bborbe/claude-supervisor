@@ -257,12 +257,18 @@ def clear_lapse():
     return True
 
 
+def day(now):
+    """The UTC day of `now`, as a dedup-key bucket for cards that cannot be episodic."""
+    return time.strftime("%Y%m%d", time.gmtime(now))
+
+
 def unclearable(now, detail):
     """Report a lapse record that could not be cleared, and say why it matters."""
     item = notify(
-        "fleet-keeper-state-unclearable",
-        f"The fleet keeper cannot remove {LAPSE}. Its old 'already reported' marker would make "
-        f"the NEXT fleet lapse look already handled, so that lapse would never be reported.",
+        f"fleet-keeper-state-unclearable-{day(now)}",
+        f"The fleet keeper cannot clear its state ({LAPSE} or {EPISODES}). An old 'already "
+        f"reported' marker there would make the NEXT fleet lapse or condition look already "
+        f"handled, so it would never be reported.",
         ["acknowledge"], context=detail,
     )
     report("cannot-tell", f"cannot clear lapse state — reported{card(item)}", now)
@@ -342,7 +348,10 @@ def raise_once(condition, payload, now, detail=""):
     since = ep["since"] if ep and isinstance(ep.get("since"), (int, float)) else now
     item = notify(f"fleet-keeper-{condition}-{int(since)}", payload, ["acknowledge"], context=detail)
     episodes[condition] = {"since": since, "item": item}
-    _save_episodes(episodes)
+    if not _save_episodes(episodes):
+        notify(f"fleet-keeper-state-unwritable-{day(now)}",
+               f"The fleet keeper cannot write {EPISODES}, so it cannot remember which conditions "
+               f"it already reported; it may repost them.", ["acknowledge"], context=detail)
     return item
 
 
@@ -402,7 +411,7 @@ def main(argv):
     # ---- stale ----
     stood = stand_down()
     if stood == "STOPPED":
-        if not clear_lapse():
+        if not clear_lapse() or not end_episodes():
             return unclearable(now, detail)
         report("stopped", "the fleet loop was stood down with /supervisor:stop — a deliberate "
                           "stop, not a lapse; left alone until it is re-armed", now)
@@ -418,7 +427,7 @@ def main(argv):
             f"{sid[:8]}) answers {live}, so the keeper cannot tell whether the session is alive.", now, detail)
         log(f"liveness {live} for {sid[:8]} — carded; lapse timing continues", now)
     if live == "ABSENT":
-        item = raise_once("absent", f"The fleet manager (session {sid[:8]}) is ABSENT — the session is gone, not merely "
+        item = raise_once(f"absent-{sid[:8]}", f"The fleet manager (session {sid[:8]}) is ABSENT — the session is gone, not merely "
             f"lapsed. Nothing supervises the fleet until one is started. The keeper never "
             f"starts or restarts one itself.", now, detail)
         report("dead", f"fleet manager {sid[:8]} is ABSENT — reported{card(item)}", now)
@@ -431,7 +440,7 @@ def main(argv):
         lapse = {"since": now, "reported": None}
         if not save_lapse(lapse):
             item = notify(
-                "fleet-keeper-state-unwritable",
+                f"fleet-keeper-state-unwritable-{day(now)}",
                 f"The fleet keeper cannot write {LAPSE}, so it cannot time a lapse: every tick "
                 f"would start a fresh 40-minute timer and a real lapse would never be reported. "
                 f"The fleet round is stale right now.",
@@ -447,7 +456,8 @@ def main(argv):
                f"slow but healthy round; not reported yet", now)
         return 0
 
-    if lapse.get("reported"):
+    lapse_day = int(held // 86400)
+    if lapse.get("reported") and lapse.get("reported_day", 0) == lapse_day:
         report("reported",
                f"lapse since {time.strftime('%H:%M:%SZ', time.gmtime(lapse['since']))} already "
                f"reported{card(lapse['reported'])}; nothing more until it recovers", now)
@@ -459,7 +469,7 @@ def main(argv):
     caveat = (" ⚠️ The keeper could not read whether the fleet was stood down on purpose, so "
               "this may be a deliberate /supervisor:stop." if stood is None else "")
     item = notify(
-        f"fleet-keeper-lapse-{int(lapse['since'])}",
+        f"fleet-keeper-lapse-{int(lapse['since'])}-d{lapse_day}",
         f"The fleet round has been stale for {int(held // 60)} min ({who}). That is past the "
         f"longest healthy round measured, so this is a lapse, not a slow round. The keeper does "
         f"not restart the fleet manager: check its tab and re-arm its loop "
@@ -469,6 +479,7 @@ def main(argv):
     note = " (stop state unreadable)" if stood is None else ""
     if item:
         lapse["reported"] = item
+        lapse["reported_day"] = lapse_day
         if not save_lapse(lapse):
             # The card is up; only the "already reported" marker failed to persist. The next tick
             # re-posts under the same dedup key, so the board still holds one card. Logged so a
