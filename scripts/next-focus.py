@@ -44,8 +44,8 @@ Usage
 Exit codes: 0 emitted · 2 refused (bad input, unreadable vault).
 """
 import argparse
-import datetime as dt
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -53,6 +53,20 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load(name, filename):
+    """Import a sibling script by path — the filenames carry hyphens."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: `defer_date` is an instant, not a date — see `defer-date.py`.
+defer_date = _load("defer_date", "defer-date.py")
 
 PLAN_DIR = "60 Periodic Notes"
 CAP = 5
@@ -427,9 +441,12 @@ def plan_candidates(vault, board, day, notes):
     return out
 
 
-def due_today(board, tasks_dir, day):
+def due_today(board, tasks_dir, day, now=None):
     """Tasks deferred or flagged for `day` — the highest rank there is."""
     iso = day.isoformat()
+    # `now` is the instant the read is taken at; `day` alone means its start, which is
+    # what a date-granular defer has always been compared against.
+    moment = defer_date.as_now(now if now is not None else day)
     out = []
     d = Path(tasks_dir)
     if not d.is_dir():
@@ -446,11 +463,15 @@ def due_today(board, tasks_dir, day):
         # dates answer different questions, so they are read apart rather than min()-ed —
         # collapsing them labelled a parked task "overdue since <due>" and an active task
         # "overdue since <defer>".
-        defer = str(fm.get("defer_date", ""))[:10]
+        defer_state, defer_reason = defer_date.defer_state(fm.get("defer_date"), moment)
+        if defer_state == "invalid":
+            # Unreadable is not "due now": the row is withheld, and the reason is said.
+            print(f"next-focus: {defer_reason} — treating as deferred", file=sys.stderr)
+        defer = defer_date.display(fm.get("defer_date"))
         due_d = str(fm.get("due_date", ""))[:10]
-        parked = bool(defer) and defer > iso
+        parked = defer_state in ("deferred", "invalid")
         overdue = bool(due_d) and due_d <= iso
-        active = bool(defer) and defer <= iso
+        active = defer_state == "due"
         due = not parked and (overdue or active)
         flagged = fm.get("flag") == "true" and fm.get("flag_set_by") == "operator"
         if not (due or flagged):
@@ -543,14 +564,15 @@ def proposed(vault, board, tasks_dir, planned_keys, alerts_state, alerts_lines):
 # ---------------------------------------------------------------------- main
 
 
-def build(vault, tasks_dir, day, live=None, target=None, plugin=None, alerts_script=None):
+def build(vault, tasks_dir, day, live=None, target=None, plugin=None, alerts_script=None,
+          now=None):
     board = Board(vault, tasks_dir)
     notes = []
 
     live, target, capacity_source = read_capacity(live, target, plugin)
     alerts_state, alerts_lines = read_alerts(vault, alerts_script)
 
-    today = due_today(board, Path(vault) / tasks_dir, day)
+    today = due_today(board, Path(vault) / tasks_dir, day, now=now)
     if today is None:
         notes.append(f"tasks dir {tasks_dir}: missing")
         today = []
@@ -650,7 +672,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Rank the next focus from the periodic plans.")
     ap.add_argument("--vault", required=True)
     ap.add_argument("--tasks-dir", default="25 Tasks")
-    ap.add_argument("--now", default=None, help="ISO date or datetime; default today")
+    ap.add_argument("--now", default=None,
+                    help="ISO date or datetime; default now (a date means its local start)")
     ap.add_argument("--live", type=int, default=None)
     ap.add_argument("--target", type=int, default=None)
     ap.add_argument("--plugin", default=os.environ.get("CLAUDE_PLUGIN_ROOT") or str(Path(__file__).resolve().parent.parent))
@@ -663,14 +686,15 @@ def main(argv=None):
         print(f"next-focus: REFUSED — vault not found: {args.vault}", file=sys.stderr)
         return 2
     try:
-        day = dt.date.fromisoformat(args.now[:10]) if args.now else dt.date.today()
+        moment = defer_date.as_now(args.now)
     except ValueError:
         print(f"next-focus: REFUSED — bad --now: {args.now}", file=sys.stderr)
         return 2
+    day = moment.date()
 
     try:
         result = build(args.vault, args.tasks_dir, day, args.live, args.target,
-                       args.plugin, args.alerts_script)
+                       args.plugin, args.alerts_script, now=moment)
     except Exception as exc:  # noqa: BLE001 — deliberate: the tick must always render
         # Any non-zero exit is a REFUSAL the round must render, so an unexpected bug
         # has to reach that contract. Unguarded, it exited 1 with a bare traceback —

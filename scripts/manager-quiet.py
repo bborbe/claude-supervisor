@@ -77,7 +77,20 @@ import json
 import os
 import re
 import sys
-import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load(name, filename):
+    """Import a sibling script by path — the filenames carry hyphens."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: `defer_date` is an instant, not a date — see `defer-date.py`.
+defer_date = _load("defer_date", "defer-date.py")
 
 QUIET_TICKS_TO_STAND_DOWN = 2
 
@@ -214,37 +227,22 @@ def write_quiet_count(s: str, n: int, state_dir: str | None = None) -> None:
     write_quiet_state(s, n, 0, state_dir)
 
 
-def parse_date(value: str):
-    """`YYYY-MM-DD` from a `defer_date` scalar, or None when it is not a date.
+def _date_key(value):
+    """The instant a `defer_date` names, or None — `defer-date.py` is the one parser.
 
     ⚠️ **Both spellings reach here.** The vault normalizes an *unquoted* date scalar to
-    RFC3339 (`2026-10-22T00:00:00Z`) and keeps the date-only form only when quoted, so
-    a reader that accepts one spelling silently ignores half the vault. The first ten
-    characters are taken when they match the date shape; anything else is not a date and
-    the caller treats it as absent.
+    RFC3339 (`2026-10-22T00:00:00Z`) and keeps the date-only form only when quoted, and
+    a full timestamp carries a time of day — all three are read as the same kind of
+    thing, an aware datetime, so the comparison below is against an instant rather than
+    a date string.
     """
-    text = (value or "").strip().strip("'\"")
-    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", text)
-    if not m:
-        return None
-    try:
-        return time.struct_time(
-            (int(m.group(1)), int(m.group(2)), int(m.group(3)), 0, 0, 0, 0, 0, -1)
-        )
-    except ValueError:
-        return None
+    parsed, _ = defer_date.parse_defer_date(value)
+    return parsed
 
 
-def _date_key(value: str):
-    """A `(y, m, d)` tuple, or None — comparable without a timezone in the picture."""
-    t = parse_date(value)
-    return (t.tm_year, t.tm_mon, t.tm_mday) if t else None
-
-
-def _date_text(value: str) -> str:
-    """The `YYYY-MM-DD` form a reader is shown, or `""` when the scalar is not a date."""
-    t = parse_date(value)
-    return f"{t.tm_year:04d}-{t.tm_mon:02d}-{t.tm_mday:02d}" if t else ""
+def _date_text(value) -> str:
+    """The form a reader is shown: `YYYY-MM-DD`, or ISO 8601 when a time is set."""
+    return defer_date.display(value)
 
 
 def classify(fm: str, tasks_dir: str, index, today_key) -> dict:
@@ -269,8 +267,13 @@ def classify(fm: str, tasks_dir: str, index, today_key) -> dict:
     if phase == UNAPPROVED_PHASE:
         return {"kind": "quiet", "defer": None, "blocked": []}
     raw_due = pd.fm_scalar(fm, "defer_date")
-    due = _date_key(raw_due)
-    if due is not None and today_key is not None and due > today_key:
+    state, detail = defer_date.defer_state(raw_due, today_key)
+    if state == "invalid":
+        # Fail toward ARMED, as this module has always documented: a defer this check
+        # cannot read is not one it can rule the row out on, so the row stays runnable —
+        # and the reason is said rather than swallowed, so the garbage is still visible.
+        print(f"manager-quiet: {detail} — not counted as a defer", file=sys.stderr)
+    if state == "deferred":
         return {"kind": "quiet", "defer": _date_text(raw_due), "blocked": []}
     verdict = pd.blocked_by_verdict(fm, tasks_dir, index)
     if verdict["blocked"]:
@@ -308,6 +311,12 @@ def survey(vault: str, members: list, today_key) -> dict:
     return out
 
 
+def _defer_instant(text):
+    """Sort key for a rendered `defer_date` — the instant it names, never the string."""
+    parsed, _ = defer_date.parse_defer_date(text)
+    return parsed or defer_date.as_now()
+
+
 def reopen_trigger(seen: dict) -> str:
     """What would make this subject live again — the line SC3 requires.
 
@@ -318,7 +327,9 @@ def reopen_trigger(seen: dict) -> str:
     naming nothing, and a reader cannot tell "no trigger exists" from "the trigger
     failed to compute".
     """
-    dates = sorted(d for d in seen["defer"].values() if d)
+    # Sorted by the INSTANT, not by the rendered string: two rows in different UTC
+    # offsets sort by their digits otherwise, naming the wrong "earliest".
+    dates = sorted((d for d in seen["defer"].values() if d), key=_defer_instant)
     if dates:
         return dates[0]
     if seen["blocked"]:
@@ -396,7 +407,9 @@ def main(argv: list) -> int:
         write_quiet_count(slug(a.subject), 0, a.state_dir)
         return EXIT_OK
 
-    today_key = _date_key(a.today) if a.today else time.localtime()[:3]
+    # Default to the CURRENT INSTANT: local midnight would keep a row quiet until the
+    # next day even after its defer time passed.
+    today_key = _date_key(a.today) if a.today else defer_date.as_now()
     result = tick(a.subject, a.vault, today_key, a.state_dir)
     if result.get("error"):
         print(result["error"], file=sys.stderr)
