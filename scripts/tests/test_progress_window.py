@@ -552,5 +552,51 @@ class TestSources(Case):
         self.assertIn("Moved:     B  SC1 ticked — rating unavailable", report["block"])
 
 
+class ResolveAnchorTest(unittest.TestCase):
+    """A relative --anchor must still find a vault task file.
+
+    The defect: worker-drive runs from whatever cwd the session holds, which is a
+    repo worktree whenever the session works in one. `--anchor "<task>.md"` then
+    resolved against that worktree, the open failed, and the run reported UNKNOWN
+    -- so the measurement the script exists to take was never taken, on every run.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", self.tmp], check=False))
+        self.root = os.path.join(self.tmp, "Obsidian")
+        self.tasks = os.path.join(self.root, "private-personal", "25 Tasks")
+        os.makedirs(self.tasks)
+        self.target = os.path.join(self.tasks, "A Task.md")
+        with open(self.target, "w", encoding="utf-8") as handle:
+            handle.write("---\nstatus: in_progress\n---\n")
+
+    def resolve(self, raw):
+        """Import the script fresh so OBSIDIAN_ROOT is read from this test's env."""
+        import importlib.util
+
+        os.environ["OBSIDIAN_ROOT"] = self.root
+        self.addCleanup(os.environ.pop, "OBSIDIAN_ROOT", None)
+        spec = importlib.util.spec_from_file_location("progress_window_under_test", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.resolve_anchor(raw)
+
+    def test_relative_anchor_resolves_under_obsidian_root(self):
+        cwd = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, cwd)
+        self.assertEqual(os.path.realpath(self.target), self.resolve("A Task.md"))
+
+    def test_absolute_anchor_is_returned_unchanged(self):
+        self.assertEqual(os.path.realpath(self.target), self.resolve(self.target))
+
+    def test_unknown_basename_stays_unresolved(self):
+        cwd = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, cwd)
+        self.assertEqual(os.path.realpath("Missing.md"), self.resolve("Missing.md"))
+
+
 if __name__ == "__main__":
     unittest.main()
