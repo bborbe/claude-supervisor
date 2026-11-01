@@ -23,6 +23,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { runAgentLoop } from './agent-loop.mjs'
+import { StreamLaggedError } from './wrapper-stream.mjs'
 
 // Builds a synthetic message stream and a driver that records the agent's `status`
 // after each message has been consumed by the loop — which is the only place the
@@ -198,6 +199,36 @@ test('the turn-complete hook runs after the payload is captured, once per result
   })
 
   assert.deepEqual(seen, ['first', 'last'], 'the hook must see the captured payload, and must fire per result')
+})
+
+// ⚠️ The branch that stops a mid-turn `result` from being read as a closed turn. A
+// `StreamLaggedError` is raised precisely when the stream stopped while the child was still
+// generating, and `wrapper-stream.mjs` exists to keep that distinguishable from an exit — so
+// settling it `done` would resurrect the "a lag looks like a finished worker" defect that module
+// was built to prevent. Result presence is NOT proof the turn closed; this error's absence is.
+test('a StreamLaggedError is never settled done, even after a captured success result', async () => {
+  const agent = makeAgent()
+  const ledgerCalls = []
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-1' }
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'mid-turn', num_turns: 1, permission_denials: [] }
+    throw new StreamLaggedError('sess-1', 'generating')
+  }
+
+  await runAgentLoop({
+    q: stream(),
+    agent,
+    writeLedger: (...args) => {
+      ledgerCalls.push(args)
+      return {}
+    },
+    log: () => {},
+  })
+
+  assert.equal(agent.status, 'error', 'a lag is not an exit — the adapter exists to keep them apart')
+  const terminal = ledgerCalls.filter(([, patch]) => patch !== undefined)
+  assert.equal(terminal.length, 1)
+  assert.equal(terminal[0][1].status, 'error')
 })
 
 test('a throwing turn-complete hook does not settle the worker as error', async () => {

@@ -117,8 +117,16 @@ export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_
     // wrote it, that no later reader can correct, and that `server/ledger.mjs` explicitly warns
     // must never be read as proof of life. That leak was independent of the classification above:
     // any other throw reached it too.
+    // ⚠️ **A `StreamLaggedError` is never a completed turn, whatever was captured.** It is raised
+    // precisely when the stream stopped while the child was still generating — a subscriber lag, a
+    // wrapper restart, a dropped connection — and `wrapper-stream.mjs` exists to keep that
+    // distinguishable from an exit. A `result` can arrive MID-turn (see the header), so its
+    // presence does not prove the turn closed; the absence of this error is what does. Settling it
+    // `done` would resurrect the exact "a lag looks like a finished worker" defect the adapter was
+    // built to prevent, which is a worse failure than the `error` it replaces.
     const terminal = { ended_at: new Date().toISOString() }
-    if (agent.result && !agent.result.is_error) {
+    const turnClosed = agent.result && !agent.result.is_error && error?.name !== 'StreamLaggedError'
+    if (turnClosed) {
       agent.status = 'done'
       writeLedger(agent, { ...terminal, status: 'done', result: agent.result })
       log(`agent ${agent.id} stream ended after a completed turn: ${error}`)

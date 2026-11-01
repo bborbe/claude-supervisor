@@ -25,7 +25,7 @@
 // frame therefore carries no reason and this module asks the wrapper directly: `exited` is a
 // real end, anything else is a `StreamLaggedError` the caller must not settle as success.
 
-import { Agent } from 'undici'
+import { Agent, fetch as undiciFetch } from 'undici'
 
 const DEFAULT_TIMEOUT_MS = 10_000
 
@@ -38,10 +38,21 @@ const DEFAULT_TIMEOUT_MS = 10_000
 // `error` — measured 2026-11-01 at 300.85 s / 301.27 s / 301.18 s after the last frame, three
 // runs of three, on a child that was still `idle` afterwards.
 //
-// `bodyTimeout: 0` disables it. This does NOT make a dead peer indistinguishable from a quiet
-// one: the wrapper closes the response when the child exits, and a genuinely unreachable wrapper
-// fails the connection instead of going silent. `headersTimeout` is left at its default — the
-// response headers are not the long-lived part.
+// `bodyTimeout: 0` disables it. ⚠️ **The accepted trade-off, stated rather than implied:** with no
+// body timeout there is no upper bound on a body that HANGS — a wrapper that accepts the request,
+// sends headers, and then wedges (e.g. the child's output pipe stops) leaves the stream open and
+// the worker `running` with nothing to time it out. An UNREACHABLE wrapper is still covered:
+// `headersTimeout` keeps its default and a refused or failed connect throws immediately. A hung
+// body is traded away deliberately, because a false termination every five minutes is the worse
+// failure and the one this change exists to remove; bounding it would need an application-level
+// idle watchdog, not a shorter HTTP timeout.
+//
+// ⚠️ **This dispatcher only works with `undici`'s own `fetch`, never Node's global one.** The two
+// are different implementations: passing an npm-`undici` `Agent` to the built-in `fetch` fails
+// every request with `TypeError: fetch failed` / `UND_ERR_INVALID_ARG` — measured, and it is why
+// `streamWrappedSession` defaults to `undiciFetch` rather than the global `fetch` the other
+// helpers use. A caller that passes its own `fetchImpl` must pass one that understands
+// `dispatcher`, or drop the option.
 const SSE_DISPATCHER = new Agent({ bodyTimeout: 0 })
 
 /** Raised when the stream stopped for a reason other than the child exiting. */
@@ -269,7 +280,7 @@ function frameOf(frame) {
  * messages, and treat iteration ending as the end of the turn. A non-exit end throws
  * `StreamLaggedError` so a lagging subscriber is never mistaken for a finished worker.
  */
-export async function* streamWrappedSession({ baseUrl, sessionId, fetchImpl = fetch, signal }) {
+export async function* streamWrappedSession({ baseUrl, sessionId, fetchImpl = undiciFetch, signal }) {
   const resp = await fetchImpl(`${baseOf(baseUrl)}/api/1.0/sessions/${encodeURIComponent(sessionId)}/events`, {
     method: 'GET',
     headers: { accept: 'text/event-stream' },

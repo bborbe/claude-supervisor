@@ -49,6 +49,7 @@ import { buildRecord, ledgerWriteRoute, mergeRecord, parentSessionId, stoppedPat
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 import { resumeRefusal } from './resume-guard.mjs'
 import { resumeAdmission } from './context-guard.mjs'
+import { shouldEndIdleWorker } from './idle-worker.mjs'
 import { fetchAttentionItems, fetchOpenCards, openCardsOf } from './open-cards.mjs'
 import { foreignParkRefusal } from './park-refusal.mjs'
 import { answerPathRefusal } from './answer-path.mjs'
@@ -2964,11 +2965,18 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       log(`WARNING: could not read ${current.id} to decide whether its turn ended; leaving it running: ${error.message}`)
       return
     }
-    if (session.state !== 'idle' || session.pending_turns !== 0) return
-    if (session.question) return
+    // Decide everything except the card check first, so an incomplete wrapper record is reported
+    // before we spend an attention-store round trip on it — and is reported at all, because a
+    // silent keep would let the idle-worker leak survive the fix that exists to remove it.
+    const pre = shouldEndIdleWorker({ session, cards: [] })
+    if (pre.reason === 'wrapper-record-incomplete') {
+      log(`WARNING: the wrapper's record for ${current.id} carries no state/pending_turns — the idle-worker end-of-life is a no-op for it until it does`)
+      return
+    }
+    if (!pre.end) return
     // `null` is "the store could not be read", never "no cards" — see open-cards.mjs.
     const cards = await fetchOpenCards({ storeUrl: config.attentionStoreUrl, sessionId: current.sessionId })
-    if (cards === null || cards.length > 0) return
+    if (!shouldEndIdleWorker({ session, cards }).end) return
     await stopWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id }).catch((error) => {
       log(`WARNING: could not stop ${current.id} after its turn closed: ${error.message}`)
     })
