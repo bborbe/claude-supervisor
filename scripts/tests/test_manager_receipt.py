@@ -1083,15 +1083,14 @@ class FleetDebt(unittest.TestCase):
     def test_an_abandonment_past_the_tolerance_is_rejected(self):
         # The other side of the edge. Without this pair the previous test passes for
         # any tolerance at all, including an unbounded one — it would only prove the
-        # happy side. Two seconds is past the one-second slack and still far inside
-        # "the operator was fast", so it isolates the tolerance rather than the
-        # day-scale future-dated case below.
+        # happy side.
         #
-        # +60, not +2: the rejection holds only while `now` is still below the
-        # record's stamp minus the slack, so a +2 record tolerates just one second
-        # between the write and the read — a stall on a loaded runner would advance
-        # `now` past it and flip the test green for the wrong reason. The larger
-        # offset keeps the boundary check and removes the window.
+        # +60, not a value just past the slack: the rejection holds only while `now`
+        # is still below the record's stamp minus the slack, so a record dated a
+        # couple of seconds ahead tolerates just one second between the write and the
+        # read — a stall on a loaded runner would advance `now` past it and flip the
+        # test green for the wrong reason. Sixty seconds keeps the boundary check and
+        # removes the window; the +0.5 case brackets the other side.
         self.skipped_round()
         self.check()
         p = os.path.join(self.tmp.name, FLEET_SLUG + ".abandoned")
