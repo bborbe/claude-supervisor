@@ -54,7 +54,7 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/Users/bborbe/.local/bin:/Users/bborbe/Documents/workspaces/go/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>/Applications/WezTerm.app/Contents/MacOS:/Users/bborbe/.local/bin:/Users/bborbe/Documents/workspaces/go/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
 
     <key>StartInterval</key>
