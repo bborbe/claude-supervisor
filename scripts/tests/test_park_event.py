@@ -100,6 +100,23 @@ class ParkEventTest(unittest.TestCase):
         # The earliest wake wins, so joining never delays the peer already parked.
         self.assertEqual(record["recheck_at"], "2026-11-02T02:00:00+01:00")
 
+    def test_join_on_a_record_missing_its_instant_takes_the_new_one(self):
+        self.run_script("register", "--event", "a metric",
+                        "--recheck", "2026-11-02T02:00:00+01:00", "--session", "aaaaaaaa")
+        path = next(iter(self.state.glob("*.json")))
+        record = json.loads(path.read_text())
+        del record["recheck_at"]
+        path.write_text(json.dumps(record))
+
+        proc = self.run_script(
+            "register", "--event", "a metric",
+            "--recheck", "2026-11-02T04:00:00+01:00", "--session", "bbbbbbbb",
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        joined = json.loads(path.read_text())
+        self.assertEqual(joined["recheck_at"], "2026-11-02T04:00:00+01:00")
+        self.assertEqual(sorted(joined["sessions"]), ["aaaaaaaa", "bbbbbbbb"])
+
     def test_distinct_keys_with_similar_names_do_not_collide(self):
         self.run_script("register", "--event", "metric a/b",
                         "--recheck", "2026-11-02T02:00:00+01:00", "--session", "s1")

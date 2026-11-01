@@ -221,7 +221,6 @@ def cmd_register(args: argparse.Namespace) -> int:
     recheck = parse_instant(args.recheck, "--recheck")
     session = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
 
-    record = None
     try:
         record = read_watch(key)
     except ParkError:
@@ -239,7 +238,15 @@ def cmd_register(args: argparse.Namespace) -> int:
     else:
         # A later re-check never shortens a watch another session is already
         # parked on: the earliest wake wins, so joining cannot delay a peer.
-        if recheck < parse_instant(record["recheck_at"], "recheck_at"):
+        # A record missing its instant (hand-edited, or written by an older
+        # shape) is treated as having none rather than raising a KeyError: the
+        # join is still correct, and crashing here would strand the caller at
+        # the moment it is trying to park.
+        try:
+            held = parse_instant(record["recheck_at"], "recheck_at")
+        except (KeyError, ParkError):
+            held = None
+        if held is None or recheck < held:
             record["recheck_at"] = iso(recheck)
 
     members = record.setdefault("sessions", [])
