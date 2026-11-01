@@ -15,6 +15,11 @@ Two independent signals are read every time, because neither answers the other's
      folded into `INVALID`: a restart resumes a session that never armed a loop, so it
      cannot create the record. It reads as `jump` for a live session — the lever is
      `/supervisor:goal-loop`, which arms.
+     ⚠️ **`UNREADABLE` is this file's own word, and it is not one of the five above.** It
+     means the probe itself could not answer — it crashed, could not be executed, or hit
+     `PROBE_TIMEOUT`. That is a fact about the instrument, not about the subject, and it
+     never licenses a restart: it reads as `jump` for a live session, exactly as `UNARMED`
+     does. Folding it into `INVALID` would restart a live manager on no evidence.
 
 The first line of stdout is the verdict, one token:
 
@@ -60,7 +65,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIRS = {"goal": "24 Goals", "topic": "23 Topics"}
 RESUME_CAP = 3
 RESUME_WINDOW = 30 * 60  # seconds
-PROBE_TIMEOUT = 30  # seconds; a hung liveness probe must not wedge the tick
+PROBE_TIMEOUT = 30  # seconds, on BOTH probes below; a hung liveness probe must not wedge the tick
 
 
 def frontmatter(text: str) -> str:
@@ -135,6 +140,21 @@ def record(path: str, stamps: list[float], now: float) -> None:
 #: all to `UNKNOWN`.
 VERDICT_BY_EXIT = {0: "LIVE", 1: "ABSENT", 2: "UNKNOWN", 3: "AMBIGUOUS", 4: "MALFORMED"}
 
+#: `ABSENT` is believed only when the instrument also says so in words.
+#: ⚠️ **Exit 1 is ABSENT's code and every Python traceback's code.** The exit-code read is
+#: right, but on its own it turned a crashed instrument — an uncaught exception, a broken
+#: install — into a confident `ABSENT`, and `ABSENT` is the ONE verdict that authorises a
+#: resume. So a broken probe would resume a manager that is already running: the
+#: double-writer this file exists to prevent, arriving through the one door the stdout scan
+#: never had. `session-liveness.py`'s `--check` path prints `ABSENT — <message>` to stderr on
+#: every genuine ABSENT, so the word corroborates the code before either is acted on.
+#: Matched per LINE and on a word boundary, so `ABSENTEE` and a prose mention do not count.
+_ABSENT_WORD = re.compile(r"ABSENT\b")
+
+
+def _absent_corroborated(stderr: str) -> bool:
+    return any(_ABSENT_WORD.match(line) for line in (stderr or "").splitlines())
+
 
 def session_verdict(sid: str) -> str:
     """`LIVE` / `ABSENT` / `UNKNOWN` / `AMBIGUOUS` / `MALFORMED`, from the instrument.
@@ -151,6 +171,9 @@ def session_verdict(sid: str) -> str:
     interpreter or a stuck child raises out of this function and aborts the whole tick with a
     traceback, instead of answering `cannot-tell` for the one subject being read. Same shape as
     `scripts/crashed-managers.py`'s `session_state()`.
+    ⚠️ **`ABSENT` additionally needs the instrument's own word on stderr** — see
+    `_ABSENT_WORD`. Exit 1 alone is a traceback as readily as a death, and only `ABSENT`
+    licenses a resume, so an uncorroborated exit 1 is `UNKNOWN`.
     """
     try:
         probe = subprocess.run(
@@ -159,15 +182,41 @@ def session_verdict(sid: str) -> str:
         )
     except (OSError, subprocess.SubprocessError):
         return "UNKNOWN"
-    return VERDICT_BY_EXIT.get(probe.returncode, "UNKNOWN")
+    verdict = VERDICT_BY_EXIT.get(probe.returncode, "UNKNOWN")
+    if verdict == "ABSENT" and not _absent_corroborated(getattr(probe, "stderr", "")):
+        return "UNKNOWN"
+    return verdict
+
+
+#: `cadence()`'s answer when the probe could not run at all. NOT one of `manager-liveness.py`'s
+#: five states, because it is not a statement about the subject: `INVALID` means the record
+#: exists and cannot be read, which `main` treats as a lapsed loop and restarts a LIVE session
+#: for. A crashed or timed-out child is a fact about the INSTRUMENT, so it gets its own word
+#: and reads as `jump` — the same reasoning `scripts/crashed-managers.py` records for its own
+#: `PROBE_FAILED`, and the same reason `session_verdict` answers `UNKNOWN` rather than `ABSENT`.
+PROBE_FAILED = "UNREADABLE"
 
 
 def cadence(subject: str, branch: str = "goal") -> str:
-    probe = subprocess.run(
-        [sys.executable, os.path.join(REPO, "scripts", "manager-liveness.py"),
-         "--state", "--subject", subject, "--branch", branch],
-        capture_output=True, text=True,
-    )
+    """The loop's state, or `PROBE_FAILED` when the probe itself could not answer.
+
+    ⚠️ **Bounded and guarded exactly like `session_verdict`, because the tick runs both.**
+    `PROBE_TIMEOUT`'s claim is that a hung liveness probe cannot wedge the tick; while this
+    probe had no `timeout=`, half that claim was false and a stuck `manager-liveness.py`
+    blocked the keep-alive forever — worse than the abort the guard prevents, because no
+    verdict is ever printed at all.
+    """
+    try:
+        probe = subprocess.run(
+            [sys.executable, os.path.join(REPO, "scripts", "manager-liveness.py"),
+             "--state", "--subject", subject, "--branch", branch],
+            capture_output=True, text=True, timeout=PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return PROBE_FAILED
+    # `--state` exits 0 for every state it can answer, so a non-zero exit is the child dying.
+    if probe.returncode != 0:
+        return PROBE_FAILED
     first = (probe.stdout.splitlines() or [""])[0]
     state = first.split("\t")[0].strip()
     return state if state in ("OK", "STALE", "STOPPED", "UNARMED", "INVALID") else "INVALID"

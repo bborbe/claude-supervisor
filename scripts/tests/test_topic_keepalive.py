@@ -295,6 +295,7 @@ class SessionVerdictTest(unittest.TestCase):
         self.k = load()
         self._orig = self.k.subprocess
         self.calls = []
+        self.kwargs = []
 
     def tearDown(self):
         self.k.subprocess = self._orig
@@ -312,7 +313,7 @@ class SessionVerdictTest(unittest.TestCase):
         )
 
     def _stub(self, rc, stdout="", stderr=""):
-        calls = self.calls
+        calls, kwargs = self.calls, self.kwargs
 
         class R:
             returncode = rc
@@ -321,6 +322,10 @@ class SessionVerdictTest(unittest.TestCase):
 
         def run(argv, *a, **kw):
             calls.append(argv)
+            # ⚠️ The kwargs are recorded, not discarded. A stub that keeps only argv cannot
+            # tell a bounded probe from an unbounded one, which is exactly how
+            # `timeout=PROBE_TIMEOUT` was deleted with all eight tests still green.
+            kwargs.append(kw)
             return R()
 
         self.k.subprocess = self._namespace(run)
@@ -344,8 +349,55 @@ class SessionVerdictTest(unittest.TestCase):
         # The regression this change removes, pinned directly: the old implementation read
         # stdout, so rc 1 with `LIVE` on stdout answered LIVE — a dead session read as alive,
         # the one direction that spawns a second manager on a live one.
-        self._stub(1, stdout="LIVE — sid-1\n")
+        self._stub(1, stdout="LIVE — sid-1\n", stderr="ABSENT — no session id matches sid-1\n")
         self.assertEqual("ABSENT", self.k.session_verdict("sid-1"))
+
+    def test_exit_1_without_the_absent_line_is_cannot_tell(self):
+        """⚠️ **Exit 1 is ABSENT's code, and it is also every Python traceback's code.**
+
+        The exit-code read is right, but on its own it turned a crashed instrument into a
+        confident `ABSENT` — the one verdict that authorises a resume, so a broken install
+        would resume a manager that is already running. `session-liveness.py`'s `--check`
+        path prints `ABSENT — <message>` to stderr on every genuine ABSENT, so the exit code
+        is corroborated by the word before it is believed. Same rule as `UNKNOWN` for an
+        undocumented code: cannot-tell is never death.
+        """
+        self._stub(1, stdout="", stderr='Traceback (most recent call last):\n  ...\n'
+                                       'KeyError: "session_id"\n')
+        self.assertEqual("UNKNOWN", self.k.session_verdict("sid-1"))
+
+    def test_exit_1_with_the_absent_line_is_absent_whatever_the_separator(self):
+        # The corroboration is the VERDICT WORD, not the em dash: a message-format change
+        # must not silently turn every dead session into a cannot-tell.
+        for stderr in ("ABSENT — no session id matches sid-1\n",
+                       "ABSENT: no session id matches sid-1\n",
+                       "\nABSENT — no session id matches sid-1\n"):
+            with self.subTest(stderr=stderr):
+                self._stub(1, stdout="", stderr=stderr)
+                self.assertEqual("ABSENT", self.k.session_verdict("sid-1"))
+
+    def test_a_non_absent_word_on_stderr_does_not_license_absent(self):
+        # The word must be the verdict, not a substring of some other line — `ABSENTEE` and
+        # a prose mention are both not the instrument's ABSENT.
+        for stderr in ("ABSENTEE — sid-1\n", "warning: ABSENT is licensed per id\n"):
+            with self.subTest(stderr=stderr):
+                self._stub(1, stdout="", stderr=stderr)
+                self.assertEqual("UNKNOWN", self.k.session_verdict("sid-1"))
+
+    def test_the_probe_is_bounded_by_probe_timeout(self):
+        """⚠️ Deleting `timeout=PROBE_TIMEOUT` must turn this red.
+
+        The hung-child guard is the one thing between a wedged `session-liveness.py` and a
+        keep-alive tick that never returns. Before this test the kwargs were never asserted,
+        so the bound could be dropped and every other test stayed green — the guard was
+        covered by nothing. Asserted on the keyword, not on a `PROBE_TIMEOUT` import, so the
+        value is free to change while its use stays pinned.
+        """
+        self._stub(0)
+        self.k.session_verdict("sid-1")
+        self.assertEqual(1, len(self.kwargs))
+        self.assertIn("timeout", self.kwargs[0])
+        self.assertEqual(self.k.PROBE_TIMEOUT, self.kwargs[0]["timeout"])
 
     def test_the_probe_is_invoked_with_check_and_the_id(self):
         # A stub that ignores argv cannot tell a correct invocation from a broken one.
@@ -365,14 +417,173 @@ class SessionVerdictTest(unittest.TestCase):
         self.assertEqual("UNKNOWN", self.k.session_verdict("sid-1"))
 
     def test_every_documented_code_maps(self):
+        # ABSENT is the one code that also carries a corroborating stderr line; the other
+        # four are believed on the exit code alone.
         for rc, want in ((0, "LIVE"), (1, "ABSENT"), (2, "UNKNOWN"),
                          (3, "AMBIGUOUS"), (4, "MALFORMED")):
-            self._stub(rc)
+            self._stub(rc, stderr="ABSENT — sid-1\n" if rc == 1 else "")
             self.assertEqual(want, self.k.session_verdict("sid-1"), rc)
 
     def test_an_undocumented_exit_is_cannot_tell(self):
         self._stub(7)
         self.assertEqual("UNKNOWN", self.k.session_verdict("sid-1"))
+
+
+class VerdictTableTest(unittest.TestCase):
+    """`VERDICT_BY_EXIT` must equal the exit codes `session-liveness.py` actually emits.
+
+    The table is a duplicate of the instrument's contract, and it has to be: both scripts run
+    standalone out of the plugin cache, so there is no shared module to import at run time.
+    A duplicate with no drift check is how the two silently disagree — the instrument gains a
+    sixth verdict or renumbers one, this file keeps mapping the old numbers, and a live
+    session becomes a resume (or a dead one becomes a cannot-tell) with nothing red. The
+    flag-predicate anti-drift test above is the same control for the same reason.
+    """
+
+    def setUp(self):
+        self.k = load()
+
+    def _instrument(self):
+        # ⚠️ `session-liveness.py` is hyphenated, so it cannot be `import`ed by name —
+        # `spec_from_file_location` is the only route, and it is the same one `load()` uses.
+        spec = importlib.util.spec_from_file_location(
+            "session_liveness", str(_HERE.parent / "session-liveness.py")
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_the_table_matches_the_instrument_constants(self):
+        instrument = self._instrument()
+        self.assertEqual(
+            {
+                instrument.LIVE: "LIVE",
+                instrument.ABSENT: "ABSENT",
+                instrument.UNKNOWN: "UNKNOWN",
+                instrument.AMBIGUOUS: "AMBIGUOUS",
+                instrument.MALFORMED: "MALFORMED",
+            },
+            self.k.VERDICT_BY_EXIT,
+        )
+
+    def test_the_constants_are_distinct_codes(self):
+        # A table can match a renumbered instrument only if the codes stay distinct; if two
+        # constants ever collided, the dict comparison above would collapse them silently.
+        instrument = self._instrument()
+        codes = [instrument.LIVE, instrument.ABSENT, instrument.UNKNOWN,
+                 instrument.AMBIGUOUS, instrument.MALFORMED]
+        self.assertEqual(len(codes), len(set(codes)), codes)
+
+
+class CadenceTest(unittest.TestCase):
+    """`cadence()` is the second probe, and it must be bounded and guarded like the first.
+
+    `PROBE_TIMEOUT`'s comment claims a hung probe cannot wedge the tick, and the tick runs
+    BOTH probes — so an unbounded `manager-liveness.py` made that comment false for half its
+    own scope. A hung child here blocks the keep-alive forever, which is worse than the
+    abort the guard prevents: no verdict is ever printed.
+    """
+
+    def setUp(self):
+        self.k = load()
+        self._orig = self.k.subprocess
+        self._orig_verdict = self.k.session_verdict
+        self.kwargs = []
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        self.k.subprocess = self._orig
+
+    def _namespace(self, run):
+        return types.SimpleNamespace(
+            run=run,
+            SubprocessError=subprocess.SubprocessError,
+            TimeoutExpired=subprocess.TimeoutExpired,
+        )
+
+    def _stub(self, rc=0, stdout="OK\tslug\tdetail\n", stderr=""):
+        kwargs = self.kwargs
+
+        class R:
+            returncode = rc
+
+        R.stdout, R.stderr = stdout, stderr
+
+        def run(argv, *a, **kw):
+            kwargs.append(kw)
+            return R()
+
+        self.k.subprocess = self._namespace(run)
+
+    def _stub_raising(self, exc):
+        def run(*a, **kw):
+            raise exc
+
+        self.k.subprocess = self._namespace(run)
+
+    def test_the_cadence_probe_is_bounded_by_probe_timeout(self):
+        self._stub()
+        self.k.cadence("A Goal")
+        self.assertEqual(1, len(self.kwargs))
+        self.assertIn("timeout", self.kwargs[0])
+        self.assertEqual(self.k.PROBE_TIMEOUT, self.kwargs[0]["timeout"])
+
+    def test_an_unrunnable_cadence_probe_does_not_raise(self):
+        # Without the guard a missing interpreter aborts the whole tick with a traceback.
+        self._stub_raising(OSError("no interpreter"))
+        self.assertEqual(self.k.PROBE_FAILED, self.k.cadence("A Goal"))
+
+    def test_a_hung_cadence_probe_does_not_raise(self):
+        self._stub_raising(subprocess.TimeoutExpired("probe", 30))
+        self.assertEqual(self.k.PROBE_FAILED, self.k.cadence("A Goal"))
+
+    def test_a_crashed_cadence_probe_is_not_read_as_a_corrupt_record(self):
+        """⚠️ A probe that could not answer is a fact about the PROBE, not the subject.
+
+        `INVALID` is `manager-liveness.py`'s own verdict for a record that exists and cannot
+        be read — and `main` treats `INVALID` on a LIVE session as `restart`. Folding a
+        crashed probe into it would restart a live manager on no evidence at all.
+        """
+        self._stub(rc=1, stdout="", stderr="Traceback (most recent call last):\n")
+        self.assertNotEqual("INVALID", self.k.cadence("A Goal"))
+        self.assertEqual(self.k.PROBE_FAILED, self.k.cadence("A Goal"))
+
+    def test_every_documented_state_still_maps(self):
+        for state in ("OK", "STALE", "STOPPED", "UNARMED", "INVALID"):
+            with self.subTest(state=state):
+                self._stub(stdout=f"{state}\tslug\tdetail\n")
+                self.assertEqual(state, self.k.cadence("A Goal"))
+
+    def test_an_unrecognised_state_is_invalid(self):
+        # The pre-existing fallback, unchanged: a well-formed exit with unparseable text is
+        # `manager-liveness.py`'s own INVALID, not a probe failure.
+        self._stub(stdout="BANANA\tslug\tdetail\n")
+        self.assertEqual("INVALID", self.k.cadence("A Goal"))
+
+    def test_an_unreadable_loop_never_licenses_a_restart(self):
+        """The consequence, pinned end to end: LIVE + unreadable probe must not restart."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        vault = pathlib.Path(tmp.name) / "vault"
+        (vault / "24 Goals").mkdir(parents=True)
+        (vault / "24 Goals" / "A Goal.md").write_text(
+            GOAL_PAGE.format(sid="sid-1", extra=""), encoding="utf-8"
+        )
+        state = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(state, ignore_errors=True))
+        original = self.k.state_path
+        self.k.state_path = lambda v, subject, branch="goal": str(
+            state / f"{branch}--{self.k.base_slug(subject)}.json"
+        )
+        self.addCleanup(lambda: setattr(self.k, "state_path", original))
+
+        self.k.session_verdict = lambda sid: "LIVE"
+        self.addCleanup(lambda: setattr(self.k, "session_verdict", self._orig_verdict))
+        self._stub_raising(OSError("no interpreter"))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.k.main(["--vault", str(vault), "--goal", "A Goal"])
+        self.assertEqual("jump", out.getvalue().splitlines()[0])
 
 
 if __name__ == "__main__":
