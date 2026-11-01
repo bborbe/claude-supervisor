@@ -33,8 +33,10 @@ Verdicts (first line of stdout), one token:
   cannot-tell  a probe could not decide: reported, never treated as fine
 
 **One card per lapse.** The lapse's start time is held in `lapse.json`. A card is posted once,
-deduplicated on that start time. The record is cleared only on `ok`, so the next lapse gets a
-new card and a continuing one never gets a second.
+deduplicated on that start time. The record is cleared on `ok` (the lapse recovered) and on a
+deliberate `stopped` (it was never a lapse), so the next lapse gets a new card and a
+continuing one never gets a second. A record that cannot be written or cleared is itself
+carded, because either failure would silently suppress a real lapse.
 
 ⚠️ **The keeper's own liveness is a separate instrument.** Each tick rewrites
 `~/.claude/state/fleet-keeper/heartbeat`. A keeper that has died leaves that file ageing while
@@ -235,10 +237,31 @@ def save_lapse(rec):
 
 
 def clear_lapse():
+    """Forget the lapse in progress. Returns whether it is gone.
+
+    ⚠️ Same reasoning as `save_lapse`, mirrored: a record that cannot be removed keeps its
+    `reported` marker, so the NEXT lapse would read as "already reported" and never get a card.
+    An absent file is success — there was nothing to forget.
+    """
     try:
         os.remove(LAPSE)
+    except FileNotFoundError:
+        return True
     except OSError:
-        pass
+        return False
+    return True
+
+
+def unclearable(now, detail):
+    """Report a lapse record that could not be cleared, and say why it matters."""
+    item = notify(
+        "fleet-keeper-state-unclearable",
+        f"The fleet keeper cannot remove {LAPSE}. Its old 'already reported' marker would make "
+        f"the NEXT fleet lapse look already handled, so that lapse would never be reported.",
+        ["acknowledge"], context=detail,
+    )
+    report("cannot-tell", f"cannot clear lapse state — reported{card(item)}", now)
+    return 1
 
 
 def notify(dedup_key, payload, options, context=""):
@@ -282,8 +305,9 @@ def main(argv):
 
     if state == "ok":
         recovered = load_lapse()
-        clear_lapse()
-        tail = (f"; the lapse since {time.strftime('%H:%M:%SZ', time.gmtime(recovered['since']))} "
+        if not clear_lapse():
+            return unclearable(now, detail)
+        tail =(f"; the lapse since {time.strftime('%H:%M:%SZ', time.gmtime(recovered['since']))} "
                 f"recovered") if recovered else ""
         report("ok", (detail or "the fleet round is inside its limit") + tail, now)
         return 0
@@ -301,13 +325,26 @@ def main(argv):
     # ---- stale ----
     stood = stand_down()
     if stood == "STOPPED":
-        clear_lapse()
+        if not clear_lapse():
+            return unclearable(now, detail)
         report("stopped", "the fleet loop was stood down with /supervisor:stop — a deliberate "
                           "stop, not a lapse; left alone until it is re-armed", now)
         return 0
 
     sid = fleet_session()
-    if sid and liveness(sid) == "ABSENT":
+    live = liveness(sid) if sid else None
+    if live in ("UNKNOWN", "AMBIGUOUS", "MALFORMED"):
+        # An undecidable probe is never death — but it IS a fault, independent of round speed,
+        # so it is carded at once rather than folded into the 40-minute lapse timer. The lapse
+        # timing below still runs, so a genuine lapse behind it is reported too.
+        notify(
+            "fleet-keeper-liveness-unknown",
+            f"The fleet round is stale and the liveness probe for the fleet manager (session "
+            f"{sid[:8]}) answers {live}, so the keeper cannot tell whether the session is alive.",
+            ["acknowledge"], context=detail,
+        )
+        log(f"liveness {live} for {sid[:8]} — carded; lapse timing continues", now)
+    if live == "ABSENT":
         item = notify(
             "fleet-keeper-absent",
             f"The fleet manager (session {sid[:8]}) is ABSENT — the session is gone, not merely "

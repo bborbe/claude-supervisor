@@ -167,13 +167,33 @@ class ReportOnlyContractTest(KeeperBase):
         self.assertNotIn("fleet-keeper-absent", self.cards)
 
     def test_a_failed_reported_marker_still_holds_the_board_to_one_card(self):
-        """If the card posts but the marker cannot be saved, the repost uses the same key."""
-        self.stale_run(T0, 40)
+        """The card posts but its marker cannot be saved, so the next tick re-posts. Both posts
+        must share one dedup key. The marker save is failed BEFORE the threshold tick — failing
+        it afterwards (as an earlier version of this test did) never reaches the re-post at all."""
+        self.stale_run(T0, 39)
         real_save = fk.save_lapse
         fk.save_lapse = lambda rec: False
         self.addCleanup(lambda: setattr(fk, "save_lapse", real_save))
+        self.tick(T0 + 40 * MIN)
         self.tick(T0 + 41 * MIN)
-        self.assertEqual(1, len(set(self.cards)), "every post must share one dedup key")
+        self.assertEqual(2, len(self.cards), "the unsaved marker must cause a re-post")
+        self.assertEqual(1, len(set(self.cards)), "and both posts must share one dedup key")
+
+    def test_an_unclearable_record_is_reported_so_the_next_lapse_is_not_lost(self):
+        """Must-Fix from the bot review: a record that survives recovery keeps `reported`, and the
+        NEXT lapse would read as already reported and never get a card."""
+        self.stale_run(T0, 40)
+        real_clear = fk.clear_lapse
+        fk.clear_lapse = lambda: False
+        self.addCleanup(lambda: setattr(fk, "clear_lapse", real_clear))
+        self.word = "ok"
+        self.assertEqual("cannot-tell", self.tick(T0 + 41 * MIN)[1][0])
+        self.assertIn("fleet-keeper-state-unclearable", self.cards)
+
+    def test_an_undecidable_liveness_probe_is_carded_at_once(self):
+        self.live = "UNKNOWN"
+        self.tick(T0)
+        self.assertIn("fleet-keeper-liveness-unknown", self.cards)
 
     # ---- SC3, stop marker, unknown ------------------------------------------
 
