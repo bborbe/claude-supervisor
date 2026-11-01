@@ -38,7 +38,7 @@ MIN = 60
 
 
 class KeeperBase(unittest.TestCase):
-    PATCHED = ("STATE_DIR", "HEARTBEAT", "KEEPER_LOG", "LAPSE", "REGISTER_DIR",
+    PATCHED = ("STATE_DIR", "HEARTBEAT", "KEEPER_LOG", "LAPSE", "EPISODES", "REGISTER_DIR",
                "verdict", "liveness", "notify", "stand_down")
 
     def setUp(self):
@@ -56,6 +56,7 @@ class KeeperBase(unittest.TestCase):
         fk.HEARTBEAT = str(state / "heartbeat")
         fk.KEEPER_LOG = str(state / "keeper.log")
         fk.LAPSE = str(state / "lapse.json")
+        fk.EPISODES = str(state / "episodes.json")
         fk.REGISTER_DIR = str(self.register)
 
         self.word = "stale"
@@ -164,7 +165,7 @@ class ReportOnlyContractTest(KeeperBase):
         for word in ("UNKNOWN", "AMBIGUOUS", "MALFORMED"):
             self.live = word
             self.assertNotEqual("dead", self.tick(T0)[1][0], word)
-        self.assertNotIn("fleet-keeper-absent", self.cards)
+        self.assertFalse(any(k.startswith("fleet-keeper-absent-") for k in self.cards))
 
     def test_a_failed_reported_marker_still_holds_the_board_to_one_card(self):
         """The card posts but its marker cannot be saved, so the next tick re-posts. Both posts
@@ -193,7 +194,7 @@ class ReportOnlyContractTest(KeeperBase):
     def test_an_undecidable_liveness_probe_is_carded_at_once(self):
         self.live = "UNKNOWN"
         self.tick(T0)
-        self.assertIn("fleet-keeper-liveness-unknown", self.cards)
+        self.assertTrue(any(k.startswith("fleet-keeper-liveness-unknown-") for k in self.cards))
 
     # ---- SC3, stop marker, unknown ------------------------------------------
 
@@ -201,7 +202,7 @@ class ReportOnlyContractTest(KeeperBase):
         self.live = "ABSENT"
         rc, out = self.tick(T0)
         self.assertEqual("dead", out[0])
-        self.assertIn("fleet-keeper-absent", self.cards)
+        self.assertTrue(any(k.startswith("fleet-keeper-absent-") for k in self.cards))
 
     def test_a_deliberate_stop_is_left_alone_and_clears_the_lapse(self):
         self.stale_run(T0, 10)
@@ -213,7 +214,7 @@ class ReportOnlyContractTest(KeeperBase):
     def test_an_unreadable_ledger_is_reported_never_fine(self):
         self.word = "unknown"
         self.assertEqual("cannot-tell", self.tick(T0)[1][0])
-        self.assertIn("fleet-keeper-unknown", self.cards)
+        self.assertTrue(any(k.startswith("fleet-keeper-unknown-") for k in self.cards))
 
     # ---- SC6 ---------------------------------------------------------------
 
@@ -288,6 +289,90 @@ class StandDownTest(unittest.TestCase):
                             "--subject", fk.SUBJECT, "--branch", fk.BRANCH],
                            capture_output=True, text=True, timeout=30, check=True)
             self.assertEqual("STOPPED", _REAL_STAND_DOWN())
+
+
+class EpisodeTest(KeeperBase):
+    """Every condition card is posted once per EPISODE, never once per tick, and no two episodes
+    share a card identity (the store swallows an open card whose identity matches an answered
+    one — `suppressAnsweredTwins` in attention-controller)."""
+
+    def test_a_condition_held_for_many_ticks_posts_one_card(self):
+        self.live = "ABSENT"
+        for m in range(30):
+            self.tick(T0 + m * MIN)
+        self.assertEqual(1, len([k for k in self.cards if k.startswith("fleet-keeper-absent-")]))
+
+    def test_a_recurrence_after_recovery_gets_a_distinct_identity(self):
+        self.live = "ABSENT"
+        self.tick(T0)
+        self.word = "ok"
+        self.tick(T0 + 5 * MIN)
+        self.word, self.live = "stale", "ABSENT"
+        self.tick(T0 + 60 * MIN)
+        absent = [k for k in self.cards if k.startswith("fleet-keeper-absent-")]
+        self.assertEqual(2, len(absent))
+        self.assertNotEqual(absent[0], absent[1],
+                            "an answered first card must never swallow the second episode")
+
+    def test_a_failed_post_is_retried_under_the_same_episode_key(self):
+        posted = []
+        fk.notify = lambda key, *a, **k: posted.append(key) or None
+        self.live = "ABSENT"
+        self.tick(T0)
+        self.tick(T0 + MIN)
+        self.assertEqual(2, len(posted))
+        self.assertEqual(1, len(set(posted)))
+
+    def test_an_episode_record_that_will_not_clear_is_reported(self):
+        self.live = "ABSENT"
+        self.tick(T0)
+        real = fk.end_episodes
+        fk.end_episodes = lambda: False
+        self.addCleanup(lambda: setattr(fk, "end_episodes", real))
+        self.word = "ok"
+        self.assertEqual("cannot-tell", self.tick(T0 + MIN)[1][0])
+        self.assertIn("fleet-keeper-state-unclearable", self.cards)
+
+
+class NotifyArgvTest(unittest.TestCase):
+    """The deployed keeper runs under launchd with NO $CLAUDE_CODE_SESSION_ID, and attention-ask
+    refuses a post without a producer. Every other test mocks `notify`, which is exactly how a
+    keeper that could post nothing went unseen — so the real argv is pinned here."""
+
+    def test_the_real_argv_names_an_explicit_producer(self):
+        done = subprocess.CompletedProcess([], 0, stdout="ITEM_ID: x\n", stderr="")
+        with mock.patch.object(fk.subprocess, "run", return_value=done) as run:
+            _REAL_NOTIFY("k", "p", ["acknowledge"])
+        argv = run.call_args[0][0]
+        self.assertIn("--producer-id", argv)
+        self.assertEqual(fk.PRODUCER_ID, argv[argv.index("--producer-id") + 1])
+        self.assertEqual("cron", argv[argv.index("--producer-kind") + 1])
+
+    def test_attention_ask_accepts_it_with_no_session_in_the_environment(self):
+        """End to end through the REAL attention-ask.py, with the session id stripped exactly as
+        launchd strips it, against a store that cannot answer: the producer gate must pass
+        (`FAILED: … unreachable`), never refuse (`REFUSED: no --producer-id`)."""
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_SESSION_ID"}
+        env["ATTENTION_STORE_URL"] = "http://127.0.0.1:9"
+        out = subprocess.run(
+            [fk.sys.executable, fk.ATTENTION_ASK, "post", "--producer-id", fk.PRODUCER_ID,
+             "--producer-kind", "cron", "--dedup-key", "fleet-keeper-test", "--payload", "p",
+             "--option", "acknowledge"],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+        text = out.stdout + out.stderr
+        self.assertNotIn("REFUSED", text)
+        self.assertIn("FAILED", text)
+
+    def test_positive_control_the_same_post_without_a_producer_is_refused(self):
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_CODE_SESSION_ID"}
+        env["ATTENTION_STORE_URL"] = "http://127.0.0.1:9"
+        out = subprocess.run(
+            [fk.sys.executable, fk.ATTENTION_ASK, "post", "--dedup-key", "fleet-keeper-test",
+             "--payload", "p", "--option", "acknowledge"],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+        self.assertIn("REFUSED", out.stdout + out.stderr)
 
 
 class NotifyParseTest(unittest.TestCase):

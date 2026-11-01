@@ -72,6 +72,11 @@ STATE_DIR = os.path.expanduser(
 HEARTBEAT = os.path.join(STATE_DIR, "heartbeat")
 KEEPER_LOG = os.path.join(STATE_DIR, "keeper.log")
 LAPSE = os.path.join(STATE_DIR, "lapse.json")
+EPISODES = os.path.join(STATE_DIR, "episodes.json")
+
+# The keeper's identity on the attention board. A stable string, because a launchd job has no
+# Claude session to borrow one from (see `notify`).
+PRODUCER_ID = "fleet-keeper"
 
 # `fleet-register.py` writes one record per fleet session here, named by session id.
 REGISTER_DIR = os.path.expanduser(
@@ -265,8 +270,17 @@ def unclearable(now, detail):
 
 
 def notify(dedup_key, payload, options, context=""):
-    """Post one attention card. Returns its item id, or `None` when the post failed."""
-    argv = [sys.executable, ATTENTION_ASK, "post", "--dedup-key", dedup_key, "--payload", payload]
+    """Post one attention card. Returns its item id, or `None` when the post failed.
+
+    ⚠️ **An explicit producer is mandatory here, not a nicety.** `attention-ask.py` defaults the
+    producer to `$CLAUDE_CODE_SESSION_ID` and REFUSES when it is unset — and a launchd job runs
+    outside any Claude session, so it is always unset. Without `--producer-id` the deployed
+    keeper could post no card at all, and every lapse would be reported to nobody. The tests
+    mock this function, which is how that went unseen; `NotifyArgvTest` now pins the argv.
+    """
+    argv = [sys.executable, ATTENTION_ASK, "post",
+            "--producer-id", PRODUCER_ID, "--producer-kind", "cron",
+            "--dedup-key", dedup_key, "--payload", payload]
     if context:
         argv += ["--context", context]
     for option in options:
@@ -279,6 +293,73 @@ def notify(dedup_key, payload, options, context=""):
         if line.startswith("ITEM_ID:"):
             return line.split(":", 1)[1].strip() or None
     return None
+
+
+def _load_episodes():
+    try:
+        with open(EPISODES, encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return rec if isinstance(rec, dict) else {}
+
+
+def _save_episodes(rec):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = EPISODES + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+        os.replace(tmp, EPISODES)
+        return True
+    except OSError:
+        return False
+
+
+def raise_once(condition, payload, now, detail=""):
+    """Post ONE card per episode of `condition`. Returns the item id (existing or new), or None.
+
+    ⚠️ Two failure modes this exists to close, both measured against the store's own source
+    (`attention-controller` `pkg/attention-store-impl.go`):
+
+    1. **Flooding.** The store collapses a re-push only "while the matching item is still open"
+       AND "its producer is still live". A launchd tick is a fresh process every minute, so
+       relying on the store to dedup a card re-posted every tick is relying on producer-liveness
+       semantics this file cannot see. The keeper therefore posts once per episode itself.
+    2. **Swallowing.** `suppressAnsweredTwins` drops — and `closeRedundantReraises` closes — an
+       open card whose `askIdentity` (producer + dedup key + payload) matches an ANSWERED one.
+       A constant key and payload would make the operator's `acknowledge` on the first episode
+       silently swallow every later one. The key therefore carries the episode's start time, so
+       no two episodes ever share an identity.
+
+    An episode ends on `ok` (`end_episodes`). A post that fails is retried on the next tick,
+    under the same episode key, so the board still ends up with exactly one card.
+    """
+    episodes = _load_episodes()
+    ep = episodes.get(condition)
+    if ep and ep.get("item"):
+        return ep["item"]
+    since = ep["since"] if ep and isinstance(ep.get("since"), (int, float)) else now
+    item = notify(f"fleet-keeper-{condition}-{int(since)}", payload, ["acknowledge"], context=detail)
+    episodes[condition] = {"since": since, "item": item}
+    _save_episodes(episodes)
+    return item
+
+
+def end_episodes():
+    """The fleet is healthy: every open condition has ended. Returns whether the record is gone.
+
+    ⚠️ A record that survives keeps its `item`, and `raise_once` returns early on that — so the
+    next episode of the same condition would get NO card. Same failure class as `clear_lapse`,
+    and handled the same way by the caller.
+    """
+    try:
+        os.remove(EPISODES)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def report(word, sentence, now=None):
@@ -305,7 +386,7 @@ def main(argv):
 
     if state == "ok":
         recovered = load_lapse()
-        if not clear_lapse():
+        if not clear_lapse() or not end_episodes():
             return unclearable(now, detail)
         tail =(f"; the lapse since {time.strftime('%H:%M:%SZ', time.gmtime(recovered['since']))} "
                 f"recovered") if recovered else ""
@@ -313,12 +394,8 @@ def main(argv):
         return 0
 
     if state == "unknown":
-        item = notify(
-            "fleet-keeper-unknown",
-            "The fleet keeper cannot read the digest ledger, so it cannot tell whether the "
-            "fleet round is running. It is NOT treating that as healthy.",
-            ["acknowledge"], context=detail,
-        )
+        item = raise_once("unknown", "The fleet keeper cannot read the digest ledger, so it cannot tell whether the "
+            "fleet round is running. It is NOT treating that as healthy.", now, detail)
         report("cannot-tell", f"{detail} — reported, never treated as fine{card(item)}", now)
         return 1
 
@@ -337,21 +414,13 @@ def main(argv):
         # An undecidable probe is never death — but it IS a fault, independent of round speed,
         # so it is carded at once rather than folded into the 40-minute lapse timer. The lapse
         # timing below still runs, so a genuine lapse behind it is reported too.
-        notify(
-            "fleet-keeper-liveness-unknown",
-            f"The fleet round is stale and the liveness probe for the fleet manager (session "
-            f"{sid[:8]}) answers {live}, so the keeper cannot tell whether the session is alive.",
-            ["acknowledge"], context=detail,
-        )
+        raise_once("liveness-unknown", f"The fleet round is stale and the liveness probe for the fleet manager (session "
+            f"{sid[:8]}) answers {live}, so the keeper cannot tell whether the session is alive.", now, detail)
         log(f"liveness {live} for {sid[:8]} — carded; lapse timing continues", now)
     if live == "ABSENT":
-        item = notify(
-            "fleet-keeper-absent",
-            f"The fleet manager (session {sid[:8]}) is ABSENT — the session is gone, not merely "
+        item = raise_once("absent", f"The fleet manager (session {sid[:8]}) is ABSENT — the session is gone, not merely "
             f"lapsed. Nothing supervises the fleet until one is started. The keeper never "
-            f"starts or restarts one itself.",
-            ["acknowledge"], context=detail,
-        )
+            f"starts or restarts one itself.", now, detail)
         report("dead", f"fleet manager {sid[:8]} is ABSENT — reported{card(item)}", now)
         return 1
 
