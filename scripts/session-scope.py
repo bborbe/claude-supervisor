@@ -428,7 +428,11 @@ def load(self_id, vault_paths=None):
         goals.setdefault(title, set()).update(_task_links(text))
         front = _frontmatter(text)
         if front:
-            match = _MANAGER_STAMP.search(front)
+            # `manager_session_id` first, `claude_session_id` second: the two are being
+            # unified onto the latter, and reading the retired key first keeps a
+            # not-yet-migrated page resolving exactly as it did before the writer swap.
+            # Once the migration lands the first search misses and the second answers.
+            match = _MANAGER_STAMP.search(front) or _CLAUDE_STAMP.search(front)
             if match:
                 managers.setdefault(match.group(1), []).append(title)
 

@@ -242,7 +242,11 @@ def live_goal_managers(vault: str, topics_dir: str, goals: list[str]) -> int:
             continue
         try:
             with open(page, encoding="utf-8") as fh:
-                sid = scalar(frontmatter(fh.read()), "manager_session_id")
+                # `manager_session_id` first, `claude_session_id` second — see the note in
+                # `topic-keepalive.py`: the retired key is read first so an unmigrated page
+                # resolves exactly as before.
+                _fm = frontmatter(fh.read())
+                sid = scalar(_fm, "manager_session_id") or scalar(_fm, "claude_session_id")
         except OSError:
             continue
         if not sid:

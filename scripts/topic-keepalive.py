@@ -217,7 +217,10 @@ def main(argv: list[str]) -> int:
         return 1
     with open(goal_page, encoding="utf-8") as fh:
         fm = frontmatter(fh.read())
-    sid = scalar(fm, "manager_session_id")
+    # `manager_session_id` first, `claude_session_id` second: the two are being unified onto
+    # the latter, so reading the retired key first keeps a not-yet-migrated page resolving
+    # exactly as it did before the writer swap.
+    sid = scalar(fm, "manager_session_id") or scalar(fm, "claude_session_id")
 
     loop = cadence(a.subject, a.branch)
 

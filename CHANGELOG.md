@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: goals and topics record their manager's session in `claude_session_id` only, retiring `manager_session_id`. The two resolve steps (`commands/steps/goal-resolve.md`, `commands/steps/topic-resolve.md`) now write `claude_session_id` — the field vault-ui's `sessionButtonHtml()` keys the Resume button on and the only one it reads, which is why every goal and topic that carried the retired key showed Start instead of Resume. Readers stay tolerant for one release: `session-scope.py`, `crashed-managers.py`, `topic-keepalive.py`, `topic-spawn.py` and `worker-keepalive.py` read `manager_session_id` first and fall back to `claude_session_id`, so a page that has not been migrated yet resolves exactly as it did before the writer swap; `flagged-rows.py` already read both keys.
+
 ## v0.227.0
 
 - fix: `restart-worker.py` resolves `vault-cli` via `PATH`, `$GOPATH/bin` and known install locations instead of a bare name, and a missing `vault-cli` now exits 3 with an `environment-fault` line instead of printing as a launcher refusal (exit 1)

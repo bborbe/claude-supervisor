@@ -194,6 +194,19 @@ def _read_page(path: str) -> str:
     return _memo(("page", path), read)
 
 
+def _page_session_id(front: dict) -> str:
+    """The session id a goal or topic page records.
+
+    `manager_session_id` is read first and `claude_session_id` second: the two are being
+    unified onto the latter, so reading the retired key first keeps a not-yet-migrated page
+    resolving exactly as it did before the writer swap, and the second lookup answers once
+    the migration lands.
+    """
+
+    scalar = helpers().scalar
+    return scalar(front, "manager_session_id") or scalar(front, "claude_session_id")
+
+
 def subjects(state_dir: str) -> tuple[list[tuple[str, str]], int]:
     """Every `(branch, base)` carrying a `<branch>--<base>.cadence` record, plus the legacy count.
 
@@ -313,7 +326,7 @@ def topic_manager_live(vault: str, goal_name: str) -> bool:
         text = _read_page(os.path.join(directory, entry))
         if not declares(text, goal_name):
             continue
-        sid = helpers().scalar(helpers().frontmatter(text), "manager_session_id")
+        sid = _page_session_id(helpers().frontmatter(text))
         if not sid or session_state(sid) != "LIVE":
             continue
         # ⚠️ A LIVE session is NOT a running keep-alive. `/supervisor:stop` disarms the loop and
@@ -387,9 +400,9 @@ def evaluate(vault: str, branch: str, base: str) -> dict:
         row["reason"] = f"cadence {row['state']} — only STALE is a lapse (STOPPED is a stand-down)"
         return row
 
-    sid = helpers().scalar(helpers().frontmatter(_read_page(subject_page)), "manager_session_id")
+    sid = _page_session_id(helpers().frontmatter(_read_page(subject_page)))
     if not sid:
-        row["reason"] = "no manager_session_id on the page — unverifiable, never abandoned"
+        row["reason"] = "no session id on the page — unverifiable, never abandoned"
         return row
     row["session"] = sid
     row["detail"] = _DETAIL.get((branch, name), "")

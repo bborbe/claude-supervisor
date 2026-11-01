@@ -159,7 +159,10 @@ class EvaluateTest(unittest.TestCase):
         self.stub("STALE", "LIVE")
         row = cm.evaluate(self.vault, "goal", "no-sid")
         self.assertFalse(row["card"])
-        self.assertIn("manager_session_id", row["reason"])
+        # The reason names no field: the reader accepts `claude_session_id` and, during
+        # the migration, the retired `manager_session_id` behind it — so "no session id"
+        # is the honest phrasing rather than naming whichever key it happened to miss.
+        self.assertIn("no session id", row["reason"])
 
     def test_a_record_with_no_page_is_abandoned(self):
         self.stub("STALE", "LIVE")
