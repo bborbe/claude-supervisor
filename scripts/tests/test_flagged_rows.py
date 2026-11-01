@@ -6,6 +6,7 @@ store. The live behaviour is exercised by the task's DoD run, not here.
 """
 
 import importlib.util
+import json
 import os
 import tempfile
 import unittest
@@ -591,6 +592,92 @@ class RowShape(unittest.TestCase):
         self.assertEqual(row["launcher"], "/opt/l/cc-v")
         self.assertEqual(row["launcher_source"], "worker-default")
         self.assertEqual(row["mode"], "interactive")
+
+
+class WindowIdIsNeverStale(unittest.TestCase):
+    """SC7: the map is read on every run, so a rewrite shows up in the next row."""
+
+    def row_with_map(self, role_map_path):
+        root = tempfile.mkdtemp()
+        tasks = os.path.join(root, "25 Tasks")
+        write(os.path.join(tasks, "A Task.md"),
+              page("page_type: task\nflag: true\nstatus: in_progress\n"
+                   "role: agent\nflag_set_by: operator"))
+        cfg = {"tasks_dir": "25 Tasks", "path": root, "worker_launcher": "/opt/l/cc-v"}
+        ctx = {"today": "2026-11-01", "role_map": fr.role_map(role_map_path),
+               "template_root": None, "no_liveness": True, "managers": set(),
+               "topic_map": {}, "mode_default": "interactive", "normalised": [],
+               "subjects": {}, "liveness_cache": {}}
+        row, reason = fr.row_for("v", cfg, "task", os.path.join(tasks, "A Task.md"), ctx)
+        self.assertIsNone(reason)
+        return row
+
+    def test_a_rewritten_map_reaches_the_next_row(self):
+        path = os.path.join(tempfile.mkdtemp(), "role-map.json")
+        write(path, json.dumps({"Agents": {"chip": "pink", "window_id": 4}}))
+        self.assertEqual(self.row_with_map(path)["window_id"], 4)
+        write(path, json.dumps({"Agents": {"chip": "red", "window_id": 9}}))
+        row = self.row_with_map(path)
+        self.assertEqual(row["window_id"], 9)
+        self.assertEqual(row["chip"], "red")
+
+    def test_a_missing_map_falls_back_to_the_documented_chip(self):
+        row = self.row_with_map(os.path.join(tempfile.mkdtemp(), "absent.json"))
+        self.assertIsNone(row["window_id"])
+        self.assertEqual(row["chip"], fr.MISSING_MAP_CHIP)
+
+
+class PerKindRefusal(unittest.TestCase):
+    """SC4: the provenance rule is not uniform, and applying it to goals refuses live work."""
+
+    def test_an_agent_set_task_is_refused(self):
+        self.assertEqual(
+            fr.refusals("task", page("flag: true\nflag_set_by: agent")),
+            ["agent-set-flag"])
+
+    def test_an_absent_flag_set_by_refuses_a_task(self):
+        # After the 2026-09-30 legacy disposition no live row should be missing it.
+        self.assertEqual(fr.refusals("task", page("flag: true")), ["agent-set-flag"])
+
+    def test_operator_and_legacy_open_a_task(self):
+        for actor in ("operator", "legacy"):
+            self.assertEqual(
+                fr.refusals("task", page("flag: true\nflag_set_by: %s" % actor)), [])
+
+    def test_a_goal_accepts_any_provenance(self):
+        self.assertEqual(
+            fr.refusals("goal", page("flag: 'true'\nflag_set_by: agent")), [])
+        self.assertEqual(fr.refusals("topic", page("flag: on")), [])
+
+    def test_the_two_tokens_can_coexist_on_one_row(self):
+        # Provenance and the manager-row rule are independent producers.
+        ctx = {"topic_map": {}, "subjects": {}, "no_liveness": False,
+               "managers": {"X"}, "liveness_cache": {}}
+        block = page("flag: true\nflag_set_by: agent\nrole: manager")
+        branch, refused = fr.resolve_branch("task", "manager", None, "LIVE", "9",
+                                            True, block)
+        self.assertEqual(branch, "skip")
+        self.assertEqual(fr.refusals("task", block) + refused,
+                         ["agent-set-flag", "manager-row"])
+
+
+class BlockedBy(unittest.TestCase):
+    """SC4: an open blocker is emitted; an empty one is `[]`, never null."""
+
+    def test_an_inline_blocker_is_emitted(self):
+        self.assertEqual(fr.blocked_by_of(page("blocked_by: '[[A Blocker]]'")),
+                         ["[[A Blocker]]"])
+
+    def test_an_empty_inline_list_is_empty(self):
+        self.assertEqual(fr.blocked_by_of(page("blocked_by: []")), [])
+
+    def test_a_list_blocker_is_emitted(self):
+        self.assertEqual(
+            fr.blocked_by_of(page("blocked_by:\n    - '[[One]]'\n    - '[[Two]]'")),
+            ["[[One]]", "[[Two]]"])
+
+    def test_an_absent_field_is_empty(self):
+        self.assertEqual(fr.blocked_by_of(page("flag: true")), [])
 
 
 class RegistryProbe(unittest.TestCase):

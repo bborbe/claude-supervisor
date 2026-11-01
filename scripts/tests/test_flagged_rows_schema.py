@@ -15,6 +15,7 @@ raises rather than passing silently, so widening the schema cannot quietly widen
 import importlib.util
 import json
 import os
+import re
 import tempfile
 import unittest
 
@@ -233,6 +234,31 @@ class EnumsMatchTheirProducers(unittest.TestCase):
     def test_kind_matches_the_sort_table(self):
         self.assertEqual(set(load_schema()["properties"]["kind"]["enum"]),
                          set(fr.KIND_ORDER))
+
+    def test_refused_is_the_resolvers_own_enum(self):
+        self.assertEqual(
+            set(load_schema()["properties"]["refused"]["items"]["enum"]),
+            set(fr.REFUSAL_REASONS))
+
+    def test_opening_actors_match_the_consumers_own_set(self):
+        """The task provenance rule is `commands/open.md`'s, not a second opinion.
+
+        Read from the consumer itself where the marketplace clone is installed; CI
+        has no clone, so the assertion degrades to the literal the file documents
+        rather than skipping silently.
+        """
+        source = os.path.join(
+            os.path.expanduser("~/.claude/plugins/marketplaces"),
+            "claude-supervisor", "commands", "open.md")
+        if os.path.isfile(source):
+            with open(source, encoding="utf-8") as handle:
+                text = handle.read()
+            match = re.search(r"^OPENING_ACTORS=\((.*)\)$", text, re.MULTILINE)
+            self.assertIsNotNone(match, "open.md no longer declares OPENING_ACTORS")
+            expected = tuple(re.findall(r"'([^']*)'", match.group(1)))
+            self.assertEqual(tuple(fr.OPENING_ACTORS), expected)
+        else:
+            self.assertEqual(tuple(fr.OPENING_ACTORS), ("operator", "legacy"))
 
 
 if __name__ == "__main__":

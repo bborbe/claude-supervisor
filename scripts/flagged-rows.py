@@ -54,6 +54,18 @@ TEMPLATE_ROOT = os.path.expanduser("~/Documents/workspaces/nuke/task/recurring-s
 #: because a YAML boolean has three.
 FLAG_TRUTHY = ("true", "yes", "on")
 
+#: `commands/open.md` § Step 0.5's `OPENING_ACTORS` — the only `flag_set_by` values a
+#: TASK admits. Everything else refuses, **including an absent field**: after the
+#: 2026-09-30 legacy disposition no live row should be missing it. A goal or topic
+#: accepts any provenance (`scripts/topic-spawn.py` `flagged()`), so this constant is
+#: consulted for tasks only.
+OPENING_ACTORS = ("operator", "legacy")
+
+#: The tokens `refused` may carry. Two producers: `refusals()` adds
+#: `agent-set-flag` from the per-kind provenance rule, `resolve_branch()` adds
+#: `manager-row` from the branch partition.
+REFUSAL_REASONS = ("agent-set-flag", "manager-row")
+
 #: Every unquoted scalar a YAML 1.1 loader resolves to boolean True — the set
 #: `commands/open.md` § Step 0.5's `t.get('flag') is True` actually sees. Matching only
 #: lowercase `true` omits an eligible task whose page says `flag: True`.
@@ -512,6 +524,20 @@ def resolve_launcher(kind, role, block, cfg):
     return (os.path.expanduser(base), "vault") if base else (None, "unresolved")
 
 
+def refusals(kind, block):
+    """The per-kind provenance refusals — not uniform, and the difference is live.
+
+    A **task** refuses a flag an agent set: `flag_set_by` outside `OPENING_ACTORS`,
+    which includes an absent field. A **goal or topic** accepts any provenance
+    (`scripts/topic-spawn.py` `flagged()`), so applying the task rule to them would
+    wrongly refuse every goal whose flag the fleet set.
+    """
+    if kind != "task":
+        return []
+    who = (open_queue.field(block, "flag_set_by") or "").strip()
+    return [] if who in OPENING_ACTORS else ["agent-set-flag"]
+
+
 def blocked_by_of(block):
     """The row's unresolved blockers, in either frontmatter shape, as a list."""
     match = re.search(r"^blocked_by:[ \t]*(.*)$", block, re.MULTILINE)
@@ -519,7 +545,12 @@ def blocked_by_of(block):
         return []
     inline = match.group(1).strip()
     if inline:
-        return [] if inline in ("[]", "[ ]") else [inline]
+        if inline in ("[]", "[ ]"):
+            return []
+        # ⚠️ Strip the quotes here too — the list form below does, and an inline
+        # `blocked_by: '[[X]]'` that kept them emitted a different name than the
+        # same blocker written as a list.
+        return [inline.strip("'\"")]
     out = []
     for line in block[match.end():].splitlines():
         if not line.strip():
@@ -740,6 +771,9 @@ def row_for(vault, cfg, kind, path, ctx):
     owner = resolve_owner(page_kind, name, block, ctx, vault)
     owner_live, chain_live = owner_liveness(owner, page_kind, name, ctx, vault)
     branch, refused = resolve_branch(page_kind, role, sid, live, pane, chain_live, block)
+    # Provenance first: `refusals()` is the per-kind rule SC4 names, and it is
+    # independent of the branch partition, so a row can carry both tokens.
+    refused = refusals(page_kind, block) + refused
     return {
         "kind": page_kind,
         "vault": vault,

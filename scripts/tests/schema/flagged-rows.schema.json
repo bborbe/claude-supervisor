@@ -121,9 +121,9 @@
       "items": { "type": "string", "minLength": 1 }
     },
     "refused": {
-      "description": "Producer: `resolve_branch()` — the named reasons this row must not be opened as written. Empty is the normal case.",
+      "description": "Producers: `refusals()` — the per-kind provenance rule, emitting `agent-set-flag` for a TASK whose `flag_set_by` is outside `commands/open.md` § Step 0.5's `OPENING_ACTORS`, and accepting any provenance for a goal or topic — plus `resolve_branch()`, which emits `manager-row` for a task carrying `role: manager`. Empty is the normal case.",
       "type": "array",
-      "items": { "type": "string", "minLength": 1 }
+      "items": { "type": "string", "enum": ["agent-set-flag", "manager-row"] }
     }
   }
 }
