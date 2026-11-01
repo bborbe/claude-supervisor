@@ -30,15 +30,15 @@ allowed-tools:
   - Read
   - Write
   - Edit
-argument-hint: "[--interval <N>m] (interval defaults to 15m; the round repeats by default)"
+argument-hint: "[--interval <N>m] (default 15m; repeats by default)"
 ---
-Fleet-drive — **the round**: one round, once, over the whole fleet, runnable by hand. The fleet's show is `/supervisor:fleet-status`.
+Fleet-drive — **the round**: one round, once, over the whole fleet, runnable by hand. The show is `/supervisor:fleet-status`.
 
-⚠️ **This is the round, not the arm.** The wakeup names THIS command; the arm (`/supervisor:fleet-loop`) is invoked **once** to arm the loop and is **never** re-invoked from a wakeup — a wakeup re-invokes THIS command (`/supervisor:fleet-drive --interval <N>m`). This file is the **round** (read on every wakeup); `commands/fleet-loop.md` is the **arm** (read once).
+⚠️ **This is the round, not the arm.** A wakeup names THIS command (`/supervisor:fleet-drive --interval <N>m`) — this file is the **round**, read every wakeup; `commands/fleet-loop.md` is the **arm**, invoked **once** and never re-invoked.
 
-⚠️ **A fleet-tier verb — never run it from a worker session.** Running a fleet-wide sweep inside a worker collapses the two roles silently: the session keeps its task anchor while its turns sweep the whole fleet (`${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles). A worker routes a sweep to its manager with `SendMessage`. A change to this command is exercised in a manager session's runtime, never from the session that authored it.
+⚠️ **A fleet-tier verb — never run it from a worker session.** Running a fleet-wide sweep in a worker collapses both roles silently: it keeps its task anchor while its turns sweep the whole fleet (`${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles). A worker routes a sweep to its manager with `SendMessage`. A change to this command is exercised in a manager session's runtime, never from the session that authored it.
 
-The hard invariants and gates live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/rules.md`; the INLINE section mirrors them so no rule is ever absent from the round.
+Hard invariants and gates: `${CLAUDE_PLUGIN_ROOT}/commands/steps/rules.md`; INLINE mirrors them so no rule is ever absent from the round.
 
 `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts` — every script below is `python3 $P/<script>`.
 
@@ -46,6 +46,10 @@ Rationale: runbook § Fleet-Manager Command — Rationale and Measured History.
 
 ⚠️ **Delegate; keep this session for the round.** `Task` is available — anything not the sweep
 goes to a sub-agent, or the round stalls (2026-10-30: 2h30m, 100 rows unmanaged).
+
+⚠️ **Carve-out: 5b and 5c are acting legs.** They run here, or in a sub-agent granted
+write tools (`Bash`, `Edit`, `Write`, `mcp__supervisor__*`); a read-only delegate is not a run of
+them — it prints the count it was told to, not the one it measured.
 
 ## Router
 
@@ -77,7 +81,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 19 | Round tail | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/fleet-round-tail.md` |
 | 20 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
 
-⚠️ **The table is evaluated more than once per round, and the later reads are the ones that get skipped.** Re-read it the moment the sweep hand-back exists, and again before the output shape renders, honouring each row whose `When` has newly become decidable **and that has not already run this round**. Never re-run a leg: **every `every tick` row is once-per-round**, and a second sweep or drive leg would duplicate sends to peers. The full rule and its measured case live in `steps/rules.md` § Re-read the router.
+⚠️ **The table is read more than once per round, and the later reads are the ones that get skipped.** Re-read it once the sweep hand-back exists, and again before the output shape renders, honouring every row whose `When` has newly become decidable **and that has not run this round**. Never re-run a leg — **each `every tick` row is once-per-round**, and a second sweep or drive leg duplicates sends. Full rule and measured case: `steps/rules.md` § Re-read the router.
 
 ## INLINE — the hard rules
 

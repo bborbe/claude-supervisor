@@ -8,6 +8,11 @@ user-invocable: false
 
 When: every tick
 
+⚠️ **This leg acts, and a read-only execution is not a run of it.** Both halves restart, resume,
+record the resume and hand over the pane; a run that only prints `unactioned: <n>` has measured
+nothing. It is one of the round's two acting legs, so the round's delegate rule carves it out —
+a sub-agent may run it only with write tools (`commands/fleet-drive.md` § the delegate rule).
+
 ## Step 5b — Restart a lapsed topic manager
 
 The goal tier has had a keep-alive since `topic-drive.md`'s § Keep alive; the topic tier has

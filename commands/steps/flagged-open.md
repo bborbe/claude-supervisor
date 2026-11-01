@@ -8,6 +8,12 @@ user-invocable: false
 
 When: every tick
 
+⚠️ **This leg acts, and a read-only execution is not a run of it.** It opens each admitted row; a
+run that only reports `unactioned: <n> operator-flagged` without invoking the command has measured
+nothing — `opened=0` because the leg was told to print it is a failure, not a quiet round. It is one
+of the round's two acting legs, so the round's delegate rule carves it out — a sub-agent may run it
+only with write tools (`commands/fleet-drive.md` § the delegate rule).
+
 ## Step 5c — Open what the operator already marked
 
 `/supervisor:open --flagged` has been specified since before the `flag_set_by` field existed and
