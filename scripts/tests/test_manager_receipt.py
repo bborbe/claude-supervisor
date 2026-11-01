@@ -457,7 +457,7 @@ class Receipt(unittest.TestCase):
         p = self.m.path(self.m.slug(self.topic))
         with open(p) as fh:
             d = json.load(fh)
-        d["round_started_at"] = now - 700  # < 2*1020+60
+        d["round_started_at"] = now - 700  # < 1020 + 180
         with open(p, "w") as fh:
             fh.write(json.dumps(d))
         # The artifacts were written "now", so re-age them into the round window.
@@ -469,6 +469,161 @@ class Receipt(unittest.TestCase):
             fh.write(json.dumps(d))
         rc, out = self.check()
         self.assertEqual(rc, 0, out)
+
+    # --- the aligned window: one rule, and the boundary is the limit -------------
+
+    def _history(self, name, now, gaps, cadence=None):
+        """Write `<name>.arms` whose arm-to-arm gaps are exactly `gaps`, ending at `now`."""
+        vals = [now]
+        for g in reversed(gaps):
+            vals.insert(0, vals[0] - g)
+        with open(os.path.join(self.live.name, name + ".arms"), "w", encoding="utf-8") as fh:
+            fh.write("".join(f"{v:.0f}\n" for v in vals))
+        if cadence is not None:
+            with open(os.path.join(self.live.name, name + ".cadence"), "w", encoding="utf-8") as fh:
+                fh.write(f"{cadence}\n")
+        return vals
+
+    def _set_started(self, started):
+        p = self.m.path(self.m.slug(self.topic))
+        with open(p, encoding="utf-8") as fh:
+            d = json.load(fh)
+        d["round_started_at"] = started
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(d))
+        return d
+
+    def _check_at(self, now):
+        """`check()` at an explicit `now`, with its stdout captured.
+
+        `cli()` cannot do this: it goes through `main()`, which reads the clock.
+        """
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = self.m.check(self.topic, now=now)
+        return rc, buf.getvalue()
+
+    def test_window_boundary_is_inclusive_at_the_limit(self):
+        """`now - started == limit` is still inside the round; `limit + 1` is not.
+
+        Pinned because the direction is invisible in a passing run: flipping `>` to
+        `>=` would report a lapsed receipt for a round that arrived exactly on time,
+        and every other test in this file would still pass.
+        """
+        now = 1_700_000_000.0
+        gap = 900
+        self._history("recurring-operator-gates", now, [gap, gap, gap], cadence=300)
+        self.start()
+        limit = gap + 180  # p90 == median == the only gap, so 1x + 180
+        s = self.m.slug(self.topic)
+
+        self._set_started(now - limit)
+        self.assertEqual(self.m.window(s, now)[1], limit)
+        _, out = self._check_at(now)
+        self.assertNotIn("skipped: receipt", out, "a round landing exactly on its limit is judged")
+        self._set_started(now - limit - 1)
+        rc, out = self._check_at(now)
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn(f"limit {limit}s period={gap}s(observed,1x+180)", out)
+
+    def test_period_is_read_from_the_branch_prefixed_record(self):
+        """The liveness record has carried a `goal--` / `topic--` prefix since the
+        goal/topic split; this file's slug never did.
+
+        Measured 2026-10-21: **4 of the 9** live receipts named a subject whose only
+        liveness record was prefixed, so the bare-base read found no history, the
+        period came back unknown, and the limit silently fell back to the reported
+        interval — a different number from the one `manager-liveness.py` used for the
+        same subject. Pinned because the fallback is silent: the receipt still prints
+        a plausible limit.
+        """
+        now = 1_700_000_000.0
+        gap = 1200
+        # ONLY the prefixed record exists; the bare base has nothing.
+        self._history("goal--recurring-operator-gates", now, [gap, gap, gap], cadence=300)
+        self.start()
+        self._set_started(now - 10)
+
+        s = self.m.slug(self.topic)
+        self.assertEqual(self.m.liveness_slug(s), "goal--recurring-operator-gates")
+        _, limit, basis = self.m.window(s, now)
+        self.assertEqual(limit, gap + 180)
+        self.assertEqual(basis, f"period={gap}s(observed,1x+180)")
+        self.assertNotIn("reported", basis)
+
+        # The claim this task repairs, asserted rather than written in prose: the
+        # receipt's limit IS the liveness limit for the same subject.
+        ml = self.m.liveness()
+        self.assertEqual(limit, ml.observed_period("goal--recurring-operator-gates") + ml.SLACK)
+
+    def test_an_already_prefixed_slug_is_not_prefixed_again(self):
+        """A fleet round puts its own branch on the receipt slug, so the period must come
+        from `fleet--<base>` — the record the arm step actually wrote.
+
+        Covers the fleet tier's observed basis end to end; no other test reaches it.
+        The early return in `liveness_slug()` that skips re-probing an already-prefixed
+        slug is clarity, not a fix: without it the bad probes find nothing and the
+        fallback returns the same name, so this test does not discriminate on it.
+        """
+        now = 1_700_000_000.0
+        gap = 1200
+        self._history("fleet--fleet-manager", now, [gap, gap, gap], cadence=300)
+
+        fleet_slug = self.m.slug("Fleet Manager", "fleet")
+        self.assertEqual(fleet_slug, "fleet--fleet-manager")
+        self.assertEqual(self.m.liveness_slug(fleet_slug), "fleet--fleet-manager")
+
+        with open(self.m.path(fleet_slug), "w", encoding="utf-8") as fh:
+            json.dump({"topic": "Fleet Manager", "round_started_at": now - 10, "fields": {}}, fh)
+        _, limit, basis = self.m.window(fleet_slug, now)
+        self.assertEqual(limit, gap + 180)
+        self.assertEqual(basis, f"period={gap}s(observed,1x+180)")
+
+    def test_printed_limit_never_understates_a_fractional_boundary(self):
+        """`observed_period()` interpolates a p90, so the limit is not always an integer.
+
+        Truncating it on the way out lets a refused round print a limit below the
+        enforced boundary, so the two printed numbers read as *not* lapsed. The invariant
+        pinned here is one-directional: the printed limit is never below the enforced
+        one, so rounding up (which can overstate by <1 s) is correct and truncating is
+        not.
+        """
+        now = 1_700_000_000.0
+        # p90 of (1000, 1101, 1200) interpolates to 1180.2, so the limit is 1360.2.
+        self._history("recurring-operator-gates", now, [1000, 1101, 1200], cadence=300)
+        self.start()
+        self._set_started(now - 1400)
+
+        _, limit, _ = self.m.window(self.m.slug(self.topic), now)
+        self.assertNotEqual(limit, int(limit), "fixture must produce a fractional limit")
+
+        rc, out = self._check_at(now)
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        printed = int(out.split("limit ")[1].split("s")[0])
+        self.assertGreaterEqual(printed, limit)
+
+    def test_reported_fallback_is_the_interval_plus_the_same_slack(self):
+        """With no `.arms` history the limit is `interval + SLACK`, not a multiple of it.
+
+        This is the branch every subject spends its first three arms in, and nothing else
+        pins it: every other test supplies history, so reverting the fallback to a `2 x`
+        multiple — or reading the wrong file for the declared cadence — would pass the
+        whole suite. It also pins `liveness_slug()`'s bare-base return, the other half of
+        the same fallback.
+        """
+        now = 1_700_000_000.0
+        self.start()
+        self._set_started(now - 10)
+        # No `.arms` at all; only the declared cadence exists.
+        with open(os.path.join(self.live.name, "recurring-operator-gates.cadence"), "w") as fh:
+            fh.write("900\n")
+
+        s = self.m.slug(self.topic)
+        self.assertEqual(self.m.liveness_slug(s), s, "no prefixed record -> the bare base")
+        _, limit, basis = self.m.window(s, now)
+        self.assertEqual(limit, 900 + 180)
+        self.assertEqual(basis, "period=900s(reported,1x+180)")
+
 
 
 FLEET_SUBJECT = "Fleet Manager"

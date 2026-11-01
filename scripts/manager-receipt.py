@@ -56,23 +56,28 @@ a fabricated receipt from a real one — only raise what fabrication costs. What
 check does guarantee is that a round cannot skip a step *silently*: omitting it is
 now a visible act rather than an invisible one.
 
-Staleness is measured on `manager-liveness.py`'s own period basis (the observed
-median arm-to-arm gap once >=4 arms exist, the declared interval as fallback), so
-the two checks agree and this one cannot re-introduce the false-positive that basis
-was built to remove.
+Staleness is `manager-liveness.py`'s rule, applied to this round: the SAME
+`observed_period()` and the SAME `SLACK`, IMPORTED from that file rather than
+restated here. The limit is `period + SLACK` — 1x the observed period plus 180 s —
+falling back to `interval + 180` when there is too little history.
+
+**One rule, one definition.** Until 2026-10-21 this file carried its own basis while
+its docstring asserted that the two checks were aligned, and the assertion was false in
+three ways: the multiple was `2x` against liveness's `1x`; the slack was 60 s against
+liveness's 180 s; and the statistic was the UPPER median (`gaps[len//2]`) against the
+true `median()`, which differs on every even gap count — so even the number being
+multiplied was not the same one. (Liveness's period is the p90 capped at `PERIOD_CAP` x
+that median, not the median itself.) Measured 2026-10-21 over the retained `.arms`
+history, the two limits differed on 46 of 46 subjects, and the band between them was
+the defect: a manager liveness had already called stale could still have its round's
+fields judged current. The receipt now imports the rule, so agreement holds by
+construction rather than by assertion.
 """
-import argparse, datetime, json, os, re, sys, time
+import argparse, datetime, importlib.util, json, math, os, re, sys, time
 
 STATE_DIR = os.path.expanduser(
     os.environ.get("MANAGER_RECEIPT_STATE_DIR", "~/.claude/state/manager-receipts")
 )
-# The liveness layer's own namespace: the period basis is read from there, never
-# re-derived, so `--check` here and `manager-liveness.py --check` cannot disagree.
-LIVENESS_STATE_DIR = os.path.expanduser(
-    os.environ.get("MANAGER_LIVENESS_STATE_DIR", "~/.claude/state/sweep-gate")
-)
-SLACK = 60  # seconds: covers the tick's own runtime before the re-arm lands
-ARMS_KEEP = 12
 EXIT_SKIPPED = 11
 # The debt's own code, distinct from EXIT_SKIPPED so a leg chained `--debt && <leg>`
 # is stopped by a debt it owes rather than by a verdict it cannot act on.
@@ -108,13 +113,14 @@ ALL_STEPS = STEPS + FLEET_STEPS
 # the state path.
 #
 # ⚠️ The two sets are deliberately NOT identical, and the asymmetry has a consequence worth
-# stating rather than discovering: a goal or topic round passes no branch here, so
-# `window()` and `observed_interval()` read `<base>.cadence` / `<base>.arms`, while
-# `manager-liveness.py` writes `goal--<base>` / `topic--<base>`. The observed-median basis
-# therefore never engages for those tiers and the reported 900 s interval is always used —
-# so the "the two checks agree" claim in this module's docstring holds for the fleet tier
-# only. Pre-existing, not introduced by the fleet tier; the remedy is for the goal/topic
-# call sites to pass their branch.
+# stating rather than discovering: a goal or topic round passes no branch here, so its
+# receipt is keyed on the bare `<base>`, while `manager-liveness.py` writes
+# `goal--<base>` / `topic--<base>`. `liveness_slug()` bridges that by resolving the record
+# from an existing prefixed twin, so the observed period DOES engage for those tiers and the
+# reported interval is the fallback only. (Until 2026-10-21 it did not, and every goal and
+# topic round silently used the reported 900 s. The alternative remedy — having those call
+# sites pass `--branch` — is unnecessary while the record itself names the branch, and would
+# leave a caller that forgets it reading the wrong file again.)
 BRANCHES = ("", "fleet")
 
 
@@ -126,6 +132,71 @@ def steps_for(branch: str) -> tuple:
 # already link-free, but a frame captured from the screen carries them, and they are
 # zero-width — so they must never decide a shape question either way.
 OSC8_RE = re.compile(r"\x1b\]8;;[^\x1b\x07]*(?:\x1b\\|\x07)")
+
+_LIVENESS = None
+
+
+def liveness():
+    """`manager-liveness.py`, imported — the ONE definition of the staleness rule.
+
+    ⚠️ **Imported, never restated.** This file used to carry its own copy of the
+    period arithmetic and claimed the two agreed; they did not (see the module
+    docstring). Delegating makes the receipt's limit literally the liveness limit —
+    `observed_period()`, `SLACK`, the branch-prefixed record names and the
+    pre-split fallback all come from the module that also writes them, so there is
+    nothing left to drift.
+
+    Hyphenated filename, so this goes through importlib — the same shape
+    `check-spawn-ledger.py` and `attention-ask.py` use for their sibling scripts.
+    """
+    global _LIVENESS
+    if _LIVENESS is None:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "manager-liveness.py")
+        spec = importlib.util.spec_from_file_location("manager_liveness", p)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _LIVENESS = mod
+    return _LIVENESS
+
+
+def liveness_slug(s: str) -> str:
+    """The liveness record's name for this receipt's slug.
+
+    ⚠️ **A goal or topic receipt slug is the bare base; the record is not.** Since the
+    goal/topic split `manager-liveness.py` writes `goal--<base>` / `topic--<base>`, while
+    a goal or topic round passes no `--branch` here and so keys its receipt on the bare
+    base. Reading the bare base therefore found no history at all for every subject whose
+    record had been prefixed — measured 2026-10-21: **4 of the 9** live receipts, each
+    silently falling back to the reported interval while a full `.arms` history sat under
+    the prefixed name. The receipt's `base_slug()` and liveness's are the same transform,
+    which is what makes the prefixed names derivable from `s` alone.
+
+    ⚠️ **An already-prefixed slug is returned unchanged.** A fleet round (or any caller
+    that passed `--branch`) has `slug()` put the branch on the front itself, so `s` is
+    already `fleet--<base>` — the correct liveness name. Probing `goal--fleet--<base>`
+    first would find nothing and fall through to the right answer by luck; say it
+    explicitly instead, so the fallback stays a fallback.
+
+    Falls back to `s` — a pre-split record, or none — so `resolve()` can still apply its
+    own legacy lookup rather than this function inventing a name.
+
+    ⚠️ **Residual: a name that is both a goal and a topic resolves to `goal--`.** The
+    probe walks `ml.BRANCHES` in order and takes the first record that exists, so a
+    subject present under both prefixes gets `goal--<base>` on the topic tier as well.
+    The arm side uses the same order (`detect_branch`), so the two agree with each
+    other — which is the property this file needs — but `manager-liveness.py --check`
+    classifies both records, so "the receipt's limit is the liveness limit" holds per
+    record, not per subject. Named rather than left to be discovered; it is the same
+    slug ambiguity the branch prefix exists to narrow, and it is not introduced here.
+    """
+    ml = liveness()
+    if any(s.startswith(f"{b}--") for b in ml.BRANCHES if b):
+        return s
+    for branch in ml.BRANCHES:
+        name = f"{branch}--{s}"
+        if os.path.exists(ml.path(name, "cadence")) or os.path.exists(ml.path(name, "arms")):
+            return name
+    return s
 
 
 def base_slug(subject: str) -> str:
@@ -248,41 +319,33 @@ def record(topic: str, branch: str, step: str, artifact: str) -> int:
     return 0
 
 
-def observed_interval(s: str):
-    """Median arm-to-arm gap in seconds, or None when there is too little history.
-
-    Mirrors `manager-liveness.py:observed_interval` — same file, same rule.
-    """
-    try:
-        with open(os.path.join(LIVENESS_STATE_DIR, f"{s}.arms"), encoding="utf-8") as fh:
-            vals = [float(x) for x in fh.read().split()][-ARMS_KEEP:]
-    except (OSError, ValueError):
-        return None
-    if len(vals) < 4:
-        return None
-    gaps = sorted(b - a for a, b in zip(vals, vals[1:]))
-    if len(gaps) < 3:
-        return None
-    return gaps[len(gaps) // 2]
-
-
 def window(s: str, now: float) -> tuple:
-    """(started_at, limit, basis) for the round in progress."""
+    """(started_at, limit, basis) for the round in progress.
+
+    The limit is `manager-liveness.py`'s own, computed by its own function: the
+    observed period plus its SLACK, or the declared interval plus the same SLACK
+    when there is too little history. Nothing here re-derives a statistic or a
+    multiple — the basis string NAMES the rule that ran (`1x+180`) so the printed
+    line, not just the number, says which one applied.
+
+    `now` is accepted rather than read so the boundary is testable without racing
+    the clock; `check()` passes its own.
+    """
     d = read_receipt(s)
     started = d.get("round_started_at")
     if not started:
         return None, None, "no receipt"
+    ml = liveness()
+    live = liveness_slug(s)
+    period = ml.observed_period(live)
+    if period:
+        return started, period + ml.SLACK, f"period={int(period)}s(observed,1x+{ml.SLACK})"
     try:
-        with open(os.path.join(LIVENESS_STATE_DIR, f"{s}.cadence"), encoding="utf-8") as fh:
+        with open(ml.resolve(live, "cadence")[0], encoding="utf-8") as fh:
             interval = int(fh.read().strip())
     except (OSError, ValueError):
         interval = 900
-    observed = observed_interval(s)
-    if observed:
-        limit, basis = 2 * observed + SLACK, f"period={int(observed)}s(observed)"
-    else:
-        limit, basis = 2 * interval + SLACK, f"period={interval}s(reported)"
-    return started, limit, basis
+    return started, interval + ml.SLACK, f"period={interval}s(reported,1x+{ml.SLACK})"
 
 
 def in_window(mtime: float, started: float, now: float, limit: float) -> bool:
@@ -515,7 +578,12 @@ def check(topic: str, branch: str = "", now: float = None) -> int:
     if (now - started) > limit:
         # The round's own window lapsed: every field is unjudgeable, so name the
         # window rather than each step — a stale receipt fails all of them at once.
-        print(f"{SENTINEL} — skipped: receipt — round started {int(now - started)}s ago, limit {limit}s {basis}")
+        # ⚠️ `math.ceil`, not `int`. `observed_period()` interpolates a p90, so the limit
+        # can be fractional; truncating it lets a round that lapsed by under a second
+        # print `started 1180s ago, limit 1180s` — a line that reads as NOT lapsed while
+        # the round was refused. Rounding up can overstate by <1 s, which is the safe
+        # direction: the printed limit is never below the enforced one.
+        print(f"{SENTINEL} — skipped: receipt — round started {int(now - started)}s ago, limit {math.ceil(limit)}s {basis}")
         return EXIT_SKIPPED
 
     # A paid step is satisfied only for the round it was paid in. The record is

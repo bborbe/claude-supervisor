@@ -1097,6 +1097,60 @@ class AgedEmissionTest(unittest.TestCase):
                       "two spaces after the kind, matching NEW GATE — " + out)
 
 
+class IdleCloserAgedTest(unittest.TestCase):
+    """An `idle` session parked on its own closer `approve:` line escalates.
+
+    ⚠️ This is the shape the old exclusion suppressed. Measured 2026-10-31: a
+    worker parked on `approve: write one flow_probe_test …` at 02:22, the arm fired
+    `NEW GATE … :: idle+closer :: …`, and no `AGED` line followed at 15 minutes
+    or at 60 — the park ran 69 minutes unescalated. Drives `main()` end to end,
+    so the assertion covers the predicate, the age clock and the log writer.
+    """
+
+    PARKED = {"aaaa1111": ("A", "approve: write one flow_probe_test sample",
+                           "idle+closer", True)}
+
+    def _drive(self, polls, clock):
+        seq, ticks = [self.PARKED] * polls, list(clock)
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            state = os.path.join(d, "state")
+            with mock.patch.object(watch, "probe",
+                                   lambda *a, **kw: seq.pop(0) if seq else {}), \
+                 mock.patch.object(watch, "repost_empty_parks",
+                                   lambda *a, **kw: []), \
+                 mock.patch.object(watch.time, "sleep", lambda *_: None), \
+                 mock.patch.object(watch.time, "time", lambda: ticks.pop(0)), \
+                 redirect_stdout(out), redirect_stderr(io.StringIO()):
+                watch.main(["--tracked", os.path.join(d, "t.txt"),
+                            "--tasks-dir", d,
+                            "--state", state,
+                            "--max-polls", str(polls)])
+            records = []
+            log = os.path.join(state, "events.jsonl")
+            if os.path.exists(log):
+                with open(log, encoding="utf-8") as f:
+                    records = [json.loads(line) for line in f if line.strip()]
+        return out.getvalue(), records
+
+    def test_aged_fires_at_fifteen_and_at_sixty_minutes(self):
+        t0 = 1_700_000_000.0
+        out, records = self._drive(4, [t0, t0, t0 + 16 * 60, t0 + 61 * 60])
+        self.assertIn("AGED  aaaa1111  15m", out, out)
+        self.assertIn("AGED  aaaa1111  60m", out, out)
+        self.assertEqual(out.count("AGED"), 2, out)
+        aged = [r["detail"] for r in records if r.get("kind") == "AGED"]
+        self.assertEqual(aged, ["15m parked [idle+closer]",
+                                "60m parked [idle+closer]"],
+                         "the production record renders `<n>m parked [<reason>]`, "
+                         "never the bare reason")
+
+    def test_no_aged_before_fifteen_minutes(self):
+        t0 = 1_700_000_000.0
+        out, _ = self._drive(3, [t0, t0, t0 + 14 * 60])
+        self.assertNotIn("AGED", out, out)
+
+
 class RepostTest(unittest.TestCase):
     """The re-post — a parked session the store no longer holds gets a card back.
 
@@ -1293,10 +1347,14 @@ class RepostTest(unittest.TestCase):
         state = {"aaaa1111": ("A", "pick — 1. alpha", "busy+parked-modal", True)}
         self.assertEqual(watch.parked_keys(state), ["aaaa1111"])
 
-    def test_a_settled_idle_park_is_not_parked(self):
-        """The deliberate exclusion, pinned so a later widening is a decision."""
-        state = {"aaaa1111": ("A", "pick — 1. alpha", "idle+closer", True)}
-        self.assertEqual(watch.parked_keys(state), [])
+    def test_a_settled_idle_closer_park_is_parked(self):
+        """⚠️ Formerly pinned as a deliberate EXCLUSION, on the premise that the
+        ownership-filtered feed already carries this shape. It does not: a closer
+        panel is a `Stop` record and `is_open_gate` drops it from `needs-you`
+        (`who-needs-me.py:1247`), so the exclusion left the shape with no
+        escalation at all — 242 production parks of ≥ 15 min, zero `AGED`."""
+        state = {"aaaa1111": ("A", "approve: write one sample", "idle+closer", True)}
+        self.assertEqual(watch.parked_keys(state), ["aaaa1111"])
 
 
 class ParkAgeDurabilityTest(unittest.TestCase):
@@ -1994,6 +2052,15 @@ class ParkCardShapeTest(unittest.TestCase):
                          "field — the answer path for a parked closer line")
         payload = cmd[cmd.index("--payload") + 1]
         self.assertIn("parked on the operator", payload)
+
+    def test_an_idle_closer_park_also_keeps_its_message_card(self):
+        """`idle+closer` joined `PARKED_REASONS`, so it now reaches the re-post —
+        and it must reach it as a question, not an `ack`: the park is a closer
+        line the board CAN answer, and `INCIDENT_KIND_BY_REASON` maps it to no
+        `permission` kind."""
+        ok, cmd = self._run("idle+closer")
+        self.assertTrue(ok)
+        self.assertNotIn("--mechanism", cmd)
 
     def test_a_resolved_pane_puts_a_jump_target_on_the_card(self):
         _, cmd = self._run("busy+parked-modal", pane="1907")
