@@ -598,7 +598,21 @@ def _skips(s: str, branch: str, d: dict, started: float, limit: float, now: floa
     # fractional `round_started_at`. Flooring the start is the same one-second cost
     # `rearm_shape` documents, and the alternative is a recovery that silently fails
     # whenever the operator is fast.
-    abandoned = {step for ts, step in read_abandoned(s) if ts >= int(started)}
+    # ⚠️ Bounded on BOTH sides. The lower bound is the round's own start; the upper
+    # bound keeps a record dated in the future from excusing the step until
+    # wall-clock caught up — a forward clock jump when `abandon()` stamped it, or a
+    # hand-edited line. `math.isfinite` in `read_abandoned` rejects inf/nan; this
+    # rejects a finite future.
+    #
+    # ⚠️ `now + 1`, not `now`, and the slack is deliberate: it is the SAME
+    # one-second tolerance `int(started)` already grants at the lower bound, so the
+    # two ends of the window are equally forgiving of a sub-second skew between when
+    # a payment was stamped and when the round it belongs to opened or was read.
+    # `abandon()` writes `"%.3f"`, so a payment made immediately before a read can
+    # land fractionally after that read's `now`; without the slack that recovery
+    # fails whenever the operator is fast. A record dated a minute or a day ahead
+    # still fails, which is what the guard is for.
+    abandoned = {step for ts, step in read_abandoned(s) if int(started) <= ts <= now + 1}
     fields = d.get("fields") or {}
     skipped = []
     for step in steps_for(branch):

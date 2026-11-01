@@ -1066,6 +1066,53 @@ class FleetDebt(unittest.TestCase):
         self.assertEqual(rc, 11, out)
         self.assertIn("skipped: digest", out)
 
+    def test_an_abandonment_stamped_in_the_same_instant_is_honoured(self):
+        # The two ends of the window carry the same one-second tolerance. Without
+        # the upper slack a payment stamped a fraction before a read — `abandon()`
+        # writes "%.3f", and the read follows in microseconds — lands past that
+        # read's `now` and the recovery silently fails. This reddened in CI on the
+        # first cut of the upper bound, which used a bare `now`.
+        self.skipped_round()
+        self.check()
+        p = os.path.join(self.tmp.name, FLEET_SLUG + ".abandoned")
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write("%.3f digest\n" % (time.time() + 0.5))
+        rc, out = self.debt()
+        self.assertEqual(rc, 0, out)
+
+    def test_an_abandonment_past_the_tolerance_is_rejected(self):
+        # The other side of the edge. Without this pair the previous test passes for
+        # any tolerance at all, including an unbounded one — it would only prove the
+        # happy side.
+        #
+        # +60, not a value just past the slack: the rejection holds only while `now`
+        # is still below the record's stamp minus the slack, so a record dated a
+        # couple of seconds ahead tolerates just one second between the write and the
+        # read — a stall on a loaded runner would advance `now` past it and flip the
+        # test green for the wrong reason. Sixty seconds keeps the boundary check and
+        # removes the window; the +0.5 case brackets the other side.
+        self.skipped_round()
+        self.check()
+        p = os.path.join(self.tmp.name, FLEET_SLUG + ".abandoned")
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write("%.3f digest\n" % (time.time() + 60))
+        rc, out = self.debt()
+        self.assertEqual(rc, 12, out)
+        self.assertIn("digest", out)
+
+    def test_a_future_dated_abandonment_is_ignored(self):
+        # The other unbounded direction: a finite timestamp in the future — a
+        # forward clock jump when `abandon()` stamped it, or a hand-edited line —
+        # would otherwise excuse the step on every round until wall-clock caught up.
+        self.skipped_round()
+        self.check()
+        p = os.path.join(self.tmp.name, FLEET_SLUG + ".abandoned")
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write("%.3f digest\n" % (time.time() + 86400))
+        rc, out = self.check()
+        self.assertEqual(rc, 11, out)
+        self.assertIn("skipped: digest", out)
+
     def test_an_abandonment_from_an_earlier_round_is_not_honoured(self):
         # `check()` honours a payment only from the round it was paid in. Without
         # that filter one abandon would excuse the step for the rest of the task's
