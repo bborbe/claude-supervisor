@@ -114,9 +114,9 @@ def goal_manager_live(fm: str, vault: str, goals_dir: str) -> str:
                 gfm = k.frontmatter(fh.read())
         except OSError:
             continue
-        # `manager_session_id` first, `claude_session_id` second — see `topic-keepalive.py`.
-        sid = (k.scalar(gfm, "manager_session_id")
-               or k.scalar(gfm, "claude_session_id"))
+        # `claude_session_id` first, `manager_session_id` second — see `topic-keepalive.py`.
+        sid = (k.scalar(gfm, "claude_session_id")
+               or k.scalar(gfm, "manager_session_id"))
         if sid and k.session_verdict(sid) == "LIVE":
             return sid
     return ""

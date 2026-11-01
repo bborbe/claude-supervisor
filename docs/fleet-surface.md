@@ -943,7 +943,7 @@ before the task's `goals:`. What remains missing is the field's **writer**, not 
 **reader** — an absent or unresolvable `managed_by` falls through to tier 2 rather than
 erroring.
 
-Then read the owner's `manager_session_id` off its page — a goal or topic page carries the
+Then read the owner's `claude_session_id` off its page — a goal or topic page carries the
 session id of the manager that armed it — and treat it as a **lead only**, never as a verdict:
 
 | `session-liveness.py --check` | exit | action |
@@ -954,15 +954,19 @@ session id of the manager that armed it — and treat it as a **lead only**, nev
 | `AMBIGUOUS` | 3 | start a fresh manager; the prefix matches two rows the store holds, which need not both be **live** (the matcher spans stale rows too), and a longer id resolves it |
 | `MALFORMED` — malformed argument | 4 | **no verdict was reached**: the argument is not a single session id — a newline-separated id blob, a value carrying whitespace, or a string with no session-id shape. Never *dead*, and never a resume authorisation. ⚠️ **A caller that arrives here with a multi-id set has a shell bug, not a dead session**: under zsh an unquoted expansion is **not** word-split, so `for id in $ids` hands the whole blob over as ONE argument — probe **one id per invocation** |
 
-`manager_session_id` is written when a manager arms the subject — by the *Record the manager's
+`claude_session_id` is written when a manager arms the subject — by the *Record the manager's
 session on the subject's page* step in `commands/goal-loop.md`, which is a named paragraph
 rather than a `## ` heading — and overwritten whenever a new manager arms it, so a value is
 evidence of **who**, never of **alive**.
 
-⚠️ **Three things this is not.** It is **not** the `claude_session_id` stamp of § Session
-stamps: that one names the session working a *task*, this one names the manager serving a
-*goal or topic*, and the multiplicity rule above governs only the former — a session may hold
-many task stamps, while the manager stamp is a different field on a different page. It is
+⚠️ **Three things this is not.** It is **not** the same claim as the `claude_session_id`
+stamp of § Session stamps, even though it is the same field: on a *task* page it names the
+session working that task, and the multiplicity rule above governs it there; on a *goal or
+topic* page it names the manager serving that subject, it is overwritten whenever a new
+manager arms it, and no multiplicity rule applies — one page, one manager. The retired
+`manager_session_id` was a second field carrying the same manager id; it is read only as a
+fallback for a page the new writer has not touched yet, and every reader resolves
+`claude_session_id` first so a mixed page cannot resolve to the stale value. It is
 **not** the chain in `docs/subject-resolution.md`, which resolves a different question — which
 *subject* a session is serving — and is unchanged by this section; the two compose, and neither
 is a fallback for the other. And a missing `managed_by` is **not** an error: the task's own

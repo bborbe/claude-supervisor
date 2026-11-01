@@ -197,14 +197,14 @@ def _read_page(path: str) -> str:
 def _page_session_id(front: dict) -> str:
     """The session id a goal or topic page records.
 
-    `manager_session_id` is read first and `claude_session_id` second: the two are being
-    unified onto the latter, so reading the retired key first keeps a not-yet-migrated page
-    resolving exactly as it did before the writer swap, and the second lookup answers once
-    the migration lands.
+    `claude_session_id` is read first and the retired `manager_session_id` second: the
+    writer sets the former without clearing the latter, so a re-armed legacy page carries
+    both and reading the retired key first would hand back the stale id. The fallback
+    answers only for a page the new writer has not touched yet.
     """
 
     scalar = helpers().scalar
-    return scalar(front, "manager_session_id") or scalar(front, "claude_session_id")
+    return scalar(front, "claude_session_id") or scalar(front, "manager_session_id")
 
 
 def subjects(state_dir: str) -> tuple[list[tuple[str, str]], int]:
