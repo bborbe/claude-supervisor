@@ -15,7 +15,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --debt --subject "Fle
   && <run this leg>
 ```
 
-Exit **12** = a step is still owed: print the `debt:` lines, skip this leg, and **carry on with the round — the tail still runs**, because step 19's `--check` is what rewrites the debt. Exit **0** = no debt, run it. ⚠️ **`--debt` judges the round in progress**, re-reading the receipt, so a round that already swept is not blocked by a debt it has paid. ⚠️ **The exit code is the gate, never the printed line** — a leg that reads only the text is satisfied by an empty read. ⚠️ **Resuming a topic manager is not urgent enough to outrank the step the round owes** — that is the trade the 2026-10-31 rounds made in the other direction, and it is why the debt gates the cheap legs rather than only the expensive one.
+Exit **12** = a step is still owed: print the `debt:` lines, skip this leg, and **carry on with the round — the tail still runs**, because step 19's `--check` is what rewrites the debt. Exit **0** = no debt, run it. ⚠️ **Exit 2 = the gate could not read or write the debt file** — it prints nothing to stdout, only a reason to stderr; skip the leg and print that reason, never read 2 as "no debt". ⚠️ **`--debt` judges the round in progress**, re-reading the receipt, so a round that already swept is not blocked by a debt it has paid. ⚠️ **The exit code is the gate, never the printed line** — a leg that reads only the text is satisfied by an empty read. ⚠️ **Resuming a topic manager is not urgent enough to outrank the step the round owes** — that is the trade the 2026-10-31 rounds made in the other direction, and it is why the debt gates the cheap legs rather than only the expensive one.
 
 ## Step 5b — Restart a lapsed topic manager
 
