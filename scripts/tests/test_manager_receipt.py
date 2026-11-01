@@ -1086,11 +1086,17 @@ class FleetDebt(unittest.TestCase):
         # happy side. Two seconds is past the one-second slack and still far inside
         # "the operator was fast", so it isolates the tolerance rather than the
         # day-scale future-dated case below.
+        #
+        # +60, not +2: the rejection holds only while `now` is still below the
+        # record's stamp minus the slack, so a +2 record tolerates just one second
+        # between the write and the read — a stall on a loaded runner would advance
+        # `now` past it and flip the test green for the wrong reason. The larger
+        # offset keeps the boundary check and removes the window.
         self.skipped_round()
         self.check()
         p = os.path.join(self.tmp.name, FLEET_SLUG + ".abandoned")
         with open(p, "a", encoding="utf-8") as fh:
-            fh.write("%.3f digest\n" % (time.time() + 2))
+            fh.write("%.3f digest\n" % (time.time() + 60))
         rc, out = self.debt()
         self.assertEqual(rc, 12, out)
         self.assertIn("digest", out)
