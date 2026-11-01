@@ -722,7 +722,8 @@ def main() -> int:
                       help="print the open debt; exits 12 while any step is unpaid, 0 when clear")
     mode.add_argument("--abandon", action="store_true",
                       help="pay ONE skipped step (needs --step): removes it from the debt "
-                           "and records it in <slug>.abandoned, which --check treats as satisfied")
+                           "and records it in <slug>.abandoned, which --check honours for "
+                           "the round it was paid in and no later one")
     ap.add_argument("--topic")
     ap.add_argument("--subject", help="alias for --topic; the fleet tier's name for it")
     ap.add_argument("--branch", default="",
