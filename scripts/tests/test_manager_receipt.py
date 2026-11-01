@@ -1067,11 +1067,11 @@ class FleetDebt(unittest.TestCase):
         self.assertIn("skipped: digest", out)
 
     def test_an_abandonment_stamped_in_the_same_instant_is_honoured(self):
-        # `abandon()` writes "%.3f", which ROUNDS to the nearest millisecond, so a
-        # payment made immediately before a read can land fractionally AFTER that
-        # read's `now`. Rejecting it would make the recovery fail whenever the
-        # operator is fast — this reddened in CI on the first cut of the upper bound,
-        # which is why it is bounded at `now + 1` rather than `now`.
+        # The two ends of the window carry the same one-second tolerance. Without
+        # the upper slack a payment stamped a fraction before a read — `abandon()`
+        # writes "%.3f", and the read follows in microseconds — lands past that
+        # read's `now` and the recovery silently fails. This reddened in CI on the
+        # first cut of the upper bound, which used a bare `now`.
         self.skipped_round()
         self.check()
         p = os.path.join(self.tmp.name, FLEET_SLUG + ".abandoned")
@@ -1079,6 +1079,21 @@ class FleetDebt(unittest.TestCase):
             fh.write("%.3f digest\n" % (time.time() + 0.5))
         rc, out = self.debt()
         self.assertEqual(rc, 0, out)
+
+    def test_an_abandonment_past_the_tolerance_is_rejected(self):
+        # The other side of the edge. Without this pair the previous test passes for
+        # any tolerance at all, including an unbounded one — it would only prove the
+        # happy side. Two seconds is past the one-second slack and still far inside
+        # "the operator was fast", so it isolates the tolerance rather than the
+        # day-scale future-dated case below.
+        self.skipped_round()
+        self.check()
+        p = os.path.join(self.tmp.name, FLEET_SLUG + ".abandoned")
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write("%.3f digest\n" % (time.time() + 2))
+        rc, out = self.debt()
+        self.assertEqual(rc, 12, out)
+        self.assertIn("digest", out)
 
     def test_a_future_dated_abandonment_is_ignored(self):
         # The other unbounded direction: a finite timestamp in the future — a

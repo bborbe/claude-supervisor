@@ -604,13 +604,14 @@ def _skips(s: str, branch: str, d: dict, started: float, limit: float, now: floa
     # hand-edited line. `math.isfinite` in `read_abandoned` rejects inf/nan; this
     # rejects a finite future.
     #
-    # ⚠️ `now + 1`, not `now`, and the slack is load-bearing. `abandon()` writes
-    # `"%.3f"`, which ROUNDS to the nearest millisecond, so a payment made
-    # immediately before a read can land fractionally *after* that read's `now` and
-    # be rejected — a recovery that silently fails whenever the operator is fast.
-    # It is the same one-second tolerance `int(started)` already grants at the lower
-    # bound. A record dated a minute or a day ahead still fails, which is what the
-    # guard is for.
+    # ⚠️ `now + 1`, not `now`, and the slack is deliberate: it is the SAME
+    # one-second tolerance `int(started)` already grants at the lower bound, so the
+    # two ends of the window are equally forgiving of a sub-second skew between when
+    # a payment was stamped and when the round it belongs to opened or was read.
+    # `abandon()` writes `"%.3f"`, so a payment made immediately before a read can
+    # land fractionally after that read's `now`; without the slack that recovery
+    # fails whenever the operator is fast. A record dated a minute or a day ahead
+    # still fails, which is what the guard is for.
     abandoned = {step for ts, step in read_abandoned(s) if int(started) <= ts <= now + 1}
     fields = d.get("fields") or {}
     skipped = []
