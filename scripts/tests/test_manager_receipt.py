@@ -985,6 +985,63 @@ class FleetDebt(unittest.TestCase):
         rc, _ = self.abandon("digest")
         self.assertEqual(rc, 2)
 
+    # --- pay by passing ---------------------------------------------------------
+
+    def test_a_clean_round_pays_the_previous_rounds_debt_by_passing(self):
+        # The mechanism that actually pays a debt in normal operation: `write_debt`
+        # rewrites on every check, so doing the work clears it with no abandon at
+        # all. `--abandon` is the exception path, not the everyday one.
+        self.skipped_round()
+        self.check()
+        self.assertEqual(self.debt()[0], 12)
+
+        self.clean_round()
+        rc, out = self.check()
+        self.assertEqual(rc, 0, out)
+        rc, out = self.debt()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.strip(), "")
+
+    def test_a_second_skipping_check_keeps_the_debt_open(self):
+        # The control for pay-by-passing. If `write_debt` appended instead of
+        # rewriting, a clean round could never clear the debt; if a repeat skip
+        # wrote nothing, the debt would silently vanish after one round.
+        self.skipped_round()
+        self.check()
+        self.skipped_round()
+        rc, out = self.check()
+        self.assertEqual(rc, 11, out)
+        rc, out = self.debt()
+        self.assertEqual(rc, 12, out)
+        self.assertIn("digest", out)
+
+    # --- the payment is scoped to its round -------------------------------------
+
+    def test_an_abandonment_from_an_earlier_round_is_not_honoured(self):
+        # `check()` honours a payment only from the round it was paid in. Without
+        # that filter one abandon would excuse the step for the rest of the task's
+        # life — the permanent-green failure this whole file exists to prevent.
+        self.skipped_round()
+        self.check()
+        p = os.path.join(self.tmp.name, FLEET_SLUG + ".abandoned")
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write("%.3f digest\n" % (time.time() - 3600))
+        rc, out = self.check()
+        self.assertEqual(rc, 11, out)
+        self.assertIn("skipped: digest", out)
+
+    # --- the debt is fleet-only -------------------------------------------------
+
+    def test_the_goal_tier_writes_no_debt(self):
+        # `--check` is shared with the goal/topic tier, but only the three fleet
+        # legs chain `--debt`. Writing the file there would leave state no command
+        # reads, which is worse than no state at all.
+        self.cli("--start", "--topic", "Some Goal")
+        rc, out = self.cli("--check", "--topic", "Some Goal")
+        self.assertEqual(rc, 11, out)
+        self.assertIn("INCOMPLETE ROUND", out)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "some-goal.debt")))
+
 
 if __name__ == "__main__":
     unittest.main()

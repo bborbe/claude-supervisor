@@ -14,8 +14,9 @@ worker held an in-tab question for 34+ minutes unrelayed. Nothing in the round's
 output distinguished it from a full one.
 
 This script is that check. The round records the artifact each load-bearing step
-produced; the tail re-arm reads the receipt back and prints `skipped: <step>` for
-every field that does not resolve to an artifact produced THIS round.
+produced; the tail re-arm reads the receipt back and prints
+`INCOMPLETE ROUND — skipped: <step> — <why>` for every field that does not resolve
+to an artifact produced THIS round.
 
 Three verbs, one receipt per subject. `--subject` is an alias for `--topic` (the fleet
 tier's name for it), and `--branch` selects the tier: `""` (the default) is the goal or
@@ -39,10 +40,10 @@ topic round, `fleet` is the fleet round, whose slug carries the branch exactly a
                                 sweep reader's rendered payload under
                                 `~/.claude/state/fleet-handback/`).
   --check  --topic T            validate against the round window. Prints
-                                `skipped: <step>` per unresolved field and exits 11
-                                if any; prints nothing and exits 0 on a full round.
-                                Run at the tail re-arm, validating the round that
-                                just ran.
+                                `INCOMPLETE ROUND — skipped: <step> — <why>` per
+                                unresolved field and exits 11 if any; prints nothing
+                                and exits 0 on a full round. Run at the tail re-arm,
+                                validating the round that just ran.
 
 **A field resolves only when its artifact proves the step RAN, not that a path
 exists.** The file must sit inside the round window AND carry the producer's own
@@ -641,7 +642,15 @@ def check(topic: str, branch: str = "", now: float = None) -> int:
     # The debt is rewritten on EVERY check, not appended to: a round that did its
     # work pays the previous round's debt simply by passing, and a round that skips
     # again re-opens it. `--start` deliberately does not touch this file.
-    write_debt(s, [step for step, _ in skipped])
+    #
+    # FLEET ONLY. The goal/topic tier shares `--check`, but nothing there chains
+    # `--debt` — only `drive.md`, `keepalive.md` and `flagged-open.md` do — so
+    # writing the file for that tier would create state no command reads, and an
+    # operator would find a `<base>.debt` whose gate nothing consults. The sentinel
+    # still fires there; only the carry is fleet-scoped, which is what it was
+    # designed for.
+    if branch == "fleet":
+        write_debt(s, [step for step, _ in skipped])
 
     for step, why in skipped:
         print(f"{SENTINEL} — skipped: {step} — {why}")
@@ -676,6 +685,13 @@ def abandon(topic: str, branch: str, step: str) -> int:
         print(f"no open debt for {step} on {s}", file=sys.stderr)
         return 2
     write_debt(s, [x for x in steps if x != step])
+    # `write_debt`'s empty branch unlinks and swallows an OSError, while its
+    # non-empty branch goes through `write_atomic` and raises. Reporting success on
+    # the silent path would leave `--debt` exiting 12 while this verb claimed the
+    # step was paid — so read the result back rather than trusting the write.
+    if step in read_debt(s):
+        print(f"could not pay {step} on {s}: the debt file is unchanged", file=sys.stderr)
+        return 2
     with open(abandoned_path(s), "a", encoding="utf-8") as fh:
         fh.write("%.3f %s\n" % (time.time(), step))
     print(f"abandoned {s} {step}")
@@ -687,13 +703,15 @@ def main() -> int:
         description="Per-round receipt for manager loops.",
         epilog=(
             "A skipped round prints `INCOMPLETE ROUND — skipped: <step> — <why>` and "
-            "exits 11, and the skipped steps are written to `<slug>.debt` beside the "
-            "receipt. `--debt` exits 12 while that file is non-empty, so a leg chained "
-            "`--debt && <leg>` cannot run ahead of the step that is owed. `--start` "
-            "does not clear it: the debt outlives the round that caused it. "
-            "`--abandon --step <step>` is the one recovery verb — it pays a step the "
-            "round genuinely will not do, records it in `<slug>.abandoned`, and lets "
-            "the next `--check` exit 0."
+            "exits 11; on the fleet tier the skipped steps are also written to "
+            "`<slug>.debt` beside the receipt. `--debt` exits 12 while that file is "
+            "non-empty, so a leg chained `--debt && <leg>` cannot run ahead of the "
+            "step that is owed. `--start` does not clear it: the debt outlives the "
+            "round that caused it. `--abandon --step <step>` is the one recovery verb "
+            "— it pays a step the round genuinely will not do and records it in "
+            "`<slug>.abandoned`, which `--check` honours for the round it was paid in "
+            "and no later one, so re-running that same round's `--check` exits 0 while "
+            "an old payment cannot excuse the step forever."
         ),
     )
     mode = ap.add_mutually_exclusive_group(required=True)
