@@ -810,6 +810,44 @@ class Cli(unittest.TestCase):
         self.assertIn("no launcher could be resolved", out.stdout)
         self.assertNotIn("killed pid", out.stdout)
 
+    def _run_with_vault_cli(self, sid, vault_cli):
+        """Run the CLI with NO config override, so `vault-cli` itself must be resolved."""
+        env = dict(os.environ)
+        for key in ("SUPERVISOR_LAUNCHER", "SUPERVISOR_VAULT_CONFIG"):
+            env.pop(key, None)
+        env["SUPERVISOR_LOAD_PATH"] = self.load
+        env["SUPERVISOR_VAULT_CLI"] = vault_cli
+        env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+        return subprocess.run(
+            [sys.executable, SCRIPT, sid, "--sessions-dir", self.reg],
+            capture_output=True, text=True, env=env,
+        )
+
+    def test_missing_vault_cli_is_an_environment_fault_not_a_refusal(self):
+        """Launcher absent: exit 3 under its own token — never the refusal line."""
+        self.write(1, entry("envfault", name="Some Worker"))
+        out = self._run_with_vault_cli("envfault", os.path.join(self.dir, "no-vault-cli"))
+        lines = out.stdout.splitlines()
+        self.assertEqual(out.returncode, 3, out.stdout)
+        self.assertEqual(lines[0], "environment-fault", out.stdout)
+        self.assertIn("vault-cli not found", out.stdout)
+        self.assertNotIn("no launcher could be resolved", out.stdout)
+        self.assertNotIn("killed pid", out.stdout)
+
+    def test_present_vault_cli_with_ineligible_target_is_a_refusal(self):
+        """Launcher present, cwd under no vault: the genuine refusal, exit 1."""
+        self.write(1, entry("ineligible", name="Some Worker"))
+        fake = os.path.join(self.dir, "vault-cli")
+        payload = json.dumps([{"name": "v", "path": os.path.join(self.dir, "elsewhere"),
+                               "claude_script": "/x/cc"}])
+        with open(fake, "w") as fh:
+            fh.write(f"#!/bin/sh\ncat <<'EOF'\n{payload}\nEOF\n")
+        os.chmod(fake, 0o755)
+        out = self._run_with_vault_cli("ineligible", fake)
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("no launcher could be resolved", out.stdout)
+        self.assertNotIn("environment-fault", out.stdout)
+
     def test_happy_path_dry_run_signals_nothing(self):
         """Cleared target: the dry run reports what it WOULD do and exits 0."""
         self.write(1, entry("ok", name="Some Worker"))

@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: `restart-worker.py` resolves `vault-cli` via `PATH`, `$GOPATH/bin` and known install locations instead of a bare name, and a missing `vault-cli` now exits 3 with an `environment-fault` line instead of printing as a launcher refusal (exit 1)
+
 ## v0.225.2
 
 - docs: **`docs/session-tiers.md` no longer says the fleet keeper restarts the Fleet Manager.** Since v0.225.1 the keeper is report-only. Rule 1 ("a crashed or lapsed manager … is restarted automatically") now names the fleet tier as its one exception: a fleet lapse is reported on a card and never restarted, with the measured reason (healthy rounds run median 18 / p90 38 / max 51 min against an 18-min `stale` threshold). The rule-4 paragraph now says the keeper opens and resumes nothing. Flagged by the pr-reviewer bot on #588 and kept out of that PR so the approved head would not move. Change set: `docs/session-tiers.md`, `CHANGELOG.md`.
