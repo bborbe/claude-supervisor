@@ -134,6 +134,20 @@ class ReportOnlyContractTest(KeeperBase):
         self.tick(T0 + 41 * MIN)
         self.assertEqual(1, len(posted), "a lapse whose card never posted must still be reported")
 
+    def test_an_unwritable_lapse_state_is_reported_not_silent(self):
+        """Without a persisted start, every tick restarts the timer and a real lapse is never
+        reported. That must surface, not read as a quiet fleet."""
+        fk.LAPSE = "/nonexistent-dir-for-fleet-keeper-test/lapse.json"
+        fk.STATE_DIR = "/nonexistent-dir-for-fleet-keeper-test"
+        rc, out = self.tick(T0)
+        self.assertEqual("cannot-tell", out[0])
+        self.assertIn("fleet-keeper-state-unwritable", self.cards)
+
+    def test_a_start_time_in_the_future_restarts_the_timer(self):
+        pathlib.Path(fk.LAPSE).write_text(json.dumps({"since": T0 + 3600, "reported": None}))
+        self.assertEqual("pending", self.tick(T0)[1][0])
+        self.assertEqual(T0, json.loads(pathlib.Path(fk.LAPSE).read_text())["since"])
+
     # ---- SC3, stop marker, unknown ------------------------------------------
 
     def test_an_absent_fleet_manager_is_reported(self):
@@ -165,18 +179,26 @@ class ReportOnlyContractTest(KeeperBase):
 class NoKillPathTest(unittest.TestCase):
     """SC2: the keeper holds no kill, resume, re-arm or spawn path at all."""
 
-    KILL_SHAPES = re.compile(r"restart-worker|os\.kill|\"spawn\"|send-text|killing-pid|--resume")
+    KILL_SHAPES = re.compile(
+        r"restart-worker|os\.kill|\"spawn\"|send-text|killing-pid|--resume"
+        r"|wezterm|launchctl|importlib|Popen|load_sibling"
+    )
+
+    @staticmethod
+    def code_only(path):
+        """The source with docstrings and full-line comments removed, so prose describing the
+        old kill path can neither pass nor fail the check."""
+        src = (_SCRIPTS / path).read_text(encoding="utf-8")
+        src = re.sub(r'"""[\s\S]*?"""', "", src)
+        return "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
 
     def test_the_keeper_source_has_no_kill_or_resume_path(self):
-        src = (_SCRIPTS / "fleet-keeper.py").read_text(encoding="utf-8")
-        code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
-        code = re.sub(r'"""[\s\S]*?"""', "", code)
-        self.assertEqual([], self.KILL_SHAPES.findall(code))
+        self.assertEqual([], self.KILL_SHAPES.findall(self.code_only("fleet-keeper.py")))
 
-    def test_positive_control_the_pattern_fires_on_a_real_kill_path(self):
-        """Without this, an empty result above could be a blind pattern."""
-        src = (_SCRIPTS / "restart-worker.py").read_text(encoding="utf-8")
-        self.assertTrue(self.KILL_SHAPES.search(src))
+    def test_positive_control_the_pattern_fires_on_stripped_real_kill_code(self):
+        """Runs through the SAME stripping as the check above, so a stripper that deleted code
+        would make this fail rather than let the real check pass blind."""
+        self.assertTrue(self.KILL_SHAPES.search(self.code_only("restart-worker.py")))
 
 
 class VerdictTest(unittest.TestCase):

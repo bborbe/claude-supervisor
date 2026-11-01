@@ -217,14 +217,21 @@ def load_lapse():
 
 
 def save_lapse(rec):
+    """Persist the lapse record. Returns whether it landed.
+
+    ⚠️ A failure here is NOT benign, so it is never swallowed silently: without a persisted
+    start time every tick begins a fresh lapse at `since=now`, the held time never reaches
+    REPORT_AFTER, and a real lapse is never reported — a dead fleet read as a quiet one.
+    """
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
         tmp = LAPSE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(rec, fh)
         os.replace(tmp, LAPSE)
+        return True
     except OSError:
-        pass
+        return False
 
 
 def clear_lapse():
@@ -312,9 +319,20 @@ def main(argv):
         return 1
 
     lapse = load_lapse()
-    if lapse is None:
+    if lapse is None or lapse["since"] > now:
+        # A start time in the future is clock skew; restart the timer rather than hold a
+        # negative age that would keep the lapse `pending` for as long as the skew lasts.
         lapse = {"since": now, "reported": None}
-        save_lapse(lapse)
+        if not save_lapse(lapse):
+            item = notify(
+                "fleet-keeper-state-unwritable",
+                f"The fleet keeper cannot write {LAPSE}, so it cannot time a lapse: every tick "
+                f"would start a fresh 40-minute timer and a real lapse would never be reported. "
+                f"The fleet round is stale right now.",
+                ["acknowledge"], context=detail,
+            )
+            report("cannot-tell", f"cannot persist lapse state — reported{card(item)}", now)
+            return 1
 
     held = now - lapse["since"]
     if held < REPORT_AFTER:
