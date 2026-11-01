@@ -342,6 +342,15 @@ class EpisodeTest(KeeperBase):
         self.assertEqual(2, len(lapse))
         self.assertTrue(lapse[1].endswith("-d1"))
 
+    def test_an_absent_manager_lasting_over_a_day_is_raised_again(self):
+        """A dead fleet manager with no successor is the episode that outlives a 24 h card."""
+        self.live = "ABSENT"
+        self.tick(T0)
+        self.tick(T0 + 25 * 3600)
+        absent = [k for k in self.cards if k.startswith("fleet-keeper-absent-")]
+        self.assertEqual(2, len(absent))
+        self.assertTrue(absent[1].endswith("-d1"))
+
     def test_a_deliberate_stop_ends_open_condition_episodes(self):
         """An episode left open across a stop would make the next one return the old,
         acknowledged card and post nothing."""

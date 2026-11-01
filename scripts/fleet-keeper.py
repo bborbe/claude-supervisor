@@ -343,11 +343,18 @@ def raise_once(condition, payload, now, detail=""):
     """
     episodes = _load_episodes()
     ep = episodes.get(condition)
-    if ep and ep.get("item"):
-        return ep["item"]
     since = ep["since"] if ep and isinstance(ep.get("since"), (int, float)) else now
-    item = notify(f"fleet-keeper-{condition}-{int(since)}", payload, ["acknowledge"], context=detail)
-    episodes[condition] = {"since": since, "item": item}
+    # Re-raised once per day of the episode, exactly as the lapse card is: a card expires after
+    # its 24 h default, and an ABSENT fleet manager with no successor is the case that outlives
+    # it. Days of the EPISODE, not calendar days, so the day-0 card overlaps the day-1 card
+    # instead of leaving a gap. (A record without `day` reads as day 0, so an upgrade does not
+    # repost.)
+    ep_day = int((now - since) // 86400)
+    if ep and ep.get("item") and ep.get("day", 0) == ep_day:
+        return ep["item"]
+    item = notify(f"fleet-keeper-{condition}-{int(since)}-d{ep_day}", payload, ["acknowledge"],
+                  context=detail)
+    episodes[condition] = {"since": since, "item": item, "day": ep_day}
     if not _save_episodes(episodes):
         notify(f"fleet-keeper-state-unwritable-{day(now)}",
                f"The fleet keeper cannot write {EPISODES}, so it cannot remember which conditions "
