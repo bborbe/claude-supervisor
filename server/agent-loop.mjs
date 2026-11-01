@@ -42,7 +42,7 @@ import { config } from './config.mjs'
 // test with a synthetic stream and no filesystem.
 const NO_HEARTBEAT = { start() {}, stop() {} }
 
-export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_HEARTBEAT }) {
+export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_HEARTBEAT, onTurnComplete = null }) {
   try {
     for await (const message of q) {
       agent.transcript.push(message)
@@ -76,6 +76,18 @@ export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_
           ...(config.costFiguresMeaningful ? { total_cost_usd: message.total_cost_usd } : {}),
           permission_denials: message.permission_denials?.length ?? 0,
         }
+        // Fires AFTER the payload is captured, so a hook that ends the session cannot swallow the
+        // turn it is ending. ⚠️ It must NOT assume the turn is over: a `result` can arrive
+        // mid-turn (see the header), so the hook re-reads the wrapper and decides for itself.
+        // A hook that throws must not settle the worker — the turn's outcome is already captured,
+        // and turning a hook bug into an `error` status would recreate the defect this fixes.
+        if (onTurnComplete) {
+          try {
+            await onTurnComplete(agent)
+          } catch (error) {
+            log(`agent ${agent.id} turn-complete hook threw: ${error}`)
+          }
+        }
       }
     }
     // The turn is over only now that the stream has ended. Settle the terminal
@@ -93,9 +105,29 @@ export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_
       })
     }
   } catch (error) {
-    agent.status = 'error'
-    agent.error = String(error)
-    log(`agent ${agent.id} threw: ${error}`)
+    // ⚠️ **A throw AFTER the turn's `result` was captured is not a worker error.** The stream can
+    // die for reasons that say nothing about the work — the wrapper restarted, a proxy dropped the
+    // connection, the subscriber was torn down — while the turn it was reporting genuinely
+    // completed. Settling that as `error` records a finished worker as a dead one, which is what
+    // every session in the wrapper-termination defect has in common: `result.subtype: success`
+    // alongside a stream failure.
+    //
+    // ⚠️ **Both branches now write a terminal row, and the old one wrote NONE.** A throw used to
+    // leave the durable row asserting `running` forever — a record that outlives the server which
+    // wrote it, that no later reader can correct, and that `server/ledger.mjs` explicitly warns
+    // must never be read as proof of life. That leak was independent of the classification above:
+    // any other throw reached it too.
+    const terminal = { ended_at: new Date().toISOString() }
+    if (agent.result && !agent.result.is_error) {
+      agent.status = 'done'
+      writeLedger(agent, { ...terminal, status: 'done', result: agent.result })
+      log(`agent ${agent.id} stream ended after a completed turn: ${error}`)
+    } else {
+      agent.status = 'error'
+      agent.error = String(error)
+      writeLedger(agent, { ...terminal, status: 'error', error: agent.error })
+      log(`agent ${agent.id} threw: ${error}`)
+    }
   } finally {
     // Covers BOTH endings — the settle above and the throw here — so a worker that errors
     // does not keep a live stamp behind it. This is the graceful half ONLY: a server killed

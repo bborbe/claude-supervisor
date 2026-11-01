@@ -25,7 +25,24 @@
 // frame therefore carries no reason and this module asks the wrapper directly: `exited` is a
 // real end, anything else is a `StreamLaggedError` the caller must not settle as success.
 
+import { Agent } from 'undici'
+
 const DEFAULT_TIMEOUT_MS = 10_000
+
+// ⚠️ **The event stream must never carry a body timeout, and undici's default is five minutes.**
+// `fetch` here is Node's global (undici), whose `bodyTimeout` defaults to `300e3` — see
+// `undici/lib/dispatcher/client.js:316`. An SSE body is IDLE BY DESIGN for exactly the states
+// this adapter exists to serve: a child between turns, and a child parked on a question while a
+// manager answers it. Five minutes of silence therefore destroys the body and undici raises
+// `TypeError: terminated`, which reaches `runAgentLoop`'s catch and settles a healthy worker as
+// `error` — measured 2026-11-01 at 300.85 s / 301.27 s / 301.18 s after the last frame, three
+// runs of three, on a child that was still `idle` afterwards.
+//
+// `bodyTimeout: 0` disables it. This does NOT make a dead peer indistinguishable from a quiet
+// one: the wrapper closes the response when the child exits, and a genuinely unreachable wrapper
+// fails the connection instead of going silent. `headersTimeout` is left at its default — the
+// response headers are not the long-lived part.
+const SSE_DISPATCHER = new Agent({ bodyTimeout: 0 })
 
 /** Raised when the stream stopped for a reason other than the child exiting. */
 export class StreamLaggedError extends Error {
@@ -256,6 +273,9 @@ export async function* streamWrappedSession({ baseUrl, sessionId, fetchImpl = fe
   const resp = await fetchImpl(`${baseOf(baseUrl)}/api/1.0/sessions/${encodeURIComponent(sessionId)}/events`, {
     method: 'GET',
     headers: { accept: 'text/event-stream' },
+    // Load-bearing: without it undici tears the body down after five idle minutes and a
+    // healthy parked child is recorded as a dead worker. See SSE_DISPATCHER above.
+    dispatcher: SSE_DISPATCHER,
     ...(signal ? { signal } : {}),
   })
   if (!resp.ok) {

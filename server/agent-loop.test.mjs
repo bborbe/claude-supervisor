@@ -111,3 +111,111 @@ test('an is_error result settles the turn as error', async () => {
   const { agent } = await drive({ isError: true })
   assert.equal(agent.status, 'error', 'a result carrying is_error must end the turn as error, not done')
 })
+
+// ⚠️ The `catch` used to do two wrong things at once, and both are pinned here because a fix
+// for one leaves the other reachable: it classified EVERY throw as a worker error — so a stream
+// that died after the turn's `result` had been captured recorded a finished worker as a dead one
+// — and it wrote NO ledger row at all, so the durable record kept asserting `running` forever,
+// which `ledger.mjs` names as the reading it must never be trusted for.
+//
+// Measured 2026-11-01 on the deployed build: three runs of three threw `TypeError: terminated`
+// 300.85 s / 301.27 s / 301.18 s after a `success` result, with the child still `idle` afterwards.
+// The trigger was undici's default five-minute `bodyTimeout` on a legitimately idle SSE body —
+// fixed in `wrapper-stream.mjs` — but this classification must not depend on that trigger staying
+// away, which is why it is asserted directly rather than through the wrapper.
+async function driveThrow({ withResult = true, isError = false } = {}) {
+  const agent = makeAgent()
+  const ledgerCalls = []
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-1' }
+    if (withResult) {
+      yield { type: 'result', subtype: 'success', is_error: isError, result: 'done work', num_turns: 1, permission_denials: [] }
+    }
+    throw new TypeError('terminated')
+  }
+  await runAgentLoop({
+    q: stream(),
+    agent,
+    writeLedger: (...args) => {
+      ledgerCalls.push(args)
+      return {}
+    },
+    log: () => {},
+  })
+  return { agent, ledgerCalls }
+}
+
+test('a stream that dies after a completed turn settles done, not error', async () => {
+  const { agent, ledgerCalls } = await driveThrow()
+
+  assert.equal(agent.status, 'done', 'a throw after a captured success result must not record a finished worker as dead')
+  const terminal = ledgerCalls.filter(([, patch]) => patch !== undefined)
+  assert.equal(terminal.length, 1, 'the terminal row must be written even when the stream threw')
+  assert.equal(terminal[0][1].status, 'done')
+  assert.equal(terminal[0][1].result.result, 'done work', 'the row must carry the result the turn actually produced')
+  assert.ok(terminal[0][1].ended_at, 'a terminal row without ended_at is not terminal')
+  assert.equal(terminal[0][1].error, undefined, 'a completed turn must not file an error field')
+})
+
+test('a stream that dies with no result settles error AND writes the terminal row', async () => {
+  const { agent, ledgerCalls } = await driveThrow({ withResult: false })
+
+  assert.equal(agent.status, 'error')
+  const terminal = ledgerCalls.filter(([, patch]) => patch !== undefined)
+  assert.equal(terminal.length, 1, 'the old catch wrote no row at all, which left the durable record at running forever')
+  assert.equal(terminal[0][1].status, 'error')
+  assert.match(terminal[0][1].error, /terminated/)
+})
+
+test('a stream that dies after an is_error result settles error', async () => {
+  const { agent } = await driveThrow({ isError: true })
+  assert.equal(agent.status, 'error', 'an is_error result stays an error even when the stream dies afterwards')
+})
+
+// The turn-complete hook is the deliberate end-of-life: a wrapper child never exits on its own,
+// so the supervisor stops a worker whose turn has closed and which has nothing parked. The loop
+// owes the hook two things — it fires AFTER the payload is captured, so a hook that ends the
+// session cannot swallow the turn it is ending, and it fires per `result`, because only the hook
+// can tell a mid-turn `result` from a closed turn (it re-reads the wrapper's `pending_turns`).
+test('the turn-complete hook runs after the payload is captured, once per result', async () => {
+  const agent = makeAgent()
+  const seen = []
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-1' }
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'first', num_turns: 1, permission_denials: [] }
+    yield { type: 'assistant', message: { content: 'still working' } }
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'last', num_turns: 2, permission_denials: [] }
+  }
+
+  await runAgentLoop({
+    q: stream(),
+    agent,
+    writeLedger: () => ({}),
+    log: () => {},
+    onTurnComplete: async (current) => {
+      seen.push(current.result?.result)
+    },
+  })
+
+  assert.deepEqual(seen, ['first', 'last'], 'the hook must see the captured payload, and must fire per result')
+})
+
+test('a throwing turn-complete hook does not settle the worker as error', async () => {
+  const agent = makeAgent()
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-1' }
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'done work', num_turns: 1, permission_denials: [] }
+  }
+
+  await runAgentLoop({
+    q: stream(),
+    agent,
+    writeLedger: () => ({}),
+    log: () => {},
+    onTurnComplete: () => {
+      throw new Error('hook bug')
+    },
+  })
+
+  assert.equal(agent.status, 'done', 'a hook bug must not be recorded as a worker error — the turn completed')
+})

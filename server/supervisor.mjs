@@ -17,7 +17,7 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
-import { answerWrappedSession, listWrappedSessions, pendingQuestionOf, sendWrappedSession, spawnWrappedSession, stopWrappedSession, streamWrappedSession } from './wrapper-stream.mjs'
+import { answerWrappedSession, listWrappedSessions, pendingQuestionOf, readWrappedSession, sendWrappedSession, spawnWrappedSession, stopWrappedSession, streamWrappedSession } from './wrapper-stream.mjs'
 import { HEARTBEAT_INTERVAL_MS, a2aStamp, clearStamp, heartbeatDir, selfStampRefusal, stampRecord, startSelfStamp } from './heartbeat.mjs'
 import { workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
@@ -2940,7 +2940,41 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // the worker's first turn. The loop itself lives in agent-loop.mjs so a test can
   // drive it with a synthetic stream and await its completion — this module cannot be
   // imported by a test at all, since it connects a stdio server at load.
-  void runAgentLoop({ q, agent, writeLedger, log, heartbeat })
+  // ⚠️ **A headless worker's child never exits on its own.** It is spawned with
+  // `--input-format stream-json` and holds its stdin pipe, so after a turn it waits for the next
+  // message forever — measured 2026-11-01: 21 of 59 wrapper sessions idle, the oldest 22 hours.
+  // Nothing ended one, so the only thing that ever did was undici's five-minute body timeout,
+  // which ended it wrongly. This is the deliberate end-of-life that timeout was standing in for.
+  //
+  // ⚠️ It runs on EVERY `result`, and a `result` can arrive MID-turn, so it re-reads the wrapper
+  // instead of assuming. `pending_turns` is the signal that separates the two — it counts the
+  // turns the child has not yet closed (`claude-wrapper` `pkg/supervisor.go:562`), so 0 means the
+  // turn is genuinely over and a non-zero value means it is not.
+  //
+  // ⚠️ **Every keep-alive condition fails CLOSED.** An unreadable wrapper or attention store
+  // keeps the worker rather than ending one that could not be inspected. A worker parked on a
+  // `question` is waiting on a manager; a worker with an open attention card is waiting on a
+  // person. Neither is finished, and stopping either would orphan exactly the card this whole
+  // task exists to protect.
+  const endWorkerIfIdle = async (current) => {
+    let session
+    try {
+      session = await readWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id })
+    } catch (error) {
+      log(`WARNING: could not read ${current.id} to decide whether its turn ended; leaving it running: ${error.message}`)
+      return
+    }
+    if (session.state !== 'idle' || session.pending_turns !== 0) return
+    if (session.question) return
+    // `null` is "the store could not be read", never "no cards" — see open-cards.mjs.
+    const cards = await fetchOpenCards({ storeUrl: config.attentionStoreUrl, sessionId: current.sessionId })
+    if (cards === null || cards.length > 0) return
+    await stopWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id }).catch((error) => {
+      log(`WARNING: could not stop ${current.id} after its turn closed: ${error.message}`)
+    })
+  }
+
+  void runAgentLoop({ q, agent, writeLedger, log, heartbeat, onTurnComplete: endWorkerIfIdle })
 
   return {
     agent_id: id,
