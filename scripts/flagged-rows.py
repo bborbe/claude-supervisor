@@ -607,8 +607,11 @@ def subject_liveness(ctx, vault, kind, name):
     block = read_block(path) if path else None
     sid = None
     if block is not None:
-        sid = ((open_queue.field(block, "manager_session_id") or "").strip()
-               or (open_queue.field(block, "claude_session_id") or "").strip()
+        # `claude_session_id` first, the retired key second — the same order the row
+        # builder below uses. Reading the retired key first here would probe `owner_live`
+        # against the stale id on exactly the mixed page this writer creates.
+        sid = ((open_queue.field(block, "claude_session_id") or "").strip()
+               or (open_queue.field(block, "manager_session_id") or "").strip()
                or None)
     if not sid:
         verdict = False

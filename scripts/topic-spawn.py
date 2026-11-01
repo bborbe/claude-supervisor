@@ -227,7 +227,7 @@ def live_goal_managers(vault: str, topics_dir: str, goals: list[str]) -> int:
 
     Two independent sources, and neither is complete on its own:
 
-    * each goal page's `manager_session_id`, probed through
+    * each goal page's `claude_session_id`, probed through
       `session-liveness.py --check`, which answers LIVE / ABSENT / UNKNOWN. Only
       LIVE counts — an UNKNOWN is not a dead manager, but it is also not a running
       one, and counting it would refuse a start on evidence nothing produced.

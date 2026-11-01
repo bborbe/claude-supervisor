@@ -29,7 +29,7 @@ this module cannot resolve.
 
 ## The four reads
 
-  1. `manager_session_id:` on a **goal** page — the goal manager's own session. Its scope is
+  1. `claude_session_id:` on a **goal** page — the goal manager's own session. Its scope is
      that goal's `# Tasks` list. This is how an operator-opened manager is identified at all:
      it was never spawned, so the spawn ledger has no record of it.
   2. `claude_session_id:` on a **task** page — the task's owning session.
@@ -67,7 +67,8 @@ exclusion removes a WAKE, never the gate.
 
 ⚠️ **A TOPIC manager is unresolved today, and that is a named limitation rather than an
 oversight.** `--self` is matched against task pages (`claude_session_id`) and goal pages
-(`manager_session_id`); a topic page (`23 Topics/`) is not read, so a topic manager resolves
+(`claude_session_id`, or the retired `manager_session_id` as a fallback); a topic page
+(`23 Topics/`) is not read, so a topic manager resolves
 no scope, prints the `SCOPE  unresolved:` line, and excludes nothing — its behaviour is exactly
 what shipped before this module existed. Widening it to topics is a separate question (a
 topic's scope is its member goals, not a `# Tasks` list) and is deliberately not guessed here.

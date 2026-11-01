@@ -194,7 +194,7 @@ def _read_page(path: str) -> str:
     return _memo(("page", path), read)
 
 
-def _page_session_id(front: dict) -> str:
+def _page_session_id(front: str) -> str:
     """The session id a goal or topic page records.
 
     `claude_session_id` is read first and the retired `manager_session_id` second: the
@@ -380,7 +380,7 @@ def evaluate(vault: str, branch: str, base: str) -> dict:
     if branch == "fleet":
         row["reason"] = (
             "fleet record — nothing sits above a fleet manager, but it has no page to carry a "
-            "manager_session_id, so live-but-lapsed cannot be established and it is never carded"
+            "session id, so live-but-lapsed cannot be established and it is never carded"
         )
         return row
 
