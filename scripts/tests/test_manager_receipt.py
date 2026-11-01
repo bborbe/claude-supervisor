@@ -1031,6 +1031,41 @@ class FleetDebt(unittest.TestCase):
 
     # --- the payment is scoped to its round -------------------------------------
 
+    def test_a_round_that_skips_is_gated_by_its_own_receipt(self):
+        # The prevention the gate exists for: the sweep is row 2 and the gate is row
+        # 5, so a round that skipped its digest must be blocked on ITS OWN receipt —
+        # not on whatever the previous round left behind.
+        self.skipped_round()
+        rc, out = self.debt()
+        self.assertEqual(rc, 12, out)
+        self.assertIn("digest", out)
+        self.assertNotIn("re-arm", out)
+
+    def test_the_gate_judges_the_round_in_progress_not_the_last_one(self):
+        # The mirror: a round that HAS swept must not be blocked by a debt it has
+        # already paid. A file-only `--debt` fails this, because the file is only
+        # rewritten at the tail (row 19) — after the legs (rows 5/5b/5c) have run.
+        self.skipped_round()
+        self.check()
+        self.assertEqual(self.debt()[0], 12)
+
+        self.clean_round()
+        rc, out = self.debt()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.strip(), "")
+
+    def test_a_non_finite_abandonment_is_ignored(self):
+        # `float()` accepts `inf`, and the honouring test has no upper bound: one
+        # tampered line would excuse the step on every later round.
+        self.skipped_round()
+        self.check()
+        p = os.path.join(self.tmp.name, FLEET_SLUG + ".abandoned")
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write("inf digest\n")
+        rc, out = self.check()
+        self.assertEqual(rc, 11, out)
+        self.assertIn("skipped: digest", out)
+
     def test_an_abandonment_from_an_earlier_round_is_not_honoured(self):
         # `check()` honours a payment only from the round it was paid in. Without
         # that filter one abandon would excuse the step for the rest of the task's

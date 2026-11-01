@@ -15,7 +15,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --debt --subject "Fle
   && <run this leg>
 ```
 
-Exit **12** = a step is still owed: print the `debt:` lines and skip this leg. Exit **0** = no debt, run it. ⚠️ **The exit code is the gate, never the printed line** — a leg that reads only the text is satisfied by an empty read of a file it never checked. ⚠️ **An operator's flag is not a licence to run ahead of the sweep** — the 13:27 round on 2026-10-31 opened three flagged rows and never swept, and nothing in its render said so. Opening the row is one round's delay; sweeping is what makes the next round's opening decision correct.
+Exit **12** = a step is still owed: print the `debt:` lines, skip this leg, and **carry on with the round — the tail still runs**, because step 19's `--check` is what rewrites the debt. Exit **0** = no debt, run it. ⚠️ **`--debt` judges the round in progress**, re-reading the receipt, so a round that already swept is not blocked by a debt it has paid. ⚠️ **The exit code is the gate, never the printed line** — a leg that reads only the text is satisfied by an empty read. ⚠️ **An operator's flag is not a licence to run ahead of the sweep** — the 13:27 round on 2026-10-31 opened three flagged rows and never swept, and nothing in its render said so. Opening the row is one round's delay; sweeping is what makes the next round's opening decision correct.
 
 ## Step 5c — Open what the operator already marked
 

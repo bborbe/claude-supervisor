@@ -296,9 +296,16 @@ def read_abandoned(s: str) -> list:
                 if len(parts) != 2:
                     continue
                 try:
-                    out.append((float(parts[0]), parts[1]))
+                    ts = float(parts[0])
                 except ValueError:
                     continue
+                # ⚠️ `float()` accepts `inf`, and `ts >= int(started)` has no upper
+                # bound — one tampered `inf` line would excuse the step on every later
+                # round, the permanent green the round-scoping exists to prevent.
+                # Nothing here writes a non-finite value, so this is a tamper guard.
+                if not math.isfinite(ts):
+                    continue
+                out.append((ts, parts[1]))
             return out
     except OSError:
         return []
@@ -575,26 +582,13 @@ def digest_shape(text: str) -> bool:
     return False
 
 
-def check(topic: str, branch: str = "", now: float = None) -> int:
-    now = time.time() if now is None else now
-    s = slug(topic, branch)
-    d = read_receipt(s)
-    started, limit, basis = window(s, now)
+def _skips(s: str, branch: str, d: dict, started: float, limit: float, now: float) -> list:
+    """`[(step, why), …]` for the round in progress. Pure — writes nothing.
 
-    if started is None:
-        print(f"{SENTINEL} — skipped: receipt — no receipt for {s}; the round did not write one")
-        return EXIT_SKIPPED
-    if (now - started) > limit:
-        # The round's own window lapsed: every field is unjudgeable, so name the
-        # window rather than each step — a stale receipt fails all of them at once.
-        # ⚠️ `math.ceil`, not `int`. `observed_period()` interpolates a p90, so the limit
-        # can be fractional; truncating it lets a round that lapsed by under a second
-        # print `started 1180s ago, limit 1180s` — a line that reads as NOT lapsed while
-        # the round was refused. Rounding up can overstate by <1 s, which is the safe
-        # direction: the printed limit is never below the enforced one.
-        print(f"{SENTINEL} — skipped: receipt — round started {int(now - started)}s ago, limit {math.ceil(limit)}s {basis}")
-        return EXIT_SKIPPED
-
+    Shared by `--check` (the tail's verdict) and `--debt` (the legs' gate), because
+    both must judge the SAME round. A `--debt` that read the file alone would gate on
+    whatever the last check happened to leave, which is the previous round's verdict.
+    """
     # A paid step is satisfied only for the round it was paid in. The record is
     # timestamped for that reason: an abandonment that survived every later round
     # would silently excuse the step forever, which is the same permanent-green
@@ -646,46 +640,92 @@ def check(topic: str, branch: str = "", now: float = None) -> int:
             ok = sweep_shape(text)
         if not ok:
             skipped.append((step, f"not the producer's shape ({artifact})"))
+    return skipped
 
-    # The debt is rewritten on EVERY check, not appended to: a round that did its
-    # work pays the previous round's debt simply by passing, and a round that skips
-    # again re-opens it. `--start` deliberately does not touch this file.
-    #
-    # FLEET ONLY. The goal/topic tier shares `--check`, but nothing there chains
-    # `--debt` — only `drive.md`, `keepalive.md` and `flagged-open.md` do — so
-    # writing the file for that tier would create state no command reads, and an
-    # operator would find a `<base>.debt` whose gate nothing consults. The sentinel
-    # still fires there; only the carry is fleet-scoped, which is what it was
-    # designed for.
-    if branch == "fleet":
-        try:
-            write_debt(s, [step for step, _ in skipped])
-        except OSError as e:
-            # A read-only or full state dir must not turn the verdict into a
-            # traceback: the caller reads the exit code, and 11 is the verdict. The
-            # debt is left as it was — stale, not silently cleared.
-            print(f"could not write {debt_path(s)}: {e}", file=sys.stderr)
+
+def _write_debt_for(s: str, branch: str, skipped: list) -> bool:
+    """Rewrite the debt from `skipped`. Returns False when the write failed.
+
+    Rewritten on EVERY evaluation, never appended to: a round that did its work pays
+    the previous round's debt simply by passing, and a round that skips again re-opens
+    it. `--start` deliberately does not touch this file.
+
+    FLEET ONLY. The goal/topic tier shares `--check`, but nothing there chains
+    `--debt` — only `drive.md`, `keepalive.md` and `flagged-open.md` do — so writing
+    the file for that tier would create state no command reads. The sentinel still
+    fires there; only the carry is fleet-scoped, which is what it was designed for.
+    """
+    if branch != "fleet":
+        return True
+    try:
+        write_debt(s, [step for step, _ in skipped])
+        return True
+    except OSError as e:
+        # A read-only or full state dir must not turn a verdict into a traceback: the
+        # caller reads the exit code. The debt is left as it was — stale, not cleared.
+        print(f"could not write {debt_path(s)}: {e}", file=sys.stderr)
+        return False
+
+
+def check(topic: str, branch: str = "", now: float = None) -> int:
+    now = time.time() if now is None else now
+    s = slug(topic, branch)
+    d = read_receipt(s)
+    started, limit, basis = window(s, now)
+
+    if started is None:
+        print(f"{SENTINEL} — skipped: receipt — no receipt for {s}; the round did not write one")
+        return EXIT_SKIPPED
+    if (now - started) > limit:
+        # The round's own window lapsed: every field is unjudgeable, so name the
+        # window rather than each step — a stale receipt fails all of them at once.
+        # ⚠️ `math.ceil`, not `int`. `observed_period()` interpolates a p90, so the limit
+        # can be fractional; truncating it lets a round that lapsed by under a second
+        # print `started 1180s ago, limit 1180s` — a line that reads as NOT lapsed while
+        # the round was refused. Rounding up can overstate by <1 s, which is the safe
+        # direction: the printed limit is never below the enforced one.
+        print(f"{SENTINEL} — skipped: receipt — round started {int(now - started)}s ago, limit {math.ceil(limit)}s {basis}")
+        return EXIT_SKIPPED
+
+    skipped = _skips(s, branch, d, started, limit, now)
+    _write_debt_for(s, branch, skipped)
 
     for step, why in skipped:
         print(f"{SENTINEL} — skipped: {step} — {why}")
     return EXIT_SKIPPED if skipped else 0
 
 
-def debt(topic: str, branch: str = "") -> int:
+def debt(topic: str, branch: str = "", now: float = None) -> int:
     """Print the open debt; exit EXIT_DEBT_OPEN while any step is unpaid.
 
-    A read of the file, never of the tail's output — which is the whole point. The
-    rounds that skipped and never ran `--check` (13:11 and 13:27 on 2026-10-31) left
-    no tail line to read, and this still fires on them.
+    ⚠️ **It RE-EVALUATES the round in progress, it does not merely read the file.**
+    The gate runs at router rows 5 / 5b / 5c, and the tail's `--check` is row 19 — so
+    a file-only read would gate every round on the *previous* round's verdict. That is
+    wrong in both directions: a round that has already swept its digest would still be
+    blocked by a debt it has paid, and the round that actually skipped would not be
+    blocked at all. Judging the current receipt fixes both, and it is what makes
+    `--debt && <leg>` a prevention rather than a one-round penalty.
+
+    The file is still what the verdict is written to, so a round that never runs the
+    tail but does run its legs still records its own skip. When the round cannot be
+    judged at all — no receipt, or its window lapsed — the carried file is the only
+    evidence there is, and it is what gets read.
     """
     s = slug(topic, branch)
-    try:
-        steps = read_debt(s)
-    except OSError as e:
-        # Unreadable, not empty. Exiting 0 here would run a leg while a debt is
-        # owed, which is the exact failure the gate exists to stop.
-        print(f"cannot read {debt_path(s)}: {e}", file=sys.stderr)
-        return 2
+    now = time.time() if now is None else now
+    started, limit, _basis = window(s, now)
+    if started is not None and (now - started) <= limit:
+        steps = [step for step, _ in _skips(s, branch, read_receipt(s), started, limit, now)]
+        if not _write_debt_for(s, branch, [(step, "") for step in steps]):
+            return 2
+    else:
+        try:
+            steps = read_debt(s)
+        except OSError as e:
+            # Unreadable, not empty. Exiting 0 here would run a leg while a debt is
+            # owed, which is the exact failure the gate exists to stop.
+            print(f"cannot read {debt_path(s)}: {e}", file=sys.stderr)
+            return 2
     for step in steps:
         print(f"debt: {step}")
     return EXIT_DEBT_OPEN if steps else 0
