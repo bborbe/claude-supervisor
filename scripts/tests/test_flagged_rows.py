@@ -789,6 +789,27 @@ class SubjectLivenessPrecedence(unittest.TestCase):
         self.assertEqual(["new-sid"], seen)
         self.assertTrue(verdict)
 
+    def test_a_legacy_page_falls_back_to_the_retired_key(self):
+        # The migration depends on this branch: a page the new writer has not
+        # touched yet carries only `manager_session_id`.
+        with tempfile.TemporaryDirectory() as tmp:
+            page = os.path.join(tmp, "Old Goal.md")
+            with open(page, "w", encoding="utf-8") as fh:
+                fh.write("---\nmanager_session_id: old-sid\n---\n")
+            ctx = {"liveness_cache": {}, "no_liveness": False}
+            seen = []
+
+            def live(sid):
+                seen.append(sid)
+                return "LIVE"
+
+            with unittest.mock.patch.object(fr, "subject_page", return_value=page), \
+                 unittest.mock.patch.object(fr, "liveness_of", side_effect=live):
+                verdict = fr.subject_liveness(ctx, "/v", "goal", "Old Goal")
+
+        self.assertEqual(["old-sid"], seen)
+        self.assertTrue(verdict)
+
 
 if __name__ == "__main__":
     unittest.main()
