@@ -2974,9 +2974,26 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       return
     }
     if (!pre.end) return
-    // `null` is "the store could not be read", never "no cards" — see open-cards.mjs.
-    const cards = await fetchOpenCards({ storeUrl: config.attentionStoreUrl, sessionId: current.sessionId })
-    if (!shouldEndIdleWorker({ session, cards }).end) return
+    // ⚠️ **A deliberately-absent store is NOT an unreadable one.** With
+    // `SUPERVISOR_ATTENTION_STORE=off`, `config.attentionStoreUrl` is null and `fetchOpenCards`
+    // returns null without issuing a request — which the predicate would read as
+    // `unreadable-cards` and keep the worker forever. In a deployment with no attention stack
+    // there can be no card to orphan, so the honest answer is "no cards": passing `[]` lets the
+    // end-of-life fire there, while a store that is configured but FAILING still returns null
+    // and still fails closed.
+    const cards = config.attentionStoreUrl
+      ? await fetchOpenCards({ storeUrl: config.attentionStoreUrl, sessionId: current.sessionId })
+      : []
+    const verdict = shouldEndIdleWorker({ session, cards })
+    if (!verdict.end) {
+      // The two keeps that explain a worker which is never reaped are logged; `not-idle` and
+      // `turn-in-flight` are the ordinary mid-turn path and would log on every result.
+      if (verdict.reason === 'unreadable-cards' || verdict.reason === 'open-card') {
+        log(`agent ${current.id}: keeping worker — ${verdict.reason}`)
+      }
+      return
+    }
+    log(`agent ${current.id}: turn closed with nothing pending — stopping the session`)
     await stopWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id }).catch((error) => {
       log(`WARNING: could not stop ${current.id} after its turn closed: ${error.message}`)
     })

@@ -36,6 +36,15 @@ import { config } from './config.mjs'
  * @param {object}   args.agent       the in-memory agent record (mutated in place)
  * @param {Function} args.writeLedger `(agent, patch?) => record` — files the durable ledger record
  * @param {Function} args.log         `(...parts) => void` — the server's stderr/file log
+ * @param {object}   [args.heartbeat] `{start, stop}` — publishes this worker as live to a process
+ *                                    that did not spawn it; the no-op when a caller has none.
+ * @param {Function} [args.onTurnComplete] `async (agent) => void` — fired AFTER each `result`
+ *                                    payload is captured, and awaited. ⚠️ It must not assume the
+ *                                    turn is over: a `result` can arrive mid-turn, so the hook
+ *                                    re-reads the wrapper and decides for itself. A hook that
+ *                                    throws is logged and swallowed — the turn's outcome is
+ *                                    already captured, and turning a hook bug into an `error`
+ *                                    status would recreate the defect this loop was fixed for.
  * @returns {Promise<void>}
  */
 // The no-op a caller that does not publish liveness gets, so the loop stays drivable from a
