@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.227.2
+## Unreleased
 
 - fix: **`progress-window.py` finds a vault task file when `--anchor` is relative and the session's cwd is a repo worktree.** A relative anchor resolved against the process cwd, so `/supervisor:worker-drive` — which runs from whatever cwd the session holds, a repo worktree whenever the session works in one — reported `UNKNOWN: anchor unreadable: <task>.md (No such file or directory)` and **never took the measurement the script exists to take**. Measured across five consecutive drive runs on one session, every one UNKNOWN, while the anchor task was open and being edited the whole time. `resolve_anchor` now falls back to a unique basename match under `OBSIDIAN_ROOT` (default `~/Documents/Obsidian`, overridable for tests) when the direct path does not exist and the argument is relative; a unique hit wins, two hits leave the anchor unresolved rather than guessing, and an absolute path is returned unchanged. The report's `anchor` field now carries the **resolved** path instead of the raw argument, and the failure message names the absolute-path requirement instead of printing a bare `No such file or directory`. Pinned by three tests in `test_progress_window.py` (relative resolves, absolute unchanged, unknown basename unresolved); tests 48 → 51. Change set: `scripts/progress-window.py`, `scripts/tests/test_progress_window.py`, `CHANGELOG.md`.
 
