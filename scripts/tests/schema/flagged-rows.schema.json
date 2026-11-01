@@ -1,0 +1,129 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/bborbe/claude-supervisor/scripts/tests/schema/flagged-rows.schema.json",
+  "title": "flagged-rows row",
+  "description": "One row of `scripts/flagged-rows.py --json`'s `rows` array: every value a spawn needs for one eligible flagged page. Each enum below is bound to the artifact that produces it, named in the property's own description — none is invented here, and none may be widened without changing its producer.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "vault",
+    "owner",
+    "owner_live",
+    "name",
+    "role",
+    "role_source",
+    "mode",
+    "launcher",
+    "launcher_source",
+    "window",
+    "window_id",
+    "chip",
+    "session_id",
+    "liveness",
+    "branch",
+    "pane",
+    "blocked_by",
+    "refused"
+  ],
+  "properties": {
+    "kind": {
+      "description": "Producer: the page's own `page_type:`, else the directory it was found in. Also the sort key — topic 0, goal 1, task 2 — so a consumer opens managers before workers.",
+      "enum": ["topic", "goal", "task"]
+    },
+    "vault": {
+      "description": "Producer: the `name` key of a `vault-cli config list` entry.",
+      "type": "string",
+      "minLength": 1
+    },
+    "owner": {
+      "description": "Producer: `docs/fleet-surface.md` § Which manager owns a subject, via `fleet-board.py`'s `manager_on_chain`. Never null — a subject with no manager on its chain gets the fleet sentinel rather than an absent field.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "name"],
+      "properties": {
+        "kind": { "enum": ["topic", "goal", "fleet"] },
+        "name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "owner_live": {
+      "description": "Producer: `session-liveness.py --list`. Null is 'not asked' — a fleet sentinel has no manager to ask about, and a subject with no live manager is null, not false.",
+      "type": ["boolean", "null"]
+    },
+    "name": {
+      "description": "Producer: the page filename, minus `.md` — the base label a tab is named with, never a derived title.",
+      "type": "string",
+      "minLength": 1
+    },
+    "role": {
+      "description": "Producer: the `# Source` schedule YAML's `frontmatter.role` (via `bborbe/nuke`), else the page's `role:`, else `agent`; normalised to `commands/open.md` § 3.0's three-role table, because a role outside it has no window.",
+      "enum": ["agent", "manager", "human"]
+    },
+    "role_source": {
+      "description": "Producer: `resolve_role()` in `scripts/flagged-rows.py` — which rung won. `template` outranks a DISAGREEING on-disk `role:`, which is the Start Day case.",
+      "enum": ["template", "on-disk", "body"]
+    },
+    "mode": {
+      "description": "Producer: `server/spawn-mode.mjs`'s `SPAWN_MODES` — the only two values a spawn accepts. A page with no `mode:` opens per the fleet's `spawn.mode`, so it is resolved here, never emitted as null or copied raw.",
+      "enum": ["interactive", "headless"]
+    },
+    "launcher": {
+      "description": "Producer: `resolve_launcher()` — the worker arm's `task` → `worker-default` → `vault`, or the manager arm's `subject` → `manager-default` → `claude-sibling` → `vault`. A row whose launcher cannot be resolved is skipped, never emitted with a null here.",
+      "type": "string",
+      "minLength": 1
+    },
+    "launcher_source": {
+      "description": "Producer: the union of the two arms — `docs/fleet-surface.md` § Spawn a worker item 8 (task, worker-default, vault, override) and § Which launcher a manager opens on (subject, manager-default, claude-sibling, vault). The arms report different sources on purpose.",
+      "enum": [
+        "task",
+        "worker-default",
+        "vault",
+        "override",
+        "subject",
+        "manager-default",
+        "claude-sibling"
+      ]
+    },
+    "window": {
+      "description": "Producer: `commands/open.md` § 3.0's role → window table. The role map's fourth key (`Hold`) is not a role target, so it is never a window value.",
+      "enum": ["Agents", "Managers", "Direct"]
+    },
+    "window_id": {
+      "description": "Producer: the WezTerm role map at `~/.cache/wezterm-role-map.json`, keyed by `window`. Null means the map is absent or carries no entry for that window — the missing-map case the consumer must handle, and the reason `window` is carried separately rather than derived from it.",
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "chip": {
+      "description": "Producer: the same role map's `chip`, defaulting to the agent chip when the map carries no entry. Never null — the role map's own null chip belongs to `Hold`, which is not a window.",
+      "enum": ["pink", "orange", "cyan"]
+    },
+    "session_id": {
+      "description": "Producer: the page's `claude_session_id:`, else `manager_session_id:`. Null is 'this subject has never run'.",
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "liveness": {
+      "description": "Producer: `session-liveness.py --check`'s exit code (LIVENESS_EXIT), plus `none` for a row that carries no session id at all. An unanswerable probe is UNKNOWN, never folded into ABSENT.",
+      "enum": ["LIVE", "ABSENT", "UNKNOWN", "AMBIGUOUS", "MALFORMED", "none"]
+    },
+    "branch": {
+      "description": "Producer: `resolve_branch()`'s ordered first-match list — unknown → direct → skip-for-role:manager → open-manager → jump → resume → skip → create. The order IS the partition: an unanswerable probe outranks everything.",
+      "enum": ["unknown", "direct", "skip", "open-manager", "jump", "resume", "create"]
+    },
+    "pane": {
+      "description": "Producer: `who-needs-me.py`'s `pane_for()`, which PRINTS the pane — never the session registry or the heartbeat store, neither of which carries one. Null when no pane resolves.",
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "blocked_by": {
+      "description": "Producer: the page's `blocked_by:` in either frontmatter shape (inline or list), as the raw entries — the consumer ranks on them, so they are not resolved here.",
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "refused": {
+      "description": "Producers: `refusals()` — the per-kind provenance rule, emitting `agent-set-flag` for a TASK whose `flag_set_by` is outside `commands/open.md` § Step 0.5's `OPENING_ACTORS`, and accepting any provenance for a goal or topic — plus `resolve_branch()`, which emits `manager-row` for a task carrying `role: manager`. Empty is the normal case.",
+      "type": "array",
+      "items": { "type": "string", "enum": ["agent-set-flag", "manager-row"] }
+    }
+  }
+}
