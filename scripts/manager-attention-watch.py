@@ -242,13 +242,31 @@ LIVE_WINDOW = 5 * 60
 # park, at the first poll whose age has crossed it.
 PARK_AGE_THRESHOLDS = (15, 60)
 
-# ⚠️ The three `is_gated` reasons that mean *parked on the operator* — and
-# deliberately not a fourth. `idle+closer` is a park too, but it is the shape the
-# ownership-filtered FEED already carries (`who-needs-me.py --section needs-you`),
-# so it is not the class this arm exists to rescue: this watcher reads the
-# registry and the transcript for the parks the store cannot carry.
+# ⚠️ The four `is_gated` reasons that mean *parked on the operator*. This
+# watcher reads the registry and the transcript for the parks the store cannot
+# carry, and every one of the four is such a park.
 #
-# ⚠️ **`headless+closer` IS included, and it is the one of the three the registry
+# ⚠️ **`idle+closer` IS included, and it used to be excluded on a false premise.**
+# The exclusion read *"it is the shape the ownership-filtered FEED already
+# carries (`who-needs-me.py --section needs-you`)"*. It does not: a closer panel
+# is written by the `Stop` hook with `event: "Stop"`, and `is_open_gate` drops
+# exactly that record unless the caller asks for panels —
+# `if is_rendered_panel(rec) and not include_panels: return False`
+# (`who-needs-me.py:1247`, `is_rendered_panel` = `rec.get("event") == "Stop"`).
+# The `kind` check at `:1239` does not separate them: a closer panel carries
+# `kind: "question"` and passes it. So the feed files every closer panel under
+# *"Rendered panels — a closer line, not a parked gate"* and carries none of
+# them in `needs-you`, and the exclusion removed the only escalation the shape
+# had. Measured 2026-11-01 over 78 production `events.jsonl` files: 587
+# `idle+closer` parks across 313 sessions, 242 of them ≥ 15 minutes, and **zero**
+# `AGED` records for the reason (all 272 `AGED` records were `registry:waiting`).
+# Membership here also feeds `repost_empty_parks`, so an `idle+closer` park whose
+# `Stop`-minted card the store has lost is now re-posted — as a question-shaped
+# `message` card, since `INCIDENT_KIND_BY_REASON` maps it to no `permission`
+# kind — which is the same guarantee `headless+closer` already gets. While the
+# closer's own card is open the re-post stays suppressed (`producer_id` match).
+#
+# ⚠️ **`headless+closer` is the one of the four the registry
 # cannot reach at all.** A headless worker is an in-process SDK `query()` with no
 # pid, so `registry_status` returns `None` and `is_gated` decides on the
 # `headless_live` branch — which is precisely why it needs this arm rather than a
@@ -265,7 +283,8 @@ PARK_AGE_THRESHOLDS = (15, 60)
 # parked on its own closer, so the gate falls through to the registry branch and
 # this set picks it up — which is what makes the closer's own card the only one it
 # gets (the re-post is suppressed while that card is open).
-PARKED_REASONS = ("registry:waiting", "busy+parked-modal", "headless+closer")
+PARKED_REASONS = ("registry:waiting", "busy+parked-modal", "headless+closer",
+                  "idle+closer")
 
 # Which incident kind a raised gate records. EVERY reason that can reach `NEW GATE`
 # appears here or in `STALL_REASON_PREFIXES`; an unmapped one records nothing rather
@@ -283,6 +302,11 @@ INCIDENT_KIND_BY_REASON = {
     "registry:waiting": "permission",
     "busy+parked-modal": "permission",
     "headless+closer": "question",
+    # A closer line on a registered `idle` session — same shape as
+    # `headless+closer`, read from the same closer, so the same kind. Before this
+    # entry existed the reason reached `NEW GATE` unmapped and opened no incident,
+    # in breach of this map's own rule above.
+    "idle+closer": "question",
     "closer-unknown": "question",
 }
 
@@ -292,7 +316,7 @@ INCIDENT_KIND_BY_REASON = {
 #: ⚠️ **A `blocked-closer` cause reaches here only when the closer was VERBLESS**
 #: (`stuck_reason`). A `🔴 BLOCKED` panel carrying an answerable `👤 You:` verb is a
 #: park, so it arrives as `registry:waiting` (records `permission`) or `idle+closer`
-#: (records nothing) instead of a `stall`. That matters because a stall has no
+#: (records `question`) instead of a `stall`. That matters because a stall has no
 #: answer path and therefore no close path — filing a settled park as one made the
 #: record escalate-only. `stream-closed` and `permission-failures` are untouched: a
 #: dead channel is a stall whoever wrote the last panel.
