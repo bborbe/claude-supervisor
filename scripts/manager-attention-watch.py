@@ -303,9 +303,9 @@ INCIDENT_KIND_BY_REASON = {
     "busy+parked-modal": "permission",
     "headless+closer": "question",
     # A closer line on a registered `idle` session — same shape as
-    # `headless+closer`, read from the same closer, so the same kind. It reached
-    # `NEW GATE` unmapped until it joined `PARKED_REASONS`, which broke this map's
-    # own rule above.
+    # `headless+closer`, read from the same closer, so the same kind. Before this
+    # entry existed the reason reached `NEW GATE` unmapped and opened no incident,
+    # in breach of this map's own rule above.
     "idle+closer": "question",
     "closer-unknown": "question",
 }
