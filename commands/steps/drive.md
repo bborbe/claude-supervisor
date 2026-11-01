@@ -8,6 +8,19 @@ user-invocable: false
 
 When: every tick
 
+⚠️ **Gate this leg on the round's debt — chain it, do not merely read it.** A round that skipped a step owes it, and running the easier legs ahead of what it owes is exactly how the 2026-10-31 rounds came to read as whole ones:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --debt --subject "Fleet Manager" --branch fleet \
+  && <dispatch this leg>
+```
+
+Exit **12** means a step is still owed: print the `debt:` lines, **skip this leg, and carry on with the round — the tail still runs.** ⚠️ **Never end the round here.** Step 19's `--check` is what rewrites the debt; a round that stopped at this gate would leave it open forever and every later round would stop at the same place, wedging drive, keepalive, flagged-open and the tail together. Exit **0** means no debt — run the leg. ⚠️ **Exit 2 is a third state, not a clear one:** the gate could not read or write the debt file (it prints nothing to stdout, only a reason to stderr). Skip the leg and print that reason — never treat 2 as "no debt".
+
+⚠️ **`--debt` judges the round IN PROGRESS, not the previous round's verdict.** It re-reads the receipt and the `.arms` ring, so a round that has already swept its digest (row 2) is not blocked by a debt it has paid, and a round that skipped the sweep *is* blocked — which is the prevention this gate exists for. A file-only read would invert both: it would gate the round after the skip and never the round that skipped.
+
+⚠️ **The exit code is the gate, never the printed line:** `--debt` prints `debt: <step>` while open and nothing when clear, so a leg that reads only the text is satisfied by an empty read. ⚠️ **This is not a brake on the arm.** The re-arm still runs first and unconditionally — `fleet-keeper.py` reads the digest ledger and would resurrect a round that refused to arm, turning one skipped step into a crash loop.
+
 ## Step 3b — Drive: dispatch the drive leg
 
 Reap is the drive leg's: **reap runs before drive**, which is why the dispatch sits after the sweep and never before it.
