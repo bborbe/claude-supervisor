@@ -54,6 +54,12 @@ TEMPLATE_ROOT = os.path.expanduser("~/Documents/workspaces/nuke/task/recurring-s
 #: because a YAML boolean has three.
 FLAG_TRUTHY = ("true", "yes", "on")
 
+#: Every unquoted scalar a YAML 1.1 loader resolves to boolean True — the set
+#: `commands/open.md` § Step 0.5's `t.get('flag') is True` actually sees. Matching only
+#: lowercase `true` omits an eligible task whose page says `flag: True`.
+YAML_TRUE = ("true", "True", "TRUE", "yes", "Yes", "YES",
+             "on", "On", "ON")
+
 #: `commands/open.md` § 3.0's role → window table. The role map's fourth key `Hold`
 #: is not a role target and its `chip` is null, so the map is never the enum source.
 ROLE_WINDOW = {"agent": "Agents", "manager": "Managers", "human": "Direct"}
@@ -128,12 +134,13 @@ def flag_admits(block, kind):
         return False
     value = raw.group(1).strip()
     if kind == "task":
-        # The YAML scalar is lowercase `true`; `open.md` § Step 0.5's `t.get('flag')
-        # is True` only reads True because it PARSES the file. A quoted scalar is a
-        # string in YAML, never a boolean, so it is rejected here as it is there.
+        # `open.md` § Step 0.5 reads `t.get('flag') is True` off a PARSED file, so the
+        # set is the one a YAML loader resolves to boolean True — not the single
+        # lowercase token. A quoted scalar is a string in YAML, never a boolean, so it
+        # is rejected here as it is there.
         if value.startswith(('"', "'")):
             return False
-        return value == "true"
+        return value in YAML_TRUE
     return value.strip("\"'").lower() in FLAG_TRUTHY
 
 
@@ -160,9 +167,15 @@ def vault_configs():
     out = subprocess.run(["vault-cli", "config", "list", "--output", "json"],
                          capture_output=True, text=True, check=False)
     if out.returncode != 0:
-        raise SystemExit("flagged-rows: `vault-cli config list` failed: %s"
-                         % (out.stderr.strip() or out.returncode))
-    payload = json.loads(out.stdout)
+        print("flagged-rows: `vault-cli config list` failed: %s"
+              % (out.stderr.strip() or out.returncode), file=sys.stderr)
+        raise SystemExit(2)
+    try:
+        payload = json.loads(out.stdout)
+    except ValueError as exc:
+        print("flagged-rows: `vault-cli config list` is not JSON: %s" % exc,
+              file=sys.stderr)
+        raise SystemExit(2)
     vaults = payload.get("vaults", payload) if isinstance(payload, dict) else payload
     items = (vaults.items() if isinstance(vaults, dict)
              else [(v.get("name"), v) for v in vaults])
@@ -296,23 +309,31 @@ def template_role(text, template_root):
 
 #: `session-liveness.py --list` renders `<sid>  pid <pid>  <name>  [<transport>]`,
 #: optionally followed by `  DEGRADED (...)`. The name is the only field that can
-#: contain spaces, so it is captured between `pid <n>` and the bracketed transport —
-#: never `parts[2]`, which is the literal word `pid`.
-_LIVE_LINE = re.compile(r"^(\S+)\s+pid\s+\d+\s+(.*?)\s+\[[^\]]*\]")
+#: contain spaces, so it is captured between the age/pid field and the bracketed
+#: transport — never `parts[2]`, which is the literal word `pid`.
+#:
+#: ⚠️ Two field forms, not one: a registry session carries `pid <n>`, while an
+#: endpoint-only session (cluster, mcp-timer) has no pid and renders `age <n>s`.
+#: Matching only the `pid` form drops every endpoint-only manager, and a dropped
+#: manager reads as an absent one — the fold that makes `open-manager` fire.
+_LIVE_LINE = re.compile(
+    r"^(\S+)\s+(?:pid\s+\d+|age\s+\d+s)\s+(.*?)\s+\[[^\]]*\]")
 
 
 def live_sessions():
-    """`{sid: name}` for every registry-live session.
+    """`{sid: name}` for every registry-live session — or `None` when the probe failed.
 
-    The line is `<sid>  pid <pid>  <name>  [<transport>]`, optionally followed by
-    `  DEGRADED (...)`. The name is the only field that can contain spaces, so it is
-    captured between `pid <n>` and the bracketed transport — never `parts[2]`, which
-    is the literal word `pid`.
+    ⚠️ **`None` is not `{}`.** `session-liveness.py --list` exits 2 when the identity
+    registry is unreadable or the coverage measurement cannot be taken (UNKNOWN). An
+    empty dict is a fact — "this fleet has no live sessions"; `None` is the absence of
+    an answer. Folding the second into the first empties `managers`, so `subject_live`
+    returns False for every subject and every goal/topic row emits `open-manager` — a
+    duplicate-spawn hazard, and the exact fold `branch: unknown` exists to reject.
     """
     out = subprocess.run([sys.executable, os.path.join(HERE, "session-liveness.py"),
                           "--list"], capture_output=True, text=True, check=False)
     if out.returncode != 0:
-        return {}
+        return None
     sessions = {}
     for line in out.stdout.splitlines():
         match = _LIVE_LINE.match(line)
@@ -321,21 +342,40 @@ def live_sessions():
     return sessions
 
 
+def strip_status_glyph(text):
+    """A session name without Claude Code's leading status marker.
+
+    Mirrors `who-needs-me.py`'s helper of the same name, which strips the `⚙ ` marker
+    on *both* sides of its ownership comparison. A registry label carries that marker
+    and a page's subject name does not, so a raw equality test never matches — the
+    manager reads absent and the row emits `open-manager` against a live manager.
+    """
+    text = (text or "").strip()
+    while text and not (text[0].isalnum() or text[0] in "/~._-"):
+        text = text[1:].lstrip()
+    return text
+
+
 def live_session_names(sessions):
     """Subjects with a live session, manager names included both raw and stripped.
 
     A manager is named `<Subject> Manager` (`fleet-board.py`'s `_MANAGER_SUFFIX`), so
     the subject is what `resolve_owner` matches on — carrying only the raw name would
-    never match a goal, and `owner_live` would read `None` on every row.
+    never match a goal, and `owner_live` would read `None` on every row. Both forms are
+    also carried glyph-stripped, so a `⚙ `-prefixed registry label still matches the
+    page that names it.
     """
     names = set()
     for name in sessions.values():
         if not name:
             continue
-        names.add(name)
-        stripped = re.sub(r"\s+Manager$", "", name)
-        if stripped != name:
-            names.add(stripped)
+        for form in (name, strip_status_glyph(name)):
+            if not form:
+                continue
+            names.add(form)
+            stripped = re.sub(r"\s+Manager$", "", form)
+            if stripped != form:
+                names.add(stripped)
     return names
 
 
@@ -356,9 +396,12 @@ def row_liveness(ctx, sid):
     return ctx["liveness_cache"][key]
 
 
-def pane_of(sid):
-    """`who-needs-me.py`'s `pane_for()` — neither the heartbeat store nor the registry
-    carries a pane field.
+def pane_of(ctx, sid):
+    """`who-needs-me.py`'s `pane_for()`, cached per sid — neither the heartbeat store
+    nor the registry carries a pane field.
+
+    ⚠️ Cached because each call spawns a fresh interpreter and importlib-loads a
+    2300-line module; rows share session ids exactly as they do for `row_liveness`.
 
     ⚠️ `pane_for` PRINTS the pane and returns an exit code, so the pane is its stdout,
     never its return value. Reading the return value yields `0`, which is not a pane
@@ -366,6 +409,9 @@ def pane_of(sid):
     """
     if not sid:
         return None
+    key = ("pane", sid)
+    if key in ctx["liveness_cache"]:
+        return ctx["liveness_cache"][key]
     script = ("import importlib.util, sys;"
               "s = importlib.util.spec_from_file_location('wnm', sys.argv[1]);"
               "m = importlib.util.module_from_spec(s); s.loader.exec_module(m);"
@@ -373,10 +419,11 @@ def pane_of(sid):
     out = subprocess.run([sys.executable, "-c", script,
                           os.path.join(HERE, "who-needs-me.py"), sid],
                          capture_output=True, text=True, check=False)
-    if out.returncode != 0:
-        return None
-    pane = out.stdout.strip().splitlines()[0].strip() if out.stdout.strip() else ""
-    return pane or None
+    pane = ""
+    if out.returncode == 0 and out.stdout.strip():
+        pane = out.stdout.strip().splitlines()[0].strip()
+    ctx["liveness_cache"][key] = pane or None
+    return ctx["liveness_cache"][key]
 
 
 def fleet_mode():
@@ -501,7 +548,11 @@ def subject_live(ctx, vault, kind, name):
     signal, which is what SELECTS an owner. Never the subject page's
     `manager_session_id`; that is a lead for the `--check` probe below, and the two
     are different questions (`docs/fleet-surface.md` § Which manager owns a subject)."""
-    if ctx["no_liveness"]:
+    if ctx["no_liveness"] or ctx["managers"] is None:
+        # `None` = the registry probe failed, so "no live manager" is NOT proven. Every
+        # caller treats `None` as "keep the subject as owner", and `resolve_branch`
+        # keys `open-manager` on `chain_live is False` — so an unanswerable registry
+        # cannot spawn a duplicate manager.
         return None
     return name in ctx["managers"]
 
@@ -683,7 +734,7 @@ def row_for(vault, cfg, kind, path, ctx):
     # A pane is only meaningful for a LIVE session, and `pane_of` re-imports a
     # 2000-line module per call — probing ABSENT rows too tripled the run time for
     # an answer that is `null` by construction.
-    pane = pane_of(sid) if live == "LIVE" else None
+    pane = pane_of(ctx, sid) if live == "LIVE" else None
     window = ROLE_WINDOW.get(role, "Agents")
     entry = (ctx["role_map"] or {}).get(window) or {}
     owner = resolve_owner(page_kind, name, block, ctx, vault)
@@ -723,14 +774,23 @@ def role_map(path):
 def collect(args):
     """(rows, skipped-reason counts, fallbacks taken, normalised values)."""
     sessions = {} if args.no_liveness else live_sessions()
+    registry_failed = sessions is None
+    if registry_failed:
+        # Reported, never silent: the rows still resolve, but `open-manager` cannot
+        # fire and `owner_live` reads `null` — the operator must see why.
+        sessions = {}
     ctx = {
         "today": date.today().isoformat(),
         "role_map": role_map(args.role_map),
         "template_root": args.template_root,
         "no_liveness": args.no_liveness,
-        "managers": set() if args.no_liveness else live_session_names(sessions),
+        #: `None` means "the registry could not be read" — a different fact from an
+        #: empty set, and the difference is what keeps `open-manager` from firing.
+        "managers": (None if registry_failed
+                     else set() if args.no_liveness
+                     else live_session_names(sessions)),
         "fleet_sid": next((sid for sid, name in sessions.items()
-                           if name == "Fleet Manager"), None),
+                           if strip_status_glyph(name) == "Fleet Manager"), None),
         "mode_default": fleet_mode(),
         "normalised": [],
         #: (vault, kind, name) → page, for the goal/topic subjects an owner resolves
@@ -739,6 +799,11 @@ def collect(args):
         "liveness_cache": {},
     }
     rows, skipped, fallbacks = [], {}, []
+    if registry_failed:
+        # Named as a fallback because it is one: the registry rung answered nothing,
+        # so every owner falls to the subject itself and `open-manager` is withheld.
+        fallbacks.append({"registry": "unreadable",
+                          "effect": "owner_live null; open-manager withheld"})
     for vault, cfg in sorted(vault_configs().items()):
         if args.vault and vault != args.vault:
             continue
@@ -798,7 +863,10 @@ def main(argv=None):
     for row in rows:
         print("%-6s %-22s %-12s %s" % (row["kind"], row["vault"], row["branch"], row["name"]))
     for item in fallbacks:
-        print("fallback: %s/%s -> %s" % (item["vault"], item["kind"], item["dir"]))
+        if "registry" in item:
+            print("fallback: registry unreadable — %s" % item["effect"])
+        else:
+            print("fallback: %s/%s -> %s" % (item["vault"], item["kind"], item["dir"]))
     for item in normalised:
         print("normalised: %s/%s %s %r -> %s"
               % (item["vault"], item["name"], item["field"], item["raw"], item["used"]))

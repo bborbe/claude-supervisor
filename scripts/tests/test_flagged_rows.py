@@ -9,6 +9,7 @@ import importlib.util
 import os
 import tempfile
 import unittest
+import unittest.mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODULE = os.path.join(os.path.dirname(HERE), "flagged-rows.py")
@@ -590,6 +591,88 @@ class RowShape(unittest.TestCase):
         self.assertEqual(row["launcher"], "/opt/l/cc-v")
         self.assertEqual(row["launcher_source"], "worker-default")
         self.assertEqual(row["mode"], "interactive")
+
+
+class RegistryProbe(unittest.TestCase):
+    """A failed `--list` is not an empty fleet, and a `⚙ `-prefixed label is not absent.
+
+    Both defects produce the same wrong branch — `open-manager` against a live manager
+    — which is a duplicate-spawn hazard, so each direction is pinned separately.
+    """
+
+    def test_a_failed_list_returns_none_not_an_empty_set(self):
+        with unittest.mock.patch.object(fr.subprocess, "run") as run:
+            run.return_value = unittest.mock.Mock(returncode=2, stdout="", stderr="x")
+            self.assertIsNone(fr.live_sessions())
+
+    def test_a_successful_empty_list_returns_an_empty_dict(self):
+        with unittest.mock.patch.object(fr.subprocess, "run") as run:
+            run.return_value = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+            self.assertEqual(fr.live_sessions(), {})
+
+    def test_the_pid_and_age_field_forms_both_parse(self):
+        with unittest.mock.patch.object(fr.subprocess, "run") as run:
+            run.return_value = unittest.mock.Mock(
+                returncode=0, stderr="",
+                stdout="sid1  pid 42  A Goal Manager  [wezterm]\n"
+                       "sid2  age 30s  A Topic Manager  [endpoint]\n")
+            self.assertEqual(fr.live_sessions(),
+                             {"sid1": "A Goal Manager", "sid2": "A Topic Manager"})
+
+    def test_a_glyph_prefixed_manager_name_matches_its_subject(self):
+        names = fr.live_session_names({"s": "⚙ A Goal Manager"})
+        self.assertIn("A Goal", names)
+        self.assertIn("A Goal Manager", names)
+
+    def test_an_unreadable_registry_withholds_open_manager(self):
+        ctx = {"topic_map": {}, "subjects": {}, "no_liveness": False,
+               "managers": None, "liveness_cache": {}}
+        # Selection keeps the subject as owner rather than collapsing to the fleet.
+        self.assertEqual(fr.resolve_owner("goal", "G", page(""), ctx, "v"),
+                         {"kind": "goal", "name": "G"})
+        self.assertIsNone(fr.subject_live(ctx, "v", "goal", "G"))
+        # And the branch does not open a second manager off an unanswerable probe.
+        self.assertNotEqual(fr.resolve_branch("goal", "agent", None, "ABSENT", None,
+                                              None, page(""))[0], "open-manager")
+
+    def test_an_unreadable_registry_cannot_fire_open_manager(self):
+        self.assertNotEqual(fr.resolve_branch("topic", "agent", None, "ABSENT", None,
+                                              None, page(""))[0], "open-manager")
+
+
+class TaskFlagScalar(unittest.TestCase):
+    """The task predicate mirrors a YAML parse, not the literal lowercase token."""
+
+    def test_unquoted_yaml_booleans_are_admitted(self):
+        for scalar in ("true", "True", "TRUE", "yes", "on", "On"):
+            self.assertTrue(fr.flag_admits(page("flag: %s" % scalar), "task"), scalar)
+
+    def test_quoted_scalars_are_strings_and_stay_rejected(self):
+        for scalar in ('"true"', "'true'", '"yes"'):
+            self.assertFalse(fr.flag_admits(page("flag: %s" % scalar), "task"), scalar)
+
+    def test_a_non_boolean_scalar_stays_rejected(self):
+        self.assertFalse(fr.flag_admits(page("flag: 1"), "task"))
+
+
+class PaneCache(unittest.TestCase):
+    """`pane_of` imports a 2300-line module per call, so duplicate sids share one."""
+
+    def test_a_repeated_session_id_probes_once(self):
+        ctx = {"liveness_cache": {}}
+        with unittest.mock.patch.object(fr.subprocess, "run") as run:
+            run.return_value = unittest.mock.Mock(returncode=0, stdout="12\n", stderr="")
+            self.assertEqual(fr.pane_of(ctx, "sid"), "12")
+            self.assertEqual(fr.pane_of(ctx, "sid"), "12")
+            self.assertEqual(run.call_count, 1)
+
+    def test_a_failed_probe_is_cached_as_none(self):
+        ctx = {"liveness_cache": {}}
+        with unittest.mock.patch.object(fr.subprocess, "run") as run:
+            run.return_value = unittest.mock.Mock(returncode=1, stdout="", stderr="x")
+            self.assertIsNone(fr.pane_of(ctx, "sid"))
+            self.assertIsNone(fr.pane_of(ctx, "sid"))
+            self.assertEqual(run.call_count, 1)
 
 
 if __name__ == "__main__":
