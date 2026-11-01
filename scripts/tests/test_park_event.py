@@ -124,6 +124,77 @@ class ParkEventTest(unittest.TestCase):
                         "--recheck", "2026-11-02T02:00:00+01:00", "--session", "s2")
         self.assertEqual(len(list(self.state.glob("*.json"))), 2)
 
+    def test_an_earlier_recheck_shortens_the_watch(self):
+        self.run_script("register", "--event", "a metric",
+                        "--recheck", "2026-11-02T04:00:00+01:00", "--session", "aaaaaaaa")
+        self.run_script("register", "--event", "a metric",
+                        "--recheck", "2026-11-02T02:00:00+01:00", "--session", "bbbbbbbb")
+        record = json.loads(next(iter(self.state.glob("*.json"))).read_text())
+        self.assertEqual(record["recheck_at"], "2026-11-02T02:00:00+01:00")
+
+    def test_register_without_a_session_is_refused(self):
+        proc = self.run_script("register", "--event", "a metric",
+                               "--recheck", "2026-11-02T02:00:00+01:00")
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertIn("no session id", proc.stderr)
+        self.assertEqual(list(self.state.glob("*.json")), [])
+
+    def test_a_corrupt_watch_is_refused_not_replaced(self):
+        self.run_script("register", "--event", "a metric",
+                        "--recheck", "2026-11-02T02:00:00+01:00", "--session", "aaaaaaaa")
+        path = next(iter(self.state.glob("*.json")))
+        path.write_text("{ not json")
+
+        proc = self.run_script("register", "--event", "a metric",
+                               "--recheck", "2026-11-02T05:00:00+01:00", "--session", "bbbbbbbb")
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertIn("unreadable", proc.stderr)
+        # The live membership must survive: a corrupt record is not an absent one.
+        self.assertEqual(path.read_text(), "{ not json")
+
+    def test_release_of_a_non_member_is_refused(self):
+        self.run_script("register", "--event", "a metric",
+                        "--recheck", "2026-11-02T02:00:00+01:00", "--session", "aaaaaaaa")
+        path = next(iter(self.state.glob("*.json")))
+        before = path.read_text()
+
+        proc = self.run_script("release", "--event", "a metric", "--session", "zzzzzzzz")
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertIn("not a member", proc.stderr)
+        self.assertEqual(path.read_text(), before)
+
+    def test_release_of_an_unknown_event_exits_3(self):
+        proc = self.run_script("release", "--event", "nope", "--session", "aaaaaaaa")
+        self.assertEqual(proc.returncode, 3, proc.stdout)
+
+    def test_concurrent_registers_keep_every_member(self):
+        sessions = [f"session{i:04d}" for i in range(8)]
+        env = dict(os.environ)
+        env["PARK_EVENT_STATE_DIR"] = str(self.state)
+        env.pop("PARK_EVENT_NOW", None)
+        env.pop("CLAUDE_CODE_SESSION_ID", None)
+        procs = [
+            subprocess.Popen(
+                [sys.executable, str(SCRIPT), "register", "--event", "same event",
+                 "--recheck", "2026-11-02T02:00:00+01:00", "--session", s],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+            )
+            for s in sessions
+        ]
+        for proc in procs:
+            proc.communicate(timeout=30)
+        record = json.loads(next(iter(self.state.glob("*.json"))).read_text())
+        self.assertEqual(sorted(record["sessions"]), sessions)
+
+    def test_list_reports_one_line_per_watch(self):
+        self.run_script("register", "--event", "first", "--session", "aaaaaaaa",
+                        "--recheck", "2026-11-02T02:00:00+01:00")
+        self.run_script("register", "--event", "second", "--session", "bbbbbbbb",
+                        "--recheck", "2026-11-02T03:00:00+01:00")
+        proc = self.run_script("list")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(proc.stdout.strip().splitlines()), 2)
+
     # --- due ----------------------------------------------------------------
 
     def test_due_fires_only_after_the_recheck_instant(self):

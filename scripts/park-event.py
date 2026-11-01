@@ -44,12 +44,15 @@ EXIT CODES. 0 ok · 2 usage or validation error · 3 no such watch.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -66,6 +69,12 @@ DEFAULT_STATE_DIR = Path.home() / ".claude" / "state" / "park-events"
 
 class ParkError(ValueError):
     """A park record that cannot be written or read honestly."""
+
+
+class WatchMissing(ParkError):
+    """No watch file exists for this key. Distinct from an unreadable one:
+    absence is the normal first-register case, while an unreadable record holds
+    live memberships that must never be silently replaced."""
 
 
 # --- the threshold -----------------------------------------------------------
@@ -148,19 +157,46 @@ def iso(instant: datetime) -> str:
 def read_watch(key: str) -> dict:
     path = watch_path(key)
     if not path.exists():
-        raise ParkError(f"no watch for event key {key!r}")
+        raise WatchMissing(f"no watch for event key {key!r}")
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ParkError(f"watch {path} is unreadable: {exc}") from exc
 
 
+@contextlib.contextmanager
+def locked(key: str):
+    """Serialise read-modify-write on one event key.
+
+    `register` and `release` are read-modify-write cycles over one JSON file. Two
+    sessions parking on the same event at the same moment is the *expected* case
+    here, not an exotic one, so an unlocked cycle loses a membership and the
+    second session is silently dropped from the watch it just joined.
+    """
+    directory = state_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    lock_path = directory / f"{slugify(key)}.lock"
+    with open(lock_path, "w", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def write_watch(key: str, record: dict) -> Path:
     path = watch_path(key)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    # A unique temp name per writer: a fixed `.json.tmp` lets two concurrent
+    # writers interleave into one file and rename a corrupt record into place.
+    handle, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f"{slugify(key)}.", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
+        os.replace(tmp_name, path)
+    except BaseException:
+        pathlib.Path(tmp_name).unlink(missing_ok=True)
+        raise
     return path
 
 
@@ -221,10 +257,30 @@ def cmd_register(args: argparse.Namespace) -> int:
     recheck = parse_instant(args.recheck, "--recheck")
     session = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
 
+    if not session:
+        raise ParkError(
+            "no session id — pass --session or set $CLAUDE_CODE_SESSION_ID; a watch "
+            "with no member can never be released and names no resume owner"
+        )
+
+    with locked(key):
+        record = _register_locked(args, key, recheck, session)
+
+    members = record.get("sessions") or []
+    print(f"{'created' if record['_created'] else 'joined'} {record['slug']}")
+    print(f"watch: {watch_path(key)}")
+    print(f"recheck: {record['recheck_at']}")
+    print(f"sessions: {len(members)} ({', '.join(m[:8] for m in members) or 'none'})")
+    return EXIT_OK
+
+
+def _register_locked(args: argparse.Namespace, key: str, recheck, session: str) -> dict:
     try:
         record = read_watch(key)
-    except ParkError:
+    except WatchMissing:
         record = None
+    # An UNREADABLE record is not an absent one: it may hold live memberships,
+    # and replacing it would silently unpark every session it carried.
 
     created = record is None
     if record is None:
@@ -253,16 +309,13 @@ def cmd_register(args: argparse.Namespace) -> int:
     if session and session not in members:
         members.append(session)
 
-    path = write_watch(key, record)
+    write_watch(key, record)
 
     if args.task:
         write_task_key(args.task, key, record["recheck_at"], args.vault)
 
-    print(f"{'created' if created else 'joined'} {record['slug']}")
-    print(f"watch: {path}")
-    print(f"recheck: {record['recheck_at']}")
-    print(f"sessions: {len(members)} ({', '.join(s[:8] for s in members) or 'none'})")
-    return EXIT_OK
+    record["_created"] = created
+    return record
 
 
 def cmd_list(args: argparse.Namespace) -> int:
@@ -310,17 +363,25 @@ def cmd_due(args: argparse.Namespace) -> int:
 
 def cmd_release(args: argparse.Namespace) -> int:
     key = " ".join(args.event.strip().split())
-    record = read_watch(key)
-    members = record.get("sessions") or []
     session = args.session.strip()
-    if session in members:
+    with locked(key):
+        record = read_watch(key)
+        members = record.get("sessions") or []
+        # A session that was never a member is reported, never "released": the
+        # old branch printed a success line and rewrote the record unchanged,
+        # so a typo in the session id read as a completed release.
+        if session not in members:
+            raise ParkError(
+                f"{session[:8]} is not a member of watch {record['slug']!r} "
+                f"(members: {', '.join(m[:8] for m in members) or 'none'})"
+            )
         members.remove(session)
-    record["sessions"] = members
-    if not members:
-        watch_path(key).unlink(missing_ok=True)
-        print(f"released {session[:8]} — watch {record['slug']} removed (no sessions left)")
-        return EXIT_OK
-    write_watch(key, record)
+        record["sessions"] = members
+        if not members:
+            watch_path(key).unlink(missing_ok=True)
+            print(f"released {session[:8]} — watch {record['slug']} removed (no sessions left)")
+            return EXIT_OK
+        write_watch(key, record)
     print(f"released {session[:8]} — watch {record['slug']} keeps {len(members)} session(s)")
     return EXIT_OK
 
@@ -363,9 +424,12 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
+    except WatchMissing as exc:
+        print(f"REFUSED\t{exc}", file=sys.stderr)
+        return EXIT_MISSING
     except ParkError as exc:
         print(f"REFUSED\t{exc}", file=sys.stderr)
-        return EXIT_MISSING if "no watch for event key" in str(exc) else EXIT_USAGE
+        return EXIT_USAGE
 
 
 if __name__ == "__main__":

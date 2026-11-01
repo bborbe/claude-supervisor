@@ -72,6 +72,31 @@ turn a refused arm into a restart loop that still runs a round every tick.
 found and did not act on — the `# Regression metric` on the task that installed this leg reads
 it, and a round that prints the number without moving it is the defect it exists to remove.
 
+## Step 5b, first half — resume the park watches whose re-check has passed
+
+A parked worker is not a dead one: it exited on purpose, on a clock. Its re-check
+time lives in `park_recheck`, written by `park-event.py register` at park time, and
+**`defer_date` cannot carry it** — every reader truncates that field to its date, so
+a time written there resurfaces the task at the start of the day, hours early.
+
+```bash
+P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
+python3 "$P/park-event.py" due
+```
+
+One line per watch whose time has passed, naming every session parked on it —
+**one watch, not one per session**, which is the dedup the register call created.
+Resume each named session through `/supervisor:open --task "<name>"`, then drop the
+member with `park-event.py release --event "<key>" --session "<id>"`; the file is
+removed when the last member leaves. A watch that comes due and cannot be resumed
+(the event has not fired) is **re-parked, not left due**: bump `park_recheck` with a
+fresh `register` call, and after the third re-park on the same event route the wait
+to the manager as a criterion challenge rather than re-parking a fourth time.
+
+⚠️ **This half is the fast path, never the only path.** The task's own `defer_date`
+surfaces the row in every manager's open queue, so a missed round delays a resume and
+never strands it. Never let this step become the sole record that a task is parked.
+
 ## Step 5b, second half — resume a worker whose session died
 
 ⚠️ **This reverses `agents/fleet-drive.md`'s *"orphan → escalate, never nudge"*.** That note
