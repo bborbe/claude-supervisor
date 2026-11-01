@@ -848,6 +848,34 @@ class Cli(unittest.TestCase):
         self.assertIn("no launcher could be resolved", out.stdout)
         self.assertNotIn("environment-fault", out.stdout)
 
+    def test_vault_cli_off_path_is_found_via_gopath(self):
+        """No override, `vault-cli` absent from PATH, present in $GOPATH/bin: resolved, so
+        the outcome is the ordinary refusal (exit 1), never the environment fault."""
+        self.write(1, entry("gopath", name="Some Worker"))
+        gobin = os.path.join(self.dir, "gopath", "bin")
+        os.makedirs(gobin)
+        fake = os.path.join(gobin, "vault-cli")
+        payload = json.dumps([{"name": "v", "path": os.path.join(self.dir, "elsewhere"),
+                               "claude_script": "/x/cc"}])
+        with open(fake, "w") as fh:
+            # The marker proves THIS binary ran — a real vault-cli at a fixed location would
+            # produce the same refusal and hide a broken $GOPATH branch.
+            fh.write(f"#!/bin/sh\ntouch {self.dir}/gopath-ran\ncat <<'EOF'\n{payload}\nEOF\n")
+        os.chmod(fake, 0o755)
+        env = dict(os.environ)
+        for key in ("SUPERVISOR_LAUNCHER", "SUPERVISOR_VAULT_CONFIG", "SUPERVISOR_VAULT_CLI"):
+            env.pop(key, None)
+        env["SUPERVISOR_LOAD_PATH"] = self.load
+        env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+        env["GOPATH"] = os.path.join(self.dir, "gopath")
+        out = subprocess.run(
+            [sys.executable, SCRIPT, "gopath", "--sessions-dir", self.reg],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertNotIn("environment-fault", out.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "gopath-ran")), out.stdout)
+
     def test_happy_path_dry_run_signals_nothing(self):
         """Cleared target: the dry run reports what it WOULD do and exits 0."""
         self.write(1, entry("ok", name="Some Worker"))
