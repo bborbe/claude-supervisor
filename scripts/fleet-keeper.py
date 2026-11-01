@@ -348,23 +348,27 @@ def main(argv):
         return 1
 
     who = f"session {sid[:8]}" if sid else "no registered fleet manager"
+    # An unreadable stop state is said ON THE CARD, not only in the log: the operator reading the
+    # card is the one who must know this might be a deliberate stop the keeper could not see.
+    caveat = (" ⚠️ The keeper could not read whether the fleet was stood down on purpose, so "
+              "this may be a deliberate /supervisor:stop." if stood is None else "")
     item = notify(
         f"fleet-keeper-lapse-{int(lapse['since'])}",
         f"The fleet round has been stale for {int(held // 60)} min ({who}). That is past the "
         f"longest healthy round measured, so this is a lapse, not a slow round. The keeper does "
         f"not restart the fleet manager: check its tab and re-arm its loop "
-        f"(/supervisor:fleet-loop), or restart it deliberately.",
+        f"(/supervisor:fleet-loop), or restart it deliberately.{caveat}",
         ["acknowledge"], context=detail,
     )
-    if stood is None:
-        item_note = " (stop state unreadable)"
-    else:
-        item_note = ""
+    note = " (stop state unreadable)" if stood is None else ""
     if item:
         lapse["reported"] = item
-        save_lapse(lapse)
-    report("reported",
-           f"stale for {int(held)}s — lapse reported for {who}{card(item)}{item_note}", now)
+        if not save_lapse(lapse):
+            # The card is up; only the "already reported" marker failed to persist. The next tick
+            # re-posts under the same dedup key, so the board still holds one card. Logged so a
+            # persistently unwritable state is visible rather than inferred.
+            note += " (reported-marker not persisted; next tick re-posts under the same key)"
+    report("reported", f"stale for {int(held)}s — lapse reported for {who}{card(item)}{note}", now)
     return 1
 
 

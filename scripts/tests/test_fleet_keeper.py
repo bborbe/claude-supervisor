@@ -148,6 +148,33 @@ class ReportOnlyContractTest(KeeperBase):
         self.assertEqual("pending", self.tick(T0)[1][0])
         self.assertEqual(T0, json.loads(pathlib.Path(fk.LAPSE).read_text())["since"])
 
+    def test_an_unreadable_stop_state_still_reports_and_says_so_on_the_card(self):
+        """Replaces the restart-era `kills nothing` test. Report-only cannot kill, so an
+        unreadable stop state no longer has to block. It must still report, and the CARD — not
+        just the log — must carry the caveat, because the operator reads the card."""
+        payloads = []
+        fk.notify = lambda key, payload, options, context="": (payloads.append(payload) or "item-1")
+        self.stood = None
+        self.assertEqual("reported", self.stale_run(T0, 40))
+        self.assertTrue(payloads)
+        self.assertIn("could not read whether the fleet was stood down", payloads[-1])
+
+    def test_an_undecidable_liveness_probe_does_not_read_as_absent(self):
+        """Replaces the restart-era liveness test: `UNKNOWN` must not raise the ABSENT card."""
+        for word in ("UNKNOWN", "AMBIGUOUS", "MALFORMED"):
+            self.live = word
+            self.assertNotEqual("dead", self.tick(T0)[1][0], word)
+        self.assertNotIn("fleet-keeper-absent", self.cards)
+
+    def test_a_failed_reported_marker_still_holds_the_board_to_one_card(self):
+        """If the card posts but the marker cannot be saved, the repost uses the same key."""
+        self.stale_run(T0, 40)
+        real_save = fk.save_lapse
+        fk.save_lapse = lambda rec: False
+        self.addCleanup(lambda: setattr(fk, "save_lapse", real_save))
+        self.tick(T0 + 41 * MIN)
+        self.assertEqual(1, len(set(self.cards)), "every post must share one dedup key")
+
     # ---- SC3, stop marker, unknown ------------------------------------------
 
     def test_an_absent_fleet_manager_is_reported(self):

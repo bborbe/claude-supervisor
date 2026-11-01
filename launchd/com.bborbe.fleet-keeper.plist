@@ -39,22 +39,24 @@
     </array>
 
     <!--
-      ⚠️ The PATH is not decoration. launchd gives a job no login shell, so it never reads
-      ~/.zshrc, and the keeper shells out to `vault-cli config list` (through
-      `restart-worker.py`) to resolve the launcher a resume must run through. Measured
-      2026-11-01: with only the system directories here, every tick refused with
-      "no launcher could be resolved … (vault-cli config could not be read)" and the agent
-      never restarted anything — the guard working, the agent inert. `vault-cli` lives in
-      ~/Documents/workspaces/go/bin, which this list did not carry.
+      ⚠️ The PATH is not decoration: launchd gives a job no login shell, so it never reads
+      ~/.zshrc, and anything not on this list is simply not found.
 
-      These are the directories `cc-env.sh` pins for the same reason, restricted to what the
-      keeper's own chain needs. Add a directory here when a tool it calls lives somewhere new;
-      the failure otherwise is silent and looks like a refusal.
+      System directories ONLY, on purpose. The report-only keeper calls nothing but its sibling
+      Python scripts (through `sys.executable`) and `ps` (in /bin). The restart-era keeper needed
+      `vault-cli` and `wezterm` to resume a session; it has no resume path now, so neither is
+      needed. User-writable directories (~/.local/bin, ~/Documents/workspaces/go/bin) would sit
+      ahead of /usr/bin and let anything dropped there shadow a system tool.
+
+      Measured 2026-11-01, the cost of getting this list wrong: with `vault-cli` missing, the
+      restart-era keeper refused every tick for 715 ticks; with `wezterm` missing, it killed the
+      Fleet Manager and could not resume it. Both failures read as a refusal, not as a broken
+      environment. If a callee ever needs a new tool, add it here and say which callee needs it.
     -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/Applications/WezTerm.app/Contents/MacOS:/Users/bborbe/.local/bin:/Users/bborbe/Documents/workspaces/go/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
 
     <key>StartInterval</key>
