@@ -278,6 +278,10 @@ def commits_between(root, since, until, rel=None):
 
 # --- anchor -----------------------------------------------------------------------------
 
+# ⚠️ This is a third spelling for the vault root: the repo already reads it as
+# OBSIDIAN_DIR (fleet-board.py, fleet-sessions.py, manager-menu-guard.py) and as
+# SUPERVISOR_VAULTS_ROOT (session-scope.py, close-worker.py). Setting either of
+# those established names has no effect here — only OBSIDIAN_ROOT moves this walk.
 OBSIDIAN_ROOT = os.environ.get("OBSIDIAN_ROOT") or os.path.expanduser("~/Documents/Obsidian")
 
 
@@ -299,7 +303,9 @@ def resolve_anchor(raw):
         return direct
     hits = []
     for dirpath, dirnames, filenames in os.walk(OBSIDIAN_ROOT):
-        dirnames[:] = [d for d in dirnames if d not in (".git", ".obsidian", "node_modules")]
+        dirnames[:] = [
+            d for d in dirnames if d not in (".git", ".obsidian", ".trash", "node_modules")
+        ]
         if base in filenames:
             hits.append(os.path.join(dirpath, base))
             if len(hits) > 1:

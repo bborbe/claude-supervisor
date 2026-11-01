@@ -575,8 +575,16 @@ class ResolveAnchorTest(unittest.TestCase):
         """Import the script fresh so OBSIDIAN_ROOT is read from this test's env."""
         import importlib.util
 
+        prior = os.environ.get("OBSIDIAN_ROOT")
         os.environ["OBSIDIAN_ROOT"] = self.root
-        self.addCleanup(os.environ.pop, "OBSIDIAN_ROOT", None)
+
+        def restore():
+            if prior is None:
+                os.environ.pop("OBSIDIAN_ROOT", None)
+            else:
+                os.environ["OBSIDIAN_ROOT"] = prior
+
+        self.addCleanup(restore)
         spec = importlib.util.spec_from_file_location("progress_window_under_test", SCRIPT)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -596,6 +604,22 @@ class ResolveAnchorTest(unittest.TestCase):
         os.chdir(self.tmp)
         self.addCleanup(os.chdir, cwd)
         self.assertEqual(os.path.realpath("Missing.md"), self.resolve("Missing.md"))
+
+    def test_two_same_named_files_decline_to_guess(self):
+        """The safety half: an ambiguous basename must NOT resolve.
+
+        Without this the fallback could silently measure a wrong-but-unique file
+        and every other test would stay green — turning the `len(hits) > 1`
+        check into a `break` is the edit this fixture exists to redden.
+        """
+        other = os.path.join(self.root, "seibert-personal", "25 Tasks")
+        os.makedirs(other)
+        with open(os.path.join(other, "A Task.md"), "w", encoding="utf-8") as handle:
+            handle.write("---\nstatus: in_progress\n---\n")
+        cwd = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, cwd)
+        self.assertEqual(os.path.realpath("A Task.md"), self.resolve("A Task.md"))
 
 
 if __name__ == "__main__":
