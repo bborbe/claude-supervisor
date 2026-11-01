@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.227.0
 
 - fix: `restart-worker.py` resolves `vault-cli` via `PATH`, `$GOPATH/bin` and known install locations instead of a bare name, and a missing `vault-cli` now exits 3 with an `environment-fault` line instead of printing as a launcher refusal (exit 1)
 
