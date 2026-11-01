@@ -259,10 +259,18 @@ def abandoned_path(s: str) -> str:
 
 
 def read_debt(s: str) -> list:
+    """The open steps, or `[]` when there is genuinely no debt file.
+
+    ⚠️ **Only `FileNotFoundError` means "no debt".** Every other `OSError` — an
+    unreadable file, a permission-denied state dir — propagates, because this is
+    the file a `--debt && <leg>` gate is chained on and swallowing it would be a
+    fail-open on the one check built to fail closed: the leg would run while a
+    debt exists. The caller decides how to report it; `--debt` exits non-zero.
+    """
     try:
         with open(debt_path(s), encoding="utf-8") as fh:
             return [ln.strip() for ln in fh if ln.strip()]
-    except OSError:
+    except FileNotFoundError:
         return []
 
 
@@ -650,7 +658,13 @@ def check(topic: str, branch: str = "", now: float = None) -> int:
     # still fires there; only the carry is fleet-scoped, which is what it was
     # designed for.
     if branch == "fleet":
-        write_debt(s, [step for step, _ in skipped])
+        try:
+            write_debt(s, [step for step, _ in skipped])
+        except OSError as e:
+            # A read-only or full state dir must not turn the verdict into a
+            # traceback: the caller reads the exit code, and 11 is the verdict. The
+            # debt is left as it was — stale, not silently cleared.
+            print(f"could not write {debt_path(s)}: {e}", file=sys.stderr)
 
     for step, why in skipped:
         print(f"{SENTINEL} — skipped: {step} — {why}")
@@ -665,7 +679,13 @@ def debt(topic: str, branch: str = "") -> int:
     no tail line to read, and this still fires on them.
     """
     s = slug(topic, branch)
-    steps = read_debt(s)
+    try:
+        steps = read_debt(s)
+    except OSError as e:
+        # Unreadable, not empty. Exiting 0 here would run a leg while a debt is
+        # owed, which is the exact failure the gate exists to stop.
+        print(f"cannot read {debt_path(s)}: {e}", file=sys.stderr)
+        return 2
     for step in steps:
         print(f"debt: {step}")
     return EXIT_DEBT_OPEN if steps else 0
@@ -680,7 +700,11 @@ def abandon(topic: str, branch: str, step: str) -> int:
     recorded statement that this step will not be done — never a refusal to re-arm.
     """
     s = slug(topic, branch)
-    steps = read_debt(s)
+    try:
+        steps = read_debt(s)
+    except OSError as e:
+        print(f"cannot read {debt_path(s)}: {e}", file=sys.stderr)
+        return 2
     if step not in steps:
         print(f"no open debt for {step} on {s}", file=sys.stderr)
         return 2
@@ -689,7 +713,12 @@ def abandon(topic: str, branch: str, step: str) -> int:
     # non-empty branch goes through `write_atomic` and raises. Reporting success on
     # the silent path would leave `--debt` exiting 12 while this verb claimed the
     # step was paid — so read the result back rather than trusting the write.
-    if step in read_debt(s):
+    try:
+        still_owed = step in read_debt(s)
+    except OSError as e:
+        print(f"cannot re-read {debt_path(s)}: {e}", file=sys.stderr)
+        return 2
+    if still_owed:
         print(f"could not pay {step} on {s}: the debt file is unchanged", file=sys.stderr)
         return 2
     with open(abandoned_path(s), "a", encoding="utf-8") as fh:
@@ -743,9 +772,19 @@ def main() -> int:
         ap.error("--topic or --subject is required with every mode")
     if a.check:
         return check(subject, a.branch)
+    # `--debt` and `--abandon` are fleet-only by construction: `check()` writes the
+    # file only for `--branch fleet`, so the goal/topic tier would read an empty file
+    # and exit 0 — a gate that always passes. Refusing is the only honest answer; a
+    # leg that forgot `--branch fleet` would otherwise run while a debt is owed.
     if a.debt:
+        if a.branch != "fleet":
+            ap.error("--debt is fleet-only: the goal/topic tier writes no debt, so an "
+                     "empty read there would be a false clear. Pass --branch fleet.")
         return debt(subject, a.branch)
     if a.abandon:
+        if a.branch != "fleet":
+            ap.error("--abandon is fleet-only: only the fleet tier opens a debt. "
+                     "Pass --branch fleet.")
         if not a.step:
             ap.error("--abandon needs --step")
         return abandon(subject, a.branch, a.step)
