@@ -50,7 +50,7 @@ file reaches you, it is a caller bug — say so and render no row for it.
    4. **`timestamp`** — the wall-clock string for a tick marker, supplied by the caller.
       **You must not read the clock yourself.**
    5. **The manager verdicts**, as `<goal> → LIVE | ABSENT | UNKNOWN`, from the caller's
-      `session-liveness.py --check` over each goal page's `claude_session_id`.
+      `session-liveness.py --check` over each goal page's `claude_session_id` (or the retired `manager_session_id` as a fallback, for a page the new writer has not touched yet).
    6. **The cadence verdicts**, as `<goal> → OK | STALE | STOPPED | INVALID`, from the
       caller's `manager-liveness.py --state --subject <goal> --branch goal`.
    7. **`today`** — ISO `YYYY-MM-DD`, for the deferred overlay on goal rows.

@@ -490,7 +490,7 @@ The goal branch **resolves the goal's manager and delegates**; it reimplements n
 
    Then match `<goal> Manager` case-insensitively against `name` and against every entry in `formerNames`.
 
-   ⚠️ **The goal page's `claude_session_id` is a lead, never the answer.** When the registry matches nothing, read it and **run `session-liveness.py --check <id>` on it before doing anything with it**, then take the action that exit code maps to in `docs/fleet-surface.md` § *Which manager owns a subject*.
+   ⚠️ **The goal page's `claude_session_id` (or the retired `manager_session_id` as a fallback) is a lead, never the answer.** When the registry matches nothing, read it and **run `session-liveness.py --check <id>` on it before doing anything with it**, then take the action that exit code maps to in `docs/fleet-surface.md` § *Which manager owns a subject*.
 
 2. **Live → JUMP** to it, same `/supervisor:jump pane:<pane-id>` + window-id reporting as Step 2A — this covers both a registry hit and a page-field `LIVE`.
 
@@ -536,7 +536,7 @@ The goal branch **resolves the goal's manager and delegates**; it reimplements n
 
    ⚠️ **The registry lists live sessions only**, like `ListAgents`: an exited session's entry is removed and its `formerNames` with it. That is the right scope here (the failure being prevented is a duplicate spawn against a *running* manager), but do not read an empty result as "this topic never had a manager" — only as "none is running now".
 
-⚠️ **The topic page's `claude_session_id` is a lead, never the answer.** The registry above answers *who is running now*. When it matches nothing, read the topic page's `claude_session_id` and **run `session-liveness.py --check <id>` on it before doing anything with it**, then take the action that exit code maps to in `docs/fleet-surface.md` § *Which manager owns a subject*.
+⚠️ **The topic page's `claude_session_id` is a lead, never the answer.** The registry above answers *who is running now*. When it matches nothing, read the topic page's `claude_session_id` (or the retired `manager_session_id` as a fallback) and **run `session-liveness.py --check <id>` on it before doing anything with it**, then take the action that exit code maps to in `docs/fleet-surface.md` § *Which manager owns a subject*.
 
 ⚠️ **The ban this replaces was right about the hazard and wrong about the remedy.** ⚠️ **The order by which an owner is resolved is stated once, in `docs/fleet-surface.md` § *Which manager owns a subject* — not restated here.**
 2. **Live → JUMP** to it, same `/supervisor:jump pane:<pane-id>` + window-id reporting as Step 2A — this covers both a registry hit and a page-field `LIVE`.

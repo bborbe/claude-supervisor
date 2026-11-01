@@ -591,7 +591,8 @@ def subject_live(ctx, vault, kind, name):
 def subject_liveness(ctx, vault, kind, name):
     """`true` / `false` / `null` for one subject's recorded manager session.
 
-    `session-liveness.py --check` on the owner page's `manager_session_id` — the
+    `session-liveness.py --check` on the owner page's `claude_session_id` (or the
+    retired `manager_session_id` as a fallback) — the
     section's own "treat it as a lead only, never as a verdict" table: `true` or
     `false` when it answers, `null` when it answers UNKNOWN / AMBIGUOUS / MALFORMED.
     A subject with NO recorded manager session is `false` — absence is a fact, an

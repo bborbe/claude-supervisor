@@ -11,7 +11,7 @@ When: every tick
 Rationale: `agents/topic-sweep-reader.md` is the plugin's canonical procedure for this half.
 
 1. **Take the readings first — before the dispatch, never batched with it.** For every goal
-   the topic declares, read its page's `claude_session_id` and probe it:
+   the topic declares, read its page's `claude_session_id` (or the retired `manager_session_id` as a fallback, for a page the new writer has not touched yet) and probe it:
 
    ```bash
    python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-liveness.py --check <id>
