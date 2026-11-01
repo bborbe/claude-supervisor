@@ -1066,6 +1066,20 @@ class FleetDebt(unittest.TestCase):
         self.assertEqual(rc, 11, out)
         self.assertIn("skipped: digest", out)
 
+    def test_an_abandonment_stamped_in_the_same_instant_is_honoured(self):
+        # `abandon()` writes "%.3f", which ROUNDS to the nearest millisecond, so a
+        # payment made immediately before a read can land fractionally AFTER that
+        # read's `now`. Rejecting it would make the recovery fail whenever the
+        # operator is fast — this reddened in CI on the first cut of the upper bound,
+        # which is why it is bounded at `now + 1` rather than `now`.
+        self.skipped_round()
+        self.check()
+        p = os.path.join(self.tmp.name, FLEET_SLUG + ".abandoned")
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write("%.3f digest\n" % (time.time() + 0.5))
+        rc, out = self.debt()
+        self.assertEqual(rc, 0, out)
+
     def test_a_future_dated_abandonment_is_ignored(self):
         # The other unbounded direction: a finite timestamp in the future — a
         # forward clock jump when `abandon()` stamped it, or a hand-edited line —

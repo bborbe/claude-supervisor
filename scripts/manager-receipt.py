@@ -599,11 +599,19 @@ def _skips(s: str, branch: str, d: dict, started: float, limit: float, now: floa
     # `rearm_shape` documents, and the alternative is a recovery that silently fails
     # whenever the operator is fast.
     # ⚠️ Bounded on BOTH sides. The lower bound is the round's own start; the upper
-    # bound is now, because a record dated in the future would otherwise excuse the
-    # step on every round until wall-clock caught up — a forward clock jump when
-    # `abandon()` stamped it, or a hand-edited line. `math.isfinite` in
-    # `read_abandoned` rejects inf/nan; this rejects a finite future.
-    abandoned = {step for ts, step in read_abandoned(s) if int(started) <= ts <= now}
+    # bound keeps a record dated in the future from excusing the step until
+    # wall-clock caught up — a forward clock jump when `abandon()` stamped it, or a
+    # hand-edited line. `math.isfinite` in `read_abandoned` rejects inf/nan; this
+    # rejects a finite future.
+    #
+    # ⚠️ `now + 1`, not `now`, and the slack is load-bearing. `abandon()` writes
+    # `"%.3f"`, which ROUNDS to the nearest millisecond, so a payment made
+    # immediately before a read can land fractionally *after* that read's `now` and
+    # be rejected — a recovery that silently fails whenever the operator is fast.
+    # It is the same one-second tolerance `int(started)` already grants at the lower
+    # bound. A record dated a minute or a day ahead still fails, which is what the
+    # guard is for.
+    abandoned = {step for ts, step in read_abandoned(s) if int(started) <= ts <= now + 1}
     fields = d.get("fields") or {}
     skipped = []
     for step in steps_for(branch):
