@@ -3,7 +3,7 @@
 
 Eligibility is the consumer's own gate, never "every page carrying a flag":
 `flag` (per kind, below) AND `status: in_progress` AND (`defer_date` absent or due).
-Measured 2026-10-31 in `private-personal`: **736 flagged pages, 39 eligible** — a
+Measured 2026-11-01 in `private-personal`: **776 flagged pages, 45 eligible** — a
 resolver that emitted the finished ones would spawn work on closed rows.
 
 ⚠️ **The flag predicate differs by kind, and the difference is live.**
