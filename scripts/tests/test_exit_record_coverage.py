@@ -135,7 +135,7 @@ class TestLiveCoverage(unittest.TestCase):
 
     Every earlier test called `coverage()` directly or `live_coverage(MGR, None)`;
     the arm that turns a pane map into titles, reads the store and consults `alive`
-    (`exit-record-coverage.py:186-187`) had never run. These three pin it, over a
+    (`exit-record-coverage.py:222-224`) had never run. These three pin it, over a
     real temp store rather than a stubbed `read_records`, so the store read is part
     of what is exercised.
     """
@@ -279,6 +279,11 @@ class TestControlCharacters(unittest.TestCase):
         of the line rather than merely vanish.
         """
         out = erc.coverage({"bbbbbbbb-0000": "​‮"}, {"3": "✳ Something Else"}, {}, alive)
+        self.assertIn("bbbbbbbb", erc.unknown_line(out))
+
+    def test_a_whitespace_only_name_falls_back_to_the_session_id(self):
+        """Whitespace renders as a gap, so the line would name no session at all."""
+        out = erc.coverage({"bbbbbbbb-0000": "   "}, {"3": "✳ Something Else"}, {}, alive)
         self.assertIn("bbbbbbbb", erc.unknown_line(out))
 
 

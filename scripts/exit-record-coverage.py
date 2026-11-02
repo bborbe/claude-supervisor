@@ -146,7 +146,7 @@ def unknown_line(result):
     n = len(result["unknown"])
     if not n:
         return None
-    names = ", ".join(printable(u["name"]) or u["session_id"][:8] for u in result["unknown"])
+    names = ", ".join(printable(u["name"]).strip() or u["session_id"][:8] for u in result["unknown"])
     return f"⚠️ UNRECORDED unknown: {n} manager pane(s) unresolvable from `wezterm cli list` — {names}"
 
 
