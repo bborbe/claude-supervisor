@@ -13,7 +13,7 @@ occupancy count and the cause-of-death classifier are imported from
 adds is only what none of them answers: *is the target's task finished, and where is its
 pane.*
 
-Seven refusals, each exit 1 with a stable reason token as the first line of output:
+Eight refusals, each exit 1 with a stable reason token as the first line of output:
 
   unknown-session-id  no registry entry carries that session id, or the registry is
                       unreadable. Closing needs a pid; there is none to close.
@@ -23,8 +23,6 @@ Seven refusals, each exit 1 with a stable reason token as the first line of outp
                       release it; closing is exactly the act the hold prevents.
   busy-target         the target is mid-turn (`status` is not `idle`). A close loses the
                       in-flight work outright — there is no resume to fall back on.
-  headless-target     the target's `entrypoint` is not `cli` (an SDK worker registers
-                      `sdk-cli`), so it has no pane to close.
   dirty-worktree      the target is the only live session in its worktree and that
                       worktree carries tracked changes. A close strands them: unlike a
                       restart, nothing comes back to finish the work.
@@ -38,9 +36,21 @@ Seven refusals, each exit 1 with a stable reason token as the first line of outp
 
 Exit codes: 0 closed, 1 refusal or operational error, 2 usage error.
 
-⚠️ **The close is a pane teardown, never a signal to the session's own conversation.**
+⚠️ **A pane is where the close is delivered, never what authorises it.** A tab session
+(`entrypoint: cli`) is closed by killing its pane; a headless one (`entrypoint: sdk-cli`)
+has no pane and is closed by SIGTERM on its registry pid. Both run the same guards above,
+and both wait `EXIT_DEADLINE` for the pid and its registry entry to disappear. The old
+`headless-target` refusal is gone: it made "no pane" read as "not closeable", which left
+the operator as the only actor who could close a finished headless worker.
+
+⚠️ **A headless worker that ended its turn is parked, not finished.** SIGTERM is not a
+substitute for the task gate — `task-not-terminal` still refuses one whose task is live,
+because an exited headless worker waits for a continuation and closing it discards that
+(`docs/fleet-surface.md` § A headless worker exits at turn end — that is not "finished").
+
+⚠️ **The close is a teardown, never a signal to the session's own conversation.**
 `/vault-cli:sync-progress` and `/vault-cli:session-close` read the worker's conversation
-and remain the worker's own act; this script only removes a pane whose work is already
+and remain the worker's own act; this script only removes a surface whose work is already
 finished. A session that still has something to say is refused by `task-not-terminal`.
 """
 import argparse
@@ -48,6 +58,7 @@ import glob
 import importlib.util
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -347,15 +358,19 @@ def main():
     # it made this guard unreachable. `entrypoint` separates them: a tab registers `cli`, an
     # SDK worker `sdk-cli` (measured 2026-10-20 across the live fleet: 24 × `cli`, 1 ×
     # `sdk-cli`). An ABSENT entrypoint is not read as headless: it is an entry written before
-    # the field existed, and refusing those would break closes for legitimate tab sessions.
-    # Absence falls through to the pane join, which is fail-safe — it ends in an operational
-    # `❌ error:` and never a close.
+    # the field existed, and treating those as pane-less would break closes for legitimate tab
+    # sessions.
+    #
+    # ⚠️ **A pane-less entrypoint is not a refusal.** Every other guard here is about the
+    # session's *state*; this one was about where its surface lives, and a `sdk-cli` worker
+    # has a registry pid to signal even though it has no pane. Refusing it left the operator
+    # as the only actor who could close one — eleven hand-typed `kill`s on 2026-11-02. So the
+    # old `headless-target` refusal is gone: the same guards run, and the pane kill is
+    # replaced by SIGTERM on the registry pid. The task-terminal gate below still carries the
+    # weight, because a headless worker that ends its turn is a *parked* process, not a
+    # finished one (`docs/fleet-surface.md` § A headless worker exits at turn end).
     entrypoint = (rec.get("entrypoint") or "").strip().lower()
-    if entrypoint and entrypoint != "cli":
-        return refuse(
-            "headless-target",
-            f"session {sid} runs entrypoint {entrypoint}; it has no pane to close",
-        )
+    headless = bool(entrypoint) and entrypoint != "cli"
 
     cwd = (rec.get("cwd") or "").strip()
     verdict, tracked, _untracked = precheck.worktree_probe(cwd)
@@ -381,38 +396,56 @@ def main():
     if bad is not None:
         return refuse(*bad)
 
-    pane, pmap = pane_for_session(jump, sid)
-    if pane is None:
-        # An operational failure, not one of the target refusals: the session resolved and
-        # every guard passed, the pane simply could not be identified. Reported under an
-        # `error:` prefix so it can never be read as a refusal token.
-        print(
-            f"❌ error: session {sid} resolved but no single live pane maps to it "
-            f"({'wezterm cli list unavailable' if pmap is None else 'no tty join'}) — "
-            "this is an operational failure, not a target refusal"
-        )
-        return 1
+    # A headless worker has no pane to join, so the join is the one step this branch skips.
+    # Every guard above has already run — the pane is where the close is *delivered*, never
+    # what authorises it.
+    pane = None
+    if not headless:
+        pane, pmap = pane_for_session(jump, sid)
+        if pane is None:
+            # An operational failure, not one of the target refusals: the session resolved and
+            # every guard passed, the pane simply could not be identified. Reported under an
+            # `error:` prefix so it can never be read as a refusal token.
+            print(
+                f"❌ error: session {sid} resolved but no single live pane maps to it "
+                f"({'wezterm cli list unavailable' if pmap is None else 'no tty join'}) — "
+                "this is an operational failure, not a target refusal"
+            )
+            return 1
 
+    where = f"pane {pane}" if pane is not None else f"pid {pid} (entrypoint {entrypoint}, no pane)"
     task_path, fm, _handed_off = task
     print(f"🧹 close-worker · session {sid[:8]} · pid {pid} · {rec.get('name')!r}")
     print(f"   task: {os.path.basename(task_path)} (status {fm.get('status')})")
     print(f"   worktree: {verdict}" + (f" · {others} other live session(s) share it" if verdict == "dirty" else ""))
-    print(f"   classification: {branch} · pane {pane}")
+    print(f"   classification: {branch} · {where}")
 
     if args.dry_run:
-        print("   ✅ would close the pane above")
+        print(f"   ✅ would close {where}")
         return 0
 
-    killed = subprocess.run(
-        ["wezterm", "cli", "kill-pane", "--pane-id", str(pane)],
-        capture_output=True, text=True, timeout=10,
-    )
-    if killed.returncode != 0:
-        print(
-            f"❌ error: wezterm refused to close pane {pane} "
-            f"(exit {killed.returncode}): {(killed.stderr or '').strip()}"
+    if headless:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            # It exited between the liveness read and the signal. The wait below still proves
+            # it gone and the stale-entry cleanup still applies — the same outcome a delivered
+            # SIGTERM produces, so this is not an error.
+            pass
+        except PermissionError as error:
+            print(f"❌ error: cannot signal pid {pid}: {error}")
+            return 1
+    else:
+        killed = subprocess.run(
+            ["wezterm", "cli", "kill-pane", "--pane-id", str(pane)],
+            capture_output=True, text=True, timeout=10,
         )
-        return 1
+        if killed.returncode != 0:
+            print(
+                f"❌ error: wezterm refused to close pane {pane} "
+                f"(exit {killed.returncode}): {(killed.stderr or '').strip()}"
+            )
+            return 1
 
     # The registry entry is Claude Code's, not ours, and it deletes it on exit. Wait for
     # that rather than racing it; only a provably dead pid whose entry lingers is removed
@@ -434,7 +467,7 @@ def main():
             print(f"   ⚠️ registry entry {path} survived pid {pid} and could not be removed: {error}")
 
     print(
-        f"   {'✅' if not alive and not entry_present else '⚠️'} closed pane {pane} · "
+        f"   {'✅' if not alive and not entry_present else '⚠️'} closed {where} · "
         f"pid {pid} {'dead' if not alive else 'STILL ALIVE'} · registry entry "
         f"{'removed' if not entry_present else 'STILL PRESENT'}"
     )

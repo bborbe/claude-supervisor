@@ -19,9 +19,12 @@ Run: python3 -m unittest discover -s scripts/tests -v
 import importlib.util
 import json
 import os
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -267,21 +270,96 @@ class TestCliRefusals(unittest.TestCase):
         done = self._run()
         self.assertEqual(done.stdout.splitlines()[0], "busy-target")
 
-    def test_headless_target(self):
-        # `sdk-cli` is the value a real SDK worker writes. The old fixture used
-        # `kind="headless"`, a value NOTHING in the fleet produces — which is why this guard
-        # read green while being unreachable: every registry entry writes `kind: interactive`,
-        # tab and SDK worker alike (measured 2026-10-20).
-        self._registry(entrypoint="sdk-cli")
-        done = self._run()
-        self.assertEqual(done.stdout.splitlines()[0], "headless-target")
-
     def test_kind_is_not_the_headless_signal(self):
         # Pins the fix: a record claiming `kind: headless` but carrying a real tab entrypoint
-        # must NOT be refused as headless. Keying on `kind` again would fail this.
+        # is a TAB session. Keying on `kind` again would send it down the SIGTERM path.
+        # `sdk-cli` is the value a real SDK worker writes; `kind` is `interactive` for both
+        # (measured 2026-10-20), which is why the old `kind`-keyed guard was unreachable.
         self._registry(kind="headless", entrypoint="cli")
+        self._task(**{"claude_session_id": SID, "status": "completed"})
+        done = self._run("--dry-run")
+        self.assertIn("pane", done.stdout)
+        self.assertNotIn("no pane", done.stdout)
+
+    # --- headless (`sdk-cli`) targets -------------------------------------------------
+    #
+    # The same guards, and SIGTERM where the pane kill used to be. Every one of these uses a
+    # REAL child process rather than a fixture pid: a fixture pid could name something else
+    # on the machine, and the close path signals whatever the registry names.
+
+    def _spawn_child(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        # Reap in the background. A terminated-but-unreaped child is a ZOMBIE, and `kill -0`
+        # succeeds on a zombie — without this the script's liveness probe reads it as alive
+        # for the whole deadline and reports `STILL ALIVE` on a close that worked. (A real
+        # worker's parent reaps it; only a test process holds the corpse.)
+        threading.Thread(target=child.wait, daemon=True).start()
+        self.addCleanup(lambda: None if child.poll() is not None else child.kill())
+        return child
+
+    def _transcript(self, closer):
+        """A real transcript under the projects dir — `who-needs-me.py` hardcodes that path.
+
+        `_read_last_assistant_text` resolves `~/.claude/projects/*/<sid>.jsonl` and takes no
+        override, so a temp directory cannot stand in for it. The file is named with the
+        fixture session id — a UUID no live session can hold — and removed in cleanup.
+        """
+        root = os.path.expanduser("~/.claude/projects")
+        if not os.path.isdir(root) or not os.access(root, os.W_OK):
+            self.skipTest("~/.claude/projects is not writable")
+        proj = tempfile.mkdtemp(prefix="close-worker-test-", dir=root)
+        self.addCleanup(shutil.rmtree, proj, True)
+        with open(os.path.join(proj, f"{SID}.jsonl"), "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": f"Working.\n\n👤 You: {closer}"}]},
+            }) + "\n")
+
+    def test_sdk_cli_refuses_on_non_terminal_task(self):
+        """No pane is not a finished task: the task gate still runs for a headless record."""
+        child = self._spawn_child()
+        self._registry(entrypoint="sdk-cli", pid=child.pid)
+        self._task(**{"claude_session_id": SID, "status": "in_progress"})
         done = self._run()
-        self.assertNotEqual(done.stdout.splitlines()[0], "headless-target")
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stdout.splitlines()[0], "task-not-terminal")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_sdk_cli_refuses_on_busy(self):
+        child = self._spawn_child()
+        self._registry(entrypoint="sdk-cli", pid=child.pid, status="busy")
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "busy-target")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_sdk_cli_refuses_on_gate(self):
+        """The gate check is not skipped just because the target has no pane."""
+        child = self._spawn_child()
+        self._registry(entrypoint="sdk-cli", pid=child.pid)
+        self._task(**{"claude_session_id": SID, "status": "completed"})
+        self._transcript("approve: rm -rf /tmp/nothing")
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "gate-held")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_sdk_cli_closes_a_terminal_idle_worker(self):
+        child = self._spawn_child()
+        self._registry(entrypoint="sdk-cli", pid=child.pid)
+        self._task(**{"claude_session_id": SID, "status": "completed"})
+        done = self._run()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("closed", done.stdout)
+        self.assertEqual(child.wait(timeout=10), -signal.SIGTERM)
+        self.assertFalse(os.path.exists(os.path.join(self.sessions, f"{child.pid}.json")))
+
+    def test_sdk_cli_dry_run_signals_nothing(self):
+        child = self._spawn_child()
+        self._registry(entrypoint="sdk-cli", pid=child.pid)
+        self._task(**{"claude_session_id": SID, "status": "completed"})
+        done = self._run("--dry-run")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("would close", done.stdout)
+        self.assertIsNone(child.poll(), "--dry-run must not signal")
 
     def test_held_session(self):
         self._registry()
@@ -320,8 +398,7 @@ class TestCliRefusals(unittest.TestCase):
         # in the operational-error branch — never a refusal token, and never a close.
         self.assertNotIn(done.stdout.splitlines()[0], {
             "unknown-session-id", "ambiguous-pid", "held-session", "busy-target",
-            "headless-target", "dirty-worktree", "gate-held", "task-unresolved",
-            "task-not-terminal",
+            "dirty-worktree", "gate-held", "task-unresolved", "task-not-terminal",
         })
         # Every guard passed, so the only remaining stop is the pane join. That branch is
         # an operational error (`❌ error:`), never a refusal token — the distinction the
