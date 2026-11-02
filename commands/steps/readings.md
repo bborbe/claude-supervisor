@@ -6,7 +6,7 @@ user-invocable: false
 
 # Readings
 
-When: every tick — take all five readings (`fleet-board.py` · `approved-not-started.py` · `unarmed-goals.py` · `next-focus.py` · `service-guard.py`; commands in the step)
+When: every tick — take all five readings (commands in the step)
 
 ## The saturation reading — the ratio, not tok/s
 
