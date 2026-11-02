@@ -40,14 +40,16 @@ SECTIONS = (
     ("Step 2C", "## Step 2C — Topic branch", "## Step 3 — Spawn the tab"),
 )
 
-#: The read must be unconditional. Same sentence shape in both branches, so one marker
-#: covers (a) — but it is asserted per section, because "updated one of two" is the defect.
-UNCONDITIONAL_MARKER = "UNCONDITIONALLY"
+#: The read must be unconditional **and ordered before the registry result**. The phrase is
+#: pinned whole, not the word alone: `UNCONDITIONALLY` as a bare substring is satisfied by a
+#: negated sentence ("do not read the page UNCONDITIONALLY") and by a mention in any item, so
+#: it cannot distinguish the ordering this check exists to protect.
+UNCONDITIONAL_MARKER = "UNCONDITIONALLY — before the registry result"
 
 #: The ambiguity, stated per branch. 2B was the gap; 2C is asserted too so a future rewrite
 #: cannot silently drop it from the branch that already had it.
 AMBIGUITY_MARKERS = {
-    "Step 2B": "An empty match is never",
+    "Step 2B": "An empty match never *proves*",
     "Step 2C": "an empty match is **ambiguous**",
 }
 
