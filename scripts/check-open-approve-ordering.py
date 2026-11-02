@@ -41,6 +41,20 @@ def main() -> int:
     readiness_at = text.find(READINESS)
     approve_at = text.find(APPROVE)
 
+    # Each anchor must occur exactly once. `find` returns the FIRST occurrence, so a
+    # duplicate earlier in the file would let a genuine reversal hide behind it: the
+    # guard would compare two positions that are not the paragraphs it means.
+    for name, phrase in (("readiness", READINESS), ("approve", APPROVE)):
+        count = text.count(phrase)
+        if count != 1:
+            print(
+                f"open-approve-ordering FAILED: the {name} anchor occurs {count} time(s) "
+                f"in {TARGET}, expected exactly 1 ({phrase!r}). With a duplicate, the "
+                f"first-match comparison can pass while the real paragraphs are reversed.",
+                file=sys.stderr,
+            )
+            return 1
+
     if readiness_at < 0:
         print(
             f"open-approve-ordering FAILED: {TARGET} does not carry the readiness "
@@ -70,13 +84,22 @@ def main() -> int:
         )
         return 1
 
-    scope_at = text.find(SCOPE)
-    if scope_at < 0 or scope_at < approve_at:
+    # The scope marker must sit INSIDE the approve paragraph, not merely somewhere at
+    # or after it. Moving it into a later paragraph would otherwise leave the guard
+    # green while the approve paragraph itself reads as applying to the single-task
+    # path — the exact misreading this check exists to prevent.
+    para_end = text.find("\n\n", approve_at)
+    if para_end < 0:
+        para_end = len(text)
+    scope_at = text.find(SCOPE, approve_at)
+    if scope_at < 0 or scope_at >= para_end:
         print(
-            f"open-approve-ordering FAILED: the reorder is not scoped to the batch. "
-            f"{TARGET} must carry {SCOPE!r} in the approve pass paragraph — on the "
-            f"single-task path the operator's approval write must precede the command, "
-            f"so an unscoped reorder refuses every single-row open.",
+            f"open-approve-ordering FAILED: the reorder is not scoped inside the "
+            f"approve paragraph. {TARGET} must carry {SCOPE!r} between the approve "
+            f"heading (char {approve_at}) and the end of that paragraph "
+            f"(char {para_end}) — on the single-task path the operator's approval "
+            f"write must precede the command, so an unscoped reorder refuses every "
+            f"single-row open.",
             file=sys.stderr,
         )
         return 1
