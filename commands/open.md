@@ -265,7 +265,13 @@ approve  a routine task - 2026W39
 Opened N · approved A · filled F fields · skipped H (human) · yours Y (manager) · refused U (undecidable) · held K (blocked).
 ```
 
-**Approve every eligible row first — before the readiness dispatch.** The batch's opening move is `vault-cli --vault "<vault>" task approve "<task>"` for each Step 0.5 selector row that is **not** JUMP/RESUME-bound. `role: human` rows are approved too. A row not at `phase: todo` is left alone.
+**Readiness-gate every CREATE-bound row first, concurrently — before anything is approved.** For each CREATE-bound row (`role: agent`, no live pane, no `claude_session_id`), dispatch Step 1.5's readiness sub-agent — **all in ONE message**, one `Agent` call per row. Resume/jump-bound, `role: human` (→ DIRECT) and `task_type:` pipeline rows are not gated. `readiness` column: `✅ ready <score>/10`; `⚠️ opened <score>/10` (operator-flagged, below threshold — gap bullets under the row); `⛔ NOT READY` (still below after the improvement pass); `— (resume/jump/direct)`. A not-ready row is **held, never opened** — **except an operator-flagged row below the ladder's open threshold, which opens with its gaps** (§ Step 1.5 Gate 2); held rows go in the footer (`… · not ready R (readiness)`). ⚠️ **Gate 1 does not refuse this batch** (`flag: true` on a `todo` row **is** the approval for `--flagged`). The batch runs **Gate 2 only** — ⚠️ **Gate 3 still runs at the spawn.**
+
+⚠️ **This dispatch runs on rows the operator has not yet approved, deliberately** — see the ordering rule below for the trade and what it buys.
+
+**Approve only the rows the dispatch will open — after readiness, never before.** ⚠️ **This ordering is the `--flagged` batch's alone.** On the **single-task path** the approve pass still runs *first*, unchanged, because Gate 1 (`phase: todo` refuses, § Step 1.5) runs after this step and depends on the approval having already landed — moving it after readiness there would leave the row at `phase: todo` when Gate 1 reads it and refuse every single-row open. The reorder below is therefore guarded on the batch path; a reader must not apply it to the single task.
+
+On the **batch path**, the approval move is `vault-cli --vault "<vault>" task approve "<task>"` for each Step 0.5 selector row that is **not** JUMP/RESUME-bound **and whose readiness outcome is to open** (`✅ ready`, `⚠️ opened`, or `— (resume/jump/direct)`); `role: human` rows are approved too. A row the dispatch **holds** is **not approved** — it stays at `phase: todo`, which is the operator's approval inbox. A row not at `phase: todo` is left alone.
 
 ⚠️ **`task approve` also moves `status` to `next`; the pass must put it back.** Every row here came from the Step 0.5 selector (`status: in_progress`). Each approved row takes one more write:
 
@@ -285,11 +291,11 @@ vault-cli --vault "<vault>" task set "<task>" phase planning
 
 ⚠️ **The order is load-bearing, not cosmetic.** A row moved to `planning` *before* the approval is recorded can never be approved afterwards — *the flag is the approval*: approval first, phase second. **A row at neither `todo` nor empty is left alone.**
 
-⚠️ **The pass runs before the readiness dispatch, never after** — a row is approved whether or not it clears Gate 2; a held row that was approved opens on the next run.
+⚠️ **The pass runs AFTER the readiness dispatch, and that is the whole point.** An approval is an **admission**: `approved_at` is what makes a row "approved and not started" — the population `scripts/approved-not-started.py` counts and every throughput reading is computed from. Approving before readiness admits rows the dispatch then holds, so every run that holds K rows adds K to that queue, and the queue never shrinks from this side because a held row is never opened. Approving only what opens means **a held row consumes no admission**: it returns to the operator's approval inbox and is approved on the run that actually opens it.
 
-⚠️ **Print one `approve <task>` line per approved row.** The run's output is the only record that the ordering held, and it is what a reader checks to tell a real approve from a line-printing no-op.
+⚠️ **On the batch path this reverses the previous ordering rule** (*"The pass runs before the readiness dispatch, never after — a row is approved whether or not it clears Gate 2"*). The trade is deliberate and bounded: the dispatch now audits rows the operator has not yet approved, at the cost of one readiness sub-agent call per selected row — paid to stop the intake refilling a queue that exists precisely to be drained. A held row that was approved under the old rule opened on the next run; under this one it is approved on that run, in the same pass that opens it.
 
-**Readiness-gate every CREATE-bound row first, concurrently.** For each CREATE-bound row (`role: agent`, no live pane, no `claude_session_id`), dispatch Step 1.5's readiness sub-agent — **all in ONE message**, one `Agent` call per row. Resume/jump-bound, `role: human` (→ DIRECT) and `task_type:` pipeline rows are not gated. `readiness` column: `✅ ready <score>/10`; `⚠️ opened <score>/10` (operator-flagged, below threshold — gap bullets under the row); `⛔ NOT READY` (still below after the improvement pass); `— (resume/jump/direct)`. A not-ready row is **held, never opened** — **except an operator-flagged row below the ladder's open threshold, which opens with its gaps** (§ Step 1.5 Gate 2); held rows go in the footer (`… · not ready R (readiness)`). ⚠️ **Gate 1 does not refuse this batch** (`flag: true` on a `todo` row **is** the approval for `--flagged`). The batch runs **Gate 2 only** — ⚠️ **Gate 3 still runs at the spawn.**
+⚠️ **Print one `approve <task>` line per approved row, and one `held <task>` line per row left unapproved.** The run's output is the only record that the ordering held, and it is what a reader checks to tell a real approve from a line-printing no-op.
 
 **Loop the eligible rows in the printed stable order**, delegating each to this command's own single-task path. Per row, invoke `/supervisor:open "<task>"` — with `--first-step "<gap bullets>"` only when the row opened below the readiness ladder's open threshold. Never reimplement jump / resume / spawn here; never pass a mode override to the fleet. ⚠️ **The per-row delegation IS the guard — no shortcut keeps it.** ⚠️ **The batch is paced by delegation, never by a counter of its own** (rule home: `docs/fleet-surface.md` § Spawn a worker item 5).
 
@@ -326,6 +332,8 @@ Then:
 **The single home of `/supervisor:open`'s spawn preconditions.** Step 2A's CREATE branch and the `--flagged` batch (Step 0.6) both reference this section; neither restates it.
 
 Two gates run here, in this order. The first asks whether the row may be opened at all; the second asks whether its plan is good enough to hand to a worker. **A row that fails the first is never probed by the second** — auditing an unapproved row spends work on a decision the operator has not made.
+
+⚠️ **One deliberate exception, and it is the `--flagged` batch's approve pass.** That pass runs the readiness dispatch *before* the approval, so it does probe rows still at `phase: todo` (§ Step 0.6). The cost is one readiness sub-agent call per selected row; what it buys is that a row the dispatch holds is never approved, so it consumes no admission and never enters the approved-not-started queue. The rule above governs the **single-task path**, where the operator has already chosen the row and the approval is theirs to give first. A batch that approved-then-held would add every held row to a queue the round exists to drain.
 
 ### Gate 1 — approval (`phase: todo` refuses)
 

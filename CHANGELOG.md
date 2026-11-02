@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`/supervisor:open`'s `--flagged` batch no longer approves rows it is about to hold — the approval now runs after the readiness dispatch, so a held row stays at `phase: todo` instead of entering the approved-not-started queue.** An approval is an admission: `approved_at` is the field `scripts/approved-not-started.py` counts, and the batch previously wrote it for **every** selected row before readiness decided whether that row would ever open — so each run that held K rows added K to a queue that exists precisely to be drained, and nothing on this side ever removed them. On the batch path the dispatch now runs first and the approve pass covers only rows whose readiness outcome is to open; a held row returns to the operator's approval inbox and is approved on the run that actually opens it. ⚠️ **The single-task path keeps the old ordering deliberately** — Gate 1 (`phase: todo` refuses) runs after this step and depends on the approval having landed, so moving it there would refuse every single-row open. `commands/open.md` § Step 1.5's rule *"a row that fails the first is never probed by the second"* now names the batch approve pass as its one exception, and the run prints a `held <task>` line per row left unapproved so the ordering is auditable from the output.
+
 ## v0.233.0
 
 - feat: `attention-ask.py` sends a bearer token when `$ATTENTION_STORE_TOKEN` is set, for stores that require authentication. Unset — the default — keeps the existing unauthenticated behaviour unchanged. Without this, posting to a token-gated store fails with a 401 that reads as "the card was never posted", which is how an approval collected on one store and read from another goes unnoticed. Scope is deliberately `attention-ask.py` only: the other scripts that read `ATTENTION_STORE_URL` (including `attention-answer.py`) are **not** covered, so against an auth-enforcing store this authenticates the post and nothing else.
