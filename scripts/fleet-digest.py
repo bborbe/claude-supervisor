@@ -71,10 +71,18 @@ filenames do not carry the snapshot time reliably — `2026-10-20T08-43-00-02-00
 holds `snapshot written: 2026-10-20T06:43:35Z` and `round14-2026-10-20T13-10Z.digest`
 holds `11:39:16Z` — so ordering by name would judge a stale round by a fresh filename.
 
-⚠️ **Nine of the 85 retained digests carry a `snapshot written:` value that is not a
-timestamp, and four of those name no baseline at all.** A parser that treats them as
+⚠️ **Most `skipped` digests carry a `snapshot written:` value that is not a timestamp**
+(43 of the 100 retained at 2026-11-01; the rest are ISO). A parser that treats them as
 fresh misses a real lapse; one that treats them as a parse failure reports a false one.
 They are enumerated in `parse_snapshot` with the rule for each.
+
+⚠️ **One of those forms is a round that RAN, and it must not be carried forward.** A
+round whose roster join collapsed writes `skipped (roster join incomplete: 5/52
+resolved)` — the round armed, swept and wrote its digest, so its own mtime is the honest
+age. Carrying an older baseline forward instead is what made a working manager read as a
+lapsed one on 2026-11-01 (`ledger.txt` `STALE … age=51862s` against a 15-hour-old
+baseline, while the round had just run). It classifies as `join-degraded`, and a
+genuinely old degraded round still ages out and still reports.
 """
 import argparse
 import calendar
@@ -114,6 +122,17 @@ ISO_FULL = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z")
 ISO_MIN = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})\b")
 ISO_DAY = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\b")
 BASELINE_KEPT = re.compile(r"baseline kept at (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)")
+# A round that RAN but could not join the roster to the registry, so it wrote no
+# snapshot time. Matched on the parenthesised prefix, never on a bare `roster join`
+# substring: `skipped (roster not supplied; round failed)` is a different failure — that
+# round did not run — and must keep carrying forward.
+ROSTER_JOIN = re.compile(r"^skipped \(roster join (?:incomplete|failed)\b")
+
+# The quality for a round that ran on a degraded roster join. Named, never folded into
+# `carried-forward`: the two say different things. `carried-forward` means "this round
+# proved nothing, age it by an older round's baseline"; `join-degraded` means "this round
+# ran, age it by itself".
+JOIN_DEGRADED = "join-degraded"
 
 
 def _epoch(y, mo, d, h=0, mi=0, s=0):
@@ -136,7 +155,9 @@ def parse_snapshot(value):
                                                         baseline
       `skipped (… baseline read ok)`                 -> unknown: no baseline named; the
                                                         caller carries the previous round's
-      `skipped (roster join failed; …)`              -> unknown, carried forward
+      `skipped (roster join incomplete: 5/52 …)`     -> join-degraded: the round RAN and
+      `skipped (roster join failed; …)`                 could not join, so its own file
+                                                        mtime is the honest age
       `skipped (roster not supplied; round failed)`  -> unknown, carried forward
       `skipped (pass not run: …)`                    -> unknown, carried forward
       `skipped (not persisted by this agent run; …)` -> unknown, carried forward
@@ -145,10 +166,23 @@ def parse_snapshot(value):
     "Carried forward" is deliberately not "fresh": a round that persisted nothing has
     not proved the loop is alive, and treating it as fresh is exactly the silent miss
     this watcher exists to prevent.
+
+    `join-degraded` is the one form that is NOT carried forward, and it earns the
+    exception by a different route: the round ran (its digest file exists and was just
+    written), so its own mtime proves the loop is alive without pretending the round
+    produced a snapshot. Measured 2026-11-01: a round that armed six times and ran still
+    rendered `skipped (roster join incomplete: 5/52 resolved)`, was aged against a
+    15-hour-old baseline, and read as a lapse — the false report this quality removes.
     """
     text = value.strip()
-    # The baseline-kept lookup runs FIRST, because that form's baseline lives inside the
-    # parentheses and any generic trailing-annotation handling would throw it away.
+    if ROSTER_JOIN.match(text):
+        return None, JOIN_DEGRADED
+    # ROSTER_JOIN precedes the ISO lookups and is mutually exclusive with BASELINE_KEPT:
+    # a roster-join render never names a baseline, and a baseline-kept render never names
+    # a failed join. Both are checked before the generic forms for the same reason.
+    # The baseline-kept lookup runs before the rest, because that form's baseline lives
+    # inside the parentheses and any generic trailing-annotation handling would throw it
+    # away.
     m = BASELINE_KEPT.search(text)
     if m:
         mm = ISO_FULL.match(m.group(1))
@@ -188,6 +222,14 @@ def newest_round():
     otherwise — never the filename, which routinely disagrees with its own contents.
     A newest file that names no baseline carries the newest PARSEABLE baseline forward,
     which is what keeps a run of `skipped` rounds from reading as either fresh or broken.
+
+    ⚠️ **Except `join-degraded`, which is aged by its own mtime.** A round that ran on a
+    degraded roster join did run — it armed, swept and wrote its digest — so carrying an
+    older round's baseline forward makes a working manager read as a lapsed one. That is
+    the false report measured 2026-11-01: the degraded round's digest sat beside a
+    15-hour-old baseline and the keepalive declared `STALE … sent` while the round had
+    just run. Its own mtime is the honest age; a genuinely old degraded round still ages
+    out and still reports.
     """
     try:
         names = [n for n in os.listdir(DIGEST_DIR) if n.endswith(".digest")]
@@ -204,14 +246,18 @@ def newest_round():
             mtime = os.path.getmtime(path)
         except OSError:
             mtime = 0.0
-        rows.append((epoch if epoch is not None else mtime, name, path, epoch, quality, raw))
+        rows.append(
+            (epoch if epoch is not None else mtime, name, path, epoch, quality, raw, mtime)
+        )
 
     rows.sort(key=lambda r: (r[0], r[1]))
-    _, name, path, epoch, quality, raw = rows[-1]
+    _, name, path, epoch, quality, raw, mtime = rows[-1]
     if epoch is not None:
         return epoch, quality, path, raw
+    if quality == JOIN_DEGRADED:
+        return mtime, quality, path, raw
 
-    for _, name2, path2, epoch2, quality2, raw2 in reversed(rows):
+    for _, name2, path2, epoch2, quality2, raw2, _mtime2 in reversed(rows):
         if epoch2 is not None:
             return epoch2, "carried-forward", path2, raw
     raise RuntimeError("no digest under %s names a usable baseline" % DIGEST_DIR)
