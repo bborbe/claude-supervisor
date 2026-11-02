@@ -2,7 +2,7 @@
 
 `commands/open.md` resolves a goal's or topic's manager from the session registry, whose empty
 match is ambiguous — it cannot tell "no manager ever existed" from "the manager exited". The
-page's `manager_session_id` is what distinguishes them, so the read must run *before* the
+page's `claude_session_id` is what distinguishes them, so the read must run *before* the
 registry result rather than only when it matches nothing.
 
 The load-bearing case is `test_pre_change_text_fails`. It feeds the wording that shipped before
@@ -24,14 +24,14 @@ ROOT = SCRIPT.parent.parent
 GOOD = (
     "## Step 2B — Goal branch\n\n"
     "1. Resolve from the registry.\n"
-    "   ⚠️ **Read the goal page's `manager_session_id` UNCONDITIONALLY, before the registry "
+    "   ⚠️ **Read the goal page's `claude_session_id` UNCONDITIONALLY, before the registry "
     "result.**\n"
     "   ⚠️ **An empty match never *proves* \"no manager ever existed\".**\n"
     "4. **`UNKNOWN` or `AMBIGUOUS`, or `None` with no page id → spawn.** ⚠️ **`None` here "
     "means registry empty AND the page carried no session id.**\n\n"
     "## Step 2C — Topic branch\n\n"
     "1. Resolve from the registry; an empty match is **ambiguous**.\n"
-    "   ⚠️ **Read the topic page's `manager_session_id` UNCONDITIONALLY, before the registry "
+    "   ⚠️ **Read the topic page's `claude_session_id` UNCONDITIONALLY, before the registry "
     "result.**\n"
     "4. **`UNKNOWN` or `AMBIGUOUS`, or `None` with no page id → spawn.** ⚠️ **`None` here "
     "means registry empty AND the page carried no session id.**\n\n"
@@ -42,13 +42,13 @@ GOOD = (
 PRE_CHANGE = (
     "## Step 2B — Goal branch\n\n"
     "1. Resolve from the registry.\n"
-    "   ⚠️ **The goal page's `manager_session_id` is a lead, never the answer.** When the "
+    "   ⚠️ **The goal page's `claude_session_id` is a lead, never the answer.** When the "
     "registry matches nothing, read it and run `session-liveness.py --check <id>` on it.\n"
     "4. **None, `UNKNOWN` or `AMBIGUOUS` → spawn a goal manager.**\n\n"
     "## Step 2C — Topic branch\n\n"
     "1. Resolve from the registry.\n"
-    "   ⚠️ **The topic page's `manager_session_id` is a lead, never the answer.** When it "
-    "matches nothing, read the topic page's `manager_session_id`.\n"
+    "   ⚠️ **The topic page's `claude_session_id` is a lead, never the answer.** When it "
+    "matches nothing, read the topic page's `claude_session_id`.\n"
     "4. **None, `UNKNOWN` or `AMBIGUOUS` → the flag gate, then spawn a manager.**\n\n"
     "## Step 3 — Spawn the tab (resume/create branches)\n"
 )
@@ -108,7 +108,7 @@ class CheckOpenManagerResolutionTest(unittest.TestCase):
     def test_one_branch_without_the_unconditional_read_fails(self):
         """'Updated one of two' is the defect this check exists to catch."""
         text = GOOD.replace(
-            "   ⚠️ **Read the topic page's `manager_session_id` UNCONDITIONALLY, before the "
+            "   ⚠️ **Read the topic page's `claude_session_id` UNCONDITIONALLY, before the "
             "registry result.**\n",
             "",
         )

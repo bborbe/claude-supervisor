@@ -37,7 +37,7 @@ A goal manager under a live topic manager is **covered** and yields no card.
 ⚠️ **`branch == "fleet"` is counted and reported but never carded, and that is not a gap.**
 Nothing sits above a fleet manager, so it is uncovered in the keep-alive sense — but the
 crash this script detects is *a LIVE session whose loop lapsed*, and a fleet record carries
-no page to read a `manager_session_id` from (`24 Goals/` and `23 Topics/` hold goal and topic
+no page to read a `claude_session_id` from (`24 Goals/` and `23 Topics/` hold goal and topic
 pages; there is no fleet page). With no session id there is no liveness probe, so a fleet
 manager's crash cannot be told from its ordinary exit and must not be carded. Every fleet
 record still appears in `--json` with that reason, so the population stays countable.
@@ -197,14 +197,13 @@ def _read_page(path: str) -> str:
 def _page_session_id(front: str) -> str:
     """The session id a goal or topic page records.
 
-    `claude_session_id` is read first and the retired `manager_session_id` second: the
-    writer sets the former without clearing the latter, so a re-armed legacy page carries
-    both and reading the retired key first would hand back the stale id. The fallback
-    answers only for a page the new writer has not touched yet.
+    `claude_session_id` is the only field either page type carries its manager in. The
+    retired-key fallback was removed once every page in both vaults was migrated; nothing
+    writes the retired key any more, so reading it would only resurrect an id no writer
+    produces.
     """
 
-    scalar = helpers().scalar
-    return scalar(front, "claude_session_id") or scalar(front, "manager_session_id")
+    return helpers().scalar(front, "claude_session_id")
 
 
 def subjects(state_dir: str) -> tuple[list[tuple[str, str]], int]:

@@ -42,7 +42,7 @@ GOAL_PAGE = """---
 page_type: goal
 status: in_progress
 phase: execution
-manager_session_id: {sid}
+claude_session_id: {sid}
 {extra}---
 # Success Criteria
 - [ ] one
@@ -121,12 +121,12 @@ class KeepAliveTest(unittest.TestCase):
         self.assertEqual("leave", out[0])
 
     def test_a_mixed_page_resolves_claude_session_id_first(self):
-        """A re-armed legacy page carries both keys; the surviving one is probed.
+        """A page left over from the tolerance window carries both keys; the retired one is ignored.
 
-        The writer sets `claude_session_id` without clearing the retired key, so
-        reading the retired key first would probe — and resume — the stale id.
+        `claude_session_id` is the only key read, so a stale retired id on the same page
+        can never be probed — and resumed — in its place.
         """
-        self.page(sid="sid-old", extra="claude_session_id: sid-new\n")
+        self.page(sid="sid-new", extra="manager_session_id: sid-old\n")
         seen = []
 
         def verdict(sid):
@@ -141,7 +141,7 @@ class KeepAliveTest(unittest.TestCase):
         self.assertEqual(["sid-new"], seen)
 
     def test_no_recorded_id_without_a_flag_is_held(self):
-        """An absent `manager_session_id` is an OPEN, not a resume, and rule 4 makes an open
+        """An absent `claude_session_id` is an OPEN, not a resume, and rule 4 makes an open
         the operator's act. The two arms must not share a verdict — `resume` here handed the
         agent a `/supervisor:open --goal` line for a goal it may not open, which is the whole
         defect this split removes."""

@@ -582,7 +582,7 @@ def subject_page(ctx, vault, kind, name):
 def subject_live(ctx, vault, kind, name):
     """Is a manager for this subject LIVE? Registry by name — `manager_on_chain`'s own
     signal, which is what SELECTS an owner. Never the subject page's
-    `manager_session_id`; that is a lead for the `--check` probe below, and the two
+    `claude_session_id`; that is a lead for the `--check` probe below, and the two
     are different questions (`docs/fleet-surface.md` § Which manager owns a subject)."""
     if ctx["no_liveness"] or ctx["managers"] is None:
         # `None` = the registry probe failed, so "no live manager" is NOT proven. Every
@@ -596,8 +596,7 @@ def subject_live(ctx, vault, kind, name):
 def subject_liveness(ctx, vault, kind, name):
     """`true` / `false` / `null` for one subject's recorded manager session.
 
-    `session-liveness.py --check` on the owner page's `claude_session_id` (or the
-    retired `manager_session_id` as a fallback) — the
+    `session-liveness.py --check` on the owner page's `claude_session_id` — the
     section's own "treat it as a lead only, never as a verdict" table: `true` or
     `false` when it answers, `null` when it answers UNKNOWN / AMBIGUOUS / MALFORMED.
     A subject with NO recorded manager session is `false` — absence is a fact, an
@@ -613,11 +612,9 @@ def subject_liveness(ctx, vault, kind, name):
     block = read_block(path) if path else None
     sid = None
     if block is not None:
-        # `claude_session_id` first, the retired key second — the same order the row
-        # builder below uses. Reading the retired key first here would probe `owner_live`
-        # against the stale id on exactly the mixed page this writer creates.
+        # `claude_session_id` is the only field a subject page records its manager in;
+        # the retired-key fallback was removed once both vaults were migrated.
         sid = ((open_queue.field(block, "claude_session_id") or "").strip()
-               or (open_queue.field(block, "manager_session_id") or "").strip()
                or None)
     if not sid:
         verdict = False
@@ -628,7 +625,7 @@ def subject_liveness(ctx, vault, kind, name):
     return verdict
 
 
-#: The fleet sentinel has no page to read a `manager_session_id` off, so its session
+#: The fleet sentinel has no page to read a `claude_session_id` off, so its session
 #: id comes from the registry and is still checked through `--check`. The cache key
 #: is a plain subject triple so fixtures can seed it like any other.
 FLEET_KEY = ("fleet", "fleet", "Fleet Manager")
@@ -768,7 +765,6 @@ def row_for(vault, cfg, kind, path, ctx):
     if not launcher:
         return None, "no launcher resolved"
     sid = ((open_queue.field(block, "claude_session_id") or "").strip()
-           or (open_queue.field(block, "manager_session_id") or "").strip()
            or None)
     live = "none" if ctx["no_liveness"] else row_liveness(ctx, sid)
     # A pane is only meaningful for a LIVE session, and `pane_of` re-imports a

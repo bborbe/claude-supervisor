@@ -47,12 +47,12 @@ class EvaluateTest(unittest.TestCase):
 
     def goal(self, name, sid="aaaa1111-0000-0000-0000-000000000000"):
         write(os.path.join(self.goals, f"{name}.md"),
-              f"---\nmanager_session_id: {sid}\npage_type: goal\n---\n\n# Impact\n")
+              f"---\nclaude_session_id: {sid}\npage_type: goal\n---\n\n# Impact\n")
 
     def topic(self, name, goals, sid="bbbb2222-0000-0000-0000-000000000000"):
         body = "\n".join(f"- [ ] [[{g}]]" for g in goals)
         write(os.path.join(self.topics, f"{name}.md"),
-              f"---\nmanager_session_id: {sid}\npage_type: topic\n---\n\n## Goals\n\n{body}\n")
+              f"---\nclaude_session_id: {sid}\npage_type: topic\n---\n\n## Goals\n\n{body}\n")
 
     def stub(self, state, verdict):
         cm.cadence_state = lambda name, branch: state
@@ -97,7 +97,7 @@ class EvaluateTest(unittest.TestCase):
                     os.remove(os.path.join(self.goals, entry))
                 self.goal("Covered Goal")
                 write(os.path.join(self.topics, "Some Topic.md"),
-                      "---\nmanager_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n"
+                      "---\nclaude_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n"
                       f"## Goals\n\n{body}\n")
                 cm.cadence_state = lambda n, b: "STALE" if b == "goal" else "OK"
                 cm.session_state = lambda s: "LIVE"
@@ -108,7 +108,7 @@ class EvaluateTest(unittest.TestCase):
         """A `## Goals` section records removals in prose; that is not a declaration."""
         self.goal("Lonely Goal")
         write(os.path.join(self.topics, "Some Topic.md"),
-              "---\nmanager_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n"
+              "---\nclaude_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n"
               "## Goals\n\n- [[In Scope Goal]]\n\n"
               "Removed 2026-09-20: [[Lonely Goal]] was re-homed.\n")
         cm.cadence_state = lambda n, b: "STALE" if b == "goal" else "OK"
@@ -159,15 +159,26 @@ class EvaluateTest(unittest.TestCase):
         self.stub("STALE", "LIVE")
         row = cm.evaluate(self.vault, "goal", "no-sid")
         self.assertFalse(row["card"])
-        # The reason names no field: the reader accepts `claude_session_id` and, during
-        # the migration, the retired `manager_session_id` behind it — so "no session id"
-        # is the honest phrasing rather than naming whichever key it happened to miss.
+        # The reason names no field: `claude_session_id` is the only key a page records
+        # its manager in, so "no session id" is the honest phrasing rather than naming
+        # a key the reader happened to miss.
+        self.assertIn("no session id", row["reason"])
+
+    def test_a_page_carrying_only_the_retired_key_resolves_to_nothing(self):
+        # The retired key is gone from every page in both vaults and nothing writes it.
+        # Reading it would resurrect an id no writer produces, so a page carrying only
+        # the retired key must read as having no recorded manager.
+        write(os.path.join(self.goals, "Legacy.md"),
+              "---\nmanager_session_id: cccc3333-0000-0000-0000-000000000000\n"
+              "page_type: goal\n---\n\n# Impact\n")
+        cm.cadence_state = lambda name, branch: "STALE"
+        row = cm.evaluate(self.vault, "goal", "legacy")
+        self.assertFalse(row["card"])
         self.assertIn("no session id", row["reason"])
 
     def test_a_mixed_page_resolves_to_claude_session_id(self):
-        # The writer sets `claude_session_id` without clearing the retired
-        # `manager_session_id`, so a re-armed legacy page carries both. Reading the
-        # retired key first would hand back the stale id and card a healthy subject.
+        # A page left over from the tolerance window carries both keys. `claude_session_id`
+        # is the one read, so the retired id can never be probed in its place.
         write(os.path.join(self.goals, "Mixed.md"),
               "---\nmanager_session_id: cccc3333-0000-0000-0000-000000000000\n"
               "claude_session_id: dddd4444-0000-0000-0000-000000000000\n"
@@ -193,7 +204,7 @@ class EvaluateTest(unittest.TestCase):
 
     def test_a_topic_manager_is_never_covered(self):
         write(os.path.join(self.topics, "Lapsed Topic.md"),
-              "---\nmanager_session_id: cccc3333-0000-0000-0000-000000000000\n---\n\n# Goals\n")
+              "---\nclaude_session_id: cccc3333-0000-0000-0000-000000000000\n---\n\n# Goals\n")
         self.stub("STALE", "LIVE")
         row = cm.evaluate(self.vault, "topic", "lapsed-topic")
         self.assertTrue(row["card"], row["reason"])
@@ -270,7 +281,7 @@ class MainTest(unittest.TestCase):
 
     def goal(self, name, sid="aaaa1111-0000-0000-0000-000000000000"):
         write(os.path.join(self.goals, f"{name}.md"),
-              f"---\nmanager_session_id: {sid}\npage_type: goal\n---\n\n# Impact\n")
+              f"---\nclaude_session_id: {sid}\npage_type: goal\n---\n\n# Impact\n")
 
     def cadence(self, branch, base):
         write(os.path.join(self.statedir, f"{branch}--{base}.cadence"), "900\n")
@@ -322,9 +333,9 @@ class MainTest(unittest.TestCase):
     def test_a_goal_and_a_topic_with_one_base_get_distinct_dedup_keys(self):
         """The branch is the only thing telling the two apart — a subject-only key collides."""
         write(os.path.join(self.goals, "Shared Name.md"),
-              "---\nmanager_session_id: aaaa1111-0000-0000-0000-000000000000\n---\n")
+              "---\nclaude_session_id: aaaa1111-0000-0000-0000-000000000000\n---\n")
         write(os.path.join(self.topics, "Shared Name.md"),
-              "---\nmanager_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n## Goals\n")
+              "---\nclaude_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n## Goals\n")
         self.cadence("goal", "shared-name")
         self.cadence("topic", "shared-name")
         self.stub()
@@ -507,9 +518,9 @@ class CoverageTest(unittest.TestCase):
 
     def test_a_live_topic_manager_declaring_another_goal_does_not_cover(self):
         write(os.path.join(self.goals, "Orphan Goal.md"),
-              "---\nmanager_session_id: aaaa1111-0000-0000-0000-000000000000\n---\n")
+              "---\nclaude_session_id: aaaa1111-0000-0000-0000-000000000000\n---\n")
         write(os.path.join(self.topics, "A Topic.md"),
-              "---\nmanager_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n"
+              "---\nclaude_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n"
               "## Goals\n\n- [[Some Other Goal]]\n")
         cm.cadence_state = lambda n, b: "STALE"
         cm.session_state = lambda s: "LIVE"
@@ -517,9 +528,9 @@ class CoverageTest(unittest.TestCase):
 
     def test_a_goal_mentioned_only_under_non_goals_is_not_declared(self):
         write(os.path.join(self.goals, "Lonely Goal.md"),
-              "---\nmanager_session_id: aaaa1111-0000-0000-0000-000000000000\n---\n")
+              "---\nclaude_session_id: aaaa1111-0000-0000-0000-000000000000\n---\n")
         write(os.path.join(self.topics, "A Topic.md"),
-              "---\nmanager_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n"
+              "---\nclaude_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n"
               "## Scope\n\n## Goals\n\n- [[In Scope Goal]]\n\n"
               "## Non-goals\n\n- [[Lonely Goal]]\n\n# Progress\n\n- restarted [[Lonely Goal]]\n")
         cm.cadence_state = lambda n, b: "STALE"
@@ -529,10 +540,10 @@ class CoverageTest(unittest.TestCase):
 
     def test_an_unreadable_topic_page_never_yields_a_card(self):
         write(os.path.join(self.goals, "Orphan Goal.md"),
-              "---\nmanager_session_id: aaaa1111-0000-0000-0000-000000000000\n---\n")
+              "---\nclaude_session_id: aaaa1111-0000-0000-0000-000000000000\n---\n")
         topic_page = os.path.join(self.topics, "A Topic.md")
         write(topic_page,
-              "---\nmanager_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n"
+              "---\nclaude_session_id: bbbb2222-0000-0000-0000-000000000000\n---\n\n"
               "## Goals\n\n- [[Orphan Goal]]\n")
         os.chmod(topic_page, 0o000)
         self.addCleanup(os.chmod, topic_page, 0o644)

@@ -177,7 +177,7 @@ class WorkerKeepAliveTest(unittest.TestCase):
             "phase: execution", "phase: execution\ngoals:\n    - '[[A Goal]]'"))
         (self.vault / "24 Goals").mkdir(parents=True)
         (self.vault / "24 Goals" / "A Goal.md").write_text(
-            "---\nmanager_session_id: gm-1\n---\n# Success Criteria\n", encoding="utf-8")
+            "---\nclaude_session_id: gm-1\n---\n# Success Criteria\n", encoding="utf-8")
         self.kp.session_verdict = lambda sid: "LIVE" if sid == "gm-1" else "ABSENT"
         out = io.StringIO()
         with redirect_stdout(out):
@@ -210,7 +210,7 @@ class WorkerKeepAliveTest(unittest.TestCase):
             "phase: execution", "phase: execution\ngoals:\n    - '[[A Goal]]'"))
         (self.vault / "24 Goals").mkdir(parents=True)
         (self.vault / "24 Goals" / "A Goal.md").write_text(
-            "---\nmanager_session_id: gm-1\n---\n", encoding="utf-8")
+            "---\nclaude_session_id: gm-1\n---\n", encoding="utf-8")
         self.kp.session_verdict = lambda sid: "ABSENT"
         out = io.StringIO()
         with redirect_stdout(out):
@@ -225,7 +225,7 @@ class WorkerKeepAliveTest(unittest.TestCase):
             "phase: execution", "phase: execution\nthemes:\n    - '[[A Theme]]'"))
         (self.vault / "24 Goals").mkdir(parents=True)
         (self.vault / "24 Goals" / "A Theme.md").write_text(
-            "---\nmanager_session_id: gm-1\n---\n", encoding="utf-8")
+            "---\nclaude_session_id: gm-1\n---\n", encoding="utf-8")
         self.kp.session_verdict = lambda sid: "LIVE" if sid == "gm-1" else "ABSENT"
         out = io.StringIO()
         with redirect_stdout(out):

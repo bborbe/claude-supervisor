@@ -67,7 +67,7 @@ exclusion removes a WAKE, never the gate.
 
 ⚠️ **A TOPIC manager is unresolved today, and that is a named limitation rather than an
 oversight.** `--self` is matched against task pages (`claude_session_id`) and goal pages
-(`claude_session_id`, or the retired `manager_session_id` as a fallback); a topic page
+(`claude_session_id`); a topic page
 (`23 Topics/`) is not read, so a topic manager resolves
 no scope, prints the `SCOPE  unresolved:` line, and excludes nothing — its behaviour is exactly
 what shipped before this module existed. Widening it to topics is a separate question (a
@@ -112,7 +112,6 @@ VAULTS_ROOT = os.environ.get("SUPERVISOR_VAULTS_ROOT") or os.path.expanduser(
 
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _CLAUDE_STAMP = re.compile(r'^claude_session_id:\s*["\']?(' + _UUID + r')', re.M)
-_MANAGER_STAMP = re.compile(r'^manager_session_id:\s*["\']?(' + _UUID + r')', re.M)
 _SESSION_ENTRY = re.compile(r'^\s*-\s+session_id:\s*["\']?(' + _UUID + r')', re.M)
 #: ⚠️ **The trailing newline is OPTIONAL, and that is load-bearing.** `_frontmatter()` returns
 #: `text[3:end]`, which drops the closing delimiter's newline — so a `goals:` block that is the
@@ -429,11 +428,11 @@ def load(self_id, vault_paths=None):
         goals.setdefault(title, set()).update(_task_links(text))
         front = _frontmatter(text)
         if front:
-            # `claude_session_id` first, `manager_session_id` second: the writer sets
-            # `claude_session_id` without clearing the retired key, so a re-armed legacy
-            # page carries BOTH — reading the retired key first would hand back the stale
-            # id. The fallback answers only for a page the new writer has not touched yet.
-            match = _CLAUDE_STAMP.search(front) or _MANAGER_STAMP.search(front)
+            # `claude_session_id` is the only field a goal page records its manager in.
+            # The retired-key fallback was removed once every page in both vaults was
+            # migrated, so a page carrying only the retired key now
+            # resolves to no manager — which is the correct answer, since nothing writes it.
+            match = _CLAUDE_STAMP.search(front)
             if match:
                 managers.setdefault(match.group(1), []).append(title)
 

@@ -490,7 +490,7 @@ The goal branch **resolves the goal's manager and delegates**; it reimplements n
 
    Then match `<goal> Manager` case-insensitively against `name` and against every entry in `formerNames`.
 
-   ⚠️ **Read the goal page's `claude_session_id` — or the retired `manager_session_id` as a fallback — UNCONDITIONALLY, before the registry result, never only when it matches nothing.** `--list --json` lists live sessions only, so an empty match is **ambiguous**: it means both "no manager ever existed" and "the manager exited". Whenever the field carries an id, **run `session-liveness.py --check <id>` on it** and take the action that exit code maps to in `docs/fleet-surface.md` § *Which manager owns a subject*. ⚠️ **An empty match never *proves* "no manager ever existed" — only that none is running now.**
+   ⚠️ **Read the goal page's `claude_session_id` — UNCONDITIONALLY, before the registry result, never only when it matches nothing.** `--list --json` lists live sessions only, so an empty match is **ambiguous**: it means both "no manager ever existed" and "the manager exited". Whenever the field carries an id, **run `session-liveness.py --check <id>` on it** and take the action that exit code maps to in `docs/fleet-surface.md` § *Which manager owns a subject*. ⚠️ **An empty match never *proves* "no manager ever existed" — only that none is running now.**
 
 2. **Live → JUMP** to it, same `/supervisor:jump pane:<pane-id>` + window-id reporting as Step 2A — this covers both a registry hit and a page-field `LIVE`.
 
@@ -534,7 +534,7 @@ The goal branch **resolves the goal's manager and delegates**; it reimplements n
 
 **Match the topic against `name` AND `formerNames`.** Matching only the current name is the hole this closes. `sessionId` is the identity, and `status` is live, so a hit can never resume a dead conversation.
 
-   ⚠️ **Read the topic page's `claude_session_id` — or the retired `manager_session_id` as a fallback — UNCONDITIONALLY, before the registry result, never only when it matches nothing.** The registry lists live sessions only, like `ListAgents`, so an empty match is **ambiguous**: it means both "this topic never had a manager" and "the manager exited". That scope is right — the failure being prevented is a duplicate spawn against a *running* manager — and the page field is what tells the two apart. Whenever it carries an id, **run `session-liveness.py --check <id>` on it** and take the action that exit code maps to in `docs/fleet-surface.md` § *Which manager owns a subject*.
+   ⚠️ **Read the topic page's `claude_session_id` — UNCONDITIONALLY, before the registry result, never only when it matches nothing.** The registry lists live sessions only, like `ListAgents`, so an empty match is **ambiguous**: it means both "this topic never had a manager" and "the manager exited". That scope is right — the failure being prevented is a duplicate spawn against a *running* manager — and the page field is what tells the two apart. Whenever it carries an id, **run `session-liveness.py --check <id>` on it** and take the action that exit code maps to in `docs/fleet-surface.md` § *Which manager owns a subject*.
 
 ⚠️ **The ban this replaces was right about the hazard and wrong about the remedy.** ⚠️ **The order by which an owner is resolved is stated once, in `docs/fleet-surface.md` § *Which manager owns a subject* — not restated here.**
 2. **Live → JUMP** to it, same `/supervisor:jump pane:<pane-id>` + window-id reporting as Step 2A — this covers both a registry hit and a page-field `LIVE`.

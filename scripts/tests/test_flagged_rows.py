@@ -8,6 +8,7 @@ store. The live behaviour is exercised by the task's DoD run, not here.
 import importlib.util
 import json
 import os
+import shutil
 import tempfile
 import unittest
 import unittest.mock
@@ -789,9 +790,10 @@ class SubjectLivenessPrecedence(unittest.TestCase):
         self.assertEqual(["new-sid"], seen)
         self.assertTrue(verdict)
 
-    def test_a_legacy_page_falls_back_to_the_retired_key(self):
-        # The migration depends on this branch: a page the new writer has not
-        # touched yet carries only `manager_session_id`.
+    def test_a_page_carrying_only_the_retired_key_reads_as_no_recorded_manager(self):
+        # The retired key is gone from every page in both vaults and nothing writes it,
+        # so a page carrying only that key has no recorded manager — and probing it
+        # would resurrect an id no writer produces.
         with tempfile.TemporaryDirectory() as tmp:
             page = os.path.join(tmp, "Old Goal.md")
             with open(page, "w", encoding="utf-8") as fh:
@@ -807,8 +809,27 @@ class SubjectLivenessPrecedence(unittest.TestCase):
                  unittest.mock.patch.object(fr, "liveness_of", side_effect=live):
                 verdict = fr.subject_liveness(ctx, "/v", "goal", "Old Goal")
 
-        self.assertEqual(["old-sid"], seen)
-        self.assertTrue(verdict)
+        self.assertEqual([], seen)
+        self.assertFalse(verdict)
+
+    def test_the_row_builder_ignores_the_retired_key_too(self):
+        # `row_for` carried the second copy of the removed fallback. Pinning it here keeps
+        # the two sites from drifting apart again — the pair disagreeing on one page is
+        # what the pre-migration review caught.
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        tasks = os.path.join(root, "25 Tasks")
+        write(os.path.join(tasks, "Old Task.md"),
+              page("page_type: task\nflag: true\nstatus: in_progress\nrole: agent\n"
+                   "manager_session_id: old-sid"))
+        cfg = {"tasks_dir": "25 Tasks", "path": root, "worker_launcher": "/opt/l/cc-v"}
+        ctx = {"today": "2026-10-31", "role_map": {}, "template_root": None,
+               "no_liveness": True, "managers": set(), "topic_map": {},
+               "mode_default": "interactive", "normalised": [],
+               "subjects": {}, "liveness_cache": {}}
+        row, reason = fr.row_for("v", cfg, "task", os.path.join(tasks, "Old Task.md"), ctx)
+        self.assertIsNone(reason)
+        self.assertIsNone(row["session_id"])
 
 
 if __name__ == "__main__":
