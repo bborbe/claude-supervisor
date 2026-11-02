@@ -144,7 +144,7 @@ for a gate flipped with the health of a manager that did not own it — and it c
 the real owner, because `verdict()` has no notion of goals or tasks at all.
 
 `session-scope.py` supplies that notion from the VAULT, which is durable: `--self` resolves to
-a goal page's `manager_session_id` (or a task's `claude_session_id`), the manager's scope is
+a goal page's `claude_session_id` (or the retired `manager_session_id` as a fallback), the manager's scope is
 that goal's `# Tasks` list, and every gated session resolves to the page it is stamped on. A
 pane whose page is outside the scope is **EXCLUDED, not dropped**: the row stays in
 `--explain --json` carrying `foreign-goal:<goal>` (or `owner-unknown` when the task declares no

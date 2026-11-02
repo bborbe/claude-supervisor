@@ -596,7 +596,8 @@ def subject_live(ctx, vault, kind, name):
 def subject_liveness(ctx, vault, kind, name):
     """`true` / `false` / `null` for one subject's recorded manager session.
 
-    `session-liveness.py --check` on the owner page's `manager_session_id` — the
+    `session-liveness.py --check` on the owner page's `claude_session_id` (or the
+    retired `manager_session_id` as a fallback) — the
     section's own "treat it as a lead only, never as a verdict" table: `true` or
     `false` when it answers, `null` when it answers UNKNOWN / AMBIGUOUS / MALFORMED.
     A subject with NO recorded manager session is `false` — absence is a fact, an
@@ -612,8 +613,11 @@ def subject_liveness(ctx, vault, kind, name):
     block = read_block(path) if path else None
     sid = None
     if block is not None:
-        sid = ((open_queue.field(block, "manager_session_id") or "").strip()
-               or (open_queue.field(block, "claude_session_id") or "").strip()
+        # `claude_session_id` first, the retired key second — the same order the row
+        # builder below uses. Reading the retired key first here would probe `owner_live`
+        # against the stale id on exactly the mixed page this writer creates.
+        sid = ((open_queue.field(block, "claude_session_id") or "").strip()
+               or (open_queue.field(block, "manager_session_id") or "").strip()
                or None)
     if not sid:
         verdict = False

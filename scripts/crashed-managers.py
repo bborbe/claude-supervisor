@@ -194,6 +194,19 @@ def _read_page(path: str) -> str:
     return _memo(("page", path), read)
 
 
+def _page_session_id(front: str) -> str:
+    """The session id a goal or topic page records.
+
+    `claude_session_id` is read first and the retired `manager_session_id` second: the
+    writer sets the former without clearing the latter, so a re-armed legacy page carries
+    both and reading the retired key first would hand back the stale id. The fallback
+    answers only for a page the new writer has not touched yet.
+    """
+
+    scalar = helpers().scalar
+    return scalar(front, "claude_session_id") or scalar(front, "manager_session_id")
+
+
 def subjects(state_dir: str) -> tuple[list[tuple[str, str]], int]:
     """Every `(branch, base)` carrying a `<branch>--<base>.cadence` record, plus the legacy count.
 
@@ -313,7 +326,7 @@ def topic_manager_live(vault: str, goal_name: str) -> bool:
         text = _read_page(os.path.join(directory, entry))
         if not declares(text, goal_name):
             continue
-        sid = helpers().scalar(helpers().frontmatter(text), "manager_session_id")
+        sid = _page_session_id(helpers().frontmatter(text))
         if not sid or session_state(sid) != "LIVE":
             continue
         # ⚠️ A LIVE session is NOT a running keep-alive. `/supervisor:stop` disarms the loop and
@@ -367,7 +380,7 @@ def evaluate(vault: str, branch: str, base: str) -> dict:
     if branch == "fleet":
         row["reason"] = (
             "fleet record — nothing sits above a fleet manager, but it has no page to carry a "
-            "manager_session_id, so live-but-lapsed cannot be established and it is never carded"
+            "session id, so live-but-lapsed cannot be established and it is never carded"
         )
         return row
 
@@ -387,9 +400,9 @@ def evaluate(vault: str, branch: str, base: str) -> dict:
         row["reason"] = f"cadence {row['state']} — only STALE is a lapse (STOPPED is a stand-down)"
         return row
 
-    sid = helpers().scalar(helpers().frontmatter(_read_page(subject_page)), "manager_session_id")
+    sid = _page_session_id(helpers().frontmatter(_read_page(subject_page)))
     if not sid:
-        row["reason"] = "no manager_session_id on the page — unverifiable, never abandoned"
+        row["reason"] = "no session id on the page — unverifiable, never abandoned"
         return row
     row["session"] = sid
     row["detail"] = _DETAIL.get((branch, name), "")

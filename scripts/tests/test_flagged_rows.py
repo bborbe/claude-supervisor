@@ -762,5 +762,54 @@ class PaneCache(unittest.TestCase):
             self.assertEqual(run.call_count, 1)
 
 
+class SubjectLivenessPrecedence(unittest.TestCase):
+    """`subject_liveness` feeds `owner_live`, so its read order is load-bearing."""
+
+    def test_a_mixed_page_resolves_claude_session_id_first(self):
+        # A re-armed legacy page carries both keys; the surviving one is the live
+        # manager. Reading the retired key first would probe the stale id and mark
+        # a healthy subject's owner dead.
+        with tempfile.TemporaryDirectory() as tmp:
+            page = os.path.join(tmp, "A Goal.md")
+            with open(page, "w", encoding="utf-8") as fh:
+                fh.write(
+                    "---\nmanager_session_id: old-sid\nclaude_session_id: new-sid\n---\n"
+                )
+            ctx = {"liveness_cache": {}, "no_liveness": False}
+            seen = []
+
+            def live(sid):
+                seen.append(sid)
+                return "LIVE"
+
+            with unittest.mock.patch.object(fr, "subject_page", return_value=page), \
+                 unittest.mock.patch.object(fr, "liveness_of", side_effect=live):
+                verdict = fr.subject_liveness(ctx, "/v", "goal", "A Goal")
+
+        self.assertEqual(["new-sid"], seen)
+        self.assertTrue(verdict)
+
+    def test_a_legacy_page_falls_back_to_the_retired_key(self):
+        # The migration depends on this branch: a page the new writer has not
+        # touched yet carries only `manager_session_id`.
+        with tempfile.TemporaryDirectory() as tmp:
+            page = os.path.join(tmp, "Old Goal.md")
+            with open(page, "w", encoding="utf-8") as fh:
+                fh.write("---\nmanager_session_id: old-sid\n---\n")
+            ctx = {"liveness_cache": {}, "no_liveness": False}
+            seen = []
+
+            def live(sid):
+                seen.append(sid)
+                return "LIVE"
+
+            with unittest.mock.patch.object(fr, "subject_page", return_value=page), \
+                 unittest.mock.patch.object(fr, "liveness_of", side_effect=live):
+                verdict = fr.subject_liveness(ctx, "/v", "goal", "Old Goal")
+
+        self.assertEqual(["old-sid"], seen)
+        self.assertTrue(verdict)
+
+
 if __name__ == "__main__":
     unittest.main()

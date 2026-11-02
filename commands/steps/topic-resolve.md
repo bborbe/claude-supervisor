@@ -46,7 +46,7 @@ Rationale: `docs/subject-resolution.md` and `commands/topic-loop.md` § Resoluti
 
 4b. **⚠️ Record the manager's session on the TOPIC page — the durable half, and a
    step to run.** Write this session's id onto the topic page:
-   `vault-cli topic set "<subject>" manager_session_id "$CLAUDE_CODE_SESSION_ID" --vault "<vault>"`,
+   `vault-cli topic set "<subject>" claude_session_id "$CLAUDE_CODE_SESSION_ID" --vault "<vault>"`,
    then read the page back and say what it now holds.
 
    ⚠️ **Without this write the topic tier has no durable record of its own

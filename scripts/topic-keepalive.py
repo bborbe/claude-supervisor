@@ -3,7 +3,7 @@
 
 Two independent signals are read every time, because neither answers the other's question:
 
-  1. **Is a session there?** The goal page's `manager_session_id`, probed with
+  1. **Is a session there?** The goal page's `claude_session_id`, probed with
      `session-liveness.py --check`. `LIVE` (0) / `ABSENT` (1) / `UNKNOWN` (2) /
      `AMBIGUOUS` (3) / `MALFORMED` (4). Only `ABSENT` licenses a resume: `UNKNOWN` and
      `AMBIGUOUS` are **cannot tell**, never dead.
@@ -33,7 +33,7 @@ The first line of stdout is the verdict, one token:
   crash-loop      the resume cap is spent; stop restarting and escalate once
 
 ⚠️ **`open` and `open-unflagged` are one case split in two, and `resume` is not one of
-them.** An absent `manager_session_id` means no session was ever created, so the row is an
+them.** An absent session id means no session was ever created, so the row is an
 **open** — which rule 4 makes the operator's act. A recorded id whose session has died is a
 **resume**, which continues a subject that already exists. Collapsing the first into the
 second is how an unflagged goal manager gets opened by a round that was told not to.
@@ -266,7 +266,10 @@ def main(argv: list[str]) -> int:
         return 1
     with open(goal_page, encoding="utf-8") as fh:
         fm = frontmatter(fh.read())
-    sid = scalar(fm, "manager_session_id")
+    # `claude_session_id` first, `manager_session_id` second: the writer sets the former
+    # without clearing the latter, so a re-armed legacy page carries both and reading the
+    # retired key first would hand back the stale id.
+    sid = scalar(fm, "claude_session_id") or scalar(fm, "manager_session_id")
 
     loop = cadence(a.subject, a.branch)
 
@@ -283,11 +286,11 @@ def main(argv: list[str]) -> int:
         # want to auto open topic-manager, goal-manager ... but flag are fine".
         if flagged(fm):
             print("open")
-            print(f'{a.subject} has no manager_session_id and it carries the flag — '
+            print(f'{a.subject} has no session id and it carries the flag — '
                   f'start one with /supervisor:open {opener} "{a.subject}"')
         else:
             print("open-unflagged")
-            print(f"{a.subject} has no manager_session_id and does not carry the flag "
+            print(f"{a.subject} has no session id and does not carry the flag "
                   f"(`flag: true`, whoever set it) — rule 4 forbids opening a manager for "
                   f"it; the fleet round's open leg still opens its workers, so the work "
                   f"moves without one")

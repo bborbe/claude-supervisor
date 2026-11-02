@@ -110,6 +110,25 @@ class Scope(unittest.TestCase):
         self.assertTrue(self.scope.resolved, self.scope.reason)
         self.assertEqual(self.scope.self_goals, [SELF_GOAL])
 
+    def test_a_mixed_goal_page_resolves_claude_session_id_first(self):
+        """A re-armed legacy page carries both keys; the surviving one wins.
+
+        The writer sets `claude_session_id` without clearing the retired key, so the
+        stale manager id is still on the page. Reading it first would scope this
+        manager to no goal at all and EXCLUDE its own gates as foreign.
+        """
+        vault = Vault()
+        vault.goal(
+            SELF_GOAL,
+            "manager_session_id: 77777777-7777-4777-8777-777777777777\n"
+            f"claude_session_id: {ME}\n",
+            ["Own Task"],
+        )
+        vault.task("Own Task", f"claude_session_id: {OWN_TASK_SESSION}\n")
+        scope = ss.load(ME, [vault.root])
+        self.assertTrue(scope.resolved, scope.reason)
+        self.assertEqual(scope.self_goals, [SELF_GOAL])
+
     def test_an_own_task_is_not_excluded(self):
         self.assertEqual(self.scope.exclusion(OWN_TASK_SESSION, ME), (False, ""))
 

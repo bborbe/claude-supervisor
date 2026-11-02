@@ -159,7 +159,31 @@ class EvaluateTest(unittest.TestCase):
         self.stub("STALE", "LIVE")
         row = cm.evaluate(self.vault, "goal", "no-sid")
         self.assertFalse(row["card"])
-        self.assertIn("manager_session_id", row["reason"])
+        # The reason names no field: the reader accepts `claude_session_id` and, during
+        # the migration, the retired `manager_session_id` behind it — so "no session id"
+        # is the honest phrasing rather than naming whichever key it happened to miss.
+        self.assertIn("no session id", row["reason"])
+
+    def test_a_mixed_page_resolves_to_claude_session_id(self):
+        # The writer sets `claude_session_id` without clearing the retired
+        # `manager_session_id`, so a re-armed legacy page carries both. Reading the
+        # retired key first would hand back the stale id and card a healthy subject.
+        write(os.path.join(self.goals, "Mixed.md"),
+              "---\nmanager_session_id: cccc3333-0000-0000-0000-000000000000\n"
+              "claude_session_id: dddd4444-0000-0000-0000-000000000000\n"
+              "page_type: goal\n---\n\n# Impact\n")
+        cm.cadence_state = lambda name, branch: "STALE"
+        seen = []
+
+        def verdict(sid):
+            seen.append(sid)
+            return "LIVE"
+
+        cm.session_state = verdict
+        cm.evaluate(self.vault, "goal", "mixed")
+        # The surviving key is the one probed; the retired id is never consulted while
+        # the surviving one is present.
+        self.assertEqual(seen, ["dddd4444-0000-0000-0000-000000000000"])
 
     def test_a_record_with_no_page_is_abandoned(self):
         self.stub("STALE", "LIVE")

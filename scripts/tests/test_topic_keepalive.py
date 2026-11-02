@@ -120,6 +120,26 @@ class KeepAliveTest(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertEqual("leave", out[0])
 
+    def test_a_mixed_page_resolves_claude_session_id_first(self):
+        """A re-armed legacy page carries both keys; the surviving one is probed.
+
+        The writer sets `claude_session_id` without clearing the retired key, so
+        reading the retired key first would probe — and resume — the stale id.
+        """
+        self.page(sid="sid-old", extra="claude_session_id: sid-new\n")
+        seen = []
+
+        def verdict(sid):
+            seen.append(sid)
+            return "LIVE"
+
+        self.k.session_verdict = verdict
+        self.k.cadence = lambda subject, branch="goal": "OK"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.k.main(["--vault", str(self.vault), "--goal", "A Goal"])
+        self.assertEqual(["sid-new"], seen)
+
     def test_no_recorded_id_without_a_flag_is_held(self):
         """An absent `manager_session_id` is an OPEN, not a resume, and rule 4 makes an open
         the operator's act. The two arms must not share a verdict — `resume` here handed the
