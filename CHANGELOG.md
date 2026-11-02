@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: `attention-ask.py` sends a bearer token when `$ATTENTION_STORE_TOKEN` is set, for stores that require authentication. Unset — the default — keeps the existing unauthenticated behaviour unchanged. Without this, posting to a token-gated store fails with a 401 that reads as "the card was never posted", which is how an approval collected on one store and read from another goes unnoticed. Scope is deliberately `attention-ask.py` only: the other scripts that read `ATTENTION_STORE_URL` (including `attention-answer.py`) are **not** covered, so against an auth-enforcing store this authenticates the post and nothing else.
+
 ## v0.232.0
 
 - feat: `fleet-board.py` flags a live manager pane running without the exit recorder — a `⚠️ UNRECORDED:` action line below the box (and `exit_record` in `--json`) for each manager whose `session-exit` record carries no `kind=spawn … writer=trap` line with a still-alive pid, plus an `unknown` count for panes `wezterm cli list` cannot resolve. New `scripts/exit-record-coverage.py` owns the rule; the store was previously read by no sweep, so a hand-opened manager's death left nothing to attribute.
