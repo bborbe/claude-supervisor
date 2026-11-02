@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#
+# Changelog fold guard, run before every push. Installed by `make hooks`.
+#
+# WHY HERE AND NOT IN `precommit`: the guard reads the CHANGELOG from a commit
+# (`git show <ref>:CHANGELOG.md`). At `precommit` time the change under test is
+# still uncommitted, so the guard evaluates the PREVIOUS commit — the one that
+# cannot fold. By the time `pre-push` runs, `HEAD` carries the bullet.
+#
+# WHY IT BLOCKS HERE AND ONLY WARNS IN CI: a blocking CI check must fail the run,
+# and a failed run mails the operator. This repo cuts a release on every merge
+# (`autoRelease: true`), so a branch folds within minutes of going stale and the
+# pull-request precheck fired on nearly every push — measured 2026-11-02: 15
+# genuine folds and 15 failure mails in 29 h, every verdict correct. Blocking here
+# costs nothing when it passes; the CI job keeps the prediction visible on the PR
+# as an annotation, without a mail.
+#
+# The guard ships from bborbe/coding and is read from the coding marketplace
+# clone, so there is one copy of the logic. Refresh: `cd ~/.claude && make update`.
+set -euo pipefail
+
+GUARD="${FOLD_GUARD:-$HOME/.claude/plugins/marketplaces/coding/scripts/check-changelog-unreleased-fold.sh}"
+
+if [ ! -f "$GUARD" ]; then
+	echo "pre-push: changelog fold guard not found at $GUARD" >&2
+	echo "pre-push: refresh the coding marketplace: cd ~/.claude && make update" >&2
+	exit 1
+fi
+
+# Pushing master itself has no branch to fold into — the guard would compare
+# master against master and learn nothing.
+ref=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+if [ "$ref" = "master" ]; then
+	exit 0
+fi
+
+# A stale origin/master makes "clean" and "already folded" print identical
+# results, so refresh it — and say so when the refresh fails rather than
+# silently checking against a copy of unknown age.
+git fetch -q origin master 2>/dev/null \
+	|| echo "pre-push: could not fetch origin/master — checking against the last known copy" >&2
+
+CHANGELOG_ROOT="$(git rev-parse --show-toplevel)" \
+CHANGELOG_BASE_REF=origin/master \
+CHANGELOG_HEAD_REF=HEAD \
+	bash "$GUARD"
