@@ -84,14 +84,33 @@ P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/sc
 python3 "$P/park-event.py" due
 ```
 
-One line per watch whose time has passed, naming every session parked on it —
-**one watch, not one per session**, which is the dedup the register call created.
-Resume each named session through `/supervisor:open --task "<name>"`, then drop the
+One line per watch whose time has passed, naming **the task** for every session
+parked on it — `register --task` recorded the name for exactly this read, since
+`/supervisor:open` opens a task and a bare session id leaves the round nothing to
+open. A watch with several sessions is still **one line, one watch**: that is the
+dedup `register` created, and resuming it is one act per named task, not one per
+watch.
+
+Resume each named task through `/supervisor:open --task "<name>"`, then drop the
 member with `park-event.py release --event "<key>" --session "<id>"`; the file is
-removed when the last member leaves. A watch that comes due and cannot be resumed
-(the event has not fired) is **re-parked, not left due**: bump `park_recheck` with a
-fresh `register` call, and after the third re-park on the same event route the wait
-to the manager as a criterion challenge rather than re-parking a fourth time.
+removed when the last member leaves. A line reading `CORRUPT <file>` is a watch
+holding memberships that cannot be read — report it, never treat it as empty.
+
+**A watch that comes due and cannot be resumed is re-parked, not left due.** The
+event has not fired, so bump the instant — and ⚠️ **always pass `--session <parked-id>`
+and `--repark`**, never a bare re-register:
+
+```bash
+python3 "$P/park-event.py" register --task "<name>" --event "<key>" \
+  --recheck "<new ISO-8601>" --session "<parked-id>" --repark
+```
+
+`register` adds whatever `--session` resolves to as a member, so a bare call from the
+round would park the **round** on the watch and the next `due` would name it as a
+session to resume. `--repark` increments the counter `due` prints; at **three** it
+stops re-parking and routes the wait to the manager as a criterion challenge — the
+count is persisted on the record because the parked session has exited and nothing
+else survives to remember it.
 
 ⚠️ **This half is the fast path, never the only path.** The task's own `defer_date`
 surfaces the row in every manager's open queue, so a missed round delays a resume and

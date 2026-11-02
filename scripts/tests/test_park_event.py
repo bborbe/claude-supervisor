@@ -212,6 +212,33 @@ class ParkEventTest(unittest.TestCase):
         self.assertEqual(after.returncode, 0, after.stderr)
         self.assertIn("resume: aaaaaaaa", after.stdout)
 
+    def test_due_names_the_task_so_the_round_can_open_it(self):
+        self.run_script("register", "--task", "Some Task", "--event", "a metric",
+                        "--recheck", "2026-11-02T02:00:00+01:00", "--session", "aaaaaaaa")
+        proc = self.run_script("due", extra_env={"PARK_EVENT_NOW": "2026-11-02T03:00:00+01:00"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("Some Task (aaaaaaaa)", proc.stdout)
+
+    def test_repark_counter_persists_and_increments(self):
+        self.run_script("register", "--task", "Some Task", "--event", "a metric",
+                        "--recheck", "2026-11-02T02:00:00+01:00", "--session", "aaaaaaaa")
+        for _ in range(2):
+            self.run_script("register", "--task", "Some Task", "--event", "a metric",
+                            "--recheck", "2026-11-03T02:00:00+01:00",
+                            "--session", "aaaaaaaa", "--repark")
+        record = json.loads(next(iter(self.state.glob("*.json"))).read_text())
+        self.assertEqual(record["repark_count"], 2)
+        # Re-parking must not add the round as a member.
+        self.assertEqual(record["sessions"], ["aaaaaaaa"])
+
+    def test_a_corrupt_watch_is_surfaced_by_due_not_hidden(self):
+        self.run_script("register", "--event", "a metric",
+                        "--recheck", "2026-11-02T02:00:00+01:00", "--session", "aaaaaaaa")
+        next(iter(self.state.glob("*.json"))).write_text("{ not json")
+        proc = self.run_script("due", extra_env={"PARK_EVENT_NOW": "2026-11-02T03:00:00+01:00"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("CORRUPT", proc.stdout)
+
     # --- release ------------------------------------------------------------
 
     def test_release_removes_the_watch_when_the_last_session_leaves(self):

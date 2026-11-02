@@ -195,22 +195,29 @@ def write_watch(key: str, record: dict) -> Path:
             stream.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
         os.replace(tmp_name, path)
     except BaseException:
-        pathlib.Path(tmp_name).unlink(missing_ok=True)
+        Path(tmp_name).unlink(missing_ok=True)
         raise
     return path
 
 
-def all_watches() -> list[dict]:
+def all_watches() -> tuple[list[dict], list[str]]:
+    """Every readable watch, plus the names of the ones that would not parse.
+
+    A corrupt watch is RETURNED AS A DEFECT, never skipped. `read_watch` refuses
+    one, so swallowing it here would make `due` report "nothing due" while a
+    record holding live memberships sat unreadable — an absence manufactured by
+    a read failure, which is the one answer this store must never give.
+    """
     directory = state_dir()
     if not directory.exists():
-        return []
-    out = []
+        return [], []
+    records, corrupt = [], []
     for path in sorted(directory.glob("*.json")):
         try:
-            out.append(json.loads(path.read_text(encoding="utf-8")))
+            records.append(json.loads(path.read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError):
-            continue
-    return out
+            corrupt.append(path.name)
+    return records, corrupt
 
 
 # --- task write --------------------------------------------------------------
@@ -290,6 +297,13 @@ def _register_locked(args: argparse.Namespace, key: str, recheck, session: str) 
             "recheck_at": iso(recheck),
             "created_at": iso(now()),
             "sessions": [],
+            # session id -> task name. `due` must name the TASK, because
+            # `/supervisor:open --task "<name>"` is what resumes it; a bare
+            # session id leaves the round with nothing to open.
+            "tasks": {},
+            # Persisted, because the parked session has exited by the time the
+            # round re-checks: nothing else survives to count re-parks.
+            "repark_count": 0,
         }
     else:
         # A later re-check never shortens a watch another session is already
@@ -306,8 +320,12 @@ def _register_locked(args: argparse.Namespace, key: str, recheck, session: str) 
             record["recheck_at"] = iso(recheck)
 
     members = record.setdefault("sessions", [])
-    if session and session not in members:
+    if session not in members:
         members.append(session)
+    if args.task:
+        record.setdefault("tasks", {})[session] = args.task
+    if args.repark:
+        record["repark_count"] = int(record.get("repark_count", 0)) + 1
 
     write_watch(key, record)
 
@@ -318,8 +336,14 @@ def _register_locked(args: argparse.Namespace, key: str, recheck, session: str) 
     return record
 
 
+def _report_corrupt(corrupt: list[str]) -> None:
+    for name in corrupt:
+        print(f"CORRUPT {name} — unreadable watch; memberships inside are invisible until it is repaired")
+
+
 def cmd_list(args: argparse.Namespace) -> int:
-    watches = all_watches()
+    watches, corrupt = all_watches()
+    _report_corrupt(corrupt)
     if args.json:
         print(json.dumps(watches, indent=2, sort_keys=True))
         return EXIT_OK
@@ -338,8 +362,10 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 def cmd_due(args: argparse.Namespace) -> int:
     clock = now()
+    watches, corrupt = all_watches()
+    _report_corrupt(corrupt)
     due = []
-    for record in all_watches():
+    for record in watches:
         try:
             when = parse_instant(record["recheck_at"], "recheck_at")
         except (KeyError, ParkError):
@@ -354,9 +380,13 @@ def cmd_due(args: argparse.Namespace) -> int:
         return EXIT_OK
     for record in due:
         members = record.get("sessions") or []
+        tasks = record.get("tasks") or {}
+        named = [f"{tasks[m]} ({m[:8]})" if tasks.get(m) else m for m in members]
         print(
-            f"{record.get('slug', '?')} · due since {record.get('recheck_at', '?')} · "
-            f"resume: {', '.join(members) or 'none recorded'}"
+            f"{record.get('slug', '?')} · event: {record.get('event', '?')} · "
+            f"due since {record.get('recheck_at', '?')} · "
+            f"re-parks: {int(record.get('repark_count', 0))} · "
+            f"resume: {', '.join(named) or 'none recorded'}"
         )
     return EXIT_OK
 
@@ -377,6 +407,7 @@ def cmd_release(args: argparse.Namespace) -> int:
             )
         members.remove(session)
         record["sessions"] = members
+        (record.get("tasks") or {}).pop(session, None)
         if not members:
             watch_path(key).unlink(missing_ok=True)
             print(f"released {session[:8]} — watch {record['slug']} removed (no sessions left)")
@@ -402,6 +433,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--recheck", required=True, help="ISO-8601 instant with offset")
     p.add_argument("--session", help="session id (default: $CLAUDE_CODE_SESSION_ID)")
     p.add_argument("--vault", help="vault name for the task write")
+    p.add_argument("--repark", action="store_true",
+                   help="count this as a re-park of the same event (escalate at 3)")
     p.set_defaults(func=cmd_register)
 
     p = sub.add_parser("list", help="one line per watch")
