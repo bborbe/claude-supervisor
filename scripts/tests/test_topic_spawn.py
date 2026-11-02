@@ -494,6 +494,21 @@ class FleetGoalManagersTest(unittest.TestCase):
         ]})
         self.assertEqual(set(), ts.fleet_goal_managers(["Alpha"]))
 
+    def test_a_mixed_goal_page_resolves_claude_session_id_first(self):
+        # A re-armed legacy page carries both keys; the surviving one is the live
+        # manager. Reading the retired key first would count zero live managers.
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = pathlib.Path(tmp)
+            (vault / "24 Goals").mkdir()
+            (vault / "24 Goals" / "Alpha.md").write_text(
+                "---\nmanager_session_id: old-sid\nclaude_session_id: new-sid\n---\n",
+                encoding="utf-8",
+            )
+            self._with_probe({"sessions": [
+                {"session_id": "new-sid", "role": "manager", "subject": "Alpha"},
+            ]})
+            self.assertEqual(1, ts.live_goal_managers(str(vault), "", ["Alpha"]))
+
     def test_the_page_id_and_the_registry_id_are_counted_once_each(self):
         with tempfile.TemporaryDirectory() as tmp:
             vault = pathlib.Path(tmp)

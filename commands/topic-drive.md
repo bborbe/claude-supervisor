@@ -77,7 +77,7 @@ arm or the step file — do not act from memory of a previous round.
 
 ⚠️ **First, drop every goal whose page reads a terminal `status` (`completed`/`aborted`).**
 Row 4c has already run this tick and may have just closed one, and `topic-keepalive.py` decides
-`jump`/`resume`/`restart` from `manager_session_id` liveness and the armed-loop state only — it
+`jump`/`resume`/`restart` from `claude_session_id` liveness and the armed-loop state only — it
 never reads `status`, and `/supervisor:open --goal` gates on `phase`, not on `status`. So a goal
 closed at 4c whose manager is `ABSENT` reaches the `resume` arm below in the same tick, and
 `/supervisor:open --goal` re-opens a finished goal. That is the *"finished goal silently restarts"*
@@ -98,7 +98,7 @@ The **first line is the verdict**:
 | `jump` | live session, loop `OK` **or `UNARMED`** | render the row. ⚠️ `UNARMED` means no record exists under either name — the loop was **never armed**, not lost; the lever is `/supervisor:goal-loop "<goal>"`, never `restart` (a restart resumes a session that never armed anything) |
 | `open` | no recorded id, **and the goal carries the flag** (any setter) | run `/supervisor:open --goal "<goal>"`. This is an **open**, and the flag is what licenses it |
 | `open-unflagged` | no recorded id, **no flag** | ⚠️ **Report, never open.** Render the row with its rank and say it is held for a flag. Rule 4: a manager is opened only for a flagged page, so a round may not create one |
-| `resume` | a recorded `manager_session_id` whose session is `ABSENT` | run `/supervisor:open --goal "<goal>"`, then `topic-keepalive.py --vault "<vault>" --subject "<goal>" --record-resume <the id>` **once the liveness instrument shows it live** |
+| `resume` | a recorded `claude_session_id` whose session is `ABSENT` | run `/supervisor:open --goal "<goal>"`, then `topic-keepalive.py --vault "<vault>" --subject "<goal>" --record-resume <the id>` **once the liveness instrument shows it live** |
 | `restart` | live session, `STALE`/`INVALID` cadence | `/supervisor:restart <session-id>`; its `busy-target` refusal means mid-turn — wait a tick, never kill in-flight work |
 | `leave` | `STOPPED` — a deliberate stand-down | nothing; the operator stood it down |
 | `cannot-tell` | the probe could not decide | render `UNVERIFIED` and name the input; **never act** |
