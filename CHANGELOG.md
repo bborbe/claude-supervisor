@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.227.4
 
 - fix: supervisor scripts honour `defer_date`'s time of day and offset instead of truncating to the date — `scripts/defer-date.py` is the one parser, read by `open-queue.py`, `flagged-rows.py`, `next-focus.py`, `orphan-candidates.py`, `worker-keepalive.py`, `manager-quiet.py` and `close-worker.py`; a date-only value (and vault-cli's `T00:00:00Z` rewrite) still means the start of that local day, an unparseable value is never read as due, and a defer later today now counts as future for the close. Parsing is stricter than the old slice: a value it half-read (`2026-11-02 # note`, `2026-11-02 00:00:00 +01:00`) is now reported and withheld rather than guessed at. Tests: `scripts/tests/test_defer_date.py`.
 
