@@ -24,17 +24,17 @@ ROOT = SCRIPT.parent.parent
 GOOD = (
     "## Step 2B — Goal branch\n\n"
     "1. Resolve from the registry.\n"
-    "   ⚠️ **Read the goal page's `manager_session_id` UNCONDITIONALLY — before the registry "
+    "   ⚠️ **Read the goal page's `manager_session_id` UNCONDITIONALLY, before the registry "
     "result.**\n"
     "   ⚠️ **An empty match never *proves* \"no manager ever existed\".**\n"
     "4. **`UNKNOWN` or `AMBIGUOUS`, or `None` with no page id → spawn.** ⚠️ **`None` here "
-    "means registry empty AND the page carried no `manager_session_id`.**\n\n"
+    "means registry empty AND the page carried no session id.**\n\n"
     "## Step 2C — Topic branch\n\n"
     "1. Resolve from the registry; an empty match is **ambiguous**.\n"
-    "   ⚠️ **Read the topic page's `manager_session_id` UNCONDITIONALLY — before the registry "
+    "   ⚠️ **Read the topic page's `manager_session_id` UNCONDITIONALLY, before the registry "
     "result.**\n"
     "4. **`UNKNOWN` or `AMBIGUOUS`, or `None` with no page id → spawn.** ⚠️ **`None` here "
-    "means registry empty AND the page carried no `manager_session_id`.**\n\n"
+    "means registry empty AND the page carried no session id.**\n\n"
     "## Step 3 — Spawn the tab (resume/create branches)\n"
 )
 
@@ -108,7 +108,7 @@ class CheckOpenManagerResolutionTest(unittest.TestCase):
     def test_one_branch_without_the_unconditional_read_fails(self):
         """'Updated one of two' is the defect this check exists to catch."""
         text = GOOD.replace(
-            "   ⚠️ **Read the topic page's `manager_session_id` UNCONDITIONALLY — before the "
+            "   ⚠️ **Read the topic page's `manager_session_id` UNCONDITIONALLY, before the "
             "registry result.**\n",
             "",
         )
@@ -121,8 +121,7 @@ class CheckOpenManagerResolutionTest(unittest.TestCase):
     def test_spawn_arm_without_the_no_page_id_scope_fails(self):
         """Dropping the replacement branch leaves every new goal with no spawn route."""
         text = GOOD.replace(
-            "⚠️ **`None` here means registry empty AND the page carried no "
-            "`manager_session_id`.**",
+            "⚠️ **`None` here means registry empty AND the page carried no session id.**",
             "",
         )
         self.write("commands/open.md", text)

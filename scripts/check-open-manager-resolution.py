@@ -44,7 +44,7 @@ SECTIONS = (
 #: pinned whole, not the word alone: `UNCONDITIONALLY` as a bare substring is satisfied by a
 #: negated sentence ("do not read the page UNCONDITIONALLY") and by a mention in any item, so
 #: it cannot distinguish the ordering this check exists to protect.
-UNCONDITIONAL_MARKER = "UNCONDITIONALLY — before the registry result"
+UNCONDITIONAL_MARKER = "UNCONDITIONALLY, before the registry result"
 
 #: The ambiguity, stated per branch. 2B was the gap; 2C is asserted too so a future rewrite
 #: cannot silently drop it from the branch that already had it.
@@ -55,7 +55,7 @@ AMBIGUITY_MARKERS = {
 
 #: (c) — the replacement branch. Without it, a subject that never had a manager has no spawn
 #: route at all, which is a worse regression than the duplicate spawn this change fixes.
-SPAWN_SCOPE_MARKER = "registry empty AND the page carried no `manager_session_id`"
+SPAWN_SCOPE_MARKER = "registry empty AND the page carried no session id"
 
 #: Literal denial pins — the superseded wording. Any of these present means the fix was
 #: reverted, half-applied, or copied back from an older revision.

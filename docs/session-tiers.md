@@ -249,7 +249,7 @@ output — the fleet table.
   `goal-unflagged`, `manager-cap`), the ranking that picks which goals get one of the N slots, and
   the keep-alive contract. It holds no `spawn_agent` tool.
   ⚠️ **The flag gates the OPEN, never the RESTART.** A goal with **no recorded
-  `manager_session_id`** is an open: an unflagged one is reported (`open-unflagged`) and
+  `claude_session_id`** is an open: an unflagged one is reported (`open-unflagged`) and
   held, however free the slots are — that is rule 4, and `topic-spawn.py`'s `goal-unflagged`
   refusal is its executable gate. A goal that **already carries a recorded id** and whose
   session is `ABSENT`, or whose loop is `STALE`, is a **restart**: rule 1 restarts it
