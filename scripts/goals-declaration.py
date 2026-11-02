@@ -30,8 +30,10 @@ tracked set with no row, no warning and no failed assertion. Measured 2026-11-02
 live `private-personal` vault: the caller's scan read 61 names and the gate's snapshot read
 60, differing by exactly the one task that declared its goal in this shape.
 
-The shapes, all live on disk (`commands/goal-loop.md`'s table lists the first three; the
-fourth is the one it omits and the one that was dropped):
+The shapes, all live on disk. ⚠️ `commands/goal-loop.md`'s own table lists three — the
+block wikilink list, the inline plain scalar and the nested list-of-list. It **omits the
+block bare item**, which is the one that was dropped, so a reader taking its census as
+complete would not know to look for the shape this module was written to recover.
 
     goals:                          block list of wikilinks
         - '[[X]]'
@@ -76,6 +78,9 @@ _BLOCK_ITEM = re.compile(r"[ \t]*-")
 _EMPTY = frozenset({"", "[]", "null", "~"})
 
 _QUOTES = "'\""
+
+#: A wikilink's inner text. Used only for a value that is itself one or more links.
+_WIKILINK = re.compile(r"\[\[(.+?)\]\]")
 
 
 def _strip(value: str) -> str:
@@ -154,8 +159,19 @@ def _split_outside_quotes(text: str) -> list[str]:
     parts: list[str] = []
     buffer: list[str] = []
     quote: str | None = None
-    for char in text:
+    index, length = 0, len(text)
+    while index < length:
+        char = text[index]
         if quote is not None:
+            # ⚠️ **YAML's doubled `''` is an escaped apostrophe, not a close-then-open.**
+            # Closing at the first `'` of `''` ends the item early and the comma after it
+            # is then read as a separator, so `['[[Bob''s Goal, Part 2]]']` becomes two
+            # fragments that match no page. Consuming the pair as one character keeps the
+            # item whole, and `goal_names` unescapes it afterwards.
+            if quote == "'" and char == "'" and text[index + 1 : index + 2] == "'":
+                buffer.append("''")
+                index += 2
+                continue
             buffer.append(char)
             if char == quote:
                 quote = None
@@ -167,6 +183,7 @@ def _split_outside_quotes(text: str) -> list[str]:
             buffer = []
         else:
             buffer.append(char)
+        index += 1
     parts.append("".join(buffer))
     return parts
 
@@ -180,6 +197,17 @@ def _inline_names(rest: str) -> list[str]:
     and goal names in this vault routinely do. Splitting a scalar on commas would shatter
     exactly the names the coverage gate was just fixed not to shatter.
     """
+    # ⚠️ **A value that IS a wikilink is not a flow list, and the two are indistinguishable
+    # by their outer brackets alone.** `goals: [[X]]` is YAML's inline nested list holding
+    # one link; read as a flow list it yields `[X]`, which matches no page. `goals: [[A]]
+    # [[B]]` loses its first bracket pair the same way. Both are shapes the three replaced
+    # readers resolved, so mishandling them here is a silent-drop regression rather than a
+    # new gap. Checking for the doubled bracket before the single one is what separates the
+    # two — a real flow list starts `[` followed by a quote, a space, or a bare name.
+    if rest.startswith("[[") and rest.endswith("]]"):
+        links = _WIKILINK.findall(rest)
+        if links:
+            return [_strip("[[%s]]" % link) for link in links]
     if rest.startswith("[") and rest.endswith("]"):
         return [_strip(part) for part in _split_outside_quotes(rest[1:-1])]
     return [_strip(rest)]
@@ -203,7 +231,12 @@ def _block_items(frontmatter: str, after: int) -> list[str]:
     """
     out: list[str] = []
     for line in frontmatter[after:].splitlines():
-        if not line.strip():
+        stripped = line.strip()
+        # A blank line and a full-line comment both sit INSIDE a block rather than ending
+        # it. `topic-spawn.py`'s previous reader skipped comments and the other two did
+        # not, so treating a comment as a terminator would have dropped every item after
+        # it — a silent drop introduced by the unification, for a shape valid in YAML.
+        if not stripped or stripped.startswith("#"):
             out.append(line)
             continue
         if not _BLOCK_ITEM.match(line):

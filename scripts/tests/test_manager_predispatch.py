@@ -3038,6 +3038,44 @@ class GoalsDeclarationShapes(Base):
         goals_fm = "goals: ['[[%s]]']\n" % name
         self.assertEqual(self.page("Comma Goal", goals_fm)["goals"], [name])
 
+    def test_an_inline_value_that_is_itself_a_wikilink_is_not_a_flow_list(self):
+        """`goals: [[X]]` is YAML's inline nested list; read as a flow list it yields `[X]`.
+
+        Both spellings are shapes the three readers this module replaces resolved, so
+        mishandling them is a silent-drop regression rather than a new gap.
+        """
+        for goals_fm, want in (
+            ("goals: [[AGoal]]\n", ["AGoal"]),
+            ("goals: [[AGoal]] [[BGoal]]\n", ["AGoal", "BGoal"]),
+        ):
+            with self.subTest(declaration=goals_fm.strip()):
+                self.assertEqual(self.page("Inline Link", goals_fm)["goals"], want)
+
+    def test_a_full_line_comment_inside_the_block_does_not_end_it(self):
+        """A comment line is not a terminator — items after it are still declarations."""
+        self.assertEqual(
+            self.page(
+                "Comment Between", "goals:\n    - AGoal\n    # note\n    - BGoal\n"
+            )["goals"],
+            ["AGoal", "BGoal"],
+        )
+
+    def test_a_doubled_quote_is_an_escaped_apostrophe_not_a_close(self):
+        """`''` must not close the quoted item, or the comma after it splits the name."""
+        self.assertEqual(
+            self.page("Escaped Comma", "goals: ['[[Bob''s Goal, Part 2]]']\n")["goals"],
+            ["Bob's Goal, Part 2"],
+        )
+
+    def test_indentation_and_line_endings_do_not_change_the_read(self):
+        """Tab indentation and CRLF are both valid YAML for the same block."""
+        for goals_fm, want in (
+            ("goals:\n\t- AGoal\n", ["AGoal"]),
+            ("goals:\r\n    - AGoal\r\n", ["AGoal"]),
+        ):
+            with self.subTest(declaration=repr(goals_fm)):
+                self.assertEqual(self.page("Indent", goals_fm)["goals"], want)
+
     def test_an_apostrophe_inside_an_unquoted_item_is_not_a_quote(self):
         """A quote opens an item; an apostrophe is punctuation inside one.
 
