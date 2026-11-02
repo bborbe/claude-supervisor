@@ -3070,20 +3070,32 @@ class TestRosterOwnerTruncation(Base):
                        alive=False),
             self.m.LIVENESS_NONE)
 
-    def test_the_truncation_floor_agrees_across_the_three_readers(self):
+    def test_the_truncation_floor_agrees_across_the_four_readers(self):
         """⚠️ `_TRUNCATION_MIN_PREFIX` is duplicated in `fleet-board.py` and
-        `resolve-task-file.py` on purpose — none of the three imports another — so the
-        values are pinned together here. Drift would make the board, this gate and the
-        sweep reader disagree about whether a name resolves, which is the one thing all
-        three exist to answer the same way."""
+        `resolve-task-file.py` on purpose — none of the four imports another — so the
+        values are pinned together here. Drift would make the board, this gate, the
+        sweep reader and the pane join disagree about whether a name resolves, which is
+        the one thing all four exist to answer the same way.
+
+        ⚠️ **The fourth reader is `exit-record-coverage.py`, and it is a late addition.**
+        It carries the same floor as `PREFIX_FLOOR` while joining PANE TITLES rather than
+        task names, so only the constant is shared: it has no `_norm_session_name`, and
+        its `normalize()` is a different transform (leading-glyph strip, not the task-name
+        normalizer). It is therefore pinned on the floor alone — a name-only loop over the
+        original two would leave this copy unpinned and let the pane join drift away from
+        the task-name join without a single failing test."""
         base = os.path.dirname(_SCRIPT)
-        for filename, alias in (("fleet-board.py", "fleet_board_floor_probe"),
-                                ("resolve-task-file.py", "resolve_task_file_floor_probe")):
+        for filename, alias, floor_attr, norm_attr in (
+                ("fleet-board.py", "fleet_board_floor_probe", "_TRUNCATION_MIN_PREFIX", "_norm_session_name"),
+                ("resolve-task-file.py", "resolve_task_file_floor_probe", "_TRUNCATION_MIN_PREFIX", "_norm_session_name"),
+                ("exit-record-coverage.py", "exit_record_coverage_floor_probe", "PREFIX_FLOOR", None)):
             with self.subTest(sibling=filename):
                 spec = importlib.util.spec_from_file_location(alias, os.path.join(base, filename))
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
-                self.assertEqual(self.m._TRUNCATION_MIN_PREFIX, mod._TRUNCATION_MIN_PREFIX)
+                self.assertEqual(self.m._TRUNCATION_MIN_PREFIX, getattr(mod, floor_attr))
+                if norm_attr is None:
+                    continue
                 # ⚠️ **The constant is not the only shared surface — pin the normalizer
                 # too.** A drift in `_norm_session_name` alone (dropping the whitespace
                 # collapse, say) makes the three readers disagree about what a name *is*,
