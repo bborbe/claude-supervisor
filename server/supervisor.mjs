@@ -40,7 +40,7 @@ import { resolveMessageChannel } from './message-channel.mjs'
 import { bindSessionToTask } from './task-binding.mjs'
 import { windowIdArgument } from './window-id.mjs'
 import { tabSpawnInner } from './tab-spawn.mjs'
-import { resolveRole } from './role-map.mjs'
+import { resolveRole, chipForRole } from './role-map.mjs'
 import { managerSessions } from './manager-sessions.mjs'
 import { mtimeReloadedConfig } from './config-reload.mjs'
 import { mtimeReloadedAllowlist } from './cluster-allowlist.mjs'
@@ -2431,6 +2431,15 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   const workerTarget = resolveWorkerTarget({ cwd, vault, vaults: loadVaults(), serverCwd: process.cwd() })
   if (workerTarget.error) return { error: workerTarget.error }
   const workerCwd = workerTarget.cwd
+
+  // A HUMAN session's chip follows the vault FAMILY rather than the role alone — green for a
+  // `seibert-*` vault, cyan for a `private-*` one — because colour is the operator's only
+  // at-a-glance cue for which employer a tab belongs to. Resolved HERE, after `workerTarget`,
+  // because the family comes from the RESOLVED vault: the raw `vault` argument is absent on
+  // every cwd-only spawn. This is a refinement of the chip, not a second role lookup, so
+  // `resolveRole` keeps its place above the answer-path probe — a bad role is still refused
+  // before that probe's ten `spawnSync('ps')` calls.
+  const resolvedChip = chipForRole({ resolution: roleResolution, vault: workerTarget.vault })
   // `SUPERVISOR_CLAUDE_CMD` stays the top override: an explicit operator setting rather
   // than a fallback, and the documented way to force a launcher for a one-off spawn.
   //
@@ -2740,7 +2749,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
 
   if (opensInteractive) {
     agent.status = 'interactive'
-    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, launcher: agent.launcher, label: agent.label, windowId: targetWindowId, chip: roleResolution.chip, env: tabShippingEnv ? { ...envOverrides, ...tabShippingEnv } : envOverrides })
+    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, launcher: agent.launcher, label: agent.label, windowId: targetWindowId, chip: resolvedChip, env: tabShippingEnv ? { ...envOverrides, ...tabShippingEnv } : envOverrides })
     if (res.error) {
       agents.delete(id)
       return { error: res.error }
@@ -3151,7 +3160,7 @@ const TOOLS = [
           type: 'string',
           enum: ['manager', 'agent', 'human'],
           description:
-            'The role this session plays, which resolves BOTH its colour and its window from the role map the WezTerm config publishes (~/.cache/wezterm-role-map.json) — manager → orange/Managers, agent → pink/Agents, human → cyan/Direct. Omit for agent, which is the correct default for every task that has not declared a role. PREFER THIS OVER window_id: a role is a word, so it cannot be mistyped or dropped in transit, and the id is looked up in-process at the moment of spawn instead of being carried across the tool boundary — which is where `window_id: 0` was lost intermittently (measured 2026-09-20: 4 of 6 spawns routed, and the two failures were a run\'s first spawn). Passing a role alone is the reliable path.',
+            'The role this session plays, which resolves BOTH its colour and its window from the role map the WezTerm config publishes (~/.cache/wezterm-role-map.json) — manager → orange/Managers, agent → pink/Agents, human → Direct, whose CHIP follows the vault family rather than the map: green for a `seibert-*` vault, cyan for a `private-*` one, and the map\'s own chip for any other family. Omit for agent, which is the correct default for every task that has not declared a role. PREFER THIS OVER window_id: a role is a word, so it cannot be mistyped or dropped in transit, and the id is looked up in-process at the moment of spawn instead of being carried across the tool boundary — which is where `window_id: 0` was lost intermittently (measured 2026-09-20: 4 of 6 spawns routed, and the two failures were a run\'s first spawn). Passing a role alone is the reliable path.',
         },
         window_id: {
           type: 'string',
