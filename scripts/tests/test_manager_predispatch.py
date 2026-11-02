@@ -3072,10 +3072,10 @@ class TestRosterOwnerTruncation(Base):
 
     def test_the_truncation_floor_agrees_across_the_four_readers(self):
         """⚠️ `_TRUNCATION_MIN_PREFIX` is duplicated in `fleet-board.py` and
-        `resolve-task-file.py` on purpose — none of the three imports another — so the
-        values are pinned together here. Drift would make the board, this gate and the
-        sweep reader disagree about whether a name resolves, which is the one thing all
-        three exist to answer the same way.
+        `resolve-task-file.py` on purpose — none of the four imports another — so the
+        values are pinned together here. Drift would make the board, this gate, the
+        sweep reader and the pane join disagree about whether a name resolves, which is
+        the one thing all four exist to answer the same way.
 
         ⚠️ **The fourth reader is `exit-record-coverage.py`, and it is a late addition.**
         It carries the same floor as `PREFIX_FLOOR` while joining PANE TITLES rather than

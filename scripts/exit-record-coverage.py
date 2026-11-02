@@ -51,7 +51,7 @@ PREFIX_FLOOR = 20
 #: made only of them stays truthy and would defeat `unknown_line`'s session-id fallback.
 _CONTROL = re.compile(
     r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b."
-    r"|[\x00-\x1f\x7f-\x9f​-‏‪-‮⁠-⁯﻿]")
+    r"|[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
 
 
 def printable(text):
