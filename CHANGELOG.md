@@ -8,10 +8,13 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.233.1
+## Unreleased
 
 - fix: the `goals:` declaration read no longer drops a shape. `scripts/manager-predispatch.py` read `goals:` through a `[[...]]`-only extractor, so a task declaring its goal as a bare block item (`goals:` then `    - Name`, no brackets) — or as a plain or nested scalar — contributed nothing to `resolve_tracked` and silently left the tracked set: no row, no warning, no failing assertion. Measured 2026-11-02 on the live `private-personal` vault, the caller's scan read 61 names against the gate's 60, differing by exactly the one task in the bare-list shape. The normaliser now lives once in the new `scripts/goals-declaration.py`, shared by `manager-predispatch.py`, `reset.py` and `topic-spawn.py` — three readers that had disagreed while each looked self-consistent on its own. The shared reader also closes two traps the split copies had each got half-right: a quoted flow-list item may carry a comma of its own (`goals: ['[[Name, With Comma]]']` is one name, and splitting the list first shatters it), and a blank line between `goals:` and its items does not end the block. `blocked_by` deliberately keeps its existing reader — its "declares a blocker that did not parse as a name" branch is a different contract.
 - fix: `manager-coverage-gate.py --changed` segments its value against the known owner names rather than splitting on commas first. A task name containing a comma — *"Digest Watcher Judges File Arrival, So a Late-Landing Digest Trips a False Report on a Timely Round"* — was shattered into two fragments that matched no owner, so `resolve` returned `None` and the gate failed open to every owner: measured on a live 61-owner set, a one-owner change dispatched all 61 at full cost. A comma inside a name is now one name, and a name the set cannot place still fails open whole-set, unchanged.
+
+## v0.233.1
+
 - test: pin the exit-record coverage check at the board boundary, strip control characters from its stderr lines, and stop re-reading the pane map and the whole store per render
 
 ## v0.233.0
