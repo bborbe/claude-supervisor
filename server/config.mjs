@@ -237,6 +237,11 @@ export const config = Object.freeze({
   // raw and unvalidated like the fields below: `null` means "no relay exists", which leaves a
   // cluster spawn on the Docker-gateway default rather than inventing an address.
   a2aPushPort: ENV.SUPERVISOR_A2A_PUSH_PORT || null,
+  // ⚠️ LOOPBACK BY DEFAULT, AND WIDENING IT IS A DELIBERATE ACT. The receiver is
+  // token-authenticated, but a loopback bind is still the narrowest surface that works — the
+  // docker path needs nothing wider. A relay on another host cannot reach loopback, so the
+  // operator sets this to the address that host can dial; that is the only reason to.
+  a2aPushHost: ENV.SUPERVISOR_A2A_PUSH_HOST || null,
   a2aK8sCallbackUrl: ENV.SUPERVISOR_A2A_K8S_CALLBACK_URL || null,
 
   // Raw and deliberately unvalidated, exactly like permissionMode below: the legal

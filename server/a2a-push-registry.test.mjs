@@ -78,7 +78,7 @@ test('a follow-up re-registers against the URL its own worker was created with',
   assert.equal((await registry.pushFor('w-docker')).url, 'http://host.docker.internal:41234/a2a/push')
 })
 
-test('the receiver is built with the configured port, so a deployed relay can target it', async () => {
+test('the receiver is built with the configured port and host, so a deployed relay can reach it', async () => {
   let opts = null
   const registry = createA2APushRegistry({
     receiverFactory: (o) => {
@@ -86,9 +86,24 @@ test('the receiver is built with the configured port, so a deployed relay can ta
       return { listen: async () => 18082, close: async () => {}, messagesFor: () => [] }
     },
     receiverPort: 18082,
+    receiverHost: '192.0.2.10',
   })
   await registry.ensureListening()
   assert.equal(opts.port, 18082, 'an ephemeral port cannot be a relay upstream; the configured one must reach the socket')
+  assert.equal(opts.host, '192.0.2.10', 'a relay on another host cannot dial loopback, so the configured bind address must reach the socket')
+
+  // The positive control beside it: an unconfigured registry still binds loopback, so the
+  // assertions above show the options are USED rather than that the default was widened.
+  let defaults = null
+  const plain = createA2APushRegistry({
+    receiverFactory: (o) => {
+      defaults = o
+      return { listen: async () => 41234, close: async () => {}, messagesFor: () => [] }
+    },
+  })
+  await plain.ensureListening()
+  assert.equal(defaults.host, '127.0.0.1', 'the docker path must not be widened by this change')
+  assert.equal(defaults.port, 0, 'the docker path keeps its ephemeral port')
 })
 
 test('pushFor hands a follow-up the token its first turn already bound', async () => {

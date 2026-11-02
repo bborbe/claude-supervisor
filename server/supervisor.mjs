@@ -82,6 +82,10 @@ const a2aPushRegistry = createA2APushRegistry({
   // port is deployed configuration — so a k8s deployment pins the port here and the relay is
   // told the same number. `0` (ephemeral) stays the default: the docker path has no relay.
   receiverPort: Number(config.a2aPushPort) || 0,
+  // Loopback unless the operator widens it. A relay on another host cannot dial loopback, so
+  // the same deployment that sets `SUPERVISOR_A2A_K8S_CALLBACK_URL` sets this to the address
+  // its relay targets — the two are one decision and are documented together in config.mjs.
+  ...(config.a2aPushHost ? { receiverHost: config.a2aPushHost } : {}),
 })
 
 /**

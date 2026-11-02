@@ -34,6 +34,9 @@ export const A2A_PUSH_MAX_MESSAGES = 50
  * @param {number} [options.receiverPort] The port the receiver binds. `0` (ephemeral) serves
  *   the docker path; a **k8s** callback needs a fixed one, because the worker reaches it
  *   through an in-cluster relay whose upstream port is deployed configuration.
+ * @param {string} [options.receiverHost] Where the receiver binds. Loopback by default — the
+ *   narrowest surface that serves the docker path. A relay on another host cannot dial
+ *   loopback, so the k8s path widens it to the address that relay targets.
  * @param {() => number} [options.now] The clock `age_s` is computed against. Injectable so the
  *   age assertion is exact rather than a range.
  */
@@ -42,6 +45,7 @@ export function createA2APushRegistry({
   receiverFactory = createA2AStatusReceiver,
   callbackHost = 'host.docker.internal',
   receiverPort = 0,
+  receiverHost = '127.0.0.1',
   now = () => Date.now(),
 } = {}) {
   // token -> workerId, or `null` while the `create` that minted it has not answered yet. The
@@ -61,6 +65,7 @@ export function createA2APushRegistry({
 
   const receiver = receiverFactory({
     port: receiverPort,
+    host: receiverHost,
     // ⚠️ THE PROVISIONAL KEY IS THE TOKEN, AND THAT IS NOT A PLACEHOLDER. Until the controller
     // names a worker id, the token IS the only identity this side holds, and it is a sound one:
     // it is unguessable, single-worker and minted here. Reporting the entry under it and
