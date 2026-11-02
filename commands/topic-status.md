@@ -84,7 +84,7 @@ cross-session state for every later tick.
 
    - `status` and `phase` from the frontmatter;
    - the `# Success Criteria` tally — `n` ticked of `m` total;
-   - `manager_session_id`, probed with `session-liveness.py --check <id>` →
+   - `claude_session_id`, probed with `session-liveness.py --check <id>` →
      `LIVE` / `ABSENT` / `UNKNOWN`;
    - the loop cadence — `manager-liveness.py --state --subject "<goal>" --branch goal` →
      `OK` / `STALE` / `STOPPED` / `INVALID`.

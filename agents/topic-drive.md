@@ -26,7 +26,7 @@ a `SendMessage`. A worker row is reported downward to the goal manager that owns
 <constraints>
 - ALWAYS take the rows from **this tick's** classification. A recalled row is
   indistinguishable from a computed one at the point of use.
-- ALWAYS prefer a **resume over a spawn**. A recorded `manager_session_id` means a
+- ALWAYS prefer a **resume over a spawn**. A recorded `claude_session_id` means a
   conversation exists; a second manager on one goal is a double writer.
 - NEVER act on a goal the caller did not declare. Membership is declared, not widened.
 - NEVER start a `phase: todo` goal. The `todo → planning` flip is the operator's approval.
@@ -64,7 +64,7 @@ tier down. The sweep is the product; everything else is delegated.
    | `cannot-tell` | `Unverified: <goal> — <the reason the script printed>` |
    | `crash-loop` | `Crash-loop: <goal> — 3 resumes in 30 min; escalate once` |
 
-   ⚠️ **`open` and `open-unflagged` are the two arms of an absent `manager_session_id`, and
+   ⚠️ **`open` and `open-unflagged` are the two arms of an absent `claude_session_id`, and
    they are not the same act.** `open` means the goal carries the flag (whoever set it), so
    you run the open; `open-unflagged` means it does not, so the row is **reported and
    held** — rule 4 opens a manager only for a flagged page, and its workers are opened by
