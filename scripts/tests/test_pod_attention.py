@@ -223,13 +223,33 @@ class RenderPollTest(unittest.TestCase):
         # no content, so the un-keyed branch printed OPEN for it — making a reaped
         # message card read exactly like a live gate. Measured 2026-11-02 on the
         # deployed 0.227.3 arm. NOT_OPERATOR_ANSWERED is the terminal it reaches
-        # now, still distinct from the ANSWERED: an acknowledgement gets.
+        # now. ⚠️ It is NOT distinguished from an acknowledgement here — see
+        # test_an_acknowledgement_close_is_indistinguishable_from_a_reap.
         out = io.StringIO()
         pod.render_poll(item(answer_mechanism="message", state="closed"), out)
         self.assertEqual(
             out.getvalue().strip(),
             "NOT_OPERATOR_ANSWERED: (no answer content recorded; item is closed)",
         )
+
+    def test_an_acknowledgement_close_is_indistinguishable_from_a_reap(self):
+        # ⚠️ Pins a LIMITATION, so the comment above cannot drift back into
+        # claiming a distinction this arm does not provide. An acknowledgement is
+        # `closed` + `answered_by` with no `answered_at`; `answered-attribution`
+        # classifies it UNATTRIBUTED (a close is a clear, not an answer), and
+        # `render_poll` prints no `ANSWERED_BY:` line, so it renders byte-identical
+        # to an actor-less reap. `attention-ask.py`'s `cmd_poll` keeps the two
+        # apart with `ANSWERED_BY:`; this arm does not. Asserting equality is the
+        # point — if someone later adds that line, this test is what tells them
+        # the comment needs updating too.
+        reap, ack = io.StringIO(), io.StringIO()
+        pod.render_poll(item(answer_mechanism="message", state="closed"), reap)
+        pod.render_poll(
+            item(answer_mechanism="message", state="closed", answered_by="someone"), ack
+        )
+        self.assertEqual(reap.getvalue(), ack.getvalue())
+        self.assertTrue(ack.getvalue().startswith("NOT_OPERATOR_ANSWERED:"))
+        self.assertNotIn("ANSWERED_BY:", ack.getvalue())
 
     def test_a_reaped_ack_close_does_not_read_as_open(self):
         # The second non-permission class that reaches the branch — `ack` cards

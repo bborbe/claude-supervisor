@@ -419,10 +419,18 @@ def render_poll(item, out):
     # here and printed OPEN; measured 2026-11-02, a reaped `message` record
     # (`state: closed`, no `answered_at`, no `answered_by`) printed OPEN on the
     # deployed 0.227.3 arm. It now falls through to `NOT_OPERATOR_ANSWERED:`
-    # below — still distinct from the `ANSWERED:` an acknowledgement reaches, so
-    # the separation this branch once bought with the overloaded word survives on
-    # the terminal instead. A record whose `state` is unreadable is not claimed as
-    # open either; failing closed is the point.
+    # below.
+    #
+    # ⚠️ **That does NOT restore a reap/acknowledgement distinction in this arm,
+    # and this comment must not claim one.** `attention-ask.py` separates the two
+    # with its `ANSWERED_BY:` line; `render_poll` prints no such line, so an
+    # acknowledgement (`closed` + `answered_by`, no `answered_at`) classifies
+    # `UNATTRIBUTED` and renders byte-identically to a reap here — measured
+    # 2026-11-02, both print `NOT_OPERATOR_ANSWERED: (no answer content recorded;
+    # item is closed)`. What the guard buys is narrower, and is still the point: a
+    # record that has left `open` stops claiming to be a live gate. A record whose
+    # `state` is unreadable is not claimed as open either; failing closed is the
+    # point.
     if (
         classified == attribution.NOTHING
         and described is None
