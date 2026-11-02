@@ -33,6 +33,10 @@ Contract
                    whitespace-separated** — task names contain spaces. An owner matches a
                    name when the owner path equals it, or when the owner's basename without
                    `.md` equals it. Matching is case-sensitive.
+                   ⚠️ **A comma INSIDE a name is fine** — the value is segmented against
+                   the known owner names rather than split, so `A, So a Late-Landing …` is
+                   one name and `A, B` is two. Splitting first made every comma-bearing
+                   name unresolvable, which failed open to every owner.
   --subject PATH   the subject page (a goal's, or a topic's). Emitted on any CHANGE even when
                    its own name is not in `--changed`, because the subject page's boxes are
                    the aggregate view: a task moving can move them, and the sweep reports the
@@ -138,17 +142,73 @@ def owner_key(path):
     return base[:-3] if base.endswith(".md") else base
 
 
-def split_names(raw):
-    """Split `--changed` on commas and newlines only.
+#: What may separate one owner name from the next in `--changed`.
+#: ⚠️ **Never whitespace** — task names contain spaces, so a whitespace split shreds every
+#: real name. That trap was caught by this gate's own suite on its first run.
+_SEPARATORS = ",\n"
 
-    ⚠️ **Never on whitespace.** Task names contain spaces — *"The Manager Loop's Coverage
-    Step Dispatches One Subagent per Tracked File Every Tick"* is one name, not fourteen —
-    so a whitespace split shreds every real name, none of them then resolves, and the gate
-    falls open on every call: the dispatch saving disappears while every test that only
-    asserts the fail-open branch still passes. Caught by this gate's own suite on its first
-    run, which is the reason the separator is stated here rather than assumed.
+
+def _owner_keys(owners):
+    """Every string an owner is known by, longest first.
+
+    An owner matches either by its full path or by its basename without the `.md` suffix.
+    ⚠️ Longest-first is load-bearing: a name that is a prefix of another must not win the
+    match, or a set containing both dispatches the wrong one.
     """
-    return [n.strip() for n in (raw or "").replace("\n", ",").split(",") if n.strip()]
+    keys: list[str] = []
+    for owner in owners:
+        for key in (owner, owner_key(owner)):
+            if key and key not in keys:
+                keys.append(key)
+    return sorted(keys, key=len, reverse=True)
+
+
+def split_names(raw, owners):
+    """Segment `--changed` into the owner names it carries, or None when it cannot.
+
+    ⚠️ **Resolution is against the KNOWN owner names, never against a split.** Task names
+    contain commas — *"Digest Watcher Judges File Arrival, So a Late-Landing Digest Trips a
+    False Report on a Timely Round"* is ONE name — so splitting first shatters it into two
+    fragments that match no owner, `resolve` then returns None, and the gate fails open to
+    every owner. Measured 2026-11-02 on a live 61-owner set: a one-owner change dispatched
+    all 61, at full cost, with every assertion still passing.
+
+    The walk is greedy longest-match: at each position take the longest known key that
+    starts there **and ends at a separator or at end-of-string**, then advance past it.
+    The boundary check is what makes `A, With Comma` one name and `A, B` two.
+
+    Returns None when any part of the value cannot be placed. The caller reads that as
+    "fail open", never as "dispatch the parts that did resolve".
+    """
+    text = raw or ""
+    keys = _owner_keys(owners)
+    found: list[str] = []
+    index, length = 0, len(text)
+    while index < length:
+        while index < length and text[index] in " \t\r" + _SEPARATORS:
+            index += 1
+        if index >= length:
+            break
+        for key in keys:
+            end = index + len(key)
+            if not text.startswith(key, index):
+                continue
+            # ⚠️ **Whitespace is NOT a terminator.** The next non-blank character must be
+            # a separator or end-of-string, so `Alpha Row Beta Row` — one unknown name
+            # that happens to decompose into two known owners — fails open whole-set
+            # instead of dispatching both. That is the documented contract: `--changed`
+            # is comma- or newline-separated, never whitespace-separated.
+            after = end
+            while after < length and text[after] in " \t\r":
+                after += 1
+            if after < length and text[after] not in _SEPARATORS:
+                continue
+            found.append(key)
+            index = after
+            break
+        else:
+            return None
+    return found
 
 
 def resolve(changed, owners):
@@ -221,8 +281,8 @@ def main(argv):
         return emit([])
 
     if verdict in CHANGE:
-        changed = split_names(args.changed)
-        selected = resolve(changed, owners) if changed else None
+        names = split_names(args.changed, owners)
+        selected = resolve(names, owners) if names else None
         if selected is None:
             # No names at all, or a name the tracked set cannot place: fail open.
             return emit(owners)
