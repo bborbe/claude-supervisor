@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Which live manager panes run without the exit recorder — so their death would leave no record.
+
+**Why this exists.** `session-exit-record.py` records how a pane ended, but only for a pane
+whose spawn installed the writer (`commands/open.md`, `server/tab-spawn.mjs`,
+`scripts/restart-worker.py`). A manager opened by hand runs with no writer, and until this
+script nothing read the store, so the absence was invisible until the manager died and left
+nothing to attribute — measured 2026-11-01, when the fleet manager died at midday with no
+record.
+
+**The test is a spawn line whose pid is still alive, not "the pane has a log".** Two traps:
+
+1. A fresh manager spawn writes `kind=spawn … session=-`: its session id does not exist until
+   the tab registers one (`server/tab-spawn.mjs`), so requiring the line to name the session
+   would flag every correctly-spawned manager (245 of 443 live spawn lines read `session=-`,
+   measured 2026-11-02).
+2. The store is keyed on the pane, and wezterm reuses pane ids. A record left by an earlier,
+   dead pane would make a hand-opened manager on the reused id look recorded. A spawn line
+   whose `pid` is dead is therefore no evidence for the pane's current occupant.
+
+**Pane resolution is by title, and an unresolved pane is UNKNOWN, never clean.** The registry
+carries no pane id. The pane title is Claude Code's session name behind a leading status glyph
+and, for a long name, truncated — so the join is exact first, then a unique prefix above a
+length floor, and anything else is counted as `unknown`. A check that cannot run must not read
+as one that found nothing.
+
+Only manager-role sessions are checked; the caller supplies them (`fleet-board.py` owns the
+role rule). Workers are out of scope — the recorder is not rolled out to them.
+"""
+
+import argparse
+import importlib.util
+import json
+import os
+import re
+import sys
+import unicodedata
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+#: A shorter shared prefix is a coincidence, not a match.
+PREFIX_FLOOR = 20
+
+
+def normalize(text):
+    """Casefolded name without leading glyphs (`✳`, `⚙`, spinner frames) or doubled spaces."""
+    text = unicodedata.normalize("NFKC", text or "").strip()
+    text = re.sub(r"^[^\w(]+", "", text)
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+def resolve_pane(name, panes):
+    """The one pane id whose title names `name`, or `None`.
+
+    `panes` is `{pane_id: title}`. Exact normalized equality wins; otherwise one side must
+    be a prefix of the other (either may be the truncated one) for exactly one pane, with
+    the shorter side at least `PREFIX_FLOOR` characters. Ambiguity resolves to `None`.
+    """
+    key = normalize(name)
+    if not key:
+        return None
+    titles = {pid: normalize(t) for pid, t in panes.items()}
+    exact = [pid for pid, t in titles.items() if t == key]
+    if len(exact) == 1:
+        return exact[0]
+    if exact:
+        return None
+    hits = [
+        pid for pid, t in titles.items()
+        if t and min(len(t), len(key)) >= PREFIX_FLOOR and (t.startswith(key) or key.startswith(t))
+    ]
+    return hits[0] if len(hits) == 1 else None
+
+
+def field(line, name):
+    """One `name=value` field of a tab-separated record line, or `""`."""
+    for part in line.split("\t"):
+        if part.startswith(name + "="):
+            return part[len(name) + 1:]
+    return ""
+
+
+def has_live_spawn(lines, alive):
+    """Does any `kind=spawn … writer=trap` line name a pid `alive()` reports running?"""
+    for line in lines:
+        if field(line, "kind") != "spawn" or field(line, "writer") != "trap":
+            continue
+        pid = field(line, "pid")
+        if pid.isdigit() and alive(int(pid)):
+            return True
+    return False
+
+
+def coverage(managers, panes, records, alive):
+    """`{"unrecorded": [...], "unknown": [...]}` for the given manager sessions.
+
+    `managers` is `{session_id: name}`, `panes` `{pane_id: title}`, `records`
+    `{pane_id: [record lines]}`. Each unrecorded entry carries `session_id`, `name`, `pane`
+    and the rendered `line`. Pure — the caller reads the live stores.
+    """
+    unrecorded, unknown = [], []
+    for sid in sorted(managers):
+        name = managers[sid]
+        pane = resolve_pane(name, panes)
+        if pane is None:
+            unknown.append({"session_id": sid, "name": name})
+            continue
+        if has_live_spawn(records.get(str(pane), []), alive):
+            continue
+        unrecorded.append({
+            "session_id": sid,
+            "name": name,
+            "pane": str(pane),
+            "line": (
+                f"⚠️ UNRECORDED: {name} — pane {pane}, session {sid[:8]} runs without the exit "
+                "recorder (no live `kind=spawn` line); its death would leave no record"
+            ),
+        })
+    return {"unrecorded": unrecorded, "unknown": unknown}
+
+
+def unknown_line(result):
+    """The `unknown` count as an action line, or `None` when every pane resolved."""
+    n = len(result["unknown"])
+    if not n:
+        return None
+    names = ", ".join(u["name"] or u["session_id"][:8] for u in result["unknown"])
+    return f"⚠️ UNRECORDED unknown: {n} manager pane(s) unresolvable from `wezterm cli list` — {names}"
+
+
+def _record_module():
+    spec = importlib.util.spec_from_file_location(
+        "session_exit_record", os.path.join(_HERE, "session-exit-record.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def read_records():
+    """`{pane_id: [lines]}` from the store, through `session-exit-record.py`'s own reader."""
+    mod = _record_module()
+    directory = mod.state_dir()
+    out = {}
+    try:
+        names = os.listdir(directory)
+    except FileNotFoundError:
+        return out
+    for name in names:
+        if not (name.startswith("pane-") and name.endswith(".log")):
+            continue
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as handle:
+                out[name[len("pane-"):-len(".log")]] = [ln.rstrip("\n") for ln in handle if ln.strip()]
+        except OSError:
+            continue
+    return out
+
+
+def live_coverage(managers, pane_map):
+    """`coverage()` over the live store. `pane_map` is `wezterm_panes()`'s answer or `None`.
+
+    `None` (an unreadable `wezterm cli list`) makes every manager `unknown` — it cannot
+    prove a pane either way.
+    """
+    if pane_map is None:
+        return {"unrecorded": [], "unknown": [{"session_id": s, "name": n} for s, n in sorted(managers.items())]}
+    panes = {pid: rec.get("title", "") for pid, rec in pane_map.items()}
+    return coverage(managers, panes, read_records(), _record_module().alive)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args(argv)
+    board = importlib.util.spec_from_file_location("fleet_board", os.path.join(_HERE, "fleet-board.py"))
+    fb = importlib.util.module_from_spec(board)
+    board.loader.exec_module(fb)
+    managers = fb.manager_sessions()
+    if managers is None:
+        print("exit-record-coverage: session registry unreadable", file=sys.stderr)
+        return 1
+    result = live_coverage(managers, fb.wnm.wezterm_panes())
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        for row in result["unrecorded"]:
+            print(row["line"])
+        line = unknown_line(result)
+        if line:
+            print(line)
+        print(f"checked {len(managers)} manager(s): {len(result['unrecorded'])} unrecorded, "
+              f"{len(result['unknown'])} unknown")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -91,6 +91,7 @@ wnm = _load("who_needs_me", "who-needs-me.py")
 fs = _load("fleet_sessions", "fleet-sessions.py")
 fc = _load("fleet_colours", "fleet-colours.py")
 dw = _load("declared_wait", "declared-wait.py")
+erc = _load("exit_record_coverage", "exit-record-coverage.py")
 
 # --- the tree's inputs -------------------------------------------------------
 
@@ -1272,6 +1273,26 @@ def build_tree(rows, grouping):
     return out, ordered, sids
 
 
+def managers_of(registry, grouping):
+    """`{session id: name}` for every registry session the grouping calls a manager.
+
+    The registry only: a heartbeat-only row is headless or a cluster pod, and owns no pane
+    to carry an exit recorder.
+    """
+    return {sid: (rec.get("name") or "") for sid, rec in registry.items()
+            if grouping.role_of(sid) == ROLE_MANAGER}
+
+
+def manager_sessions():
+    """`managers_of()` over the live registry and vault, or `None` if the registry is unreadable."""
+    registry = registry_records()
+    if registry is None:
+        return None
+    task_titles, _ = fs.build_task_index()
+    grouping = build_grouping(registry, vault_index(), colour_census(), loop_slugs(), task_titles)
+    return managers_of(registry, grouping)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--stuck-min", type=int, default=20)
@@ -1353,6 +1374,11 @@ def main():
     # drop one step later, and only this one can see it.
     errors = coverage_errors([r["session_id"] for r in rows], set(registry), fresh, beat_ids)
     errors += tree_errors(ordered, [r["session_id"] for r in rows])
+    # Manager panes running without the exit recorder. Not a column — the box is at its
+    # 119-character budget — so it rides the doc and the below-box action lines (stderr,
+    # beside the coverage and pane-read warnings). The line text is the coverage script's
+    # own; this board only relays it, so it cannot special-case one pane.
+    exit_record = erc.live_coverage(managers_of(registry, grouping), wnm.wezterm_panes())
     counts = {b: sum(1 for r in rows if r["bucket"] == b) for b in BUCKET_ORDER}
     # Every value in the fixed set, always present — a class with no rows reads
     # `0`, never an absent key, so a consumer cannot mistake "none this round"
@@ -1383,8 +1409,14 @@ def main():
         # claim is otherwise only checkable by parsing the glyphs, and a probe
         # that reads the rendered cell is testing the formatter, not the sort.
         "order": ordered,
+        "exit_record": exit_record,
     }
     print(json.dumps(doc if a.json else {k: doc[k] for k in ("header", "rows", "widths")}))
+    for row in exit_record["unrecorded"]:
+        print(row["line"], file=sys.stderr)
+    unknown = erc.unknown_line(exit_record)
+    if unknown:
+        print(unknown, file=sys.stderr)
 
     if errors:
         # Loud, never silent: a table that renders correctly and omits sessions is
