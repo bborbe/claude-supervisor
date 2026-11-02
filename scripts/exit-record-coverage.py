@@ -42,19 +42,24 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 PREFIX_FLOOR = 20
 
 
-#: ANSI escape sequences and control characters, removed before a name reaches the
-#: operator's terminal. `fleet-board.py`'s `cell()` folds whitespace for its TAB-separated
-#: `--mismatches` path; that is not enough here — a BEL or an SGR sequence survives a
-#: whitespace fold and executes in the terminal it is printed to.
-_CONTROL = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b.|[\x00-\x1f\x7f-\x9f]")
+#: ANSI escape sequences, control characters (C0/C1) and the invisible format
+#: characters (zero-width, bidi overrides, BOM) removed before a name reaches the
+#: operator's terminal. `fleet-board.py`'s `cell()` folds whitespace for its
+#: TAB-separated `--mismatches` path; that is not enough here — a BEL or an SGR
+#: sequence survives a whitespace fold and executes in the terminal it is printed to.
+#: The format characters matter for a second reason: they render as nothing, so a name
+#: made only of them stays truthy and would defeat `unknown_line`'s session-id fallback.
+_CONTROL = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b."
+    r"|[\x00-\x1f\x7f-\x9f​-‏‪-‮⁠-⁯﻿]")
 
 
 def printable(text):
-    """`text` safe to print: no ANSI escape sequences, no control characters.
+    """`text` safe to print: no ANSI escape sequences, no control or format characters.
 
     Deliberately stricter than `fleet-board.py`'s `cell()`, which is
-    `" ".join(str(text).split())` and strips neither — it only folds whitespace, so a
-    tab-only fixture would pass on the unmodified code and prove nothing.
+    `" ".join(str(text).split())` and strips none of these — it only folds whitespace,
+    so a tab-only fixture would pass on the unmodified code and prove nothing.
     """
     return _CONTROL.sub("", text or "")
 

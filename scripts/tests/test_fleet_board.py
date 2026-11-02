@@ -1233,5 +1233,47 @@ class TestExitRecordRelay(unittest.TestCase):
         self.assertNotIn(self.LINE, out, "the operator's warning belongs on stderr, not the doc")
 
 
+class TestCollectSignalsPaneMap(unittest.TestCase):
+    """`collect_signals()`'s fourth value is the pane MAP, never a bool.
+
+    `TestExitRecordRelay` stubs `collect_signals`, so it cannot see this contract at
+    all: reverting the return to `pmap is not None` leaves every relay test green,
+    while `main()` hands a bool to `live_coverage`, whose `pane_map.items()` raises,
+    is swallowed by the try/except, and silently degrades the check to all-unknown —
+    a false "every manager is unresolvable" on every render. These two drive the real
+    function over stubbed stores and pin the value and its `None` sentinel.
+    """
+
+    PANE_MAP = {"7": {"title": "✳ Fleet Manager"}}
+
+    def _signals(self, pane_map):
+        names = ("read_registry", "load", "quiet_session_ids", "wezterm_panes",
+                 "reclassify_idle", "is_live", "is_open_gate", "rendered_panels")
+        saved = {name: getattr(fb.wnm, name) for name in names}
+        saved_wait = fb.dw.declared_wait_ids
+        try:
+            fb.wnm.read_registry = lambda sessions_dir=None: {}
+            fb.wnm.load = lambda kind: []
+            fb.wnm.quiet_session_ids = lambda records, live_ids: set()
+            fb.wnm.wezterm_panes = lambda timeout=None: pane_map
+            fb.wnm.reclassify_idle = lambda record: record
+            fb.wnm.is_live = lambda record, pmap, quiet: True
+            fb.wnm.is_open_gate = lambda record, **kwargs: False
+            fb.wnm.rendered_panels = lambda needs, **kwargs: []
+            fb.dw.declared_wait_ids = lambda state_dir=None: set()
+            return fb.collect_signals(20)
+        finally:
+            for name, value in saved.items():
+                setattr(fb.wnm, name, value)
+            fb.dw.declared_wait_ids = saved_wait
+
+    def test_the_fourth_value_is_the_pane_map_itself(self):
+        self.assertIs(self._signals(self.PANE_MAP)[3], self.PANE_MAP,
+                      "a bool here degrades the coverage check to all-unknown on every render")
+
+    def test_an_unreadable_pane_map_is_none(self):
+        self.assertIsNone(self._signals(None)[3])
+
+
 if __name__ == "__main__":
     unittest.main()

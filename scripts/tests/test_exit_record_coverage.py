@@ -270,6 +270,17 @@ class TestControlCharacters(unittest.TestCase):
         out = erc.coverage({"bbbbbbbb-0000": "\x1b[31m"}, {"3": "✳ Something Else"}, {}, alive)
         self.assertIn("bbbbbbbb", erc.unknown_line(out))
 
+    def test_a_name_of_invisible_format_characters_falls_back_to_the_session_id(self):
+        """Zero-width and bidi-override characters render as nothing but stay truthy.
+
+        Without stripping them, `printable(name) or session_id[:8]` keeps the invisible
+        name and the line names no session at all — the operator sees a gap. The
+        right-to-left override is the sharper case: it would visually reorder the rest
+        of the line rather than merely vanish.
+        """
+        out = erc.coverage({"bbbbbbbb-0000": "​‮"}, {"3": "✳ Something Else"}, {}, alive)
+        self.assertIn("bbbbbbbb", erc.unknown_line(out))
+
 
 class TestManagersOf(unittest.TestCase):
     def test_only_manager_role(self):
