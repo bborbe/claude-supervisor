@@ -262,10 +262,14 @@ approve  a routine task - 2026W39
 ⚠️  Ordering is NOT auto-detected. Every ⛔ row is skipped;
     the rest open in the stable order printed above.
 
-Opened N · approved A · filled F fields · skipped H (human) · yours Y (manager) · refused U (undecidable) · held K (blocked).
+Opened N · approved A · filled F fields · skipped H (human) · yours Y (manager) · refused U (undecidable) · held K (blocked) · not ready R (readiness).
 ```
 
-**Approve every eligible row first — before the readiness dispatch.** The batch's opening move is `vault-cli --vault "<vault>" task approve "<task>"` for each Step 0.5 selector row that is **not** JUMP/RESUME-bound. `role: human` rows are approved too. A row not at `phase: todo` is left alone.
+**Readiness-gate every CREATE-bound row first, concurrently.** ⚠️ **Order differs by path**: on the `--flagged` batch this runs *before* the approval (§ below); on the single-task path the **operator has already approved the row before invoking the command**, so this dispatch normally sees a `planning` row — Gate 1, which runs later in Step 1.5, only verifies that and never writes the approval. For each CREATE-bound row (`role: agent`, no live pane, no `claude_session_id`), dispatch Step 1.5's readiness sub-agent — **all in ONE message**, one `Agent` call per row. Resume/jump-bound, `role: human` (→ DIRECT) and `task_type:` pipeline rows are not gated. `readiness` column: `✅ ready <score>/10`; `⚠️ opened <score>/10` (operator-flagged, below threshold — gap bullets under the row); `⛔ NOT READY` (still below after the improvement pass); `— (resume/jump/direct)`; `— (pipeline contract)` (an ungated `task_type:` row, defined at Gate 2). A not-ready row is **held, never opened** — **except an operator-flagged row below the ladder's open threshold, which opens with its gaps** (§ Step 1.5 Gate 2); held rows go in the footer (`… · not ready R (readiness)`). ⚠️ **Gate 1 does not refuse this batch** (`flag: true` on a `todo` row **is** the approval for `--flagged`). The batch runs **Gate 2 only** — ⚠️ **Gate 3 still runs at the spawn.**
+
+**Approve only the rows the dispatch will open — after readiness, never before.** ⚠️ **`--flagged` batch only.** On the single-task path there is no approve pass here: the **operator's** approval write must precede the command invocation, and Gate 1 (§ Step 1.5) then verifies it.
+
+On the batch path the approval move is `vault-cli --vault "<vault>" task approve "<task>"` for each Step 0.5 selector row that is **not** JUMP/RESUME-bound, **whose readiness outcome is to open** (`✅ ready`, `⚠️ opened`, `— (resume/jump/direct)`, or `— (pipeline contract)` for an ungated `task_type:` row), **and that the batch will actually open**. A `role: human` row carries `— (resume/jump/direct)` and **is approved** — it is not JUMP/RESUME-bound, so that arm applies; state it explicitly rather than leaving a manager to infer it, or Direct rows strand at `phase: todo` and the delegated Gate 1 refuses them. ⚠️ **That last clause is not implied by the outcome**: the loop below also skips a `⛔ HOLD` row (prerequisite-blocked) and a row the headless answer-path probe refused, and neither is visible to readiness — a blocked row can still audit `✅ ready`, and a blocked `role: human` or `task_type:` row carries an open outcome by construction. Those rows are **not approved either**, or the batch would admit exactly the rows it is about to skip. ⚠️ **The guarantee is bounded, not absolute**: Gate 3 runs at the spawn and can still refuse a row this pass approved — at the fleet cap, for instance — so an approved row can enter the queue by that route. That residual predates this change and is named here so the fix is not read as total. A row any **pre-approval** gate holds is **not approved** — it stays at `phase: todo`, the operator's inbox. A row not at `phase: todo` is left alone. ⚠️ **The `— (pipeline contract)` arm is load-bearing** — a `task_type:` row is ungated, so it carries that outcome not a score; omitting it would strand the row unapproved for the delegated Gate 1.
 
 ⚠️ **`task approve` also moves `status` to `next`; the pass must put it back.** Every row here came from the Step 0.5 selector (`status: in_progress`). Each approved row takes one more write:
 
@@ -285,11 +289,9 @@ vault-cli --vault "<vault>" task set "<task>" phase planning
 
 ⚠️ **The order is load-bearing, not cosmetic.** A row moved to `planning` *before* the approval is recorded can never be approved afterwards — *the flag is the approval*: approval first, phase second. **A row at neither `todo` nor empty is left alone.**
 
-⚠️ **The pass runs before the readiness dispatch, never after** — a row is approved whether or not it clears Gate 2; a held row that was approved opens on the next run.
+⚠️ **Approval is an admission, so the batch runs it last.** `approved_at` is what `approved-not-started.py` counts; approving before readiness admits rows the dispatch then holds, adding K per run to a queue that exists to be drained. This **reverses** the old rule (*"The pass runs before the readiness dispatch, never after"*) on the batch path only.
 
-⚠️ **Print one `approve <task>` line per approved row.** The run's output is the only record that the ordering held, and it is what a reader checks to tell a real approve from a line-printing no-op.
-
-**Readiness-gate every CREATE-bound row first, concurrently.** For each CREATE-bound row (`role: agent`, no live pane, no `claude_session_id`), dispatch Step 1.5's readiness sub-agent — **all in ONE message**, one `Agent` call per row. Resume/jump-bound, `role: human` (→ DIRECT) and `task_type:` pipeline rows are not gated. `readiness` column: `✅ ready <score>/10`; `⚠️ opened <score>/10` (operator-flagged, below threshold — gap bullets under the row); `⛔ NOT READY` (still below after the improvement pass); `— (resume/jump/direct)`. A not-ready row is **held, never opened** — **except an operator-flagged row below the ladder's open threshold, which opens with its gaps** (§ Step 1.5 Gate 2); held rows go in the footer (`… · not ready R (readiness)`). ⚠️ **Gate 1 does not refuse this batch** (`flag: true` on a `todo` row **is** the approval for `--flagged`). The batch runs **Gate 2 only** — ⚠️ **Gate 3 still runs at the spawn.**
+⚠️ **Print one `approve <task>` line per approved row and one `not ready <task>` per row readiness left unapproved** — the output is the only record that the ordering held. ⚠️ **Only readiness-held rows get `not ready`**: a `⛔ HOLD` row and an answer-path-refused row are reported by their own skip line, and a JUMP/RESUME-bound row is excluded from this pass entirely, so printing `not ready` for any of them would double-report. (`not ready`, not `held`: the footer's `held K` is for prerequisite-blocked rows.)
 
 **Loop the eligible rows in the printed stable order**, delegating each to this command's own single-task path. Per row, invoke `/supervisor:open "<task>"` — with `--first-step "<gap bullets>"` only when the row opened below the readiness ladder's open threshold. Never reimplement jump / resume / spawn here; never pass a mode override to the fleet. ⚠️ **The per-row delegation IS the guard — no shortcut keeps it.** ⚠️ **The batch is paced by delegation, never by a counter of its own** (rule home: `docs/fleet-surface.md` § Spawn a worker item 5).
 
@@ -326,6 +328,8 @@ Then:
 **The single home of `/supervisor:open`'s spawn preconditions.** Step 2A's CREATE branch and the `--flagged` batch (Step 0.6) both reference this section; neither restates it.
 
 Two gates run here, in this order. The first asks whether the row may be opened at all; the second asks whether its plan is good enough to hand to a worker. **A row that fails the first is never probed by the second** — auditing an unapproved row spends work on a decision the operator has not made.
+
+⚠️ **One deliberate exception: the `--flagged` batch's approve pass** (§ Step 0.6) runs readiness *before* the approval, so it does probe `phase: todo` rows — one readiness call per selected row, buying that a held row is never approved. ⚠️ **The single-task path tolerates the same probe but is not a second exception** — the operator approves before invoking, and Gate 1 is the enforcement: its predicate does not read `phase`, so a `todo` row that reaches it is probed (wasted audit work), and Gate 1 then refuses it, so nothing is approved or opened.
 
 ### Gate 1 — approval (`phase: todo` refuses)
 
@@ -376,7 +380,7 @@ Agent(subagent_type='vault-cli:task-auditor', description='Readiness: <task>',
 
 
 
-⚠️ **A `phase: todo` row is untouched by the ladder** — it is refused at Gate 1 above, before any probe runs, and the improvement pass never writes its `phase`.
+⚠️ **A `phase: todo` row is untouched by the ladder** — it is refused at Gate 1 above, before any probe runs, and the improvement pass never writes its `phase`. ⚠️ **Exception, `--flagged` batch only** — see § Step 0.6, which owns that ordering and its trade. Do not restate it here.
 
 ⚠️ **A readiness string in this file is not a gate.** A file-level grep for the reference satisfies a naive check while individual sites stay ungated. Each site (CREATE branch, batch dispatch) links here by name — check each one's own window.
 
