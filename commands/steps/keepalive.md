@@ -24,7 +24,7 @@ had none, so a lapsed topic manager simply stayed lapsed and nothing reported it
 the missing rung: **restart is not open**, so resuming a topic manager that already owns its
 subject decides nothing new (`docs/session-tiers.md` § The four tiers, rule 1).
 
-**Population — every topic page carrying a `manager_session_id`.** Read the vault's topic
+**Population — every topic page carrying a session id.** Read the vault's topic
 directory, not the roster: a topic manager whose session died is absent from the roster, which
 is exactly the row this leg exists to recover. ⚠️ **Resolve the directory from the vault's own
 config, never assume `23 Topics`** — a renamed directory would glob nothing and the leg would
@@ -40,7 +40,7 @@ for x in json.load(sys.stdin):
 TOPICS="${TOPICS:-23 Topics}"
 for f in "<vault>/$TOPICS"/*.md; do
   name=$(basename "$f" .md)
-  grep -qE '^manager_session_id: *[^ ]' "$f" || continue
+  grep -qE '^(claude_session_id|manager_session_id): *[^ ]' "$f" || continue
   printf '%s\t' "$name"
   python3 "$P/topic-keepalive.py" --vault "<vault>" --subject "$name" --branch topic --dir "$TOPICS" | head -2 | tr '\n' '\t'
   echo
@@ -130,8 +130,8 @@ enforces the exclusion itself rather than leaving it to this prose.** That gate 
 goal tier's tick with its own `last_auto_resume` cap; this leg runs on the fleet tick with the
 `worker--<slug>` cap. Both caps record only **after** a resume the instrument confirms `LIVE`,
 so a check-then-act race would let two resumes land before either cap arms. The script therefore
-scans the task's frontmatter for wikilinks and, if any page one names has a `manager_session_id`
-the liveness instrument reads `LIVE`, returns `jump` with *"goal manager <id> is live and owns this
+scans the task's frontmatter for wikilinks and, if any page one names has a session id
+(`claude_session_id`, or the retired `manager_session_id`) the liveness instrument reads `LIVE`, returns `jump` with *"goal manager <id> is live and owns this
 task"* — the fleet leg never acts on a row the goal tier owns. This leg takes only the rows
 whose goal has no live manager, the same fallback `docs/fleet-surface.md` § Which manager owns a
 subject already states.
