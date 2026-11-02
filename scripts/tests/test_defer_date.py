@@ -373,6 +373,17 @@ class TestNoReaderTruncatesOrDefaultsToADate(unittest.TestCase):
                         f"{name} defaults its defer clock to a date, not an instant",
                     )
 
+    def test_open_flagged_selector_delegates_to_the_parser(self):
+        # commands/open.md embeds the --flagged selector in a prompt, outside READERS,
+        # which is how it kept its [:10] slice after the scripts were fixed.
+        src = (_SCRIPTS.parent / "commands" / "open.md").read_text(encoding="utf-8")
+        start = src.index("**Selector — ALL VAULTS")
+        block = src[src.index("```bash", start):src.index("\n```\n", start)]
+        code = "\n".join(l for l in block.splitlines() if not l.lstrip().startswith("#"))
+        self.assertNotIn("[:10]", code, "--flagged selector truncates defer_date")
+        self.assertNotRegex(code, r"date\.today\(\)", "--flagged selector uses a date clock")
+        self.assertIn("defer_state(", code, "--flagged selector does not call defer-date.py")
+
 
 if __name__ == "__main__":
     unittest.main()
