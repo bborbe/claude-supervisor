@@ -55,17 +55,6 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def _load(name, filename):
-    """Import a sibling script by path — the filenames carry hyphens."""
-    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-#: `defer_date` is an instant, not a date — see `defer-date.py`.
-defer_date = _load("defer_date", "defer-date.py")
-
 SESSIONS_DIR = os.path.expanduser(
     os.environ.get("SUPERVISOR_SESSIONS_DIR") or "~/.claude/sessions"
 )
@@ -99,6 +88,10 @@ def load_sibling(filename):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+#: `defer_date` is an instant, not a date — see `defer-date.py`.
+defer_date = load_sibling("defer-date.py")
 
 
 def frontmatter(path):

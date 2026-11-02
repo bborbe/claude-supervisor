@@ -24,6 +24,7 @@ import datetime as dt
 import importlib.util
 import os
 import pathlib
+import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -93,7 +94,10 @@ class TestParseDeferDate(unittest.TestCase):
     def test_naive_datetime_is_local(self):
         parsed, reason = dd.parse_defer_date("2026-11-02T11:00:00")
         self.assertIsNone(reason)
-        self.assertEqual(parsed.utcoffset(), dt.datetime.now().astimezone().utcoffset())
+        # The offset of the PARSED wall clock, not of the current one: comparing against
+        # `now` goes red every summer in a DST zone.
+        self.assertEqual(parsed.utcoffset(),
+                         dt.datetime(2026, 11, 2, 11, 0).astimezone().utcoffset())
         self.assertEqual((parsed.hour, parsed.minute), (11, 0))
 
     def test_garbage_is_invalid_with_a_reason(self):
@@ -264,8 +268,21 @@ class TestManagerQuiet(unittest.TestCase):
     """scripts/manager-quiet.py — `classify()` is what stands a manager down."""
 
     def setUp(self):
-        os.environ["MANAGER_LIVENESS_STATE_DIR"] = tempfile.mkdtemp()
+        # Restored on teardown: a leaked env var and temp dir would follow every later
+        # test in this process.
+        state_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, state_dir, True)
+        previous = os.environ.get("MANAGER_LIVENESS_STATE_DIR")
+        os.environ["MANAGER_LIVENESS_STATE_DIR"] = state_dir
+        self.addCleanup(self._restore_state_dir, previous)
         self.mq = load("manager-quiet.py")
+
+    @staticmethod
+    def _restore_state_dir(previous):
+        if previous is None:
+            os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+        else:
+            os.environ["MANAGER_LIVENESS_STATE_DIR"] = previous
 
     def classify(self, defer, today):
         fm = f"---\nstatus: in_progress\nphase: execution\ndefer_date: {defer}\n---\n"
@@ -281,9 +298,12 @@ class TestManagerQuiet(unittest.TestCase):
         self.assertEqual("runnable", verdict["kind"])
 
     def test_the_earliest_future_defer_is_reported(self):
-        seen = {"defer": {"B": "2026-11-03", "A": "2026-11-02T11:00:00+01:00"},
+        # Cross-offset on purpose: A sorts FIRST as a string but is the LATER instant
+        # (23:30Z vs 23:15Z), so a plain string sort names the wrong trigger and this
+        # case fails against it.
+        seen = {"defer": {"A": "2026-11-02T23:30:00Z", "B": "2026-11-03T00:15:00+01:00"},
                 "blocked": {}}
-        self.assertEqual("2026-11-02T11:00:00+01:00", self.mq.reopen_trigger(seen))
+        self.assertEqual("2026-11-03T00:15:00+01:00", self.mq.reopen_trigger(seen))
 
 
 class TestCloseWorker(unittest.TestCase):

@@ -444,9 +444,9 @@ def plan_candidates(vault, board, day, notes):
 def due_today(board, tasks_dir, day, now=None):
     """Tasks deferred or flagged for `day` — the highest rank there is."""
     iso = day.isoformat()
-    # `now` is the instant the read is taken at; `day` alone means its start, which is
-    # what a date-granular defer has always been compared against.
-    moment = defer_date.as_now(now if now is not None else day)
+    # `now` is the instant the read is taken at; absent, it is the CURRENT instant, never
+    # `day`'s start — local midnight would park a defer that already came due today.
+    moment = defer_date.as_now(now)
     out = []
     d = Path(tasks_dir)
     if not d.is_dir():

@@ -397,7 +397,7 @@ def main(argv=None):
     )
     parser.add_argument("--tasks-dir", required=True, help="the vault's task directory")
     parser.add_argument("--now", default=None,
-                        help="ISO date or datetime for the defer guard (default: today)")
+                        help="ISO date or datetime for the defer guard (default: now)")
     parser.add_argument("--vault", default=None,
                         help="vault name, used to compose each row's ready-to-run action")
     parser.add_argument("--json", action="store_true", help="emit the selection as JSON")
@@ -415,7 +415,14 @@ def main(argv=None):
     # Default to the CURRENT INSTANT, not today's date: a date reads as local midnight,
     # which would park a defer to 02:00 until the next day and reopen the very bug this
     # guard was fixed for.
-    today = args.now or defer_date.as_now()
+    try:
+        today = defer_date.as_now(args.now)
+    except ValueError:
+        # A bad --now is a refusal, not a traceback: the round reads exit 2 and renders
+        # "open leg: unknown" rather than losing the whole line to a stack dump.
+        print("open leg: unknown")
+        print("❌ bad --now: %s" % args.now, file=sys.stderr)
+        return 2
     rows, skipped, err = collect(args.tasks_dir, today)
     if err:
         print("open leg: unknown")

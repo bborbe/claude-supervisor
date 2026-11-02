@@ -120,9 +120,6 @@ UNAPPROVED_PHASE = "todo"
 EXIT_OK = 0
 EXIT_UNREADABLE = 2
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-
-
 _PREDISPATCH = None
 
 
@@ -143,7 +140,7 @@ def load_predispatch():
     global _PREDISPATCH
     if _PREDISPATCH is None:
         spec = importlib.util.spec_from_file_location(
-            "manager_predispatch", os.path.join(_HERE, "manager-predispatch.py")
+            "manager_predispatch", os.path.join(HERE, "manager-predispatch.py")
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -314,7 +311,9 @@ def survey(vault: str, members: list, today_key) -> dict:
 def _defer_instant(text):
     """Sort key for a rendered `defer_date` — the instant it names, never the string."""
     parsed, _ = defer_date.parse_defer_date(text)
-    return parsed or defer_date.as_now()
+    # `parsed` alone: the caller already filters falsy values, and falling back to "now"
+    # here would sort an unreadable defer as the EARLIEST, naming the wrong trigger.
+    return parsed
 
 
 def reopen_trigger(seen: dict) -> str:
@@ -398,7 +397,7 @@ def main(argv: list) -> int:
     ap = argparse.ArgumentParser(description="Zero-runnable-tasks check for one subject.")
     ap.add_argument("--subject", required=True)
     ap.add_argument("--vault", required=True)
-    ap.add_argument("--today", help="YYYY-MM-DD; defaults to the local date")
+    ap.add_argument("--today", help="YYYY-MM-DD or a full datetime; defaults to now")
     ap.add_argument("--state-dir", default=None)
     ap.add_argument("--reset", action="store_true", help="clear the counter and exit")
     a = ap.parse_args(argv)

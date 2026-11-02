@@ -19,14 +19,21 @@ Accepted shapes:
   * empty / None                              -> no defer
 
 ⚠️ **An unparseable value is `invalid`, never "available now".** The caller is told the
-reason and decides; it must not read garbage as due.
+reason and decides; it must not read garbage as due. Five readers withhold the row;
+`manager-quiet.py` is the one deliberate exception and fails toward ARMED instead — a
+typo must not stand a live manager down — and says why on stderr.
+
+⚠️ **Stricter than the `[:10]` slice it replaces.** Values the old slice silently
+accepted — `2026-11-02 # note`, `2026-11-02 00:00:00 +01:00`, `2026-11-2` — are now
+`invalid` and withheld by the fail-closed readers, so a hand-edited value of that shape
+needs correcting in the vault rather than being half-read.
 """
 
 import datetime as _dt
 import re
 
 _DATE_ONLY = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
-_MIDNIGHT_UTC = re.compile(r"^(\d{4})-(\d{2})-(\d{2})[T ]00:00(?::00(?:\.0+)?)?(?:Z|[+-]00:?00)$")
+_MIDNIGHT_UTC = re.compile(r"^(\d{4})-(\d{2})-(\d{2})[T ]00:00(?::00(?:\.0+)?)?Z$")
 
 
 def _local_midnight(y, m, d):
