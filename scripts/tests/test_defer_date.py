@@ -27,7 +27,7 @@ import pathlib
 import shutil
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 
 _HERE = pathlib.Path(__file__).resolve().parent
@@ -296,6 +296,16 @@ class TestManagerQuiet(unittest.TestCase):
     def test_a_date_only_defer_today_is_runnable(self):
         verdict = self.classify("2026-11-02", "2026-11-02")
         self.assertEqual("runnable", verdict["kind"])
+
+    def test_a_bad_today_refuses_instead_of_reading_as_now(self):
+        """`--today garbage` must exit 2, not silently become "now" — falling through
+        would read future defers as quiet and stand the manager down."""
+        err = StringIO()
+        with redirect_stderr(err):
+            code = self.mq.main(["--subject", "S", "--vault", "/nonexistent",
+                                 "--today", "garbage"])
+        self.assertEqual(2, code)
+        self.assertIn("REFUSED", err.getvalue())
 
     def test_the_earliest_future_defer_is_reported(self):
         # Cross-offset on purpose: A sorts FIRST as a string but is the LATER instant

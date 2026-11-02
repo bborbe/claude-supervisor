@@ -409,6 +409,12 @@ def main(argv: list) -> int:
     # Default to the CURRENT INSTANT: local midnight would keep a row quiet until the
     # next day even after its defer time passed.
     today_key = _date_key(a.today) if a.today else defer_date.as_now()
+    if today_key is None:
+        # A bad --today must REFUSE, never fall through as "now": that would read future
+        # defers as quiet and stand the manager down, the opposite of this module's
+        # fail-toward-armed invariant. `next-focus.py` and `open-queue.py` refuse too.
+        print(f"manager-quiet: REFUSED — bad --today: {a.today}", file=sys.stderr)
+        return EXIT_UNREADABLE
     result = tick(a.subject, a.vault, today_key, a.state_dir)
     if result.get("error"):
         print(result["error"], file=sys.stderr)
