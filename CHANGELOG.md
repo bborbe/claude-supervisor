@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: standing resource guard for long-running local services — `scripts/service-guard.py`, run every fleet round as the fifth reading of router row 15 (`commands/steps/service-guard.md`). It reads each guarded service's `phys_footprint` (never RSS, which on macOS under-reads by more than an order of magnitude) and `ps` CPU against the bar in `~/.claude/state/service-guard.json`, and with `--apply` reopens the owning task row when a breach lands on a terminal one, so a service that drifts back after its fix is caught by the round instead of by the operator. `UNKNOWN` is a third answer that exits non-zero, never rounded to `OK`; the guard reopens and never restarts.
+
 ## v0.234.0
 
 - feat: let a `k8s` spawn register its status callback against a caller-supplied URL, so a cluster worker is no longer handed `host.docker.internal` — a name CoreDNS does not resolve inside a pod, and whose LAN substitute the worker's own egress NetworkPolicy drops. `beginCreate({ callbackUrl })` overrides the per-spawn URL, the registry keeps it per token so a follow-up turn re-registers against the URL its own worker was created with rather than this process's default, and `SUPERVISOR_A2A_K8S_CALLBACK_URL` names the in-cluster relay the operator deploys; unset leaves the previous behaviour, visibly rather than silently. The receiver also takes a fixed `port` (`SUPERVISOR_A2A_PUSH_PORT`) and a bind `host` (`SUPERVISOR_A2A_PUSH_HOST`), because a relay's upstream is deployed configuration and an ephemeral loopback port cannot be dialled from another host; `0` and `127.0.0.1` stay the defaults, so the docker path is unchanged.

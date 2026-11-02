@@ -6,7 +6,7 @@ user-invocable: false
 
 # Readings
 
-When: every tick — take all four readings (`fleet-board.py` · `approved-not-started.py` · `unarmed-goals.py` · `next-focus.py`; commands in the step)
+When: every tick — take all five readings (`fleet-board.py` · `approved-not-started.py` · `unarmed-goals.py` · `next-focus.py` · `service-guard.py`; commands in the step)
 
 ## The saturation reading — the ratio, not tok/s
 
@@ -71,3 +71,7 @@ Read it from `python3 $P/next-focus.py --vault "<vault>" --tasks-dir "25 Tasks"`
 ⚠️ **Any non-zero exit is a REFUSAL, never "nothing to do".** An unreadable vault or a bad `--now` exits 2 with the reason on stderr, and an unexpected failure is mapped to the same 2 rather than escaping as a traceback — render it as `Next focus: refused — <that reason>`, per Output shape item 2; an empty plan set exits 0 with `note:` lines. The two must not render the same.
 
 ⚠️ **The reading reports; it never opens.** What this block proposes is still the operator's to approve — the card is the ask, and `attention-ask.py` is how it is answered. Once a row carries that approval, opening it is the **open leg's** act (router row 16), never this reading's and never the card's: the card answers *what to approve*, the leg answers *which approved row opens now*, and collapsing the two would turn a proposal into a spawn.
+
+## The service-guard reading
+
+Every tick runs `python3 $P/service-guard.py --apply` and prints its lines. Unlike the four readings above, this one acts: a breach on a terminal owning row reopens it. The contract — config, instrument, the three states, and why it reopens but never restarts — lives in `${CLAUDE_PLUGIN_ROOT}/commands/steps/service-guard.md`.
