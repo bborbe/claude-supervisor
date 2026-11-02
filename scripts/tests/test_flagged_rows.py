@@ -8,6 +8,7 @@ store. The live behaviour is exercised by the task's DoD run, not here.
 import importlib.util
 import json
 import os
+import shutil
 import tempfile
 import unittest
 import unittest.mock
@@ -810,6 +811,25 @@ class SubjectLivenessPrecedence(unittest.TestCase):
 
         self.assertEqual([], seen)
         self.assertFalse(verdict)
+
+    def test_the_row_builder_ignores_the_retired_key_too(self):
+        # `row_for` carried the second copy of the removed fallback. Pinning it here keeps
+        # the two sites from drifting apart again — the pair disagreeing on one page is
+        # what the pre-migration review caught.
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        tasks = os.path.join(root, "25 Tasks")
+        write(os.path.join(tasks, "Old Task.md"),
+              page("page_type: task\nflag: true\nstatus: in_progress\nrole: agent\n"
+                   "manager_session_id: old-sid"))
+        cfg = {"tasks_dir": "25 Tasks", "path": root, "worker_launcher": "/opt/l/cc-v"}
+        ctx = {"today": "2026-10-31", "role_map": {}, "template_root": None,
+               "no_liveness": True, "managers": set(), "topic_map": {},
+               "mode_default": "interactive", "normalised": [],
+               "subjects": {}, "liveness_cache": {}}
+        row, reason = fr.row_for("v", cfg, "task", os.path.join(tasks, "Old Task.md"), ctx)
+        self.assertIsNone(reason)
+        self.assertIsNone(row["session_id"])
 
 
 if __name__ == "__main__":

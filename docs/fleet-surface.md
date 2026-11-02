@@ -966,7 +966,7 @@ topic* page it names the manager serving that subject, it is overwritten wheneve
 manager arms it, and no multiplicity rule applies — one page, one manager. A retired
 field used to carry the same manager id; it was read as a fallback
 while pages were being migrated, and it is gone now — both vaults are migrated, nothing
-writes it, and no reader resolves it. It is
+writes it, and no reader resolves it. The `claude_session_id` on a goal or topic page is
 **not** the chain in `docs/subject-resolution.md`, which resolves a different question — which
 *subject* a session is serving — and is unchanged by this section; the two compose, and neither
 is a fallback for the other. And a missing `managed_by` is **not** an error: the task's own
