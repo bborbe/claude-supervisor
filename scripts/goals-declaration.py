@@ -144,6 +144,7 @@ def _strip_comment(value: str) -> str:
     — that yields `'[[Name`, a fragment matching no page, which is the silent drop.
     """
     quote: str | None = None
+    depth = 0
     for index, char in enumerate(value):
         if quote is not None:
             if char == quote:
@@ -152,7 +153,17 @@ def _strip_comment(value: str) -> str:
         if char in _QUOTES and _opens_quote(value[:index]):
             quote = char
             continue
-        if char == "#" and index > 0 and value[index - 1] in " \t":
+        # ⚠️ **Bracket depth is tracked because a flow list is a single value.** Without
+        # it, a `#` inside the list's second item reads as a comment and the whole value
+        # truncates mid-list; the trailing comment after the closing `]` is the only one
+        # this scan should cut.
+        if char == "[":
+            depth += 1
+            continue
+        if char == "]":
+            depth = max(0, depth - 1)
+            continue
+        if char == "#" and depth == 0 and (index == 0 or value[index - 1] in " \t"):
             return value[:index].rstrip()
     return value
 
@@ -246,8 +257,14 @@ def _block_items(frontmatter: str, after: int) -> list[str]:
         # it. `topic-spawn.py`'s previous reader skipped comments and the other two did
         # not, so treating a comment as a terminator would have dropped every item after
         # it — a silent drop introduced by the unification, for a shape valid in YAML.
-        if not stripped or stripped.startswith("#"):
+        if not stripped:
             out.append(line)
+            continue
+        # ⚠️ A full-line comment is DROPPED, not kept for the caller. Keeping it let a
+        # column-0 `# note` survive `_strip_comment` — that scan needs a preceding
+        # whitespace to recognise a comment — and `goal_names` reported it as a goal the
+        # file does not carry.
+        if stripped.startswith("#"):
             continue
         if not _BLOCK_ITEM.match(line):
             break
@@ -271,8 +288,10 @@ def goal_names(frontmatter: str) -> list[str]:
     match = _GOALS_KEY.search(frontmatter)
     if not match:
         return []
-    # The comment is stripped before the empty test, or `goals: [] # note` reads as a goal
-    # named `[] # note` instead of as a declaration that names nothing.
+    # The trailing comment is stripped here so `goals: [] # note` reads as empty rather
+    # than as a goal named `[] # note`. `_strip_comment` is quote- AND bracket-aware, so
+    # this cuts only a comment that sits outside the value — a `#` inside a quoted name or
+    # inside a flow list's later item is content, and truncating on it was a silent drop.
     rest = _strip_comment(match.group(1)).strip()
     if rest and rest.lower() not in _EMPTY:
         names = _inline_names(rest)

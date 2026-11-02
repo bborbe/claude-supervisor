@@ -3112,9 +3112,21 @@ class GoalsDeclarationShapes(Base):
         for goals_fm, want in (
             ("goals:\n    - '[[Name # With Hash]]'\n", ["Name"]),
             ("goals: ['[[Name # Hash]]', 'Other']\n", ["Name", "Other"]),
+            # ⚠️ A LATER item is the case that failed when the comment scan ran on the
+            # whole value: the first item's text sat in front of the second item's opening
+            # quote, so the quote was never recognised and the list truncated at the `#`.
+            ("goals: ['[[AGoal]]', 'Bob # 2']\n", ["AGoal", "Bob # 2"]),
+            ("goals: ['[[AGoal]]', '[[B # C]]']\n", ["AGoal", "B"]),
         ):
             with self.subTest(declaration=goals_fm.strip()):
                 self.assertEqual(self.page("Hash Link", goals_fm)["goals"], want)
+
+    def test_a_column_zero_comment_inside_the_block_is_dropped(self):
+        """An unindented comment line is a comment, not a goal the file carries."""
+        self.assertEqual(
+            self.page("Column Zero Comment", "goals:\n# note\n- AGoal\n")["goals"],
+            ["AGoal"],
+        )
 
     def test_a_comment_on_an_empty_declaration_is_still_empty(self):
         """`goals: [] # note` names no goal, not a goal called `[] # note`."""
