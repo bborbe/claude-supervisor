@@ -22,4 +22,8 @@ Memory is `footprint -p <pid>` → `phys_footprint`, **never `ps -o rss`**: on m
 - `BREACH` — with `--apply`, a terminal owning row (`completed` / `aborted`) is set back to `status: in_progress`, `phase: execution`, and the line reads `REOPENED`. An open row is left as it is. Print every `BREACH` and `REOPENED` line in the round's report; a reopened row is approved work and enters the open leg (router row 16) like any other.
 - `UNKNOWN` — the pid or footprint could not be read; the script exits non-zero. Print it as it comes back and never round it to `OK`: "within bounds" and "could not measure" must not render the same.
 
+## Exit codes
+
+`0` — every service measured (`OK` or `BREACH`) and every reopen succeeded. `1` — any `UNKNOWN` reading, any `REOPEN FAILED` line, or a `REFUSED` config (unreadable, or an entry missing `label` / `max_footprint_mb` / `task` / `vault`). A reopen reads the row with `--output json` and requires its `value`: an unknown task answers exit 0 with an error payload, which is a `REOPEN FAILED`, never an "already open" row. `--json` prints `{readings, outcomes}` for a caller that wants the fields.
+
 ⚠️ **The guard reopens; it never restarts.** A restart returns a process to its baseline and proves nothing about the leak, and it is production-touching besides. Restarting a guarded service stays the owning row's decision, under its own approval.

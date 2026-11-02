@@ -28,8 +28,13 @@ prints `UNKNOWN`, because "within bounds" and "I could not measure" must not
 render the same.
 
 With `--apply`, a breach reopens the owning task: a terminal row
-(`completed` / `aborted`) is set back to `status: in_progress` and
-`phase: execution`. An open row is left untouched — it is already open.
+(`completed` / `aborted`) is set back to `phase: execution`,
+`status: in_progress`, and its `completed_date` cleared. An open row is left
+untouched — it is already open.
+
+Exit codes: 0 — every service measured (OK or BREACH) and every reopen
+succeeded; 1 — any UNKNOWN reading, any REOPEN FAILED, or a REFUSED
+(unreadable or malformed) config.
 """
 
 from __future__ import annotations
@@ -59,10 +64,11 @@ _UNITS = {"B": 1 / (1024 * 1024), "KB": 1 / 1024, "MB": 1.0, "GB": 1024.0}
 
 def parse_footprint_mb(text: str) -> Optional[float]:
     """Return phys_footprint in MB from `footprint -p` output, or None."""
-    m = re.search(r"phys_footprint:\s*([\d.]+)\s*(B|KB|MB|GB)\b", text)
+    m = re.search(r"phys_footprint:\s*([\d,.]+)\s*(B|KB|MB|GB)\b", text)
     if not m:
         return None
-    return float(m.group(1)) * _UNITS[m.group(2)]
+    # A grouped value (`5,522 MB`) must parse, not read UNKNOWN forever.
+    return float(m.group(1).replace(",", "")) * _UNITS[m.group(2)]
 
 
 def parse_launchctl_pid(text: str) -> Optional[int]:
@@ -118,15 +124,63 @@ def measure(service: dict, runner: Runner) -> Reading:
     return Reading(label, state, pid=pid, footprint_mb=fp, cpu_pct=cpu, reason="; ".join(over))
 
 
+REQUIRED_KEYS = ("label", "max_footprint_mb", "task", "vault")
+
+
+class ReopenFailed(Exception):
+    """The owning row could not be read or reopened."""
+
+
+def validate(services) -> Optional[str]:
+    """Return a refusal for a malformed config, or None when every entry is usable."""
+    if not isinstance(services, list):
+        return "config must be a JSON list of service entries"
+    for i, entry in enumerate(services):
+        if not isinstance(entry, dict):
+            return f"entry {i} is not an object"
+        missing = [k for k in REQUIRED_KEYS if k not in entry]
+        if missing:
+            return f"entry {i} missing {', '.join(missing)}"
+        for k in ("max_footprint_mb", "max_cpu_pct"):
+            if k in entry and not isinstance(entry[k], (int, float)):
+                return f"entry {i} {k} is not a number"
+    return None
+
+
+def task_status(base: list, task: str, runner: Runner) -> str:
+    """Read the owning row's status. `--output json` exits 0 on an unknown task
+    and carries the error in the payload, so a missing `value` is a failure —
+    never an "already open" row."""
+    try:
+        payload = json.loads(runner(base + ["get", task, "status", "--output", "json"]))
+    except (ValueError, TypeError) as exc:
+        raise ReopenFailed(f"unparseable status read: {exc}") from exc
+    value = payload.get("value") if isinstance(payload, dict) else None
+    if not isinstance(value, str) or not value:
+        error = payload.get("error") if isinstance(payload, dict) else payload
+        raise ReopenFailed(f"status read failed: {error}")
+    return value
+
+
 def reopen(service: dict, runner: Runner) -> str:
-    """Reopen the owning task when it is terminal. Returns a one-line outcome."""
+    """Reopen the owning task when it is terminal. Returns a one-line outcome.
+
+    Uses the canonical reopen — phase, then status, then clear
+    `completed_date`. Phase goes first: if a later call fails the row is still
+    terminal, so the next round retries the whole reopen instead of skipping a
+    half-reopened row whose phase was never repaired.
+    """
     base = ["vault-cli", "--vault", service["vault"], "task"]
     task = service["task"]
-    status = runner(base + ["get", task, "status"]).strip()
+    status = task_status(base, task, runner)
     if status not in TERMINAL_STATUSES:
         return f"service-guard: {service['label']} owning row already open (status: {status})"
-    runner(base + ["set", task, "status", "in_progress"])
-    runner(base + ["set", task, "phase", "execution"])
+    try:
+        runner(base + ["set", task, "phase", "execution"])
+        runner(base + ["set", task, "status", "in_progress"])
+        runner(base + ["clear", task, "completed_date"])
+    except Exception as exc:  # noqa: BLE001 — surfaced as REOPEN FAILED
+        raise ReopenFailed(f"reopen write failed: {exc}") from exc
     return f"service-guard: {service['label']} REOPENED \"{task}\" (was {status})"
 
 
@@ -140,17 +194,27 @@ def main(argv: Optional[list] = None, runner: Runner = run) -> int:
     if not os.path.exists(args.config):
         print("service-guard: no config")
         return 0
-    with open(args.config, encoding="utf-8") as fh:
-        services = json.load(fh)
+    try:
+        with open(args.config, encoding="utf-8") as fh:
+            services = json.load(fh)
+    except (OSError, ValueError) as exc:
+        print(f"service-guard: REFUSED — unreadable config {args.config}: {exc}")
+        return 1
+    refusal = validate(services)
+    if refusal:
+        print(f"service-guard: REFUSED — {refusal} ({args.config})")
+        return 1
 
     readings = [measure(s, runner) for s in services]
     outcomes = []
+    reopen_failed = False
     if args.apply:
         for service, reading in zip(services, readings):
             if reading.state == "BREACH":
                 try:
                     outcomes.append(reopen(service, runner))
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:  # noqa: BLE001 — any failure is a REOPEN FAILED line
+                    reopen_failed = True
                     outcomes.append(f"service-guard: {service['label']} REOPEN FAILED — {exc}")
 
     if args.json:
@@ -160,7 +224,9 @@ def main(argv: Optional[list] = None, runner: Runner = run) -> int:
             print(r.line())
         for o in outcomes:
             print(o)
-    failed = any(r.state == "UNKNOWN" for r in readings) or any("FAILED" in o for o in outcomes)
+    # A structured flag, never a substring scan: an outcome line echoes the
+    # task title, and a title containing "FAILED" must not fail a clean reopen.
+    failed = reopen_failed or any(r.state == "UNKNOWN" for r in readings)
     return 1 if failed else 0
 
 
