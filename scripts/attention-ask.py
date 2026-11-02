@@ -121,6 +121,23 @@ attribution = _load("answered_attribution", "answered-attribution.py")
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
 
+# Bearer token for a store that requires authentication.
+#
+# Empty by default, so a local unauthenticated store behaves exactly as before.
+# An in-cluster store answers 401 without it — and 401 reads to this script as
+# "nothing was posted", which is the confusing failure this exists to remove.
+# The token belongs to whoever runs the command: it is read from the
+# environment and never written, logged or echoed.
+TOKEN = os.environ.get("ATTENTION_STORE_TOKEN", "").strip()
+
+
+def _headers(extra=None):
+    """Request headers, carrying the bearer token when one is configured."""
+    headers = dict(extra or {})
+    if TOKEN:
+        headers["Authorization"] = "Bearer " + TOKEN
+    return headers
+
 
 # The largest TTL this script will accept.
 #
@@ -581,7 +598,7 @@ def post_question(
     req = urllib.request.Request(
         f"{STORE}/api/1.0/attention",
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=_headers({"Content-Type": "application/json"}),
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=STORE_TIMEOUT) as resp:
@@ -589,7 +606,10 @@ def post_question(
 
 
 def fetch_item(item_id):
-    with urllib.request.urlopen(f"{STORE}/api/1.0/attention/{item_id}", timeout=STORE_TIMEOUT) as resp:
+    req = urllib.request.Request(
+        f"{STORE}/api/1.0/attention/{item_id}", headers=_headers()
+    )
+    with urllib.request.urlopen(req, timeout=STORE_TIMEOUT) as resp:
         return json.load(resp)
 
 
