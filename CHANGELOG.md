@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- test: pin the below-box action-line order against the drawn (tree) rows
+
 ## v0.233.1
 
 - test: pin the exit-record coverage check at the board boundary, strip control characters from its stderr lines, and stop re-reading the pane map and the whole store per render
