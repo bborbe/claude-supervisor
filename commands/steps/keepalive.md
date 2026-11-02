@@ -72,6 +72,56 @@ turn a refused arm into a restart loop that still runs a round every tick.
 found and did not act on — the `# Regression metric` on the task that installed this leg reads
 it, and a round that prints the number without moving it is the defect it exists to remove.
 
+## Step 5b, first half — resume the park watches whose re-check has passed
+
+A parked worker is not a dead one: it exited on purpose, on a clock. Its re-check
+instant lives in `defer_date`, written by `park-event.py register` at park time and
+honoured by the readers, so the task resurfaces on its own even if this step never
+runs. What the store adds is the **event key**: which waits are the same wait, and
+which sessions are already parked on one.
+
+```bash
+P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
+python3 "$P/park-event.py" due
+```
+
+One line per watch whose time has passed, naming **the task** for every session
+parked on it — `register --task` recorded the name for exactly this read, since
+`/supervisor:open` opens a task and a bare session id leaves the round nothing to
+open. A watch with several sessions is still **one line, one watch**: that is the
+dedup `register` created, and resuming it is one act per named task, not one per
+watch.
+
+Resume each named task through `/supervisor:open --task "<name>"`, then drop the
+member with `park-event.py release --event "<key>" --session "<id>"` — the `<id>` in
+brackets is the **full** session id, which `release` compares verbatim; `register`
+and `list` print only the first eight characters, so take it from the `due` line or
+from `due --json`. The file is removed when the last member leaves. A line reading
+`CORRUPT <file>` is a watch holding memberships that cannot be read — report it,
+never treat it as empty.
+
+**A watch that comes due and cannot be resumed is re-parked, not left due.** The
+event has not fired, so bump the instant — and ⚠️ **always pass `--session <parked-id>`
+and `--repark`**, never a bare re-register:
+
+```bash
+python3 "$P/park-event.py" register --task "<name>" --event "<key>" \
+  --recheck "<new ISO-8601>" --session "<parked-id>" --repark
+```
+
+`register` adds whatever `--session` resolves to as a member, so a bare call from the
+round would park the **round** on the watch and the next `due` would name it as a
+session to resume. `--repark` does two things: it **moves `recheck_at` forward** to
+the instant given (the earliest-wake rule that governs a plain join does not apply —
+otherwise the watch stays due and re-fires every round), and it increments the
+counter `due` prints. At **three** re-parks it stops and routes the wait to the
+manager as a criterion challenge; the count is persisted on the record because the
+parked session has exited and nothing else survives to remember it.
+
+⚠️ **This half is the fast path, never the only path.** The task's own `defer_date`
+surfaces the row in every manager's open queue, so a missed round delays a resume and
+never strands it. Never let this step become the sole record that a task is parked.
+
 ## Step 5b, second half — resume a worker whose session died
 
 ⚠️ **This reverses `agents/fleet-drive.md`'s *"orphan → escalate, never nudge"*.** That note
