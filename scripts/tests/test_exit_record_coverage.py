@@ -93,6 +93,49 @@ class TestUnknown(unittest.TestCase):
         self.assertIsNone(erc.unknown_line(out))
 
 
+class TestReadRecords(unittest.TestCase):
+    def test_undecodable_record_does_not_blind_the_rest(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "pane-1.log"), "wb") as h:
+                h.write(b"\xff\xfe torn\n")
+            with open(os.path.join(d, "pane-2.log"), "w", encoding="utf-8") as h:
+                h.write(spawn(LIVE) + "\n")
+            with open(os.path.join(d, "other.txt"), "w") as h:
+                h.write("ignored\n")
+            out = erc.read_records(d)
+        self.assertEqual(sorted(out), ["1", "2"])
+        self.assertEqual(out["2"], [spawn(LIVE)])
+
+    def test_absent_store_is_empty(self):
+        self.assertEqual(erc.read_records("/nonexistent/session-exit-dir"), {})
+
+
+class TestEdgeNames(unittest.TestCase):
+    def test_empty_name_is_unknown(self):
+        out = erc.coverage({"bbbbbbbb-0000": ""}, PANES, {}, alive)
+        self.assertEqual((len(out["unknown"]), out["unrecorded"]), (1, []))
+
+    def test_two_exact_titles_are_unknown(self):
+        out = erc.coverage(MGR, {"1": "✳ Fleet Manager", "2": "⠿ Fleet Manager"}, {}, alive)
+        self.assertEqual((len(out["unknown"]), out["unrecorded"]), (1, []))
+
+    def test_all_unknown_shape(self):
+        out = erc.all_unknown(MGR)
+        self.assertEqual(out["unrecorded"], [])
+        self.assertEqual(out["unknown"][0]["session_id"], "aaaaaaaa-0000")
+
+
+class TestManagersOf(unittest.TestCase):
+    def test_only_manager_role(self):
+        spec = importlib.util.spec_from_file_location("fleet_board", os.path.join(_HERE, "..", "fleet-board.py"))
+        fb = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fb)
+        registry = {"m": {"name": "X Manager"}, "w": {"name": "a worker"}}
+        grouping = fb.Grouping(roles={"m": fb.ROLE_MANAGER})
+        self.assertEqual(fb.managers_of(registry, grouping), {"m": "X Manager"})
+
+
 class TestResolvePane(unittest.TestCase):
     def test_gear_and_glyph_stripped(self):
         self.assertEqual(erc.resolve_pane("⚙ Add a Thing Manager", {"5": "✳ ⚙ Add a Thing Manager"}), "5")

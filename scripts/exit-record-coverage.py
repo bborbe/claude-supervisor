@@ -128,18 +128,27 @@ def unknown_line(result):
     return f"⚠️ UNRECORDED unknown: {n} manager pane(s) unresolvable from `wezterm cli list` — {names}"
 
 
+_RECORD = None
+
+
 def _record_module():
-    spec = importlib.util.spec_from_file_location(
-        "session_exit_record", os.path.join(_HERE, "session-exit-record.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    """`session-exit-record.py`, imported once — its `state_dir()` and `alive()` are the store's own."""
+    global _RECORD
+    if _RECORD is None:
+        spec = importlib.util.spec_from_file_location(
+            "session_exit_record", os.path.join(_HERE, "session-exit-record.py"))
+        _RECORD = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_RECORD)
+    return _RECORD
 
 
-def read_records():
-    """`{pane_id: [lines]}` from the store, through `session-exit-record.py`'s own reader."""
-    mod = _record_module()
-    directory = mod.state_dir()
+def read_records(directory=None):
+    """`{pane_id: [lines]}` from the store. Absent store reads as `{}`.
+
+    A torn write by the trap can leave invalid UTF-8, so bytes are replaced rather than
+    raised on — one damaged record must not blind the check to every other pane.
+    """
+    directory = directory or _record_module().state_dir()
     out = {}
     try:
         names = os.listdir(directory)
@@ -149,11 +158,16 @@ def read_records():
         if not (name.startswith("pane-") and name.endswith(".log")):
             continue
         try:
-            with open(os.path.join(directory, name), encoding="utf-8") as handle:
+            with open(os.path.join(directory, name), encoding="utf-8", errors="replace") as handle:
                 out[name[len("pane-"):-len(".log")]] = [ln.rstrip("\n") for ln in handle if ln.strip()]
         except OSError:
             continue
     return out
+
+
+def all_unknown(managers):
+    """Every manager as `unknown` — the answer when the check itself cannot run."""
+    return {"unrecorded": [], "unknown": [{"session_id": s, "name": n} for s, n in sorted(managers.items())]}
 
 
 def live_coverage(managers, pane_map):
@@ -161,10 +175,15 @@ def live_coverage(managers, pane_map):
 
     `None` (an unreadable `wezterm cli list`) makes every manager `unknown` — it cannot
     prove a pane either way.
+
+    ⚠️ Known limit: `alive()` is `kill(pid, 0)`, so a dead spawn's pid recycled by an
+    unrelated process reads as live and the pane as recorded — a false clean. It needs a
+    pane id AND a pid reused together, which is rare; closing it would mean comparing the
+    process start time with the spawn line's timestamp.
     """
     if pane_map is None:
-        return {"unrecorded": [], "unknown": [{"session_id": s, "name": n} for s, n in sorted(managers.items())]}
-    panes = {pid: rec.get("title", "") for pid, rec in pane_map.items()}
+        return all_unknown(managers)
+    panes = {pid: (rec.get("title", "") if isinstance(rec, dict) else "") for pid, rec in pane_map.items()}
     return coverage(managers, panes, read_records(), _record_module().alive)
 
 

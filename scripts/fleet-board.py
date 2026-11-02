@@ -1378,7 +1378,14 @@ def main():
     # 119-character budget — so it rides the doc and the below-box action lines (stderr,
     # beside the coverage and pane-read warnings). The line text is the coverage script's
     # own; this board only relays it, so it cannot special-case one pane.
-    exit_record = erc.live_coverage(managers_of(registry, grouping), wnm.wezterm_panes())
+    # A side check must never take the board down with it: on any failure every manager
+    # reads `unknown`, which is honest, rather than the table not rendering at all.
+    managers = managers_of(registry, grouping)
+    try:
+        exit_record = erc.live_coverage(managers, wnm.wezterm_panes())
+    except Exception as exc:  # noqa: BLE001 — degrade to unknown, never crash the board
+        print(f"fleet-board: exit-record check failed: {exc}", file=sys.stderr)
+        exit_record = erc.all_unknown(managers)
     counts = {b: sum(1 for r in rows if r["bucket"] == b) for b in BUCKET_ORDER}
     # Every value in the fixed set, always present — a class with no rows reads
     # `0`, never an absent key, so a consumer cannot mistake "none this round"
