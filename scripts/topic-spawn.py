@@ -53,6 +53,7 @@ not recognise and never refuses the empty one.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -332,36 +333,33 @@ def ready_work(vault: str, goal: str) -> int:
     return count
 
 
+_GOALS_DECLARATION = None
+
+
+def _goals_declaration():
+    """Import goals-declaration.py — the shared `goals:` reader.
+
+    ⚠️ **Shared, and it was not before.** This module carried the third private copy of
+    the same extractor (`manager-predispatch.py` and `reset.py` held the other two), and
+    the three disagreed on which shapes they read. One implementation is what stops the
+    drift recurring; `test_topic_spawn.py`'s shape assertions are unchanged by the
+    move and now pin the shared reader too.
+    """
+    global _GOALS_DECLARATION
+    if _GOALS_DECLARATION is None:
+        here = os.path.dirname(os.path.abspath(__file__))
+        spec = importlib.util.spec_from_file_location(
+            "goals_declaration", os.path.join(here, "goals-declaration.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _GOALS_DECLARATION = mod
+    return _GOALS_DECLARATION
+
+
 def goals_of(fm: str) -> list[str]:
-    """The goal names a task's `goals:` frontmatter names, across all three shapes."""
-    m = re.search(r"^goals:(.*)$", fm, re.MULTILINE)
-    if not m:
-        return []
-    inline = m.group(1).strip()
-    if inline and inline not in ("[]", "null", "~"):
-        names = re.findall(r"\[\[([^\]|#]+)", inline)
-        return names or [inline.strip("\"' ")] if inline.strip("\"' ") else []
-    # Block form: every following indented `- …` entry, with any `- - ` nesting.
-    # ⚠️ Blank lines are SKIPPED, not treated as the end of the block: `m.end()` lands
-    # before the newline that follows the `goals:` key, so the first item of
-    # `splitlines()` is always empty and a `break` there returns `[]` for every block-form
-    # task — the shape most of the vault uses.
-    names = []
-    for line in fm[m.end():].splitlines():
-        if not line.strip():
-            continue
-        if not line.startswith((" ", "\t")):
-            break
-        s = line.strip()
-        if not s.startswith("-"):
-            continue
-        s = re.sub(r"^-\s*", "", s)
-        s = re.sub(r"^-\s*", "", s)
-        w = re.search(r"\[\[([^\]|#]+)", s)
-        name = (w.group(1) if w else s).strip().strip("\"' ")
-        if name:
-            names.append(name)
-    return names
+    """The goal names a task's `goals:` frontmatter names, across every shape."""
+    return _goals_declaration().goal_names(fm)
 
 
 def operator_pin(topic_text: str, goal_fm: str, goal: str) -> bool:

@@ -216,9 +216,14 @@ class CoverageGateTest(unittest.TestCase):
             handle.write(SUBJECT + "\n")
         rc, rows, _ = run("--tracked", tracked, "--delta", "change", "--changed", name)
         self.assertEqual(rows, [owner])
-        self.assertNotIn("Digest Watcher Judges File Arrival", rows)
+        # ⚠️ Assert on the JOINED stdout, not on list membership: `rows` holds whole
+        # owner paths, so `assertNotIn("<fragment>", rows)` is element equality and
+        # cannot fail even when a fragment is emitted.
+        stdout = "\n".join(rows)
+        self.assertNotIn("Digest Watcher Judges File Arrival\n", stdout + "\n")
         self.assertNotIn(
-            "So a Late-Landing Digest Trips a False Report on a Timely Round", rows
+            "\nSo a Late-Landing Digest Trips a False Report on a Timely Round",
+            "\n" + stdout,
         )
 
     def test_changed_names_match_a_full_path_too(self):

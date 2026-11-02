@@ -3027,9 +3027,31 @@ class GoalsDeclarationShapes(Base):
                     "%s disagrees between read_task and reset.goals_of" % label,
                 )
 
+    def test_a_comma_inside_a_quoted_flow_item_is_not_a_separator(self):
+        """The mirror of the coverage gate's comma fix, in the declaration read.
+
+        A quoted flow-list item may carry a comma of its own. Splitting the list before
+        locating its item boundaries shatters the name into fragments that match no
+        member — the same silent drop the bare-list fix removed, one shape over.
+        """
+        name = "Digest Watcher Judges File Arrival, So a Late-Landing Digest Trips a False Report on a Timely Round"
+        goals_fm = "goals: ['[[%s]]']\n" % name
+        self.assertEqual(self.page("Comma Goal", goals_fm)["goals"], [name])
+
+    def test_a_flow_list_still_splits_on_the_commas_between_its_items(self):
+        """The positive control: quote-awareness must not stop a real two-item list."""
+        self.assertEqual(
+            self.page("Two Goals", "goals: ['[[AGoal]]', '[[BGoal]]']\n")["goals"],
+            ["AGoal", "BGoal"],
+        )
+
     def test_an_empty_declaration_is_still_empty(self):
-        """The control: every empty spelling names no goal, so the fix cannot over-read."""
-        for goals_fm in ("goals: []\n", "goals:\n", "goals: null\n"):
+        """The control: every empty spelling names no goal, so the fix cannot over-read.
+
+        `goals: ~` is included because YAML's null is case-insensitive — a reader that
+        matches `null` only in lower case would read `goals: NULL` as a goal named `NULL`.
+        """
+        for goals_fm in ("goals: []\n", "goals:\n", "goals: null\n", "goals: ~\n", "goals: NULL\n"):
             with self.subTest(declaration=goals_fm.strip()):
                 self.assertEqual(self.page("Empty Task", goals_fm)["goals"], [])
 
