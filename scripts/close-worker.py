@@ -21,8 +21,15 @@ Eight refusals, each exit 1 with a stable reason token as the first line of outp
                       carries no integer pid. Closing one is a coin flip.
   held-session        the operator holds this session (`/supervisor:hold`). Only they
                       release it; closing is exactly the act the hold prevents.
-  busy-target         the target is mid-turn (`status` is not `idle`). A close loses the
-                      in-flight work outright — there is no resume to fall back on.
+  busy-target         the target is mid-turn. For a tab session that means `status` is not
+                      `idle`. For a pane-less one (`sdk-cli`) it also covers an open tool
+                      marker in `~/.claude/state/attention/<sid>.tool.json` younger than 20
+                      minutes: such a session parked on the permission channel keeps
+                      `status: idle` and writes no transcript closer, so the marker is the
+                      only record left. A close loses the in-flight work outright — there is
+                      no resume to fall back on. ⚠️ The marker is not reliably cleared at tool
+                      end, so read it as "used a tool recently": it delays a pane-less close
+                      by up to 20 minutes rather than blocking it.
   dirty-worktree      the target is the only live session in its worktree and that
                       worktree carries tracked changes. A close strands them: unlike a
                       restart, nothing comes back to finish the work.
@@ -56,6 +63,7 @@ finished. A session that still has something to say is refused by `task-not-term
 import argparse
 import glob
 import importlib.util
+import json
 import os
 import re
 import signal
@@ -90,6 +98,48 @@ TERMINAL = {"completed", "aborted", "hold"}
 # stale), so this is normally a fraction of a second; the bound exists so a hung exit is
 # reported rather than waited on forever.
 EXIT_DEADLINE = 8.0
+
+#: The attention store's in-flight tool markers, `<session-id>.tool.json`. Same override the
+#: other readers honour, so a drill or a test can point at a tree it controls.
+ATTENTION_DIR = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser(
+    "~/.claude/state/attention"
+)
+
+#: How recent an open tool marker must be to mean "mid-call right now". The same window
+#: `round-readings.py` applies: past it, an open marker is the stuck path's shape — a session
+#: that is not working — and treating it as in-flight would refuse every close forever.
+TOOL_MARKER_WINDOW = 20 * 60
+
+
+def in_flight_tool(session_id):
+    """`(label, age_seconds)` when an open tool marker says the session is mid-call, else None.
+
+    This is the guard a transcript cannot give. A worker parked on the supervisor's permission
+    channel writes no `👤 You:` line, so `gate-held` — which reads the transcript tail — sees
+    nothing and reports `mid-work`, and the registry `status` does not move either.
+
+    ⚠️ **The marker is written at tool start and is NOT reliably cleared at tool end** —
+    measured 2026-11-02: the store held markers open for 10, 43 and 1,033 days. So an open
+    marker is read as *"used a tool within the window"*, not as *"inside a call right now"*.
+    The effect is a bounded delay, never a permanent block: a close attempted inside the
+    window refuses as `busy-target` and succeeds on a later sweep. That is the safe
+    direction, and it is the same reading `round-readings.py` applies — past the window an
+    open marker is the *stuck* path's shape, and refusing on it forever would refuse every
+    close.
+    """
+    path = os.path.join(ATTENTION_DIR, f"{session_id}.tool.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            rec = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if rec.get("state") != "open":
+        return None
+    ts = rec.get("ts")
+    age = (time.time() - float(ts)) if isinstance(ts, (int, float)) else TOOL_MARKER_WINDOW
+    if age >= TOOL_MARKER_WINDOW:
+        return None
+    return (rec.get("tool") or rec.get("detail") or "tool"), age
 
 
 def load_sibling(filename):
@@ -375,6 +425,21 @@ def main():
     entrypoint = (rec.get("entrypoint") or "").strip().lower()
     headless = entrypoint == "sdk-cli"
 
+    # `busy-target` again, from the other source, and **only for the pane-less population**.
+    # A tab session's registry `status` moves while it works, so `busy-target` above already
+    # covers it and a second check would only add delay. A pane-less one parked on the
+    # supervisor's permission channel does not move its `status` and writes no `👤 You:` line,
+    # so neither guard above sees it — the tool marker is the only record left.
+    if headless:
+        in_flight = in_flight_tool(sid)
+        if in_flight is not None:
+            label, age = in_flight
+            return refuse(
+                "busy-target",
+                f"session {sid} used a tool {int(age // 60)} min ago ({label}); a close loses "
+                "in-flight work with no resume to fall back on",
+            )
+
     cwd = (rec.get("cwd") or "").strip()
     verdict, tracked, _untracked = precheck.worktree_probe(cwd)
     others = precheck.other_occupants(entries, cwd, sid)
@@ -417,6 +482,8 @@ def main():
             return 1
 
     where = f"pane {pane}" if pane is not None else f"pid {pid} (entrypoint {entrypoint}, no pane)"
+    # The success line names the pid separately, so its target must not repeat it.
+    closed_target = f"pane {pane}" if pane is not None else f"headless session ({entrypoint})"
     task_path, fm, _handed_off = task
     print(f"🧹 close-worker · session {sid[:8]} · pid {pid} · {rec.get('name')!r}")
     print(f"   task: {os.path.basename(task_path)} (status {fm.get('status')})")
@@ -428,16 +495,36 @@ def main():
         return 0
 
     if headless:
+        # ⚠️ **Re-read the entry immediately before the signal.** `pid` was resolved before
+        # the guards, which take tens of seconds — a `git status`, a transcript read and a
+        # `grep` over every vault's task dirs. A session that exits in that window can have
+        # its pid recycled onto an unrelated process, and SIGTERM would land there. One file
+        # read narrows the window to the signal itself. The tab path needs no equivalent:
+        # `wezterm kill-pane` is id-based and refuses a dead pane.
         try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            # It exited between the liveness read and the signal. The wait below still proves
-            # it gone and the stale-entry cleanup still applies — the same outcome a delivered
-            # SIGTERM produces, so this is not an error.
-            pass
-        except PermissionError as error:
-            print(f"❌ error: cannot signal pid {pid}: {error}")
+            with open(path, encoding="utf-8") as handle:
+                fresh = json.load(handle)
+        except (OSError, ValueError):
+            fresh = {}
+        if fresh.get("pid") != pid or fresh.get("sessionId") != sid:
+            print(
+                f"❌ error: the registry entry for {sid} changed during the guards "
+                f"(pid {pid} → {fresh.get('pid')}); nothing was signalled"
+            )
             return 1
+        if precheck.pid_is_alive(pid):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                # It exited between the check above and the signal. The wait below still
+                # proves it gone and the stale-entry cleanup still applies — the same outcome
+                # a delivered SIGTERM produces, so this is not an error.
+                pass
+            except PermissionError as error:
+                print(f"❌ error: cannot signal pid {pid}: {error}")
+                return 1
+        # else: it exited during the guards. Fall through — the wait proves it gone and the
+        # stale-entry cleanup applies, which is the same outcome a delivered signal produces.
     else:
         killed = subprocess.run(
             ["wezterm", "cli", "kill-pane", "--pane-id", str(pane)],
@@ -470,7 +557,7 @@ def main():
             print(f"   ⚠️ registry entry {path} survived pid {pid} and could not be removed: {error}")
 
     print(
-        f"   {'✅' if not alive and not entry_present else '⚠️'} closed {where} · "
+        f"   {'✅' if not alive and not entry_present else '⚠️'} closed {closed_target} · "
         f"pid {pid} {'dead' if not alive else 'STILL ALIVE'} · registry entry "
         f"{'removed' if not entry_present else 'STILL PRESENT'}"
     )

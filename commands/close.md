@@ -77,7 +77,7 @@ below it. Eight tokens, each terminal for this run:
 | `unknown-session-id` | **Stop.** No entry carries it, or the registry could not be read. |
 | `ambiguous-pid` | **Stop.** More than one pid claims that id; closing one is a coin flip. |
 | `held-session` | **Stop.** The operator holds it. Only they release it (`/supervisor:hold`). |
-| `busy-target` | **Stop.** The session is mid-turn. A close loses the work with no resume behind it. |
+| `busy-target` | **Stop.** The session is mid-turn. For a tab session that is `status` not `idle`. For a pane-less one (`sdk-cli`) it also covers an open tool marker in `~/.claude/state/attention/<sid>.tool.json` younger than 20 minutes — such a session parked on the permission channel keeps `status: idle` and writes no transcript closer. A close loses the work with no resume behind it. ⚠️ The marker is not reliably cleared at tool end, so it reads as "used a tool recently": it delays a pane-less close by up to 20 minutes, it does not block one. Retry on a later sweep. |
 | `dirty-worktree` | **Stop.** The target is the only live session in that worktree and it carries tracked changes. Hand the operator the choice: commit, stash, or another target. |
 | `gate-held` | **Stop.** Its transcript tail carries an unanswered `👤 You:` gate. Closing discards a question the operator never answered — hand them the jump link instead. |
 | `task-unresolved` | **Stop.** No task file carries this session id as `claude_session_id`. Fail closed: absent evidence is not evidence of a finished task. |
@@ -95,12 +95,13 @@ neither is the other's remedy.
 
 The script prints its own report on success: the session, its pid, the task it closed
 against, the worktree verdict, the classification and the target — `pane <N>` for a tab
-session, `pid <pid> (entrypoint sdk-cli, no pane)` for a headless one. Repeat it — do not
+session, `pid <pid> (entrypoint sdk-cli, no pane)` for a headless one. The success line names
+the target separately, so a headless close reads `closed headless session (sdk-cli)`. Repeat it — do not
 paraphrase the task status, which is the evidence the close was permitted.
 
 `✅ closed pane <N> · pid <pid> dead · registry entry removed` is the success line; for a
-headless target it reads `✅ closed pid <pid> (entrypoint sdk-cli, no pane) · pid <pid> dead
-· registry entry removed`. A `⚠️` line means the surface went but the pid or its registry
+headless target it reads `✅ closed headless session (sdk-cli) · pid <pid> dead · registry
+entry removed`. A `⚠️` line means the surface went but the pid or its registry
 entry survived; report it as written and do not retry.
 
 **No jump link on success** — the pane is gone, and a link to a closed pane is a dead

@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -226,8 +227,10 @@ class TestCliRefusals(unittest.TestCase):
         self.repo = os.path.join(self.tmp, "repo")
         self.vaults = os.path.join(self.tmp, "vaults")
         self.tasks = os.path.join(self.vaults, "somevault", "25 Tasks")
+        self.attention = os.path.join(self.tmp, "attention")
         os.makedirs(self.sessions)
         os.makedirs(self.tasks)
+        os.makedirs(self.attention)
         os.makedirs(self.repo)
         subprocess.run(["git", "init", "-q", self.repo], check=True)
         with open(os.path.join(self.repo, "a.txt"), "w", encoding="utf-8") as handle:
@@ -255,6 +258,7 @@ class TestCliRefusals(unittest.TestCase):
         env["SUPERVISOR_SESSIONS_DIR"] = self.sessions
         env["SUPERVISOR_VAULTS_ROOT"] = self.vaults
         env["SUPERVISOR_SESSION_HOLDS"] = holds or os.path.join(self.tmp, "no-holds.json")
+        env["ATTENTION_STATE_DIR"] = self.attention
         return subprocess.run(
             [sys.executable, SCRIPT, SID, *extra],
             capture_output=True, text=True, env=env, timeout=60,
@@ -352,6 +356,43 @@ class TestCliRefusals(unittest.TestCase):
         self.assertEqual(child.wait(timeout=10), -signal.SIGTERM)
         self.assertFalse(os.path.exists(os.path.join(self.sessions, f"{child.pid}.json")))
 
+    def _marker(self, state="open", age=0.0, sid=SID):
+        with open(os.path.join(self.attention, f"{sid}.tool.json"), "w", encoding="utf-8") as handle:
+            json.dump({"session_id": sid, "state": state, "ts": time.time() - age,
+                       "detail": "Bash"}, handle)
+
+    def test_open_tool_marker_refuses_as_busy(self):
+        """A session parked inside a call reads `idle` and writes no closer — the marker is it.
+
+        Without this guard a headless worker parked on the supervisor's permission channel
+        looks idle, looks ungated, and is SIGTERMed with its question discarded.
+        """
+        child = self._spawn_child()
+        self._registry(entrypoint="sdk-cli", pid=child.pid)
+        self._task(**{"claude_session_id": SID, "status": "completed"})
+        self._marker(age=60)
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "busy-target")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_tab_session_ignores_the_tool_marker(self):
+        """`status` already moves for a tab session; the marker must not add a 20-min delay."""
+        self._registry(entrypoint="cli")
+        self._task(**{"claude_session_id": SID, "status": "completed"})
+        self._marker(age=60)
+        done = self._run("--dry-run")
+        self.assertNotEqual(done.stdout.splitlines()[0], "busy-target")
+
+    def test_stale_tool_marker_does_not_refuse(self):
+        """Past the window an open marker is the stuck path's shape, not a live call."""
+        child = self._spawn_child()
+        self._registry(entrypoint="sdk-cli", pid=child.pid)
+        self._task(**{"claude_session_id": SID, "status": "completed"})
+        self._marker(age=cw.TOOL_MARKER_WINDOW + 60)
+        done = self._run()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("closed", done.stdout)
+
     def test_unmeasured_entrypoint_is_never_signalled(self):
         """Only `sdk-cli` is measured pane-less; an unknown value must not aim a SIGTERM.
 
@@ -402,7 +443,7 @@ class TestCliRefusals(unittest.TestCase):
         self.assertEqual(done.stdout.splitlines()[0], "task-not-terminal")
 
     def test_dry_run_passes_every_guard_and_closes_nothing(self):
-        """A terminal task passes all seven guards; `--dry-run` must stop before the pane."""
+        """A terminal task passes every guard; `--dry-run` must stop before the close."""
         self._registry()
         self._task(**{"claude_session_id": SID, "status": "completed"})
         done = self._run("--dry-run")
