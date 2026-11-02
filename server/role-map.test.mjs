@@ -153,6 +153,14 @@ test('an unlisted family keeps the fallback rather than picking a colour', () =>
   assert.equal(familyChip({}), null)
 })
 
+test('a family named after an Object.prototype member still falls back', () => {
+  // A bare `FAMILY_CHIPS[family]` lookup walks the prototype chain, so `constructor` would
+  // return a function — which then reaches the pane as a `/color …` argument.
+  for (const inherited of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__']) {
+    assert.equal(familyChip({ vault: `${inherited}-brogrammers`, fallback: 'cyan' }), 'cyan', inherited)
+  }
+})
+
 test('all six role × family combinations resolve as specified', () => {
   // `chipForRole` is the function the spawn path calls, so this asserts the same composition a
   // real spawn runs rather than a re-derivation that could drift from it.

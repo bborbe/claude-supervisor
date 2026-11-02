@@ -39,10 +39,14 @@ export const ROLE_PURPOSES = { manager: 'Managers', agent: 'Agents', human: 'Dir
 // convention is green = Seibert, cyan = private, and colour is the only at-a-glance cue for
 // which employer a tab belongs to — so a Seibert tab that comes up cyan reads as a private one.
 //
-// This is the one place that rule lives. It cannot live in the WezTerm config: `window_specs`
+// This is where the SERVER path derives it. It cannot live in the WezTerm config: `window_specs`
 // publishes `purpose -> {chip, window_id}`, a purpose is 1:1 with a window, and WezTerm knows
 // windows rather than vaults — the vault is known only at spawn time. So the map stays the
 // source for `window_id` and for the fallback chip, and this module owns the family split.
+//
+// ⚠️ `commands/open.md` § 3.0 carries the same table for the shell path — the resume branch and
+// the no-supervisor-MCP fallback — because a bash caller cannot import this module. Those two
+// are a hand-kept pair, not one source: change one, change the other.
 export const FAMILY_CHIPS = { seibert: 'green', private: 'cyan' }
 
 // The family is the prefix before the first hyphen: `seibert-brogrammers` -> `seibert`.
@@ -60,8 +64,11 @@ export function vaultFamily(vault) {
 // convention covers only seibert and private, and an unlisted family must keep the colour the
 // map already gives it rather than silently picking one of the two.
 export function familyChip({ vault, fallback = null } = {}) {
-  const chip = FAMILY_CHIPS[vaultFamily(vault)]
-  return chip === undefined ? fallback : chip
+  // `Object.hasOwn`, not a bare lookup: a family named `constructor` or `toString` would
+  // otherwise return an inherited member instead of the documented fallback, and that value
+  // reaches the pane as a `/color …` argument.
+  const family = vaultFamily(vault)
+  return Object.hasOwn(FAMILY_CHIPS, family) ? FAMILY_CHIPS[family] : fallback
 }
 
 // The chip a spawn actually applies: the role's own chip, refined by the vault family for a
