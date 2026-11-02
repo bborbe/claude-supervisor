@@ -198,11 +198,45 @@ rejected:
     would then read its own workers as `peer-manager`. Inert in its target
     window.
 
+## ROLE — the operator's own workspace, and why it is excluded rather than dropped
+
+`verdict()` had no notion of the spawn's declared `role`, so a `role: human` row — the
+operator's own session, opened into the Direct window by `/supervisor:open --flagged`
+(`commands/open.md` § Step 0.6: *"A `role: human` row is never opened as a WORKER — it is
+opened into the Direct window instead"*) — was judged by the spawn edge alone. When the
+manager was its spawner that read `own-worker`, the branch that exists for the panes a
+manager EXISTS to see. Measured 2026-10-27 on Fleet Manager `ac24db61`: pane 2165
+(`Check Prometheus Alerts - 2026-10-27`, `role: human`) fired the feed **three times**
+across three consecutive 30-minute windows, each firing a full manager turn spent
+re-establishing that the gate was the operator's own and relaying nothing.
+
+A human row is answered in its own tab, so no manager ever acts on it, and the exclusion is
+a third EXCLUDE reason beside the two the vault supplies. EXCLUDE and not DROP, for the
+reason § GOAL SCOPE gives: the row must stay visible in `--explain` / `--json` naming what
+it is, and only the bare feed omits it. `counts_line()` therefore reports it in its own
+`excluded(role-human)` bucket — folded into `dropped(...)` it would read as a spawn-edge
+drop, and printed nowhere at all it would be the silence `--explain` exists to prevent.
+
+⚠️ **THE PREDICATE FAILS CLOSED, IN THE OPPOSITE DIRECTION FROM `is_manager`'s.** `is_human`
+matches ONLY an explicit `role: "human"`; a record with no `role`, `role: null`, or no
+record at all is NOT human. The two defaults point opposite ways because the failure
+directions do: `is_manager` defaults to worker so a pre-field record cannot drop the whole
+fleet's gates, and this defaults to not-human so an unrecorded session cannot be silently
+excluded — which is that same fleet-wide silence reached from the other side.
+
+⚠️ **It sits ABOVE the `own-worker` branch and above the scope block.** Above `own-worker`
+because that branch returns EMIT for every pane this watcher spawned, which is exactly the
+reported case; above the scope block so the reason always names the durable fact rather
+than whichever goal page happens to claim the row. The match is deliberately NOT scoped to
+this watcher's own spawns: `role` is a global ledger fact, so a human row spawned by another
+manager is excluded too — a human row is never a manager's to route, whoever spawned it.
+
 ⚠️ A filter that silently matches nothing is indistinguishable from a quiet
 fleet (a broken watcher is indistinguishable from a quiet one). So `--explain`
 prints the reason for every verdict, and every run prints a
 `gates: N  emit: N  dropped(peer-manager): N  dropped(peer-manager-own): N
-dropped(claimed): N  excluded(foreign-goal): N  excluded(owner-unknown): N` line on
+dropped(claimed): N  excluded(foreign-goal): N  excluded(owner-unknown): N
+excluded(role-human): N` line on
 stderr — which is what makes an empty result legible as "nothing to filter" rather
 than "the filter is broken". `excluded` is a separate family from `dropped` on
 purpose: see § GOAL SCOPE.
@@ -233,11 +267,12 @@ EMIT = "emit"
 DROP = "drop"
 #: A THIRD outcome, and it exists so an exclusion can never be read as a drop. A row is
 #: EXCLUDE when the gated session's own page belongs to another goal (`foreign-goal:<goal>`)
-#: or to no goal at all (`owner-unknown`). The row stays in `--explain` / `--json` with that
-#: owner named; only the bare feed omits it. Measured 2026-10-29: a manager was handed five
-#: gates from five other goals in one afternoon, and the filter had no vocabulary to say
-#: whose they were — `verdict()` has no notion of goals or tasks, so its only answers were a
-#: liveness-derived drop or an emit.
+#: or to no goal at all (`owner-unknown`), or — since 2026-11-02 — when its own ledger
+#: `role` is `human` (`role-human`), the operator's workspace: see § ROLE. The row stays in
+#: `--explain` / `--json` with that owner named; only the bare feed omits it. Measured
+#: 2026-10-29: a manager was handed five gates from five other goals in one afternoon, and
+#: the filter had no vocabulary to say whose they were — `verdict()` has no notion of goals
+#: or tasks, so its only answers were a liveness-derived drop or an emit.
 EXCLUDE = "exclude"
 
 # The token `who-needs-me.py` writes to its STDOUT when it refuses a read, so the
@@ -445,6 +480,28 @@ def is_manager(session_id, ledger):
     if record is None:
         return True
     return record.get("role") == "manager"
+
+
+def is_human(session_id, ledger):
+    """The gated session is the OPERATOR'S own workspace, not a delegate.
+
+    `role: human` is what `spawn_agent` writes for a row opened into the Direct window
+    (`commands/open.md` § Step 0.6), so its gate is answered in that tab and no manager ever
+    acts on it. Measured 2026-10-27 on Fleet Manager `ac24db61`: pane 2165
+    (`Check Prometheus Alerts - 2026-10-27`, `role: human`) fired the feed three times across
+    three consecutive 30-minute windows — see the module header § ROLE.
+
+    ⚠️ **ONLY an explicit `human` counts, and the default is the OPPOSITE of `is_manager`'s.**
+    A record with no `role`, `role: null`, or no record at all is NOT human. The two defaults
+    point opposite ways because the failure directions do: `is_manager` defaults to worker so
+    a pre-field record cannot drop the whole fleet's gates, and this defaults to not-human so
+    an unrecorded session cannot be silently excluded — that same fleet-wide silence, reached
+    from the other side. `role` is a positive assertion here, never an absence.
+    """
+    if not session_id:
+        return False
+    record = ledger.get(session_id) or {}
+    return record.get("role") == "human"
 
 
 def live_ids(registry_dir=REGISTRY):
@@ -691,9 +748,10 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None, scope=None)
 
     The keep-set is wide on purpose: drop ONLY on a live peer manager -- reached
     by the spawn edge (its spawner), by the gated session being one itself, or by
-    a claim a live peer manager holds. EXCLUDE is the third answer and it comes
-    from the vault, not from any live store: the gated session's own page belongs
-    to another goal.
+    a claim a live peer manager holds. EXCLUDE is the third answer and it has two
+    sources: the vault (the gated session's own page belongs to another goal) and
+    the ledger's `role: human` (the operator's own workspace, which no manager
+    routes — see § ROLE).
 
     ⚠️ **The scope check sits ABOVE the spawner path, deliberately.** For a
     positively-foreign pane the spawn edge may say `peer-manager`, `dead-manager`
@@ -705,6 +763,18 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None, scope=None)
         return EMIT, "unowned"
     if self_id and session_id == self_id:
         return EMIT, "self"
+
+    # THE OPERATOR'S OWN WORKSPACE. A `role: human` row is opened into the Direct window
+    # (`commands/open.md` § Step 0.6), so its gate is answered there and a manager never acts
+    # on it -- yet the spawn edge emits it, and when this watcher IS the spawner it emits
+    # `own-worker`, the branch that exists for the panes the manager EXISTS to see. Placed
+    # above that branch for exactly that reason, and above the scope block so the reason
+    # always names the durable fact rather than whichever goal page happens to claim the row.
+    # `is_human` fails closed -- only an explicit `human` matches -- so a record with no
+    # `role`, a `null` role or no record at all keeps every existing verdict. See § ROLE.
+    if is_human(session_id, ledger):
+        return EXCLUDE, "role-human"
+
     if self_id and spawner == self_id:
         # Above both the spawner path and the claim branch, deliberately: a
         # manager's own workers are the panes it EXISTS to see, so neither a
@@ -1013,7 +1083,10 @@ def counts_line(rows):
     would make a scope exclusion read as a spawn-edge drop, which is the exact
     misattribution the exclusion exists to end. The two buckets are split by
     owner-named vs owner-unknown for the same reason the dropped ones are split by
-    rule.
+    rule, and a third — `excluded(role-human)` — is the ledger's `role`, not the
+    vault: the operator's own workspace, which no manager routes (see § ROLE). It
+    gets its own bucket for the same reason: a row excluded because the operator
+    owns it is a different fact from one excluded because another goal does.
     """
     kept = [r for r in rows if r["verdict"] == EMIT]
     dropped = [r for r in rows if r["verdict"] == DROP]
@@ -1023,13 +1096,15 @@ def counts_line(rows):
     excluded = [r for r in rows if r["verdict"] == EXCLUDE]
     excluded_goal = [r for r in excluded if r["reason"].startswith("foreign-goal:")]
     excluded_unknown = [r for r in excluded if r["reason"] == "owner-unknown"]
+    excluded_human = [r for r in excluded if r["reason"] == "role-human"]
     return (
         f"gates: {len(rows)}  emit: {len(kept)}  "
         f"dropped(peer-manager): {len(dropped_peer)}  "
         f"dropped(peer-manager-own): {len(dropped_own)}  "
         f"dropped(claimed): {len(dropped_claimed)}  "
         f"excluded(foreign-goal): {len(excluded_goal)}  "
-        f"excluded(owner-unknown): {len(excluded_unknown)}"
+        f"excluded(owner-unknown): {len(excluded_unknown)}  "
+        f"excluded(role-human): {len(excluded_human)}"
     )
 
 
