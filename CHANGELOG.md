@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.228.1
 
 - fix: **`/supervisor:open` reads a subject's session id unconditionally, so a goal or topic whose manager exited resumes instead of spawning a duplicate.** The page read was gated on *"when the registry matches nothing"*, and Step 2B/2C item 4's enumeration named that same empty match as a spawn outcome — so the enumeration won and a stale pointer spawned a second manager (measured 2026-10-27, a page id resolving `ABSENT` while item 3 forbids reaching item 4 on that verdict). Both branches now read the page field — `claude_session_id`, or the retired `manager_session_id` as a fallback — before the registry result, state that an empty match never *proves* no manager ever existed, and scope `None` to *registry empty **and** no page id* — so a subject that never had a manager still spawns. Pinned by `scripts/check-open-manager-resolution.py`, whose denial pins carry a negative control against the pre-change wording, wired into `check:` and `precommit:`. Change set: `commands/open.md`, `scripts/check-open-manager-resolution.py`, `scripts/tests/test_check_open_manager_resolution.py`, `scripts/budget-baseline.json`, `Makefile`, `CHANGELOG.md`.
 
