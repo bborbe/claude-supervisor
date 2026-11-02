@@ -44,7 +44,6 @@ import os
 import re
 import subprocess
 import sys
-from datetime import date
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROLE_MAP = os.path.expanduser("~/.cache/wezterm-role-map.json")
@@ -165,8 +164,14 @@ def eligible(block, kind, today):
     status = (open_queue.field(block, "status") or "").strip()
     if status != "in_progress":
         return "status is %s" % (status or "<none>")
-    defer = (open_queue.field(block, "defer_date") or "").strip()[:10]
-    if defer and defer > today:
+    state, detail = open_queue.defer_date.defer_state(
+        open_queue.field(block, "defer_date"), today
+    )
+    if state == "invalid":
+        # Not a deferral this script can vouch for, so not "due now" either: the row is
+        # withheld, and the reason reaches stderr rather than being swallowed.
+        print("flagged-rows: %s — treating as deferred" % detail, file=sys.stderr)
+    if state in ("deferred", "invalid"):
         return "deferred"
     return None
 
@@ -818,7 +823,9 @@ def collect(args):
         # fire and `owner_live` reads `null` — the operator must see why.
         sessions = {}
     ctx = {
-        "today": date.today().isoformat(),
+        # The CURRENT INSTANT, not today's date: a date reads as local midnight, which
+        # would park a defer that already came due today for another full day.
+        "today": open_queue.defer_date.as_now(),
         "role_map": role_map(args.role_map),
         "template_root": args.template_root,
         "no_liveness": args.no_liveness,

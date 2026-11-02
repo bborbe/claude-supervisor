@@ -44,7 +44,6 @@ and remain the worker's own act; this script only removes a pane whose work is a
 finished. A session that still has something to say is refused by `task-not-terminal`.
 """
 import argparse
-import datetime
 import glob
 import importlib.util
 import os
@@ -54,6 +53,7 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
 
 SESSIONS_DIR = os.path.expanduser(
     os.environ.get("SUPERVISOR_SESSIONS_DIR") or "~/.claude/sessions"
@@ -88,6 +88,10 @@ def load_sibling(filename):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+#: `defer_date` is an instant, not a date — see `defer-date.py`.
+defer_date = load_sibling("defer-date.py")
 
 
 def frontmatter(path):
@@ -216,22 +220,21 @@ def find_task(session_id, cwd, vault_root=None):
 
 
 def is_future(value, today):
-    """True when `value` is an ISO date after `today`.
+    """True when `value` names an instant after `today`.
 
-    `vault-cli` writes both `2026-05-26` and the RFC3339 form an unquoted date scalar is
-    normalised to, so the leading `YYYY-MM-DD` is what is read. An unparseable value is
-    *not* a deferral — it is a value this script cannot vouch for, and the task is then
-    judged on its status alone.
+    `vault-cli` writes `2026-05-26`, the RFC3339 form an unquoted date scalar is
+    normalised to, and a full timestamp with a time of day; `defer-date.py` reads all
+    three, so a defer later TODAY counts as future and permits the close. An
+    unparseable value is *not* a deferral — it is a value this script cannot vouch for,
+    so the task is judged on its status alone and the reason goes to stderr.
     """
-    if not value:
+    parsed, reason = defer_date.parse_defer_date(value)
+    if reason:
+        print(f"close-worker: {reason} — not counted as a future defer", file=sys.stderr)
         return False
-    match = re.match(r"^(\d{4})-(\d{2})-(\d{2})", str(value).strip())
-    if not match:
+    if parsed is None:
         return False
-    try:
-        return datetime.date(*map(int, match.groups())) > today
-    except ValueError:
-        return False
+    return parsed > defer_date.as_now(today)
 
 
 def task_verdict(task, today):
@@ -374,7 +377,7 @@ def main():
         )
 
     task = find_task(sid, cwd, VAULTS_ROOT)
-    bad = task_verdict(task, datetime.date.today())
+    bad = task_verdict(task, defer_date.as_now())
     if bad is not None:
         return refuse(*bad)
 

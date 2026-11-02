@@ -42,9 +42,23 @@ import os
 import re
 import sys
 import time
-from datetime import date
+from datetime import datetime
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load(name, filename):
+    """Import a sibling script by path — the filenames carry hyphens."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: `defer_date` is an instant, not a date — see `defer-date.py`.
+defer_date = _load("defer_date", "defer-date.py")
+
 TASKS_DIR = "25 Tasks"
 RESUME_CAP = 3
 RESUME_WINDOW = 30 * 60  # seconds
@@ -176,10 +190,20 @@ def main(argv: list[str]) -> int:
         print("jump")
         print(f"task is parked (status {status}, phase {phase}); a park is not a death")
         return 0
-    defer = k.scalar(fm, "defer_date")[:10]
-    if defer and defer > date.today().isoformat():
+    # The same instant the resume window is measured at, so an injected `--now`
+    # (the suite's clock) moves the defer guard with it.
+    state, reason = defer_date.defer_state(
+        k.scalar(fm, "defer_date"), datetime.fromtimestamp(now).astimezone()
+    )
+    if state == "invalid":
+        # Not "due now": an unreadable defer parks the row rather than earning a resume.
         print("jump")
-        print(f"task is deferred to {defer}; a snooze is not a death")
+        print(f"{reason} — a defer this script cannot read is not an invitation to resume")
+        return 0
+    if state == "deferred":
+        print("jump")
+        print(f"task is deferred to {defer_date.display(k.scalar(fm, 'defer_date'))}; "
+              "a snooze is not a death")
         return 0
     if open_boxes(text) == 0:
         print("jump")
