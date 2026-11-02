@@ -1318,7 +1318,8 @@ def main():
         action="store_true",
         help=(
             "skip the vault scope read entirely — the filter then behaves exactly "
-            "as it did before that input existed (no row is ever excluded)"
+            "as it did before that input existed (no row is excluded by the SCOPE; "
+            "the `role: human` exclusion is not a scope input and still applies)"
         ),
     )
     parser.add_argument(
@@ -1390,8 +1391,9 @@ def main():
         scope = _session_scope().load(args.self_id, args.scope_vault or None)
         if not scope.resolved:
             print(
-                f"SCOPE  unresolved: {scope.reason} — no row is excluded; "
-                f"every gate emits exactly as before",
+                f"SCOPE  unresolved: {scope.reason} — no row is excluded by the scope; "
+                f"every gate emits exactly as before, except a `role: human` row, which "
+                f"is excluded by the role rule and not by this input",
                 file=sys.stderr,
             )
             scope = None
