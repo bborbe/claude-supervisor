@@ -235,6 +235,37 @@ class ParkEventTest(unittest.TestCase):
         # re-fire it every round, tripping the escalation in consecutive ticks.
         self.assertEqual(record["recheck_at"], "2026-11-03T02:00:00+01:00")
 
+    def test_repark_advances_every_member_task_not_just_the_named_one(self):
+        calls = pathlib.Path(self._tmp.name) / "calls.txt"
+        bin_dir = pathlib.Path(self._tmp.name) / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "vault-cli"
+        stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{calls}"\nexit 0\n')
+        stub.chmod(0o755)
+        env = {"PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+        for session, task in (("aaaaaaaa", "Task A"), ("bbbbbbbb", "Task B")):
+            self.run_script("register", "--task", task, "--event", "a metric",
+                            "--recheck", "2026-11-02T02:00:00+01:00",
+                            "--session", session, extra_env=env)
+        calls.write_text("")
+
+        proc = self.run_script(
+            "register", "--task", "Task A", "--event", "a metric",
+            "--recheck", "2026-11-05T02:00:00+01:00",
+            "--session", "aaaaaaaa", "--repark", extra_env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        written = calls.read_text()
+        # The peer must move too: a past defer is not "deferred" to the reader,
+        # so leaving Task B behind resumes it into a wait that has not fired.
+        self.assertIn("task set Task A defer_date 2026-11-05T02:00:00+01:00", written)
+        self.assertIn("task set Task B defer_date 2026-11-05T02:00:00+01:00", written)
+        self.assertIn("advanced: Task B", proc.stdout)
+        # ...and the watch is still counted once, not once per member.
+        record = json.loads(next(iter(self.state.glob("*.json"))).read_text())
+        self.assertEqual(record["repark_count"], 1)
+
     def test_a_corrupt_watch_is_surfaced_by_due_not_hidden(self):
         self.run_script("register", "--event", "a metric",
                         "--recheck", "2026-11-02T02:00:00+01:00", "--session", "aaaaaaaa")

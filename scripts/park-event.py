@@ -222,6 +222,18 @@ def all_watches() -> tuple[list[dict], list[str]]:
 
 # --- task write --------------------------------------------------------------
 
+def _set_field(task: str, field: str, value: str, vault: str | None) -> None:
+    cmd = ["vault-cli", "task", "set", task, field, value]
+    if vault:
+        cmd += ["--vault", vault]
+    done = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if done.returncode != 0:
+        raise ParkError(
+            f"could not write {field} on {task!r}: "
+            f"{(done.stderr or done.stdout).strip() or 'vault-cli failed'}"
+        )
+
+
 def write_task_key(task: str, key: str, recheck: str, vault: str | None) -> None:
     """Record the event key and the re-check instant on the task.
 
@@ -235,16 +247,26 @@ def write_task_key(task: str, key: str, recheck: str, vault: str | None) -> None
     owns its own frontmatter and an unattended writer that bypasses the CLI is
     how a page ends up with a key no reader expects.
     """
-    for field, value in (("park_event", key), ("defer_date", recheck)):
-        cmd = ["vault-cli", "task", "set", task, field, value]
-        if vault:
-            cmd += ["--vault", vault]
-        done = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if done.returncode != 0:
-            raise ParkError(
-                f"could not write {field} on {task!r}: "
-                f"{(done.stderr or done.stdout).strip() or 'vault-cli failed'}"
-            )
+    _set_field(task, "park_event", key, vault)
+    _set_field(task, "defer_date", recheck, vault)
+
+
+def advance_members(record: dict, recheck: str, vault: str | None, skip: str | None) -> list[str]:
+    """Move EVERY member's `defer_date` forward on a re-park.
+
+    A watch with several members is the case this store exists for. Advancing
+    only the `--task` given to the re-register leaves the peers holding a past
+    `defer_date`, and a past defer is not "deferred" to `worker-keepalive.py` —
+    it falls through to `resume`, so those peers are resumed into a wait that
+    has not fired. The watch is counted once; the clock moves for all of it.
+    """
+    moved = []
+    for task in sorted({t for t in (record.get("tasks") or {}).values() if t}):
+        if task == skip:
+            continue
+        _set_field(task, "defer_date", recheck, vault)
+        moved.append(task)
+    return moved
 
 
 # --- subcommands -------------------------------------------------------------
@@ -276,6 +298,8 @@ def cmd_register(args: argparse.Namespace) -> int:
     print(f"watch: {watch_path(key)}")
     print(f"recheck: {record['recheck_at']}")
     print(f"sessions: {len(members)} ({', '.join(m[:8] for m in members) or 'none'})")
+    if record.get("_moved"):
+        print(f"advanced: {', '.join(record['_moved'])}")
     return EXIT_OK
 
 
@@ -335,6 +359,8 @@ def _register_locked(args: argparse.Namespace, key: str, recheck, session: str) 
 
     if args.task:
         write_task_key(args.task, key, record["recheck_at"], args.vault)
+    if args.repark:
+        record["_moved"] = advance_members(record, record["recheck_at"], args.vault, args.task)
 
     record["_created"] = created
     return record

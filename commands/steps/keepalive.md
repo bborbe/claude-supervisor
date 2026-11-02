@@ -17,7 +17,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --debt --subject "Fle
 
 Exit **12** = a step is still owed: print the `debt:` lines, skip this leg, and **carry on with the round — the tail still runs**, because the tail's `--check` is what reports the round's verdict to the operator. Exit **0** = no debt, run it. ⚠️ **Exit 2 = the gate could not read or write the debt file** — it prints nothing to stdout, only a reason to stderr; skip the leg and print that reason, never read 2 as "no debt". ⚠️ **`--debt` judges the round in progress**, re-reading the receipt, so a round that already swept is not blocked by a debt it has paid. ⚠️ **The exit code is the gate, never the printed line** — a leg that reads only the text is satisfied by an empty read. ⚠️ **Resuming a topic manager is not urgent enough to outrank the step the round owes** — that is the trade the 2026-10-31 rounds made in the other direction, and it is why the debt gates the cheap legs rather than only the expensive one.
 
-## Step 5b — Restart a lapsed topic manager
+## Restart a lapsed topic manager
 
 The goal tier has had a keep-alive since `topic-drive.md`'s § Keep alive; the topic tier has
 had none, so a lapsed topic manager simply stayed lapsed and nothing reported it. This leg is
@@ -72,7 +72,7 @@ turn a refused arm into a restart loop that still runs a round every tick.
 found and did not act on — the `# Regression metric` on the task that installed this leg reads
 it, and a round that prints the number without moving it is the defect it exists to remove.
 
-## Step 5b, first half — resume the park watches whose re-check has passed
+## Resume the park watches whose re-check has passed
 
 A parked worker is not a dead one: it exited on purpose, on a clock. Its re-check
 instant lives in `defer_date`, written by `park-event.py register` at park time and
@@ -122,7 +122,7 @@ parked session has exited and nothing else survives to remember it.
 surfaces the row in every manager's open queue, so a missed round delays a resume and
 never strands it. Never let this step become the sole record that a task is parked.
 
-## Step 5b, second half — resume a worker whose session died
+## Resume a worker whose session died
 
 ⚠️ **This reverses `agents/fleet-drive.md`'s *"orphan → escalate, never nudge"*.** That note
 made a dead worker the operator's problem every round; rule 1 says a crashed or lapsed worker
