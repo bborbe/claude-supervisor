@@ -31,6 +31,12 @@ export const A2A_PUSH_MAX_MESSAGES = 50
  *   reason: the registry's own rules are then testable without a socket.
  * @param {string} [options.callbackHost] The host a container uses to reach this machine's
  *   loopback. Measured, not assumed — see `a2a-receive.mjs`.
+ * @param {number} [options.receiverPort] The port the receiver binds. `0` (ephemeral) serves
+ *   the docker path; a **k8s** callback needs a fixed one, because the worker reaches it
+ *   through an in-cluster relay whose upstream port is deployed configuration.
+ * @param {string} [options.receiverHost] Where the receiver binds. Loopback by default — the
+ *   narrowest surface that serves the docker path. A relay on another host cannot dial
+ *   loopback, so the k8s path widens it to the address that relay targets.
  * @param {() => number} [options.now] The clock `age_s` is computed against. Injectable so the
  *   age assertion is exact rather than a range.
  */
@@ -38,6 +44,8 @@ export function createA2APushRegistry({
   tokenFactory = () => randomUUID(),
   receiverFactory = createA2AStatusReceiver,
   callbackHost = 'host.docker.internal',
+  receiverPort = 0,
+  receiverHost = '127.0.0.1',
   now = () => Date.now(),
 } = {}) {
   // token -> workerId, or `null` while the `create` that minted it has not answered yet. The
@@ -47,10 +55,17 @@ export function createA2APushRegistry({
   // workerId -> entries. Keyed by the TOKEN until `bind` re-keys it, so a push that lands while
   // the create is in flight is buffered rather than refused.
   const messages = new Map()
+  // token -> the callback URL that token's worker was told to POST to. Kept per token rather
+  // than derived once, because the URL is a property of the TARGET: a docker worker is given
+  // the Docker gateway and a cluster worker an in-cluster relay, and a follow-up turn must
+  // re-register against the SAME url its own worker can reach — not this process's default.
+  const urls = new Map()
 
   let listening = null
 
   const receiver = receiverFactory({
+    port: receiverPort,
+    host: receiverHost,
     // ⚠️ THE PROVISIONAL KEY IS THE TOKEN, AND THAT IS NOT A PLACEHOLDER. Until the controller
     // names a worker id, the token IS the only identity this side holds, and it is a sound one:
     // it is unguessable, single-worker and minted here. Reporting the entry under it and
@@ -95,12 +110,21 @@ export function createA2APushRegistry({
      * step because a token with no URL registers nothing and reads downstream as a configured
      * channel that is merely quiet — the failure shape this whole task exists to remove.
      */
-    async beginCreate() {
+    async beginCreate({ callbackUrl } = {}) {
       const ready = await ensureListening()
       if (ready.error) return { error: ready.error }
       const token = tokenFactory()
       tokens.set(token, null)
-      return { token, push: { url: ready.url, token } }
+      // ⚠️ THE CALLER SUPPLIES THE URL WHEN THE TARGET NEEDS ONE THIS PROCESS CANNOT DERIVE.
+      // `ready.url` is the Docker gateway, and it is right for a container. It is wrong for
+      // every cluster worker: a pod reaches this machine through neither the gateway name nor
+      // its LAN address — the first does not resolve there and the second is dropped by the
+      // worker's own egress policy — so a `k8s:` target is handed an in-cluster relay instead.
+      // The default is kept, not replaced, so a caller with nothing to say still gets the
+      // behaviour it had.
+      const url = typeof callbackUrl === 'string' && callbackUrl !== '' ? callbackUrl : ready.url
+      urls.set(token, url)
+      return { token, push: { url, token } }
     },
 
     /**
@@ -123,7 +147,10 @@ export function createA2APushRegistry({
       const ready = await ensureListening()
       if (ready.error) return null
       for (const [token, bound] of tokens.entries()) {
-        if (bound === workerId) return { url: ready.url, token }
+        // The URL this worker was created against, not this process's default: a follow-up
+        // that re-registered a cluster worker against the Docker gateway would silently
+        // restore the very defect the per-target URL exists to remove.
+        if (bound === workerId) return { url: urls.get(token) ?? ready.url, token }
       }
       return null
     },
@@ -165,6 +192,7 @@ export function createA2APushRegistry({
       if (tokens.get(token) !== null) return false
       tokens.delete(token)
       messages.delete(token)
+      urls.delete(token)
       return true
     },
 
