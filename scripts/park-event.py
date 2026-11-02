@@ -223,30 +223,28 @@ def all_watches() -> tuple[list[dict], list[str]]:
 # --- task write --------------------------------------------------------------
 
 def write_task_key(task: str, key: str, recheck: str, vault: str | None) -> None:
-    """Record the event key on the task so a restarted round re-derives it.
+    """Record the event key and the re-check instant on the task.
+
+    `defer_date` carries the full instant, not a bare date: the readers honour
+    the time of day (`scripts/defer-date.py`), so this is the field that
+    actually resurfaces the row at the right moment. The event key rides
+    alongside so a restarted round re-derives the watch from disk instead of
+    arming a second one.
 
     Written through `vault-cli task set`, never by editing the file: the vault
     owns its own frontmatter and an unattended writer that bypasses the CLI is
     how a page ends up with a key no reader expects.
     """
-    cmd = ["vault-cli", "task", "set", task, "park_event", key]
-    if vault:
-        cmd += ["--vault", vault]
-    done = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if done.returncode != 0:
-        raise ParkError(
-            f"could not write park_event on {task!r}: "
-            f"{(done.stderr or done.stdout).strip() or 'vault-cli failed'}"
-        )
-    cmd = ["vault-cli", "task", "set", task, "park_recheck", recheck]
-    if vault:
-        cmd += ["--vault", vault]
-    done = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if done.returncode != 0:
-        raise ParkError(
-            f"could not write park_recheck on {task!r}: "
-            f"{(done.stderr or done.stdout).strip() or 'vault-cli failed'}"
-        )
+    for field, value in (("park_event", key), ("defer_date", recheck)):
+        cmd = ["vault-cli", "task", "set", task, field, value]
+        if vault:
+            cmd += ["--vault", vault]
+        done = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if done.returncode != 0:
+            raise ParkError(
+                f"could not write {field} on {task!r}: "
+                f"{(done.stderr or done.stdout).strip() or 'vault-cli failed'}"
+            )
 
 
 # --- subcommands -------------------------------------------------------------

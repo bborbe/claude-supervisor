@@ -75,9 +75,10 @@ it, and a round that prints the number without moving it is the defect it exists
 ## Step 5b, first half — resume the park watches whose re-check has passed
 
 A parked worker is not a dead one: it exited on purpose, on a clock. Its re-check
-time lives in `park_recheck`, written by `park-event.py register` at park time, and
-**`defer_date` cannot carry it** — every reader truncates that field to its date, so
-a time written there resurfaces the task at the start of the day, hours early.
+instant lives in `defer_date`, written by `park-event.py register` at park time and
+honoured by the readers, so the task resurfaces on its own even if this step never
+runs. What the store adds is the **event key**: which waits are the same wait, and
+which sessions are already parked on one.
 
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts

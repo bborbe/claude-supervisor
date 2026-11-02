@@ -283,7 +283,7 @@ class ParkEventTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         written = calls.read_text()
         self.assertIn("task set Some Task park_event a metric", written)
-        self.assertIn("task set Some Task park_recheck 2026-11-02T02:00:00+01:00", written)
+        self.assertIn("task set Some Task defer_date 2026-11-02T02:00:00+01:00", written)
 
     def test_a_refused_task_write_is_reported_not_swallowed(self):
         bin_dir = pathlib.Path(self._tmp.name) / "bin"
