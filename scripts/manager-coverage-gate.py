@@ -193,10 +193,18 @@ def split_names(raw, owners):
             end = index + len(key)
             if not text.startswith(key, index):
                 continue
-            if end < length and text[end] not in " \t\r" + _SEPARATORS:
+            # ⚠️ **Whitespace is NOT a terminator.** The next non-blank character must be
+            # a separator or end-of-string, so `Alpha Row Beta Row` — one unknown name
+            # that happens to decompose into two known owners — fails open whole-set
+            # instead of dispatching both. That is the documented contract: `--changed`
+            # is comma- or newline-separated, never whitespace-separated.
+            after = end
+            while after < length and text[after] in " \t\r":
+                after += 1
+            if after < length and text[after] not in _SEPARATORS:
                 continue
             found.append(key)
-            index = end
+            index = after
             break
         else:
             return None

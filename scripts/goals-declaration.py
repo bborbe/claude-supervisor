@@ -92,6 +92,7 @@ def _strip(value: str) -> str:
     carrying `#` or `|` is a name, and truncating it would be the same silent drop this
     module exists to remove.
     """
+    value = _strip_comment(value)
     previous = None
     while previous != value:
         previous = value
@@ -102,6 +103,42 @@ def _strip(value: str) -> str:
             value = value[1:-1].strip()
         if value.startswith("[[") and value.endswith("]]"):
             value = value[2:-2].split("|")[0].split("#")[0].strip()
+    return value
+
+
+def _opens_quote(buffer: list[str]) -> bool:
+    """Whether a quote character here starts a quoted item rather than being literal.
+
+    ⚠️ **Only an item-initial quote opens.** Toggling on every `'` reads the apostrophe in
+    `The Manager Loop's Coverage Step` as an opening quote, swallows the comma after it,
+    and merges two names into one that matches no page — the same silent drop this module
+    exists to remove. An apostrophe is punctuation inside a name; a quote at the start of
+    an item is YAML quoting its value.
+    """
+    return not "".join(buffer).strip()
+
+
+def _strip_comment(value: str) -> str:
+    """Drop a YAML inline comment: a `#` preceded by whitespace and outside a quoted item.
+
+    ⚠️ **Not cosmetic — a comment-bearing declaration used to work.** Both readers this
+    module replaces extracted `X` from `- '[[X]]' # note`; without this the unified reader
+    normalises the whole line to `'[[X]]' # note`, which matches no page, and the task
+    leaves the tracked set. That is the silent-drop class reintroduced by the unification.
+    YAML requires whitespace before `#` for it to begin a comment, which is what keeps a
+    `#` inside a name or inside a wikilink heading intact.
+    """
+    quote: str | None = None
+    for index, char in enumerate(value):
+        if quote is not None:
+            if char == quote:
+                quote = None
+            continue
+        if char in _QUOTES and not value[:index].strip():
+            quote = char
+            continue
+        if char == "#" and index > 0 and value[index - 1] in " \t":
+            return value[:index].rstrip()
     return value
 
 
@@ -122,7 +159,7 @@ def _split_outside_quotes(text: str) -> list[str]:
             buffer.append(char)
             if char == quote:
                 quote = None
-        elif char in _QUOTES:
+        elif char in _QUOTES and _opens_quote(buffer):
             quote = char
             buffer.append(char)
         elif char == ",":
@@ -191,7 +228,9 @@ def goal_names(frontmatter: str) -> list[str]:
     match = _GOALS_KEY.search(frontmatter)
     if not match:
         return []
-    rest = match.group(1).strip()
+    # The comment is stripped before the empty test, or `goals: [] # note` reads as a goal
+    # named `[] # note` instead of as a declaration that names nothing.
+    rest = _strip_comment(match.group(1)).strip()
     if rest and rest.lower() not in _EMPTY:
         names = _inline_names(rest)
     else:

@@ -3038,6 +3038,36 @@ class GoalsDeclarationShapes(Base):
         goals_fm = "goals: ['[[%s]]']\n" % name
         self.assertEqual(self.page("Comma Goal", goals_fm)["goals"], [name])
 
+    def test_an_apostrophe_inside_an_unquoted_item_is_not_a_quote(self):
+        """A quote opens an item; an apostrophe is punctuation inside one.
+
+        Toggling quote state on every `'` reads the apostrophe in `Loop's` as an opening
+        quote, swallows the comma that follows, and merges two names into one that matches
+        no page — the same silent drop, reached through the fix for it.
+        """
+        self.assertEqual(
+            self.page(
+                "Apostrophe",
+                "goals: [The Manager Loop's Coverage Step, Other Goal]\n",
+            )["goals"],
+            ["The Manager Loop's Coverage Step", "Other Goal"],
+        )
+
+    def test_a_yaml_inline_comment_is_stripped(self):
+        """A comment-bearing declaration used to work; the unification must not break it."""
+        for goals_fm, want in (
+            ("goals:\n    - '[[AGoal]]' # note\n", ["AGoal"]),
+            ("goals: AGoal # note\n", ["AGoal"]),
+        ):
+            with self.subTest(declaration=goals_fm.strip()):
+                self.assertEqual(self.page("Commented", goals_fm)["goals"], want)
+
+    def test_a_comment_on_an_empty_declaration_is_still_empty(self):
+        """`goals: [] # note` names no goal, not a goal called `[] # note`."""
+        self.assertEqual(
+            self.page("Commented Empty", "goals: [] # note\n")["goals"], []
+        )
+
     def test_a_flow_list_still_splits_on_the_commas_between_its_items(self):
         """The positive control: quote-awareness must not stop a real two-item list."""
         self.assertEqual(

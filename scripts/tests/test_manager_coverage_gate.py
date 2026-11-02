@@ -226,6 +226,19 @@ class CoverageGateTest(unittest.TestCase):
             "\n" + stdout,
         )
 
+    def test_a_space_separated_value_fails_open_rather_than_splitting(self):
+        """`--changed` is comma- or newline-separated, never whitespace-separated.
+
+        A single unknown name that happens to decompose into two known owners must not
+        narrow the dispatch to those two — the value is one name the set cannot place, and
+        the documented contract for that is fail-open whole-set.
+        """
+        rc, rows, _ = run(
+            "--tracked", self.tracked, "--delta", "change", "--changed", "Alpha Row Beta Row"
+        )
+        self.assertEqual(rows, TASKS + [SUBJECT])
+        self.assertEqual(rc, 10)
+
     def test_changed_names_match_a_full_path_too(self):
         rc, rows, _ = run(
             "--tracked", self.tracked, "--delta", "change", "--changed", TASKS[0],
