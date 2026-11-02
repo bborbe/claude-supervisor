@@ -2957,6 +2957,210 @@ class TestBlockedVerdictsMode(Base):
         self.assertEqual(out.strip(), "")
 
 
+class GoalsDeclarationShapes(Base):
+    """The `goals:` read, against every shape the vault writes.
+
+    The defect (measured 2026-11-02 on the live `private-personal` vault): a `goals:`
+    block item written as a bare list entry carries no `[[...]]`, so the wikilink-only
+    extractor returned `[]` for it. `resolve_tracked` admits a task only when its goals
+    intersect the member set, so that task left the tracked set entirely — no row, no
+    warning, no failed assertion. The caller's scan read 61 names against the gate's 60,
+    differing by exactly the one task in this shape.
+
+    ⚠️ The four shapes are asserted through `read_task`, the path `resolve_tracked`
+    actually walks — not through the normaliser alone. A test of the helper would pass
+    against a `read_task` still wired to the old extractor, which is the wiring this
+    defect lived in.
+    """
+
+    SHAPES = {
+        "wikilink list": "goals:\n    - '[[AGoal]]'\n",
+        "plain scalar": "goals: AGoal\n",
+        "nested list-of-list": "goals:\n    - - AGoal\n",
+        "plain-list item": "goals:\n    - AGoal\n",
+    }
+
+    def page(self, name, goals_fm):
+        """Write a task page declaring `goals_fm`, and return its parsed frontmatter dict."""
+        self.write(
+            "25 Tasks/%s.md" % name,
+            "---\nstatus: in_progress\nphase: execution\n%s---\nTags: [[Task]]\n"
+            % goals_fm,
+        )
+        return self.m.read_task(os.path.join(self.vault, "25 Tasks", "%s.md" % name))
+
+    def test_every_shape_reads_as_the_same_one_name(self):
+        for label, goals_fm in self.SHAPES.items():
+            with self.subTest(shape=label):
+                self.assertEqual(
+                    self.page("Shape Task", goals_fm)["goals"],
+                    ["AGoal"],
+                    "%s did not read as one goal name" % label,
+                )
+
+    def test_a_plain_list_item_puts_the_task_in_the_tracked_set(self):
+        """SC1: the row this defect dropped, restored to the tracked set."""
+        self.page("Bare Item", self.SHAPES["plain-list item"])
+        names = [t["name"] for t in self.m.resolve_tracked(self.vault, ["AGoal"])]
+        self.assertIn(
+            "Bare Item", names, "a bare `- Name` goals item left the task untracked"
+        )
+
+    def test_the_reader_and_reset_py_agree_on_every_shape(self):
+        """SC2: the gate's extractor and the caller's scan are ONE implementation.
+
+        `reset.py` re-discovers the tracked set from disk — the caller's side of the
+        `--compare-tracked` comparison. Before this fix it handled all four shapes while
+        the gate handled two, and each looked self-consistent on its own.
+        """
+        spec = importlib.util.spec_from_file_location(
+            "reset_under_test", os.path.join(os.path.dirname(_HERE), "reset.py")
+        )
+        reset = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reset)
+        for label, goals_fm in self.SHAPES.items():
+            with self.subTest(shape=label):
+                page = "---\n%s---\nTags: [[Task]]\n" % goals_fm
+                self.assertEqual(
+                    set(self.page("Shape Task", goals_fm)["goals"]),
+                    reset.goals_of(page),
+                    "%s disagrees between read_task and reset.goals_of" % label,
+                )
+
+    def test_a_comma_inside_a_quoted_flow_item_is_not_a_separator(self):
+        """The mirror of the coverage gate's comma fix, in the declaration read.
+
+        A quoted flow-list item may carry a comma of its own. Splitting the list before
+        locating its item boundaries shatters the name into fragments that match no
+        member — the same silent drop the bare-list fix removed, one shape over.
+        """
+        name = "Digest Watcher Judges File Arrival, So a Late-Landing Digest Trips a False Report on a Timely Round"
+        goals_fm = "goals: ['[[%s]]']\n" % name
+        self.assertEqual(self.page("Comma Goal", goals_fm)["goals"], [name])
+
+    def test_an_inline_value_that_is_itself_a_wikilink_is_not_a_flow_list(self):
+        """`goals: [[X]]` is YAML's inline nested list; read as a flow list it yields `[X]`.
+
+        Both spellings are shapes the three readers this module replaces resolved, so
+        mishandling them is a silent-drop regression rather than a new gap.
+        """
+        for goals_fm, want in (
+            ("goals: [[AGoal]]\n", ["AGoal"]),
+            ("goals: [[AGoal]] [[BGoal]]\n", ["AGoal", "BGoal"]),
+        ):
+            with self.subTest(declaration=goals_fm.strip()):
+                self.assertEqual(self.page("Inline Link", goals_fm)["goals"], want)
+
+    def test_a_full_line_comment_inside_the_block_does_not_end_it(self):
+        """A comment line is not a terminator — items after it are still declarations."""
+        self.assertEqual(
+            self.page(
+                "Comment Between", "goals:\n    - AGoal\n    # note\n    - BGoal\n"
+            )["goals"],
+            ["AGoal", "BGoal"],
+        )
+
+    def test_a_doubled_quote_is_an_escaped_apostrophe_not_a_close(self):
+        """`''` must not close the quoted item, or the comma after it splits the name."""
+        self.assertEqual(
+            self.page("Escaped Comma", "goals: ['[[Bob''s Goal, Part 2]]']\n")["goals"],
+            ["Bob's Goal, Part 2"],
+        )
+
+    def test_indentation_and_line_endings_do_not_change_the_read(self):
+        """Tab indentation and CRLF are both valid YAML for the same block."""
+        for goals_fm, want in (
+            ("goals:\n\t- AGoal\n", ["AGoal"]),
+            ("goals:\r\n    - AGoal\r\n", ["AGoal"]),
+        ):
+            with self.subTest(declaration=repr(goals_fm)):
+                self.assertEqual(self.page("Indent", goals_fm)["goals"], want)
+
+    def test_an_apostrophe_inside_an_unquoted_item_is_not_a_quote(self):
+        """A quote opens an item; an apostrophe is punctuation inside one.
+
+        Toggling quote state on every `'` reads the apostrophe in `Loop's` as an opening
+        quote, swallows the comma that follows, and merges two names into one that matches
+        no page — the same silent drop, reached through the fix for it.
+        """
+        self.assertEqual(
+            self.page(
+                "Apostrophe",
+                "goals: [The Manager Loop's Coverage Step, Other Goal]\n",
+            )["goals"],
+            ["The Manager Loop's Coverage Step", "Other Goal"],
+        )
+
+    def test_a_yaml_inline_comment_is_stripped(self):
+        """A comment-bearing declaration used to work; the unification must not break it."""
+        for goals_fm, want in (
+            ("goals:\n    - '[[AGoal]]' # note\n", ["AGoal"]),
+            ("goals: AGoal # note\n", ["AGoal"]),
+        ):
+            with self.subTest(declaration=goals_fm.strip()):
+                self.assertEqual(self.page("Commented", goals_fm)["goals"], want)
+
+    def test_a_hash_inside_a_quoted_wikilink_is_not_read_as_a_comment(self):
+        """The comment scan must open the quote past the list marker and the flow bracket.
+
+        A prefix test demanding literal blankness refuses to open the quote after `    - `
+        or `[`, so the space-preceded `#` inside the name reads as a comment and the line
+        truncates before the link closes — `'[[Name`, a fragment matching no page. The
+        expected value is `Name` rather than `Name # Heading` because the wikilink's
+        heading is split off deliberately, as Obsidian reads `[[Page#Heading]]`.
+        """
+        for goals_fm, want in (
+            ("goals:\n    - '[[Name # With Hash]]'\n", ["Name"]),
+            ("goals: ['[[Name # Hash]]', 'Other']\n", ["Name", "Other"]),
+            # ⚠️ A LATER item is the case that failed when the comment scan ran on the
+            # whole value: the first item's text sat in front of the second item's opening
+            # quote, so the quote was never recognised and the list truncated at the `#`.
+            ("goals: ['[[AGoal]]', 'Bob # 2']\n", ["AGoal", "Bob # 2"]),
+            ("goals: ['[[AGoal]]', '[[B # C]]']\n", ["AGoal", "B"]),
+        ):
+            with self.subTest(declaration=goals_fm.strip()):
+                self.assertEqual(self.page("Hash Link", goals_fm)["goals"], want)
+
+    def test_a_column_zero_comment_inside_the_block_is_dropped(self):
+        """An unindented comment line is a comment, not a goal the file carries."""
+        self.assertEqual(
+            self.page("Column Zero Comment", "goals:\n# note\n- AGoal\n")["goals"],
+            ["AGoal"],
+        )
+
+    def test_a_comment_on_an_empty_declaration_is_still_empty(self):
+        """`goals: [] # note` names no goal, not a goal called `[] # note`."""
+        self.assertEqual(
+            self.page("Commented Empty", "goals: [] # note\n")["goals"], []
+        )
+
+    def test_a_flow_list_still_splits_on_the_commas_between_its_items(self):
+        """The positive control: quote-awareness must not stop a real two-item list."""
+        self.assertEqual(
+            self.page("Two Goals", "goals: ['[[AGoal]]', '[[BGoal]]']\n")["goals"],
+            ["AGoal", "BGoal"],
+        )
+
+    def test_an_empty_declaration_is_still_empty(self):
+        """The control: every empty spelling names no goal, so the fix cannot over-read.
+
+        `goals: ~` is included because YAML's null is case-insensitive — a reader that
+        matches `null` only in lower case would read `goals: NULL` as a goal named `NULL`.
+        """
+        for goals_fm in (
+            "goals: []\n",
+            "goals:\n",
+            "goals: null\n",
+            "goals: ~\n",
+            "goals: NULL\n",
+            # A live marker in the vault: emptiness spelled as a list ITEM rather than as
+            # the value. Returning `[]` as a name would be a phantom matching no page.
+            "goals:\n    - '[]'\n",
+        ):
+            with self.subTest(declaration=goals_fm.strip()):
+                self.assertEqual(self.page("Empty Task", goals_fm)["goals"], [])
+
+
 class DeclaredMembersBoundary(unittest.TestCase):
     """`## Goals` membership must not be truncated by a `###`.
 
