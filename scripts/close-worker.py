@@ -357,20 +357,23 @@ def main():
     # session and an SDK worker spawned with `interactive: false` both write it — so keying on
     # it made this guard unreachable. `entrypoint` separates them: a tab registers `cli`, an
     # SDK worker `sdk-cli` (measured 2026-10-20 across the live fleet: 24 × `cli`, 1 ×
-    # `sdk-cli`). An ABSENT entrypoint is not read as headless: it is an entry written before
-    # the field existed, and treating those as pane-less would break closes for legitimate tab
-    # sessions.
+    # `sdk-cli`; 2026-11-02: 28 × `cli`, 1 × `sdk-cli`).
     #
     # ⚠️ **A pane-less entrypoint is not a refusal.** Every other guard here is about the
-    # session's *state*; this one was about where its surface lives, and a `sdk-cli` worker
+    # session's *state*; this one was about where its surface lives, and a `sdk-cli` session
     # has a registry pid to signal even though it has no pane. Refusing it left the operator
     # as the only actor who could close one — eleven hand-typed `kill`s on 2026-11-02. So the
     # old `headless-target` refusal is gone: the same guards run, and the pane kill is
     # replaced by SIGTERM on the registry pid. The task-terminal gate below still carries the
     # weight, because a headless worker that ends its turn is a *parked* process, not a
     # finished one (`docs/fleet-surface.md` § A headless worker exits at turn end).
+    #
+    # ⚠️ **`sdk-cli` exactly, not "anything but `cli`".** It is the only pane-less value
+    # measured in the fleet, and widening the signal to an unmeasured value would aim SIGTERM
+    # at a pid on a guess. Any other value — and an absent one — falls through to the pane
+    # join, which is fail-safe: it ends in an operational `❌ error:` and never a close.
     entrypoint = (rec.get("entrypoint") or "").strip().lower()
-    headless = bool(entrypoint) and entrypoint != "cli"
+    headless = entrypoint == "sdk-cli"
 
     cwd = (rec.get("cwd") or "").strip()
     verdict, tracked, _untracked = precheck.worktree_probe(cwd)

@@ -352,6 +352,19 @@ class TestCliRefusals(unittest.TestCase):
         self.assertEqual(child.wait(timeout=10), -signal.SIGTERM)
         self.assertFalse(os.path.exists(os.path.join(self.sessions, f"{child.pid}.json")))
 
+    def test_unmeasured_entrypoint_is_never_signalled(self):
+        """Only `sdk-cli` is measured pane-less; an unknown value must not aim a SIGTERM.
+
+        It falls through to the pane join, which is fail-safe — an operational `❌ error:`,
+        never a close.
+        """
+        child = self._spawn_child()
+        self._registry(entrypoint="something-new", pid=child.pid)
+        self._task(**{"claude_session_id": SID, "status": "completed"})
+        done = self._run()
+        self.assertIsNone(child.poll(), "an unmeasured entrypoint must not be signalled")
+        self.assertIn("no single live pane", done.stdout)
+
     def test_sdk_cli_dry_run_signals_nothing(self):
         child = self._spawn_child()
         self._registry(entrypoint="sdk-cli", pid=child.pid)
