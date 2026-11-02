@@ -979,9 +979,8 @@ class PollTest(unittest.TestCase):
         self.assertNotIn("OPEN", text)
 
     def poll_error(self, code, body=b""):
-        # fetch_item passes a URL string to urlopen, not a Request, so the fake
-        # takes a str — reading `.full_url` here would be an AttributeError, not
-        # a raised HTTPError.
+        # fetch_item passes a Request to urlopen (it carries the auth header), so
+        # the fake takes one and hands it straight back as the HTTPError's url.
         def fake(url, timeout=None):
             raise urllib.error.HTTPError(url, code, "err", None, io.BytesIO(body))
 
@@ -1452,6 +1451,60 @@ class ManagerCallSitesPassTheKindTest(unittest.TestCase):
                         "not pass --producer-kind manager",
                     )
         self.assertGreaterEqual(seen, 10, "the site list stopped covering the tree")
+
+
+class StoreTokenTest(unittest.TestCase):
+    """`$ATTENTION_STORE_TOKEN` reaches the request only when it is set.
+
+    Four cases, and the last two are the ones a regression misses: `fetch_item`
+    was converted from a bare URL string to a `Request` solely to carry this
+    header, so the GET is pinned separately from the POST. The unset cases are
+    the backwards-compatibility claim — an unauthenticated store must see exactly
+    the request it saw before this change.
+    """
+
+    def _auth_header(self, token, invoke):
+        seen = {}
+
+        def fake(request, timeout=None):
+            seen["auth"] = request.get_header("Authorization")
+            return FakeResponse({"item_id": STORE_ITEM_ID, "state": "open"})
+
+        with mock.patch.object(ask, "TOKEN", token):
+            with mock.patch.object(ask.urllib.request, "urlopen", fake):
+                invoke()
+        return seen.get("auth")
+
+    def _post(self):
+        ask.post_question(
+            producer_id="p",
+            producer_kind="session",
+            liveness_ref="heartbeat:/tmp/none",
+            dedup_key="k",
+            interrupt_class="pick",
+            risk="",
+            payload="x",
+            context="",
+            options=[],
+            expires_at="",
+        )
+
+    def test_post_carries_the_token_when_set(self):
+        self.assertEqual(
+            self._auth_header("secret-token", self._post), "Bearer secret-token"
+        )
+
+    def test_post_carries_no_header_when_unset(self):
+        self.assertIsNone(self._auth_header("", self._post))
+
+    def test_poll_carries_the_token_when_set(self):
+        self.assertEqual(
+            self._auth_header("secret-token", lambda: ask.fetch_item(STORE_ITEM_ID)),
+            "Bearer secret-token",
+        )
+
+    def test_poll_carries_no_header_when_unset(self):
+        self.assertIsNone(self._auth_header("", lambda: ask.fetch_item(STORE_ITEM_ID)))
 
 
 if __name__ == "__main__":
