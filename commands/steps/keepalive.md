@@ -100,6 +100,15 @@ from `due --json`. The file is removed when the last member leaves. A line readi
 `CORRUPT <file>` is a watch holding memberships that cannot be read — report it,
 never treat it as empty.
 
+⚠️ **Read `release`'s exit code as information, never as failure.** `0` released it ·
+`2` the session is not a member (a peer released it first) · `3` no watch exists for
+that event (the last member left, so the file is already gone). **`2` and `3` both
+mean the member is already absent** — the post-condition this step wants — so report
+the line and continue the leg; aborting on them turns a healthy round into a stalled
+one. `due` itself always exits `0`: it reports on stdout (`CORRUPT …`, or
+`no park watches due`), so a non-zero exit from `due` is a genuine fault worth
+stopping on, and an empty one is not.
+
 **A watch that comes due and cannot be resumed is re-parked, not left due.** The
 event has not fired, so bump the instant — and ⚠️ **always pass `--session <parked-id>`
 and `--repark`**, never a bare re-register:

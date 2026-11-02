@@ -8,6 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+
+## Unreleased
+
+- fix: **the park-watch resume leg states `park-event.py release`'s exit-code contract**, so a round cannot read a benign "already released" as a failure. `0` released · `2` not a member (a peer got there first) · `3` no watch (the last member left). Both `2` and `3` mean the member is already absent — the post-condition the step wants — so the leg reports and continues instead of aborting. `due` always exits `0` and reports on stdout, so a non-zero exit from `due` is a genuine fault and an empty one is not. Flagged by review on #598 and shipped unfixed there; documentation only.
+
 ## v0.232.0
 
 - feat: `fleet-board.py` flags a live manager pane running without the exit recorder — a `⚠️ UNRECORDED:` action line below the box (and `exit_record` in `--json`) for each manager whose `session-exit` record carries no `kind=spawn … writer=trap` line with a still-alive pid, plus an `unknown` count for panes `wezterm cli list` cannot resolve. New `scripts/exit-record-coverage.py` owns the rule; the store was previously read by no sweep, so a hand-opened manager's death left nothing to attribute.
