@@ -1233,6 +1233,29 @@ class TestExitRecordRelay(unittest.TestCase):
         self.assertNotIn(self.LINE, out, "the operator's warning belongs on stderr, not the doc")
 
 
+class TestBelowBoxActionLineOrder(unittest.TestCase):
+    """The below-box action lines keep their position relative to the drawn rows.
+
+    The order asserted here is `details[sid]` collected by iterating the RENDERED
+    rows. Asserting on `list(details)` would pin the wrong thing: that dict is filled
+    inside `build_rows()`'s `for sid, rec in registry.items()` loop, and
+    `rows.sort(...)` runs afterwards, so its insertion order is registry order and
+    says nothing about where a line is drawn. The two attributions below are distinct
+    on purpose — identical text would make the sequence unobservable.
+    """
+
+    GOLDEN = ["pane 1040 — open question gate", "pane 1039 — open permission gate"]
+
+    def test_action_lines_follow_the_rendered_row_order(self):
+        attribution = {_sid(3): "pane 1039 — open permission gate",
+                       _sid(6): "pane 1040 — open question gate"}
+        rows, details = fb.build_rows(REGISTRY, GATES, STUCK, TITLES, AGES,
+                                      gate_attribution=attribution)
+        ordered = [details[row["session_id"]] for row in rows
+                   if row["session_id"] in details]
+        self.assertEqual(ordered, self.GOLDEN)
+
+
 class TestCollectSignalsPaneMap(unittest.TestCase):
     """`collect_signals()`'s fourth value is the pane MAP, never a bool.
 
