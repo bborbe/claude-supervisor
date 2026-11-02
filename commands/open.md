@@ -291,7 +291,7 @@ vault-cli --vault "<vault>" task set "<task>" phase planning
 
 ⚠️ **Approval is an admission, so the batch runs it last.** `approved_at` is what `approved-not-started.py` counts; approving before readiness admits rows the dispatch then holds, adding K per run to a queue that exists to be drained. This **reverses** the old rule (*"The pass runs before the readiness dispatch, never after"*) on the batch path only.
 
-⚠️ **Print one `approve <task>` line per approved row and one `not ready <task>` per row left unapproved** — the output is the only record that the ordering held. (`not ready`, not `held`: the footer's `held K` is for prerequisite-blocked rows.)
+⚠️ **Print one `approve <task>` line per approved row and one `not ready <task>` per row readiness left unapproved** — the output is the only record that the ordering held. ⚠️ **Only readiness-held rows get `not ready`**: a `⛔ HOLD` row and an answer-path-refused row are reported by their own skip line, and a JUMP/RESUME-bound row is excluded from this pass entirely, so printing `not ready` for any of them would double-report. (`not ready`, not `held`: the footer's `held K` is for prerequisite-blocked rows.)
 
 **Loop the eligible rows in the printed stable order**, delegating each to this command's own single-task path. Per row, invoke `/supervisor:open "<task>"` — with `--first-step "<gap bullets>"` only when the row opened below the readiness ladder's open threshold. Never reimplement jump / resume / spawn here; never pass a mode override to the fleet. ⚠️ **The per-row delegation IS the guard — no shortcut keeps it.** ⚠️ **The batch is paced by delegation, never by a counter of its own** (rule home: `docs/fleet-surface.md` § Spawn a worker item 5).
 
@@ -329,7 +329,7 @@ Then:
 
 Two gates run here, in this order. The first asks whether the row may be opened at all; the second asks whether its plan is good enough to hand to a worker. **A row that fails the first is never probed by the second** — auditing an unapproved row spends work on a decision the operator has not made.
 
-⚠️ **One deliberate exception: the `--flagged` batch's approve pass** (§ Step 0.6) runs readiness *before* the approval, so it does probe `phase: todo` rows — one readiness call per selected row, buying that a held row is never approved. ⚠️ **On the single-task path the probe is tolerated and Gate 1 is the enforcement.** The operator approves the row *before* invoking the command, so Step 0.6's dispatch normally sees a `planning` row; because its predicate does not read `phase`, a `todo` row that reaches it anyway is still probed — wasted audit work, and a real exception to the rule above, but no admission: Gate 1 refuses it, so nothing is approved or opened.
+⚠️ **One deliberate exception: the `--flagged` batch's approve pass** (§ Step 0.6) runs readiness *before* the approval, so it does probe `phase: todo` rows — one readiness call per selected row, buying that a held row is never approved. ⚠️ **The single-task path tolerates the same probe but is not a second exception** — the operator approves before invoking, and Gate 1 is the enforcement: its predicate does not read `phase`, so a `todo` row that reaches it is probed (wasted audit work), and Gate 1 then refuses it, so nothing is approved or opened.
 
 ### Gate 1 — approval (`phase: todo` refuses)
 

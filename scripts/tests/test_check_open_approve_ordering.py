@@ -88,6 +88,19 @@ class CheckOpenApproveOrderingTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("not scoped inside the approve paragraph", result.stderr)
 
+    def test_paragraph_outside_step_0_6_fails(self):
+        """Correct order but the wrong section must fail.
+
+        Step 0.5 runs before the selector is final and Step 1.5 runs after the dispatch, so
+        neither position reproduces approve-after-readiness. A guard that only compared
+        file positions would stay green while the mechanism broke.
+        """
+        text = f"## Step 0.5\n\n{READINESS}\n\n## Step 0.6\n\n{APPROVE}\n"
+        self.write("commands/open.md", text)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("outside Step 0.6", result.stderr)
+
     def test_duplicate_anchor_fails(self):
         """A second copy of an anchor must fail, not let first-match mask a reversal.
 

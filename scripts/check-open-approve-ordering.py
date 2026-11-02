@@ -55,6 +55,34 @@ def main() -> int:
             )
             return 1
 
+    # Both paragraphs must sit INSIDE Step 0.6. Ordering them correctly but placing one in
+    # a neighbouring step would leave this guard green while the mechanism breaks: Step 0.5
+    # runs before the selector is final and Step 1.5 runs after the dispatch, so neither
+    # position reproduces approve-after-readiness.
+    step_start = text.find("## Step 0.6")
+    if step_start < 0:
+        print(
+            f"open-approve-ordering FAILED: {TARGET} has no '## Step 0.6' heading, so the "
+            f"ordering has no section to be bounded to. A renamed heading must fail loudly "
+            f"rather than scan an unbounded file.",
+            file=sys.stderr,
+        )
+        return 1
+    step_end = text.find("\n## ", step_start + 1)
+    if step_end < 0:
+        step_end = len(text)
+
+    for name, pos in (("readiness", readiness_at), ("approve", approve_at)):
+        if not (step_start < pos < step_end):
+            print(
+                f"open-approve-ordering FAILED: the {name} paragraph sits at char {pos}, "
+                f"outside Step 0.6 ({step_start}..{step_end}). Correct order anywhere else "
+                f"in the file proves nothing — only inside Step 0.6 does the dispatch run "
+                f"before the approve pass on the same batch.",
+                file=sys.stderr,
+            )
+            return 1
+
     if readiness_at > approve_at:
         print(
             f"open-approve-ordering FAILED: in {TARGET} the approve pass sits at char "
