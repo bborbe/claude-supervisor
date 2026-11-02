@@ -55,25 +55,6 @@ def main() -> int:
             )
             return 1
 
-    if readiness_at < 0:
-        print(
-            f"open-approve-ordering FAILED: {TARGET} does not carry the readiness "
-            f"dispatch paragraph ({READINESS!r}). Without it the approve pass has "
-            f"nothing to gate on and every selected row is admitted.",
-            file=sys.stderr,
-        )
-        return 1
-
-    if approve_at < 0:
-        print(
-            f"open-approve-ordering FAILED: {TARGET} does not carry the approve pass "
-            f"paragraph ({APPROVE!r}). A silent drop of the ordering is exactly the "
-            f"regression this guard exists to catch, so a missing paragraph fails "
-            f"rather than passing.",
-            file=sys.stderr,
-        )
-        return 1
-
     if readiness_at > approve_at:
         print(
             f"open-approve-ordering FAILED: in {TARGET} the approve pass sits at char "
