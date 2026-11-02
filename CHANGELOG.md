@@ -8,9 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.228.0
+## Unreleased
 
 - fix: no router table can route a manager-proposal step — `scripts/check-manager-proposal-row.py` fails when any `commands/*.md` router row names `commands/steps/propose-manager.md` in its `File` cell, or runs `propose-managers.py --post` from its `Step`/`When` cells; wired into `make precommit` as `check-manager-proposal-row`. The row's removal (PR #542) was unguarded: `check-step-when.py` validates rows → step files only, so a step file with no row is never checked, and the inline shape is invisible to it because it skips rows naming no step file. Rows are read, never the file body, so a prose mention stays green. Tests: `scripts/tests/test_check_manager_proposal_row.py`.
+
+## v0.228.0
 
 - feat: goals and topics record their manager's session in `claude_session_id` only, retiring `manager_session_id`. The two resolve steps (`commands/steps/goal-resolve.md`, `commands/steps/topic-resolve.md`) now write `claude_session_id` — the field vault-ui's `sessionButtonHtml()` keys the Resume button on and the only one it reads, which is why every goal and topic that carried the retired key showed Start instead of Resume. Readers stay tolerant for one release and resolve `claude_session_id` **first**, the retired key second: the writer sets the surviving key without clearing the old one, so a re-armed legacy page carries both and reading the retired key first would hand back the stale id — `session-scope.py`, `crashed-managers.py`, `topic-keepalive.py`, `topic-spawn.py` and `worker-keepalive.py` all follow that order. `flagged-rows.py` is flipped in this release too: its `subject_liveness()` — which feeds `owner_live` — read the retired key first while its own row builder already read the surviving one, so the two disagreed on exactly the mixed page this writer creates; both now read `claude_session_id` first.
 
