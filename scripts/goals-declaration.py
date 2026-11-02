@@ -111,16 +111,23 @@ def _strip(value: str) -> str:
     return value
 
 
-def _opens_quote(buffer: list[str]) -> bool:
-    """Whether a quote character here starts a quoted item rather than being literal.
+def _opens_quote(prefix: str) -> bool:
+    """Whether a quote character here opens a quoted value rather than being literal.
 
     ⚠️ **Only an item-initial quote opens.** Toggling on every `'` reads the apostrophe in
     `The Manager Loop's Coverage Step` as an opening quote, swallows the comma after it,
     and merges two names into one that matches no page — the same silent drop this module
     exists to remove. An apostrophe is punctuation inside a name; a quote at the start of
     an item is YAML quoting its value.
+
+    ⚠️ **"Item-initial" has to survive the structure wrapped around the item**, or the
+    rule fails in both directions at once. A block item reaches this with `    - ` in front
+    of it and a flow-list item with `[` in front, and a prefix test that demanded literal
+    blankness would then refuse to open the quote — so a `#` inside the quoted name reads
+    as a comment and truncates it. List markers and the flow list's opening bracket are
+    structure, not content, and are stripped before the blankness test.
     """
-    return not "".join(buffer).strip()
+    return not prefix.strip().lstrip("-").strip().strip("[").strip()
 
 
 def _strip_comment(value: str) -> str:
@@ -131,7 +138,10 @@ def _strip_comment(value: str) -> str:
     normalises the whole line to `'[[X]]' # note`, which matches no page, and the task
     leaves the tracked set. That is the silent-drop class reintroduced by the unification.
     YAML requires whitespace before `#` for it to begin a comment, which is what keeps a
-    `#` inside a name or inside a wikilink heading intact.
+    `#` inside a name intact. ⚠️ **Not the same as keeping a wikilink's heading**: a later
+    stage splits `[[Page#Heading]]` to `Page`, which is Obsidian's own reading of the link
+    and is deliberate. What this function must not do is truncate *before* the link closes
+    — that yields `'[[Name`, a fragment matching no page, which is the silent drop.
     """
     quote: str | None = None
     for index, char in enumerate(value):
@@ -139,7 +149,7 @@ def _strip_comment(value: str) -> str:
             if char == quote:
                 quote = None
             continue
-        if char in _QUOTES and not value[:index].strip():
+        if char in _QUOTES and _opens_quote(value[:index]):
             quote = char
             continue
         if char == "#" and index > 0 and value[index - 1] in " \t":
@@ -175,7 +185,7 @@ def _split_outside_quotes(text: str) -> list[str]:
             buffer.append(char)
             if char == quote:
                 quote = None
-        elif char in _QUOTES and _opens_quote(buffer):
+        elif char in _QUOTES and _opens_quote("".join(buffer)):
             quote = char
             buffer.append(char)
         elif char == ",":
@@ -271,6 +281,9 @@ def goal_names(frontmatter: str) -> list[str]:
     out: list[str] = []
     for name in names:
         name = name.replace("''", "'")
-        if name and name not in out:
+        # ⚠️ An item can itself spell emptiness — `goals:` then `    - '[]'` is a live
+        # marker in the vault, and returning `[]` as a NAME produces a phantom that
+        # matches no page. The empty test applies per item, not only to the whole value.
+        if name and name.lower() not in _EMPTY and name not in out:
             out.append(name)
     return out

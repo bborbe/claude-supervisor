@@ -3100,6 +3100,22 @@ class GoalsDeclarationShapes(Base):
             with self.subTest(declaration=goals_fm.strip()):
                 self.assertEqual(self.page("Commented", goals_fm)["goals"], want)
 
+    def test_a_hash_inside_a_quoted_wikilink_is_not_read_as_a_comment(self):
+        """The comment scan must open the quote past the list marker and the flow bracket.
+
+        A prefix test demanding literal blankness refuses to open the quote after `    - `
+        or `[`, so the space-preceded `#` inside the name reads as a comment and the line
+        truncates before the link closes — `'[[Name`, a fragment matching no page. The
+        expected value is `Name` rather than `Name # Heading` because the wikilink's
+        heading is split off deliberately, as Obsidian reads `[[Page#Heading]]`.
+        """
+        for goals_fm, want in (
+            ("goals:\n    - '[[Name # With Hash]]'\n", ["Name"]),
+            ("goals: ['[[Name # Hash]]', 'Other']\n", ["Name", "Other"]),
+        ):
+            with self.subTest(declaration=goals_fm.strip()):
+                self.assertEqual(self.page("Hash Link", goals_fm)["goals"], want)
+
     def test_a_comment_on_an_empty_declaration_is_still_empty(self):
         """`goals: [] # note` names no goal, not a goal called `[] # note`."""
         self.assertEqual(
@@ -3119,7 +3135,16 @@ class GoalsDeclarationShapes(Base):
         `goals: ~` is included because YAML's null is case-insensitive — a reader that
         matches `null` only in lower case would read `goals: NULL` as a goal named `NULL`.
         """
-        for goals_fm in ("goals: []\n", "goals:\n", "goals: null\n", "goals: ~\n", "goals: NULL\n"):
+        for goals_fm in (
+            "goals: []\n",
+            "goals:\n",
+            "goals: null\n",
+            "goals: ~\n",
+            "goals: NULL\n",
+            # A live marker in the vault: emptiness spelled as a list ITEM rather than as
+            # the value. Returning `[]` as a name would be a phantom matching no page.
+            "goals:\n    - '[]'\n",
+        ):
             with self.subTest(declaration=goals_fm.strip()):
                 self.assertEqual(self.page("Empty Task", goals_fm)["goals"], [])
 
