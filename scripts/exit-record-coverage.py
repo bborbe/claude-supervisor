@@ -42,6 +42,23 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 PREFIX_FLOOR = 20
 
 
+#: ANSI escape sequences and control characters, removed before a name reaches the
+#: operator's terminal. `fleet-board.py`'s `cell()` folds whitespace for its TAB-separated
+#: `--mismatches` path; that is not enough here — a BEL or an SGR sequence survives a
+#: whitespace fold and executes in the terminal it is printed to.
+_CONTROL = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b.|[\x00-\x1f\x7f-\x9f]")
+
+
+def printable(text):
+    """`text` safe to print: no ANSI escape sequences, no control characters.
+
+    Deliberately stricter than `fleet-board.py`'s `cell()`, which is
+    `" ".join(str(text).split())` and strips neither — it only folds whitespace, so a
+    tab-only fixture would pass on the unmodified code and prove nothing.
+    """
+    return _CONTROL.sub("", text or "")
+
+
 def normalize(text):
     """Casefolded name without leading glyphs (`✳`, `⚙`, spinner frames) or doubled spaces."""
     text = unicodedata.normalize("NFKC", text or "").strip()
@@ -112,7 +129,7 @@ def coverage(managers, panes, records, alive):
             "name": name,
             "pane": str(pane),
             "line": (
-                f"⚠️ UNRECORDED: {name} — pane {pane}, session {sid[:8]} runs without the exit "
+                f"⚠️ UNRECORDED: {printable(name)} — pane {pane}, session {sid[:8]} runs without the exit "
                 "recorder (no live `kind=spawn` line); its death would leave no record"
             ),
         })
@@ -124,7 +141,7 @@ def unknown_line(result):
     n = len(result["unknown"])
     if not n:
         return None
-    names = ", ".join(u["name"] or u["session_id"][:8] for u in result["unknown"])
+    names = ", ".join(printable(u["name"]) or u["session_id"][:8] for u in result["unknown"])
     return f"⚠️ UNRECORDED unknown: {n} manager pane(s) unresolvable from `wezterm cli list` — {names}"
 
 
@@ -142,8 +159,13 @@ def _record_module():
     return _RECORD
 
 
-def read_records(directory=None):
+def read_records(directory=None, panes=None):
     """`{pane_id: [lines]}` from the store. Absent store reads as `{}`.
+
+    `panes` narrows the read to those pane ids — the ones that actually resolved to a
+    manager. `None` reads the whole store, which is what a caller with no resolved set
+    still gets; the board always has one, and scanning every file per render is the
+    cost this argument removes (443 spawn lines measured 2026-11-02).
 
     A torn write by the trap can leave invalid UTF-8, so bytes are replaced rather than
     raised on — one damaged record must not blind the check to every other pane.
@@ -154,12 +176,16 @@ def read_records(directory=None):
         names = os.listdir(directory)
     except FileNotFoundError:
         return out
+    wanted = None if panes is None else {str(p) for p in panes}
     for name in names:
         if not (name.startswith("pane-") and name.endswith(".log")):
             continue
+        pane = name[len("pane-"):-len(".log")]
+        if wanted is not None and pane not in wanted:
+            continue
         try:
             with open(os.path.join(directory, name), encoding="utf-8", errors="replace") as handle:
-                out[name[len("pane-"):-len(".log")]] = [ln.rstrip("\n") for ln in handle if ln.strip()]
+                out[pane] = [ln.rstrip("\n") for ln in handle if ln.strip()]
         except OSError:
             continue
     return out
@@ -184,7 +210,13 @@ def live_coverage(managers, pane_map):
     if pane_map is None:
         return all_unknown(managers)
     panes = {pid: (rec.get("title", "") if isinstance(rec, dict) else "") for pid, rec in pane_map.items()}
-    return coverage(managers, panes, read_records(), _record_module().alive)
+    # Resolve first, then read only the panes that resolved: `coverage()` looks up a
+    # record by the pane it resolved, so a file for any other pane can never be
+    # consulted. Resolving here costs one extra pass over the pane titles (tens of
+    # panes against a handful of managers) and saves opening every file in the store.
+    resolved = {resolve_pane(name, panes) for name in managers.values()}
+    return coverage(managers, panes, read_records(panes={p for p in resolved if p is not None}),
+                    _record_module().alive)
 
 
 def main(argv=None):

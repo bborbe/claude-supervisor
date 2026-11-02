@@ -767,10 +767,13 @@ def collect_signals(stuck_min):
     and the stuck predicate are the same ones the operator's `Needs you` section
     is built from — one definition, two renderings.
 
-    The fourth return value is whether the pane read succeeded. A failed read is
-    `None`, which `is_live()` keeps every row on — the board degrades to the
-    registry's own verdict rather than rendering a false empty — but it must say
-    so, or a board whose pane filter never ran looks identical to one that ran.
+    The fourth return value is the pane map itself — `{pane_id: record}`, or `None`
+    when the read failed. A failed read is `None`, which `is_live()` keeps every row
+    on — the board degrades to the registry's own verdict rather than rendering a
+    false empty — but it must say so, or a board whose pane filter never ran looks
+    identical to one that ran. It is the MAP and not a bool so the exit-record check
+    downstream can reuse this one read instead of spawning a second `wezterm cli
+    list` (up to its 5 s timeout) on every render.
 
     The fifth is the Rendered-panels session-id set — the `operator-keystroke`
     input. It is composed here rather than in `build_rows()` because it needs
@@ -831,7 +834,7 @@ def collect_signals(stuck_min):
         for r in wnm.rendered_panels(needs, open_panes=open_panes,
                                      task_status=wnm.task_status_from_closer)
     }
-    return (gate_ids, stuck_ids, gate_attribution(gates, gate_ids), pmap is not None,
+    return (gate_ids, stuck_ids, gate_attribution(gates, gate_ids), pmap,
             panel_ids, wait_ids)
 
 
@@ -1306,8 +1309,8 @@ def main():
         print("fleet-board: session registry unreadable — refusing to render a table", file=sys.stderr)
         return 1
 
-    gate_ids, stuck_ids, attribution, panes_read, panel_ids, wait_ids = collect_signals(a.stuck_min)
-    if not panes_read:
+    gate_ids, stuck_ids, attribution, pane_map, panel_ids, wait_ids = collect_signals(a.stuck_min)
+    if pane_map is None:
         print(
             "fleet-board: ⚠️ `wezterm cli list` unreadable — pane data withheld. Every row is kept "
             "on the session registry's verdict alone: a pane that cannot be checked is UNKNOWN, "
@@ -1382,7 +1385,7 @@ def main():
     # reads `unknown`, which is honest, rather than the table not rendering at all.
     managers = managers_of(registry, grouping)
     try:
-        exit_record = erc.live_coverage(managers, wnm.wezterm_panes())
+        exit_record = erc.live_coverage(managers, pane_map)
     except Exception as exc:  # noqa: BLE001 — degrade to unknown, never crash the board
         print(f"fleet-board: exit-record check failed: {exc}", file=sys.stderr)
         exit_record = erc.all_unknown(managers)

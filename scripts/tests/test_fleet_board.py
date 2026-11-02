@@ -32,8 +32,12 @@ which records a real run against the real registry.
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
+import io
+import json
 import os
+import sys
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1064,6 +1068,167 @@ class TestSessionTaskTitle(unittest.TestCase):
         reasons = {fb.TASK_TITLE_NO_MANAGER, fb.TASK_TITLE_NO_TASK_FILE,
                    fb.TASK_TITLE_NO_BINDING}
         self.assertEqual(len(reasons), 3, "one wording per distinct absence, never shared")
+
+
+class _EmptyIndex:
+    """A `VaultIndex` with no pages — enough for `build_grouping` to run offline.
+
+    `build_grouping` and `manager_subject` reach for `.topics`, `.goals`,
+    `.subject()`, `.has_task_file()`, `.goals_of()` and `.managed_by_of()`; every
+    one of them answers empty here, so the grouping classifies the fixture rows and
+    touches no vault.
+    """
+
+    topics = {}
+    goals = {}
+
+    def subject(self, name):
+        return None
+
+    def has_task_file(self, name):
+        return False
+
+    def goals_of(self, title):
+        return ()
+
+    def managed_by_of(self, title):
+        return None
+
+
+class TestExitRecordRelay(unittest.TestCase):
+    """The board↔coverage wiring — the three things a refactor breaks silently.
+
+    `fleet-board.py` relays `exit-record-coverage`'s answer in three places: the
+    `--json` document, the default `{header, rows, widths}` render (where it must
+    NOT appear), and stderr. Until this class nothing drove `main()` at all, so
+    dropping the doc key, widening the render whitelist, or deleting the stderr
+    relay left every other test green. Each test below pins one of them by name.
+
+    `erc.live_coverage` and the registry are stubbed; the remaining live reads are
+    stubbed too, because `main()` reads them before it ever reaches the coverage
+    call and a test that left them live would be neither hermetic nor fast.
+    """
+
+    SID = _sid(1)
+    #: The pane map `collect_signals()` now RETURNS — the object the coverage call must
+    #: reuse rather than re-reading `wezterm cli list` for.
+    PANE_MAP = {"7": {"title": "✳ Fleet Manager"}}
+    LINE = ("⚠️ UNRECORDED: Fleet Manager — pane 7, session aaaabbbb runs without the "
+            "exit recorder (no live `kind=spawn` line); its death would leave no record")
+    UNKNOWN = "⚠️ UNRECORDED unknown: 1 manager pane(s) unresolvable from `wezterm cli list` — X Manager"
+
+    def _result(self):
+        return {
+            "unrecorded": [{"session_id": self.SID, "name": "Fleet Manager",
+                            "pane": "7", "line": self.LINE}],
+            "unknown": [{"session_id": _sid(2), "name": "X Manager"}],
+        }
+
+    def _run(self, argv, result):
+        """Drive `main()` with every live read stubbed. Returns (rc, stdout, stderr)."""
+        registry = {self.SID: {"status": "idle", "name": "Fleet Manager", "cwd": CWD}}
+        heartbeat = type("_LW", (), {
+            "read_live": staticmethod(lambda directory: []),
+            "heartbeat_dir": staticmethod(lambda: "/nonexistent/heartbeat"),
+        })
+        saved = {
+            "registry_records": fb.registry_records,
+            "collect_signals": fb.collect_signals,
+            "transcript_fresh_ids": fb.transcript_fresh_ids,
+            "vault_index": fb.vault_index,
+            "colour_census": fb.colour_census,
+            "loop_slugs": fb.loop_slugs,
+            "_load": fb._load,
+        }
+        saved_age = fb.wnm.session_transcript_age
+        saved_panes = fb.wnm.wezterm_panes
+        saved_bti = fb.fs.build_task_index
+        saved_live = fb.erc.live_coverage
+        saved_argv = sys.argv
+        try:
+            fb.registry_records = lambda sessions_dir=None: registry
+            fb.collect_signals = lambda stuck_min: (set(), set(), {}, self.PANE_MAP, set(), set())
+            fb.transcript_fresh_ids = lambda window=None: set()
+            fb.vault_index = lambda: _EmptyIndex()
+            fb.colour_census = lambda: {}
+            fb.loop_slugs = lambda state_dir=None: set()
+            fb._load = lambda name, filename: heartbeat
+            fb.wnm.session_transcript_age = lambda sid: 60
+            # `main()` evaluates `wnm.wezterm_panes()` as an ARGUMENT at the coverage
+            # call, so patching `live_coverage` alone would still spawn `wezterm`.
+            # Counting the call is the whole point of the SC5 assertion below.
+            self.wezterm_calls = 0
+            self.received_pane_map = None
+
+            def _panes(timeout=None):
+                self.wezterm_calls += 1
+                return {}
+
+            def _coverage(managers, pane_map):
+                self.received_pane_map = pane_map
+                return result
+
+            fb.wnm.wezterm_panes = _panes
+            fb.fs.build_task_index = lambda: ({}, {})
+            fb.erc.live_coverage = _coverage
+            sys.argv = ["fleet-board.py"] + argv
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = fb.main()
+        finally:
+            for name, value in saved.items():
+                setattr(fb, name, value)
+            fb.wnm.session_transcript_age = saved_age
+            fb.wnm.wezterm_panes = saved_panes
+            fb.fs.build_task_index = saved_bti
+            fb.erc.live_coverage = saved_live
+            sys.argv = saved_argv
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_exit_record_rides_the_json_document(self):
+        """SC1(a) — `--json` carries `exit_record`. Fails if `:1419` is dropped."""
+        rc, out, _ = self._run(["--json"], self._result())
+        self.assertEqual(rc, 0)
+        doc = json.loads(out)
+        self.assertIn("exit_record", doc)
+        self.assertEqual([r["pane"] for r in doc["exit_record"]["unrecorded"]], ["7"])
+
+    def test_exit_record_is_absent_from_the_default_render(self):
+        """SC1(b) — the default render is a whitelist; `exit_record` must not leak in.
+
+        Fails if `:1421`'s `{k: doc[k] for k in ("header", "rows", "widths")}` is
+        widened, or if the board ever switches to dumping `doc` whole.
+        """
+        rc, out, _ = self._run([], self._result())
+        self.assertEqual(rc, 0)
+        doc = json.loads(out)
+        self.assertNotIn("exit_record", doc)
+        self.assertEqual(sorted(doc), ["header", "rows", "widths"])
+
+    def test_the_coverage_call_reuses_the_pane_map_collect_signals_read(self):
+        """SC5 — one `wezterm cli list` per render, and the coverage check gets THAT map.
+
+        Before this, `collect_signals()` returned only `pmap is not None` and `main()`
+        re-spawned `wezterm cli list` at the coverage call. Two assertions, because
+        either half can regress alone: zero calls means no second read, and identity
+        means the reused object is the one already read rather than a fresh `{}`.
+        """
+        self._run(["--json"], self._result())
+        self.assertEqual(self.wezterm_calls, 0,
+                         "a second `wezterm cli list` per render is the cost SC5 removes")
+        self.assertIs(self.received_pane_map, self.PANE_MAP,
+                      "the coverage check must receive the map collect_signals() already read")
+
+    def test_exit_record_lines_reach_stderr(self):
+        """SC1(c) — the UNRECORDED and unknown lines are relayed to stderr.
+
+        Fails if `:1422-1426` is deleted: the doc would still carry the key, so
+        only this assertion notices that the operator's warning never printed.
+        """
+        _, out, err = self._run([], self._result())
+        self.assertIn(self.LINE, err)
+        self.assertIn(self.UNKNOWN, err)
+        self.assertNotIn(self.LINE, out, "the operator's warning belongs on stderr, not the doc")
 
 
 if __name__ == "__main__":
