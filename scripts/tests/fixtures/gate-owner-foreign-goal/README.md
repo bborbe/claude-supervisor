@@ -69,9 +69,12 @@ After (this tree):
 
 ```
 feed stdout:  410
-gates: 6  emit: 1  dropped(peer-manager): 0  dropped(peer-manager-own): 0  dropped(claimed): 0
-          excluded(foreign-goal): 3  excluded(owner-unknown): 2
+gates: 6  emit: 1  dropped(peer-manager): 0  dropped(peer-manager-own): 0  dropped(claimed): 0  excluded(foreign-goal): 3  excluded(owner-unknown): 2  excluded(role-human): 0
 ```
+
+`excluded(role-human)` is the third exclusion family and reads `0` here: none of these six
+sessions is the operator's own workspace. It is present in the line either way, because a
+family that appears only when it matches is indistinguishable from one that is broken.
 
 and `--explain --json` still carries **all six** rows — the five as `exclude` with
 `foreign-goal:<goal>` / `owner-unknown`, the control as `emit own-worker`. A pane missing from
