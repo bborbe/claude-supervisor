@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.230.1
 - fix: **the changelog fold is now caught by a pre-push hook, and the CI precheck warns instead of failing.** A blocking CI check must fail the run, and a failed run mails the operator; this repo cuts a release on every merge, so a branch folds within minutes of going stale and the precheck fired on nearly every push — measured 2026-11-02: 15 genuine folds and 15 failure mails in 29 h, every verdict correct. `scripts/hooks/pre-push` runs the same guard against `origin/master` and blocks the push; `make hooks` installs it via `core.hooksPath`, once per clone, covering every worktree of that clone. ⚠️ **It hangs off pre-push and not off `precommit`** — the guard reads the CHANGELOG from a commit (`git show <ref>:CHANGELOG.md`), so at `precommit` time it evaluates the previous commit, which is the one that cannot fold; only after the commit does `HEAD` carry the bullet under test. The script is read from the coding marketplace clone, so `bborbe/coding` keeps the single copy of the logic; a missing guard fails the hook rather than silently skipping, an unreachable `origin/master` is announced before checking against the last known copy, and a push of `master` itself is skipped. The pull-request workflow keeps the prediction visible as an `::warning` annotation, without a mail
 
 ## v0.230.0
