@@ -1234,26 +1234,38 @@ class TestExitRecordRelay(unittest.TestCase):
 
 
 class TestBelowBoxActionLineOrder(unittest.TestCase):
-    """The below-box action lines keep their position relative to the drawn rows.
+    """The below-box action lines keep their position relative to the DRAWN rows.
 
-    The order asserted here is `details[sid]` collected by iterating the RENDERED
-    rows. Asserting on `list(details)` would pin the wrong thing: that dict is filled
-    inside `build_rows()`'s `for sid, rec in registry.items()` loop, and
-    `rows.sort(...)` runs afterwards, so its insertion order is registry order and
-    says nothing about where a line is drawn. The two attributions below are distinct
-    on purpose — identical text would make the sequence unobservable.
+    Three orderings are easy to confuse here, and only one is the drawn one:
+
+    1. `list(details)` — insertion order, filled inside `build_rows()`'s
+       `for sid, rec in registry.items()` loop. Says nothing about drawing.
+    2. `build_rows()`'s flat `rows` — the bucket/label sort. **Not** what the board
+       draws; a test pinned here passes while the drawn order changes.
+    3. `build_tree()`'s `ordered` — the emission order, which re-sorts each sibling
+       group by `(role != manager, _age_key, label)` and so diverges from the flat
+       sort whenever ages differ.
+
+    This asserts (3). The fixture's ages are set to 300 s and 5 s precisely so the
+    flat and drawn orders disagree — with equal ages the test would pass against the
+    wrong ordering and prove nothing. The golden carries a `None` for every row with
+    no action line, so the *absence* of a line for the four ungated rows is pinned
+    too, not silently filtered away.
     """
 
-    GOLDEN = ["pane 1040 — open question gate", "pane 1039 — open permission gate"]
+    GOLDEN = ["pane 1039 — open permission gate", "pane 1040 — open question gate",
+              None, None, None, None]
 
-    def test_action_lines_follow_the_rendered_row_order(self):
+    def test_action_lines_follow_the_drawn_row_order(self):
         attribution = {_sid(3): "pane 1039 — open permission gate",
                        _sid(6): "pane 1040 — open question gate"}
-        rows, details = fb.build_rows(REGISTRY, GATES, STUCK, TITLES, AGES,
+        ages = dict(AGES)
+        ages[_sid(3)] = 300
+        ages[_sid(6)] = 5
+        rows, details = fb.build_rows(REGISTRY, GATES, STUCK, TITLES, ages,
                                       gate_attribution=attribution)
-        ordered = [details[row["session_id"]] for row in rows
-                   if row["session_id"] in details]
-        self.assertEqual(ordered, self.GOLDEN)
+        _, ordered, _ = fb.build_tree(rows, fb.Grouping(None, {}, {}, {}))
+        self.assertEqual([details.get(sid) for sid in ordered], self.GOLDEN)
 
 
 class TestCollectSignalsPaneMap(unittest.TestCase):

@@ -10,7 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- test: pin the below-box action-line order against the rendered rows
+- test: pin the below-box action-line order against the drawn (tree) rows
 
 ## v0.233.1
 
