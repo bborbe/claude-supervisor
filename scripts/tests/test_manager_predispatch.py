@@ -2957,6 +2957,83 @@ class TestBlockedVerdictsMode(Base):
         self.assertEqual(out.strip(), "")
 
 
+class GoalsDeclarationShapes(Base):
+    """The `goals:` read, against every shape the vault writes.
+
+    The defect (measured 2026-11-02 on the live `private-personal` vault): a `goals:`
+    block item written as a bare list entry carries no `[[...]]`, so the wikilink-only
+    extractor returned `[]` for it. `resolve_tracked` admits a task only when its goals
+    intersect the member set, so that task left the tracked set entirely — no row, no
+    warning, no failed assertion. The caller's scan read 61 names against the gate's 60,
+    differing by exactly the one task in this shape.
+
+    ⚠️ The four shapes are asserted through `read_task`, the path `resolve_tracked`
+    actually walks — not through the normaliser alone. A test of the helper would pass
+    against a `read_task` still wired to the old extractor, which is the wiring this
+    defect lived in.
+    """
+
+    SHAPES = {
+        "wikilink list": "goals:\n    - '[[AGoal]]'\n",
+        "plain scalar": "goals: AGoal\n",
+        "nested list-of-list": "goals:\n    - - AGoal\n",
+        "plain-list item": "goals:\n    - AGoal\n",
+    }
+
+    def page(self, name, goals_fm):
+        """Write a task page declaring `goals_fm`, and return its parsed frontmatter dict."""
+        self.write(
+            "25 Tasks/%s.md" % name,
+            "---\nstatus: in_progress\nphase: execution\n%s---\nTags: [[Task]]\n"
+            % goals_fm,
+        )
+        return self.m.read_task(os.path.join(self.vault, "25 Tasks", "%s.md" % name))
+
+    def test_every_shape_reads_as_the_same_one_name(self):
+        for label, goals_fm in self.SHAPES.items():
+            with self.subTest(shape=label):
+                self.assertEqual(
+                    self.page("Shape Task", goals_fm)["goals"],
+                    ["AGoal"],
+                    "%s did not read as one goal name" % label,
+                )
+
+    def test_a_plain_list_item_puts_the_task_in_the_tracked_set(self):
+        """SC1: the row this defect dropped, restored to the tracked set."""
+        self.page("Bare Item", self.SHAPES["plain-list item"])
+        names = [t["name"] for t in self.m.resolve_tracked(self.vault, ["AGoal"])]
+        self.assertIn(
+            "Bare Item", names, "a bare `- Name` goals item left the task untracked"
+        )
+
+    def test_the_reader_and_reset_py_agree_on_every_shape(self):
+        """SC2: the gate's extractor and the caller's scan are ONE implementation.
+
+        `reset.py` re-discovers the tracked set from disk — the caller's side of the
+        `--compare-tracked` comparison. Before this fix it handled all four shapes while
+        the gate handled two, and each looked self-consistent on its own.
+        """
+        spec = importlib.util.spec_from_file_location(
+            "reset_under_test", os.path.join(os.path.dirname(_HERE), "reset.py")
+        )
+        reset = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reset)
+        for label, goals_fm in self.SHAPES.items():
+            with self.subTest(shape=label):
+                page = "---\n%s---\nTags: [[Task]]\n" % goals_fm
+                self.assertEqual(
+                    set(self.page("Shape Task", goals_fm)["goals"]),
+                    reset.goals_of(page),
+                    "%s disagrees between read_task and reset.goals_of" % label,
+                )
+
+    def test_an_empty_declaration_is_still_empty(self):
+        """The control: every empty spelling names no goal, so the fix cannot over-read."""
+        for goals_fm in ("goals: []\n", "goals:\n", "goals: null\n"):
+            with self.subTest(declaration=goals_fm.strip()):
+                self.assertEqual(self.page("Empty Task", goals_fm)["goals"], [])
+
+
 class DeclaredMembersBoundary(unittest.TestCase):
     """`## Goals` membership must not be truncated by a `###`.
 

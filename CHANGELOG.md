@@ -8,6 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: the `goals:` declaration read no longer drops a shape. `scripts/manager-predispatch.py` read `goals:` through a `[[...]]`-only extractor, so a task declaring its goal as a bare block item (`goals:` then `    - Name`, no brackets) — or as a plain or nested scalar — contributed nothing to `resolve_tracked` and silently left the tracked set: no row, no warning, no failing assertion. Measured 2026-11-02 on the live `private-personal` vault, the caller's scan read 61 names against the gate's 60, differing by exactly the one task in the bare-list shape. The normaliser now lives once in the new `scripts/goals-declaration.py`, shared by `manager-predispatch.py` and `reset.py`, which had disagreed while each looked self-consistent on its own. `blocked_by` deliberately keeps its existing reader — its "declares a blocker that did not parse as a name" branch is a different contract.
+- fix: `manager-coverage-gate.py --changed` segments its value against the known owner names rather than splitting on commas first. A task name containing a comma — *"Digest Watcher Judges File Arrival, So a Late-Landing Digest Trips a False Report on a Timely Round"* — was shattered into two fragments that matched no owner, so `resolve` returned `None` and the gate failed open to every owner: measured on a live 61-owner set, a one-owner change dispatched all 61 at full cost. A comma inside a name is now one name, and a name the set cannot place still fails open whole-set, unchanged.
+
 ## v0.233.0
 
 - feat: `attention-ask.py` sends a bearer token when `$ATTENTION_STORE_TOKEN` is set, for stores that require authentication. Unset — the default — keeps the existing unauthenticated behaviour unchanged. Without this, posting to a token-gated store fails with a 401 that reads as "the card was never posted", which is how an approval collected on one store and read from another goes unnoticed. Scope is deliberately `attention-ask.py` only: the other scripts that read `ATTENTION_STORE_URL` (including `attention-answer.py`) are **not** covered, so against an auth-enforcing store this authenticates the post and nothing else.

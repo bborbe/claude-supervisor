@@ -177,6 +177,50 @@ class CoverageGateTest(unittest.TestCase):
         self.assertEqual(rows, [owner], "a multi-word name is one name, not many")
         self.assertEqual(rc, 10)
 
+    def test_a_comma_bearing_name_resolves_as_one_name(self):
+        """SC3: a comma INSIDE a task name is not a separator.
+
+        Regression: `split_names` split on every comma, so this name became two fragments,
+        neither matched an owner, `resolve` returned None and the gate failed open to the
+        whole set. Measured 2026-11-02 on the live 61-owner set: a one-owner change
+        dispatched all 61 at full cost, with every fail-open assertion still passing.
+
+        ⚠️ The fixture holds FOUR owners and asserts ONE row, so the assertion cannot be
+        satisfied by a build that emits nothing — the collapse is the claim.
+        """
+        name = (
+            "Digest Watcher Judges File Arrival, So a Late-Landing Digest Trips a "
+            "False Report on a Timely Round"
+        )
+        owner = f"/vault/25 Tasks/{name}.md"
+        tracked = os.path.join(self._tmp.name, "comma.txt")
+        with open(tracked, "w", encoding="utf-8") as handle:
+            handle.write(owner + "\n")
+            for other in TASKS:
+                handle.write(other + "\n")
+            handle.write(SUBJECT + "\n")
+        rc, rows, _ = run("--tracked", tracked, "--delta", "change", "--changed", name)
+        self.assertEqual(rows, [owner], "a comma inside a name is not a separator")
+        self.assertEqual(rc, 10)
+
+    def test_a_comma_bearing_name_leaves_no_fragment_on_stdout(self):
+        """The negative evidence: the dispatch list names the owner, never its halves."""
+        name = (
+            "Digest Watcher Judges File Arrival, So a Late-Landing Digest Trips a "
+            "False Report on a Timely Round"
+        )
+        owner = f"/vault/25 Tasks/{name}.md"
+        tracked = os.path.join(self._tmp.name, "comma-neg.txt")
+        with open(tracked, "w", encoding="utf-8") as handle:
+            handle.write(owner + "\n")
+            handle.write(SUBJECT + "\n")
+        rc, rows, _ = run("--tracked", tracked, "--delta", "change", "--changed", name)
+        self.assertEqual(rows, [owner])
+        self.assertNotIn("Digest Watcher Judges File Arrival", rows)
+        self.assertNotIn(
+            "So a Late-Landing Digest Trips a False Report on a Timely Round", rows
+        )
+
     def test_changed_names_match_a_full_path_too(self):
         rc, rows, _ = run(
             "--tracked", self.tracked, "--delta", "change", "--changed", TASKS[0],
