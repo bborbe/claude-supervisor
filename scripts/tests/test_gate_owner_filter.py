@@ -1791,7 +1791,10 @@ class RoleHumanExclusion(unittest.TestCase):
         MGR: {"session_id": MGR, "role": "manager"},
         "nobody": {"session_id": "nobody"},
     }
-    LIVE = {HUMAN, AGENT, MGR, ME}
+    # `other-manager` is LIVE so the peer-manager test exercises the `DROP` path rather
+    # than the dead-manager one: a spawner absent from LIVE emits, which would make the
+    # case pass for the wrong reason.
+    LIVE = {HUMAN, AGENT, MGR, ME, "other-manager"}
 
     def call(self, session_id, spawner, ledger=None, live=None):
         return gf.verdict(
@@ -1809,6 +1812,21 @@ class RoleHumanExclusion(unittest.TestCase):
     def test_a_human_row_with_no_spawner_is_excluded_too(self):
         """The operator-started half of the population: no spawner, still not routable."""
         self.assertEqual(self.call(self.HUMAN, None), (gf.EXCLUDE, "role-human"))
+
+    def test_a_human_row_spawned_by_another_live_manager_is_excluded_too(self):
+        """The match is deliberately NOT scoped to this watcher's own spawns.
+
+        `role` is a global ledger fact, so a peer manager's human row is excluded as well —
+        and that case is the one where the spawn edge would otherwise return a `DROP`
+        (`peer-manager`), so it pins that the role rule outranks `spawner_verdict` and not
+        only the `own-worker` branch above it.
+        """
+        # The premise, asserted so the case cannot pass for the wrong reason: without the
+        # role rule this spawn edge resolves to a DROP, so the exclusion is what changes it.
+        self.assertEqual(gf.spawner_verdict("other-manager", self.LEDGER, self.LIVE),
+                         (gf.DROP, "peer-manager"))
+        self.assertEqual(self.call(self.HUMAN, "other-manager"),
+                         (gf.EXCLUDE, "role-human"))
 
     def test_the_exclusion_outranks_the_scope_block(self):
         """The role names the row better than whichever goal page happens to claim it."""
