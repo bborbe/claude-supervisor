@@ -1,5 +1,5 @@
 ---
-manager_session_id: 49b471f1-a8a6-48b0-b2b2-14b9cb2437e3
+claude_session_id: 49b471f1-a8a6-48b0-b2b2-14b9cb2437e3
 page_type: goal
 status: in_progress
 ---

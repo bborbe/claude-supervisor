@@ -963,10 +963,10 @@ evidence of **who**, never of **alive**.
 stamp of § Session stamps, even though it is the same field: on a *task* page it names the
 session working that task, and the multiplicity rule above governs it there; on a *goal or
 topic* page it names the manager serving that subject, it is overwritten whenever a new
-manager arms it, and no multiplicity rule applies — one page, one manager. The retired
-`manager_session_id` was a second field carrying the same manager id; it is read only as a
-fallback for a page the new writer has not touched yet, and every reader resolves
-`claude_session_id` first so a mixed page cannot resolve to the stale value. It is
+manager arms it, and no multiplicity rule applies — one page, one manager. A retired
+field used to carry the same manager id; it was read as a fallback
+while pages were being migrated, and it is gone now — both vaults are migrated, nothing
+writes it, and no reader resolves it. It is
 **not** the chain in `docs/subject-resolution.md`, which resolves a different question — which
 *subject* a session is serving — and is unchanged by this section; the two compose, and neither
 is a fallback for the other. And a missing `managed_by` is **not** an error: the task's own

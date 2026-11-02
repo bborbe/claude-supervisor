@@ -38,7 +38,7 @@ page_type: goal
 status: in_progress
 phase: {phase}
 priority: {priority}
-manager_session_id: {sid}
+claude_session_id: {sid}
 flag: {flag}
 flag_set_by: {setter}
 ---
@@ -514,7 +514,7 @@ class FleetGoalManagersTest(unittest.TestCase):
             vault = pathlib.Path(tmp)
             (vault / "24 Goals").mkdir()
             (vault / "24 Goals" / "Alpha.md").write_text(
-                "---\nmanager_session_id: page-sid\n---\n", encoding="utf-8"
+                "---\nclaude_session_id: page-sid\n---\n", encoding="utf-8"
             )
             self._with_probe({"sessions": [
                 {"session_id": "page-sid", "role": "manager", "subject": "Alpha"},

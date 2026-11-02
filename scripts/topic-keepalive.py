@@ -78,7 +78,7 @@ def frontmatter(text: str) -> str:
 def scalar(fm: str, key: str) -> str:
     # ⚠️ `[ \t]*`, never `\s*`: `\s` matches the newline, so an EMPTY value makes the regex
     # swallow the line break and return the NEXT key's line as this key's value. A goal page
-    # carrying `manager_session_id:` with no id would then read as having one — and this
+    # carrying `claude_session_id:` with no id would then read as having one — and this
     # script would resume a session that does not exist instead of reporting an open.
     m = re.search(rf"^{re.escape(key)}:[ \t]*(.*)$", fm, re.MULTILINE)
     return (m.group(1).strip().strip("\"'") if m else "")
@@ -266,10 +266,9 @@ def main(argv: list[str]) -> int:
         return 1
     with open(goal_page, encoding="utf-8") as fh:
         fm = frontmatter(fh.read())
-    # `claude_session_id` first, `manager_session_id` second: the writer sets the former
-    # without clearing the latter, so a re-armed legacy page carries both and reading the
-    # retired key first would hand back the stale id.
-    sid = scalar(fm, "claude_session_id") or scalar(fm, "manager_session_id")
+    # `claude_session_id` is the only field a goal page records its manager in; the
+    # retired-key fallback was removed once both vaults were migrated.
+    sid = scalar(fm, "claude_session_id")
 
     loop = cadence(a.subject, a.branch)
 

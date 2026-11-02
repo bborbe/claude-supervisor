@@ -38,7 +38,7 @@ keys on the vault rather than on that chain.
 
 `ledger.json` is served by `endpoint_fixture.FixtureEndpoint` (the same stub the unit suite
 uses), and `state/` + `registry/` + `claims.json` are the remaining stubs the filter takes as
-flags. `vault/` is the scope input: one goal page (`manager_session_id` + `# Tasks`) and the
+flags. `vault/` is the scope input: one goal page (`claude_session_id` + `# Tasks`) and the
 five task pages, each stamped exactly as its real page is — including pane 260's, which is
 stamped only through a `- session_id:` metrics entry.
 

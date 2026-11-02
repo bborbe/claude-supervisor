@@ -4,11 +4,11 @@ after it — because an empty registry match cannot tell "no manager ever existe
 "the manager exited".
 
 `session-liveness.py --list --json` lists live sessions only, so the same empty output means
-both things. The page's `manager_session_id` is what distinguishes them, and a read gated on
+both things. The page's recorded session id is what distinguishes them, and a read gated on
 the registry result never runs for the case it exists to catch. Measured 2026-10-27: a Fleet
-Manager reached Step 2B item 4 (spawn) on a goal whose page carried
-`manager_session_id: 276fc353-…`, which `--check` resolves `ABSENT` — a verdict item 3 maps
-to RESUME.
+Manager reached Step 2B item 4 (spawn) on a goal whose page carried a recorded session id
+(the field has since been unified onto `claude_session_id`), and `--check`
+resolved that id `ABSENT` — a verdict item 3 maps to RESUME.
 
 This check asserts the three things that keep that from recurring in `commands/open.md`:
 

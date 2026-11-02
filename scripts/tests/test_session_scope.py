@@ -80,7 +80,7 @@ class Vault:
 class Scope(unittest.TestCase):
     def setUp(self):
         self.vault = Vault()
-        self.vault.goal(SELF_GOAL, f"manager_session_id: {ME}\n", ["Own Task"])
+        self.vault.goal(SELF_GOAL, f"claude_session_id: {ME}\n", ["Own Task"])
         self.vault.task("Own Task", f"claude_session_id: {OWN_TASK_SESSION}\n")
         self.vault.task(
             "Foreign Task",
@@ -210,7 +210,7 @@ class GoalsBlockAsLastFrontmatterKey(unittest.TestCase):
     def test_a_foreign_page_whose_goals_block_is_last_still_names_its_goal(self):
         vault = Vault()
         try:
-            vault.goal(SELF_GOAL, f"manager_session_id: {ME}\n", ["Own Task"])
+            vault.goal(SELF_GOAL, f"claude_session_id: {ME}\n", ["Own Task"])
             vault.task("Own Task", f"claude_session_id: {OWN_TASK_SESSION}\n")
             vault.task_ending_at(
                 "Last Key Foreign",
@@ -230,7 +230,7 @@ class GoalsBlockAsLastFrontmatterKey(unittest.TestCase):
         try:
             vault.goal(
                 "Some Goal",
-                "manager_session_id: 12341234-1234-4123-8123-123412341234\n",
+                "claude_session_id: 12341234-1234-4123-8123-123412341234\n",
                 ["Manager Task", "Own Task"],
             )
             vault.task_ending_at(
@@ -250,7 +250,7 @@ class Unresolved(unittest.TestCase):
 
     def setUp(self):
         self.vault = Vault()
-        self.vault.goal("Some Goal", "manager_session_id: 12341234-1234-4123-8123-123412341234\n", [])
+        self.vault.goal("Some Goal", "claude_session_id: 12341234-1234-4123-8123-123412341234\n", [])
         self.vault.task("A Task", f"claude_session_id: {FOREIGN_SESSION}\n"
                                   "goals:\n    - '[[Some Goal]]'\n")
 
@@ -273,7 +273,7 @@ class Unresolved(unittest.TestCase):
         attributable outside it is foreign. Unresolved is a MISSING page, not an empty one."""
         vault = Vault()
         try:
-            vault.goal("Lonely Goal", "manager_session_id: 12341234-1234-4123-8123-123412341234\n", [])
+            vault.goal("Lonely Goal", "claude_session_id: 12341234-1234-4123-8123-123412341234\n", [])
             vault.task("Elsewhere", f"claude_session_id: {FOREIGN_SESSION}\n"
                                     "goals:\n    - '[[Another Goal]]'\n")
             scope = ss.load("12341234-1234-4123-8123-123412341234", [vault.root])
@@ -311,7 +311,7 @@ class DuplicateGoalBasename(unittest.TestCase):
         self.second.close()
 
     def test_a_second_page_with_the_same_basename_merges_rather_than_replaces(self):
-        self.first.goal(SELF_GOAL, f"manager_session_id: {ME}\n", ["Own Task"])
+        self.first.goal(SELF_GOAL, f"claude_session_id: {ME}\n", ["Own Task"])
         self.first.task("Own Task", f"claude_session_id: {OWN_TASK_SESSION}\n")
         self.second.goal(SELF_GOAL, "", ["Some Other Task"])
 
@@ -324,7 +324,7 @@ class DuplicateGoalBasename(unittest.TestCase):
 
     def test_an_empty_second_page_does_not_wipe_the_first(self):
         """A duplicate-basename page with no `# Tasks` heading is an empty set, not an eraser."""
-        self.first.goal(SELF_GOAL, f"manager_session_id: {ME}\n", ["Own Task"])
+        self.first.goal(SELF_GOAL, f"claude_session_id: {ME}\n", ["Own Task"])
         self.first.task("Own Task", f"claude_session_id: {OWN_TASK_SESSION}\n")
         self.second.goal(SELF_GOAL, "", [])
 
@@ -394,7 +394,7 @@ class Cli(unittest.TestCase):
 
         vault = Vault()
         try:
-            vault.goal(SELF_GOAL, f"manager_session_id: {ME}\n", ["Own Task"])
+            vault.goal(SELF_GOAL, f"claude_session_id: {ME}\n", ["Own Task"])
             vault.task("Own Task", f"claude_session_id: {OWN_TASK_SESSION}\n")
             vault.task("Foreign Task", f"claude_session_id: {FOREIGN_SESSION}\n"
                                        "goals:\n    - '[[Some Other Goal]]'\n")
@@ -420,7 +420,7 @@ class Cli(unittest.TestCase):
     def test_json_dump_carries_goals_and_sessions(self):
         vault = Vault()
         try:
-            vault.goal(SELF_GOAL, f"manager_session_id: {ME}\n", ["Own Task"])
+            vault.goal(SELF_GOAL, f"claude_session_id: {ME}\n", ["Own Task"])
             vault.task("Own Task", f"claude_session_id: {OWN_TASK_SESSION}\n")
             scope = ss.load(ME, [vault.root])
             self.assertEqual(scope.own_titles, {"Own Task", SELF_GOAL})

@@ -40,7 +40,7 @@ for x in json.load(sys.stdin):
 TOPICS="${TOPICS:-23 Topics}"
 for f in "<vault>/$TOPICS"/*.md; do
   name=$(basename "$f" .md)
-  grep -qE '^(claude_session_id|manager_session_id): *[^ ]' "$f" || continue
+  grep -qE '^claude_session_id: *[^ ]' "$f" || continue
   printf '%s\t' "$name"
   python3 "$P/topic-keepalive.py" --vault "<vault>" --subject "$name" --branch topic --dir "$TOPICS" | head -2 | tr '\n' '\t'
   echo
@@ -181,7 +181,7 @@ goal tier's tick with its own `last_auto_resume` cap; this leg runs on the fleet
 `worker--<slug>` cap. Both caps record only **after** a resume the instrument confirms `LIVE`,
 so a check-then-act race would let two resumes land before either cap arms. The script therefore
 scans the task's frontmatter for wikilinks and, if any page one names has a session id
-(`claude_session_id`, or the retired `manager_session_id`) the liveness instrument reads `LIVE`, returns `jump` with *"goal manager <id> is live and owns this
+(`claude_session_id`) the liveness instrument reads `LIVE`, returns `jump` with *"goal manager <id> is live and owns this
 task"* — the fleet leg never acts on a row the goal tier owns. This leg takes only the rows
 whose goal has no live manager, the same fallback `docs/fleet-surface.md` § Which manager owns a
 subject already states.
