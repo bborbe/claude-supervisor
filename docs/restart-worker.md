@@ -34,6 +34,7 @@ path is read from `SUPERVISOR_LOAD_PATH`, else
 | `0` | Success — the pid was signalled and the session resumed (or, under `--dry-run`, would have been). |
 | `1` | Refusal. The first line of stdout is the reason token below; the second is the sentence. **Or** an operational failure, printed with an `❌ error:` prefix instead of a token — see below. |
 | `2` | Usage error (argparse) — a missing or empty session id, an unknown flag. |
+| `3` | Environment fault — **not** a refusal. The first line is `environment-fault`; `vault-cli` could be found neither on `PATH` nor at `$GOPATH/bin` or a known install location, so no launcher can be resolved for any session. Checked before every refusal, so a broken caller environment never reads as a guard declining. |
 
 A refusal is a printed reason, never a traceback.
 

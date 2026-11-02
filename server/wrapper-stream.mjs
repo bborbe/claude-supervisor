@@ -25,7 +25,35 @@
 // frame therefore carries no reason and this module asks the wrapper directly: `exited` is a
 // real end, anything else is a `StreamLaggedError` the caller must not settle as success.
 
+import { Agent, fetch as undiciFetch } from 'undici'
+
 const DEFAULT_TIMEOUT_MS = 10_000
+
+// ⚠️ **The event stream must never carry a body timeout, and undici's default is five minutes.**
+// `fetch` here is Node's global (undici), whose `bodyTimeout` defaults to `300e3` — see
+// `undici/lib/dispatcher/client.js:316`. An SSE body is IDLE BY DESIGN for exactly the states
+// this adapter exists to serve: a child between turns, and a child parked on a question while a
+// manager answers it. Five minutes of silence therefore destroys the body and undici raises
+// `TypeError: terminated`, which reaches `runAgentLoop`'s catch and settles a healthy worker as
+// `error` — measured 2026-11-01 at 300.85 s / 301.27 s / 301.18 s after the last frame, three
+// runs of three, on a child that was still `idle` afterwards.
+//
+// `bodyTimeout: 0` disables it. ⚠️ **The accepted trade-off, stated rather than implied:** with no
+// body timeout there is no upper bound on a body that HANGS — a wrapper that accepts the request,
+// sends headers, and then wedges (e.g. the child's output pipe stops) leaves the stream open and
+// the worker `running` with nothing to time it out. An UNREACHABLE wrapper is still covered:
+// `headersTimeout` keeps its default and a refused or failed connect throws immediately. A hung
+// body is traded away deliberately, because a false termination every five minutes is the worse
+// failure and the one this change exists to remove; bounding it would need an application-level
+// idle watchdog, not a shorter HTTP timeout.
+//
+// ⚠️ **This dispatcher only works with `undici`'s own `fetch`, never Node's global one.** The two
+// are different implementations: passing an npm-`undici` `Agent` to the built-in `fetch` fails
+// every request with `TypeError: fetch failed` / `UND_ERR_INVALID_ARG` — measured, and it is why
+// `streamWrappedSession` defaults to `undiciFetch` rather than the global `fetch` the other
+// helpers use. A caller that passes its own `fetchImpl` must pass one that understands
+// `dispatcher`, or drop the option.
+const SSE_DISPATCHER = new Agent({ bodyTimeout: 0 })
 
 /** Raised when the stream stopped for a reason other than the child exiting. */
 export class StreamLaggedError extends Error {
@@ -252,10 +280,13 @@ function frameOf(frame) {
  * messages, and treat iteration ending as the end of the turn. A non-exit end throws
  * `StreamLaggedError` so a lagging subscriber is never mistaken for a finished worker.
  */
-export async function* streamWrappedSession({ baseUrl, sessionId, fetchImpl = fetch, signal }) {
+export async function* streamWrappedSession({ baseUrl, sessionId, fetchImpl = undiciFetch, signal }) {
   const resp = await fetchImpl(`${baseOf(baseUrl)}/api/1.0/sessions/${encodeURIComponent(sessionId)}/events`, {
     method: 'GET',
     headers: { accept: 'text/event-stream' },
+    // Load-bearing: without it undici tears the body down after five idle minutes and a
+    // healthy parked child is recorded as a dead worker. See SSE_DISPATCHER above.
+    dispatcher: SSE_DISPATCHER,
     ...(signal ? { signal } : {}),
   })
   if (!resp.ok) {

@@ -38,10 +38,25 @@
         <string>/Users/bborbe/.claude/plugins/marketplaces/claude-supervisor/scripts/fleet-keeper.py</string>
     </array>
 
+    <!--
+      ⚠️ The PATH is not decoration: launchd gives a job no login shell, so it never reads
+      ~/.zshrc, and anything not on this list is simply not found.
+
+      System directories ONLY, on purpose. The report-only keeper calls nothing but its sibling
+      Python scripts (through `sys.executable`) and `ps` (in /bin). The restart-era keeper needed
+      `vault-cli` and `wezterm` to resume a session; it has no resume path now, so neither is
+      needed. User-writable directories (~/.local/bin, ~/Documents/workspaces/go/bin) would sit
+      ahead of /usr/bin and let anything dropped there shadow a system tool.
+
+      Measured 2026-11-01, the cost of getting this list wrong: with `vault-cli` missing, the
+      restart-era keeper refused every tick for 715 ticks; with `wezterm` missing, it killed the
+      Fleet Manager and could not resume it. Both failures read as a refusal, not as a broken
+      environment. If a callee ever needs a new tool, add it here and say which callee needs it.
+    -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
 
     <key>StartInterval</key>

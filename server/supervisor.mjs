@@ -17,7 +17,7 @@ import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
-import { answerWrappedSession, listWrappedSessions, pendingQuestionOf, sendWrappedSession, spawnWrappedSession, stopWrappedSession, streamWrappedSession } from './wrapper-stream.mjs'
+import { answerWrappedSession, listWrappedSessions, pendingQuestionOf, readWrappedSession, sendWrappedSession, spawnWrappedSession, stopWrappedSession, streamWrappedSession } from './wrapper-stream.mjs'
 import { HEARTBEAT_INTERVAL_MS, a2aStamp, clearStamp, heartbeatDir, selfStampRefusal, stampRecord, startSelfStamp } from './heartbeat.mjs'
 import { workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
@@ -49,6 +49,7 @@ import { buildRecord, ledgerWriteRoute, mergeRecord, parentSessionId, stoppedPat
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 import { resumeRefusal } from './resume-guard.mjs'
 import { resumeAdmission } from './context-guard.mjs'
+import { shouldEndIdleWorker } from './idle-worker.mjs'
 import { fetchAttentionItems, fetchOpenCards, openCardsOf } from './open-cards.mjs'
 import { foreignParkRefusal } from './park-refusal.mjs'
 import { answerPathRefusal } from './answer-path.mjs'
@@ -2940,7 +2941,65 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // the worker's first turn. The loop itself lives in agent-loop.mjs so a test can
   // drive it with a synthetic stream and await its completion — this module cannot be
   // imported by a test at all, since it connects a stdio server at load.
-  void runAgentLoop({ q, agent, writeLedger, log, heartbeat })
+  // ⚠️ **A headless worker's child never exits on its own.** It is spawned with
+  // `--input-format stream-json` and holds its stdin pipe, so after a turn it waits for the next
+  // message forever — measured 2026-11-01: 21 of 59 wrapper sessions idle, the oldest 22 hours.
+  // Nothing ended one, so the only thing that ever did was undici's five-minute body timeout,
+  // which ended it wrongly. This is the deliberate end-of-life that timeout was standing in for.
+  //
+  // ⚠️ It runs on EVERY `result`, and a `result` can arrive MID-turn, so it re-reads the wrapper
+  // instead of assuming. `pending_turns` is the signal that separates the two — it counts the
+  // turns the child has not yet closed (`claude-wrapper` `pkg/supervisor.go:562`), so 0 means the
+  // turn is genuinely over and a non-zero value means it is not.
+  //
+  // ⚠️ **Every keep-alive condition fails CLOSED.** An unreadable wrapper or attention store
+  // keeps the worker rather than ending one that could not be inspected. A worker parked on a
+  // `question` is waiting on a manager; a worker with an open attention card is waiting on a
+  // person. Neither is finished, and stopping either would orphan exactly the card this whole
+  // task exists to protect.
+  const endWorkerIfIdle = async (current) => {
+    let session
+    try {
+      session = await readWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id })
+    } catch (error) {
+      log(`WARNING: could not read ${current.id} to decide whether its turn ended; leaving it running: ${error.message}`)
+      return
+    }
+    // Decide everything except the card check first, so an incomplete wrapper record is reported
+    // before we spend an attention-store round trip on it — and is reported at all, because a
+    // silent keep would let the idle-worker leak survive the fix that exists to remove it.
+    const pre = shouldEndIdleWorker({ session, cards: [] })
+    if (pre.reason === 'wrapper-record-incomplete') {
+      log(`WARNING: the wrapper's record for ${current.id} carries no state/pending_turns — the idle-worker end-of-life is a no-op for it until it does`)
+      return
+    }
+    if (!pre.end) return
+    // ⚠️ **A deliberately-absent store is NOT an unreadable one.** With
+    // `SUPERVISOR_ATTENTION_STORE=off`, `config.attentionStoreUrl` is null and `fetchOpenCards`
+    // returns null without issuing a request — which the predicate would read as
+    // `unreadable-cards` and keep the worker forever. In a deployment with no attention stack
+    // there can be no card to orphan, so the honest answer is "no cards": passing `[]` lets the
+    // end-of-life fire there, while a store that is configured but FAILING still returns null
+    // and still fails closed.
+    const cards = config.attentionStoreUrl
+      ? await fetchOpenCards({ storeUrl: config.attentionStoreUrl, sessionId: current.sessionId })
+      : []
+    const verdict = shouldEndIdleWorker({ session, cards })
+    if (!verdict.end) {
+      // The two keeps that explain a worker which is never reaped are logged; `not-idle` and
+      // `turn-in-flight` are the ordinary mid-turn path and would log on every result.
+      if (verdict.reason === 'unreadable-cards' || verdict.reason === 'open-card') {
+        log(`agent ${current.id}: keeping worker — ${verdict.reason}`)
+      }
+      return
+    }
+    log(`agent ${current.id}: turn closed with nothing pending — stopping the session`)
+    await stopWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id }).catch((error) => {
+      log(`WARNING: could not stop ${current.id} after its turn closed: ${error.message}`)
+    })
+  }
+
+  void runAgentLoop({ q, agent, writeLedger, log, heartbeat, onTurnComplete: endWorkerIfIdle })
 
   return {
     agent_id: id,

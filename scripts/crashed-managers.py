@@ -37,7 +37,7 @@ A goal manager under a live topic manager is **covered** and yields no card.
 ⚠️ **`branch == "fleet"` is counted and reported but never carded, and that is not a gap.**
 Nothing sits above a fleet manager, so it is uncovered in the keep-alive sense — but the
 crash this script detects is *a LIVE session whose loop lapsed*, and a fleet record carries
-no page to read a `manager_session_id` from (`24 Goals/` and `23 Topics/` hold goal and topic
+no page to read a `claude_session_id` from (`24 Goals/` and `23 Topics/` hold goal and topic
 pages; there is no fleet page). With no session id there is no liveness probe, so a fleet
 manager's crash cannot be told from its ordinary exit and must not be carded. Every fleet
 record still appears in `--json` with that reason, so the population stays countable.
@@ -194,6 +194,18 @@ def _read_page(path: str) -> str:
     return _memo(("page", path), read)
 
 
+def _page_session_id(front: str) -> str:
+    """The session id a goal or topic page records.
+
+    `claude_session_id` is the only field either page type carries its manager in. The
+    retired-key fallback was removed once every page in both vaults was migrated; nothing
+    writes the retired key any more, so reading it would only resurrect an id no writer
+    produces.
+    """
+
+    return helpers().scalar(front, "claude_session_id")
+
+
 def subjects(state_dir: str) -> tuple[list[tuple[str, str]], int]:
     """Every `(branch, base)` carrying a `<branch>--<base>.cadence` record, plus the legacy count.
 
@@ -313,7 +325,7 @@ def topic_manager_live(vault: str, goal_name: str) -> bool:
         text = _read_page(os.path.join(directory, entry))
         if not declares(text, goal_name):
             continue
-        sid = helpers().scalar(helpers().frontmatter(text), "manager_session_id")
+        sid = _page_session_id(helpers().frontmatter(text))
         if not sid or session_state(sid) != "LIVE":
             continue
         # ⚠️ A LIVE session is NOT a running keep-alive. `/supervisor:stop` disarms the loop and
@@ -367,7 +379,7 @@ def evaluate(vault: str, branch: str, base: str) -> dict:
     if branch == "fleet":
         row["reason"] = (
             "fleet record — nothing sits above a fleet manager, but it has no page to carry a "
-            "manager_session_id, so live-but-lapsed cannot be established and it is never carded"
+            "session id, so live-but-lapsed cannot be established and it is never carded"
         )
         return row
 
@@ -387,9 +399,9 @@ def evaluate(vault: str, branch: str, base: str) -> dict:
         row["reason"] = f"cadence {row['state']} — only STALE is a lapse (STOPPED is a stand-down)"
         return row
 
-    sid = helpers().scalar(helpers().frontmatter(_read_page(subject_page)), "manager_session_id")
+    sid = _page_session_id(helpers().frontmatter(_read_page(subject_page)))
     if not sid:
-        row["reason"] = "no manager_session_id on the page — unverifiable, never abandoned"
+        row["reason"] = "no session id on the page — unverifiable, never abandoned"
         return row
     row["session"] = sid
     row["detail"] = _DETAIL.get((branch, name), "")

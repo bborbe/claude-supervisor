@@ -278,6 +278,40 @@ def commits_between(root, since, until, rel=None):
 
 # --- anchor -----------------------------------------------------------------------------
 
+# ⚠️ This is a third spelling for the vault root: the repo already reads it as
+# OBSIDIAN_DIR (fleet-board.py, fleet-sessions.py, manager-menu-guard.py) and as
+# SUPERVISOR_VAULTS_ROOT (session-scope.py, close-worker.py). Setting either of
+# those established names has no effect here — only OBSIDIAN_ROOT moves this walk.
+OBSIDIAN_ROOT = os.environ.get("OBSIDIAN_ROOT") or os.path.expanduser("~/Documents/Obsidian")
+
+
+def resolve_anchor(raw):
+    """Resolve --anchor to an absolute path.
+
+    A relative anchor resolves against the process cwd. When the session works
+    inside a repo worktree, the vault's task file then reads as unreadable even
+    though it exists -- the caller sees a bare "No such file or directory" and
+    the measurement is silently never taken. Fall back to a unique basename
+    match under the Obsidian root before giving up; the walk only runs on the
+    failure path and stops at the second hit.
+    """
+    direct = os.path.realpath(raw)
+    if os.path.isabs(raw) or os.path.exists(direct):
+        return direct
+    base = os.path.basename(raw)
+    if not base or not os.path.isdir(OBSIDIAN_ROOT):
+        return direct
+    hits = []
+    for dirpath, dirnames, filenames in os.walk(OBSIDIAN_ROOT):
+        dirnames[:] = [
+            d for d in dirnames if d not in (".git", ".obsidian", ".trash", "node_modules")
+        ]
+        if base in filenames:
+            hits.append(os.path.join(dirpath, base))
+            if len(hits) > 1:
+                return direct
+    return os.path.realpath(hits[0]) if len(hits) == 1 else direct
+
 
 def sections(text):
     """Map lower-cased top-level heading -> its lines."""
@@ -608,13 +642,17 @@ def measure(args):
         raise Unknown("session %s is known to neither the registry nor any transcript" % args.session)
     calls, first = load_calls(transcripts)
 
-    anchor = os.path.realpath(args.anchor)
+    anchor = resolve_anchor(args.anchor)
+    report["anchor"] = anchor
     try:
         with open(anchor, encoding="utf-8") as handle:
             working = handle.read()
         mtime = datetime.datetime.fromtimestamp(os.stat(anchor).st_mtime, datetime.timezone.utc)
     except OSError as exc:
-        raise Unknown("anchor unreadable: %s (%s)" % (args.anchor, exc.strerror))
+        raise Unknown(
+            "anchor unreadable: %s (%s) — a relative anchor resolves against the cwd, "
+            "so pass an absolute path when the session works outside the vault" % (args.anchor, exc.strerror)
+        )
     vault = toplevel(anchor)
     if vault is None:
         raise Unknown("anchor is not inside a git repository: %s" % args.anchor)
