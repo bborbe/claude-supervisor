@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.228.3
 
 - fix: no router table can route a manager-proposal step — `scripts/check-manager-proposal-row.py` fails when any `commands/*.md` router row names `commands/steps/propose-manager.md` in its `File` cell, or runs `propose-managers.py --post` from its `Step`/`When` cells; wired into `make precommit` as `check-manager-proposal-row`. The row's removal (PR #542) was unguarded: `check-step-when.py` validates rows → step files only, so a step file with no row is never checked, and the inline shape is invisible to it because it skips rows naming no step file. Rows are read, never the file body, so a prose mention stays green. The header is matched by containment, so an extra column or a renamed neighbour cannot hide the table, and recognising zero router rows — or finding no router command at all — fails rather than printing `ok`. Tests: `scripts/tests/test_check_manager_proposal_row.py`.
 
