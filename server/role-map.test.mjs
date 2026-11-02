@@ -15,6 +15,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import { resolveRole, ROLES, DEFAULT_ROLE, vaultFamily, familyChip, chipForRole } from './role-map.mjs'
 
@@ -151,6 +152,14 @@ test('an unlisted family keeps the fallback rather than picking a colour', () =>
   assert.equal(familyChip({ vault: 'assistant-personal', fallback: 'orange' }), 'orange')
   assert.equal(familyChip({ vault: undefined, fallback: 'cyan' }), 'cyan')
   assert.equal(familyChip({}), null)
+})
+
+test('the spawn path feeds chipForRole the RESOLVED vault', () => {
+  // The failure this guards: passing the raw `vault` argument instead of `workerTarget.vault`
+  // restores the defect on every cwd-only spawn — where `vault` is undefined — while every
+  // pure-helper test above still passes. Same source-shape assertion `manager-cap.test.mjs` uses.
+  const source = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  assert.match(source, /chipForRole\(\{ resolution: roleResolution, vault: workerTarget\.vault \}\)/)
 })
 
 test('a family named after an Object.prototype member still falls back', () => {

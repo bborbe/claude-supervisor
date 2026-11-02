@@ -373,8 +373,10 @@ through the router while looking like nothing at all.
 ⚠️ **`role` resolves BOTH the colour and the window — pass it, and prefer it over
 `window_id`.** The server reads the map the WezTerm config publishes on its reconcile tick
 (`~/.cache/wezterm-role-map.json`) and resolves `manager` → orange/Managers, `agent` →
-pink/Agents, `human` → cyan/Direct. **Omit it for an agent**, which is the correct default
-for every task that has not declared a role.
+pink/Agents, `human` → Direct with its **chip taken from the vault family** — green for a
+`seibert-*` vault, cyan for a `private-*` one, and the map's own chip for any other family.
+The family split lives in `FAMILY_CHIPS` in `server/role-map.mjs`. **Omit it for an agent**,
+which is the correct default for every task that has not declared a role.
 
 ```
 mcp__supervisor__spawn_agent(prompt="...", cwd="/path", label="alpha", role="manager")
@@ -492,7 +494,9 @@ not drift into two different resolution rules.
 
 **`$WINDOW_ID` and `$CHIP` are a role-resolved PAIR**, read from the published map before
 spawning (`~/.cache/wezterm-role-map.json`): `manager` → Managers / orange, `agent` →
-Agents / pink, `human` → Direct / cyan, with `role:` absent resolving to `agent`. Both are
+Agents / pink, `human` → Direct / cyan, with `role:` absent resolving to `agent`. ⚠️ **This
+shell path does not yet apply the vault-family split** that `spawn_agent` above does — a
+resumed `role: human` session in a `seibert-*` vault still comes up cyan here. Both are
 role signals, so a hardcoded colour or a missing `--window-id` **is** the defect this shape
 was corrected for on 2026-09-20 — the old `"/color pink"` painted a manager as a worker, and
 the missing flag dropped the tab into whatever window the caller happened to occupy.
