@@ -35,6 +35,48 @@ export const DEFAULT_ROLE = 'agent'
 // than each consumer re-deriving the pairing.
 export const ROLE_PURPOSES = { manager: 'Managers', agent: 'Agents', human: 'Direct' }
 
+// A HUMAN session's chip follows the VAULT FAMILY, not the role alone. The operator's
+// convention is green = Seibert, cyan = private, and colour is the only at-a-glance cue for
+// which employer a tab belongs to — so a Seibert tab that comes up cyan reads as a private one.
+//
+// This is the one place that rule lives. It cannot live in the WezTerm config: `window_specs`
+// publishes `purpose -> {chip, window_id}`, a purpose is 1:1 with a window, and WezTerm knows
+// windows rather than vaults — the vault is known only at spawn time. So the map stays the
+// source for `window_id` and for the fallback chip, and this module owns the family split.
+export const FAMILY_CHIPS = { seibert: 'green', private: 'cyan' }
+
+// The family is the prefix before the first hyphen: `seibert-brogrammers` -> `seibert`.
+// A vault with no hyphen is its own family, which simply misses the table and falls back.
+export function vaultFamily(vault) {
+  if (typeof vault !== 'string') return null
+  const name = vault.trim()
+  if (name === '') return null
+  const at = name.indexOf('-')
+  return at === -1 ? name : name.slice(0, at)
+}
+
+// The chip a session carries in this vault, or `fallback` when the family is not named above.
+// The fallback is deliberate and load-bearing: `assistant-*` vaults exist, the operator's
+// convention covers only seibert and private, and an unlisted family must keep the colour the
+// map already gives it rather than silently picking one of the two.
+export function familyChip({ vault, fallback = null } = {}) {
+  const chip = FAMILY_CHIPS[vaultFamily(vault)]
+  return chip === undefined ? fallback : chip
+}
+
+// The chip a spawn actually applies: the role's own chip, refined by the vault family for a
+// human session. The composition lives here rather than at the call site so the test exercises
+// the same function the spawn path does — a test that re-derives the composition proves only
+// that its own copy works.
+//
+// A degraded resolution (`resolved: false`, `chip: null`) is passed through untouched: the
+// family must not manufacture a chip for a role the map could not resolve at all.
+export function chipForRole({ resolution, vault } = {}) {
+  if (!resolution) return null
+  if (resolution.role !== 'human' || !resolution.resolved) return resolution.chip ?? null
+  return familyChip({ vault, fallback: resolution.chip })
+}
+
 // Resolve a role against an already-parsed role map.
 //
 // Returns `{ role, purpose, chip, windowId, resolved, warning }` on success, or
