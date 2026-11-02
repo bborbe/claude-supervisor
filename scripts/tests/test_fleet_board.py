@@ -1156,7 +1156,7 @@ class TestExitRecordRelay(unittest.TestCase):
             fb.wnm.session_transcript_age = lambda sid: 60
             # `main()` evaluates `wnm.wezterm_panes()` as an ARGUMENT at the coverage
             # call, so patching `live_coverage` alone would still spawn `wezterm`.
-            # Counting the call is the whole point of the SC5 assertion below.
+            # Counting the call is what the reuse assertion below observes.
             self.wezterm_calls = 0
             self.received_pane_map = None
 
@@ -1186,7 +1186,7 @@ class TestExitRecordRelay(unittest.TestCase):
         return rc, out.getvalue(), err.getvalue()
 
     def test_exit_record_rides_the_json_document(self):
-        """SC1(a) — `--json` carries `exit_record`. Fails if `:1419` is dropped."""
+        """`--json` carries `exit_record`. Dropping the doc key fails this test and nothing else."""
         rc, out, _ = self._run(["--json"], self._result())
         self.assertEqual(rc, 0)
         doc = json.loads(out)
@@ -1194,10 +1194,10 @@ class TestExitRecordRelay(unittest.TestCase):
         self.assertEqual([r["pane"] for r in doc["exit_record"]["unrecorded"]], ["7"])
 
     def test_exit_record_is_absent_from_the_default_render(self):
-        """SC1(b) — the default render is a whitelist; `exit_record` must not leak in.
+        """The default render is a whitelist, so `exit_record` must not leak into it.
 
-        Fails if `:1421`'s `{k: doc[k] for k in ("header", "rows", "widths")}` is
-        widened, or if the board ever switches to dumping `doc` whole.
+        Widening the whitelist, or switching the board to dumping `doc` whole, fails
+        this test and nothing else.
         """
         rc, out, _ = self._run([], self._result())
         self.assertEqual(rc, 0)
@@ -1206,24 +1206,26 @@ class TestExitRecordRelay(unittest.TestCase):
         self.assertEqual(sorted(doc), ["header", "rows", "widths"])
 
     def test_the_coverage_call_reuses_the_pane_map_collect_signals_read(self):
-        """SC5 — one `wezterm cli list` per render, and the coverage check gets THAT map.
+        """One `wezterm cli list` per render, and the coverage check gets THAT map.
 
-        Before this, `collect_signals()` returned only `pmap is not None` and `main()`
-        re-spawned `wezterm cli list` at the coverage call. Two assertions, because
-        either half can regress alone: zero calls means no second read, and identity
-        means the reused object is the one already read rather than a fresh `{}`.
+        `collect_signals()` reads the pane map already; re-reading it at the coverage
+        call costs a second subprocess (up to its 5 s timeout) per render. Two
+        assertions, because either half can regress alone: zero calls means no second
+        read, and identity means the reused object is the one already read rather
+        than a fresh `{}`.
         """
         self._run(["--json"], self._result())
         self.assertEqual(self.wezterm_calls, 0,
-                         "a second `wezterm cli list` per render is the cost SC5 removes")
+                         "a second `wezterm cli list` per render is the cost this reuse removes")
         self.assertIs(self.received_pane_map, self.PANE_MAP,
                       "the coverage check must receive the map collect_signals() already read")
 
     def test_exit_record_lines_reach_stderr(self):
-        """SC1(c) — the UNRECORDED and unknown lines are relayed to stderr.
+        """The UNRECORDED and unknown lines are relayed to stderr.
 
-        Fails if `:1422-1426` is deleted: the doc would still carry the key, so
-        only this assertion notices that the operator's warning never printed.
+        Deleting the relay fails this test and nothing else: the doc would still
+        carry the key, so only this assertion notices that the operator's warning
+        never printed.
         """
         _, out, err = self._run([], self._result())
         self.assertIn(self.LINE, err)
