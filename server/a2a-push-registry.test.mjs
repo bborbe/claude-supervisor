@@ -50,6 +50,47 @@ test('beginCreate mints a token and the callback URL together', async () => {
   assert.deepEqual(begun.push, { url: 'http://host.docker.internal:41234/a2a/push', token: 'tok-alpha' })
 })
 
+test('beginCreate honours a caller-supplied callback URL, and still defaults without one', async () => {
+  let minted = 0
+  const { registry } = harness({ tokenFactory: () => `tok-${++minted}` })
+  const relay = 'http://a2a-push-relay.agent.svc.cluster.local:18082/a2a/push'
+  const withRelay = await registry.beginCreate({ callbackUrl: relay })
+  assert.deepEqual(withRelay.push, { url: relay, token: 'tok-1' })
+  // The positive control in the same process: an override-less call still yields the Docker
+  // gateway, so the assertion above shows the override is USED rather than that the default moved.
+  const plain = await registry.beginCreate()
+  assert.deepEqual(plain.push, { url: 'http://host.docker.internal:41234/a2a/push', token: 'tok-2' })
+})
+
+test('a follow-up re-registers against the URL its own worker was created with', async () => {
+  let minted = 0
+  const { registry } = harness({ tokenFactory: () => `tok-${++minted}` })
+  const relay = 'http://a2a-push-relay.agent.svc.cluster.local:18082/a2a/push'
+  const cluster = await registry.beginCreate({ callbackUrl: relay })
+  registry.bind({ token: cluster.token, workerId: 'w-k8s' })
+  const docker = await registry.beginCreate()
+  registry.bind({ token: docker.token, workerId: 'w-docker' })
+  // ⚠️ THE NEGATIVE THIS PINS: `pushFor` must not fall back to this process's default for a
+  // worker created against the relay. A follow-up that re-registered a cluster worker against
+  // the Docker gateway would silently restore the very defect the per-target URL removes — and
+  // it would look like a healthy registration, because the worker accepts it.
+  assert.equal((await registry.pushFor('w-k8s')).url, relay)
+  assert.equal((await registry.pushFor('w-docker')).url, 'http://host.docker.internal:41234/a2a/push')
+})
+
+test('the receiver is built with the configured port, so a deployed relay can target it', async () => {
+  let opts = null
+  const registry = createA2APushRegistry({
+    receiverFactory: (o) => {
+      opts = o
+      return { listen: async () => 18082, close: async () => {}, messagesFor: () => [] }
+    },
+    receiverPort: 18082,
+  })
+  await registry.ensureListening()
+  assert.equal(opts.port, 18082, 'an ephemeral port cannot be a relay upstream; the configured one must reach the socket')
+})
+
 test('pushFor hands a follow-up the token its first turn already bound', async () => {
   const { registry } = harness({ tokenFactory: () => 'tok-alpha' })
   const begun = await registry.beginCreate()

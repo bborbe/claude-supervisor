@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: let a `k8s` spawn register its status callback against a caller-supplied URL, so a cluster worker is no longer handed `host.docker.internal` — a name CoreDNS does not resolve inside a pod, and whose LAN substitute the worker's own egress NetworkPolicy drops. `beginCreate({ callbackUrl })` overrides the per-spawn URL, the registry keeps it per token so a follow-up turn re-registers against the URL its own worker was created with rather than this process's default, and `SUPERVISOR_A2A_K8S_CALLBACK_URL` names the in-cluster relay the operator deploys; unset leaves the previous behaviour, visibly rather than silently. The receiver also takes a fixed `port` (`SUPERVISOR_A2A_PUSH_PORT`) because a relay's upstream port is deployed configuration and an ephemeral one would have to be re-deployed on every restart; `0` stays the default, so the docker path is unchanged.
+
 ## v0.233.2
 
 - test: pin the below-box action-line order against the drawn (tree) rows

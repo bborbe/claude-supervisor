@@ -77,7 +77,32 @@ const agents = new Map() // id -> agent record
 // pre-change worker. `ensureListening()` is called at boot so the port is ready before the first
 // spawn, and again by `beginCreate` — which is what keeps a boot-time failure from being the only
 // attempt, without ever retrying per spawn.
-const a2aPushRegistry = createA2APushRegistry()
+const a2aPushRegistry = createA2APushRegistry({
+  // A cluster worker reaches this receiver through an in-cluster relay, and a relay's upstream
+  // port is deployed configuration — so a k8s deployment pins the port here and the relay is
+  // told the same number. `0` (ephemeral) stays the default: the docker path has no relay.
+  receiverPort: Number(config.a2aPushPort) || 0,
+})
+
+/**
+ * The callback URL a `k8s` worker must be told to POST to — `undefined` when this process was
+ * not configured with a relay, which leaves the caller on the default Docker-gateway URL.
+ *
+ * ⚠️ A CLUSTER WORKER CANNOT USE THE DEFAULT, AND THIS IS MEASURED RATHER THAN INFERRED.
+ * `host.docker.internal` does not resolve inside a pod (CoreDNS: `no such host`), and a pod
+ * cannot reach this machine's LAN address either: the worker's generated egress NetworkPolicy
+ * permits only `kube-system`, its own `agent` namespace, `monitoring`, and two named `dev`
+ * pods — nothing on the LAN. The egress proxy is a third wall behind those two. So the only
+ * route out of the pod that exists today is a service INSIDE `agent`, which the policy already
+ * permits: `SUPERVISOR_A2A_K8S_CALLBACK_URL` names that relay, and it is the operator's job to
+ * deploy it. Unset means "no relay exists", and a cluster spawn then registers the Docker
+ * gateway exactly as it did before — visibly broken, rather than silently pretending.
+ */
+function a2aCallbackUrlForTarget(target) {
+  if (!String(target ?? '').startsWith('k8s')) return undefined
+  const relay = config.a2aK8sCallbackUrl
+  return typeof relay === 'string' && relay.trim() !== '' ? relay.trim() : undefined
+}
 
 // A headless worker's liveness, published where a process that did NOT spawn it can read it.
 //
@@ -1887,7 +1912,9 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
   // without it produces exactly the pre-change worker, and failing here would lose a live worker
   // to an optional transport. The degradation is visible where it matters — `status_messages`
   // stays empty, and the surfacing criterion is written so an empty array satisfies nothing.
-  const pushBegun = await a2aPushRegistry.beginCreate()
+  const pushBegun = await a2aPushRegistry.beginCreate({
+    callbackUrl: a2aCallbackUrlForTarget(canonicalTarget),
+  })
   const push = pushBegun.error ? undefined : pushBegun.push
 
   // A fresh `messageId` and `contextId` per attempt: a retry is a NEW turn on the controller's

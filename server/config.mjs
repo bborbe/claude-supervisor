@@ -230,6 +230,15 @@ export const config = Object.freeze({
   configFileContents: CONFIG_FILE_READ.file,
   configFileError: CONFIG_FILE_READ.error,
 
+  // The A2A status callback a CLUSTER worker is told to POST to. A pod reaches neither this
+  // machine's Docker gateway name (CoreDNS has no such name) nor its LAN address (the worker's
+  // generated egress policy permits only in-cluster namespaces), so the only route out is a
+  // relay the operator deploys inside `agent` — already permitted — and names here. Both are
+  // raw and unvalidated like the fields below: `null` means "no relay exists", which leaves a
+  // cluster spawn on the Docker-gateway default rather than inventing an address.
+  a2aPushPort: ENV.SUPERVISOR_A2A_PUSH_PORT || null,
+  a2aK8sCallbackUrl: ENV.SUPERVISOR_A2A_K8S_CALLBACK_URL || null,
+
   // Raw and deliberately unvalidated, exactly like permissionMode below: the legal
   // values and the message naming a bad one belong to the module that owns the meaning.
   spawnMode: ENV.SUPERVISOR_SPAWN_MODE || null,
