@@ -92,9 +92,12 @@ dedup `register` created, and resuming it is one act per named task, not one per
 watch.
 
 Resume each named task through `/supervisor:open --task "<name>"`, then drop the
-member with `park-event.py release --event "<key>" --session "<id>"`; the file is
-removed when the last member leaves. A line reading `CORRUPT <file>` is a watch
-holding memberships that cannot be read — report it, never treat it as empty.
+member with `park-event.py release --event "<key>" --session "<id>"` — the `<id>` in
+brackets is the **full** session id, which `release` compares verbatim; `register`
+and `list` print only the first eight characters, so take it from the `due` line or
+from `due --json`. The file is removed when the last member leaves. A line reading
+`CORRUPT <file>` is a watch holding memberships that cannot be read — report it,
+never treat it as empty.
 
 **A watch that comes due and cannot be resumed is re-parked, not left due.** The
 event has not fired, so bump the instant — and ⚠️ **always pass `--session <parked-id>`
@@ -107,10 +110,12 @@ python3 "$P/park-event.py" register --task "<name>" --event "<key>" \
 
 `register` adds whatever `--session` resolves to as a member, so a bare call from the
 round would park the **round** on the watch and the next `due` would name it as a
-session to resume. `--repark` increments the counter `due` prints; at **three** it
-stops re-parking and routes the wait to the manager as a criterion challenge — the
-count is persisted on the record because the parked session has exited and nothing
-else survives to remember it.
+session to resume. `--repark` does two things: it **moves `recheck_at` forward** to
+the instant given (the earliest-wake rule that governs a plain join does not apply —
+otherwise the watch stays due and re-fires every round), and it increments the
+counter `due` prints. At **three** re-parks it stops and routes the wait to the
+manager as a criterion challenge; the count is persisted on the record because the
+parked session has exited and nothing else survives to remember it.
 
 ⚠️ **This half is the fast path, never the only path.** The task's own `defer_date`
 surfaces the row in every manager's open queue, so a missed round delays a resume and

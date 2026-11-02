@@ -217,7 +217,7 @@ class ParkEventTest(unittest.TestCase):
                         "--recheck", "2026-11-02T02:00:00+01:00", "--session", "aaaaaaaa")
         proc = self.run_script("due", extra_env={"PARK_EVENT_NOW": "2026-11-02T03:00:00+01:00"})
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("Some Task (aaaaaaaa)", proc.stdout)
+        self.assertIn("Some Task [aaaaaaaa]", proc.stdout)
 
     def test_repark_counter_persists_and_increments(self):
         self.run_script("register", "--task", "Some Task", "--event", "a metric",
@@ -230,6 +230,10 @@ class ParkEventTest(unittest.TestCase):
         self.assertEqual(record["repark_count"], 2)
         # Re-parking must not add the round as a member.
         self.assertEqual(record["sessions"], ["aaaaaaaa"])
+        # And it must MOVE the instant forward: the earliest-wake rule applies to
+        # joins, not re-parks. A stale past instant would leave the watch due and
+        # re-fire it every round, tripping the escalation in consecutive ticks.
+        self.assertEqual(record["recheck_at"], "2026-11-03T02:00:00+01:00")
 
     def test_a_corrupt_watch_is_surfaced_by_due_not_hidden(self):
         self.run_script("register", "--event", "a metric",

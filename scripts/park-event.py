@@ -316,7 +316,13 @@ def _register_locked(args: argparse.Namespace, key: str, recheck, session: str) 
             held = parse_instant(record["recheck_at"], "recheck_at")
         except (KeyError, ParkError):
             held = None
-        if held is None or recheck < held:
+        # A RE-PARK sets the instant unconditionally. The earliest-wake rule
+        # below exists so a JOINING peer cannot delay one already parked — but a
+        # re-park is the opposite act: the event has not fired, the old instant
+        # is in the past, and keeping it would leave the watch due so `due`
+        # re-fired it every round and the three-re-park escalation tripped in
+        # consecutive ticks instead of after the intended waits.
+        if args.repark or held is None or recheck < held:
             record["recheck_at"] = iso(recheck)
 
     members = record.setdefault("sessions", [])
@@ -381,7 +387,7 @@ def cmd_due(args: argparse.Namespace) -> int:
     for record in due:
         members = record.get("sessions") or []
         tasks = record.get("tasks") or {}
-        named = [f"{tasks[m]} ({m[:8]})" if tasks.get(m) else m for m in members]
+        named = [f"{tasks[m]} [{m}]" if tasks.get(m) else m for m in members]
         print(
             f"{record.get('slug', '?')} · event: {record.get('event', '?')} · "
             f"due since {record.get('recheck_at', '?')} · "
