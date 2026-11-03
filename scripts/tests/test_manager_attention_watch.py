@@ -788,12 +788,12 @@ class CommitLoopTest(unittest.TestCase):
             "an unregistered session is HELD, never cleared: " + out)
 
     def test_a_lost_sight_session_is_recorded_not_announced(self):
-        """SC2's discriminating control — the OTHER `HELD` cause.
+        """The control that tells the narrow fix from a widened branch.
 
-        Both causes arrive at the emit loop as one `kind`, so a fix that widens
-        that branch prints both and still passes every other test in this class.
-        A session the watcher stopped tracking is bookkeeping, not a dead gate,
-        and must stay out of the announcement.
+        Both `HELD` causes arrive at the emit loop as one `kind`, so a fix that
+        widens that branch prints both and still passes every other test in this
+        class. A session the watcher stopped tracking is bookkeeping, not a dead
+        gate, and must stay out of the announcement.
         """
         out = self._drive([{}, self.GATED, self.GATED, {}, {}])
         self.assertEqual(out.count("NEW GATE"), 1, out)
