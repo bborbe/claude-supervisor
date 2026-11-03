@@ -152,6 +152,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1341,8 +1342,9 @@ def answered_park_keys(sids, store=STORE, timeout=None):
     acts on it by re-posting, so an unreachable store would re-post for every
     parked worker on every poll.
 
-    ⚠️ **One read for the whole poll, never one per session.** The page is tens of
-    thousands of items; the caller passes every candidate at once for that reason,
+    ⚠️ **One read for the whole poll, never one per session.** On a store older
+    than attention-controller v0.67.0 the page is tens of thousands of items (a
+    current store narrows it to `park:` keys); the caller passes every candidate at once for that reason,
     and this returns early when there are none — an idle arm must not depend on
     the store being up.
     """
@@ -1355,7 +1357,15 @@ def answered_park_keys(sids, store=STORE, timeout=None):
     try:
         with urllib.request.urlopen(
                 f"{store}/api/1.0/attention/history"
-                f"?limit={card_lookup.HISTORY_LIMIT}",
+                f"?limit={card_lookup.HISTORY_LIMIT}"
+                # ⚠️ Narrowed server-side to `park:` keys — the only ones the
+                # loop below reads. Measured 2026-11-03: eight of these
+                # watchers read the WHOLE history every 60 s and the endpoint
+                # was 41 % of the store's allocation. A store that predates
+                # the parameter (< attention-controller v0.67.0) ignores it;
+                # the `startswith("park:")` check below still filters, so
+                # either deploy order is safe.
+                + "&dedup_key_prefix=" + urllib.parse.quote("park:", safe=""),
                 timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8") or "[]")
         # ⚠️ Strict, unlike `card_lookup.items_of`, which tolerates a wrapper by
