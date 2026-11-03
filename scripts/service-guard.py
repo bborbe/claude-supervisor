@@ -28,8 +28,8 @@ prints `UNKNOWN`, because "within bounds" and "I could not measure" must not
 render the same.
 
 With `--apply`, a breach reopens the owning task: a terminal row
-(`completed` / `aborted`) is set back to `phase: execution`,
-`status: in_progress`, and its `completed_date` cleared. An open row is left
+(`completed` / `aborted`) is set back to `phase: execution`, its
+`completed_date` cleared, and `status: in_progress` written last. An open row is left
 untouched — it is already open.
 
 Exit codes: 0 — every service measured (OK or BREACH) and every reopen
@@ -141,9 +141,25 @@ def validate(services) -> Optional[str]:
         missing = [k for k in REQUIRED_KEYS if k not in entry]
         if missing:
             return f"entry {i} missing {', '.join(missing)}"
+        for k in ("label", "task", "vault"):
+            value = entry[k]
+            if not isinstance(value, str) or not value.strip():
+                return f"entry {i} {k} must be a non-empty string"
+            # ⚠️ These reach `launchctl` / `vault-cli` argv. A leading dash would
+            # be parsed as a flag rather than as data.
+            if value.startswith("-"):
+                return f"entry {i} {k} must not start with '-'"
         for k in ("max_footprint_mb", "max_cpu_pct"):
-            if k in entry and not isinstance(entry[k], (int, float)):
+            if k not in entry:
+                continue
+            value = entry[k]
+            # ⚠️ `bool` is a subclass of `int`: `true` would pass as a 1 MB bar.
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
                 return f"entry {i} {k} is not a number"
+            # A bar of zero or below makes every healthy reading a BREACH and
+            # reopens the owning row on a service that is fine.
+            if value <= 0:
+                return f"entry {i} {k} must be greater than 0"
     return None
 
 
@@ -165,10 +181,12 @@ def task_status(base: list, task: str, runner: Runner) -> str:
 def reopen(service: dict, runner: Runner) -> str:
     """Reopen the owning task when it is terminal. Returns a one-line outcome.
 
-    Uses the canonical reopen — phase, then status, then clear
-    `completed_date`. Phase goes first: if a later call fails the row is still
-    terminal, so the next round retries the whole reopen instead of skipping a
-    half-reopened row whose phase was never repaired.
+    Uses the canonical reopen — phase, clear `completed_date`, then status.
+    ⚠️ **The status write goes LAST**, because it is the one that ends the
+    retry: a row is reopened only while it reads terminal. With status last, any
+    earlier failure leaves the row terminal and the next round repeats the whole
+    reopen; with it anywhere earlier, a later failure would leave a non-terminal
+    row the next round skips as "already open", never repaired.
     """
     base = ["vault-cli", "--vault", service["vault"], "task"]
     task = service["task"]
@@ -177,8 +195,8 @@ def reopen(service: dict, runner: Runner) -> str:
         return f"service-guard: {service['label']} owning row already open (status: {status})"
     try:
         runner(base + ["set", task, "phase", "execution"])
-        runner(base + ["set", task, "status", "in_progress"])
         runner(base + ["clear", task, "completed_date"])
+        runner(base + ["set", task, "status", "in_progress"])
     except Exception as exc:  # noqa: BLE001 — surfaced as REOPEN FAILED
         raise ReopenFailed(f"reopen write failed: {exc}") from exc
     return f"service-guard: {service['label']} REOPENED \"{task}\" (was {status})"
@@ -191,19 +209,27 @@ def main(argv: Optional[list] = None, runner: Runner = run) -> int:
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
+    def early_exit(line: str, error: Optional[str], code: int) -> int:
+        # ⚠️ `--json` must hold on EVERY exit, not only the measured one — a JSON
+        # caller needs the structured answer exactly when the config is wrong.
+        if args.json:
+            print(json.dumps({"readings": [], "outcomes": [], "error": error}))
+        else:
+            print(line)
+        return code
+
     if not os.path.exists(args.config):
-        print("service-guard: no config")
-        return 0
+        return early_exit("service-guard: no config", None, 0)
     try:
         with open(args.config, encoding="utf-8") as fh:
             services = json.load(fh)
     except (OSError, ValueError) as exc:
-        print(f"service-guard: REFUSED — unreadable config {args.config}: {exc}")
-        return 1
+        reason = f"unreadable config {args.config}: {exc}"
+        return early_exit(f"service-guard: REFUSED — {reason}", reason, 1)
     refusal = validate(services)
     if refusal:
-        print(f"service-guard: REFUSED — {refusal} ({args.config})")
-        return 1
+        reason = f"{refusal} ({args.config})"
+        return early_exit(f"service-guard: REFUSED — {reason}", reason, 1)
 
     readings = [measure(s, runner) for s in services]
     outcomes = []

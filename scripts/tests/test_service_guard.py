@@ -123,9 +123,20 @@ class MainTest(unittest.TestCase):
         writes = [c for c in runner.calls if c[:4] == ["vault-cli", "--vault", "v", "task"] and c[4] != "get"]
         self.assertEqual(writes, [
             ["vault-cli", "--vault", "v", "task", "set", "Some Task", "phase", "execution"],
-            ["vault-cli", "--vault", "v", "task", "set", "Some Task", "status", "in_progress"],
             ["vault-cli", "--vault", "v", "task", "clear", "Some Task", "completed_date"],
+            ["vault-cli", "--vault", "v", "task", "set", "Some Task", "status", "in_progress"],
         ])
+
+    def test_failed_clear_leaves_the_row_terminal_for_a_retry(self):
+        # The status write is last, so a clear that fails never reaches it and
+        # the row still reads terminal on the next round.
+        runner = runner_for()
+        runner.outputs[("vault-cli", "--vault", "v", "task", "clear")] = RuntimeError("boom")
+        rc, out = run_main([SERVICE], runner, "--apply")
+        self.assertEqual(rc, 1)
+        self.assertIn("REOPEN FAILED", out)
+        status_writes = [c for c in runner.calls if c[4:5] == ["set"] and c[6:7] == ["status"]]
+        self.assertEqual(status_writes, [])
 
     def test_apply_reopens_aborted_row(self):
         _, out = run_main([SERVICE], runner_for(status=status_json("aborted")), "--apply")
@@ -165,6 +176,38 @@ class MainTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("REFUSED", out)
         self.assertIn("missing max_footprint_mb", out)
+
+    def test_bad_entries_are_refused(self):
+        for bad, needle in (
+            (dict(SERVICE, max_footprint_mb=0), "greater than 0"),
+            (dict(SERVICE, max_footprint_mb=-5), "greater than 0"),
+            (dict(SERVICE, max_footprint_mb=True), "not a number"),
+            (dict(SERVICE, max_cpu_pct=False), "not a number"),
+            (dict(SERVICE, label=""), "non-empty string"),
+            (dict(SERVICE, task=["x"]), "non-empty string"),
+            (dict(SERVICE, vault=None), "non-empty string"),
+            (dict(SERVICE, task="--vault"), "must not start with '-'"),
+        ):
+            with self.subTest(bad=bad):
+                runner = runner_for()
+                rc, out = run_main([bad], runner)
+                self.assertEqual(rc, 1)
+                self.assertIn("REFUSED", out)
+                self.assertIn(needle, out)
+                self.assertEqual(runner.calls, [])
+
+    def test_json_holds_on_early_exits(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = sg.main(["--config", "/nonexistent/service-guard.json", "--json"], runner=runner_for())
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out.getvalue()), {"readings": [], "outcomes": [], "error": None})
+
+        rc, out = run_main([{"label": "x"}], runner_for(), "--json")
+        self.assertEqual(rc, 1)
+        payload = json.loads(out)
+        self.assertEqual(payload["readings"], [])
+        self.assertIn("missing", payload["error"])
 
     def test_non_numeric_bar_is_refused(self):
         rc, out = run_main([dict(SERVICE, max_footprint_mb="150")], runner_for())
