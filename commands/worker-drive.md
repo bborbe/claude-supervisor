@@ -324,7 +324,7 @@ When a task step is refused by the auto-mode classifier or by a gate you cannot 
 
 ⚠️ **The dedup key is what keeps two reports of one denial from becoming two cards.** A second denial of a *different* tool is a second card, deliberately — that is a second gate, not noise.
 
-⚠️ **You clear the marker when the denial stops blocking you** — delete `<sid>.denial.json` as soon as the step succeeds or is abandoned, in the same turn. It is a declaration about a *live* block, never a flag to leave behind: nothing expires it, so a stale marker keeps the row `⚠️ problem` every round for the rest of the task, which is the same indefinite-mute failure the reader records for a stale `declared_wait:`.
+⚠️ **You clear the marker when the denial stops blocking you** — delete `<sid>.denial.json` as soon as the step succeeds or is abandoned, in the same turn. It is a declaration about a *live* block, never a flag to leave behind: `round-readings.py` ignores one older than 30 minutes, but that is a backstop — until it fires the row reads `⚠️ problem`, the same indefinite-mute failure as a stale `declared_wait:`.
 
 ## Step 8 — Report once, at the end
 
