@@ -155,26 +155,43 @@ def _ssl_context():
     bundle, so `urlopen` keeps its default and a machine that was working is
     unchanged. Also None when no bundle is found anywhere: there is nothing to
     trust, and failing loudly beats silently trusting nothing.
+
+    ⚠️ **A candidate must produce a context that actually loaded roots, not
+    merely a path that exists.** A `cafile` naming an empty file, a malformed
+    one, or an existing-but-certless `capath` all build a context with zero
+    trust anchors — the original `CERTIFICATE_VERIFY_FAILED` then persists and
+    the fix is a silent no-op, which is indistinguishable from the bug it was
+    meant to cure. So each candidate is tried in turn and a dud falls through
+    to the next rather than being returned.
     """
     paths = ssl.get_default_verify_paths()
     if paths.cafile or paths.capath:
         return None
-    cafile = os.environ.get("SSL_CERT_FILE") or ""
-    if not cafile:
+    for cafile in _ca_bundle_candidates():
+        if not os.path.exists(cafile):
+            continue
         try:
-            import certifi
+            context = ssl.create_default_context(cafile=cafile)
+        except (OSError, ssl.SSLError):
+            continue
+        if context.get_ca_certs():
+            return context
+    return None
 
-            cafile = certifi.where()
-        except ImportError:
-            cafile = ""
-    if not cafile:
-        for candidate in CA_BUNDLE_PATHS:
-            if os.path.exists(candidate):
-                cafile = candidate
-                break
-    if not cafile:
-        return None
-    return ssl.create_default_context(cafile=cafile)
+
+def _ca_bundle_candidates():
+    """The bundle paths to try, in the caller's order of intent."""
+    env = os.environ.get("SSL_CERT_FILE") or ""
+    if env:
+        yield env
+    try:
+        import certifi
+
+        yield certifi.where()
+    except ImportError:
+        pass
+    yield from CA_BUNDLE_PATHS
+
 
 # Bearer token for a store that requires authentication.
 #

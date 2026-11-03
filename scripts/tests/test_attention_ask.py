@@ -1522,12 +1522,30 @@ class SslContextTest(unittest.TestCase):
     every other case pins one step of the resolution order.
     """
 
-    def _resolve(self, *, default_paths, env=None, certifi=None, existing=()):
-        seen = {}
+    def _resolve(
+        self,
+        *,
+        default_paths,
+        env=None,
+        certifi=None,
+        existing=(),
+        unreadable=(),
+        certless=(),
+    ):
+        """Run `_ssl_context()` against a fake filesystem and a fake ssl.
+
+        Returns `(context_or_None, tried)` where `tried` is every `cafile` the
+        resolver handed to `create_default_context`, in order — the sequence is
+        the resolution order, and it is what the fall-through cases assert on.
+        """
+        tried = []
 
         def fake_create(cafile=None):
-            seen["cafile"] = cafile
-            return "CONTEXT"
+            tried.append(cafile)
+            if cafile in unreadable:
+                raise OSError("cannot read bundle")
+            loaded = [] if cafile in certless else ["root"]
+            return mock.Mock(get_ca_certs=lambda: loaded)
 
         env = dict(env or {})
         env.setdefault("SSL_CERT_FILE", "")
@@ -1547,55 +1565,151 @@ class SslContextTest(unittest.TestCase):
                     ):
                         with mock.patch.dict(sys.modules, modules):
                             result = ask._ssl_context()
-        return result, seen.get("cafile")
+        return result, tried
 
     def test_a_working_default_is_left_alone(self):
         paths = mock.Mock(cafile="/usr/lib/ssl/cert.pem", capath=None)
-        self.assertEqual(
-            self._resolve(default_paths=paths), (None, None)
-        )
+        result, tried = self._resolve(default_paths=paths)
+        self.assertIsNone(result)
+        self.assertEqual(tried, [])
 
     def test_a_capath_alone_is_enough_to_leave_it_alone(self):
         paths = mock.Mock(cafile=None, capath="/etc/ssl/certs")
-        self.assertEqual(
-            self._resolve(default_paths=paths), (None, None)
-        )
+        result, tried = self._resolve(default_paths=paths)
+        self.assertIsNone(result)
+        self.assertEqual(tried, [])
 
     def test_ssl_cert_file_wins_over_every_other_source(self):
         paths = mock.Mock(cafile=None, capath=None)
-        self.assertEqual(
-            self._resolve(
-                default_paths=paths,
-                env={"SSL_CERT_FILE": "/custom/bundle.pem"},
-                certifi="/certifi/cacert.pem",
-                existing=("/etc/ssl/cert.pem",),
-            ),
-            ("CONTEXT", "/custom/bundle.pem"),
+        result, tried = self._resolve(
+            default_paths=paths,
+            env={"SSL_CERT_FILE": "/custom/bundle.pem"},
+            certifi="/certifi/cacert.pem",
+            existing=("/custom/bundle.pem", "/etc/ssl/cert.pem"),
         )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/custom/bundle.pem"])
 
     def test_certifi_is_used_when_the_caller_sets_nothing(self):
         paths = mock.Mock(cafile=None, capath=None)
-        self.assertEqual(
-            self._resolve(
-                default_paths=paths,
-                certifi="/certifi/cacert.pem",
-                existing=("/etc/ssl/cert.pem",),
-            ),
-            ("CONTEXT", "/certifi/cacert.pem"),
+        result, tried = self._resolve(
+            default_paths=paths,
+            certifi="/certifi/cacert.pem",
+            existing=("/certifi/cacert.pem", "/etc/ssl/cert.pem"),
         )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/certifi/cacert.pem"])
 
     def test_the_platform_bundle_is_the_last_resort(self):
         paths = mock.Mock(cafile=None, capath=None)
-        self.assertEqual(
-            self._resolve(
-                default_paths=paths, existing=("/etc/ssl/cert.pem",)
-            ),
-            ("CONTEXT", "/etc/ssl/cert.pem"),
+        result, tried = self._resolve(
+            default_paths=paths, existing=("/etc/ssl/cert.pem",)
         )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/etc/ssl/cert.pem"])
 
     def test_no_bundle_anywhere_keeps_the_loud_failure(self):
         paths = mock.Mock(cafile=None, capath=None)
-        self.assertEqual(self._resolve(default_paths=paths), (None, None))
+        result, tried = self._resolve(default_paths=paths)
+        self.assertIsNone(result)
+        self.assertEqual(tried, [])
+
+    def test_a_stale_ssl_cert_file_falls_through_to_the_platform_bundle(self):
+        """An env var naming a path that is not there must not become the answer.
+
+        `create_default_context(cafile=...)` raises on a missing file, and the
+        caller catches `OSError` and reports a transport failure — so a stale
+        variable would turn a working machine into a failing one. Falling
+        through keeps the resolver's promise: the caller named a preference, not
+        a requirement.
+        """
+        paths = mock.Mock(cafile=None, capath=None)
+        result, tried = self._resolve(
+            default_paths=paths,
+            env={"SSL_CERT_FILE": "/gone/bundle.pem"},
+            existing=("/etc/ssl/cert.pem",),
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/etc/ssl/cert.pem"])
+
+    def test_a_bundle_that_parses_to_zero_roots_falls_through(self):
+        """An existing bundle with no certificates is a silent no-op, not a fix.
+
+        This is the failure the existence check cannot see: the path is there,
+        `create_default_context` succeeds, and the context carries no trust
+        anchors — so the original `CERTIFICATE_VERIFY_FAILED` persists and looks
+        exactly like the bug this change was written to cure.
+        """
+        paths = mock.Mock(cafile=None, capath=None)
+        result, tried = self._resolve(
+            default_paths=paths,
+            env={"SSL_CERT_FILE": "/empty/bundle.pem"},
+            existing=("/empty/bundle.pem", "/etc/ssl/cert.pem"),
+            certless=("/empty/bundle.pem",),
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/empty/bundle.pem", "/etc/ssl/cert.pem"])
+
+    def test_an_unreadable_bundle_falls_through(self):
+        paths = mock.Mock(cafile=None, capath=None)
+        result, tried = self._resolve(
+            default_paths=paths,
+            env={"SSL_CERT_FILE": "/locked/bundle.pem"},
+            existing=("/locked/bundle.pem", "/etc/ssl/cert.pem"),
+            unreadable=("/locked/bundle.pem",),
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/locked/bundle.pem", "/etc/ssl/cert.pem"])
+
+
+CONTEXT_SENTINEL = object()
+
+
+class UrlopenContextWiringTest(unittest.TestCase):
+    """`context=` must actually reach `urlopen`, or the fix is dead code.
+
+    Widening every fake to `**kwargs` is what let this argument disappear
+    quietly: the fakes accept `context` and none inspects it, so deleting the
+    kwarg from either call site left the whole suite green — a fix that could
+    not fail. These two assertions are what make that deletion a red run.
+    """
+
+    def _captured_context(self, invoke):
+        seen = {}
+
+        def fake(request, timeout=None, **kwargs):
+            seen["context"] = kwargs.get("context")
+            return FakeResponse({"item_id": STORE_ITEM_ID, "state": "open"})
+
+        with mock.patch.object(ask, "_ssl_context", lambda: CONTEXT_SENTINEL):
+            with mock.patch.object(ask.urllib.request, "urlopen", fake):
+                invoke()
+        return seen.get("context")
+
+    def test_post_passes_the_context_to_urlopen(self):
+        self.assertIs(
+            self._captured_context(
+                lambda: ask.post_question(
+                    producer_id="p",
+                    producer_kind="session",
+                    liveness_ref="heartbeat:/tmp/none",
+                    dedup_key="k",
+                    interrupt_class="pick",
+                    risk="",
+                    payload="x",
+                    context="",
+                    options=[],
+                    expires_at="",
+                )
+            ),
+            CONTEXT_SENTINEL,
+        )
+
+    def test_poll_passes_the_context_to_urlopen(self):
+        self.assertIs(
+            self._captured_context(lambda: ask.fetch_item(STORE_ITEM_ID)),
+            CONTEXT_SENTINEL,
+        )
 
 
 if __name__ == "__main__":
