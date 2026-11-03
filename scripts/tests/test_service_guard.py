@@ -138,9 +138,24 @@ class MainTest(unittest.TestCase):
         status_writes = [c for c in runner.calls if c[4:5] == ["set"] and c[6:7] == ["status"]]
         self.assertEqual(status_writes, [])
 
-    def test_apply_reopens_aborted_row(self):
-        _, out = run_main([SERVICE], runner_for(status=status_json("aborted")), "--apply")
-        self.assertIn("(was aborted)", out)
+    def test_apply_leaves_aborted_row_alone(self):
+        runner = runner_for(status=status_json("aborted"))
+        rc, out = run_main([SERVICE], runner, "--apply")
+        self.assertEqual(rc, 0)
+        self.assertIn("aborted — not reopened", out)
+        self.assertFalse(any(c[4:5] in (["set"], ["clear"]) for c in runner.calls))
+
+    def test_disabled_service_reads_off_and_exits_zero(self):
+        runner = runner_for()
+        rc, out = run_main([dict(SERVICE, enabled=False)], runner, "--apply")
+        self.assertEqual(rc, 0)
+        self.assertIn("OFF — disabled in config", out)
+        self.assertEqual(runner.calls, [])
+
+    def test_enabled_must_be_a_bool(self):
+        rc, out = run_main([dict(SERVICE, enabled="no")], runner_for())
+        self.assertEqual(rc, 1)
+        self.assertIn("enabled must be true or false", out)
 
     def test_title_containing_failed_does_not_fail_a_clean_reopen(self):
         svc = dict(SERVICE, task="Fix FAILED nightly build")

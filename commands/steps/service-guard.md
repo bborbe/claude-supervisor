@@ -19,7 +19,8 @@ Memory is `footprint -p <pid>` → `phys_footprint`, **never `ps -o rss`**: on m
 ## What it does
 
 - `OK` — nothing.
-- `BREACH` — with `--apply`, a terminal owning row (`completed` / `aborted`) is set back to `status: in_progress`, `phase: execution`, and the line reads `REOPENED`. An open row is left as it is. Print every `BREACH` and `REOPENED` line in the round's report; a reopened row is approved work and enters the open leg (router row 16) like any other.
+- `BREACH` — with `--apply`, a `completed` owning row is set back to `phase: execution`, its `completed_date` cleared, then `status: in_progress` (written last, so a failed write leaves the row terminal and the next round retries); the line reads `REOPENED`. An open row is left as it is. An `aborted` row is the operator's rejection — it is reported (`aborted — not reopened`) and never reopened. Print every `BREACH` and `REOPENED` line in the round's report; a reopened row carries its original approval and enters the open leg (router row 16) like any other.
+- `OFF` — the entry carries `"enabled": false`: a service stopped on purpose. Nothing is measured and the round stays green; delete the flag to guard it again.
 - `UNKNOWN` — the pid or footprint could not be read; the script exits non-zero. Print it as it comes back and never round it to `OK`: "within bounds" and "could not measure" must not render the same.
 
 ## Exit codes

@@ -28,8 +28,10 @@ prints `UNKNOWN`, because "within bounds" and "I could not measure" must not
 render the same.
 
 With `--apply`, a breach reopens the owning task: a terminal row
-(`completed` / `aborted`) is set back to `phase: execution`, its
-`completed_date` cleared, and `status: in_progress` written last. An open row is left
+(`completed`) is set back to `phase: execution`, its `completed_date`
+cleared, and `status: in_progress` written last. An `aborted` row is the
+operator's rejection and is reported, never reopened. An entry with
+`"enabled": false` reads OFF and exits 0 — a service stopped on purpose. An open row is left
 untouched — it is already open.
 
 Exit codes: 0 — every service measured (OK or BREACH) and every reopen
@@ -49,7 +51,12 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 DEFAULT_CONFIG = os.path.expanduser("~/.claude/state/service-guard.json")
-TERMINAL_STATUSES = ("completed", "aborted")
+# Only `completed` is reopened. ⚠️ `aborted` is the operator's REJECTION — the
+# inbox documents it as irreversible — and an aborted row that was never
+# approved carries no `approved_at`, which the open leg requires, so a reopened
+# aborted row would sit `in_progress` with no session forever. A breach on an
+# aborted row is reported and left alone.
+REOPENABLE_STATUSES = ("completed",)
 
 Runner = Callable[[list], str]
 
@@ -80,13 +87,15 @@ def parse_launchctl_pid(text: str) -> Optional[int]:
 @dataclass
 class Reading:
     label: str
-    state: str  # OK | BREACH | UNKNOWN
+    state: str  # OK | BREACH | UNKNOWN | OFF
     pid: Optional[int] = None
     footprint_mb: Optional[float] = None
     cpu_pct: Optional[float] = None
     reason: str = ""
 
     def line(self) -> str:
+        if self.state == "OFF":
+            return f"service-guard: {self.label} OFF — {self.reason}"
         if self.state == "UNKNOWN":
             return f"service-guard: {self.label} UNKNOWN — {self.reason}"
         cpu = f" · cpu {self.cpu_pct:.1f}%" if self.cpu_pct is not None else ""
@@ -97,6 +106,12 @@ class Reading:
 
 def measure(service: dict, runner: Runner) -> Reading:
     label = service["label"]
+    # ⚠️ OFF is a deliberate state, not a failure: a service stopped on purpose
+    # must not read UNKNOWN (exit 1) every round — an always-red guard trains
+    # the operator to ignore it. UNKNOWN stays reserved for "could not measure"
+    # on a service that should be running.
+    if service.get("enabled") is False:
+        return Reading(label, "OFF", reason="disabled in config")
     try:
         pid = parse_launchctl_pid(runner(["launchctl", "list", label]))
     except Exception as exc:  # noqa: BLE001 — every failure is an UNKNOWN reading
@@ -149,6 +164,8 @@ def validate(services) -> Optional[str]:
             # be parsed as a flag rather than as data.
             if value.startswith("-"):
                 return f"entry {i} {k} must not start with '-'"
+        if "enabled" in entry and not isinstance(entry["enabled"], bool):
+            return f"entry {i} enabled must be true or false"
         for k in ("max_footprint_mb", "max_cpu_pct"):
             if k not in entry:
                 continue
@@ -191,7 +208,10 @@ def reopen(service: dict, runner: Runner) -> str:
     base = ["vault-cli", "--vault", service["vault"], "task"]
     task = service["task"]
     status = task_status(base, task, runner)
-    if status not in TERMINAL_STATUSES:
+    if status == "aborted":
+        return (f"service-guard: {service['label']} owning row is aborted — "
+                f"not reopened (an operator rejection stands)")
+    if status not in REOPENABLE_STATUSES:
         return f"service-guard: {service['label']} owning row already open (status: {status})"
     try:
         runner(base + ["set", task, "phase", "execution"])
