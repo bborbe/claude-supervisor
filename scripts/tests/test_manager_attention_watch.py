@@ -503,6 +503,30 @@ class StateScopeTest(unittest.TestCase):
         self.assertEqual([k for k, *_ in watch.transitions(["aaaa1111"], [], state)],
                          ["HELD"])
 
+    def test_held_causes_are_distinguishable_for_the_emit_loop(self):
+        # The emit loop ANNOUNCES one of the two HELD causes and only records the
+        # other, so the split has to be decidable from the record alone. It keys
+        # on `UNTRACKED_DETAIL`, the exact string the lost-sight branch emits —
+        # so that string must match, and the announced cause must not collide
+        # with it. A prefix test would be the fragile form; this pins equality.
+        lost = watch.transitions(["aaaa1111"], [], {})[0]
+        unregistered = watch.transitions(
+            ["aaaa1111"], [], {"aaaa1111": ("A", "x", "unregistered", None)})[0]
+        self.assertEqual(lost[3], watch.UNTRACKED_DETAIL,
+                         "the lost-sight cause must match the constant exactly")
+        self.assertNotEqual(unregistered[3], watch.UNTRACKED_DETAIL,
+                            "the announced cause must not collide with it")
+        self.assertIn("unregistered", unregistered[3])
+
+    def test_unregistered_held_record_carries_a_label(self):
+        # The announcement prints `label[:46]`; an empty label would announce a
+        # dead gate with no task name attached, which is the half of the message
+        # the manager needs to act on. The lost-sight cause carries no label and
+        # is never printed, so only this one has to have one.
+        got = watch.transitions(
+            ["aaaa1111"], [], {"aaaa1111": ("My Task", "x", "unregistered", None)})
+        self.assertEqual(got[0][2], "My Task")
+
     def test_genuine_answer_still_clears(self):
         # The verdict a genuine answer now produces is the settle at `idle` with
         # no ask — NOT `registry:busy`, which is HELD. See `is_gated`.
@@ -696,8 +720,8 @@ class CommitLoopTest(unittest.TestCase):
     """The commit loop, driven for real — `--once` returns before it.
 
     Everything this watcher guarantees about `CLEARED` honesty is decided inside
-    this loop: the stability gate, the HELD-logged-not-printed branch, and the
-    atomic state write. `--once` returns at the top of the loop, so before this
+    this loop: the stability gate, the two `HELD` causes (one announced, one
+    log-only), and the atomic state write. `--once` returns at the top of the loop, so before this
     test the tested units were the honest parts and the untested one was where
     dishonesty is decided. Found in review 2026-10-04.
     """
@@ -748,12 +772,59 @@ class CommitLoopTest(unittest.TestCase):
         self.assertEqual(out.count("NEW GATE"), 1, out)
         self.assertEqual(out.count("CLEARED"), 1, out)
 
-    def test_an_unregistered_session_is_held_and_never_printed(self):
+    def test_an_unregistered_session_is_held_and_announced(self):
+        # ⚠️ INVERTED 2026-11-03. This used to assert the HELD record was never
+        # printed — which was the defect: a manager that is not told its worker's
+        # gate died keeps waiting on a card that no longer exists. The line is now
+        # ANNOUNCED, so the "never cleared" half has to be read per line: the
+        # detail text itself carries the word `CLEARED` ("no CLEARED emitted").
         held = {"aaaa1111": ("A", "unregistered", "unregistered", None)}
-        out = self._drive([{}, self.GATED, self.GATED, held, held])
+        out = self._drive([{}, self.GATED, self.GATED, held, held, held])
         self.assertEqual(out.count("NEW GATE"), 1, out)
-        self.assertNotIn("CLEARED", out,
-                         "an unregistered session is HELD, never cleared")
+        # ⚠️ EXACTLY ONCE, not merely present — and the poll COUNT is load-bearing.
+        # `assertIn` alone would still pass if the `prev.pop(sid8, None)` in the
+        # emit loop were dropped, and the line would then re-fire on every poll: a
+        # `Monitor` notification storm, which is the risk this change's own
+        # rationale names.
+        #
+        # ⚠️ A FIVE-poll sequence cannot see that. The stability gate admits the
+        # departure only on the second poll that shows it, so with
+        # `[{}, GATED, GATED, held, held]` the HELD lands on the FIFTH — the last —
+        # and the count is 1 whether or not the pop runs. A sixth poll is what makes
+        # the pop observable: without it, poll six re-announces and the count is 2.
+        self.assertEqual(out.count("HELD"), 1, out)
+        self.assertIn("HELD  aaaa1111  A  ::  unregistered; no CLEARED emitted",
+                      out, "a dead worker's gate must reach the manager")
+        self.assertFalse(
+            [ln for ln in out.splitlines() if ln.startswith("CLEARED  ")],
+            "an unregistered session is HELD, never cleared: " + out)
+
+    def test_two_dead_workers_each_get_their_own_line(self):
+        # The announcement is per WORKER, and so is the pop. A single-session
+        # fixture cannot tell a per-sid8 pop from a blanket one that drops the
+        # whole set — both leave one line behind.
+        gated = {"aaaa1111": ("A", "pick", "idle+closer", True),
+                 "bbbb2222": ("B", "pick", "idle+closer", True)}
+        held = {"aaaa1111": ("A", "unregistered", "unregistered", None),
+                "bbbb2222": ("B", "unregistered", "unregistered", None)}
+        out = self._drive([{}, gated, gated, held, held, held])
+        self.assertEqual(out.count("HELD"), 2, out)
+        self.assertIn("HELD  aaaa1111  A  ::", out)
+        self.assertIn("HELD  bbbb2222  B  ::", out)
+
+    def test_a_lost_sight_session_is_recorded_not_announced(self):
+        """The control that tells the narrow fix from a widened branch.
+
+        Both `HELD` causes arrive at the emit loop as one `kind`, so a fix that
+        widens that branch prints both and still passes every other test in this
+        class. A session the watcher stopped tracking is bookkeeping, not a dead
+        gate, and must stay out of the announcement.
+        """
+        out = self._drive([{}, self.GATED, self.GATED, {}, {}])
+        self.assertEqual(out.count("NEW GATE"), 1, out)
+        self.assertNotIn("HELD", out,
+                         "a session that stopped being tracked is not a dead "
+                         "gate: " + out)
 
     def test_a_closer_unknown_read_does_not_drop_the_gate(self):
         """THE DEFECT, at the commit loop — where the lost `CLEARED` is decided.
