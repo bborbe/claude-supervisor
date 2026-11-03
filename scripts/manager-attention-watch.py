@@ -924,10 +924,15 @@ def is_gated(status, body, headless_live=False, stuck=None, pending=None,
     # ⚠️ The one narrowing this accepts, stated rather than left to be discovered:
     # on a host whose heartbeat store is absent or unreadable, `headless_live` is
     # False for every session, so a stuck headless worker there reads
-    # `unregistered` (HELD) instead of `stuck:` (gated). That is the safe
-    # direction — such a host already cannot see a headless worker well enough to
-    # gate `headless+closer` either — and it is the same narrowing `heartbeat_live`
-    # already documents for the registry half.
+    # `unregistered` (HELD) instead of `stuck:` (gated). That was the safe
+    # direction while HELD was silent — such a host already cannot see a headless
+    # worker well enough to gate `headless+closer` either — and it is the same
+    # narrowing `heartbeat_live` already documents for the registry half.
+    # ⚠️ It is no longer free: the emit loop now ANNOUNCES the `unregistered` cause,
+    # so on such a host a stuck headless worker reaches the manager as a `HELD`
+    # line rather than as a carded `stuck:`. Still the safe direction — a gate the
+    # manager is told is gone beats a gate nobody mentions — but it is a false
+    # negative in what the line claims, and `round-tail.md` says so.
     if status is None and not headless_live:
         return None, "unregistered"
     # Deliberately ahead of the registry half: a dead permission channel is the
@@ -2024,6 +2029,18 @@ def main(argv=None):
                     # it fires on every gated session that leaves the tracked set,
                     # which is ordinary bookkeeping rather than a dead gate. See
                     # UNTRACKED_DETAIL for the discriminator.
+                    #
+                    # ⚠️ `unregistered` is a THREE-valued verdict, not proof the
+                    # worker is dead: `registry_status()` also yields `None` for an
+                    # unreadable registry dir and for a session whose registry file
+                    # is mid-rewrite. A registry outage spanning two polls therefore
+                    # announces this line for gated workers that are still alive.
+                    # Accepted rather than gated on positive evidence, because
+                    # silence was the larger error — a manager waiting on a card
+                    # that is genuinely gone has no other signal — and because the
+                    # outage is warned on stderr ("this is not a quiet sweep") and
+                    # self-heals on the next readable poll. Stated here so the next
+                    # reader does not discover it from a false page.
                     if kind == "NEW GATE":
                         print(f"NEW GATE  {sid8}  {label[:46]}  ::  {detail}",
                               flush=True)

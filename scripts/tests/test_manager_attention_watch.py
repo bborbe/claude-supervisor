@@ -779,13 +779,19 @@ class CommitLoopTest(unittest.TestCase):
         # ANNOUNCED, so the "never cleared" half has to be read per line: the
         # detail text itself carries the word `CLEARED` ("no CLEARED emitted").
         held = {"aaaa1111": ("A", "unregistered", "unregistered", None)}
-        out = self._drive([{}, self.GATED, self.GATED, held, held])
+        out = self._drive([{}, self.GATED, self.GATED, held, held, held])
         self.assertEqual(out.count("NEW GATE"), 1, out)
-        # ⚠️ EXACTLY ONCE, not merely present. `assertIn` alone would still pass if
-        # the `prev.pop(sid8, None)` in the emit loop were dropped, and the line
-        # would then re-fire on every poll — a `Monitor` notification storm, which
-        # is the risk this change's own rationale names. Pinned the way
-        # `test_a_gate_is_announced_once_and_cleared_once` pins NEW GATE/CLEARED.
+        # ⚠️ EXACTLY ONCE, not merely present — and the poll COUNT is load-bearing.
+        # `assertIn` alone would still pass if the `prev.pop(sid8, None)` in the
+        # emit loop were dropped, and the line would then re-fire on every poll: a
+        # `Monitor` notification storm, which is the risk this change's own
+        # rationale names.
+        #
+        # ⚠️ A FIVE-poll sequence cannot see that. The stability gate admits the
+        # departure only on the second poll that shows it, so with
+        # `[{}, GATED, GATED, held, held]` the HELD lands on the FIFTH — the last —
+        # and the count is 1 whether or not the pop runs. A sixth poll is what makes
+        # the pop observable: without it, poll six re-announces and the count is 2.
         self.assertEqual(out.count("HELD"), 1, out)
         self.assertIn("HELD  aaaa1111  A  ::  unregistered; no CLEARED emitted",
                       out, "a dead worker's gate must reach the manager")
