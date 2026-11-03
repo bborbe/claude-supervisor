@@ -781,6 +781,12 @@ class CommitLoopTest(unittest.TestCase):
         held = {"aaaa1111": ("A", "unregistered", "unregistered", None)}
         out = self._drive([{}, self.GATED, self.GATED, held, held])
         self.assertEqual(out.count("NEW GATE"), 1, out)
+        # ⚠️ EXACTLY ONCE, not merely present. `assertIn` alone would still pass if
+        # the `prev.pop(sid8, None)` in the emit loop were dropped, and the line
+        # would then re-fire on every poll — a `Monitor` notification storm, which
+        # is the risk this change's own rationale names. Pinned the way
+        # `test_a_gate_is_announced_once_and_cleared_once` pins NEW GATE/CLEARED.
+        self.assertEqual(out.count("HELD"), 1, out)
         self.assertIn("HELD  aaaa1111  A  ::  unregistered; no CLEARED emitted",
                       out, "a dead worker's gate must reach the manager")
         self.assertFalse(
