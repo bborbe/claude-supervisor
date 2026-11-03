@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a `goal-drive` or `topic-drive` round now writes its manager's liveness record every round, so a live manager no longer reads `STALE` after one period.** The arm lived only in the one-shot loop commands (`goal-loop` step 3, `topic-loop`), and a round re-arms no wakeup by design — so a manager driven by rounds kept `ScheduleWakeup` armed while its `.arms` record aged out, and the fleet sweep classified it as lapsed. Three managers read `STALE` on 2026-11-03 with their loops demonstrably live; the only thing refreshing them was `topic-keepalive.py` restarting a stale session, which re-runs the one-shot arm. New router row **0a** (`commands/steps/round-liveness.md`) writes the record in both rounds, **before the pre-dispatch gate** — the gate's `exit 0` ends a no-change by-hand round, so a record below it would be missing on exactly the rounds that go stale. It skips a `STOPPED` subject (`--arm` clears the `.stopped` marker, so arming a stood-down manager would silently un-stand it down), takes the clamped `--interval` from the wakeup prompt (`--arm` requires it > 0), and passes `--branch` explicitly. `goal-drive.md`'s *"This is the round, not the arm"* and `--interval` lines are amended in the same change: the `ScheduleWakeup` arm stays one-shot, the liveness record is per-round.
+
 ## v0.236.2
 
 - fix: `manager-attention-watch.py` announces a dead worker's gate instead of only logging it. The `UNREGISTERED` `HELD` record now prints `HELD  <sid8>  <label>  ::  <reason>; no CLEARED emitted` on the arm's stdout — the same `Monitor` channel that carries `NEW GATE` and `CLEARED` — so a manager stops waiting on a card that no longer exists. The other `HELD` cause (a session the watcher lost sight of, because it stopped being tracked) stays log-only, matched exactly via `UNTRACKED_DETAIL`; announcing it would fire on every gated session that leaves the tracked set.
