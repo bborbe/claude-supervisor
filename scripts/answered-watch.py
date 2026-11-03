@@ -72,6 +72,10 @@ STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "10"))
 # EVERY stream (re)connect, under the unchanged 10 s STORE_TIMEOUT. Correctness
 # over cost is the right trade — a missed wake is the worse failure — but the
 # budget is deliberate, not incidental, so do not shrink this back to a bare read.
+# ⚠️ Since attention-controller v0.67.0 the read is narrowed server-side to this
+# session's own cards (`producer_id`, see `fetch_history`), so on a current store
+# the page is this session's history, not ~22 MB. The limit still bounds the
+# fallback: an older store ignores the parameter and answers the whole history.
 HISTORY_LIMIT = int(os.environ.get("ATTENTION_HISTORY_LIMIT", "50000"))
 # A long-lived stream: the read blocks between events, so this timeout is
 # generous and its expiry is treated as a drop-and-reconnect, not as an error.
@@ -130,8 +134,9 @@ def fetch_json(url, timeout):
 
 
 def fetch_history(store, limit=HISTORY_LIMIT, session=None):
-    # ⚠️ `producer_id` narrows the page server-side to this session's own cards.
-    # A store that predates the parameter ignores it and answers every
+    # ⚠️ `producer_id` narrows the page server-side to this session's own cards —
+    # honoured by attention-controller >= v0.67.0. An older store ignores the
+    # unknown parameter (it reads only `limit` / `offset`) and answers every
     # producer, and `is_mine` still filters below — so the narrowing is a cost
     # cut, never a correctness dependency, and either deploy order is safe.
     query = f"limit={limit}"
@@ -175,7 +180,11 @@ def emit(item_id, out):
 
 
 def reconcile(store, session, seen, started_at, attribution, out, err):
-    """Fold the store's full history into `seen`, emitting only post-start answers.
+    """Fold this session's history into `seen`, emitting only post-start answers.
+
+    The read is narrowed to this session's `producer_id` on a store that honours
+    it (attention-controller >= v0.67.0); an older store answers its full
+    history and `is_mine` narrows it here instead.
 
     Called on every (re)connect. On the first call `seen` is empty, so every one
     of this session's answered cards is adopted — and those answered **before**

@@ -228,6 +228,16 @@ class ReconcileTest(unittest.TestCase):
                 self.err,
             )
 
+    def test_reconcile_reads_with_its_own_session(self):
+        # The wiring that makes the narrowing effective: without `session=`
+        # the read silently widens back to the whole history.
+        with mock.patch.object(watch, "fetch_history", return_value=[]) as fetch:
+            watch.reconcile(
+                "http://store", ME, set(), self.started,
+                FakeAttribution(set()), self.out, self.err,
+            )
+        fetch.assert_called_once_with("http://store", session=ME)
+
     def test_emits_for_own_item_answered_after_start(self):
         seen = self.run_reconcile([item("abc")])
         self.assertEqual(self.out.getvalue(), "ANSWERED abc\n")

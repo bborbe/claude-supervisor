@@ -1595,9 +1595,10 @@ class AnsweredParkKeysTest(unittest.TestCase):
 
         with mock.patch("urllib.request.urlopen", urlopen):
             watch.answered_park_keys([self.SID8])
-        self.assertEqual(len(seen), 1)
-        self.assertIn("&dedup_key_prefix=park%3A", seen[0])
-        self.assertIn(f"?limit={watch.card_lookup.HISTORY_LIMIT}", seen[0])
+        self.assertEqual(seen, [
+            f"{watch.STORE}/api/1.0/attention/history"
+            f"?limit={watch.card_lookup.HISTORY_LIMIT}&dedup_key_prefix=park%3A"
+        ])
 
     def test_no_sids_does_not_touch_the_store(self):
         with mock.patch("urllib.request.urlopen",
