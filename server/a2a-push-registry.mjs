@@ -35,8 +35,11 @@ export const A2A_PUSH_MAX_MESSAGES = 50
  *   the docker path; a **k8s** callback needs a fixed one, because the worker reaches it
  *   through an in-cluster relay whose upstream port is deployed configuration.
  * @param {string} [options.receiverHost] Where the receiver binds. Loopback by default — the
- *   narrowest surface that serves the docker path. A relay on another host cannot dial
- *   loopback, so the k8s path widens it to the address that relay targets.
+ *   narrowest surface that serves the docker path.
+ * @param {string} [options.routerUrl] The push router that owns the stable address a cluster
+ *   relay forwards to. When set, this session keeps its receiver on loopback and registers its
+ *   token with that router instead of binding the stable port itself — see
+ *   `a2a-push-router.mjs` for why one process must own it.
  * @param {() => number} [options.now] The clock `age_s` is computed against. Injectable so the
  *   age assertion is exact rather than a range.
  */
@@ -46,6 +49,8 @@ export function createA2APushRegistry({
   callbackHost = 'host.docker.internal',
   receiverPort = 0,
   receiverHost = '127.0.0.1',
+  routerUrl = null,
+  registerWithRouter = registerTokenWithRouter,
   now = () => Date.now(),
 } = {}) {
   // token -> workerId, or `null` while the `create` that minted it has not answered yet. The
@@ -115,6 +120,17 @@ export function createA2APushRegistry({
       if (ready.error) return { error: ready.error }
       const token = tokenFactory()
       tokens.set(token, null)
+      // ⚠️ A REGISTRATION THAT FAILS MUST NOT LEAVE A LIVE TOKEN BEHIND. The token is only
+      // useful once the router can route it; keeping it would make `pushFor` hand a follow-up a
+      // credential nothing can deliver, which reads downstream as a configured channel that is
+      // merely quiet — the exact failure shape this module exists to remove.
+      if (routerUrl) {
+        const registered = await registerWithRouter({ routerUrl, token, port: ready.port })
+        if (registered?.error) {
+          tokens.delete(token)
+          return { error: registered.error }
+        }
+      }
       // ⚠️ THE CALLER SUPPLIES THE URL WHEN THE TARGET NEEDS ONE THIS PROCESS CANNOT DERIVE.
       // `ready.url` is the Docker gateway, and it is right for a container. It is wrong for
       // every cluster worker: a pod reaches this machine through neither the gateway name nor
@@ -221,4 +237,32 @@ export function createA2APushRegistry({
 
     close: () => receiver.close(),
   }
+}
+
+/**
+ * Tell the push router that this token's pushes belong to `port` — `null`, or `{ error }`.
+ *
+ * ⚠️ THE FAILURE IS RETURNED, NOT SWALLOWED. A registry that registered "best effort" would
+ * mint a token, hand it to a worker, and have every push refused by the router as unknown —
+ * which surfaces as an empty `status_messages` and no explanation. Returning the reason is what
+ * lets `push_registration` carry it.
+ */
+export function registerTokenWithRouter({ routerUrl, token, port, fetchImpl = fetch, timeoutMs = 5000 } = {}) {
+  const url = `${String(routerUrl).replace(/\/+$/, '')}/register`
+  return fetchImpl(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token, port }),
+    // ⚠️ BOUNDED, BECAUSE THIS RUNS ON THE SPAWN PATH. A router that accepts the connection and
+    // never answers would otherwise stall worker creation for undici's default headers timeout
+    // (~5 minutes) on every spawn — an unbounded regression on the one path that must stay fast.
+    signal: AbortSignal.timeout(timeoutMs),
+  })
+    .then(async (res) => {
+      if (!res.ok) {
+        return { error: `the push router refused the registration (HTTP ${res.status}): ${(await res.text()).slice(0, 200)}` }
+      }
+      return null
+    })
+    .catch((cause) => ({ error: `the push router could not be reached at ${url}: ${cause?.message ?? cause}` }))
 }

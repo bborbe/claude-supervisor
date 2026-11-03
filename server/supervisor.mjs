@@ -81,11 +81,20 @@ const a2aPushRegistry = createA2APushRegistry({
   // A cluster worker reaches this receiver through an in-cluster relay, and a relay's upstream
   // port is deployed configuration — so a k8s deployment pins the port here and the relay is
   // told the same number. `0` (ephemeral) stays the default: the docker path has no relay.
-  receiverPort: Number(config.a2aPushPort) || 0,
-  // Loopback unless the operator widens it. A relay on another host cannot dial loopback, so
-  // the same deployment that sets `SUPERVISOR_A2A_K8S_CALLBACK_URL` sets this to the address
-  // its relay targets — the two are one decision and are documented together in config.mjs.
-  ...(config.a2aPushHost ? { receiverHost: config.a2aPushHost } : {}),
+  // ⚠️ A ROUTER SUPERSEDES THE HOST/PORT PAIR, IT DOES NOT JOIN IT. With a router, this
+  // session's receiver MUST stay on loopback at an ephemeral port: the router forwards to
+  // `127.0.0.1:<that port>`, so a receiver bound to the LAN address would refuse every forward
+  // (502), and a receiver pinned to the fixed port would hit EADDRINUSE on the second session —
+  // reintroducing exactly the contention the router exists to remove. The two are one decision,
+  // so the router wins and the pair is ignored rather than merged.
+  ...(config.a2aPushRouterUrl
+    ? { routerUrl: config.a2aPushRouterUrl }
+    : {
+        receiverPort: Number(config.a2aPushPort) || 0,
+        // Loopback unless the operator widens it — the pre-router shape, kept for a
+        // deployment that has not adopted the router yet.
+        ...(config.a2aPushHost ? { receiverHost: config.a2aPushHost } : {}),
+      }),
 })
 
 /**
