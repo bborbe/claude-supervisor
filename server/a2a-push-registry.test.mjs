@@ -62,6 +62,28 @@ test('beginCreate honours a caller-supplied callback URL, and still defaults wit
   assert.deepEqual(plain.push, { url: 'http://host.docker.internal:41234/a2a/push', token: 'tok-2' })
 })
 
+test('a router registration failure releases the token rather than minting an undeliverable one', async () => {
+  const make = (registerWithRouter) =>
+    createA2APushRegistry({
+      receiverFactory: () => ({ listen: async () => 41234, close: async () => {}, messagesFor: () => [] }),
+      tokenFactory: () => 'tok-reg',
+      routerUrl: 'http://127.0.0.1:1',
+      registerWithRouter,
+    })
+
+  // The positive control in the same process: a successful registration mints the token.
+  const ok = await make(async () => null).beginCreate()
+  assert.equal(ok.token, 'tok-reg')
+
+  // ⚠️ The negative this pins: a token whose router refused it is a credential nothing can
+  // deliver, and keeping it would make `pushFor` hand a follow-up a channel that reads as
+  // configured-but-quiet — the exact failure shape this module exists to remove.
+  const failed = await make(async () => ({ error: 'router unreachable' })).beginCreate()
+  assert.equal(failed.error, 'router unreachable')
+  assert.equal(failed.token, undefined, 'no token may survive a failed registration')
+  assert.equal(failed.push, undefined)
+})
+
 test('a follow-up re-registers against the URL its own worker was created with', async () => {
   let minted = 0
   const { registry } = harness({ tokenFactory: () => `tok-${++minted}` })

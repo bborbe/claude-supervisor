@@ -11,6 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
+import os from 'node:os'
 import { createA2APushRouter, isLoopback, TOKEN_HEADER, REGISTER_PATH, PUSH_PATH } from './a2a-push-router.mjs'
 
 async function startRouter({ forward } = {}) {
@@ -126,6 +127,50 @@ test('a forwarding failure surfaces as 502, never as a delivered push', async ()
   } finally {
     await router.close()
   }
+})
+
+test('registration over loopback succeeds on an all-interfaces listener, and a LAN source is refused', async () => {
+  // ⚠️ THE REGRESSION THIS PINS. The router binds every interface so a relay can reach it, and
+  // a session registers at `http://127.0.0.1:<port>`. A listener bound to a *specific* LAN
+  // address instead makes that registration arrive with the LAN source address, the
+  // loopback-only gate refuses its own machine, and every cluster spawn silently loses its
+  // channel. Both directions are asserted here: the loopback registration works, and the same
+  // request sourced from a LAN address is refused.
+  const router = createA2APushRouter({ host: '0.0.0.0', port: 0 })
+  const port = await router.listen()
+  try {
+    const viaLoopback = await register(`http://127.0.0.1:${port}`, 'tok-loop', 41000)
+    assert.equal(viaLoopback.status, 200, 'a same-machine session must be able to register')
+
+    const lan = Object.values(os.networkInterfaces())
+      .flat()
+      .find((i) => i && i.family === 'IPv4' && !i.internal)
+    if (lan) {
+      const viaLan = await register(`http://${lan.address}:${port}`, 'tok-lan', 41001)
+      assert.equal(viaLan.status, 403, 'a routing claim from off-loopback must be refused')
+      assert.equal(router.routesFor().has('tok-lan'), false)
+    }
+  } finally {
+    await router.close()
+  }
+})
+
+test('an expired route is refused and evicted, so a stale token cannot reach a reused port', async () => {
+  let clock = 1_000_000
+  const { router, calls, base } = await startRouter()
+  const expiring = createA2APushRouter({ port: 0, now: () => clock, routeTtlMs: 1000, forward: async () => ({ status: 200, body: '{}' }) })
+  const p = await expiring.listen()
+  try {
+    await register(`http://127.0.0.1:${p}`, 'tok-old', 41000)
+    clock += 2000
+    const res = await push(`http://127.0.0.1:${p}`, 'tok-old')
+    assert.equal(res.status, 403, 'a route past its TTL must not forward')
+    assert.equal(expiring.routesFor().size, 0, 'and it must be evicted, not merely ignored')
+  } finally {
+    await expiring.close()
+  }
+  await router.close()
+  assert.equal(calls.length, 0)
 })
 
 test('the real hop reaches a loopback receiver and replays the token header', async () => {

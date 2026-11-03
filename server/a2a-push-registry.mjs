@@ -247,12 +247,16 @@ export function createA2APushRegistry({
  * which surfaces as an empty `status_messages` and no explanation. Returning the reason is what
  * lets `push_registration` carry it.
  */
-export function registerTokenWithRouter({ routerUrl, token, port, fetchImpl = fetch } = {}) {
+export function registerTokenWithRouter({ routerUrl, token, port, fetchImpl = fetch, timeoutMs = 5000 } = {}) {
   const url = `${String(routerUrl).replace(/\/+$/, '')}/register`
   return fetchImpl(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ token, port }),
+    // ⚠️ BOUNDED, BECAUSE THIS RUNS ON THE SPAWN PATH. A router that accepts the connection and
+    // never answers would otherwise stall worker creation for undici's default headers timeout
+    // (~5 minutes) on every spawn — an unbounded regression on the one path that must stay fast.
+    signal: AbortSignal.timeout(timeoutMs),
   })
     .then(async (res) => {
       if (!res.ok) {

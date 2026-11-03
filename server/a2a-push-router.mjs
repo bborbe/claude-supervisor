@@ -17,11 +17,15 @@
 // exactly: it forwards by the header it received, and it never parses the payload — a router
 // that read the body would reintroduce the identity confusion the receiver exists to prevent.
 //
-// ⚠️ REGISTRATION IS LOOPBACK-ONLY. The listener is bound to a LAN address so a relay can
-// reach it, which means anyone on that LAN can reach `/register` too. A registration is a
-// routing claim — "send this token's pushes to my port" — so accepting one from off-machine
-// would let a remote party intercept another worker's status. Only a loopback peer may
-// register; a push may arrive from anywhere the network allows.
+// ⚠️ REGISTRATION IS LOOPBACK-ONLY, AND THAT IS WHY THE DEFAULT BIND IS ALL INTERFACES RATHER
+// THAN THE LAN ADDRESS. A registration is a routing claim — "send this token's pushes to my
+// port" — so accepting one from off-machine would let a remote party intercept another worker's
+// status; only a loopback peer may register, while a push may arrive from anywhere the network
+// allows. But binding a *specific* LAN address makes loopback unreachable, and a same-machine
+// supervisor registering at `http://<lan>:<port>` is then seen by the kernel with the LAN
+// source address, so the gate refuses its own machine's registration and every cluster spawn
+// loses its channel. Binding all interfaces keeps both reachable and lets the gate stay strict:
+// the relay dials the LAN address, sessions register at `http://127.0.0.1:<port>`.
 
 import { createServer, request as httpRequest } from 'node:http'
 
@@ -74,15 +78,43 @@ function readBody(req, limit = 1024 * 1024) {
  * @param {(target: {port: number, body: Buffer, headers: object}) => Promise<{status: number, body: string}>}
  *   [options.forward] Injected so the routing rules are testable without a second socket.
  */
+/** Hop-by-hop headers must not be replayed (RFC 7230 §6.1) — see `forwardOverLoopback`. */
+const HOP_BY_HOP = new Set([
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+])
+
 export function createA2APushRouter({
-  host = '127.0.0.1',
+  host = '0.0.0.0',
   port = 0,
   forward = forwardOverLoopback,
+  now = () => Date.now(),
+  routeTtlMs = 24 * 60 * 60 * 1000,
 } = {}) {
-  // token -> the loopback port of the session that minted it. Re-registration overwrites:
-  // a session that restarts reuses nothing, and a stale port would forward into a dead socket
-  // rather than reporting the miss.
+  // token -> { port, at }. Re-registration overwrites: a session that restarts reuses nothing,
+  // and a stale port would forward into a dead socket rather than reporting the miss.
+  //
+  // ⚠️ ROUTES EXPIRE, AND A FAILED FORWARD DROPS ONE IMMEDIATELY. This is the one long-lived
+  // process on the machine, so an eviction-free map grows one entry per spawn forever. Worse
+  // than the growth: a stale token→port route outlives its session, and once the OS reuses that
+  // ephemeral port for an unrelated listener, a push carrying the old token is delivered to an
+  // unrelated local process — which answers 200, so it reads as delivered.
   const routes = new Map()
+  const live = (token) => {
+    const route = routes.get(token)
+    if (!route) return undefined
+    if (now() - route.at > routeTtlMs) {
+      routes.delete(token)
+      return undefined
+    }
+    return route
+  }
 
   const server = createServer(async (req, res) => {
     const respond = (code, payload) => {
@@ -110,18 +142,27 @@ export function createA2APushRouter({
         return
       }
       const { token, port: sessionPort } = parsed
-      if (typeof token !== 'string' || token === '' || !Number.isInteger(sessionPort) || sessionPort <= 0) {
-        respond(400, { error: 'registration requires { token, port }' })
+      // ⚠️ `<= 65535` IS NOT DECORATION. A larger port is accepted here and then throws
+      // ERR_SOCKET_BAD_PORT inside the forward, which surfaces as a 502 "receiver did not
+      // answer" — a misleading verdict for a registration the router should have refused.
+      if (
+        typeof token !== 'string' ||
+        token === '' ||
+        !Number.isInteger(sessionPort) ||
+        sessionPort <= 0 ||
+        sessionPort > 65535
+      ) {
+        respond(400, { error: 'registration requires { token, port } with port in 1..65535' })
         return
       }
-      routes.set(token, sessionPort)
+      routes.set(token, { port: sessionPort, at: now() })
       respond(200, { registered: true, port: sessionPort })
       return
     }
 
     if (req.url === PUSH_PATH) {
       const token = req.headers[TOKEN_HEADER]
-      const target = typeof token === 'string' ? routes.get(token) : undefined
+      const target = typeof token === 'string' ? live(token) : undefined
       // ⚠️ AN UNKNOWN TOKEN IS REFUSED HERE RATHER THAN FORWARDED AND REFUSED THERE. Both end
       // in a 4xx, but forwarding every unknown token would let an unauthenticated caller make
       // this process open arbitrary loopback connections, which is the SSRF shape the push
@@ -132,8 +173,11 @@ export function createA2APushRouter({
       }
       let result
       try {
-        result = await forward({ port: target, body: await readBody(req), headers: req.headers })
+        result = await forward({ port: target.port, body: await readBody(req), headers: req.headers })
       } catch (cause) {
+        // A receiver that refuses the connection is gone; keeping its route would let a later
+        // push land on whatever reuses that port.
+        if (cause?.code === 'ECONNREFUSED') routes.delete(token)
         respond(502, { error: `the owning session's receiver did not answer: ${cause?.message ?? cause}` })
         return
       }
@@ -167,6 +211,13 @@ export function createA2APushRouter({
  * delivered.
  */
 export function forwardOverLoopback({ port, body, headers }) {
+  // ⚠️ HOP-BY-HOP HEADERS ARE STRIPPED (RFC 7230 §6.1), and `transfer-encoding` is the one that
+  // bites: replaying it beside the recomputed `content-length` sends a request claiming both,
+  // with a length that no longer describes the buffered body.
+  const replayable = {}
+  for (const [name, value] of Object.entries(headers)) {
+    if (!HOP_BY_HOP.has(name.toLowerCase())) replayable[name] = value
+  }
   return new Promise((resolve, reject) => {
     const outbound = httpRequest(
       {
@@ -174,7 +225,7 @@ export function forwardOverLoopback({ port, body, headers }) {
         port,
         path: PUSH_PATH,
         method: 'POST',
-        headers: { ...headers, host: `127.0.0.1:${port}`, 'content-length': body.length },
+        headers: { ...replayable, host: `127.0.0.1:${port}`, 'content-length': body.length },
         timeout: FORWARD_TIMEOUT_MS,
       },
       (res) => {

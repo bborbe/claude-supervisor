@@ -5,24 +5,26 @@
 // supervisor server that sets SUPERVISOR_A2A_PUSH_ROUTER_URL then keeps its own receiver on
 // loopback and registers its tokens here, so N sessions no longer contend for one port.
 //
-// ⚠️ THE HOST IS A LAN ADDRESS ON PURPOSE. The in-cluster relay's Endpoints point at this
-// machine, and 127.0.0.1 is not reachable from a pod. That widens the push surface to the LAN —
-// which is why `/register` accepts loopback peers only: a push may arrive from anywhere the
-// network allows, but a routing claim may not.
+// ⚠️ THE DEFAULT BIND IS ALL INTERFACES, AND THAT IS DELIBERATE. The in-cluster relay's
+// Endpoints point at this machine, so 127.0.0.1 alone is not reachable from a pod — but binding
+// the LAN address *only* makes loopback unreachable, and a same-machine supervisor registering
+// at `http://<lan>:<port>` is seen by the kernel with the LAN source address, so the
+// loopback-only registration gate refuses its own machine and every cluster spawn loses its
+// channel. All interfaces keeps both reachable: the relay dials the LAN address, sessions
+// register at `http://127.0.0.1:<port>`, and the gate stays strict.
 //
 // Env:
-//   A2A_PUSH_ROUTER_HOST  bind address   (default 192.168.20.100 — the Mac's cluster-facing
-//                                         lease on en7, the interface that routes to nuke)
-//   A2A_PUSH_ROUTER_PORT  bind port      (default 18082 — must equal the relay's upstream port)
+//   A2A_PUSH_ROUTER_HOST  bind address   (default 0.0.0.0)
+//   A2A_PUSH_ROUTER_PORT  bind port      (default 18083 — must equal the relay's targetPort)
 //
-// ⚠️ THE DEFAULT HOST IS A DHCP LEASE. A lease change silently repoints the relay's Endpoints
-// at an address that now belongs to something else. Re-derive it with
-// `route -n get 192.168.178.30 | grep interface` and `ifconfig <iface> | grep 'inet '`.
+// ⚠️ THE RELAY'S ENDPOINTS CARRY THIS MACHINE'S DHCP LEASE, not this bind address. A lease
+// change silently repoints them at an address that now belongs to something else; re-derive it
+// with `route -n get 192.168.178.30 | grep interface` and `ifconfig <iface> | grep 'inet '`.
 
 import { createA2APushRouter } from '../server/a2a-push-router.mjs'
 
-const host = process.env.A2A_PUSH_ROUTER_HOST || '192.168.20.100'
-const port = Number(process.env.A2A_PUSH_ROUTER_PORT) || 18082
+const host = process.env.A2A_PUSH_ROUTER_HOST || '0.0.0.0'
+const port = Number(process.env.A2A_PUSH_ROUTER_PORT) || 18083
 
 const router = createA2APushRouter({ host, port })
 
