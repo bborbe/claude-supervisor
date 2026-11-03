@@ -145,6 +145,16 @@ than cleared: no `CLEARED` is emitted, because nothing was answered.
   and stays log-only. `UNTRACKED_DETAIL` is the exact string the emit loop
   matches to keep the two apart.
 
+  ⚠️ **The announcement is not proof.** `unregistered` is three-valued: a dead or
+  never-spawned worker, an unreadable registry directory, or a registry file
+  caught mid-rewrite all produce it, and a host whose heartbeat store cannot see
+  a headless worker reads the same way. So the line can name a worker that is
+  still parked. It is announced anyway, because the alternative — silence — leaves
+  a manager waiting on a card that is genuinely gone with no signal at all, and
+  the condition self-heals on the next readable poll. The operator-facing rule
+  (confirm the card; several `HELD` lines in one poll mean an outage, not N dead
+  gates) lives in `commands/steps/round-tail.md`.
+
   ⚠️ **The transcript-only predecessor got this wrong in the opposite way, and it
   is worth stating because it is the mirror of the defect above.** Keyed on the
   transcript alone, a session that died while gated stayed in the set forever: a
@@ -2038,9 +2048,14 @@ def main(argv=None):
                     # Accepted rather than gated on positive evidence, because
                     # silence was the larger error — a manager waiting on a card
                     # that is genuinely gone has no other signal — and because the
-                    # outage is warned on stderr ("this is not a quiet sweep") and
-                    # self-heals on the next readable poll. Stated here so the next
-                    # reader does not discover it from a false page.
+                    # condition self-heals on the next readable poll, so a line that
+                    # does not repeat is its own false-positive signature.
+                    # ⚠️ Do NOT lean on the stderr warning to identify it: the
+                    # `warned` set lives for the whole process, so only the FIRST
+                    # outage in an arm prints "registry unreadable"; a second one is
+                    # silent. `commands/steps/round-tail.md` carries the operator-
+                    # facing rule — confirm the card, and read several `HELD` lines
+                    # in one poll as an outage rather than as N dead gates.
                     if kind == "NEW GATE":
                         print(f"NEW GATE  {sid8}  {label[:46]}  ::  {detail}",
                               flush=True)
