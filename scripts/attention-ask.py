@@ -100,6 +100,7 @@ import importlib.util
 import json
 import math
 import os
+import ssl
 import sys
 import time
 import urllib.error
@@ -120,6 +121,60 @@ def _load(name, filename):
 attribution = _load("answered_attribution", "answered-attribution.py")
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
+
+# Where a platform keeps its CA bundle when the interpreter knows of none.
+# macOS, Debian/Ubuntu, and RHEL respectively.
+CA_BUNDLE_PATHS = (
+    "/etc/ssl/cert.pem",
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+)
+
+
+def _ssl_context():
+    """An SSL context that can verify a certificate, or None to keep the default.
+
+    A python.org build ships no CA bundle, so `ssl.get_default_verify_paths()`
+    returns None for both `cafile` and `capath` and `urllib` rejects every
+    certificate before the request is sent:
+
+        [SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate
+
+    That reads as a bad server certificate and is not one — the chain validates
+    under `curl` and `openssl s_client`, and the store answers normally once a
+    bundle is supplied. This went unnoticed because every store this script had
+    used was `http://localhost`, where no TLS is involved, so the first HTTPS
+    store was also the first to fail.
+
+    Resolution order, first hit wins: `$SSL_CERT_FILE` (the caller's explicit
+    choice), then `certifi` when installed, then the platform bundle. A fix
+    inside the script rather than a caller-side env var, because the next
+    caller will not know to set one.
+
+    Returns None when the interpreter's own default paths already carry a
+    bundle, so `urlopen` keeps its default and a machine that was working is
+    unchanged. Also None when no bundle is found anywhere: there is nothing to
+    trust, and failing loudly beats silently trusting nothing.
+    """
+    paths = ssl.get_default_verify_paths()
+    if paths.cafile or paths.capath:
+        return None
+    cafile = os.environ.get("SSL_CERT_FILE") or ""
+    if not cafile:
+        try:
+            import certifi
+
+            cafile = certifi.where()
+        except ImportError:
+            cafile = ""
+    if not cafile:
+        for candidate in CA_BUNDLE_PATHS:
+            if os.path.exists(candidate):
+                cafile = candidate
+                break
+    if not cafile:
+        return None
+    return ssl.create_default_context(cafile=cafile)
 
 # Bearer token for a store that requires authentication.
 #
@@ -601,7 +656,9 @@ def post_question(
         headers=_headers({"Content-Type": "application/json"}),
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=STORE_TIMEOUT) as resp:
+    with urllib.request.urlopen(
+        req, timeout=STORE_TIMEOUT, context=_ssl_context()
+    ) as resp:
         return json.load(resp)
 
 
@@ -609,7 +666,9 @@ def fetch_item(item_id):
     req = urllib.request.Request(
         f"{STORE}/api/1.0/attention/{item_id}", headers=_headers()
     )
-    with urllib.request.urlopen(req, timeout=STORE_TIMEOUT) as resp:
+    with urllib.request.urlopen(
+        req, timeout=STORE_TIMEOUT, context=_ssl_context()
+    ) as resp:
         return json.load(resp)
 
 
