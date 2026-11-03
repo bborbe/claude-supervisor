@@ -799,6 +799,19 @@ class CommitLoopTest(unittest.TestCase):
             [ln for ln in out.splitlines() if ln.startswith("CLEARED  ")],
             "an unregistered session is HELD, never cleared: " + out)
 
+    def test_two_dead_workers_each_get_their_own_line(self):
+        # The announcement is per WORKER, and so is the pop. A single-session
+        # fixture cannot tell a per-sid8 pop from a blanket one that drops the
+        # whole set — both leave one line behind.
+        gated = {"aaaa1111": ("A", "pick", "idle+closer", True),
+                 "bbbb2222": ("B", "pick", "idle+closer", True)}
+        held = {"aaaa1111": ("A", "unregistered", "unregistered", None),
+                "bbbb2222": ("B", "unregistered", "unregistered", None)}
+        out = self._drive([{}, gated, gated, held, held, held])
+        self.assertEqual(out.count("HELD"), 2, out)
+        self.assertIn("HELD  aaaa1111  A  ::", out)
+        self.assertIn("HELD  bbbb2222  B  ::", out)
+
     def test_a_lost_sight_session_is_recorded_not_announced(self):
         """The control that tells the narrow fix from a widened branch.
 
