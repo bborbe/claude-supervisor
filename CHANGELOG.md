@@ -12,6 +12,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 - fix: `manager-attention-watch.py` announces a dead worker's gate instead of only logging it. The `UNREGISTERED` `HELD` record now prints `HELD  <sid8>  <label>  ::  <reason>; no CLEARED emitted` on the arm's stdout — the same `Monitor` channel that carries `NEW GATE` and `CLEARED` — so a manager stops waiting on a card that no longer exists. The other `HELD` cause (a session the watcher lost sight of, because it stopped being tracked) stays log-only, matched exactly via `UNTRACKED_DETAIL`; announcing it would fire on every gated session that leaves the tracked set.
 
+## v0.236.0
+
+- feat: standing resource guard for long-running local services — `scripts/service-guard.py`, run every fleet round as the fifth reading of router row 15 (`commands/steps/service-guard.md`). It reads each guarded service's `phys_footprint` (never RSS, which on macOS under-reads by more than an order of magnitude) and `ps` CPU against the bar in `~/.claude/state/service-guard.json`, and with `--apply` reopens the owning task row when a breach lands on a terminal one, so a service that drifts back after its fix is caught by the round instead of by the operator. `UNKNOWN` is a third answer that exits non-zero, never rounded to `OK`; the guard reopens and never restarts.
+
 ## v0.235.1
 
 - perf: the two history pollers ask the attention store to narrow server-side — `manager-attention-watch.py` reads `?dedup_key_prefix=park:` (the only keys its loop reads) and `answered-watch.py` reads `?producer_id=<session>` — instead of the whole history. Measured 2026-11-03 on the Mac board: eight manager watchers each read `?limit=50000` every 60 s and the endpoint was 41 % of the store's allocation. A store that predates the parameters ignores them and both readers still filter client-side, so either deploy order is safe.
