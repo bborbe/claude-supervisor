@@ -171,6 +171,7 @@ commands/reset.md + scripts/reset.py             re-discover its state; never de
 docs/fleet-surface.md                            spawn shape + fleet table render spec (canonical)
 docs/closer-classes.md                           the CLOSERS class vocabulary, the routine-continue table and the digest join rule (canonical)
 docs/sweep-output.md                             the manager sweep's output frame — columns, widths, icons (canonical)
+docs/fleet-drive-rationale.md                    the evidence behind the drive leg's rules — the agent body states them and points here
 docs/session-tiers.md                            session tiers + command → tier table (canonical)
 docs/subject-resolution.md                      the four-source subject chain the eight manager commands share
 scripts/topic-spawn.py                           the topic tier's spawn gate — goal-not-in-scope / goal-not-startable / manager-cap, the § 1 ranking, and the worker refusal

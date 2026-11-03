@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- refactor: **the fleet drive leg's body sheds 2,195 bytes of incident rationale into `docs/fleet-drive-rationale.md`, restoring real headroom under the 30,720-byte budget.** `agents/fleet-drive.md` measured 32,353 bytes and was pinned there by its own baseline entry, so every later change to the drive leg either grew a file already 1,633 bytes over budget or tripped the stale-baseline rule. The rules stay in the body; the measurements and the reasoning behind them move to the new page behind a pointer, and `scripts/budget-baseline.json` is **tightened** to the new size rather than raised. The body now measures 30,158 bytes — 562 bytes of headroom — and the ratchet records the lower maximum instead of pre-authorising the old one.
+
 ## v0.235.1
 
 - perf: the two history pollers ask the attention store to narrow server-side — `manager-attention-watch.py` reads `?dedup_key_prefix=park:` (the only keys its loop reads) and `answered-watch.py` reads `?producer_id=<session>` — instead of the whole history. Measured 2026-11-03 on the Mac board: eight manager watchers each read `?limit=50000` every 60 s and the endpoint was 41 % of the store's allocation. A store that predates the parameters ignores them and both readers still filter client-side, so either deploy order is safe.
