@@ -151,32 +151,48 @@ def _ssl_context():
     inside the script rather than a caller-side env var, because the next
     caller will not know to set one.
 
-    Returns None when the interpreter's own default paths already carry a
-    bundle, so `urlopen` keeps its default and a machine that was working is
+    Returns None when the interpreter's own default context actually loads
+    roots, so `urlopen` keeps its default and a machine that was working is
     unchanged. Also None when no bundle is found anywhere: there is nothing to
     trust, and failing loudly beats silently trusting nothing.
 
-    ⚠️ **A candidate must produce a context that actually loaded roots, not
-    merely a path that exists.** A `cafile` naming an empty file, a malformed
-    one, or an existing-but-certless `capath` all build a context with zero
-    trust anchors — the original `CERTIFICATE_VERIFY_FAILED` then persists and
-    the fix is a silent no-op, which is indistinguishable from the bug it was
-    meant to cure. So each candidate is tried in turn and a dud falls through
-    to the next rather than being returned.
+    ⚠️ **"Loaded roots" is the test, never "a path is configured."** A bundle
+    that exists but parses to zero certificates builds a context with no trust
+    anchors; the original `CERTIFICATE_VERIFY_FAILED` then persists and the fix
+    is a silent no-op, indistinguishable from the bug it was meant to cure. The
+    same trap sits on the interpreter's own default: `get_default_verify_paths()`
+    reports the **compiled-in** OpenSSL paths, not paths that were checked — a
+    python.org macOS build names a `cert.pem` under its framework that does not
+    exist until `Install Certificates.command` has run. So the default is probed
+    by building it and counting its roots, and only a default that really trusts
+    something is accepted. Each fallback candidate is validated the same way and
+    a dud falls through to the next rather than being returned.
     """
-    paths = ssl.get_default_verify_paths()
-    if paths.cafile or paths.capath:
+    if _default_context_loads_roots():
         return None
     for cafile in _ca_bundle_candidates():
         if not os.path.exists(cafile):
             continue
         try:
             context = ssl.create_default_context(cafile=cafile)
-        except (OSError, ssl.SSLError):
+        except OSError:
             continue
         if context.get_ca_certs():
             return context
     return None
+
+
+def _default_context_loads_roots():
+    """Whether the interpreter's own default context trusts any certificate.
+
+    Probed rather than inferred from `get_default_verify_paths()`: that reports
+    what OpenSSL was *compiled* to use, and a reported path may not exist.
+    """
+    try:
+        context = ssl.create_default_context()
+    except OSError:
+        return False
+    return bool(context.get_ca_certs())
 
 
 def _ca_bundle_candidates():

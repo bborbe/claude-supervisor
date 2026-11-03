@@ -1525,7 +1525,7 @@ class SslContextTest(unittest.TestCase):
     def _resolve(
         self,
         *,
-        default_paths,
+        default_roots=("root",),
         env=None,
         certifi=None,
         existing=(),
@@ -1534,13 +1534,17 @@ class SslContextTest(unittest.TestCase):
     ):
         """Run `_ssl_context()` against a fake filesystem and a fake ssl.
 
-        Returns `(context_or_None, tried)` where `tried` is every `cafile` the
-        resolver handed to `create_default_context`, in order — the sequence is
-        the resolution order, and it is what the fall-through cases assert on.
+        `default_roots` is what the interpreter's own default context loads —
+        an empty tuple models the python.org build, whose compiled-in bundle is
+        reported but absent. Returns `(context_or_None, tried)`, where `tried`
+        is every `cafile` handed to `create_default_context`, in order; the
+        sequence is the resolution order the fall-through cases assert on.
         """
         tried = []
 
         def fake_create(cafile=None):
+            if cafile is None:  # the probe of the interpreter's own default
+                return mock.Mock(get_ca_certs=lambda: list(default_roots))
             tried.append(cafile)
             if cafile in unreadable:
                 raise OSError("cannot read bundle")
@@ -1553,36 +1557,38 @@ class SslContextTest(unittest.TestCase):
         if certifi is not None:
             modules["certifi"] = mock.Mock(where=lambda: certifi)
 
-        with mock.patch.object(
-            ask.ssl, "get_default_verify_paths", lambda: default_paths
-        ):
-            with mock.patch.dict(os.environ, env, clear=False):
+        with mock.patch.dict(os.environ, env, clear=False):
+            with mock.patch.object(ask.ssl, "create_default_context", fake_create):
                 with mock.patch.object(
-                    ask.ssl, "create_default_context", fake_create
+                    ask.os.path, "exists", lambda p: p in existing
                 ):
-                    with mock.patch.object(
-                        ask.os.path, "exists", lambda p: p in existing
-                    ):
-                        with mock.patch.dict(sys.modules, modules):
-                            result = ask._ssl_context()
+                    with mock.patch.dict(sys.modules, modules):
+                        result = ask._ssl_context()
         return result, tried
 
     def test_a_working_default_is_left_alone(self):
-        paths = mock.Mock(cafile="/usr/lib/ssl/cert.pem", capath=None)
-        result, tried = self._resolve(default_paths=paths)
+        result, tried = self._resolve(default_roots=("root",))
         self.assertIsNone(result)
         self.assertEqual(tried, [])
 
-    def test_a_capath_alone_is_enough_to_leave_it_alone(self):
-        paths = mock.Mock(cafile=None, capath="/etc/ssl/certs")
-        result, tried = self._resolve(default_paths=paths)
-        self.assertIsNone(result)
-        self.assertEqual(tried, [])
+    def test_a_reported_but_rootless_default_falls_through(self):
+        """The python.org macOS trap: a default that is *reported*, not working.
+
+        `get_default_verify_paths()` names the compiled-in OpenSSL bundle, which
+        on that build does not exist until `Install Certificates.command` runs.
+        Trusting the report would return the default, `urlopen` would use the
+        same dead path, and the original `CERTIFICATE_VERIFY_FAILED` would
+        persist with no sign the fix did nothing.
+        """
+        result, tried = self._resolve(
+            default_roots=(), existing=("/etc/ssl/cert.pem",)
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/etc/ssl/cert.pem"])
 
     def test_ssl_cert_file_wins_over_every_other_source(self):
-        paths = mock.Mock(cafile=None, capath=None)
         result, tried = self._resolve(
-            default_paths=paths,
+            default_roots=(),
             env={"SSL_CERT_FILE": "/custom/bundle.pem"},
             certifi="/certifi/cacert.pem",
             existing=("/custom/bundle.pem", "/etc/ssl/cert.pem"),
@@ -1591,9 +1597,8 @@ class SslContextTest(unittest.TestCase):
         self.assertEqual(tried, ["/custom/bundle.pem"])
 
     def test_certifi_is_used_when_the_caller_sets_nothing(self):
-        paths = mock.Mock(cafile=None, capath=None)
         result, tried = self._resolve(
-            default_paths=paths,
+            default_roots=(),
             certifi="/certifi/cacert.pem",
             existing=("/certifi/cacert.pem", "/etc/ssl/cert.pem"),
         )
@@ -1601,16 +1606,14 @@ class SslContextTest(unittest.TestCase):
         self.assertEqual(tried, ["/certifi/cacert.pem"])
 
     def test_the_platform_bundle_is_the_last_resort(self):
-        paths = mock.Mock(cafile=None, capath=None)
         result, tried = self._resolve(
-            default_paths=paths, existing=("/etc/ssl/cert.pem",)
+            default_roots=(), existing=("/etc/ssl/cert.pem",)
         )
         self.assertIsNotNone(result)
         self.assertEqual(tried, ["/etc/ssl/cert.pem"])
 
     def test_no_bundle_anywhere_keeps_the_loud_failure(self):
-        paths = mock.Mock(cafile=None, capath=None)
-        result, tried = self._resolve(default_paths=paths)
+        result, tried = self._resolve(default_roots=())
         self.assertIsNone(result)
         self.assertEqual(tried, [])
 
@@ -1623,9 +1626,8 @@ class SslContextTest(unittest.TestCase):
         through keeps the resolver's promise: the caller named a preference, not
         a requirement.
         """
-        paths = mock.Mock(cafile=None, capath=None)
         result, tried = self._resolve(
-            default_paths=paths,
+            default_roots=(),
             env={"SSL_CERT_FILE": "/gone/bundle.pem"},
             existing=("/etc/ssl/cert.pem",),
         )
@@ -1640,9 +1642,8 @@ class SslContextTest(unittest.TestCase):
         anchors — so the original `CERTIFICATE_VERIFY_FAILED` persists and looks
         exactly like the bug this change was written to cure.
         """
-        paths = mock.Mock(cafile=None, capath=None)
         result, tried = self._resolve(
-            default_paths=paths,
+            default_roots=(),
             env={"SSL_CERT_FILE": "/empty/bundle.pem"},
             existing=("/empty/bundle.pem", "/etc/ssl/cert.pem"),
             certless=("/empty/bundle.pem",),
@@ -1651,9 +1652,8 @@ class SslContextTest(unittest.TestCase):
         self.assertEqual(tried, ["/empty/bundle.pem", "/etc/ssl/cert.pem"])
 
     def test_an_unreadable_bundle_falls_through(self):
-        paths = mock.Mock(cafile=None, capath=None)
         result, tried = self._resolve(
-            default_paths=paths,
+            default_roots=(),
             env={"SSL_CERT_FILE": "/locked/bundle.pem"},
             existing=("/locked/bundle.pem", "/etc/ssl/cert.pem"),
             unreadable=("/locked/bundle.pem",),
