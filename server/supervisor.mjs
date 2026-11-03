@@ -86,6 +86,9 @@ const a2aPushRegistry = createA2APushRegistry({
   // the same deployment that sets `SUPERVISOR_A2A_K8S_CALLBACK_URL` sets this to the address
   // its relay targets — the two are one decision and are documented together in config.mjs.
   ...(config.a2aPushHost ? { receiverHost: config.a2aPushHost } : {}),
+  // Set, the router owns the stable address and this session registers with it; the receiver
+  // stays on loopback, so N sessions no longer contend for one port.
+  ...(config.a2aPushRouterUrl ? { routerUrl: config.a2aPushRouterUrl } : {}),
 })
 
 /**
