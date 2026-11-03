@@ -308,8 +308,8 @@ def gated_sessions_from_panes(panes, attention_dir):
 # --------------------------------------------------------------------------- #
 
 
-def denial_marker(session_ids, attention_dir):
-    """The worker's own denial declaration, or None.
+def denial_markers(session_ids, attention_dir):
+    """Every readable denial declaration as `(sid, record)`, in id order.
 
     A classifier denial raises **no** `permission` gate: the attention event log has
     no `answer`/`decision` field at all and its only kinds are `idle`/`question`/
@@ -318,9 +318,16 @@ def denial_marker(session_ids, attention_dir):
     the `.tool.json` marker the hook already writes — before it messages its manager.
     Reading that file is the only durable way the manager can see the denial.
 
-    Returns `(sid, record)` — the session id matters downstream, because whether the
-    denial still blocks is decided against *that* session's transcript.
+    **All** of them, not the first: a row carries every id the task ever ran under
+    (`claude_session_id` plus each `metrics_sessions` id), so returning one and
+    stopping would let a stale marker on the first id mask a live marker on a later
+    one — a false `none` for a worker that is still blocked. The caller walks the list
+    and takes the first that still holds.
+
+    Each entry carries its session id, because whether a denial still blocks is
+    decided against *that* session's transcript.
     """
+    out = []
     for sid in session_ids:
         path = os.path.join(attention_dir, f"{sid}.denial.json")
         try:
@@ -329,8 +336,8 @@ def denial_marker(session_ids, attention_dir):
         except (OSError, ValueError):
             continue
         if isinstance(rec, dict):
-            return sid, rec
-    return None
+            out.append((sid, rec))
+    return out
 
 
 def marker_ts(rec, attention_dir, sid):
@@ -374,8 +381,14 @@ def later_success(sid, tool, since_ts, projects_dir):
     could not be opened, or that does not exist, leaves the marker in force — the
     same three-valued discipline the rest of this file follows.
     """
+    # `sid` reaches both a glob pattern and a path join from task-file state, so a
+    # value carrying a separator could address another session's transcript. The
+    # answer is only a boolean and the state is operator-owned, but an exact join
+    # costs nothing.
+    if not sid or os.path.basename(sid) != sid:
+        return None
     try:
-        hits = glob.glob(os.path.join(projects_dir, "*", f"{sid}.jsonl"))
+        hits = glob.glob(os.path.join(projects_dir, "*", f"{glob.escape(sid)}.jsonl"))
     except OSError:
         return None
     if not hits:
@@ -466,9 +479,7 @@ def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=Non
     if live != "LIVE":
         return "none", ""
     attention_dir = attention_dir or ATTENTION_DIR
-    denial = denial_marker(session_ids, attention_dir)
-    if denial:
-        sid, rec = denial
+    for sid, rec in denial_markers(session_ids, attention_dir):
         if denial_still_blocks(sid, rec, attention_dir, now, projects_dir):
             tool = rec.get("tool") or "a tool"
             return "denied", f"{tool} denied — {rec.get('reason') or 'no reason recorded'}"

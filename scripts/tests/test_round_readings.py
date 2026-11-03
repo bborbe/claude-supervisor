@@ -284,7 +284,20 @@ class Verdicts(Tmp):
                                       self.attention, self.projects)
         self.assertEqual(verdict, "denied")
 
-    def test_an_unreadable_transcript_keeps_the_denial(self):
+    def test_a_failed_later_retry_does_not_clear_the_denial(self):
+        """`is_error` present means the retry failed, so the gate is still closed.
+        Without this case the `is_error` skip branch is never exercised and a
+        regression counting a failure as success would pass the whole suite."""
+        sid = "aaaa0007"
+        now = time.time()
+        self.write(f"{sid}.denial.json",
+                   {"tool": "Bash", "reason": "denied", "ts": now - 60})
+        self.write_transcript(sid, [("Bash", "tu-7", True, now - 30)])
+        verdict, _ = rr.stuck_verdict({"mtime": now}, [sid], "LIVE", "clear", 900, now,
+                                      self.attention, self.projects)
+        self.assertEqual(verdict, "denied")
+
+    def test_a_missing_transcript_keeps_the_denial(self):
         """`unread` is never a reason to clear — the fail-safe direction."""
         sid = "aaaa0005"
         now = time.time()
@@ -293,6 +306,21 @@ class Verdicts(Tmp):
         verdict, _ = rr.stuck_verdict({"mtime": now}, [sid], "LIVE", "clear", 900, now,
                                       self.attention, self.projects)
         self.assertEqual(verdict, "denied")
+
+    def test_a_stale_marker_on_the_first_id_does_not_mask_a_live_one_later(self):
+        """A row carries every id the task ran under. Stopping at the first readable
+        marker would let an expired one hide a live one behind it — a false `none`
+        for a worker that is still blocked."""
+        now = time.time()
+        self.write("aaaa0008.denial.json",
+                   {"tool": "Bash", "reason": "old", "ts": now - 31 * 60})
+        self.write("aaaa0009.denial.json",
+                   {"tool": "Bash", "reason": "still blocked", "ts": now - 60})
+        verdict, reason = rr.stuck_verdict(
+            {"mtime": now}, ["aaaa0008", "aaaa0009"], "LIVE", "clear", 900, now,
+            self.attention, self.projects)
+        self.assertEqual(verdict, "denied")
+        self.assertIn("still blocked", reason)
 
     def test_a_denial_older_than_the_ttl_is_ignored(self):
         sid = "aaaa0003"
