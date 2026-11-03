@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.235.0
 
 - feat: standing resource guard for long-running local services — `scripts/service-guard.py`, run every fleet round as the fifth reading of router row 15 (`commands/steps/service-guard.md`). It reads each guarded service's `phys_footprint` (never RSS, which on macOS under-reads by more than an order of magnitude) and `ps` CPU against the bar in `~/.claude/state/service-guard.json`, and with `--apply` reopens the owning task row when a breach lands on a terminal one, so a service that drifts back after its fix is caught by the round instead of by the operator. `UNKNOWN` is a third answer that exits non-zero, never rounded to `OK`; the guard reopens and never restarts.
 
