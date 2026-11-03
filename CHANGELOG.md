@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- refactor: **the fleet drive leg's body sheds 2,195 bytes of incident rationale into `docs/fleet-drive-rationale.md`, restoring real headroom under the 30,720-byte budget.** `agents/fleet-drive.md` measured 32,353 bytes and was pinned there by its own baseline entry, so every later change to the drive leg either grew a file already 1,633 bytes over budget or tripped the stale-baseline rule. The rules stay in the body; the measurements and the reasoning behind them move to the new page behind a pointer, and `scripts/budget-baseline.json` is **tightened** to the new size rather than raised. The body now measures 30,158 bytes — 562 bytes of headroom — and the ratchet records the lower maximum instead of pre-authorising the old one.
+
 ## v0.236.0
 
 - feat: standing resource guard for long-running local services — `scripts/service-guard.py`, run every fleet round as the fifth reading of router row 15 (`commands/steps/service-guard.md`). It reads each guarded service's `phys_footprint` (never RSS, which on macOS under-reads by more than an order of magnitude) and `ps` CPU against the bar in `~/.claude/state/service-guard.json`, and with `--apply` reopens the owning task row when a breach lands on a terminal one, so a service that drifts back after its fix is caught by the round instead of by the operator. `UNKNOWN` is a third answer that exits non-zero, never rounded to `OK`; the guard reopens and never restarts.
