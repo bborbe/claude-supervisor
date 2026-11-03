@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.236.2
 
 - fix: `manager-attention-watch.py` announces a dead worker's gate instead of only logging it. The `UNREGISTERED` `HELD` record now prints `HELD  <sid8>  <label>  ::  <reason>; no CLEARED emitted` on the arm's stdout — the same `Monitor` channel that carries `NEW GATE` and `CLEARED` — so a manager stops waiting on a card that no longer exists. The other `HELD` cause (a session the watcher lost sight of, because it stopped being tracked) stays log-only, matched exactly via `UNTRACKED_DETAIL`; announcing it would fire on every gated session that leaves the tracked set.
 
