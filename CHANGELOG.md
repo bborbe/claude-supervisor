@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: `manager-attention-watch.py` announces a dead worker's gate instead of only logging it. The `UNREGISTERED` `HELD` record now prints `HELD  <sid8>  <label>  ::  <reason>; no CLEARED emitted` on the arm's stdout — the same `Monitor` channel that carries `NEW GATE` and `CLEARED` — so a manager stops waiting on a card that no longer exists. The other `HELD` cause (a session the watcher lost sight of, because it stopped being tracked) stays log-only, matched exactly via `UNTRACKED_DETAIL`; announcing it would fire on every gated session that leaves the tracked set.
+
 ## v0.235.1
 
 - perf: the two history pollers ask the attention store to narrow server-side — `manager-attention-watch.py` reads `?dedup_key_prefix=park:` (the only keys its loop reads) and `answered-watch.py` reads `?producer_id=<session>` — instead of the whole history. Measured 2026-11-03 on the Mac board: eight manager watchers each read `?limit=50000` every 60 s and the endpoint was 41 % of the store's allocation. A store that predates the parameters ignores them and both readers still filter client-side, so either deploy order is safe.
