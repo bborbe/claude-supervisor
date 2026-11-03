@@ -1355,7 +1355,14 @@ def answered_park_keys(sids, store=STORE, timeout=None):
     try:
         with urllib.request.urlopen(
                 f"{store}/api/1.0/attention/history"
-                f"?limit={card_lookup.HISTORY_LIMIT}",
+                f"?limit={card_lookup.HISTORY_LIMIT}"
+                # ⚠️ Narrowed server-side to `park:` keys — the only ones the
+                # loop below reads. Measured 2026-11-03: eight of these
+                # watchers read the WHOLE history every 60 s and the endpoint
+                # was 41 % of the store's allocation. A store that predates
+                # the parameter ignores it; the `startswith("park:")` check
+                # below still filters, so either deploy order is safe.
+                f"&dedup_key_prefix=park%3A",
                 timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8") or "[]")
         # ⚠️ Strict, unlike `card_lookup.items_of`, which tolerates a wrapper by

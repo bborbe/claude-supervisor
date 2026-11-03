@@ -116,6 +116,32 @@ class HelpersTest(unittest.TestCase):
             [f"http://store/api/1.0/attention/history?limit={watch.HISTORY_LIMIT}"],
         )
 
+    def test_history_read_is_narrowed_to_the_session(self):
+        seen = []
+
+        class Response:
+            def read(self):
+                return b"[]"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def urlopen(url, timeout=None):
+            seen.append(url)
+            return Response()
+
+        with mock.patch("urllib.request.urlopen", urlopen):
+            watch.fetch_history("http://store", session="a b/c")
+
+        self.assertEqual(
+            seen,
+            [f"http://store/api/1.0/attention/history?limit={watch.HISTORY_LIMIT}"
+             "&producer_id=a%20b%2Fc"],
+        )
+
     def test_history_limit_matches_the_reference_reader(self):
         # ⚠️ Load the sibling module rather than hardcoding its number. A test
         # that only asserts `== 50000` passes unchanged when the *reference*

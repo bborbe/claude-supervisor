@@ -1579,6 +1579,26 @@ class AnsweredParkKeysTest(unittest.TestCase):
         self.assertEqual(list(out), [self.SID8],
                          "the good row still resolves; the bad ones are skipped")
 
+    def test_history_read_is_narrowed_to_park_keys(self):
+        # The loop only reads `park:` keys, so the read asks the store for only
+        # those — eight watchers reading the whole history every 60 s was 41 %
+        # of the store's allocation (measured 2026-11-03).
+        seen = []
+        resp = mock.MagicMock()
+        resp.read.return_value = b"[]"
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda *a: False
+
+        def urlopen(url, **kw):
+            seen.append(url)
+            return resp
+
+        with mock.patch("urllib.request.urlopen", urlopen):
+            watch.answered_park_keys([self.SID8])
+        self.assertEqual(len(seen), 1)
+        self.assertIn("&dedup_key_prefix=park%3A", seen[0])
+        self.assertIn(f"?limit={watch.card_lookup.HISTORY_LIMIT}", seen[0])
+
     def test_no_sids_does_not_touch_the_store(self):
         with mock.patch("urllib.request.urlopen",
                         side_effect=AssertionError("read with nothing to check")):
