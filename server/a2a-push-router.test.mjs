@@ -203,3 +203,125 @@ test('the real hop reaches a loopback receiver and replays the token header', as
     await new Promise((resolve) => receiver.close(resolve))
   }
 })
+
+// ⚠️ TUNNEL MODE IS ASSERTED WITH A STUBBED RELAY AND A STUBBED FORWARD, for the same reason
+// the push tests stub the hop: the rules under test are the router's own — which token reaches
+// which port, and what an unknown token does — not the transport. The loop runs concurrently
+// with the assertions, so these assert on membership, never on a call count.
+// ⚠️ A bare `fetch` here leaves undici's pool holding sockets, which keeps the test process
+// alive after every server is closed — the run then hangs with all tests green. `agent: false`
+// plus `connection: close` makes each request own and drop its socket.
+import { request as httpRequest } from 'node:http'
+function postJson(port, path, body, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      {
+        host: '127.0.0.1',
+        port,
+        path,
+        method: 'POST',
+        agent: false,
+        headers: { 'content-type': 'application/json', connection: 'close', ...headers },
+      },
+      (res) => {
+        res.resume()
+        res.on('end', () => resolve(res.statusCode))
+      },
+    )
+    req.on('error', reject)
+    req.end(typeof body === 'string' ? body : JSON.stringify(body))
+  })
+}
+
+function tunnelRouter({ items, calls }) {
+  // The stub hands its batch over once and then reports empty, which is what a real relay does
+  // after a drain. A stub that repeats its batch forever would spin the loop with no idle turn.
+  let pending = [...items]
+  // The first pull answers empty on purpose: the loop starts with the listener, before a
+  // session has registered, and delivering into that window would test a case that cannot
+  // happen in production (the router is up long before a worker pushes).
+  let firstPull = true
+  return createA2APushRouter({
+    port: 0,
+    relayUrl: 'http://relay.test',
+    tunnelSecret: 's3cret',
+    retryDelayMs: 5,
+    forward: async (args) => {
+      calls.push(args)
+      return { status: 200, body: '{"accepted":true}' }
+    },
+    fetchImpl: async (url, init) => ({
+      ok: true,
+      status: 200,
+      url,
+      init,
+      json: async () => {
+        if (firstPull) {
+          firstPull = false
+          return { items: [] }
+        }
+        const batch = pending
+        pending = []
+        return { items: batch }
+      },
+    }),
+  })
+}
+
+test('tunnel mode dispatches a pulled item to the session that registered its token', async () => {
+  const calls = []
+  const router = tunnelRouter({ items: [{ token: 'tok-a', body: { kind: 'statusUpdate' } }], calls })
+  const port = await router.listen()
+  try {
+    await postJson(port, REGISTER_PATH, { token: 'tok-a', port: 5555 })
+
+    await new Promise((r) => setTimeout(r, 60))
+
+    const hit = calls.find((c) => c.port === 5555)
+    assert.ok(hit, 'the item must reach the registered port')
+    assert.equal(hit.headers[TOKEN_HEADER], 'tok-a')
+    // The body travels verbatim: the receiver re-validates it, so the router is a transport hop
+    // and never an authority over its content.
+    assert.equal(hit.body.toString('utf8'), JSON.stringify({ kind: 'statusUpdate' }))
+  } finally {
+    await router.close()
+  }
+})
+
+test('tunnel mode drops an item whose token nothing registered', async () => {
+  const calls = []
+  const router = tunnelRouter({ items: [{ token: 'nobody', body: { kind: 'statusUpdate' } }], calls })
+  const port = await router.listen()
+  try {
+    await postJson(port, REGISTER_PATH, { token: 'tok-a', port: 5555 })
+
+    await new Promise((r) => setTimeout(r, 60))
+
+    assert.equal(calls.length, 0, 'an unknown token must not open a loopback connection')
+  } finally {
+    await router.close()
+  }
+})
+
+test('tunnel mode refuses a direct push, because the relay is the push endpoint', async () => {
+  const calls = []
+  const router = tunnelRouter({ items: [], calls })
+  const port = await router.listen()
+  try {
+    const status = await postJson(port, PUSH_PATH, '{}', { [TOKEN_HEADER]: 'tok-a' })
+
+    assert.equal(status, 503)
+  } finally {
+    await router.close()
+  }
+})
+
+test('a failed pull rejects rather than reporting an empty success', async () => {
+  const router = createA2APushRouter({
+    port: 0,
+    relayUrl: 'http://relay.test',
+    tunnelSecret: 's3cret',
+    fetchImpl: async () => ({ ok: false, status: 401, json: async () => ({}) }),
+  })
+  await assert.rejects(() => router.pullOnce(), /401/)
+})

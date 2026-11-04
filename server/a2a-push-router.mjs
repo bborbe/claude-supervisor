@@ -32,6 +32,13 @@ import { createServer, request as httpRequest } from 'node:http'
 /** The header the SDK's push sender sets. Same name `a2a-receive.mjs` reads. */
 export const TOKEN_HEADER = 'a2a-notification-token'
 
+/**
+ * The header the relay's pull endpoint authenticates with. Deliberately NOT the token header:
+ * a push is a worker's claim and a pull is the operator's channel, and one header for both
+ * would let a worker drain the queue.
+ */
+export const TUNNEL_SECRET_HEADER = 'x-a2a-tunnel-secret'
+
 export const REGISTER_PATH = '/register'
 export const PUSH_PATH = '/a2a/push'
 
@@ -96,6 +103,17 @@ export function createA2APushRouter({
   forward = forwardOverLoopback,
   now = () => Date.now(),
   routeTtlMs = 24 * 60 * 60 * 1000,
+  // ⚠️ TUNNEL MODE. Set `relayUrl` and the router stops receiving pushes and starts pulling
+  // them from the in-cluster relay instead, dispatching each one to the owning session by the
+  // same token rule. It exists because the Mac cannot accept an inbound connection from the
+  // cluster at all: its firewall drops every port except two something else already owns
+  // (measured 2026-11-04 from both cluster nodes). The Mac dialling out is the only direction
+  // that works, so the tunnel is inverted and this end becomes a client.
+  relayUrl = null,
+  tunnelSecret = '',
+  pollWait = '25s',
+  fetchImpl = globalThis.fetch,
+  retryDelayMs = 1000,
 } = {}) {
   // token -> { port, at }. Re-registration overwrites: a session that restarts reuses nothing,
   // and a stale port would forward into a dead socket rather than reporting the miss.
@@ -161,6 +179,13 @@ export function createA2APushRouter({
     }
 
     if (req.url === PUSH_PATH) {
+      // In tunnel mode nothing should push here — the relay is the push endpoint, and this
+      // process only ever pulls from it. Refused loudly rather than silently accepted, because
+      // a push that lands here would be delivered by a path the deployment no longer means.
+      if (relayUrl) {
+        respond(503, { error: 'this router is in tunnel mode; push to the relay instead' })
+        return
+      }
       const token = req.headers[TOKEN_HEADER]
       const target = typeof token === 'string' ? live(token) : undefined
       // ⚠️ AN UNKNOWN TOKEN IS REFUSED HERE RATHER THAN FORWARDED AND REFUSED THERE. Both end
@@ -189,16 +214,83 @@ export function createA2APushRouter({
     respond(404, { error: 'not found' })
   })
 
+  // ⚠️ THE PULL LOOP OWNS ITS OWN FAILURE HANDLING. A relay that is briefly unreachable must
+  // not end the loop: the whole point of a tunnel is that the far side may come and go, and a
+  // loop that exits on the first error would leave the channel silently dead with nothing on
+  // screen to say so. It backs off and retries instead.
+  let tunnel = null
+  async function pullOnce() {
+    const base = relayUrl.replace(/\/+$/, '')
+    const res = await fetchImpl(`${base}/relay/pull?wait=${encodeURIComponent(pollWait)}`, {
+      headers: { [TUNNEL_SECRET_HEADER]: tunnelSecret },
+    })
+    if (!res.ok) throw new Error(`relay pull failed with ${res.status}`)
+    const payload = await res.json()
+    const items = Array.isArray(payload?.items) ? payload.items : []
+    for (const item of items) {
+      // An unknown token is dropped here rather than forwarded: the receiver would refuse it
+      // anyway, and forwarding would let the relay make this process open arbitrary loopback
+      // connections — the SSRF shape the push branch already avoids.
+      const target = typeof item?.token === 'string' ? live(item.token) : undefined
+      if (target === undefined) continue
+      try {
+        await forward({
+          port: target.port,
+          body: Buffer.from(JSON.stringify(item.body)),
+          headers: { [TOKEN_HEADER]: item.token },
+        })
+      } catch (cause) {
+        if (cause?.code === 'ECONNREFUSED') routes.delete(item.token)
+      }
+    }
+    return items.length
+  }
+
+  function startTunnel() {
+    if (!relayUrl || tunnel) return
+    let stopped = false
+    tunnel = { stop: () => { stopped = true } }
+    void (async () => {
+      while (!stopped) {
+        try {
+          const delivered = await pullOnce()
+          // ⚠️ AN EMPTY PULL MUST YIELD TO THE EVENT LOOP, NOT JUST TO THE MICROTASK QUEUE.
+          // The relay normally long-polls, so a prompt empty answer is the abnormal case — but
+          // if one arrives, `await` on an already-resolved promise only drains microtasks, and
+          // a tight loop of those starves timers and sockets: the process looks hung while
+          // burning CPU. A real timer is what gives the rest of the event loop a turn.
+          if (delivered === 0) await new Promise((r) => setTimeout(r, retryDelayMs))
+        } catch {
+          await new Promise((r) => setTimeout(r, retryDelayMs))
+        }
+      }
+    })()
+  }
+
   return {
     server,
     /** The token -> session-port map, for assertions. Read-only by convention. */
     routesFor: () => new Map(routes),
+    /** One pull-and-dispatch cycle, for assertions. Never used by the loop itself. */
+    pullOnce,
     listen: () =>
       new Promise((resolve, reject) => {
         server.once('error', reject)
-        server.listen(port, host, () => resolve(server.address().port))
+        server.listen(port, host, () => {
+          startTunnel()
+          resolve(server.address().port)
+        })
       }),
-    close: () => new Promise((resolve) => server.close(resolve)),
+    close: () =>
+      new Promise((resolve) => {
+        tunnel?.stop()
+        // ⚠️ `close()` alone waits for idle keep-alive sockets, which a client using `fetch`
+        // holds open — so a test or a restart would hang for the keep-alive timeout with
+        // nothing to show for it. Destroying the open connections first makes shutdown
+        // immediate and is what `closeAllConnections` exists for.
+        server.closeAllConnections?.()
+        server.close(resolve)
+      }),
   }
 }
 
