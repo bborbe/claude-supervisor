@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.238.1
 
 - fix: **a doubled `snapshot written:` label no longer reads as "no baseline", which made a timely round report as late.** A render that copies the whole `snapshot written: …` tail into the value emits `snapshot written: snapshot written: <iso>`; `parse_snapshot` matched nothing, returned `no-baseline`, and `newest_round()` carried the PREVIOUS round's baseline forward. Measured 2026-11-03 on `2026-11-03T07-44Z.digest` — the watcher reported `STALE … age=1129s` at `08:00:48Z` on a round that had run on time, the one spurious report in a 24 h live window of 78. `parse_snapshot` now unwraps a repeated label before matching: the watcher is the last line of defence and cannot assume the renderer wrote the label exactly once, so a malformed header costs nothing instead of a false report. Two regression tests carry the measured value and the empty-label guard.
 
