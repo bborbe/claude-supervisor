@@ -45,6 +45,7 @@ would drift from it, and the repo's own rule is that the two surfaces must agree
 """
 import argparse
 import datetime
+import glob
 import importlib.util
 import json
 import os
@@ -68,6 +69,13 @@ PROJECTS_DIR = os.path.expanduser(
 # Limb 2's own window, restated from `agents/goal-drive.md`: an open tool marker inside
 # it is a worker mid-call; past it the stuck path fires instead.
 TOOL_MARKER_WINDOW = 20 * 60
+
+# How long a denial declaration may keep a row `stuck: denied`. The marker is a claim
+# about a *live* block, and nothing expires it: `commands/worker-drive.md` asks the
+# worker to delete it once the step succeeds, but that instruction is unenforced and
+# was demonstrably not followed (session 6040cad5's marker outlived hours of a healthy
+# worker, 2026-11-03). A ceiling is the backstop for a marker nobody removed.
+DENIAL_TTL = 30 * 60
 
 # The feed renders one row per gate as `  [<pane>]  <age>  <name>  <state> · …`.
 PANE_RE = re.compile(r"^\s*\[(\d+)\]")
@@ -300,8 +308,8 @@ def gated_sessions_from_panes(panes, attention_dir):
 # --------------------------------------------------------------------------- #
 
 
-def denial_marker(session_ids, attention_dir):
-    """The worker's own denial declaration, or None.
+def denial_markers(session_ids, attention_dir):
+    """Every readable denial declaration as `(sid, record)`, in id order.
 
     A classifier denial raises **no** `permission` gate: the attention event log has
     no `answer`/`decision` field at all and its only kinds are `idle`/`question`/
@@ -309,7 +317,17 @@ def denial_marker(session_ids, attention_dir):
     worker therefore writes the fact down itself — `<sid>.denial.json`, the sibling of
     the `.tool.json` marker the hook already writes — before it messages its manager.
     Reading that file is the only durable way the manager can see the denial.
+
+    **All** of them, not the first: a row carries every id the task ever ran under
+    (`claude_session_id` plus each `metrics_sessions` id), so returning one and
+    stopping would let a stale marker on the first id mask a live marker on a later
+    one — a false `none` for a worker that is still blocked. The caller walks the list
+    and takes the first that still holds.
+
+    Each entry carries its session id, because whether a denial still blocks is
+    decided against *that* session's transcript.
     """
+    out = []
     for sid in session_ids:
         path = os.path.join(attention_dir, f"{sid}.denial.json")
         try:
@@ -318,11 +336,126 @@ def denial_marker(session_ids, attention_dir):
         except (OSError, ValueError):
             continue
         if isinstance(rec, dict):
-            return rec
-    return None
+            out.append((sid, rec))
+    return out
 
 
-def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=None):
+def marker_ts(rec, attention_dir, sid):
+    """The marker's own timestamp, falling back to its file mtime.
+
+    The writer stamps `ts` (`commands/worker-drive.md:319`), but a marker written by
+    an older build or by hand may not carry it. Falling back to the mtime keeps the
+    TTL and the ordering check meaningful instead of silently disabling both.
+    """
+    ts = rec.get("ts")
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+        return float(ts)
+    try:
+        return os.path.getmtime(os.path.join(attention_dir, f"{sid}.denial.json"))
+    except OSError:
+        return None
+
+
+def _iso_epoch(value):
+    """An ISO-8601 transcript timestamp as epoch seconds, or None if unparseable."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def later_success(sid, tool, since_ts, projects_dir):
+    """Did `tool` succeed in `sid` after `since_ts`? True / False / None.
+
+    The transcript carries the two halves in separate records: a `tool_result` block
+    names only `tool_use_id`, and the tool's *name* lives on the paired `tool_use`
+    block. So the two are joined here — a result attributed to no known tool cannot
+    clear anything.
+
+    Success is `is_error` absent or false: the harness omits the key on success rather
+    than writing `false`, so `if block.get("is_error"): continue` is the correct test.
+
+    **None means unread, and unread is never a reason to clear.** A transcript that
+    could not be opened, or that does not exist, leaves the marker in force — the
+    same three-valued discipline the rest of this file follows.
+    """
+    # `sid` reaches both a glob pattern and a path join from task-file state, so a
+    # value carrying a separator could address another session's transcript. The
+    # answer is only a boolean and the state is operator-owned, but an exact join
+    # costs nothing.
+    if not sid or os.path.basename(sid) != sid:
+        return None
+    try:
+        hits = glob.glob(os.path.join(projects_dir, "*", f"{glob.escape(sid)}.jsonl"))
+    except OSError:
+        return None
+    if not hits:
+        return None
+    try:
+        path = max(hits, key=os.path.getmtime)
+        with open(path, encoding="utf-8") as fh:
+            names = {}
+            for line in fh:
+                if '"tool_result"' not in line and '"tool_use"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                msg = rec.get("message") or {}
+                content = msg.get("content")
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "tool_use":
+                        names[block.get("id")] = block.get("name")
+                    elif block.get("type") == "tool_result":
+                        if block.get("is_error"):
+                            continue
+                        if names.get(block.get("tool_use_id")) != tool:
+                            continue
+                        ts = _iso_epoch(rec.get("timestamp"))
+                        if ts is not None and ts > since_ts:
+                            return True
+    except OSError:
+        return None
+    return False
+
+
+def denial_still_blocks(sid, rec, attention_dir, now, projects_dir=None):
+    """Whether the declared denial is still a live block.
+
+    Two independent reasons it is not, both measured 2026-11-03 on session 6040cad5:
+
+    * **the same tool later succeeded** — the worker got past the gate, so the
+      declaration is about a block that has ended. The comparison is on the tool
+      *name*: a success of a different tool says nothing about this gate, and clearing
+      on one would un-stick a worker that is still blocked.
+    * **the marker is older than `DENIAL_TTL`** — the worker never came back to remove
+      it. The TTL is a ceiling on a declaration nothing else expires.
+
+    Everything that cannot be established keeps the denial in force: a missing
+    timestamp, a marker with no tool, a transcript that could not be read. That is the
+    fail-safe direction — the cost of a stale `denied` is a nudge, the cost of a
+    wrong `none` is a blocked worker nobody looks at.
+    """
+    ts = marker_ts(rec, attention_dir, sid)
+    if ts is None:
+        return True
+    if now - ts > DENIAL_TTL:
+        return False
+    tool = rec.get("tool")
+    if not tool:
+        return True
+    return later_success(sid, tool, ts, projects_dir or PROJECTS_DIR) is not True
+
+
+def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=None,
+                  projects_dir=None):
     """`(verdict, reason)` — denied | frozen | none | unread.
 
     Two carriers, both of which today render `progressing`:
@@ -336,13 +469,20 @@ def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=Non
       is a stuck claim rather than a check-in.
 
     `none` is only returned when both carriers were actually examined.
+
+    The `denied` carrier is a *live* claim, so it is read through
+    `denial_still_blocks` rather than taken at face value — a marker whose tool has
+    since succeeded, or one older than `DENIAL_TTL`, no longer holds. A stale marker
+    falls through to the frozen carrier instead of short-circuiting to `none`, because
+    a live worker with a frozen task file is still frozen.
     """
     if live != "LIVE":
         return "none", ""
-    denial = denial_marker(session_ids, attention_dir or ATTENTION_DIR)
-    if denial:
-        tool = denial.get("tool") or "a tool"
-        return "denied", f"{tool} denied — {denial.get('reason') or 'no reason recorded'}"
+    attention_dir = attention_dir or ATTENTION_DIR
+    for sid, rec in denial_markers(session_ids, attention_dir):
+        if denial_still_blocks(sid, rec, attention_dir, now, projects_dir):
+            tool = rec.get("tool") or "a tool"
+            return "denied", f"{tool} denied — {rec.get('reason') or 'no reason recorded'}"
     if feed == "gated":
         # A genuinely gated worker is reported by the park cell, never double-reported.
         return "none", ""
@@ -409,7 +549,8 @@ def compute(subject, tracked_path, vault, interval, now=None,
         fl, limb = in_flight(ids, registry, attention_dir, now, wnm.session_transcript_age)
         fv = feed_verdict(ids, gated, feed_state)
         ew = external_wait(ids, attention_dir)
-        sv, sreason = stuck_verdict(row, ids, live, fv, interval, now, attention_dir)
+        sv, sreason = stuck_verdict(row, ids, live, fv, interval, now, attention_dir,
+                                    projects_dir or PROJECTS_DIR)
         out_rows[name] = {
             "ids": ids,
             "liveness": live,

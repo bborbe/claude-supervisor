@@ -373,13 +373,78 @@ class TestNoReaderTruncatesOrDefaultsToADate(unittest.TestCase):
                         f"{name} defaults its defer clock to a date, not an instant",
                     )
 
-    def test_open_flagged_selector_delegates_to_the_parser(self):
-        # commands/open.md embeds the --flagged selector in a prompt, outside READERS,
-        # which is how it kept its [:10] slice after the scripts were fixed.
+
+
+class TestOpenFlaggedSelector(unittest.TestCase):
+    """commands/open.md embeds the --flagged selector in a prompt, outside READERS —
+    which is how it kept its [:10] slice after the scripts were fixed. A text pin alone
+    passes on a dead selector, so the block is also executed over fixture rows."""
+
+    HEADING = "**Selector — ALL VAULTS"
+    PROG_START = 'python3 -c "\nimport json,sys,os,importlib.util'
+    PROG_END = '\n"\ndone'
+
+    def block(self):
         src = (_SCRIPTS.parent / "commands" / "open.md").read_text(encoding="utf-8")
-        start = src.index("**Selector — ALL VAULTS")
-        block = src[src.index("```bash", start):src.index("\n```\n", start)]
-        code = "\n".join(l for l in block.splitlines() if not l.lstrip().startswith("#"))
+        self.assertEqual(src.count(self.HEADING), 1, "--flagged selector heading moved")
+        rest = src.split(self.HEADING, 1)[1]
+        self.assertIn("```bash", rest, "--flagged selector lost its bash fence")
+        return rest.split("```bash", 1)[1].split("\n```", 1)[0]
+
+    def program(self):
+        block = self.block()
+        self.assertEqual(block.count(self.PROG_START), 1, "selector python program moved")
+        prog = block.split(self.PROG_START, 1)[1]
+        self.assertIn(self.PROG_END, prog, "selector python program end moved")
+        prog = "import json,sys,os,importlib.util" + prog.split(self.PROG_END, 1)[0]
+        # The block runs inside a double-quoted shell string; extracting it verbatim is
+        # only faithful while the shell has nothing in it to expand or unescape.
+        for ch in ('"', "$", "`", "\\"):
+            self.assertNotIn(ch, prog, f"selector program carries shell-active {ch!r}")
+        return prog
+
+    def run_selector(self, rows, dd_path):
+        import json
+        import subprocess
+        import sys
+        env = dict(os.environ, VAULT="fixture", DD=str(dd_path))
+        return subprocess.run([sys.executable, "-c", self.program()], input=json.dumps(rows),
+                              capture_output=True, text=True, env=env, timeout=30)
+
+    def test_the_parser_path_falls_back_when_plugin_root_is_unset(self):
+        # Bare ${CLAUDE_PLUGIN_ROOT} expands to "" in a Bash tool call, so the loader would
+        # target /scripts/defer-date.py and the batch would select nothing.
+        block = self.block()
+        self.assertNotIn("${CLAUDE_PLUGIN_ROOT}/", block, "bare CLAUDE_PLUGIN_ROOT in selector")
+        self.assertIn("${CLAUDE_PLUGIN_ROOT:-", block, "selector path has no fallback")
+
+    def test_selector_withholds_future_tomorrow_and_invalid(self):
+        now = dt.datetime.now().astimezone()
+        today = now.date()
+        base = {"flag": True, "status": "in_progress", "flag_set_by": "operator"}
+        rows = [
+            dict(base, name="future-2h", defer_date=(now + dt.timedelta(hours=2)).isoformat()),
+            dict(base, name="past-20m", defer_date=(now - dt.timedelta(minutes=20)).isoformat()),
+            dict(base, name="date-today", defer_date=today.isoformat()),
+            dict(base, name="date-tomorrow", defer_date=(today + dt.timedelta(days=1)).isoformat()),
+            dict(base, name="invalid", defer_date="2026-13-45"),
+            dict(base, name="absent"),
+        ]
+        out = self.run_selector(rows, _SCRIPTS / "defer-date.py")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        opened = {ln.split("|")[1].strip() for ln in out.stdout.splitlines()
+                  if ln.startswith("fixture |")}
+        self.assertEqual(opened, {"past-20m", "date-today", "absent"}, out.stdout)
+
+    def test_an_unloadable_parser_fails_the_vault_loudly(self):
+        rows = [{"name": "absent", "flag": True, "status": "in_progress",
+                 "flag_set_by": "operator"}]
+        out = self.run_selector(rows, "/nonexistent/scripts/defer-date.py")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("ERROR | fixture | defer-date.py not loaded", out.stdout)
+
+    def test_block_calls_the_parser_and_never_slices(self):
+        code = "\n".join(l for l in self.block().splitlines() if not l.lstrip().startswith("#"))
         self.assertNotIn("[:10]", code, "--flagged selector truncates defer_date")
         self.assertNotRegex(code, r"date\.today\(\)", "--flagged selector uses a date clock")
         self.assertIn("defer_state(", code, "--flagged selector does not call defer-date.py")

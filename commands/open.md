@@ -107,7 +107,7 @@ for v in $(vault-cli config list --output json | python3 -c "
 import json,sys
 for x in json.load(sys.stdin):
     if x.get('tasks_dir'): print(x['name'])"); do
-  vault-cli --vault "$v" task list --all --output json 2>/dev/null | VAULT="$v" python3 -c "
+  vault-cli --vault "$v" task list --all --output json 2>/dev/null | VAULT="$v" DD="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/defer-date.py" python3 -c "
 import json,sys,os,importlib.util as iu
 raw=sys.stdin.read().strip()
 if not raw: sys.exit(0)                      # vault returned nothing — skip, never crash
@@ -115,7 +115,8 @@ try: d=json.loads(raw)
 except Exception: sys.exit(0)
 if d is None: sys.exit(0)                    # measured: one vault returns literal null
 tasks=d if isinstance(d,list) else d.get('tasks',d.get('items',[]))
-s=iu.spec_from_file_location('dd','${CLAUDE_PLUGIN_ROOT}/scripts/defer-date.py');dd=iu.module_from_spec(s);s.loader.exec_module(dd)
+try: s=iu.spec_from_file_location('dd',os.environ['DD']);dd=iu.module_from_spec(s);s.loader.exec_module(dd)
+except Exception as e: print('ERROR |',os.environ['VAULT'],'| defer-date.py not loaded, nothing selected:',e); sys.exit(1)
 def due(t): return dd.defer_state(t.get('defer_date'))[0] in ('none','due')
 # An agent-set flag is never an approval (ruled 2026-09-28). Only these two actors open a row:
 #   operator — the operator's own surface wrote it (Vault UI toggle, a hand-typed --by operator)

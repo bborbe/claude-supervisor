@@ -242,6 +242,10 @@ export const config = Object.freeze({
   // docker path needs nothing wider. A relay on another host cannot reach loopback, so the
   // operator sets this to the address that host can dial; that is the only reason to.
   a2aPushHost: ENV.SUPERVISOR_A2A_PUSH_HOST || null,
+  // The push router that owns the stable address a cluster relay forwards to. Set, this
+  // session keeps its receiver on loopback and registers its token there; unset, it binds
+  // whatever `a2aPushHost` / `a2aPushPort` say, which a fixed port admits for one process only.
+  a2aPushRouterUrl: ENV.SUPERVISOR_A2A_PUSH_ROUTER_URL || null,
   a2aK8sCallbackUrl: ENV.SUPERVISOR_A2A_K8S_CALLBACK_URL || null,
 
   // Raw and deliberately unvalidated, exactly like permissionMode below: the legal

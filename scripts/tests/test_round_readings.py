@@ -19,6 +19,7 @@ not be read is never a negative.
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import datetime
 import importlib.util
 import json
 import os
@@ -52,7 +53,9 @@ class Tmp(unittest.TestCase):
         self._dir = tempfile.TemporaryDirectory()
         self.dir = self._dir.name
         self.attention = os.path.join(self.dir, "attention")
+        self.projects = os.path.join(self.dir, "projects")
         os.makedirs(self.attention, exist_ok=True)
+        os.makedirs(self.projects, exist_ok=True)
 
     def tearDown(self):
         self._dir.cleanup()
@@ -61,6 +64,34 @@ class Tmp(unittest.TestCase):
         path = os.path.join(self.attention, name)
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(payload if isinstance(payload, str) else json.dumps(payload))
+        return path
+
+    def write_transcript(self, sid, calls):
+        """Write `sid`'s transcript holding `calls` — `(tool, tool_use_id, is_error, ts)`.
+
+        Each call becomes the two records the harness actually emits: the `tool_use`
+        block on an assistant message, and the `tool_result` block on the following
+        user message. The name lives only on the first; the second carries just the
+        id, which is the join the reader has to make.
+        """
+        lines = []
+        for name, tool_use_id, is_error, ts in calls:
+            stamp = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+            iso = stamp.isoformat().replace("+00:00", "Z")
+            lines.append(json.dumps({"type": "assistant", "timestamp": iso,
+                                     "message": {"content": [
+                                         {"type": "tool_use", "id": tool_use_id,
+                                          "name": name}]}}))
+            block = {"type": "tool_result", "tool_use_id": tool_use_id}
+            if is_error:
+                block["is_error"] = True
+            lines.append(json.dumps({"type": "user", "timestamp": iso,
+                                     "message": {"content": [block]}}))
+        project = os.path.join(self.projects, "project")
+        os.makedirs(project, exist_ok=True)
+        path = os.path.join(project, f"{sid}.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
         return path
 
 
@@ -206,12 +237,110 @@ class Verdicts(Tmp):
 
     def test_denial_marker_yields_stuck_denied(self):
         sid = "eeee5555"
+        now = time.time()
         self.write(f"{sid}.denial.json",
-                   {"tool": "Bash", "reason": "auto-mode classifier denied gh pr merge"})
-        verdict, reason = rr.stuck_verdict({"mtime": time.time()}, [sid], "LIVE",
-                                           "clear", 900, time.time(), self.attention)
+                   {"tool": "Bash", "reason": "auto-mode classifier denied gh pr merge",
+                    "ts": now})
+        verdict, reason = rr.stuck_verdict({"mtime": now}, [sid], "LIVE",
+                                           "clear", 900, now, self.attention, self.projects)
         self.assertEqual(verdict, "denied")
         self.assertIn("Bash", reason)
+
+    # -- the denial carrier clears on evidence, not on age alone ----------------
+    # Measured 2026-11-03: session 6040cad5's marker stayed on disk after the denied
+    # `crane delete` was re-run successfully, so a healthy worker read `stuck: denied`
+    # for hours. Each test below pins one half of the fix.
+
+    def test_a_later_success_of_the_same_tool_clears_the_denial(self):
+        sid = "aaaa0001"
+        now = time.time()
+        self.write(f"{sid}.denial.json",
+                   {"tool": "Bash", "reason": "denied", "ts": now - 60})
+        self.write_transcript(sid, [("Bash", "tu-1", False, now - 30)])
+        verdict, _ = rr.stuck_verdict({"mtime": now}, [sid], "LIVE", "clear", 900, now,
+                                      self.attention, self.projects)
+        self.assertEqual(verdict, "none")
+
+    def test_a_later_success_of_a_different_tool_does_not_clear_the_denial(self):
+        """The negative control. An implementation that clears on ANY later success
+        passes every other test here while un-sticking a worker that is still
+        blocked on the denied tool."""
+        sid = "aaaa0002"
+        now = time.time()
+        self.write(f"{sid}.denial.json",
+                   {"tool": "Bash", "reason": "denied", "ts": now - 60})
+        self.write_transcript(sid, [("Edit", "tu-2", False, now - 30)])
+        verdict, _ = rr.stuck_verdict({"mtime": now}, [sid], "LIVE", "clear", 900, now,
+                                      self.attention, self.projects)
+        self.assertEqual(verdict, "denied")
+
+    def test_a_success_before_the_marker_does_not_clear_the_denial(self):
+        sid = "aaaa0004"
+        now = time.time()
+        self.write(f"{sid}.denial.json",
+                   {"tool": "Bash", "reason": "denied", "ts": now - 60})
+        self.write_transcript(sid, [("Bash", "tu-4", False, now - 120)])
+        verdict, _ = rr.stuck_verdict({"mtime": now}, [sid], "LIVE", "clear", 900, now,
+                                      self.attention, self.projects)
+        self.assertEqual(verdict, "denied")
+
+    def test_a_failed_later_retry_does_not_clear_the_denial(self):
+        """`is_error` present means the retry failed, so the gate is still closed.
+        Without this case the `is_error` skip branch is never exercised and a
+        regression counting a failure as success would pass the whole suite."""
+        sid = "aaaa0007"
+        now = time.time()
+        self.write(f"{sid}.denial.json",
+                   {"tool": "Bash", "reason": "denied", "ts": now - 60})
+        self.write_transcript(sid, [("Bash", "tu-7", True, now - 30)])
+        verdict, _ = rr.stuck_verdict({"mtime": now}, [sid], "LIVE", "clear", 900, now,
+                                      self.attention, self.projects)
+        self.assertEqual(verdict, "denied")
+
+    def test_a_missing_transcript_keeps_the_denial(self):
+        """`unread` is never a reason to clear — the fail-safe direction."""
+        sid = "aaaa0005"
+        now = time.time()
+        self.write(f"{sid}.denial.json",
+                   {"tool": "Bash", "reason": "denied", "ts": now - 60})
+        verdict, _ = rr.stuck_verdict({"mtime": now}, [sid], "LIVE", "clear", 900, now,
+                                      self.attention, self.projects)
+        self.assertEqual(verdict, "denied")
+
+    def test_a_stale_marker_on_the_first_id_does_not_mask_a_live_one_later(self):
+        """A row carries every id the task ran under. Stopping at the first readable
+        marker would let an expired one hide a live one behind it — a false `none`
+        for a worker that is still blocked."""
+        now = time.time()
+        self.write("aaaa0008.denial.json",
+                   {"tool": "Bash", "reason": "old", "ts": now - 31 * 60})
+        self.write("aaaa0009.denial.json",
+                   {"tool": "Bash", "reason": "still blocked", "ts": now - 60})
+        verdict, reason = rr.stuck_verdict(
+            {"mtime": now}, ["aaaa0008", "aaaa0009"], "LIVE", "clear", 900, now,
+            self.attention, self.projects)
+        self.assertEqual(verdict, "denied")
+        self.assertIn("still blocked", reason)
+
+    def test_a_denial_older_than_the_ttl_is_ignored(self):
+        sid = "aaaa0003"
+        now = time.time()
+        self.write(f"{sid}.denial.json",
+                   {"tool": "Bash", "reason": "denied", "ts": now - 31 * 60})
+        verdict, _ = rr.stuck_verdict({"mtime": now}, [sid], "LIVE", "clear", 900, now,
+                                      self.attention, self.projects)
+        self.assertEqual(verdict, "none")
+
+    def test_a_stale_denial_still_falls_through_to_the_frozen_carrier(self):
+        """Dropping the denial must not short-circuit to `none`: a live worker whose
+        task file has not moved is still frozen."""
+        sid = "aaaa0006"
+        now = time.time()
+        self.write(f"{sid}.denial.json",
+                   {"tool": "Bash", "reason": "denied", "ts": now - 31 * 60})
+        verdict, _ = rr.stuck_verdict({"mtime": now - 1000}, [sid], "LIVE", "clear", 900,
+                                      now, self.attention, self.projects)
+        self.assertEqual(verdict, "frozen")
 
     def test_frozen_when_live_and_the_file_is_older_than_one_interval(self):
         now = time.time()
