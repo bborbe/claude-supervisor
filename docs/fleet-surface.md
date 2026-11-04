@@ -977,6 +977,37 @@ is a fallback for the other. And a missing `managed_by` is **not** an error: the
 `goals:` are the documented default, tried in order, which is why a single-goal task never
 needs the field.
 
+## Approval provenance
+
+**Which surface reads `flag_set_by`, and which does not.** What `flag` *means* has its single
+home in `bborbe/vault-cli` `docs/task-writing.md` § The approval flag; this section owns only
+the split below. A surface that needs either half points here instead of restating it.
+
+| Surface | File | Reads `flag`? | Reads `flag_set_by`? |
+|---|---|---|---|
+| **Open** — `/supervisor:open --flagged` | `commands/open.md` § Step 0.5, `scripts/flagged-rows.py` | yes — selects | **yes, tasks only** — only `OPENING_ACTORS` (`operator`, `legacy`) open; an agent-set or absent setter is `REFUSED`. A goal or topic accepts any setter (`flagged-rows.py` `refusals()`) |
+| **Operator-named marker** — the cap exemption | `commands/open.md` § Step 1.5 | yes | **yes** — `operator_named` needs the pair, `flag` true **and** an opening actor |
+| **Spawn** — a manager's `To open` rows | `commands/steps/goal-spawn.md` | yes — not a parked marker | **no** |
+| **Fleet open leg** — the fleet round's task opens | `commands/steps/open.md`, `scripts/open-queue.py` | yes — ranks first | **no** |
+| **Goal / topic opens** | `scripts/topic-spawn.py --goal`, `--topic-open`; `scripts/topic-keepalive.py` | yes | **no** |
+| **Focus rank** — read-only ranking | `scripts/next-focus.py` | yes | **yes** — an operator-set flag ranks; it opens nothing |
+| **Resume** — the drive leg's auto-resume gate | `agents/goal-drive.md` step 3 | **no** — the `not parked` clause is phase and status only | **no** |
+
+**Why the open path alone reads it.** The `--flagged` batch writes `approved_by: operator` — an
+approval record — so it may only act on a flag the operator set (ruled 2026-09-28). Spawn and
+resume write no approval, so provenance is a note there, not a gate (ruled 2026-10-30: *"it
+should not matter how set the flag"*). Measured 2026-10-30 in the primary vault: of **684**
+flagged tasks, **0** were `human_review` or `hold` and **632** were `completed` — the flag
+never expressed the parked class; the two fields beside it do. A resumed row was already approved and already running;
+excluding it on `flag: true` stranded operator-approved rows with dead sessions — the operator
+ruled on 2026-11-03 that *"flag means approved"*, and on 2026-11-04 that the resume gate gains
+no `flag_set_by` check in its place.
+
+⚠️ **Guarded by `scripts/check-resume-flag-clause.py`**, which parses the gate's `not parked`
+bullet into a predicate and evaluates fixture rows through it and through Step 0.5's own
+selector lines. A token grep would not hold this: deleting the token and adding a new
+flag-excluding bullet passes any text check.
+
 ## Referencing vault notes
 
 Several fleet commands cite the operator's Obsidian runbooks. The rule is a **wikilink by
