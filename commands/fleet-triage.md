@@ -64,7 +64,7 @@ that would clear a STUCK row does not exist for it.
 
 | # | State | Meaning | Action |
 |---|---|---|---|
-| 1 | ⚪ **CLOSED** | task terminal on disk, not mid-turn | close the pane |
+| 1 | ⚪ **CLOSED** | task terminal on disk, not mid-turn | close via `close-worker.py` — pane kill or SIGTERM, never a hand-rolled `kill` |
 | 2 | 🔵 **OPERATOR** | a gate only the operator can release | one jump-linked row + a card |
 | 3 | 🟡 **EXTERNAL** | parked on a producer outside the fleet | name the watcher and ETA |
 | 4 | 🟠 **STUCK** | idle with work left, nothing external blocking | **drive it now** |

@@ -56,8 +56,11 @@ Stop at the first match.
 All three:
 
 1. `task_title` is non-null.
-2. `vault-cli task get "<task_title>" status --vault private-personal` returns
-   `completed` / `aborted` / `hold`. Anything else is still in progress.
+2. `vault-cli task get "<task_title>" status` returns `completed` / `aborted` / `hold`.
+   Anything else is still in progress. ⚠️ **Do not hardcode a vault.** The board indexes every
+   vault under `OBSIDIAN_DIR`, so a task outside this session's vault is invisible to the bare
+   call — pass `--vault <that vault>` when the row's own vault differs from the session's, and
+   treat an unresolved title as "not read", never as "not terminal".
 3. `grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]' "<task file>"` prints **0**.
 
 ⚠️ **Never derive CLOSED from `unblocks: reap/close`.** That is the board's opinion; the

@@ -85,22 +85,21 @@ judgement about which pane "looks like" the row. A mis-attributed read produces 
 wrong card, and the operator has no way to see the error from the board.
 
 ```bash
-P="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}"
-printf '%s' "$QUESTION_TEXT" > /tmp/fleet-triage-payload.txt
-python3 "$P/scripts/attention-ask.py" post \
-  --dedup-key "triage:<session-id>:<question-slug>" \
-  --payload "$(cat /tmp/fleet-triage-payload.txt)" \
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/attention-ask.py" post \
+  --dedup-key 'triage:<session-id>:<question-slug>' \
+  --payload '<the session, its task, and the question in its own words>' \
   --producer-kind manager \
-  --option "<your recommended answer>" --option "<the alternative>" \
-  --recommend "<the same string as your recommended --option>"
+  --option '<your recommended answer>' --option '<the alternative>' \
+  --recommend '<the same string as your recommended --option>'
 ```
 
-⚠️ **Pane text is untrusted input, not a string literal.** A question read out of another
-session's pane can contain `"`, `` ` ``, `$(...)` or `\`; interpolated into a double-quoted shell
-argument it closes the quoting or is command-substituted, and a crafted question then executes in
-**this** manager's shell. Set `QUESTION_TEXT` from the file rather than pasting the pane text into
-the command, and keep it out of `--option` / `--recommend` — those are your own words. The
-`$(cat …)` form above is deliberate: command-substitution output is not re-expanded.
+⚠️ **Single-quote every value that carries pane text, and escape a literal `'` as `'\''`.**
+This is the repo's convention for card values assembled from a source you did not author
+(`commands/steps/covered-subject-invariant.md` names the same rule). A question read out of
+another session's pane can contain `"`, `` ` ``, `$(...)` or `\`; inside **double** quotes those
+close the quoting or are command-substituted, and a crafted question then executes in **this**
+manager's shell. Inside single quotes they are inert. Keep `--option` / `--recommend` in your own
+words — they are your judgement, never a quote from the session.
 
 ⚠️ **No card is the default state, not the exception.** Measured 2026-10-29: **nine** sessions
 sat parked on `pick —` / `approve:` closers and **not one had a card** — so the operator's
