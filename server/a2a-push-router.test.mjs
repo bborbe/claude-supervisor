@@ -233,7 +233,7 @@ function postJson(port, path, body, headers = {}) {
   })
 }
 
-function tunnelRouter({ items, calls }) {
+function tunnelRouter({ items, calls, ready = () => true, served = { count: 0 } }) {
   // The stub hands its batch over once and then reports empty, which is what a real relay does
   // after a drain. A stub that repeats its batch forever would spin the loop with no idle turn.
   let pending = [...items]
@@ -260,22 +260,46 @@ function tunnelRouter({ items, calls }) {
           firstPull = false
           return { items: [] }
         }
+        // ⚠️ THE BATCH IS GATED ON THE ROUTE EXISTING, NOT ON A SLEEP. The token only becomes
+        // routable after a real loopback registration round-trip, so a stub that hands the
+        // batch over on its own schedule can deliver into a window where nothing is registered
+        // — which fails the positive test on a loaded box and, worse, makes the negative test
+        // pass for the wrong reason: the item would be dropped because no route existed at
+        // pull time, not because its token was unknown.
+        if (!ready() || pending.length === 0) return { items: [] }
         const batch = pending
         pending = []
+        served.count++
         return { items: batch }
       },
     }),
   })
 }
 
+// waitFor polls a predicate to a deadline. A fixed sleep is a bet on machine speed, and this
+// suite loses that bet on a loaded CI box.
+async function waitFor(predicate, timeoutMs = 5000, stepMs = 10, diagnostic = () => '') {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await new Promise((r) => setTimeout(r, stepMs))
+  }
+  throw new Error(`condition not met within ${timeoutMs}ms ${diagnostic()}`)
+}
+
 test('tunnel mode dispatches a pulled item to the session that registered its token', async () => {
   const calls = []
-  const router = tunnelRouter({ items: [{ token: 'tok-a', body: { kind: 'statusUpdate' } }], calls })
+  let router
+  router = tunnelRouter({
+    items: [{ token: 'tok-a', body: { kind: 'statusUpdate' } }],
+    calls,
+    ready: () => router.routesFor().has('tok-a'),
+  })
   const port = await router.listen()
   try {
     await postJson(port, REGISTER_PATH, { token: 'tok-a', port: 5555 })
 
-    await new Promise((r) => setTimeout(r, 60))
+    await waitFor(() => calls.length > 0)
 
     const hit = calls.find((c) => c.port === 5555)
     assert.ok(hit, 'the item must reach the registered port')
@@ -290,12 +314,26 @@ test('tunnel mode dispatches a pulled item to the session that registered its to
 
 test('tunnel mode drops an item whose token nothing registered', async () => {
   const calls = []
-  const router = tunnelRouter({ items: [{ token: 'nobody', body: { kind: 'statusUpdate' } }], calls })
+  const served = { count: 0 }
+  let router
+  router = tunnelRouter({
+    items: [{ token: 'nobody', body: { kind: 'statusUpdate' } }],
+    calls,
+    served,
+    // The route for a DIFFERENT token exists, so the batch is genuinely served — the drop is
+    // then about the item's own unknown token, which is the thing under test.
+    ready: () => router.routesFor().has('tok-a'),
+  })
   const port = await router.listen()
   try {
     await postJson(port, REGISTER_PATH, { token: 'tok-a', port: 5555 })
 
-    await new Promise((r) => setTimeout(r, 60))
+    await waitFor(
+      () => served.count === 1,
+      5000,
+      10,
+      () => `(served=${served.count} routes=${[...router.routesFor().keys()].join(',')})`,
+    )
 
     assert.equal(calls.length, 0, 'an unknown token must not open a loopback connection')
   } finally {
@@ -324,6 +362,54 @@ test('a failed pull rejects rather than reporting an empty success', async () =>
     fetchImpl: async () => ({ ok: false, status: 401, json: async () => ({}) }),
   })
   await assert.rejects(() => router.pullOnce(), /401/)
+})
+
+// ⚠️ A PULL THAT NEVER ANSWERS MUST NOT OUTLIVE `close()`. Without an abort, `close()` resolves
+// while a request is still open and the loop can dispatch a batch after shutdown — bounded in
+// practice only because the launcher exits the process immediately afterwards, which is not a
+// property this module should depend on.
+test('close aborts a pull that is still in flight', async () => {
+  let pullStarted = false
+  let aborted = false
+  const router = createA2APushRouter({
+    port: 0,
+    relayUrl: 'http://relay.test',
+    tunnelSecret: 's3cret',
+    retryDelayMs: 5,
+    fetchImpl: (url, init) =>
+      new Promise((_resolve, reject) => {
+        pullStarted = true
+        init?.signal?.addEventListener('abort', () => {
+          aborted = true
+          reject(new Error('aborted'))
+        })
+      }),
+  })
+  await router.listen()
+  await waitFor(() => pullStarted)
+
+  const startedAt = Date.now()
+  await router.close()
+
+  assert.equal(aborted, true, 'the in-flight pull must be aborted, not merely abandoned')
+  assert.ok(
+    Date.now() - startedAt < 2000,
+    `close() must not wait on a pull that never answers (took ${Date.now() - startedAt}ms)`,
+  )
+})
+
+test('a pull that never answers times out instead of parking the loop', async () => {
+  const router = createA2APushRouter({
+    port: 0,
+    relayUrl: 'http://relay.test',
+    tunnelSecret: 's3cret',
+    pullTimeoutMs: 50,
+    fetchImpl: (url, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal.reason))
+      }),
+  })
+  await assert.rejects(() => router.pullOnce(), /exceeded 50ms/)
 })
 
 test('a tunnel with no secret is refused at construction rather than started inert', () => {

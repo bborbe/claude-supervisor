@@ -114,6 +114,14 @@ export function createA2APushRouter({
   pollWait = '25s',
   fetchImpl = globalThis.fetch,
   retryDelayMs = 1000,
+  // ⚠️ A CEILING ON THE BACKOFF, AND A TIMEOUT ON THE PULL ITSELF. Without the first, a relay
+  // that stays down would back off to hours and a recovered relay would not be noticed. Without
+  // the second, a relay that accepts the connection and never answers parks the loop with no
+  // liveness signal at all — the only bound would be undici's implicit headers timeout, which is
+  // a library default rather than a decision made here. It exceeds `pollWait` because the relay
+  // legitimately holds the request open for that long before answering.
+  maxRetryDelayMs = 30_000,
+  pullTimeoutMs = 90_000,
 } = {}) {
   // ⚠️ A TUNNEL WITH NO SECRET IS REFUSED AT CONSTRUCTION, NOT STARTED AND LEFT TO 401.
   // The relay authenticates every pull with this secret; an empty one produces a loop that
@@ -226,62 +234,112 @@ export function createA2APushRouter({
   // ⚠️ THE PULL LOOP OWNS ITS OWN FAILURE HANDLING. A relay that is briefly unreachable must
   // not end the loop: the whole point of a tunnel is that the far side may come and go, and a
   // loop that exits on the first error would leave the channel silently dead with nothing on
-  // screen to say so. It backs off and retries instead.
+  // screen to say so. It logs, backs off, and retries instead.
   let tunnel = null
-  async function pullOnce() {
+  // The controller for the pull in flight, so `close()` can abort it rather than resolving
+  // while a batch is still being dispatched.
+  let inFlight = null
+  async function pullOnce(signal) {
     const base = relayUrl.replace(/\/+$/, '')
-    const res = await fetchImpl(`${base}/relay/pull?wait=${encodeURIComponent(pollWait)}`, {
-      headers: { [TUNNEL_SECRET_HEADER]: tunnelSecret },
-    })
-    if (!res.ok) throw new Error(`relay pull failed with ${res.status}`)
-    const payload = await res.json()
-    const items = Array.isArray(payload?.items) ? payload.items : []
-    for (const item of items) {
-      // An unknown token is dropped here rather than forwarded: the receiver would refuse it
-      // anyway, and forwarding would let the relay make this process open arbitrary loopback
-      // connections — the SSRF shape the push branch already avoids.
-      const target = typeof item?.token === 'string' ? live(item.token) : undefined
-      if (target === undefined) continue
-      try {
-        await forward({
-          port: target.port,
-          body: Buffer.from(JSON.stringify(item.body)),
-          headers: { [TOKEN_HEADER]: item.token },
-        })
-      } catch (cause) {
-        // ⚠️ A DEAD RECEIVER AND A FAILED DELIVERY ARE NOT THE SAME EVENT, AND ONLY ONE OF THEM
-        // IS SAFE TO SWALLOW. ECONNREFUSED means the session is gone, so its route is dropped —
-        // that is the correct outcome. Any other failure means the status was lost while the
-        // receiver is alive, and there is no caller to answer here the way the push path
-        // answers 502, so it has to reach the log or it is invisible.
-        if (cause?.code === 'ECONNREFUSED') {
-          routes.delete(item.token)
-        } else {
-          process.emitWarning(
-            `a2a-push-router: tunnel delivery failed for a registered token: ${cause?.message ?? cause}`,
-          )
+    const controller = new AbortController()
+    inFlight = controller
+    // ⚠️ TWO WAYS TO CANCEL, AND BOTH ARE NEEDED: the timeout bounds a relay that goes quiet
+    // mid-request, and the caller's signal is what lets `close()` stop a pull already running.
+    const timer = setTimeout(
+      () => controller.abort(new Error(`relay pull exceeded ${pullTimeoutMs}ms`)),
+      pullTimeoutMs,
+    )
+    const relayAbort = () => controller.abort()
+    signal?.addEventListener('abort', relayAbort, { once: true })
+    try {
+      const res = await fetchImpl(`${base}/relay/pull?wait=${encodeURIComponent(pollWait)}`, {
+        headers: { [TUNNEL_SECRET_HEADER]: tunnelSecret },
+        signal: controller.signal,
+      })
+      if (!res.ok) throw new Error(`relay pull failed with ${res.status}`)
+      const payload = await res.json()
+      const items = Array.isArray(payload?.items) ? payload.items : []
+      for (const item of items) {
+        // An unknown token is dropped here rather than forwarded: the receiver would refuse it
+        // anyway, and forwarding would let the relay make this process open arbitrary loopback
+        // connections — the SSRF shape the push branch already avoids.
+        const target = typeof item?.token === 'string' ? live(item.token) : undefined
+        if (target === undefined) continue
+        try {
+          await forward({
+            port: target.port,
+            body: Buffer.from(JSON.stringify(item.body)),
+            headers: { [TOKEN_HEADER]: item.token },
+          })
+        } catch (cause) {
+          // ⚠️ A DEAD RECEIVER AND A FAILED DELIVERY ARE NOT THE SAME EVENT, AND ONLY ONE OF THEM
+          // IS SAFE TO SWALLOW. ECONNREFUSED means the session is gone, so its route is dropped —
+          // that is the correct outcome. Any other failure means the status was lost while the
+          // receiver is alive, and there is no caller to answer here the way the push path
+          // answers 502, so it has to reach the log or it is invisible.
+          if (cause?.code === 'ECONNREFUSED') {
+            routes.delete(item.token)
+          } else {
+            process.emitWarning(
+              `a2a-push-router: tunnel delivery failed for a registered token: ${cause?.message ?? cause}`,
+            )
+          }
         }
       }
+      return items.length
+    } finally {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', relayAbort)
+      if (inFlight === controller) inFlight = null
     }
-    return items.length
   }
 
   function startTunnel() {
     if (!relayUrl || tunnel) return
+    const controller = new AbortController()
     let stopped = false
-    tunnel = { stop: () => { stopped = true } }
+    tunnel = {
+      stop: () => {
+        stopped = true
+        controller.abort()
+        // The pull in flight holds its own controller, which the signal above aborts; this
+        // line only covers the window between two pulls.
+        inFlight?.abort()
+      },
+    }
     void (async () => {
+      let failures = 0
       while (!stopped) {
         try {
-          const delivered = await pullOnce()
+          const delivered = await pullOnce(controller.signal)
+          // A successful pull proves the far side is healthy, so the next failure is a new
+          // state and deserves its own line.
+          failures = 0
           // ⚠️ AN EMPTY PULL MUST YIELD TO THE EVENT LOOP, NOT JUST TO THE MICROTASK QUEUE.
           // The relay normally long-polls, so a prompt empty answer is the abnormal case — but
           // if one arrives, `await` on an already-resolved promise only drains microtasks, and
           // a tight loop of those starves timers and sockets: the process looks hung while
           // burning CPU. A real timer is what gives the rest of the event loop a turn.
           if (delivered === 0) await new Promise((r) => setTimeout(r, retryDelayMs))
-        } catch {
-          await new Promise((r) => setTimeout(r, retryDelayMs))
+        } catch (cause) {
+          // ⚠️ THE FAILURE IS LOGGED AND BACKED OFF, NOT SWALLOWED AT A FIXED RATE. A bare
+          // `catch {}` retrying once a second forever is exactly the "deployed but inert" shape
+          // the constructor guard exists to prevent: a wrong secret (401) or a bad relay host
+          // (DNS) would spin silently, and the guard only rejects an EMPTY secret — a non-empty
+          // wrong one, which is what rotation and typos produce, is the likeliest
+          // misconfiguration of all.
+          //
+          // Logged on the first failure and then on each doubling, so a persistent fault stays
+          // visible without turning the log into a 1 Hz drumbeat.
+          failures++
+          if (failures === 1 || (failures & (failures - 1)) === 0) {
+            process.emitWarning(
+              `a2a-push-router: relay pull failed ${failures}× in a row: ${cause?.message ?? cause}`,
+            )
+          }
+          if (stopped) break
+          const delay = Math.min(retryDelayMs * 2 ** Math.min(failures - 1, 8), maxRetryDelayMs)
+          await new Promise((r) => setTimeout(r, delay))
         }
       }
     })()
