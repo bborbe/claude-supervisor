@@ -1,5 +1,5 @@
 ---
-description: One pass over every live Claude Code session — classify each into CLOSED / WORKING / EXTERNAL / OPERATOR / STUCK, close the finished (headless workers included, via `close-worker.py`), drive everything that is not genuinely blocked on something outside the fleet, post a card for every question that has none, and hand the operator only what only they can release. Ends by re-sweeping and asserting every session is working, closed, or parked on a named producer or an open card — with the stuck, uncarded and finished-open counts all zero.
+description: One pass over every live Claude Code session — classify each into CLOSED / WORKING / EXTERNAL / OPERATOR / STUCK / LIVE-IDLE HEADLESS, close the finished (headless workers included, via `close-worker.py`), drive everything that is not genuinely blocked on something outside the fleet, post a card for every question that has none, and hand the operator only what only they can release. Ends by re-sweeping and asserting every session is working, closed, or parked on a named producer or an open card — with the stuck, uncarded and finished-open counts all zero.
 allowed-tools:
   - Read
   - ListAgents
@@ -9,7 +9,8 @@ allowed-tools:
   - Bash(wezterm cli list:*)
   - Bash(wezterm cli get-text:*)
   - Bash(vault-cli:*)
-  - Bash(git:*)
+  - Bash(echo:*)
+  - Bash(tail:*)
   - Bash(ls:*)
   - Bash(grep:*)
   - Bash(jq:*)
@@ -55,9 +56,11 @@ This is **not** any of its neighbours:
 
 `--dry-run` classifies and repairs nothing, but still prints the stuck list.
 
-## The five states
+## The six states
 
-Exactly one per session, first match wins, evaluated in this order:
+Exactly one per session, first match wins, evaluated in this order. `4b` is a distinct state,
+not a sub-case of `4`: a live-idle headless session is **not STUCK**, because the drive verb
+that would clear a STUCK row does not exist for it.
 
 | # | State | Meaning | Action |
 |---|---|---|---|
@@ -65,7 +68,7 @@ Exactly one per session, first match wins, evaluated in this order:
 | 2 | 🔵 **OPERATOR** | a gate only the operator can release | one jump-linked row + a card |
 | 3 | 🟡 **EXTERNAL** | parked on a producer outside the fleet | name the watcher and ETA |
 | 4 | 🟠 **STUCK** | idle with work left, nothing external blocking | **drive it now** |
-| 4b | 🔒 **UNREACHABLE** | live, idle, headless, no pane — no *supervisor* verb can reach it | **`SendMessage` first; card a kill only if no reply** |
+| 4b | 🔒 **LIVE-IDLE HEADLESS** | live, idle, headless, no pane — no *supervisor* verb reaches it, but a cross-session `SendMessage` does | **`SendMessage` first; card a kill only if no reply** |
 | 5 | 🟢 **WORKING** | everything else | nothing |
 
 ⚠️ **The order is the design.** CLOSED first, or a finished session reports as working
@@ -86,11 +89,15 @@ moving or with a card.
 | 6 | Verify | every run — the last step, always | `${CLAUDE_PLUGIN_ROOT}/commands/steps/fleet-triage-verify.md` |
 | 7 | Rules | not already in this session's context | `${CLAUDE_PLUGIN_ROOT}/commands/steps/fleet-triage-rules.md` |
 
-Steps 0–6 run in order on every pass; step 7 is read once. `--dry-run` changes step 4 to a no-op and nothing else.
+Steps 0–6 run in order on every pass; step 7 is read once. `--dry-run` changes step 4 to a
+no-op, and it also changes step 6's rendering — the verdict block prints its buckets as
+*would-be* (`0 (n closable)`), because a dry run has nothing to report as done.
 
 ## INLINE — the hard rules
 
-One imperative per rule; the full text, the measurements and the `⚠️` clauses live in `steps/fleet-triage-rules.md` and in the step that owns each.
+One imperative per rule; the full text, the measurements and the `⚠️` clauses live in
+`steps/fleet-triage-rules.md`, in `commands/steps/rules.md` (the three fleet-wide rules), and in
+the step that owns each.
 
 - **One pass, then one verification sweep** — no polling loop.
 - **Never type into another session's pane** — `wezterm cli send-text` into another session turns a question into a menu selection.
@@ -106,4 +113,4 @@ One imperative per rule; the full text, the measurements and the `⚠️` clause
 - **A card is not a ping** — it carries the question verbatim and a recommended answer; if you cannot state both, the honest output is a STUCK row naming what is missing.
 - **A `STALE` manager reading is arithmetic, not proof of a lapsed loop**, and **`session-liveness.py --check` returning `ABSENT` is not a death verdict** — both are `commands/steps/rules.md` rules; corroborate against a registry pid, a transcript mtime or pane text before either reaches a report or an action.
 - **Never recommend OPENING a manager** — the only subject this fleet opens is one carrying `flag: true` with no loop armed (`commands/steps/rules.md` § No manager-proposal row).
-- **Prove a card does not already exist before posting one** — `ls ~/.claude/state/attention/<session-id>*.open.json`, then poll every `item_id` it prints.
+- **Prove a card does not already exist before posting one** — `ls ~/.claude/state/attention/<session-id>*.open.json`, then **read each matched file's `item_id` and poll that** — `ls` prints paths, not ids.

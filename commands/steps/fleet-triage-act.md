@@ -13,8 +13,16 @@ When: every row whose state is not WORKING, unless `--dry-run`
 ### CLOSED → close
 
 ```bash
-"$LOAD_PATH"scripts/close-worker.py <session-id>
+"${CLAUDE_PLUGIN_ROOT:?set by the loaded plugin}/scripts/close-worker.py" <session-id>
 ```
+
+**One close path for both tiers.** `close-worker.py` kills the pane of a tab session and sends
+SIGTERM to the registry pid of a headless one, waiting `EXIT_DEADLINE` for the pid and its
+registry entry to disappear before printing `✅ closed pid <pid> (entrypoint sdk-cli, no pane) ·
+pid <pid> dead · registry entry removed`. Every guard this runbook used to apply by hand is
+inside it — `busy-target`, `held-session`, `dirty-worktree`, `gate-held`, `task-unresolved` and
+`task-not-terminal` — so the "is it finished, is it idle, is it gated" evidence 3.1 and 3.0
+already gathered is re-checked against the same sources rather than trusted from this table.
 
 **The refusal token is the first line of stdout.** Branch on it:
 
@@ -31,20 +39,6 @@ When: every row whose state is not WORKING, unless `--dry-run`
 
 ⚠️ **A refusal is terminal for that row — never fall back to `wezterm cli kill-pane`.** That
 is the same act with none of the guards.
-
-### CLOSED → close a headless worker
-
-**`close-worker.py` closes a headless worker itself — run it, do not signal the pid by hand.**
-It sends SIGTERM to the registry pid, waits `EXIT_DEADLINE` for the pid and its registry entry
-to disappear, and prints `✅ closed pid <pid> (entrypoint sdk-cli, no pane) · pid <pid> dead ·
-registry entry removed`. Every guard this runbook used to apply by hand is inside it:
-`busy-target`, `held-session`, `dirty-worktree`, `gate-held`, `task-unresolved` and
-`task-not-terminal` — so the "is it finished, is it idle, is it gated" evidence 3.1 and 3.0
-already gathered is re-checked against the same sources rather than trusted from this table.
-
-```bash
-"$LOAD_PATH"scripts/close-worker.py <session-id>
-```
 
 ⚠️ **`headless-target` no longer exists.** A `sdk-cli` entrypoint is a delivery detail, not a
 refusal — the close is a pane kill for a tab session and a SIGTERM for a headless one. If you
