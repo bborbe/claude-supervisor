@@ -325,3 +325,10 @@ test('a failed pull rejects rather than reporting an empty success', async () =>
   })
   await assert.rejects(() => router.pullOnce(), /401/)
 })
+
+test('a tunnel with no secret is refused at construction rather than started inert', () => {
+  assert.throws(
+    () => createA2APushRouter({ port: 0, relayUrl: 'http://relay.test', tunnelSecret: '' }),
+    /tunnelSecret/,
+  )
+})

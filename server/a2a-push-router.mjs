@@ -115,6 +115,15 @@ export function createA2APushRouter({
   fetchImpl = globalThis.fetch,
   retryDelayMs = 1000,
 } = {}) {
+  // ⚠️ A TUNNEL WITH NO SECRET IS REFUSED AT CONSTRUCTION, NOT STARTED AND LEFT TO 401.
+  // The relay authenticates every pull with this secret; an empty one produces a loop that
+  // retries once a second forever and delivers nothing, with no error anywhere to say why.
+  // That is the "deployed but inert" shape this file's own history is full of — fail closed
+  // and loudly instead.
+  if (relayUrl && !tunnelSecret) {
+    throw new Error('a2a-push-router: relayUrl requires a non-empty tunnelSecret')
+  }
+
   // token -> { port, at }. Re-registration overwrites: a session that restarts reuses nothing,
   // and a stale port would forward into a dead socket rather than reporting the miss.
   //
@@ -240,7 +249,18 @@ export function createA2APushRouter({
           headers: { [TOKEN_HEADER]: item.token },
         })
       } catch (cause) {
-        if (cause?.code === 'ECONNREFUSED') routes.delete(item.token)
+        // ⚠️ A DEAD RECEIVER AND A FAILED DELIVERY ARE NOT THE SAME EVENT, AND ONLY ONE OF THEM
+        // IS SAFE TO SWALLOW. ECONNREFUSED means the session is gone, so its route is dropped —
+        // that is the correct outcome. Any other failure means the status was lost while the
+        // receiver is alive, and there is no caller to answer here the way the push path
+        // answers 502, so it has to reach the log or it is invisible.
+        if (cause?.code === 'ECONNREFUSED') {
+          routes.delete(item.token)
+        } else {
+          process.emitWarning(
+            `a2a-push-router: tunnel delivery failed for a registered token: ${cause?.message ?? cause}`,
+          )
+        }
       }
     }
     return items.length
