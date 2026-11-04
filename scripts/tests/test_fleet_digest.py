@@ -113,6 +113,23 @@ class Parse(Base):
         self.assertEqual(quality, "parsed")
         self.assertEqual(epoch, 1792496356)
 
+    def test_doubled_snapshot_label_still_parses(self):
+        # A render that copies the whole `snapshot written: …` tail into the value emits
+        # `snapshot written: snapshot written: <iso>`. Measured 2026-11-03 on
+        # `2026-11-03T07-44Z.digest`: it parsed as `no-baseline`, the previous round's
+        # baseline was carried forward, and the watcher reported `STALE … age=1129s` at
+        # `08:00:48Z` on a round that had run on time.
+        epoch, quality = self.m.parse_snapshot(
+            "snapshot written: 2026-11-03T07:48:58Z - 48 sessions"
+        )
+        self.assertEqual(quality, "parsed")
+        self.assertEqual(epoch, self.m.parse_snapshot("2026-11-03T07:48:58Z")[0])
+
+    def test_doubled_label_without_a_timestamp_stays_unknown(self):
+        epoch, quality = self.m.parse_snapshot("snapshot written:")
+        self.assertIsNone(epoch)
+        self.assertEqual(quality, "no-baseline")
+
     def test_day_precision_is_unknown(self):
         epoch, quality = self.m.parse_snapshot("2026-10-12 (fleet-snapshot.py)")
         self.assertIsNone(epoch)
