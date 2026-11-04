@@ -16,19 +16,24 @@ adding a new bullet (`- **not operator-flagged**: …`) would pass any text chec
 gate still excluded flagged rows. So the check **parses** the clauses into a predicate and
 **evaluates fixture rows through it**:
 
-  1. The `not parked` bullet — exactly one inside the gate — is split into conjuncts, and
-     every conjunct must match the grammar below. An unreadable conjunct fails closed: a
-     clause this parser cannot read is not a verdict.
-  2. Every *other* gate bullet that names a field the fixtures vary (`flag`,
-     `flag_set_by`, `approved_by`, `approved_at`) must parse too, and joins the predicate.
+  1. Every bullet inside the gate — bolded or not, indented or not — must be one of
+     `KNOWN_CLAUSES`, each exactly once. An added or renamed clause fails until it is
+     listed here, which is the moment to confirm it reads no flag and no provenance.
+  2. The `not parked` bullet is split into conjuncts, and every conjunct must match the
+     grammar below. An unreadable conjunct fails closed: a clause this parser cannot read
+     is not a verdict. Every *other* bullet that names a field the fixtures vary (`flag`,
+     `flag_set_by`, `approved_by`, `approved_at`), backticked or as a bare word, must
+     parse too, and joins the predicate.
   3. The fixtures — operator-, legacy-, agent- and absent-setter flags, and no flag — must
      all be **admitted**. Two positive controls (`phase: human_review`, `status: hold`)
      must be **excluded**, so a predicate emptied to admit everything also fails.
   4. The open path is evaluated on the same fixtures by executing `commands/open.md`
-     § Step 0.5's own selector lines (`OPENING_ACTORS=`, `cand=`, `sel=`): it must admit
-     only `operator` / `legacy`, and its actor set must equal `scripts/flagged-rows.py`'s.
+     § Step 0.5's own selector lines (`OPENING_ACTORS=`, `cand=`, `sel=`), read from that
+     section only, shape-checked with `ast` and run with `str` as their only builtin: it
+     must admit only `operator` / `legacy`, and its actor set must equal
+     `scripts/flagged-rows.py`'s.
   5. The ownership statement lives once — `docs/fleet-surface.md` § Approval provenance —
-     and all three surfaces name it.
+     and every surface that would otherwise restate it names it.
 
 **What this proves, and what it does not.** It proves the gate's written predicate admits
 flagged rows and reads no provenance, and that the open selector as written still refuses
@@ -51,15 +56,38 @@ OPEN_FILE = "commands/open.md"
 RESOLVER = "scripts/flagged-rows.py"
 OWNER_DOC = "docs/fleet-surface.md"
 SECTION = "Approval provenance"
-POINTER_CARRIERS = (GATE_FILE, OPEN_FILE, "commands/steps/goal-spawn.md")
+POINTER_CARRIERS = (GATE_FILE, OPEN_FILE, "commands/steps/goal-spawn.md", "docs/session-tiers.md")
 
 GATE_START = "3. **Then run the auto-resume gate on confirmed orphans**"
 GATE_END = "**Gate holds → resume.**"
+OPEN_START = "## Step 0.5"
+
+#: Every clause the gate carries, by its opening words. Closed on purpose: a clause added
+#: or renamed anywhere in the gate fails here until it is listed, so a new flag-excluding
+#: bullet cannot slip in under a label this check has never seen.
+KNOWN_CLAUSES = (
+    "task `status: in_progress` AND",
+    "the task's **id set is non-empty**",
+    "**not parked**",
+    "**no live id on ANY id in the set**",
+    "**not shared**",
+    "**not on roster**",
+    "**transcript stale**",
+    "**not terminal**",
+    "**not blocked**",
+    "**not deferred**",
+    "**resumable by the path its own `mode:` selects**",
+    "**not a remote worker**",
+)
 
 #: Fields the fixtures vary. A gate bullet naming one — as a backticked field reference,
 #: never the English word (the `transcript stale` bullet reads "a bare `stat` flag:") —
 #: must be a parseable predicate. The `not parked` bullet is parsed whatever it names.
-VARYING = re.compile(r"`(?:flag|flag_set_by|approved_by|approved_at)\b")
+_FIELD = r"(?:flag|flag_set_by|approved_by|approved_at)"
+VARYING = re.compile(r"`" + _FIELD + r"\b|\b" + _FIELD + r"\b")
+#: The English word in the `transcript stale` bullet ("a bare `stat` flag", "each bare
+#: flag") — a `stat` command-line flag, not the frontmatter field.
+NOT_A_FIELD = re.compile(r"bare (?:`stat` )?flag")
 
 BASE = {"status": "in_progress", "phase": "execution"}
 APPROVED = {"approved_by": "operator", "approved_at": "2026-11-01T23:57:00+01:00"}
@@ -115,17 +143,31 @@ def gate_bullets(text):
     end = text.find(GATE_END, begin)
     if end == -1:
         return None, f"{GATE_FILE} carries the gate heading but not {GATE_END!r}"
-    out = []
+    out, seen = [], []
     for line in text[begin:end].splitlines():
-        m = re.match(r"^- \*\*(.+?)\*\*:?\s*(.*)$", line)
-        if m:
-            out.append((m.group(1).strip(), m.group(2).strip()))
+        m = re.match(r"^\s*- (.+)$", line)
+        if not m:
+            continue
+        item = m.group(1).strip()
+        known = [k for k in KNOWN_CLAUSES if item.startswith(k)]
+        if len(known) != 1:
+            return None, (
+                f"gate bullet {item[:60]!r} is not a known clause — confirm it reads no flag "
+                f"and no provenance, then add it to KNOWN_CLAUSES"
+            )
+        seen.append(known[0])
+        lab = re.match(r"^\*\*(.+?)\*\*:?\s*(.*)$", item)
+        out.append((lab.group(1).strip(), lab.group(2).strip()) if lab else (known[0], item))
+    for k in KNOWN_CLAUSES:
+        n = seen.count(k)
+        if n != 1:
+            return None, f"the gate carries clause {k!r} {n} time(s), want 1"
     return out, None
 
 
 def parse(label, body):
     """-> (exclusion predicates, error). Fail closed on any conjunct the grammar cannot read."""
-    body = re.sub(r"\s*\([^()]*§[^()]*\)", "", body)  # a `(file § section)` pointer is not a predicate
+    body = re.sub(r"\s*\(`[^`]+`\s*§\s*[A-Za-z ]+\)", "", body)  # only the exact `(\`file\` § Section)` pointer
     body = body.strip().rstrip(";.").strip()
     if not body:
         return None, f"`{label}` has no predicate"
@@ -147,9 +189,8 @@ def resume_predicate(text):
     if err:
         return None, err
     parked = [b for b in bullets if b[0] == "not parked"]
-    if len(parked) != 1:
-        return None, f"the gate carries {len(parked)} `not parked` bullet(s), want 1"
-    clauses = parked + [b for b in bullets if b[0] != "not parked" and VARYING.search(b[1] + " " + b[0])]
+    mentions = lambda b: VARYING.search(NOT_A_FIELD.sub("", b[0] + " " + b[1]))  # noqa: E731
+    clauses = parked + [b for b in bullets if b[0] != "not parked" and mentions(b)]
     preds = []
     for label, body in clauses:
         p, err = parse(label, body)
@@ -165,20 +206,52 @@ def excluded_by(preds, row):
 
 def open_selector(text):
     """-> (selector(tasks) -> admitted names, actors, error), from Step 0.5's own lines."""
+    if text.count(OPEN_START) != 1:
+        return None, None, f"{OPEN_FILE} carries {OPEN_START!r} {text.count(OPEN_START)} times, want 1"
+    begin = text.index(OPEN_START)
+    end = text.find("\n## ", begin + len(OPEN_START))
+    section = text[begin : end if end != -1 else len(text)]
     lines = {}
     for key in ("OPENING_ACTORS=", "cand=", "sel="):
-        hits = [ln.strip() for ln in text.splitlines() if ln.strip().startswith(key)]
+        hits = [ln.strip() for ln in section.splitlines() if ln.strip().startswith(key)]
         if len(hits) != 1:
             return None, None, f"{OPEN_FILE} carries {len(hits)} `{key}` line(s), want 1"
         lines[key] = hits[0]
     actors = ast.literal_eval(lines["OPENING_ACTORS="].split("=", 1)[1])
+    code = "\n".join(lines.values())
+    err = selector_shape_error(code)
+    if err:
+        return None, None, f"{OPEN_FILE} § Step 0.5 selector: {err}"
 
     def select(tasks):
-        env = {"tasks": tasks, "due": lambda t: True}
-        exec("\n".join(lines.values()), {}, env)  # noqa: S102 — the repo's own selector lines
+        # One dict for globals: below Python 3.12 a comprehension is its own scope and
+        # resolves `due` / `OPENING_ACTORS` as globals, so a separate locals dict fails.
+        env = {"__builtins__": {"str": str}, "tasks": tasks, "due": lambda t: True}
+        exec(code, env)  # noqa: S102 — shape-checked above, `str` the only builtin
         return {t["name"] for t in env["sel"]}
 
     return select, tuple(actors), None
+
+
+SELECTOR_NAMES = {"tasks", "t", "x", "cand", "sel", "due", "str", "OPENING_ACTORS"}
+SELECTOR_ATTRS = {"get", "strip"}
+
+
+def selector_shape_error(code):
+    """The three lines may only assign a tuple of strings or a list comprehension."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        return f"does not parse: {exc}"
+    for stmt in tree.body:
+        if not isinstance(stmt, ast.Assign) or not isinstance(stmt.value, (ast.Tuple, ast.ListComp)):
+            return f"line {stmt.lineno} is not a tuple or list-comprehension assignment"
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id not in SELECTOR_NAMES:
+            return f"names {node.id!r}, outside {sorted(SELECTOR_NAMES)}"
+        if isinstance(node, ast.Attribute) and node.attr not in SELECTOR_ATTRS:
+            return f"reads attribute {node.attr!r}, outside {sorted(SELECTOR_ATTRS)}"
+    return None
 
 
 def resolver_actors(text):
