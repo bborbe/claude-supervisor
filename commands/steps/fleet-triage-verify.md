@@ -9,7 +9,7 @@ user-invocable: false
 When: every run — the last step, always
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py" --json > /tmp/fleet-triage-after.json
+python3 "${CLAUDE_PLUGIN_ROOT:?set by the loaded plugin}/scripts/fleet-board.py" --json > /tmp/fleet-triage-after.json
 ```
 
 Re-derive the states from the fresh sweep and print one line:

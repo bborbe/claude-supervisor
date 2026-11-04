@@ -65,7 +65,7 @@ Exactly one per session, first match wins, evaluated in this order:
 | 2 | 🔵 **OPERATOR** | a gate only the operator can release | one jump-linked row + a card |
 | 3 | 🟡 **EXTERNAL** | parked on a producer outside the fleet | name the watcher and ETA |
 | 4 | 🟠 **STUCK** | idle with work left, nothing external blocking | **drive it now** |
-| 4b | 🔒 **UNREACHABLE** | live, idle, headless, no pane — no verb can reach it | **card a kill, then resume** |
+| 4b | 🔒 **UNREACHABLE** | live, idle, headless, no pane — no *supervisor* verb can reach it | **`SendMessage` first; card a kill only if no reply** |
 | 5 | 🟢 **WORKING** | everything else | nothing |
 
 ⚠️ **The order is the design.** CLOSED first, or a finished session reports as working

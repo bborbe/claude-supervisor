@@ -91,10 +91,12 @@ judgement about which pane "looks like" the row. A mis-attributed read produces 
 wrong card, and the operator has no way to see the error from the board.
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/attention-ask.py" post \
+python3 "${CLAUDE_PLUGIN_ROOT:?set by the loaded plugin}/scripts/attention-ask.py" post \
   --dedup-key "triage:<session-id>:<question-slug>" \
+  --payload "<the session, its task, and the question in its own words>" \
   --producer-kind manager \
-  --option "<your recommended answer>" --option "<the alternative>"
+  --option "<your recommended answer>" --option "<the alternative>" \
+  --recommend "<the same string as your recommended --option>"
 ```
 
 ⚠️ **No card is the default state, not the exception.** Measured 2026-10-29: **nine** sessions
@@ -132,7 +134,7 @@ armed; do arm one that was never armed.
    OPERATOR row ("loop stopped deliberately; re-arm?"). `UNARMED` with a live session and an
    open subject is re-armable:
    ```bash
-   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py" --arm --subject "<subject>" --branch goal --interval 900
+   python3 "${CLAUDE_PLUGIN_ROOT:?set by the loaded plugin}/scripts/manager-liveness.py" --arm --subject "<subject>" --branch goal --interval 900
    ```
 
 ⚠️ **Every STUCK row must end the run either moving or carded.** A row that is still stuck

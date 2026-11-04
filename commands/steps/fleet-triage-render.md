@@ -27,7 +27,7 @@ Under it, and only for rows that are not WORKING:
 words, your recommended answer.
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/jump-link.py" <pane-id>
+python3 "${CLAUDE_PLUGIN_ROOT:?set by the loaded plugin}/scripts/jump-link.py" <pane-id>
 ```
 
 ⚠️ **`jump-link.py` takes an integer pane id only.** Resolve it by joining `label` against

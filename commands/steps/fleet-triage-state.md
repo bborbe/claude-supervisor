@@ -220,6 +220,10 @@ For a worker this session spawned, the richer read is `mcp__supervisor__agent_st
 Never classify STUCK from recency alone — this is the single largest source of false STUCK
 rows, and it fires on every headless park.
 
+⚠️ **Check 3.4b's conjunction first, or 3.4 swallows it.** A session that is live, `idle`,
+`entrypoint: sdk-cli` and has `pane: null` is **not STUCK** — it is 3.4b, and the first signal
+below matches it exactly. Apply these signals only to a session that fails that conjunction.
+
 Signals — any one:
 
 - idle with a non-terminal task and open boxes,
@@ -281,14 +285,15 @@ Check every manager — the fleet manager (`--branch fleet`), every goal manager
 (`--branch goal`), every topic manager (`--branch topic`):
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py" \
+python3 "${CLAUDE_PLUGIN_ROOT:?set by the loaded plugin}/scripts/manager-liveness.py" \
   --state --subject "<subject>" --branch <fleet|goal|topic>
 ```
 
 | Reading | Cause | Is it a finding? |
 |---|---|---|
 | `OK` | loop armed | no |
-| `STOPPED` + subject page reads `status: completed` / `aborted` / `hold` | the subject is **terminal** | **no** — a loop on a closed subject is the bug |
+| `STOPPED` + subject page reads `status: completed` / `aborted` | the subject is **terminal** | **no** — a loop on a closed subject is the bug |
+| `STOPPED` + subject page reads `status: hold` | a **pause**, not a closure — see `commands/steps/goal-closure.md` | **no** — a `hold` subject never reports `CLOSE` and never authorises a stop, so an armed loop on one is correct, not a defect |
 | `STOPPED` + `manager-quiet.py` stood it down on N quiet ticks and `runnable` is 0 | **auto-quiet** | **no** — re-arming without adding work just reproduces the stand-down. The lever is the quiet threshold, not the marker |
 | `STOPPED` with a marker and a **live, non-terminal** subject carrying runnable work | a deliberate `/supervisor:stop` | **operator row** — only they release it |
 | `UNARMED`, or `STALE` beyond one full observed period **and** the subject has runnable work | a genuine lapse | **drive it** — tell the manager to re-arm in its own pane |
