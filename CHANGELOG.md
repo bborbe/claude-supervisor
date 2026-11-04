@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.238.2
 
 - fix: **`/supervisor:open --flagged` no longer opens a row deferred to later today.** The Step 0.5 selector truncated `defer_date` to its first ten characters and compared against `date.today()`, so a row parked until 23:56 was opened at 22:56. It now calls `scripts/defer-date.py`'s `defer_state()` (loaded by path, like the scripts fixed in #599): a time of day is honoured, a date-only value still means the start of that day, and an unparseable value is withheld rather than opened — matching `flagged-rows.py`. The parser path uses the file's `${CLAUDE_PLUGIN_ROOT:-…}` fallback (a bare `${CLAUDE_PLUGIN_ROOT}` is empty in a Bash tool call), and a parser that cannot load prints `ERROR | <vault> | defer-date.py not loaded` and exits non-zero instead of silently selecting nothing. `test_defer_date.py` executes the extracted block over fixture rows (timestamp ahead/behind, date-only today/tomorrow, invalid, absent, unloadable parser) and pins the fallback, the `defer_state(` call and the absence of `[:10]` / `date.today()`. `commands/open.md`'s budget entry is raised by 276 bytes (78226 → 78502) to pay for the loader and its guard.
 
