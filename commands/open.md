@@ -135,13 +135,13 @@ for t in sorted(sel, key=lambda x: x.get('name','')):
 done
 ```
 
-⚠️ **The provenance filter is a gate, not a tidy-up; it must stay ahead of the approve pass.**
+⚠️ **The provenance filter is a gate, not a tidy-up; it must stay ahead of the approve pass.** Which surface reads provenance: `docs/fleet-surface.md` § Approval provenance.
 
 ⚠️ **Refuse loudly; never drop a row silently.** A refused row prints `REFUSED | <vault> | <task> | flag_set_by=<who>` and is excluded from the batch.
 
 ⚠️ **`legacy` opens a row — a migration marker, not a credential.**
 
-**Scan every vault that declares a `tasks_dir`; `--vault <name>` narrows to one.** Of 13 configured vaults, 8 declare one. A vault-scoped run is the exception now, not the default — the operator manages one fleet, not one vault, and the same complaint already stood against the fleet manager's vault argument.
+**Scan every vault that declares a `tasks_dir`; `--vault <name>` narrows to one.** Of 13 configured vaults, 8 declare one. A vault-scoped run is the exception now, not the default — the operator manages one fleet, not one vault.
 
 **An unanswerable vault is skipped and named, never fatal** — the loop exits quietly per vault.
 
