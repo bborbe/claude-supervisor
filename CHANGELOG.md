@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.238.3
 
 - fix: `scripts/close-worker.py` resolves a session anchored only on a goal or topic page — a goal manager or topic manager — instead of refusing it `task-unresolved`. When no task resolves the session, the script walks `24 Goals` / `23 Goals` / `23 Topics` with the same join as the task lookup: `claude_session_id`, else the session's `metrics_sessions` entry. A task the session holds as `claude_session_id` always wins. A task matched only by handover does not outrank a page the session still holds, and every held page must pass. Goal/topic terminal-state rule: the session is closable when it has handed the page over, when the page is `completed` or `aborted`, or when the page has a future `defer_date`. It refuses `task-not-terminal` while the session still holds a non-terminal page, `hold` included. The task rule does not transfer, because a goal stays `in_progress` across many sessions. A failed goal/topic lookup (grep error) refuses `task-unresolved` instead of being skipped. `--dry-run` names each resolved page path. `commands/close.md` and `docs/fleet-surface.md` describe the page rule.
 
