@@ -460,6 +460,194 @@ class TestCliRefusals(unittest.TestCase):
         self.assertIn("❌ error:", out)
         self.assertIn("no single live pane", out)
 
+    # --- goal / topic anchor -------------------------------------------------------------
+
+    def _page(self, kind, **fm):
+        sub = "24 Goals" if kind == "goal" else "23 Topics"
+        d = os.path.join(self.vaults, "somevault", sub)
+        os.makedirs(d, exist_ok=True)
+        lines = ["---"] + [f"{k}: {v}" for k, v in fm.items()] + ["---", ""]
+        path = os.path.join(d, "p.md")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines))
+        return path
+
+    def test_goal_holder_on_live_goal_refuses(self):
+        for kind in ("goal", "topic"):
+            with self.subTest(kind=kind):
+                self._registry()
+                path = self._page(kind, claude_session_id=SID, status="in_progress")
+                done = self._run()
+                self.assertEqual(done.stdout.splitlines()[0], "task-not-terminal")
+                self.assertIn(path, done.stdout)
+                os.remove(path)
+
+    def test_completed_goal_resolves_and_passes_every_guard(self):
+        """A completed goal resolves the session; `--dry-run` names the page and closes nothing."""
+        for kind in ("goal", "topic"):
+            with self.subTest(kind=kind):
+                child = self._spawn_child()
+                self._registry(entrypoint="sdk-cli", pid=child.pid)
+                path = self._page(kind, claude_session_id=SID, status="completed")
+                done = self._run("--dry-run")
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                self.assertIn(f"{kind}: {path} (status completed, held, session {SID})", done.stdout)
+                self.assertIn("would close", done.stdout)
+                self.assertIsNone(child.poll(), "--dry-run must not signal")
+                os.remove(path)
+                os.remove(os.path.join(self.sessions, f"{child.pid}.json"))
+
+    def test_handed_off_task_does_not_outrank_a_held_live_goal(self):
+        """Review finding: a metrics-only task match is weaker than a page still held."""
+        self._registry()
+        with open(os.path.join(self.tasks, "t.md"), "w", encoding="utf-8") as handle:
+            handle.write(
+                f"---\nclaude_session_id: {OTHER}\nstatus: in_progress\nmetrics_sessions:\n"
+                f"    - session_id: {SID}\n      started_at: \"2026-11-04T10:00:00+01:00\"\n---\n"
+            )
+        path = self._page("goal", claude_session_id=SID, status="in_progress")
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "task-not-terminal")
+        self.assertIn(path, done.stdout)
+
+    def test_completed_goal_does_not_free_a_held_live_topic(self):
+        self._registry()
+        self._page("goal", claude_session_id=SID, status="completed")
+        path = self._page("topic", claude_session_id=SID, status="in_progress")
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "task-not-terminal")
+        self.assertIn(path, done.stdout)
+
+    def test_handed_over_goal_closes_while_in_progress(self):
+        child = self._spawn_child()
+        self._registry(entrypoint="sdk-cli", pid=child.pid)
+        d = os.path.join(self.vaults, "somevault", "24 Goals")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, "p.md")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                f"---\nclaude_session_id: {OTHER}\nstatus: in_progress\nmetrics_sessions:\n"
+                f"    - session_id: {SID}\n      started_at: \"2026-11-04T10:00:00+01:00\"\n---\n"
+            )
+        done = self._run("--dry-run")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f"goal: {path} (status in_progress, handed off to {OTHER}, session {SID})", done.stdout)
+        self.assertIsNone(child.poll(), "--dry-run must not signal")
+
+    def test_live_task_wins_over_completed_goal(self):
+        self._registry()
+        self._page("goal", claude_session_id=SID, status="completed")
+        self._task(**{"claude_session_id": SID, "status": "in_progress"})
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "task-not-terminal")
+        self.assertIn("t.md", done.stdout)
+
+
+class TestPageVerdict(unittest.TestCase):
+    def setUp(self):
+        import datetime
+        self.today = datetime.date(2026, 10, 20)
+
+    def _verdict(self, handed_off=False, kind="goal", **fm):
+        return cw.page_verdict((kind, "/v/24 Goals/g.md", fm, handed_off), self.today)
+
+    def test_holder_of_live_goal_refuses(self):
+        refusal, detail = self._verdict(status="in_progress")
+        self.assertEqual(refusal, "task-not-terminal")
+        self.assertIn("still holds it", detail)
+
+    def test_hold_is_not_a_goal_end_state(self):
+        """Unlike a task, a goal on `hold` is still its manager's — parked, not finished."""
+        refusal, _ = self._verdict(status="hold")
+        self.assertEqual(refusal, "task-not-terminal")
+
+    def test_completed_and_aborted_pass(self):
+        self.assertIsNone(self._verdict(status="completed"))
+        self.assertIsNone(self._verdict(status="aborted"))
+
+    def test_future_defer_passes(self):
+        self.assertIsNone(self._verdict(status="in_progress", defer_date="2026-12-01"))
+
+    def test_past_defer_refuses(self):
+        refusal, _ = self._verdict(status="in_progress", defer_date="2026-01-01")
+        self.assertEqual(refusal, "task-not-terminal")
+
+    def test_handed_over_passes_while_in_progress(self):
+        self.assertIsNone(self._verdict(handed_off=True, status="in_progress"))
+
+    def test_topic_same_terms(self):
+        self.assertIsNone(self._verdict(kind="topic", status="completed"))
+        refusal, _ = self._verdict(kind="topic", status="in_progress")
+        self.assertEqual(refusal, "task-not-terminal")
+
+
+class TestFindPages(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.vaults = os.path.join(self.tmp, "vaults")
+        self.goals = os.path.join(self.vaults, "somevault", "24 Goals")
+        self.topics = os.path.join(self.vaults, "somevault", "23 Topics")
+        os.makedirs(self.goals)
+        os.makedirs(self.topics)
+
+    def _write(self, d, body, name="p.md"):
+        path = os.path.join(d, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        return path
+
+    def _find(self):
+        return cw.find_pages(SID, self.tmp, self.vaults)
+
+    def test_finds_goal_by_claude_session_id(self):
+        path = self._write(self.goals, f"---\nclaude_session_id: {SID}\nstatus: in_progress\n---\n")
+        self.assertEqual(self._find(), ([("goal", path, cw.frontmatter(path), False)], [], None))
+
+    def test_finds_topic_by_claude_session_id(self):
+        path = self._write(self.topics, f"---\nclaude_session_id: {SID}\n---\n")
+        held, _, _ = self._find()
+        self.assertEqual([h[:2] for h in held], [("topic", path)])
+
+    def test_finds_handover_by_metrics_session(self):
+        path = self._write(
+            self.goals,
+            f"---\nclaude_session_id: {OTHER}\nstatus: in_progress\n"
+            f"metrics_sessions:\n    - session_id: {SID}\n"
+            f"      started_at: \"2026-11-04T10:00:00+01:00\"\n---\n",
+        )
+        held, handed, _ = self._find()
+        self.assertEqual(held, [])
+        self.assertEqual([h[:2] for h in handed], [("goal", path)])
+        self.assertTrue(handed[0][3])
+
+    def test_collects_every_held_page(self):
+        """Pages stay stamped after they end, so all of them are returned, not the first."""
+        self._write(self.goals, f"---\nclaude_session_id: {SID}\nstatus: completed\n---\n")
+        self._write(self.topics, f"---\nclaude_session_id: {SID}\nstatus: in_progress\n---\n")
+        held, _, _ = self._find()
+        self.assertEqual([h[0] for h in held], ["goal", "topic"])
+
+    def test_body_mention_is_not_ownership(self):
+        self._write(self.goals, f"---\nclaude_session_id: {OTHER}\n---\n\nsee {SID}\n")
+        self.assertEqual(self._find(), ([], [], None))
+
+    def test_23_goals_is_a_goal_dir(self):
+        d = os.path.join(self.vaults, "othervault", "23 Goals")
+        os.makedirs(d)
+        path = self._write(d, f"---\nclaude_session_id: {SID}\n---\n")
+        held, _, _ = self._find()
+        self.assertEqual([h[:2] for h in held], [("goal", path)])
+
+    def test_grep_error_is_reported_not_skipped(self):
+        """grep exit 2 is an error, not "no match" — the caller must refuse on it."""
+        path = self._write(self.goals, f"---\nclaude_session_id: {SID}\n---\n")
+        os.chmod(path, 0)
+        self.addCleanup(os.chmod, path, 0o644)
+        _, _, error = self._find()
+        self.assertIsNotNone(error)
+        self.assertIn("goal lookup failed", error)
+
 
 if __name__ == "__main__":
     unittest.main()
