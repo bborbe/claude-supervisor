@@ -134,6 +134,16 @@ Once every page in the set has been examined, and **only** if the SUBJECT itself
 ⚠️ **A tracked page closing is not this** — a task or a member goal closing just leaves the
 tracked set; only the subject ends the round.
 
+⚠️ **`hold` is a pause, not a closure — and a manager stopped on one is not thereby
+"correctly stopped".** `${CLAUDE_PLUGIN_ROOT}/commands/topic-spawn.md:50` states it for goals
+(*"not `hold`, which is a pause, not a closure"*), and the consequence here is that a `hold`
+subject never reports `CLOSE`, never authorises the `--stop` above, and never justifies an
+armed loop being read as a defect. A `hold` subject is a **parked** round: it may resume
+without anything being re-armed by hand, so the loop staying armed is correct. The error is
+the opposite one — an armed loop on a subject that has already reported `CLOSE`, which the
+goal branch above stops, because a loop still arming on a `completed` subject reports work
+where there is none.
+
 ## Which pages this covers
 
 | Branch | Examined | Contract |
