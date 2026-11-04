@@ -159,11 +159,12 @@ for p in glob.glob(os.path.expanduser(f"~/.claude/projects/*/{sid}.jsonl")):
         for line in f:
             try: d=json.loads(line)
             except Exception: continue
-            if d.get("type")!="assistant": continue
-            c=d.get("message",{}).get("content")
+            if not isinstance(d,dict) or d.get("type")!="assistant": continue
+            c=(d.get("message") or {}).get("content")
             if isinstance(c,list):
                 for b in c:
-                    if b.get("type")=="text" and b.get("text","").strip(): tail=b["text"]
+                    if not isinstance(b,dict): continue
+                    if b.get("type")=="text" and (b.get("text") or "").strip(): tail=b["text"]
 m=[l.strip() for l in (tail or "").splitlines() if re.search(r"👤 You:|⏰ Next:|⏰ Ends:|⚪ DONE", l)]
 print("\n".join(m[-2:]) or "(no closer)")
 PY
