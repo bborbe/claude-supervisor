@@ -266,18 +266,26 @@ def task_dirs_for(cwd, vault_root=None, names=TASK_DIRS):
     return dirs
 
 
-def find_page(session_id, cwd, vault_root=None):
-    """`(kind, path, frontmatter, handed_off)` for a goal or topic anchor, or `None`.
+def find_pages(session_id, cwd, vault_root=None):
+    """`(held, handed, error)` — every goal or topic page that records this session.
 
-    Consulted only when `find_task` resolves nothing — a task anchor always wins. A goal or
-    topic manager holds a page, not a task, and `vault-cli goal work-on` / `topic work-on`
-    record it the same way they record a task: `claude_session_id`, plus a
-    `metrics_sessions` entry. The join is therefore the one `find_task` uses, over the goal
-    and topic directories instead of the task ones.
+    `held` are pages whose `claude_session_id` is this session, `handed` pages that list it
+    only under `metrics_sessions` (a recorded handover); each entry is
+    `(kind, path, frontmatter, handed_off)`. `error` is a string when a lookup failed, and
+    the caller must refuse on it: a failed grep is not evidence that no live page exists.
+
+    All pages are collected rather than the first, because pages stay stamped after they
+    end — one session can hold a completed goal and a live topic at once, and the live one
+    must decide. A goal or topic manager holds a page, not a task, and `vault-cli goal
+    work-on` / `topic work-on` record it the same way they record a task
+    (`claude_session_id` plus a `metrics_sessions` entry — `vault-cli`
+    `pkg/ops/goal_workon.go` `persistGoalSessionID`, `pkg/ops/topic_workon.go`
+    `persistTopicSessionID`), so the join is the one `find_task` uses, over the goal and
+    topic directories instead of the task ones.
     """
+    held, handed = [], []
     if not session_id:
-        return None
-    handed_off = None
+        return held, handed, None
     for kind, names in (("goal", GOAL_DIRS), ("topic", TOPIC_DIRS)):
         dirs = task_dirs_for(cwd, vault_root, names)
         if not dirs:
@@ -287,15 +295,18 @@ def find_page(session_id, cwd, vault_root=None):
                 ["grep", "-rl", "--fixed-strings", session_id, *dirs],
                 capture_output=True, text=True, timeout=15,
             )
-        except Exception:
-            continue
+        except Exception as exc:
+            return held, handed, f"{kind} lookup failed ({exc})"
+        # `grep` exits 1 on "no match", which is an answer; 2 is an error, which is not.
+        if found.returncode not in (0, 1):
+            return held, handed, f"{kind} lookup failed (grep exit {found.returncode})"
         for path in sorted((found.stdout or "").splitlines()):
             fm = frontmatter(path)
             if (fm.get("claude_session_id") or "").strip() == session_id:
-                return kind, path, fm, False
-            if handed_off is None and session_id in metrics_session_ids(path):
-                handed_off = (kind, path, fm, True)
-    return handed_off
+                held.append((kind, path, fm, False))
+            elif session_id in metrics_session_ids(path):
+                handed.append((kind, path, fm, True))
+    return held, handed, None
 
 
 def page_verdict(page, today):
@@ -550,11 +561,34 @@ def main():
         )
 
     task = find_task(sid, cwd, VAULTS_ROOT)
-    page = None if task is not None else find_page(sid, cwd, VAULTS_ROOT)
-    if page is not None:
-        bad = page_verdict(page, defer_date.as_now())
-    else:
+    pages = []
+    if task is not None and not task[2]:
+        # The session holds this task as `claude_session_id`: the task decides alone.
         bad = task_verdict(task, defer_date.as_now())
+    else:
+        # No held task. A task matched only through `metrics_sessions` (handed off) is
+        # weaker evidence than a page the session still holds, so the pages are read in
+        # both cases, and every held page must pass.
+        held, handed, error = find_pages(sid, cwd, VAULTS_ROOT)
+        bad = None
+        if error:
+            bad = (
+                "task-unresolved",
+                f"{error}; a failed lookup is not evidence that no live goal or topic "
+                "page holds this session",
+            )
+        else:
+            for candidate in held:
+                bad = page_verdict(candidate, defer_date.as_now())
+                if bad is not None:
+                    break
+            if bad is None:
+                if held:
+                    pages = held
+                elif task is None and handed:
+                    pages = handed[:1]
+                else:
+                    bad = task_verdict(task, defer_date.as_now())
     if bad is not None:
         return refuse(*bad)
 
@@ -579,10 +613,10 @@ def main():
     # The success line names the pid separately, so its target must not repeat it.
     closed_target = f"pane {pane}" if pane is not None else f"headless session ({entrypoint})"
     print(f"🧹 close-worker · session {sid[:8]} · pid {pid} · {rec.get('name')!r}")
-    if page is not None:
-        kind, page_path, fm, page_handed_off = page
-        held = f"handed off to {fm.get('claude_session_id') or '(none)'}" if page_handed_off else "held"
-        print(f"   {kind}: {page_path} (status {fm.get('status')}, {held}, session {sid})")
+    if pages:
+        for kind, page_path, fm, page_handed_off in pages:
+            how = f"handed off to {fm.get('claude_session_id') or '(none)'}" if page_handed_off else "held"
+            print(f"   {kind}: {page_path} (status {fm.get('status')}, {how}, session {sid})")
     else:
         task_path, fm, _handed_off = task
         print(f"   task: {os.path.basename(task_path)} (status {fm.get('status')})")
