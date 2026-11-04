@@ -4,22 +4,26 @@
 user-invocable: false
 ---
 
-# Step 0 — Assert the load path
+# Step 0 — Resolve the load path
 
 When: every run — before the sweep
 
 ```bash
-: "${CLAUDE_PLUGIN_ROOT:?CLAUDE_PLUGIN_ROOT is unset — run this from the loaded plugin, not a bare shell}"
-echo "$CLAUDE_PLUGIN_ROOT"
+echo "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}"
 ```
 
-The **loaded plugin's own root**, never the marketplace clone — the clone updates
-independently of what this session loaded, so a path resolved from it runs scripts this
-session never loaded. The `:?` is deliberate: it refuses rather than falling back, because
-a silent fallback to the clone is exactly the version skew this step exists to prevent.
+The **loaded plugin's own root** when the client substitutes it, and the marketplace clone only
+when it does not.
 
-⚠️ **Every script call in every step inlines the same `${CLAUDE_PLUGIN_ROOT:?...}` form.**
-There is no `LOAD_PATH` variable to carry forward: shell state does not survive between
-`Bash` calls, so a variable set here would be empty by the time a later step used it. This
-step therefore *proves* the variable is set and stops the run early if it is not; it exports
-nothing.
+⚠️ **The `:-` fallback is load-bearing, not style.** `CLAUDE_PLUGIN_ROOT` is **unset** in a
+command's Bash — the client substitutes the exact `${CLAUDE_PLUGIN_ROOT}` token into the command
+text, it does not export the variable to the shell — so a bare form resolves to
+`/scripts/<name>.py` and fails, and a `:?` form aborts the whole run with its own error message.
+Measured and recorded at `docs/session-tiers.md:203-206` (verified 2026-09-23) and in CHANGELOG
+v0.59.2 / v0.62.1. This is why the fallback is the repo-wide convention rather than a
+belt-and-braces default.
+
+⚠️ **There is no variable to carry forward.** Shell state does not survive between `Bash` calls,
+so every script call in every step inlines this same
+`${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}` form. This step
+prints the resolved root for the run's record; it exports nothing.

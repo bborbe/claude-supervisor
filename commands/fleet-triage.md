@@ -52,7 +52,7 @@ This is **not** any of its neighbours:
 | `/supervisor:fleet-status` | what is everyone doing (snapshot, zero side effects) |
 | `/supervisor:who-needs-my-help` | what is blocking each session (report-only on gates) |
 | `/supervisor:fleet-drive` | the manager's recurring round |
-| **`/fleet-triage`** | **what is stuck, and then unstick it** |
+| **`/supervisor:fleet-triage`** | **what is stuck, and then unstick it** |
 
 `--dry-run` classifies and repairs nothing, but still prints the stuck list.
 

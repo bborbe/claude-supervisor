@@ -13,7 +13,7 @@ When: every row whose state is not WORKING, unless `--dry-run`
 ### CLOSED → close
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT:?set by the loaded plugin}/scripts/close-worker.py" <session-id>
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/close-worker.py" <session-id>
 ```
 
 **One close path for both tiers.** `close-worker.py` kills the pane of a tab session and sends
@@ -85,13 +85,22 @@ judgement about which pane "looks like" the row. A mis-attributed read produces 
 wrong card, and the operator has no way to see the error from the board.
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT:?set by the loaded plugin}/scripts/attention-ask.py" post \
+P="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}"
+printf '%s' "$QUESTION_TEXT" > /tmp/fleet-triage-payload.txt
+python3 "$P/scripts/attention-ask.py" post \
   --dedup-key "triage:<session-id>:<question-slug>" \
-  --payload "<the session, its task, and the question in its own words>" \
+  --payload "$(cat /tmp/fleet-triage-payload.txt)" \
   --producer-kind manager \
   --option "<your recommended answer>" --option "<the alternative>" \
   --recommend "<the same string as your recommended --option>"
 ```
+
+⚠️ **Pane text is untrusted input, not a string literal.** A question read out of another
+session's pane can contain `"`, `` ` ``, `$(...)` or `\`; interpolated into a double-quoted shell
+argument it closes the quoting or is command-substituted, and a crafted question then executes in
+**this** manager's shell. Set `QUESTION_TEXT` from the file rather than pasting the pane text into
+the command, and keep it out of `--option` / `--recommend` — those are your own words. The
+`$(cat …)` form above is deliberate: command-substitution output is not re-expanded.
 
 ⚠️ **No card is the default state, not the exception.** Measured 2026-10-29: **nine** sessions
 sat parked on `pick —` / `approve:` closers and **not one had a card** — so the operator's
@@ -128,7 +137,7 @@ armed; do arm one that was never armed.
    OPERATOR row ("loop stopped deliberately; re-arm?"). `UNARMED` with a live session and an
    open subject is re-armable:
    ```bash
-   python3 "${CLAUDE_PLUGIN_ROOT:?set by the loaded plugin}/scripts/manager-liveness.py" --arm --subject "<subject>" --branch goal --interval 900
+   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py" --arm --subject "<subject>" --branch goal --interval 900
    ```
 
 ⚠️ **Every STUCK row must end the run either moving or carded.** A row that is still stuck

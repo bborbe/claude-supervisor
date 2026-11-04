@@ -286,7 +286,7 @@ Check every manager — the fleet manager (`--branch fleet`), every goal manager
 (`--branch goal`), every topic manager (`--branch topic`):
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT:?set by the loaded plugin}/scripts/manager-liveness.py" \
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py" \
   --state --subject "<subject>" --branch <fleet|goal|topic>
 ```
 
