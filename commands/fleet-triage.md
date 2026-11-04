@@ -58,17 +58,21 @@ This is **not** any of its neighbours:
 
 ## The six states
 
-Exactly one per session, first match wins, evaluated in this order. `4b` is a distinct state,
-not a sub-case of `4`: a live-idle headless session is **not STUCK**, because the drive verb
-that would clear a STUCK row does not exist for it.
+Exactly one per session, first match wins, evaluated **down the table**. `4b` is a distinct
+state, not a sub-case of `4`: a live-idle headless session is **not STUCK**, because the drive
+verb that would clear a STUCK row does not exist for it. ⚠️ **`4b` is evaluated before `4`,
+despite the letter** — a live-idle headless session satisfies `4`'s definition exactly, so
+reading `4` first would swallow it. The letter is a stable label kept for cross-references, not
+a position in the order; `commands/steps/fleet-triage-state.md` states the same rule at its
+3.4b check ("Check 3.4b's conjunction first, or 3.4 swallows it").
 
 | # | State | Meaning | Action |
 |---|---|---|---|
 | 1 | ⚪ **CLOSED** | task terminal on disk, not mid-turn | close via `close-worker.py` — pane kill or SIGTERM, never a hand-rolled `kill` |
 | 2 | 🔵 **OPERATOR** | a gate only the operator can release | one jump-linked row + a card |
 | 3 | 🟡 **EXTERNAL** | parked on a producer outside the fleet | name the watcher and ETA |
-| 4 | 🟠 **STUCK** | idle with work left, nothing external blocking | **drive it now** |
 | 4b | 🔒 **LIVE-IDLE HEADLESS** | live, idle, headless, no pane — no *supervisor* verb reaches it, but a cross-session `SendMessage` does | **`SendMessage` first; card a kill only if no reply** |
+| 4 | 🟠 **STUCK** | idle with work left, nothing external blocking | **drive it now** |
 | 5 | 🟢 **WORKING** | everything else | nothing |
 
 ⚠️ **The order is the design.** CLOSED first, or a finished session reports as working

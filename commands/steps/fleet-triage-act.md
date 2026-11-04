@@ -134,7 +134,19 @@ armed; do arm one that was never armed.
 4. **Owning manager loop `STOPPED` / `UNARMED`** → this is a fleet finding, not a nudge.
    `STOPPED` is a deliberate marker, so **do not re-arm it unilaterally** — raise it as an
    OPERATOR row ("loop stopped deliberately; re-arm?"). `UNARMED` with a live session and an
-   open subject is re-armable:
+   open subject is re-armable — **but check the name with the script before it reaches the
+   shell:**
+
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/closure-name-safe.py" "<subject>"
+   ```
+
+   It exits 0 on a safe name and 1 on one carrying `$`, a backtick, `"` or `\` — the entire
+   injection surface inside a double-quoted word. **On exit 1, do not arm** — report the name
+   and stop. This is the same gate, and the same reasoning, as
+   `commands/steps/goal-closure.md:98-101`: the subject is a vault page name, this step runs
+   unattended, and a rule the model has to remember every tick is not a gate. Only then:
+
    ```bash
    python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py" --arm --subject "<subject>" --branch goal --interval 900
    ```

@@ -288,6 +288,18 @@ operator to fix things that are already right.
 Check every manager — the fleet manager (`--branch fleet`), every goal manager
 (`--branch goal`), every topic manager (`--branch topic`):
 
+⚠️ **Check the name with the script before it reaches the shell.** The subject is a vault page
+name and it lands inside a double-quoted word, where `$`, a backtick, `"` and `\` all still
+execute or close the quoting:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/closure-name-safe.py" "<subject>"
+```
+
+Exit 0 is safe; **exit 1 means do not run the query** — report the name as unreadable and
+continue with the next manager. Same gate, same reasoning, as `commands/steps/goal-closure.md:98-101`;
+Step 4's arm path applies it again before it arms anything.
+
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py" \
   --state --subject "<subject>" --branch <fleet|goal|topic>
