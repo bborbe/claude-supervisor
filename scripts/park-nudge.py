@@ -189,7 +189,14 @@ def main(argv=None) -> int:
         return EXIT_UNKNOWN
 
     state = Path(a.state).expanduser()
-    limit_s = threshold_seconds()
+    try:
+        # The threshold's one home. A missing or unreadable park-event.py is a
+        # broken install, and a traceback would read as a crash rather than the
+        # "could not decide" this line reports.
+        limit_s = threshold_seconds()
+    except Exception as e:
+        print(f"park-nudge: unknown — threshold unreadable ({type(e).__name__}: {e})")
+        return EXIT_UNKNOWN
     exit_script = self_exit_path()
     try:
         with locked(state):
