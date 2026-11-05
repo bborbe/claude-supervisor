@@ -2093,8 +2093,6 @@ class ForeignGoalFixture(unittest.TestCase):
                          list(self.replay.FOREIGN))
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 _PANELESS_FIXTURE = os.path.join(_HERE, "fixtures", "paneless-gate-feed.txt")
@@ -2145,7 +2143,10 @@ class PanelessHeadlessGateReachesTheKeptSet(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("gates: 2  emit: 2", result.stderr)
-        self.assertEqual(result.stdout.split(), ["hst:" + _HST_ITEM, "417"])
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["hst:" + _HST_ITEM + "  session=unresolved", "417"],
+        )
 
     def test_the_store_resolves_the_session_and_ownership_applies(self):
         """The store's `producer_id` is the session; a live peer manager's worker drops."""
@@ -2169,3 +2170,35 @@ class PanelessHeadlessGateReachesTheKeptSet(unittest.TestCase):
 
     def test_an_unreachable_store_fails_open(self):
         self.assertEqual(gf.headless_items(["hst:" + _HST_ITEM], dead_url()), [])
+
+    def test_a_headless_fingerprint_survives_a_flapping_store(self):
+        """The store read can fail on one poll and answer on the next; the key is the gate."""
+        key = "hst:" + _HST_ITEM
+        resolved = [{"pane": key, "session_id": GATED, "detail": "Bash: date", "ts": 1}]
+        self.assertEqual(gf.gate_fingerprint(key, []), gf.gate_fingerprint(key, resolved))
+
+    def test_a_second_poll_on_the_same_headless_gate_emits_nothing(self):
+        key = "hst:" + _HST_ITEM
+        first, state = gf.emit_decisions([key], {}, [], 100.0, 3600)
+        self.assertEqual(first, {key})
+        again, _ = gf.emit_decisions([key], state, [], 160.0, 3600)
+        self.assertEqual(again, set())
+
+    def test_the_wake_line_names_the_session_or_says_unresolved(self):
+        args = mock.Mock(json=False, explain=False, feed=True)
+        rows = [
+            {"pane": "hst:a", "replayed": False, "verdict": gf.EMIT, "session_id": GATED},
+            {"pane": "hst:b", "replayed": False, "verdict": gf.EMIT, "session_id": None},
+            {"pane": "417", "replayed": False, "verdict": gf.EMIT, "session_id": GATED},
+        ]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            gf.render(rows, args)
+        self.assertEqual(
+            out.getvalue().splitlines(),
+            [f"hst:a  session={GATED}", "hst:b  session=unresolved", "417"],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

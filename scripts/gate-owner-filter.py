@@ -651,6 +651,11 @@ def gate_fingerprint(pane, items):
     text changes exactly when the gate does: a new question on the same pane is a
     new gate, and a re-render of the same question is not.
     """
+    # A headless key IS the store item id, so it already names exactly one gate.
+    # Its text comes from a per-poll store read that may fail, and mixing it in
+    # would flip the fingerprint on every flap and re-wake the manager each time.
+    if is_headless_key(pane):
+        return hashlib.sha256(str(pane).encode("utf-8")).hexdigest()[:16]
     record = newest_item_for_pane(pane, items)
     payload = f"{pane}\x1f{normalise(gate_text(record))}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
@@ -1144,7 +1149,11 @@ def render(rows, args, new_panes=None):
             # A headless key names the store item but no pane to jump to, so the
             # wake line also names the session it belongs to — the one handle the
             # manager can act on. A pane row renders exactly as before.
-            who = f"  session={r['session_id']}" if is_headless_key(r["pane"]) and r["session_id"] else ""
+            who = (
+                f"  session={r['session_id'] or 'unresolved'}"
+                if is_headless_key(r["pane"])
+                else ""
+            )
             print(f"{r['pane']}{who}{'  ' + REPLAY_MARK if r['replayed'] else ''}")
         return
 
