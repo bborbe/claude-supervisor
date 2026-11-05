@@ -77,8 +77,11 @@ TOOL_MARKER_WINDOW = 20 * 60
 # worker, 2026-11-03). A ceiling is the backstop for a marker nobody removed.
 DENIAL_TTL = 30 * 60
 
-# The feed renders one row per gate as `  [<pane>]  <age>  <name>  <state> · …`.
-PANE_RE = re.compile(r"^\s*\[(\d+)\]")
+# The feed renders one row per gate as `  [<pane>]  <age>  <name>  <state> · …`, the
+# pane column right-aligned to four: `[ 417]`, `[1234]`, `[ hst]` (headless, keyed by
+# its `answer:` line) or `[   ?]` (neither). Any row marker counts as a gate; which
+# ones resolve to a key is `gate-owner-filter.py`'s `feed_rows`, reused, never re-derived.
+ROW_RE = re.compile(r"^\s*\[\s*(\d+|hst|\?)\s*\]")
 # The `⏰ Ends:` slot, taken from a `Stop` record's `detail`. Non-empty is required:
 # the closer template emits the slot with a blank value when nothing is declared.
 ENDS_RE = re.compile(r"⏰ Ends:\s*(\S.*)$", re.MULTILINE)
@@ -264,12 +267,30 @@ def feed_panes(endpoint):
         return set(), "unread"
     if out.returncode != 0:
         return set(), "unread"
-    panes = set()
-    for line in out.stdout.splitlines():
-        m = PANE_RE.match(line)
-        if m:
-            panes.add(m.group(1))
-    return panes, "read"
+    return parse_feed(out.stdout)
+
+
+def parse_feed(text):
+    """`(set_of_keys, state)` from the feed's rendered rows.
+
+    Keys are digit panes and `hst:<store item id>` keys, exactly as
+    `gate-owner-filter.feed_rows` reads them. A row marker that yields no key — a
+    `[   ?]` row, or a `[ hst]` row with no `answer:` line — is a gate whose owner
+    cannot be named, so the read is `unread`: dropping it would let its worker read
+    `clear`, which is the defect this verdict exists to remove.
+    """
+    lines = text.splitlines()
+    filt = _load("gate-owner-filter")
+    keys = {pane for pane, _ in filt.feed_rows(lines)}
+    state = "read"
+    for index, line in enumerate(lines):
+        m = ROW_RE.match(line)
+        if not m:
+            continue
+        token = m.group(1)
+        if token == "?" or (token == "hst" and filt.headless_key(lines, index) is None):
+            state = "unread"
+    return keys, state
 
 
 def feed_verdict(session_ids, gated_sessions, state):
@@ -281,26 +302,46 @@ def feed_verdict(session_ids, gated_sessions, state):
     return "gated" if any(s in gated_sessions for s in session_ids) else "clear"
 
 
-def gated_sessions_from_panes(panes, attention_dir):
-    """Map the feed's pane ids to session ids through the events log.
+def gated_sessions_from_panes(panes, attention_dir, store_endpoint=None):
+    """`(set_of_session_ids, state)` for the feed's keys.
 
-    The feed prints **pane ids only**, and `wezterm cli list` carries no session id,
-    so the events log is the only join — the one `gate-owner-filter.py`'s
-    `session_for_pane` already performs, reused here rather than re-derived.
+    Digit panes join through the events log, `hst:<id>` keys through the attention
+    store — the hops `gate-owner-filter.py`'s `session_for_pane` / `headless_items`
+    already perform, reused here rather than re-derived.
+
+    A failed log read, or an `hst:` key the store does not resolve to a session, is
+    `unread`, never an empty set: `headless_items` returns `[]` both for an
+    unreachable store and for no match, so an unresolved key is the only signal a
+    store read failed, and it must not read as `clear`.
     """
     if not panes:
-        return set()
+        return set(), "read"
     filt = _load("gate-owner-filter")
-    try:
-        items = filt.log_items(attention_dir)
-    except Exception:
-        return set()
-    out = set()
-    for pane in panes:
-        sid = filt.session_for_pane(pane, items)
-        if sid:
-            out.add(sid)
-    return out
+    hst = [p for p in panes if filt.is_headless_key(p)]
+    digit = [p for p in panes if not filt.is_headless_key(p)]
+    out, state = set(), "read"
+    if digit:
+        try:
+            items = filt.log_items(attention_dir)
+        except Exception:
+            return set(), "unread"
+        for pane in digit:
+            sid = filt.session_for_pane(pane, items)
+            if sid:
+                out.add(sid)
+    if hst:
+        try:
+            records = filt.headless_items(hst, store_endpoint)
+        except Exception:
+            records = []
+        owners = {r["pane"]: r.get("session_id") for r in records}
+        for key in hst:
+            sid = owners.get(key)
+            if sid:
+                out.add(sid)
+            else:
+                state = "unread"
+    return out, state
 
 
 # --------------------------------------------------------------------------- #
@@ -535,7 +576,9 @@ def compute(subject, tracked_path, vault, interval, now=None,
 
     registry = wnm.registry_records(sessions_dir)
     panes, feed_state = feed_panes(endpoint)
-    gated = gated_sessions_from_panes(panes, attention_dir)
+    gated, join_state = gated_sessions_from_panes(panes, attention_dir)
+    if join_state != "read":
+        feed_state = "unread"
 
     out_rows = {}
     for row in rows:

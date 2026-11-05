@@ -235,6 +235,63 @@ class Verdicts(Tmp):
     def test_feed_gated_when_the_session_is_in_the_feed(self):
         self.assertEqual(rr.feed_verdict(["x"], {"x"}, "read"), "gated")
 
+
+# The feed's pane column is right-aligned to four, so a real row reads `[ 417]`, and a
+# headless gate reads `[ hst]` with its store item id on the `answer:` continuation
+# line. The pre-fix pattern `^\s*\[(\d+)\]` matched 1 of these 3 rows (`[1234]`).
+FEED = (
+    "  [ 417]  2m  some-task  permission · Bash\n"
+    "  [ hst]  5m  headless-task  permission · Bash\n"
+    "          answer: python3 attention-answer.py answer item-abc\n"
+    "  [1234]  1m  other-task  question\n"
+)
+
+
+class FeedParse(Tmp):
+    def setUp(self):
+        super().setUp()
+        self.filt = rr._load("gate-owner-filter")
+        self._orig = self.filt.headless_items
+
+    def tearDown(self):
+        self.filt.headless_items = self._orig
+        super().tearDown()
+
+    def _store(self, records):
+        def fake(keys, endpoint=None):
+            return [r for r in records if r["pane"] in keys]
+        self.filt.headless_items = fake
+
+    def test_padded_and_headless_rows_are_matched(self):
+        keys, state = rr.parse_feed(FEED)
+        self.assertEqual(keys, {"417", "hst:item-abc", "1234"})
+        self.assertEqual(state, "read")
+
+    def test_headless_row_resolves_to_its_owning_session(self):
+        self._store([{"pane": "hst:item-abc", "session_id": "sid-hst"}])
+        gated, state = rr.gated_sessions_from_panes({"hst:item-abc"}, self.attention)
+        self.assertEqual((gated, state), ({"sid-hst"}, "read"))
+        self.assertEqual(rr.feed_verdict(["sid-hst"], gated, state), "gated")
+
+    def test_a_failed_store_read_is_unread_never_clear(self):
+        self._store([])  # `headless_items` returns [] for an unreachable store
+        gated, state = rr.gated_sessions_from_panes({"hst:item-abc"}, self.attention)
+        self.assertEqual(state, "unread")
+        self.assertEqual(rr.feed_verdict(["sid-hst"], gated, state), "unread")
+
+    def test_a_raising_store_read_is_unread(self):
+        def boom(keys, endpoint=None):
+            raise RuntimeError("store down")
+        self.filt.headless_items = boom
+        _, state = rr.gated_sessions_from_panes({"hst:item-abc"}, self.attention)
+        self.assertEqual(state, "unread")
+
+    def test_an_unkeyable_row_is_unread(self):
+        for text in ("  [   ?]  3m  orphan  question\n",
+                     "  [ hst]  3m  headless  permission · Bash\n  [1234]  1m  x  q\n"):
+            _, state = rr.parse_feed(text)
+            self.assertEqual(state, "unread", text)
+
     def test_denial_marker_yields_stuck_denied(self):
         sid = "eeee5555"
         now = time.time()
