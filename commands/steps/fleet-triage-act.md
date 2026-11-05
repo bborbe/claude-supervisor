@@ -86,12 +86,15 @@ wrong card, and the operator has no way to see the error from the board.
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/attention-ask.py" post \
+  --producer-kind manager \
+  --liveness-ref owner:<session-id> \
   --dedup-key 'triage:<session-id>:<question-slug>' \
   --payload '<the session, its task, and the question in its own words>' \
-  --producer-kind manager \
   --option '<your recommended answer>' --option '<the alternative>' \
   --recommend '<the same string as your recommended --option>'
 ```
+
+⚠️ **`--liveness-ref owner:<session-id>` is not optional, and omitting it reintroduces the defect this whole card path exists to avoid.** `attention-ask.py post` defaults the ref to `owner:<producer-id>` — **this** manager — and `attention-controller`'s `pkg/provenance.go` `sessionIDFromItem` resolves the jump from `liveness_ref` **before** `producer_id`. So a card about another session, posted without the ref, sends the operator straight back to the fleet manager's own pane, where there is nothing to answer. That is the complaint the operator raised three times (2026-09-30 ×2, 2026-11-04) and the one `commands/steps/goal-gates.md` and `commands/steps/needs-input.md` fix in this same release; this tier's post path is a third caller and must pass it too. `owner:` is the right model precisely because it probes nothing (`OwnerLivenessModel` returns live unconditionally), so the card outlives the target's exit and is bounded only by `expires_at` — and every OPERATOR row is a live sweep entry by construction.
 
 ⚠️ **Single-quote every value that carries pane text, and escape a literal `'` as `'\''`.**
 This is the repo's convention for card values assembled from a source you did not author
@@ -116,12 +119,36 @@ the `ack`-only noise that makes the board unreadable.
 
 ⚠️ **The `--dedup-key` is what makes re-runs safe.** Derive it from the session id plus a slug
 of the question, never from a timestamp — a second triage of the same unchanged question must
-collapse onto the first card, not mint a twin.
+collapse onto the first card, not mint a twin. ⚠️ **`<question-slug>` is `[a-z0-9-]+`** — derive
+it by lowercasing and replacing every run of other characters with `-`, never by quoting pane
+text into the key. The key is a single-quoted word, so a slug carrying a literal `'` closes the
+quoting; constraining it to that alphabet removes the case instead of relying on the escape
+rule at line 96.
 
 ### EXTERNAL → report
 
 One line: the watcher and the ETA. Nothing else. Do not re-arm a watcher that is already
 armed; do arm one that was never armed.
+
+### 4b LIVE-IDLE HEADLESS → `SendMessage` first
+
+**This row is not STUCK, and it must not fall through to the STUCK branch below.** Its drive
+verb does not exist: no *supervisor* command reaches a session with `pane: null`, so
+`/supervisor:open`, a pane nudge and a `wezterm` keystroke all have nothing to act on. The one
+channel that does reach it is a cross-session `SendMessage`.
+
+1. **`SendMessage` the session directly**, naming its next open box. This is the only drive
+   verb for this state — never the owning manager (that is STUCK item 3, a different row), and
+   never a pane write.
+2. **Re-read its status once, after the send.** Still `idle` with the same open box and no
+   reply → it is parked, not stuck.
+3. **Card a kill only if the send produced no reply and the task is finished** — an OPERATOR row
+   carrying the session id, the question, and the `close-worker.py` command you propose. Never
+   signal a headless pid by hand, and never close a live worker that still has open work.
+
+⚠️ **The distinction is the conjunction, not the symptom.** Live, `idle`, `entrypoint: sdk-cli`,
+`pane: null` — all four, and `commands/steps/fleet-triage-state.md` § 3.4b owns the test. A
+session failing any limb is some other state and belongs to its own branch.
 
 ### STUCK → drive it, in this order
 
@@ -138,13 +165,20 @@ armed; do arm one that was never armed.
    shell:**
 
    ```bash
-   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/closure-name-safe.py" "<subject>"
+   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/closure-name-safe.py" '<subject>'
    ```
+
+   ⚠️ **Single-quoted, and that is the whole point — a double-quoted gate here is inert.** Inside
+   `"…"` the shell expands `$`, a backtick and `\` **before** the script is invoked, so a name
+   carrying `$(…)` executes on the way in and the script is then handed the *result* and reports
+   `SAFE`. The gate would pass exactly the names it exists to refuse. Inside `'…'` all four are
+   literal, so the script sees them and can exit 1.
 
    It exits 0 on a safe name and 1 on one carrying `$`, a backtick, `"` or `\` — the entire
    injection surface inside a double-quoted word. **On exit 1, do not arm** — report the name
-   and stop. This is the same gate, and the same reasoning, as
-   `commands/steps/goal-closure.md:98-101`: the subject is a vault page name, this step runs
+   and stop. A literal `'` in the name closes the single-quoting, so escape it as `'\''`; a name
+   that needs that is a name you do not arm on. This is the same gate, and the same reasoning,
+   as `commands/steps/goal-closure.md:98-101`: the subject is a vault page name, this step runs
    unattended, and a rule the model has to remember every tick is not a gate. Only then:
 
    ```bash

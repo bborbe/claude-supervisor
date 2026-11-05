@@ -38,7 +38,13 @@ in this order:
 
 1. **the registry's `status`** — `shell` ⇒ **in-flight**; `waiting` ⇒ **quiet** (a gate park,
    3.4); `idle` / `busy` ⇒ no signal, fall through. ⚠️ **`busy` is deliberately not the
-   signal** — it is the weaker word and it lags both ways.
+   signal** — it is the weaker word and it lags both ways. ⚠️ **`shell` carries the manager
+   tier's carve-out, and dropping it turns a parked worker into a live one:** `shell` means
+   in-flight **unless** the session's newest `event: Stop` record carries a non-empty `⏰ Ends:`
+   slot, in which case it is a declared wait and falls through to limbs 2 and 3
+   (`commands/steps/round-readings.md:31`, `agents/goal-drive.md:130-134`,
+   `agents/fleet-sweep-reader.md:110`). This is the one limb where "reuses the ladder" is not
+   the whole story — take the carve-out with it.
 2. **`~/.claude/state/attention/<session-id>.tool.json`** — an open marker inside ~20 min ⇒
    **in flight**. Open **past** it ⇒ do **not** drop it; that is the stuck path.
 3. **the transcript's mtime** against `who-needs-me.py`'s `LIVE_WINDOW` (5 min) — last resort.
@@ -77,7 +83,12 @@ scope questions a manager can settle.
 - `bucket == 'needs-input'`, or `unblocks == 'operator-keystroke'`, or
   `details[session_id]` names a human answer — **and** the release test says operator.
 - An open attention card: `attention-ask.py poll "<item-id>"` → `OPEN`.
-  **`NOT_OPERATOR_ANSWERED:` reads exactly as `OPEN`.**
+  **`NOT_OPERATOR_ANSWERED:`, `DECLINED:` and `HIDDEN` all read exactly as `OPEN`** — treat all
+  four as an unreleased gate and keep the row OPERATOR. `DECLINED:` is the operator dismissing
+  the card (a decline, not an acceptance), and `HIDDEN` is them closing it as handled elsewhere
+  with nothing routed back; neither is an answer, and reading either as one drops a live gate
+  off the board. The canonical reading has one home, `scripts/answered-attribution.py`, and
+  `commands/steps/goal-gates.md` and `commands/steps/needs-input.md` state the same four.
 
 ⚠️ `ANSWERED` is not a decision — re-asking an answered question is the defect.
 ⚠️ `skip` is a decline, never silence to re-ask around.
@@ -156,9 +167,12 @@ For every session that is idle, has no pane, and reached neither 3.2 nor 3.2c:
 python3 - "$SESSION_ID" <<'PY'
 import json,glob,os,re,sys
 sid=sys.argv[1]
+TAIL=256*1024          # the repo's own agent_status bound — transcripts reach MBs
 tail=None
 for p in glob.glob(os.path.expanduser(f"~/.claude/projects/*/{sid}.jsonl")):
     with open(p,errors="ignore") as f:
+        if os.path.getsize(p)>TAIL:
+            f.seek(-TAIL,os.SEEK_END); f.readline()   # drop the partial first line
         for line in f:
             try: d=json.loads(line)
             except Exception: continue

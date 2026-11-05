@@ -15,6 +15,7 @@ When: every run — after the act phase
   ⚪ CLOSED   worker         <label>                       completed, 0 open boxes
   🔵 OPERATOR goal-manager   <label>                       <the question, verbatim>
   🟡 EXTERNAL worker         <label>                       bot review on <PR> — ETA ~HH:MM
+  🔒 LIVE-IDLE HEADLESS worker <label>                     idle, no pane — SendMessage sent, no reply
   🟠 STUCK    worker         <label>                       idle 41m, 3 open boxes, no gate
   🟢 WORKING  worker         <label>                       —
 ```

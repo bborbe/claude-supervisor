@@ -27,10 +27,11 @@ When: not already in this session's context
   `pending_permissions` / `awaiting_input: true`, means the turn is suspended mid-tool-call.
   Route the gate (3.2b) — never drive it, never close it, and never call it STUCK on
   transcript recency alone.
-- **A signal is the last resort of the close path, never of the drive path.** `kill` is legal
-  only for a session whose CLOSED evidence holds, whose transcript is provably static, and
-  whose pid carries `--print`. Killing a worker to unstick it is the opposite of this
-  command's job.
+- **A signal is the last resort of the close path, never of the drive path.** The close path's
+  signal is used only for a session whose CLOSED evidence holds, whose transcript is provably
+  static, and whose pid carries `--print` — and it is `close-worker.py` that emits it, never a
+  hand-run `kill` (see `commands/steps/fleet-triage-act.md` § CLOSED). Killing a worker to
+  unstick it is the opposite of this command's job.
 - **Every question ends the run carded.** A session classified OPERATOR with no open card is
   the run's failure, named in Step 6's `uncarded` count — never a note in passing.
 - **A card is not a ping.** It carries the question verbatim and a recommended answer; if you

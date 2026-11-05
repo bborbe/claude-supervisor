@@ -9,12 +9,19 @@ user-invocable: false
 When: every run — before any classification
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py" --json > /tmp/fleet-triage.json
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py" --json > "/tmp/fleet-triage-${CLAUDE_CODE_SESSION_ID:-default}.json"
 echo "EXIT=$?"
 ```
 
 ⚠️ **A non-zero exit or unparseable JSON is a hard stop.** An incomplete sweep reads exactly
 like a clean one, and acting on it is worse than not acting.
+
+⚠️ **The path is keyed on the session id, and Step 6 must use the same one.** A fixed
+`/tmp/fleet-triage.json` is shared across every concurrent Claude session, so two triage runs
+clobber each other's before/after snapshots and the delta in Step 6 compares this run's "after"
+against another run's "before" — a clean-looking verdict built on someone else's fleet. The
+`${CLAUDE_CODE_SESSION_ID}` suffix keeps each run's file its own; two runs *within* one session
+still collide, which is why this command is one pass per session and not run twice at once.
 
 Per `sessions[]`: `session_id`, `role`, `label`, `subject`, `bucket`, `unblocks`,
 `task_title`, `age`, `parent`.

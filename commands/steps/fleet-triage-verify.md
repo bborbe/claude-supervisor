@@ -9,10 +9,14 @@ user-invocable: false
 When: every run — the last step, always
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py" --json > /tmp/fleet-triage-after.json
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py" --json > "/tmp/fleet-triage-after-${CLAUDE_CODE_SESSION_ID:-default}.json"
 ```
 
-Re-derive the states from the fresh sweep and print one line:
+Re-derive the states from the fresh sweep and print one line. ⚠️ **`<n>` is read from disk, not
+from memory** — it is the stuck count in this run's *before* sweep, which Step 1 wrote to
+`/tmp/fleet-triage-${CLAUDE_CODE_SESSION_ID:-default}.json` (`commands/steps/fleet-triage-sweep.md`).
+Re-read that file and count the STUCK rows in it; after a compaction the number is gone from
+context and the delta cannot be reconstructed from the fresh sweep alone.
 
 ```
 Stuck: <n> → <m> · Closed: <c> · Drove: <d> · Operator: <o> (uncarded <u>) · External: <e> · Finished-but-open: <f>
