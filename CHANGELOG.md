@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.239.1
 
 - fix: the fleet round's keepalive leg (router row 5b, `commands/steps/keepalive.md`) now gates on its own debt — `manager-receipt.py --debt --only re-arm` — instead of the whole round's. Gated on the whole round, it was stopped by a step it never consumes whenever the round reached 5b with the sweep reader still running in the background: `--debt` printed `debt: digest` and exited 12, and the digest was recorded only after the leg (measured 2026-11-05 on the Fleet Manager: 2 of 25 gate calls). New repeatable `--only <step>` on `--debt` scopes the exit code and the printed lines, never the record — the debt file still carries every owed step, so `--check` and the `drive.md` / `flagged-open.md` gates are unchanged. `keepalive.md`'s park-watch section no longer claims a missed round "never strands" a resume: `defer_date` resurfaces the row but nothing starts the session. `fleet-round-tail.md` and `output-shape.md` item 13 restate the scoped gate.
 
