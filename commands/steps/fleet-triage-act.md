@@ -146,6 +146,14 @@ channel that does reach it is a cross-session `SendMessage`.
 3. **Card a kill only if the send produced no reply and the task is finished** — an OPERATOR row
    carrying the session id, the question, and the `close-worker.py` command you propose. Never
    signal a headless pid by hand, and never close a live worker that still has open work.
+4. ⚠️ **A nudge unanswered on two consecutive runs is a card either way, finished task or not.**
+   The question changes from *"shall I close it"* to *"this worker has ignored two nudges —
+   close it, or take the pane?"*, and it goes to the operator as an OPERATOR row with the
+   session id, the open box it was nudged about, and both nudges' timestamps. A third identical
+   `SendMessage` is not a drive action: it is the same input against the same state, and the
+   run's own `NUDGED` outcome (`commands/fleet-triage.md` § The invariant) is only legitimate
+   because it expires. Left uncarded, a worker that ignores every nudge is exactly the
+   "idle with work left" the invariant calls a failure — this is the branch that catches it.
 
 ⚠️ **The distinction is the conjunction, not the symptom.** Live, `idle`, `entrypoint: sdk-cli`,
 `pane: null` — all four, and `commands/steps/fleet-triage-state.md` § 3.4b owns the test. A

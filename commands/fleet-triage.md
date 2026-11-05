@@ -26,16 +26,26 @@ Fleet triage — one pass over the whole fleet, ending with **nothing idle that 
 
 ## The invariant
 
-> **At the end of a run, every session is doing one of four things: working, closed,
-> genuinely waiting on a producer outside the fleet, or held by an operator gate that
-> carries a card. A session that is idle with work left is a failure of this command.**
+> **At the end of a run, every session is doing exactly one of these things: working,
+> closed, genuinely waiting on a producer outside the fleet, held by an operator gate that
+> carries a card, or nudged this run and still idle with its nudge recorded. A session that
+> is idle with work left and no nudge behind it is a failure of this command.**
 
 The same invariant stated as the exit condition, which is what Step 6 asserts:
 
-> **Every live session ends the run either WORKING, or CLOSED, or parked with a named
-> valid reason to wait — a named external producer with an ETA, or an open attention card
-> carrying the question. "Idle, finished, still open" and "parked on a question with no
+> **Every live session ends the run either WORKING, or CLOSED, or NUDGED — a delivered
+> `SendMessage` naming its next open box, recorded in the run's report — or parked with a
+> named valid reason to wait: a named external producer with an ETA, or an open attention
+> card carrying the question. "Idle, finished, still open" and "parked on a question with no
 > card" are both failures, and both are counted.**
+
+⚠️ **`NUDGED` is a driven outcome, not a fifth way of being idle, and it expires.** The
+session was acted on — the only channel that reaches a live-idle headless worker is a
+cross-session `SendMessage` (`commands/steps/fleet-triage-act.md` § 4b) — and the run records
+it so the next run re-classifies the row rather than rediscovering it. **A nudge that goes
+unanswered on two consecutive runs becomes an OPERATOR card**, because a third identical send
+is not a drive action; that rule lives in the 4b step and is what keeps this outcome from
+becoming a standing exemption.
 
 That is the whole point. A good-looking table with three idle workers on it is a failed
 run. The stuck list is the deliverable, and the target is zero.
