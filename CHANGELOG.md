@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.240.2
 
 - fix: `round-readings.py` matches padded `[ 417]` and headless `[ hst]` gate rows through `gate-owner-filter.py`'s `feed_rows`, resolves `hst:<item id>` to its owning session from the attention store, and reads `unread` — never `clear` — when a `[   ?]` row, an unkeyed `[ hst]` row, a failed events-log read or an unresolved store key leaves a gate's owner unknown
 
