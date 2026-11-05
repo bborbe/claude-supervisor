@@ -8,14 +8,16 @@ user-invocable: false
 
 When: every tick
 
-⚠️ **Gate this leg on the round's debt — chain it, do not merely read it:**
+⚠️ **Gate this leg on its own debt — the `re-arm` step — and chain it, do not merely read it:**
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --debt --subject "Fleet Manager" --branch fleet \
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --debt --subject "Fleet Manager" --branch fleet --only re-arm \
   && <run this leg>
 ```
 
-Exit **12** = a step is still owed: print the `debt:` lines, skip this leg, and **carry on with the round — the tail still runs**, because the tail's `--check` is what reports the round's verdict to the operator. Exit **0** = no debt, run it. ⚠️ **Exit 2 = the gate could not read or write the debt file** — it prints nothing to stdout, only a reason to stderr; skip the leg and print that reason, never read 2 as "no debt". ⚠️ **`--debt` judges the round in progress**, re-reading the receipt, so a round that already swept is not blocked by a debt it has paid. ⚠️ **The exit code is the gate, never the printed line** — a leg that reads only the text is satisfied by an empty read. ⚠️ **Resuming a topic manager is not urgent enough to outrank the step the round owes** — that is the trade the 2026-10-31 rounds made in the other direction, and it is why the debt gates the cheap legs rather than only the expensive one.
+Exit **12** = the arm is still owed: print the `debt:` lines, skip this leg, and **carry on with the round — the tail still runs**, because the tail's `--check` is what reports the round's verdict to the operator. Exit **0** = no debt this leg consumes, run it. ⚠️ **Exit 2 = the gate could not read or write the debt file** — it prints nothing to stdout, only a reason to stderr; skip the leg and print that reason, never read 2 as "no debt". ⚠️ **`--debt` judges the round in progress**, re-reading the receipt, so a round that already armed is not blocked by a debt it has paid. ⚠️ **The exit code is the gate, never the printed line** — a leg that reads only the text is satisfied by an empty read.
+
+⚠️ **Why `--only re-arm`, and not the whole round's debt.** None of this leg's four procedures reads the digest — they read `topic-keepalive.py`, `park-event.py`, `park-nudge.py` and `worker-keepalive.py`. Gated on the whole round, the leg was stopped by a step it cannot consume whenever the round reached row 5b with the sweep reader (row 2) still running in the background: measured 2026-11-05 on the Fleet Manager, 2 of 25 gate calls printed `debt: digest` and exited 12 (03:13:29, 06:57:39 — the second one's digest recorded at 07:05:35, after the leg). `--only` scopes the exit code, never the record: the debt file still carries the digest, so `--check` at the tail and the unscoped legs (`drive.md`, `flagged-open.md`) are unchanged. This narrows the 2026-10-31 trade — *a topic-manager resume is not urgent enough to outrank the step the round owes* — to the one step this leg needs: a round that has not armed still skips it, and a round whose sweep is merely in flight no longer does.
 
 ## Restart a lapsed topic manager
 
@@ -118,9 +120,14 @@ counter `due` prints. At **three** re-parks it stops and routes the wait to the
 manager as a criterion challenge; the count is persisted on the record because the
 parked session has exited and nothing else survives to remember it.
 
-⚠️ **This half is the fast path, never the only path.** The task's own `defer_date`
-surfaces the row in every manager's open queue, so a missed round delays a resume and
-never strands it. Never let this step become the sole record that a task is parked.
+⚠️ **This half is the only path that resumes automatically — keep `defer_date` set
+anyway.** The task's own `defer_date` resurfaces the row in every manager's open
+queue, but surfacing is not resuming: no reader of that queue starts the parked
+session, so a round that misses this step **strands** the worker until someone acts by
+hand. Measured 2026-11-05: after ~12 rounds that never entered this step, `due --json`
+listed 24 overdue watches, the oldest past its re-check by ~52 h, each with a past
+`defer_date`. Keep `defer_date` set so the row stays visible, never as a reason this
+step can be skipped.
 
 ## Nudge a watcher past the park threshold
 
