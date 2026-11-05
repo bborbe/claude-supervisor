@@ -19,7 +19,7 @@ when it does not.
 command's Bash — the client substitutes the exact `${CLAUDE_PLUGIN_ROOT}` token into the command
 text, it does not export the variable to the shell — so a bare form resolves to
 `/scripts/<name>.py` and fails, and a `:?` form aborts the whole run with its own error message.
-Measured and recorded at `docs/session-tiers.md:203-206` (verified 2026-09-23). This is why the
+Measured and recorded at `docs/session-tiers.md:200-202` (verified 2026-09-23). This is why the
 fallback is the repo-wide convention rather than a belt-and-braces default.
 
 ⚠️ **There is no variable to carry forward.** Shell state does not survive between `Bash` calls,

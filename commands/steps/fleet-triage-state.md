@@ -62,12 +62,22 @@ Stop at the first match.
 All three:
 
 1. `task_title` is non-null.
-2. `vault-cli task get "<task_title>" status` returns `completed` / `aborted` / `hold`.
+2. `vault-cli task get '<task_title>' status` returns `completed` / `aborted` / `hold`.
    Anything else is still in progress. ⚠️ **Do not hardcode a vault.** The board indexes every
    vault under `OBSIDIAN_DIR`, so a task outside this session's vault is invisible to the bare
    call — pass `--vault <that vault>` when the row's own vault differs from the session's, and
    treat an unresolved title as "not read", never as "not terminal".
-3. `grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]' "<task file>"` prints **0**.
+3. `grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]' '<task file>'` prints **0**.
+
+⚠️ **Single-quote every board-derived value in this file, and this is the rule for all of
+them.** `task_title` and the task file path are read off the board, not authored here; inside
+`"…"` the shell expands `$`, a backtick and `\` **before** the command runs, so a title carrying
+`$(…)` executes in this manager's shell. The same applies to the `--subject` queries in § 3.6
+and to `attention-ask.py poll` in § 3.2 — those values are already single-quoted for the same
+reason. A literal `'` in the value closes the quoting: escape it as `'\''`, and treat a value
+needing that as unreadable rather than proceeding. The subject additionally passes
+`closure-name-safe.py` first (§ 3.6), because it is the one value this step later interpolates
+into a double-quoted sink.
 
 ⚠️ **Never derive CLOSED from `unblocks: reap/close`.** That is the board's opinion; the
 task file is the evidence. Idle-with-open-boxes is STUCK, not CLOSED.
@@ -82,7 +92,7 @@ scope questions a manager can settle.
 
 - `bucket == 'needs-input'`, or `unblocks == 'operator-keystroke'`, or
   `details[session_id]` names a human answer — **and** the release test says operator.
-- An open attention card: `attention-ask.py poll "<item-id>"` → `OPEN`.
+- An open attention card: `attention-ask.py poll '<item-id>'` → `OPEN`.
   **`NOT_OPERATOR_ANSWERED:`, `DECLINED:` and `HIDDEN` all read exactly as `OPEN`** — treat all
   four as an unreleased gate and keep the row OPERATOR. `DECLINED:` is the operator dismissing
   the card (a decline, not an acceptance), and `HIDDEN` is them closing it as handled elsewhere
@@ -302,17 +312,25 @@ operator to fix things that are already right.
 Check every manager — the fleet manager (`--branch fleet`), every goal manager
 (`--branch goal`), every topic manager (`--branch topic`):
 
-⚠️ **Check the name with the script before it reaches the shell.** The subject is a vault page
-name and it lands inside a double-quoted word, where `$`, a backtick, `"` and `\` all still
-execute or close the quoting:
+⚠️ **Check the name with the script before it reaches the shell — and single-quote the check,
+which is the opposite of how the query below is quoted.** The subject is a vault page name:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/closure-name-safe.py" "<subject>"
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/closure-name-safe.py" '<subject>'
 ```
 
+⚠️ **The single quotes ARE the gate.** Inside `"…"` the shell expands `$`, a backtick and `\`
+**before** the script runs, so a name carrying `$(…)` executes on the way in, the script is
+handed the *result* and prints `SAFE`, and the query below then receives the injected value —
+the gate would pass exactly the names it exists to refuse. Inside `'…'` all four reach the
+script literally, which is what lets it exit 1. A literal `'` closes the single-quoting: escape
+it as `'\''`, and treat a name needing that as unreadable.
+
 Exit 0 is safe; **exit 1 means do not run the query** — report the name as unreadable and
-continue with the next manager. Same gate, same reasoning, as `commands/steps/goal-closure.md:98-101`;
-Step 4's arm path applies it again before it arms anything.
+continue with the next manager. Same gate, same reasoning, and the same single-quoting, as
+`commands/steps/goal-closure.md:98-101` and `commands/steps/fleet-triage-act.md` § STUCK item 4;
+Step 4's arm path applies it again before it arms anything. **Only once it exits 0** is the
+double-quoted `--state` call below safe — it is the sink this gate exists to protect.
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py" \
