@@ -3006,6 +3006,8 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // `question` is waiting on a manager; a worker with an open attention card is waiting on a
   // person. Neither is finished, and stopping either would orphan exactly the card this whole
   // task exists to protect.
+  // How long a session whose last result ran zero turns is kept for a queued prompt to start.
+  const ZERO_TURN_GRACE_MS = 120_000
   const endWorkerIfIdle = async (current) => {
     let session
     try {
@@ -3023,7 +3025,20 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       return
     }
     if (!pre.end) {
-      if (pre.reason === 'zero-turn-result') log(`agent ${current.id}: zero-turn result — keeping the session so a queued prompt can still run`)
+      if (pre.reason === 'zero-turn-result') {
+        // Bounded keep: give a queued prompt the grace window to start. If no newer result has
+        // replaced this one by then, the session really did nothing — stop it, so the stream ends
+        // and the loop settles `error: zero-turn` instead of leaking a process that reads `running`.
+        const zeroTurnResult = current.result
+        log(`WARNING: agent ${current.id}: zero-turn result — keeping the session ${ZERO_TURN_GRACE_MS} ms so a queued prompt can still run`)
+        setTimeout(() => {
+          if (current.result !== zeroTurnResult || current.status !== 'running') return
+          log(`WARNING: agent ${current.id}: still zero-turn after ${ZERO_TURN_GRACE_MS} ms — stopping the session`)
+          stopWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id }).catch((error) => {
+            log(`WARNING: could not stop zero-turn ${current.id}: ${error.message}`)
+          })
+        }, ZERO_TURN_GRACE_MS).unref?.()
+      }
       return
     }
     // ⚠️ **A deliberately-absent store is NOT an unreadable one.** With

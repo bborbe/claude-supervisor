@@ -98,3 +98,8 @@ test('a zero-turn last result keeps the worker even when the wrapper reads idle 
   )
   assert.equal(shouldEndIdleWorker({ session, cards: [], lastResult: { num_turns: 3 } }).end, true)
 })
+
+test('an error result with num_turns 0 is not kept — a CLI that failed before its first turn still ends', () => {
+  const session = { state: 'idle', pending_turns: 0 }
+  assert.equal(shouldEndIdleWorker({ session, cards: [], lastResult: { num_turns: 0, is_error: true } }).end, true)
+})

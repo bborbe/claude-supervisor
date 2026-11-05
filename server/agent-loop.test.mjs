@@ -293,6 +293,8 @@ test('a zero-turn result followed by a stream throw is not read as a completed t
     yield { type: 'result', subtype: 'success', is_error: false, result: '', num_turns: 0, permission_denials: [] }
     throw new Error('socket closed')
   }
-  await runAgentLoop({ q: stream(), agent, writeLedger: () => ({}), log: () => {} })
+  const ledgerCalls = []
+  await runAgentLoop({ q: stream(), agent, writeLedger: (...a) => { ledgerCalls.push(a); return {} }, log: () => {} })
   assert.equal(agent.status, 'error')
+  assert.equal(ledgerCalls.at(-1)[1].status, 'error')
 })

@@ -29,7 +29,7 @@ export function shouldEndIdleWorker({ session, cards, lastResult = null } = {}) 
   // the wrapper counts against `pending_turns` (pkg/supervisor.go `case "result"`), so the record
   // reads idle with nothing pending while the real prompt still sits in the CLI's queue.
   // Ending here killed that prompt — measured 2026-11-05, agent_12 / agent_13.
-  if (lastResult && lastResult.num_turns === 0) return { end: false, reason: 'zero-turn-result' }
+  if (lastResult && !lastResult.is_error && lastResult.num_turns === 0) return { end: false, reason: 'zero-turn-result' }
   if (!session || typeof session !== 'object') return { end: false, reason: 'unreadable-wrapper' }
   // ⚠️ `undefined` is not "no turn in flight" — it is a record this build does not understand.
   // Without this branch an older wrapper that omits either field would make every worker a
