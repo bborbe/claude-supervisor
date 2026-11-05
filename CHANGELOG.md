@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: the fleet round's keepalive leg (router row 5b, `commands/steps/keepalive.md`) now gates on its own debt — `manager-receipt.py --debt --only re-arm` — instead of the whole round's. Gated on the whole round, it was stopped by a step it never consumes: the round reached 5b while the sweep reader was still running in the background, so `--debt` printed `debt: digest` and exited 12, and the digest was recorded only after the leg. That reproduced on every tick, so no parked worker was resumed by a round (measured 2026-11-05: 1515 round subagent transcripts, 0 `park-event.py` invocations; 23 watches overdue up to ~52 h). New repeatable `--only <step>` on `--debt` scopes the exit code and the printed lines, never the record — the debt file still carries every owed step, so `--check` and the `drive.md` / `flagged-open.md` gates are unchanged. `keepalive.md`'s park-watch section no longer claims a missed round "never strands" a resume: `defer_date` resurfaces the row but nothing starts the session. `fleet-round-tail.md` and `output-shape.md` item 13 restate the scoped gate.
+
 ## v0.238.5
 
 - docs: state that `hold` is never for a task waiting on an operator decision or answer. `docs/worker-session-states.md` § *Closed* carries the rule — such a task is `decision`, not `closed` — and names the status fix rather than a close; `commands/worker-drive.md` § *Park a clock-bound session* points at it from its "a deferred task is not `hold`" sentence. `scripts/budget-baseline.json` raises that file's entry 49673 → 49817 for the added pointer (deliberate growth; the file sat exactly at its ceiling).

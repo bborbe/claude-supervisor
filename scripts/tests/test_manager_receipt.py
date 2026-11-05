@@ -1054,6 +1054,71 @@ class FleetDebt(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(out.strip(), "")
 
+    # --- a leg gates on the steps it consumes (--only) ---------------------------
+
+    def debt_only(self, *steps):
+        argv = ["--debt", "--subject", FLEET_SUBJECT, "--branch", "fleet"]
+        for step in steps:
+            argv += ["--only", step]
+        return self.cli(*argv)
+
+    def test_a_leg_scoped_to_re_arm_runs_while_the_digest_is_still_owed(self):
+        # The measured defect, 2026-11-05: row 5b reached the gate with the arm paid
+        # and the sweep reader still running, so the whole-round gate read
+        # `debt: digest` and skipped the keepalive leg every tick. The keepalive
+        # procedures never read the digest, so scoped to `re-arm` the leg runs.
+        self.skipped_round()
+        rc, out = self.debt()
+        self.assertEqual(rc, 12, out)  # the control: unscoped, the leg is stopped
+        rc, out = self.debt_only("re-arm")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.strip(), "")
+
+    def test_a_scoped_gate_still_fires_on_the_step_it_consumes(self):
+        # The mirror. Without it `--only` could be a constant 0 and the test above
+        # would still pass: a round that never armed must still stop a re-arm leg.
+        self.digest_only_round()
+        rc, out = self.debt_only("re-arm")
+        self.assertEqual(rc, 12, out)
+        self.assertIn("debt: re-arm", out)
+        self.assertNotIn("digest", out)
+
+    def test_a_scoped_gate_scopes_the_exit_never_the_record(self):
+        # `--only` narrows what can stop THIS leg. The debt file is what `--check` and
+        # the unscoped legs read, so a scoped call that rewrote it to the subset would
+        # silently pay the digest for every other gated leg.
+        self.skipped_round()
+        self.assertEqual(self.debt_only("re-arm")[0], 0)
+        with open(os.path.join(self.tmp.name, FLEET_SLUG + ".debt"), encoding="utf-8") as fh:
+            self.assertIn("digest", fh.read())
+        rc, out = self.debt()
+        self.assertEqual(rc, 12, out)
+        self.assertIn("digest", out)
+
+    def test_a_scoped_gate_reads_the_carried_file_when_the_round_is_unjudgeable(self):
+        # The other branch of `debt()`: with no receipt the carried file is the only
+        # evidence, and the scope must apply there too — in both directions.
+        self.skipped_round()
+        self.check()
+        os.unlink(os.path.join(self.tmp.name, FLEET_SLUG + ".json"))
+        self.assertEqual(self.debt_only("re-arm")[0], 0)
+        rc, out = self.debt_only("digest")
+        self.assertEqual(rc, 12, out)
+        self.assertIn("debt: digest", out)
+
+    def test_only_is_a_usage_error_outside_debt(self):
+        with self.assertRaises(SystemExit) as caught:
+            self.cli("--check", "--subject", FLEET_SUBJECT, "--branch", "fleet",
+                     "--only", "re-arm")
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_only_refuses_a_step_the_fleet_round_does_not_owe(self):
+        # `sweep` is a goal/topic step. Accepting it would scope the gate to a step the
+        # fleet debt never contains — a gate that always passes.
+        with self.assertRaises(SystemExit) as caught:
+            self.debt_only("sweep")
+        self.assertEqual(caught.exception.code, 2)
+
     def test_a_non_finite_abandonment_is_ignored(self):
         # `float()` accepts `inf`, and the honouring test has no upper bound: one
         # tampered line would excuse the step on every later round.
