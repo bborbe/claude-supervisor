@@ -45,9 +45,14 @@ Stuck: <n> → <m> · Closed: <c> · Drove: <d> · Operator: <o> (uncarded <u>) 
 
 The two counters beyond `stuck` are the ones this command previously could not see:
 
-- **`uncarded` (`u`)** — OPERATOR rows with **no open card** at the end of the run. Poll each
-  row's dedup key; anything not `OPEN`/`ANSWERED` is uncarded. A non-zero `u` means the
-  operator is waiting on questions they cannot see.
+- **`uncarded` (`u`)** — OPERATOR rows with **no open card** at the end of the run. Check each
+  row by listing its card files and polling the **`item_id` each record carries** —
+  `ls ~/.claude/state/attention/<session-id>*.open.json`, then read `item_id` from each match
+  and `attention-ask.py poll <item_id>`. ⚠️ **Poll the `item_id`, never the dedup key** —
+  `poll` takes an item id only (`scripts/attention-ask.py:1276-1277`), and a dedup key passed in
+  its place resolves to nothing, which reads as "no card" for a row that is carded. Anything not
+  `OPEN`/`ANSWERED` is uncarded. A non-zero `u` means the operator is waiting on questions they
+  cannot see.
 - **`finished-but-open` (`f`)** — sessions whose 3.1 evidence holds but which are **still
   live**: the close refused, or the headless branch was skipped. Measured 2026-10-29: five
   such workers had been alive 2 h–13 h, each counted as a healthy idle session on every sweep.
