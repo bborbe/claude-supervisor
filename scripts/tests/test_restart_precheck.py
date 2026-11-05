@@ -152,6 +152,13 @@ class TestHeadlessAnswerability(unittest.TestCase):
         get = fake_store(open_items=[{"producer_id": SID, "state": "open"}])
         self.assertEqual(self._classify("approve: reply `go`", get=get), "gate-held")
 
+    def test_open_message_class_card_does_not_hold(self):
+        """SendMessage refuses a headless worker, so a message answer can never land."""
+        get = fake_store(open_items=[{"producer_id": SID, "state": "open",
+                                      "answer_mechanism": "message"}],
+                         items={self.CARD: {"state": "open", "answer_mechanism": "message"}})
+        self.assertEqual(self._classify(f"review: {self.CARD}", get=get), "gate-unanswerable")
+
     def test_another_sessions_open_card_does_not_hold(self):
         get = fake_store(open_items=[{"producer_id": OTHER, "state": "open"}])
         self.assertEqual(self._classify("approve: reply `go`", get=get), "gate-unanswerable")

@@ -108,7 +108,7 @@ def card_is_live_channel(item_id, get=store_get):
     if not item:
         return False
     if item.get("state") == "open":
-        return True
+        return reaches_headless(item)
     if not item.get("answered_at"):
         return False
     report = get(f"/api/1.0/attention/{item_id}/attempt") or {}
@@ -145,7 +145,20 @@ def has_open_own_card(sid, get=store_get):
         return False
     listing = get("/api/1.0/attention?limit=1000")
     items = listing if isinstance(listing, list) else (listing or {}).get("items") or []
-    return any(i.get("producer_id") == sid and i.get("state", "open") == "open" for i in items)
+    return any(i.get("producer_id") == sid and i.get("state", "open") == "open"
+               and reaches_headless(i) for i in items)
+
+
+def reaches_headless(item):
+    """Whether an answer to this open card can be delivered to a pane-less session.
+
+    ⚠️ A `message`-class answer is delivered by `SendMessage`, which refuses a headless
+    worker — measured 2026-11-05 on witness `78c15080`: the board answered its mirror
+    card and the store recorded the delivery attempt as `failed`
+    (`supervisor:message-delivery`). So an open `message` card is no channel for it. Any
+    other or absent mechanism is kept as a channel: failing closed keeps `gate-held`.
+    """
+    return item.get("answer_mechanism") != "message"
 
 SESSIONS_DIR = os.path.expanduser(
     os.environ.get("SUPERVISOR_SESSIONS_DIR") or "~/.claude/sessions"
