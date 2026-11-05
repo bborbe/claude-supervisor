@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: state that `hold` is never for a task waiting on an operator decision or answer. `docs/worker-session-states.md` § *Closed* carries the rule — such a task is `decision`, not `closed` — and names the status fix rather than a close; `commands/worker-drive.md` § *Park a clock-bound session* points at it from its "a deferred task is not `hold`" sentence. `scripts/budget-baseline.json` raises that file's entry 49673 → 49817 for the added pointer (deliberate growth; the file sat exactly at its ceiling).
+
 ## v0.238.4
 
 - fix: the drive leg's auto-resume gate (`agents/goal-drive.md` step 3) no longer excludes a row on `flag: true`. Its `not parked` clause now reads phase and status only, so an operator-flagged, approved row whose session died is resumed instead of being opened by nothing. The gate reads no `flag_set_by` (operator rulings 2026-10-30, 2026-11-03, 2026-11-04). The open path (`commands/open.md` § Step 0.5) keeps its `OPENING_ACTORS` gate. New `docs/fleet-surface.md` § Approval provenance records which surface reads provenance; `commands/open.md`, `commands/steps/goal-spawn.md` and `docs/session-tiers.md` point at it instead of restating it. New `scripts/check-resume-flag-clause.py` (wired into `make precommit`) holds the gate's clauses to a closed list. It parses the `not parked` bullet, and any clause naming a flag field, into a predicate and fails closed on anything unreadable. It evaluates five fixture rows and two parked controls through that predicate. It then runs Step 0.5's own selector lines, shape-checked with only `str` as a builtin, on the same fixtures.
