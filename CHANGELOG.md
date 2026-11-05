@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.240.1
 
 - fix: `gate-owner-filter.py` now reads a headless worker's `[ hst]` gate row instead of skipping it, keyed `hst:<store item id>` and resolved to its session through one extra attention-store read, so a parked headless worker reaches the manager's armed watcher (the wake line names `session=<id>`); an unreachable store fails open and still emits
 
