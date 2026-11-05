@@ -32,6 +32,8 @@ Never add a second card for the same ask: no `📣 Board: yes` line and no manua
 
 `closed` covers `completed`, `aborted` and `hold`, but only `completed` and `aborted` are terminal: run `/vault-cli:sync-progress`, then `/vault-cli:session-close`, and stop. `hold` is parked, not finished — sync and report it, never end the session on it. This is the existing Never-end-the-session rule, not a new one.
 
+⚠️ **A `hold` is only ever a block of unknown length.** A task waiting on an operator decision or answer is `decision` — its card is the wait — or `in_progress` + `defer_date` once a pickup date exists; it is never `hold`. A session found at that combination is a mis-set status, not a `closed` one: report it as `decision`, and the fix is `vault-cli task set "<task>" status in_progress`, not a close.
+
 ## Provenance
 
 The vocabulary and its gaps were first recorded in the operator's vault note `Worker Session States`; that note is provenance, not a dependency — the rule above is the copy this plugin runs on.

@@ -79,7 +79,7 @@ The peer's framing, verbatim: *"a worker may not spawn; a manager may not verify
 
 **`stop` is not a close.** It writes no page (its one state write is the `<slug>.stopped` marker, so the liveness watcher reads the silence as a stop rather than a lapse), the topic's `status` is byte-identical before and after, and it never offers `/vault-cli:session-close`. **Restart is the same command that started the loop** — `/supervisor:goal-loop "<subject>"` — so there is no `start` verb and none is needed.
 
-**`/supervisor:close <session-id|pid>` is the close, and it closes a session, never a loop.** It tears down one *finished* session and resumes nothing — the third arm beside `/supervisor:open` (open/resume) and `/supervisor:restart` (kill + resume). **A pane is where the close is delivered, never what authorises it:** a tab session is closed by killing its pane, a pane-less one (`entrypoint: sdk-cli`) by SIGTERM on its registry pid, and both run the same guards. **Eight refusals, and every one of them is a reason not to close rather than a reason to retry:** `busy-target` (mid-turn — a close has no resume to fall back on), `gate-held` (an unanswered operator gate would be discarded), `dirty-worktree` (the target is the only live session in a worktree carrying tracked changes), `held-session` (`/supervisor:hold` outranks everything), `task-not-terminal` (the task is neither `completed`/`aborted`/`hold` nor deferred to a future `defer_date`), `task-unresolved` (no task file claims the session id — absent evidence is not evidence of a finished task), `unknown-session-id` and `ambiguous-pid` (the id does not resolve, or two pids claim it). ⚠️ **`headless-target` is retired** — "no pane" was a delivery detail, not a reason to refuse, and refusing it left the operator as the only actor who could close a finished pane-less session. ⚠️ **It reuses the guards rather than adding a second kill mechanism:** the registry read, the hold store and the refusal contract come from `scripts/restart-worker.py`, the worktree probe and cause-of-death classifier from `scripts/restart-precheck.py`, and the pane→session join from `scripts/jump.py`. ⚠️ **A close is not a `session-close`** — `/vault-cli:sync-progress` and `/vault-cli:session-close` read the worker's own conversation and remain the worker's act; this verb only removes a pane whose task is already finished. Tier: fleet manager and manager, never a worker (`docs/session-tiers.md`).
+**`/supervisor:close <session-id|pid>` is the close, and it closes a session, never a loop.** It tears down one *finished* session and resumes nothing — the third arm beside `/supervisor:open` (open/resume) and `/supervisor:restart` (kill + resume). **A pane is where the close is delivered, never what authorises it:** a tab session is closed by killing its pane, a pane-less one (`entrypoint: sdk-cli`) by SIGTERM on its registry pid, and both run the same guards. **Eight refusals, and every one of them is a reason not to close rather than a reason to retry:** `busy-target` (mid-turn — a close has no resume to fall back on), `gate-held` (an unanswered operator gate would be discarded), `dirty-worktree` (the target is the only live session in a worktree carrying tracked changes), `held-session` (`/supervisor:hold` outranks everything), `task-not-terminal` (the task is neither `completed`/`aborted`/`hold` nor deferred to a future `defer_date` — or, for a goal/topic manager with no held task, it still holds a goal or topic page that is neither `completed`/`aborted` nor parked on a future `defer_date`; a handed-over page does not refuse), `task-unresolved` (no task, goal or topic file claims the session id, or the goal/topic lookup failed — absent evidence is not evidence of a finished task), `unknown-session-id` and `ambiguous-pid` (the id does not resolve, or two pids claim it). ⚠️ **`headless-target` is retired** — "no pane" was a delivery detail, not a reason to refuse, and refusing it left the operator as the only actor who could close a finished pane-less session. ⚠️ **It reuses the guards rather than adding a second kill mechanism:** the registry read, the hold store and the refusal contract come from `scripts/restart-worker.py`, the worktree probe and cause-of-death classifier from `scripts/restart-precheck.py`, and the pane→session join from `scripts/jump.py`. ⚠️ **A close is not a `session-close`** — `/vault-cli:sync-progress` and `/vault-cli:session-close` read the worker's own conversation and remain the worker's act; this verb only removes a pane whose task is already finished. Tier: fleet manager and manager, never a worker (`docs/session-tiers.md`).
 
 ⚠️ **Probe the gate loop by the script argument's basename, never by a substring of the command line.** `pgrep -f sweep-gate` matches any process whose argv merely *mentions* the path, and a manager's spawn prompt quotes it — measured 2026-09-22, the substring probe returned **three** pids for one loop, two of them the worker sessions spawned from a prompt naming the script. **The count is transient; the mechanism is not** — re-run hours later those two workers had exited and it returned one, while a bystander process whose argv merely carried the string reproduced the spurious pid on demand. `scripts/stop-probe.py` matches the second argv token's basename against the two known script names, which also fails in the safe direction: a path containing a space mis-splits and the probe under-reports rather than inventing a loop.
 
@@ -976,6 +976,37 @@ writes it, and no reader resolves it. The `claude_session_id` on a goal or topic
 is a fallback for the other. And a missing `managed_by` is **not** an error: the task's own
 `goals:` are the documented default, tried in order, which is why a single-goal task never
 needs the field.
+
+## Approval provenance
+
+**Which surface reads `flag_set_by`, and which does not.** What `flag` *means* has its single
+home in `bborbe/vault-cli` `docs/task-writing.md` § The approval flag; this section owns only
+the split below. A surface that needs either half points here instead of restating it.
+
+| Surface | File | Reads `flag`? | Reads `flag_set_by`? |
+|---|---|---|---|
+| **Open** — `/supervisor:open --flagged` | `commands/open.md` § Step 0.5, `scripts/flagged-rows.py` | yes — selects | **yes, tasks only** — only `OPENING_ACTORS` (`operator`, `legacy`) open; an agent-set or absent setter is `REFUSED`. A goal or topic accepts any setter (`flagged-rows.py` `refusals()`) |
+| **Operator-named marker** — the cap exemption | `commands/open.md` § Step 1.5 | yes | **yes** — `operator_named` needs the pair, `flag` true **and** an opening actor |
+| **Spawn** — a manager's `To open` rows | `commands/steps/goal-spawn.md` | yes — not a parked marker | **no** |
+| **Fleet open leg** — the fleet round's task opens | `commands/steps/open.md`, `scripts/open-queue.py` | yes — ranks first | **no** |
+| **Goal / topic opens** | `scripts/topic-spawn.py --goal`, `--topic-open`; `scripts/topic-keepalive.py` | yes | **no** |
+| **Focus rank** — read-only ranking | `scripts/next-focus.py` | yes | **yes** — an operator-set flag ranks; it opens nothing |
+| **Resume** — the drive leg's auto-resume gate | `agents/goal-drive.md` step 3 | **no** — the `not parked` clause is phase and status only | **no** |
+
+**Why the open path alone reads it.** The `--flagged` batch writes `approved_by: operator` — an
+approval record — so it may only act on a flag the operator set (ruled 2026-09-28). Spawn and
+resume write no approval, so provenance is a note there, not a gate (ruled 2026-10-30: *"it
+should not matter how set the flag"*). Measured 2026-10-30 in the primary vault: of **684**
+flagged tasks, **0** were `human_review` or `hold` and **632** were `completed` — the flag
+never expressed the parked class; the two fields beside it do. A resumed row was already approved and already running;
+excluding it on `flag: true` stranded operator-approved rows with dead sessions — the operator
+ruled on 2026-11-03 that *"flag means approved"*, and on 2026-11-04 that the resume gate gains
+no `flag_set_by` check in its place.
+
+⚠️ **Guarded by `scripts/check-resume-flag-clause.py`**, which parses the gate's `not parked`
+bullet into a predicate and evaluates fixture rows through it and through Step 0.5's own
+selector lines. A token grep would not hold this: deleting the token and adding a new
+flag-excluding bullet passes any text check.
 
 ## Referencing vault notes
 

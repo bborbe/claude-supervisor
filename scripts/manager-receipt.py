@@ -709,8 +709,18 @@ def check(topic: str, branch: str = "", now: float = None) -> int:
     return EXIT_SKIPPED if skipped else 0
 
 
-def debt(topic: str, branch: str = "", now: float = None) -> int:
+def debt(topic: str, branch: str = "", now: float = None, only=None) -> int:
     """Print the open debt; exit EXIT_DEBT_OPEN while any step is unpaid.
+
+    ⚠️ **`only` scopes the GATE, never the record.** A leg passes the steps it actually
+    consumes, and only those can stop it; the debt file is still rewritten with every
+    step the round owes, so `--check` and the other gated legs see exactly what they
+    saw before. Measured 2026-11-05 on the Fleet Manager: 2 of 25 keepalive gate
+    calls exited 12 on `debt: digest` because the round reached row 5b while the
+    sweep reader was still running in the background (06:57:39; digest recorded at
+    07:05:35). The keepalive procedures read `park-event.py`, `park-nudge.py`,
+    `worker-keepalive.py` and `topic-keepalive.py`, never the digest, so a digest
+    owed is no reason to skip them.
 
     ⚠️ **It RE-EVALUATES the round in progress, it does not merely read the file.**
     The gate runs at router rows 5 / 5b / 5c, and the tail's `--check` is row 19 — so
@@ -740,6 +750,8 @@ def debt(topic: str, branch: str = "", now: float = None) -> int:
             # owed, which is the exact failure the gate exists to stop.
             print(f"cannot read {debt_path(s)}: {e}", file=sys.stderr)
             return 2
+    if only:
+        steps = [step for step in steps if step in only]
     for step in steps:
         print(f"debt: {step}")
     return EXIT_DEBT_OPEN if steps else 0
@@ -813,6 +825,10 @@ def main() -> int:
                     help="the session tier; `fleet` selects the fleet round's steps")
     ap.add_argument("--step", choices=ALL_STEPS)
     ap.add_argument("--path", help="the artifact the step produced")
+    ap.add_argument("--only", action="append", choices=FLEET_STEPS, metavar="STEP",
+                    help="with --debt: gate only on this step (repeatable). The debt "
+                         "file still records every owed step; only the exit code and "
+                         "the printed lines are scoped")
     a = ap.parse_args()
     subject = a.subject or a.topic
     # Validate here as well as in `slug()`: the CLI owes an argparse usage error, not a
@@ -824,6 +840,8 @@ def main() -> int:
         ap.error(f"--step {a.step!r} is not a {a.branch or 'goal/topic'} step")
     if not subject:
         ap.error("--topic or --subject is required with every mode")
+    if a.only and not a.debt:
+        ap.error("--only scopes the --debt gate and means nothing with any other mode")
     if a.check:
         return check(subject, a.branch)
     # `--debt` and `--abandon` are fleet-only by construction: `check()` writes the
@@ -834,7 +852,7 @@ def main() -> int:
         if a.branch != "fleet":
             ap.error("--debt is fleet-only: the goal/topic tier writes no debt, so an "
                      "empty read there would be a false clear. Pass --branch fleet.")
-        return debt(subject, a.branch)
+        return debt(subject, a.branch, only=a.only)
     if a.abandon:
         if a.branch != "fleet":
             ap.error("--abandon is fleet-only: only the fleet tier opens a debt. "

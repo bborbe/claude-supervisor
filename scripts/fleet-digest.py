@@ -175,6 +175,16 @@ def parse_snapshot(value):
     15-hour-old baseline, and read as a lapse — the false report this quality removes.
     """
     text = value.strip()
+    # A render that copies a whole `snapshot written: …` tail into the value emits
+    # `snapshot written: snapshot written: <iso>`. Measured 2026-11-03: one such file
+    # (`2026-11-03T07-44Z.digest`) parsed as `no-baseline`, `newest_round()` carried the
+    # PREVIOUS round's baseline forward, and the watcher reported `STALE … age=1129s` at
+    # `08:00:48Z` on a round that had run on time — the same false report this watcher
+    # exists to remove, reached through a malformed header rather than a late file. The
+    # watcher is the last line of defence and cannot assume the renderer wrote the label
+    # exactly once, so it unwraps rather than carrying a stale baseline forward.
+    while text.lower().startswith("snapshot written:"):
+        text = text[len("snapshot written:"):].strip()
     if ROSTER_JOIN.match(text):
         return None, JOIN_DEGRADED
     # ROSTER_JOIN precedes the ISO lookups and is mutually exclusive with BASELINE_KEPT:

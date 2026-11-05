@@ -1,5 +1,5 @@
 ---
-description: Close ONE finished session — a worker whose task is terminal or deferred, idle, and holding no gate. Closes a tab by killing its pane and a headless worker by SIGTERM on its registry pid, running the same guards for both. Refuses in eight named cases and reuses the restart scripts' guards rather than adding a second kill mechanism. Takes a session id (or a pid).
+description: Close ONE finished session — a worker whose task is terminal or deferred, or a goal/topic manager whose page is handed over, ended or parked — idle, and holding no gate. Closes a tab by killing its pane and a headless worker by SIGTERM on its registry pid, running the same guards for both. Refuses in eight named cases and reuses the restart scripts' guards rather than adding a second kill mechanism. Takes a session id (or a pid).
 argument-hint: "<session-id | pid>"
 allowed-tools:
   - Read
@@ -80,8 +80,8 @@ below it. Eight tokens, each terminal for this run:
 | `busy-target` | **Stop.** The session is mid-turn. For a tab session that is `status` not `idle`. For a pane-less one (`sdk-cli`) it also covers an open tool marker in `~/.claude/state/attention/<sid>.tool.json` younger than 20 minutes — such a session parked on the permission channel keeps `status: idle` and writes no transcript closer. A close loses the work with no resume behind it. ⚠️ The marker is not reliably cleared at tool end, so it reads as "used a tool recently": it delays a pane-less close by up to 20 minutes, it does not block one. Retry on a later sweep. |
 | `dirty-worktree` | **Stop.** The target is the only live session in that worktree and it carries tracked changes. Hand the operator the choice: commit, stash, or another target. |
 | `gate-held` | **Stop.** Its transcript tail carries an unanswered `👤 You:` gate. Closing discards a question the operator never answered — hand them the jump link instead. |
-| `task-unresolved` | **Stop.** No task file carries this session id as `claude_session_id`. Fail closed: absent evidence is not evidence of a finished task. |
-| `task-not-terminal` | **Stop.** The task is neither terminal nor deferred to a future `defer_date`. |
+| `task-unresolved` | **Stop.** No task, goal or topic file carries this session id as `claude_session_id` or in its `metrics_sessions`, or a goal/topic lookup failed. Fail closed: absent evidence is not evidence of a finished task. |
+| `task-not-terminal` | **Stop.** The task is neither terminal nor deferred to a future `defer_date` — or, for a goal/topic anchor (a goal or topic manager with no held task), the session still holds a page that is neither `completed`/`aborted` nor parked on a future `defer_date`. `hold` refuses there: a held goal is parked, not finished. A handed-over page (the id only in `metrics_sessions`) does not refuse. |
 
 ⚠️ **A refusal is terminal — never fall back to another teardown route.** `wezterm cli
 kill-pane` by hand, or closing the tab, is the same act with none of the guards. Falling
@@ -94,7 +94,8 @@ neither is the other's remedy.
 ## Step 2 — Report
 
 The script prints its own report on success: the session, its pid, the task it closed
-against, the worktree verdict, the classification and the target — `pane <N>` for a tab
+against (or, for a goal/topic anchor, a `goal: <path>` / `topic: <path>` line per page),
+the worktree verdict, the classification and the target — `pane <N>` for a tab
 session, `pid <pid> (entrypoint sdk-cli, no pane)` for a headless one. The success line names
 the target separately, so a headless close reads `closed headless session (sdk-cli)`. Repeat it — do not
 paraphrase the task status, which is the evidence the close was permitted.
@@ -119,6 +120,7 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
   called.
 - **A close is not a `session-close`.** `/vault-cli:sync-progress` and
   `/vault-cli:session-close` read the worker's own conversation and remain the worker's
-  act; this verb only removes a pane whose task is already terminal or deferred.
+  act; this verb only removes a pane whose task is already terminal or deferred (or whose
+  goal/topic anchor passes the page rule in `scripts/close-worker.py` § Goal/topic anchor).
 - **Never close a pane holding a gate.** That is what `gate-held` is for; the operator's
   answer is the only way past it.

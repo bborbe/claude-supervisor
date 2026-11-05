@@ -36,10 +36,23 @@ Eight refusals, each exit 1 with a stable reason token as the first line of outp
   gate-held           the target's transcript tail carries an unanswered `👤 You:` gate.
                       Closing it discards a question the operator never answered.
   task-unresolved     no task file in the session's vault carries this session id as
-                      `claude_session_id`. Absent evidence is not evidence of a finished
-                      task; fail closed.
+                      `claude_session_id` — and no goal or topic page does either (see
+                      the goal/topic anchor below). Absent evidence is not evidence of a
+                      finished task; fail closed.
   task-not-terminal   the task is neither terminal (`completed`/`aborted`/`hold`) nor
-                      deferred to a future `defer_date`.
+                      deferred to a future `defer_date` — or, for a goal/topic anchor,
+                      the page fails the goal/topic terminal-state rule below.
+
+Goal/topic anchor. When no task resolves the session, a goal page (`24 Goals` /
+`23 Goals`) or topic page (`23 Topics`) is resolved by the same join: `claude_session_id`,
+else the session's `metrics_sessions` entry. Goal/topic terminal-state rule: the session
+may be closed when (1) it has handed the page over — its id is in `metrics_sessions` while
+`claude_session_id` names another session; or (2) the page's `status` is `completed` or
+`aborted`; or (3) the page carries a future `defer_date`. It may NOT be closed while it is
+still the page's `claude_session_id` on a non-terminal page (`in_progress`, `next`,
+`backlog`, `hold`, …) with no future `defer_date`. The task rule does not transfer: a goal
+or topic stays `in_progress` across many sessions, so gating on "goal complete" would make
+every goal manager unclosable.
 
 Exit codes: 0 closed, 1 refusal or operational error, 2 usage error.
 
@@ -81,6 +94,16 @@ SESSIONS_DIR = os.path.expanduser(
 # A vault's task directory, newest naming first. `private-starcitizen` and
 # `private-family` use `24 Tasks`; the numbered vaults use `25 Tasks`.
 TASK_DIRS = ("25 Tasks", "24 Tasks")
+
+# A vault's goal and topic directories — where a goal or topic manager's anchor lives.
+# `private-personal` / `seibert-*` use `24 Goals`, the `24 Tasks` vaults use `23 Goals`;
+# topics live in `23 Topics` wherever a vault has them.
+GOAL_DIRS = ("24 Goals", "23 Goals")
+TOPIC_DIRS = ("23 Topics",)
+
+# A goal or topic page's own end states. Narrower than TERMINAL on purpose: `hold` on a
+# goal is a parked page whose holder is still its manager, not a finished one.
+PAGE_TERMINAL = {"completed", "aborted"}
 
 # Where the vaults live. `SUPERVISOR_VAULTS_ROOT` first for the same reason the registry
 # and the load path carry an override: a drill or a test must be able to point the task
@@ -213,19 +236,20 @@ def metrics_session_ids(path):
     return ids
 
 
-def task_dirs_for(cwd, vault_root=None):
+def task_dirs_for(cwd, vault_root=None, names=TASK_DIRS):
     """Candidate task directories: the vault above `cwd`, then every known vault.
 
     The walk-up answers the common case — a worker whose cwd is its vault. The vault scan
     answers the repo-worktree case: a worker editing `claude-supervisor` has a repo cwd,
     and its task lives in whichever Obsidian vault filed it. Both are bounded and
-    read-only; neither is a filesystem-wide search.
+    read-only; neither is a filesystem-wide search. `names` selects the directory set, so
+    the goal/topic lookup walks the same two places.
     """
     dirs = []
     if cwd:
         cur = os.path.abspath(cwd)
         while True:
-            for name in TASK_DIRS:
+            for name in names:
                 candidate = os.path.join(cur, name)
                 if os.path.isdir(candidate) and candidate not in dirs:
                     dirs.append(candidate)
@@ -235,11 +259,88 @@ def task_dirs_for(cwd, vault_root=None):
             cur = parent
     root = vault_root or VAULTS_ROOT
     for vault in sorted(glob.glob(os.path.join(root, "*"))):
-        for name in TASK_DIRS:
+        for name in names:
             candidate = os.path.join(vault, name)
             if os.path.isdir(candidate) and candidate not in dirs:
                 dirs.append(candidate)
     return dirs
+
+
+def find_pages(session_id, cwd, vault_root=None):
+    """`(held, handed, error)` — every goal or topic page that records this session.
+
+    `held` are pages whose `claude_session_id` is this session, `handed` pages that list it
+    only under `metrics_sessions` (a recorded handover); each entry is
+    `(kind, path, frontmatter, handed_off)`. `error` is a string when a lookup failed, and
+    the caller must refuse on it: a failed grep is not evidence that no live page exists.
+
+    All pages are collected rather than the first, because pages stay stamped after they
+    end — one session can hold a completed goal and a live topic at once, and the live one
+    must decide. A goal or topic manager holds a page, not a task, and `vault-cli goal
+    work-on` / `topic work-on` record it the same way they record a task
+    (`claude_session_id` plus a `metrics_sessions` entry — `vault-cli`
+    `pkg/ops/goal_workon.go` `persistGoalSessionID`, `pkg/ops/topic_workon.go`
+    `persistTopicSessionID`), so the join is the one `find_task` uses, over the goal and
+    topic directories instead of the task ones.
+    """
+    held, handed = [], []
+    if not session_id:
+        return held, handed, None
+    for kind, names in (("goal", GOAL_DIRS), ("topic", TOPIC_DIRS)):
+        dirs = task_dirs_for(cwd, vault_root, names)
+        if not dirs:
+            continue
+        try:
+            found = subprocess.run(
+                ["grep", "-rl", "--fixed-strings", session_id, *dirs],
+                capture_output=True, text=True, timeout=15,
+            )
+        except Exception as exc:
+            return held, handed, f"{kind} lookup failed ({exc})"
+        # `grep` exits 1 on "no match", which is an answer; 2 is an error, which is not.
+        if found.returncode not in (0, 1):
+            return held, handed, f"{kind} lookup failed (grep exit {found.returncode})"
+        for path in sorted((found.stdout or "").splitlines()):
+            fm = frontmatter(path)
+            if (fm.get("claude_session_id") or "").strip() == session_id:
+                held.append((kind, path, fm, False))
+            elif session_id in metrics_session_ids(path):
+                handed.append((kind, path, fm, True))
+    return held, handed, None
+
+
+def page_verdict(page, today):
+    """`(refusal, detail)` when a goal or topic anchor does not permit a close, else `None`.
+
+    Goal/topic terminal-state rule. The session may be closed when (1) it has handed the
+    page over — its id is in `metrics_sessions` while `claude_session_id` names another
+    session; or (2) the page's `status` is `completed` or `aborted`; or (3) the page carries
+    a future `defer_date`. It may NOT be closed while it is still the page's
+    `claude_session_id` on a non-terminal page (`in_progress`, `next`, `backlog`, `hold`, …)
+    with no future `defer_date`.
+
+    The task rule does not transfer. A task's terminal status proves one session's work is
+    finished; a goal or topic stays `in_progress` across many sessions, and its boxes and
+    phase describe the page's whole lifetime. Gating on "goal complete" would make every
+    goal manager unclosable — so the provable fact is that the session no longer holds the
+    page, or that the page itself has ended or is parked.
+    """
+    kind, path, fm, handed_off = page
+    if handed_off:
+        return None
+    status = (fm.get("status") or "").strip()
+    if status in PAGE_TERMINAL:
+        return None
+    defer = fm.get("defer_date")
+    if is_future(defer, today):
+        return None
+    return (
+        "task-not-terminal",
+        f"{kind} {path} is status {status or '(none)'!r} with defer_date "
+        f"{defer or '(unset)'!r} and this session still holds it as claude_session_id; "
+        f"a {kind} outlives its sessions, so a close needs a handover, a page that is "
+        f"{'/'.join(sorted(PAGE_TERMINAL))}, or a future defer_date",
+    )
 
 
 def find_task(session_id, cwd, vault_root=None):
@@ -303,8 +404,8 @@ def task_verdict(task, today):
     if task is None:
         return (
             "task-unresolved",
-            "no task file carries this session id as claude_session_id; a close needs a "
-            "finished task, and absent evidence is not evidence of one",
+            "no task, goal or topic file carries this session id as claude_session_id; a "
+            "close needs a finished anchor, and absent evidence is not evidence of one",
         )
     path, fm, handed_off = task
     if handed_off:
@@ -460,7 +561,34 @@ def main():
         )
 
     task = find_task(sid, cwd, VAULTS_ROOT)
-    bad = task_verdict(task, defer_date.as_now())
+    pages = []
+    if task is not None and not task[2]:
+        # The session holds this task as `claude_session_id`: the task decides alone.
+        bad = task_verdict(task, defer_date.as_now())
+    else:
+        # No held task. A task matched only through `metrics_sessions` (handed off) is
+        # weaker evidence than a page the session still holds, so the pages are read in
+        # both cases, and every held page must pass.
+        held, handed, error = find_pages(sid, cwd, VAULTS_ROOT)
+        bad = None
+        if error:
+            bad = (
+                "task-unresolved",
+                f"{error}; a failed lookup is not evidence that no live goal or topic "
+                "page holds this session",
+            )
+        else:
+            for candidate in held:
+                bad = page_verdict(candidate, defer_date.as_now())
+                if bad is not None:
+                    break
+            if bad is None:
+                if held:
+                    pages = held
+                elif task is None and handed:
+                    pages = handed[:1]
+                else:
+                    bad = task_verdict(task, defer_date.as_now())
     if bad is not None:
         return refuse(*bad)
 
@@ -484,9 +612,14 @@ def main():
     where = f"pane {pane}" if pane is not None else f"pid {pid} (entrypoint {entrypoint}, no pane)"
     # The success line names the pid separately, so its target must not repeat it.
     closed_target = f"pane {pane}" if pane is not None else f"headless session ({entrypoint})"
-    task_path, fm, _handed_off = task
     print(f"🧹 close-worker · session {sid[:8]} · pid {pid} · {rec.get('name')!r}")
-    print(f"   task: {os.path.basename(task_path)} (status {fm.get('status')})")
+    if pages:
+        for kind, page_path, fm, page_handed_off in pages:
+            how = f"handed off to {fm.get('claude_session_id') or '(none)'}" if page_handed_off else "held"
+            print(f"   {kind}: {page_path} (status {fm.get('status')}, {how}, session {sid})")
+    else:
+        task_path, fm, _handed_off = task
+        print(f"   task: {os.path.basename(task_path)} (status {fm.get('status')})")
     print(f"   worktree: {verdict}" + (f" · {others} other live session(s) share it" if verdict == "dirty" else ""))
     print(f"   classification: {branch} · {where}")
 

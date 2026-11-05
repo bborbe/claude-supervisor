@@ -100,25 +100,24 @@ Skip Steps 1–4 when `--flagged` was given: a batch has no single name to resol
 
 **Selector — ALL VAULTS by default, and an absent `defer_date` does NOT exclude.**
 
-`flag: true` AND `status: in_progress` AND (`defer_date` absent OR `defer_date <= today`), read from the CLI per vault — blocked state has the same single source, never a frontmatter grep:
+`flag: true` AND `status: in_progress` AND `defer_date` absent or due (`scripts/defer-date.py`, time of day kept; invalid withheld), read from the CLI per vault — blocked state has the same single source, never a frontmatter grep:
 
 ```bash
 for v in $(vault-cli config list --output json | python3 -c "
 import json,sys
 for x in json.load(sys.stdin):
     if x.get('tasks_dir'): print(x['name'])"); do
-  vault-cli --vault "$v" task list --all --output json 2>/dev/null | VAULT="$v" python3 -c "
-import json,sys,os,datetime
+  vault-cli --vault "$v" task list --all --output json 2>/dev/null | VAULT="$v" DD="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/defer-date.py" python3 -c "
+import json,sys,os,importlib.util as iu
 raw=sys.stdin.read().strip()
 if not raw: sys.exit(0)                      # vault returned nothing — skip, never crash
 try: d=json.loads(raw)
 except Exception: sys.exit(0)
 if d is None: sys.exit(0)                    # measured: one vault returns literal null
 tasks=d if isinstance(d,list) else d.get('tasks',d.get('items',[]))
-today=datetime.date.today().isoformat()
-def due(t):
-    dd=str(t.get('defer_date') or '')[:10]
-    return (not dd) or dd <= today           # ABSENT means not deferred, i.e. available now
+try: s=iu.spec_from_file_location('dd',os.environ['DD']);dd=iu.module_from_spec(s);s.loader.exec_module(dd)
+except Exception as e: print('ERROR |',os.environ['VAULT'],'| defer-date.py not loaded, nothing selected:',e); sys.exit(1)
+def due(t): return dd.defer_state(t.get('defer_date'))[0] in ('none','due')
 # An agent-set flag is never an approval (ruled 2026-09-28). Only these two actors open a row:
 #   operator — the operator's own surface wrote it (Vault UI toggle, a hand-typed --by operator)
 #   legacy   — one of the 270 rows whose flag predates the field, dispositioned 2026-09-30
@@ -136,13 +135,13 @@ for t in sorted(sel, key=lambda x: x.get('name','')):
 done
 ```
 
-⚠️ **The provenance filter is a gate, not a tidy-up; it must stay ahead of the approve pass.**
+⚠️ **The provenance filter is a gate, not a tidy-up; it must stay ahead of the approve pass.** Which surface reads provenance: `docs/fleet-surface.md` § Approval provenance.
 
 ⚠️ **Refuse loudly; never drop a row silently.** A refused row prints `REFUSED | <vault> | <task> | flag_set_by=<who>` and is excluded from the batch.
 
 ⚠️ **`legacy` opens a row — a migration marker, not a credential.**
 
-**Scan every vault that declares a `tasks_dir`; `--vault <name>` narrows to one.** Of 13 configured vaults, 8 declare one. A vault-scoped run is the exception now, not the default — the operator manages one fleet, not one vault, and the same complaint already stood against the fleet manager's vault argument.
+**Scan every vault that declares a `tasks_dir`; `--vault <name>` narrows to one.** Of 13 configured vaults, 8 declare one. A vault-scoped run is the exception now, not the default — the operator manages one fleet, not one vault.
 
 **An unanswerable vault is skipped and named, never fatal** — the loop exits quietly per vault.
 
