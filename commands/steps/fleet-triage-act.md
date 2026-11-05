@@ -18,8 +18,9 @@ python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervi
 
 **One close path for both tiers.** `close-worker.py` kills the pane of a tab session and sends
 SIGTERM to the registry pid of a headless one, waiting `EXIT_DEADLINE` for the pid and its
-registry entry to disappear before printing `✅ closed pid <pid> (entrypoint sdk-cli, no pane) ·
-pid <pid> dead · registry entry removed`. Every guard this runbook used to apply by hand is
+registry entry to disappear before printing `✅ closed pane <N> · pid <pid> dead · registry entry
+removed` for a tab session, and `✅ closed headless session (sdk-cli) · pid <pid> dead · registry entry
+removed` for a headless one (`commands/close.md:102-105` documents both shapes). Every guard this runbook used to apply by hand is
 inside it — `busy-target`, `held-session`, `dirty-worktree`, `gate-held`, `task-unresolved` and
 `task-not-terminal` — so the "is it finished, is it idle, is it gated" evidence 3.1 and 3.0
 already gathered is re-checked against the same sources rather than trusted from this table.
@@ -161,29 +162,18 @@ session failing any limb is some other state and belongs to its own branch.
 4. **Owning manager loop `STOPPED` / `UNARMED`** → this is a fleet finding, not a nudge.
    `STOPPED` is a deliberate marker, so **do not re-arm it unilaterally** — raise it as an
    OPERATOR row ("loop stopped deliberately; re-arm?"). `UNARMED` with a live session and an
-   open subject is re-armable — **but check the name with the script before it reaches the
-   shell:**
+   open subject is a lapse, and the drive is **one `SendMessage` to that manager telling it to
+   re-arm in its own pane** — `commands/steps/fleet-triage-state.md` § 3.6 carries the same row
+   and the same mechanism, and this step must not invent a second one.
 
-   ```bash
-   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/closure-name-safe.py" '<subject>'
-   ```
-
-   ⚠️ **Single-quoted, and that is the whole point — a double-quoted gate here is inert.** Inside
-   `"…"` the shell expands `$`, a backtick and `\` **before** the script is invoked, so a name
-   carrying `$(…)` executes on the way in and the script is then handed the *result* and reports
-   `SAFE`. The gate would pass exactly the names it exists to refuse. Inside `'…'` all four are
-   literal, so the script sees them and can exit 1.
-
-   It exits 0 on a safe name and 1 on one carrying `$`, a backtick, `"` or `\` — the entire
-   injection surface inside a double-quoted word. **On exit 1, do not arm** — report the name
-   and stop. A literal `'` in the name closes the single-quoting, so escape it as `'\''`; a name
-   that needs that is a name you do not arm on. This is the same gate, and the same reasoning,
-   as `commands/steps/goal-closure.md:98-101`: the subject is a vault page name, this step runs
-   unattended, and a rule the model has to remember every tick is not a gate. Only then:
-
-   ```bash
-   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py" --arm --subject "<subject>" --branch goal --interval 900
-   ```
+   ⚠️ **Never run `manager-liveness.py --arm` from here.** `--arm` is documented as *"run by the
+   manager at EVERY re-arm"*: it writes the cadence record and clears `.stopped`, so calling it
+   from the triage session **fakes an arm on a manager that never armed itself** — the record
+   then reads armed while nothing ticks, and the next sweep reports a healthy loop that does not
+   exist. It also cannot be made correct from here: `--arm` takes `--branch <fleet|goal|topic>`
+   and a triage row may be any of the three, so a hardcoded `--branch goal` writes the wrong
+   namespace for a fleet or topic manager. The manager owns its own arm; this command owns the
+   finding.
 
 ⚠️ **Every STUCK row must end the run either moving or carded.** A row that is still stuck
 and uncarded at Step 6 is the run's failure, and must be named as such.

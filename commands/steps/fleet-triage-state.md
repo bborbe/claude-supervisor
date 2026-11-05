@@ -32,7 +32,7 @@ compare against the size you recorded at the start of this run.
 so it lags both ways. The transcript is the artifact; the status is the report.
 
 ⚠️ **Take the in-flight verdict the way the loops already take it — do not invent a fourth
-definition of "idle".** The manager tier's own ladder (`steps/round-readings.md`, citing
+definition of "idle".** The manager tier's own ladder (`commands/steps/round-readings.md`, citing
 `agents/goal-drive.md:100-134`) is the shipped reading and this command reuses it verbatim,
 in this order:
 
@@ -62,11 +62,21 @@ Stop at the first match.
 All three:
 
 1. `task_title` is non-null.
-2. `vault-cli task get '<task_title>' status` returns `completed` / `aborted` / `hold`.
+2. `vault-cli task get '<task_title>' status` returns `completed` or `aborted`.
    Anything else is still in progress. ⚠️ **Do not hardcode a vault.** The board indexes every
    vault under `OBSIDIAN_DIR`, so a task outside this session's vault is invisible to the bare
    call — pass `--vault <that vault>` when the row's own vault differs from the session's, and
    treat an unresolved title as "not read", never as "not terminal".
+
+   ⚠️ **`hold` is NOT terminal here, and a held task is never CLOSED.** `docs/worker-session-states.md:33`
+   is explicit: `closed` covers `completed`, `aborted` and `hold`, **but only `completed` and
+   `aborted` are terminal** — *"`hold` is parked, not finished — sync and report it, never end
+   the session on it"*. So a `hold` task is a **report row, never a close**: route it to the
+   EXTERNAL/OPERATOR buckets by what it waits on, name the hold, and leave the session running.
+   ⚠️ **`close-worker.py` would happily close it** — its task `TERMINAL` set includes `hold`
+   (`scripts/close-worker.py:117`) — so nothing downstream will stop you; the rule has to hold
+   here. It is also the same distinction this release makes for subjects
+   (`commands/steps/goal-closure.md` — a `hold` subject is a pause, not a closure).
 3. `grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]' '<task file>'` prints **0**.
 
 ⚠️ **Single-quote every board-derived value in this file, and this is the rule for all of
@@ -153,11 +163,20 @@ something specific by y, name it and I'll act on it"*, and the board called it w
 Read the pane for any row that is `idle` or older than ~20 minutes:
 
 ```bash
-wezterm cli get-text --pane-id <pane-id> | tail -12
+wezterm cli get-text --pane-id <pane-id>
 ```
 
-- **composer empty + last line asks or offers** → a question with no gate → run 3.2b on it.
-- **composer empty + last line is a completion** → STUCK if open boxes remain (3.4).
+⚠️ **Never triage by position — no fixed `tail -N`, and never "the last non-empty line".**
+`commands/steps/round-readings.md:27` owns that rule and it applies here verbatim: every Claude
+Code pane's last non-empty line is its **status bar**, so a last-line test reads the status bar
+on a healthy pane and on a parked one alike. Test each line for a **marker that begins it**
+(`Enter to select`, `Esc to cancel`), with `Tab to amend` as the discriminator *within* the
+`Esc to cancel · Tab to amend` line — never by bare containment, never by position.
+
+- **a modal marker begins a line** → a selection modal is open; hand over the jump link and
+  never drive it (the Path-B rule).
+- **composer empty + a line asks or offers** → a question with no gate → run 3.2b on it.
+- **composer empty + the content is a completion** → STUCK if open boxes remain (3.4).
 - **composer holds text** → the pane is parked on an unsent draft nobody owns; report it and
   hand the jump link. Never clear it.
 
@@ -173,8 +192,16 @@ headless, every one reported as idle.
 
 For every session that is idle, has no pane, and reached neither 3.2 nor 3.2c:
 
+⚠️ **`'<session-id>'` is that row's own id, substituted per row — never
+`$CLAUDE_CODE_SESSION_ID`, which is *this* triage session.** The read is per-target, so a
+variable bound once would read the wrong transcript for every row but one; and a bare
+`$SESSION_ID` is bound nowhere at all (`commands/steps/fleet-triage-load-path.md:25` — shell
+state does not survive between `Bash` calls), so it would expand empty, the glob would become
+`~/.claude/projects/*/.jsonl`, match nothing, and every headless row would print `(no closer)`
+— a clean-looking sweep that read nothing.
+
 ```bash
-python3 - "$SESSION_ID" <<'PY'
+python3 - '<session-id>' <<'PY'
 import json,glob,os,re,sys
 sid=sys.argv[1]
 TAIL=256*1024          # the repo's own agent_status bound — transcripts reach MBs
