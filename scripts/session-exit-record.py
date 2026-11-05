@@ -266,7 +266,9 @@ def has_end(path, pid):
     pid = str(pid)
     found = False
     try:
-        with open(path, encoding="utf-8") as handle:
+        # `errors="replace"`: one bad byte in a long-lived log must not raise here, which
+        # would kill the detached observer and lose this run's end line the same way.
+        with open(path, encoding="utf-8", errors="replace") as handle:
             for line in handle:
                 if parse_field(line, "pid") != pid:
                     continue

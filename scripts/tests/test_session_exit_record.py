@@ -325,6 +325,27 @@ class Observer(StoreTestCase):
         self.assertIn("kind=unknown-end", lines[2])
         self.assertIn(f"pid={pid}", lines[2])
 
+    def test_another_pids_end_after_this_spawn_does_not_silence_this_run(self):
+        """An older run's observer can outlive its pane and write into the reused log."""
+        pid = str(self._gone_pid())
+        self._run("append", "--pane", "2156", "--kind", "spawn", "--pid", pid, "--now", "t1")
+        self._run("append", "--pane", "2156", "--pid", "56446", "--rc", "0", "--now", "t2")
+        self._run("observe", "--pane", "2156", "--pid", pid, "--foreground")
+        lines = self._lines()
+        self.assertEqual(len(lines), 3)
+        self.assertIn("kind=unknown-end", lines[2])
+        self.assertIn(f"pid={pid}", lines[2])
+
+    def test_a_log_with_an_undecodable_byte_still_gets_this_runs_end(self):
+        """A bad byte must not raise inside the observer and lose the end line."""
+        pid = str(self._gone_pid())
+        with open(os.path.join(self.dir, "pane-2156.log"), "wb") as handle:
+            handle.write(b"garbage \xff\xfe line\n")
+        self._run("observe", "--pane", "2156", "--pid", pid, "--foreground")
+        with open(os.path.join(self.dir, "pane-2156.log"), encoding="utf-8", errors="replace") as handle:
+            tail = handle.read().splitlines()[-1]
+        self.assertIn("kind=unknown-end", tail)
+
     def test_a_reused_pid_does_not_borrow_its_earlier_lifes_end(self):
         """A `spawn` line for the pid starts a new run; an end before it belongs to the old one."""
         pid = str(self._gone_pid())
