@@ -2095,3 +2095,77 @@ class ForeignGoalFixture(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+_PANELESS_FIXTURE = os.path.join(_HERE, "fixtures", "paneless-gate-feed.txt")
+_HST_ITEM = "f712443d00000000000000000000aaaa"
+
+
+class PanelessHeadlessGateReachesTheKeptSet(unittest.TestCase):
+    """A `[ hst]` row is a gate, keyed `hst:<store item id>`.
+
+    ⚠️ The digit-only row match skipped every headless worker's gate, so the filter
+    read `gates: 0` over a feed carrying the gate and the armed watcher never woke —
+    measured 2026-11-03, 11 of 13 live gates rendered `[ hst]`. The fixture is the
+    two-row feed the task names: it read `gates: 1` before this change.
+    """
+
+    def feed(self):
+        with open(_PANELESS_FIXTURE, encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_feed_rows_keys_the_headless_row_on_its_store_item(self):
+        rows = gf.feed_rows(self.feed().splitlines(keepends=True))
+        self.assertEqual(rows, [("hst:" + _HST_ITEM, False), ("417", False)])
+
+    def test_a_headless_row_without_an_answer_line_is_not_a_gate(self):
+        feed = ["  [ hst]  1m  x\n", "         headless\n", "  [ 417]  2m  y\n"]
+        self.assertEqual(gf.feed_rows(feed), [("417", False)])
+
+    def test_an_answer_line_is_never_borrowed_from_the_next_row(self):
+        feed = [
+            "  [ hst]  1m  x\n",
+            "  [ 417]  2m  y\n",
+            "         answer: python3 a/attention-answer.py answer abc\n",
+        ]
+        self.assertEqual(gf.feed_rows(feed), [("417", False)])
+
+    def test_the_question_mark_row_stays_unparsed(self):
+        """A pane-less row with nothing to answer may be an exited session."""
+        self.assertEqual(gf.feed_rows(["  [   ?]  5m  ⟳replay  x\n"]), [])
+
+    def test_the_fixture_reads_two_gates_two_emits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [sys.executable, _SCRIPT, "--feed", "--no-scope",
+                 "--state-dir", tmp, "--registry-dir", tmp,
+                 "--endpoint", dead_url(),
+                 "--claims-file", os.path.join(tmp, "none.json")],
+                input=self.feed(), capture_output=True, text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("gates: 2  emit: 2", result.stderr)
+        self.assertEqual(result.stdout.split(), ["hst:" + _HST_ITEM, "417"])
+
+    def test_the_store_resolves_the_session_and_ownership_applies(self):
+        """The store's `producer_id` is the session; a live peer manager's worker drops."""
+        payload = json.dumps(
+            [{"item_id": _HST_ITEM, "producer_id": GATED, "payload": "Bash: date"}]
+        ).encode("utf-8")
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = payload
+        with mock.patch("urllib.request.urlopen", return_value=response):
+            items = gf.headless_items(["hst:" + _HST_ITEM, "417"], "http://x")
+        self.assertEqual(gf.session_for_pane("hst:" + _HST_ITEM, items), GATED)
+        ledger = {
+            GATED: {"session_id": GATED, "parent_session": PEER},
+            PEER: {"session_id": PEER, "label": "manager", "role": "manager"},
+        }
+        with mock.patch.object(gf, "is_manager", side_effect=lambda s, _l: s == PEER):
+            call, reason, sid, _ = gf.evaluate(
+                "hst:" + _HST_ITEM, ledger, {GATED, PEER}, items, ME
+            )
+        self.assertEqual((call, reason, sid), (gf.DROP, "peer-manager", GATED))
+
+    def test_an_unreachable_store_fails_open(self):
+        self.assertEqual(gf.headless_items(["hst:" + _HST_ITEM], dead_url()), [])
