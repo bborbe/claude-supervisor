@@ -28,9 +28,11 @@ When: not already in this session's context
   Route the gate (3.2b) — never drive it, never close it, and never call it STUCK on
   transcript recency alone.
 - **A signal is the last resort of the close path, never of the drive path.** The close path's
-  signal is used only for a session whose CLOSED evidence holds, whose transcript is provably
-  static, and whose pid carries `--print` — and it is `close-worker.py` that emits it, never a
-  hand-run `kill` (see `commands/steps/fleet-triage-act.md` § CLOSED). Killing a worker to
+  signal is used only for a session whose CLOSED evidence holds **and which `close-worker.py`
+  agrees to close** — it discriminates a headless target by `entrypoint == "sdk-cli"`
+  (`scripts/close-worker.py:527`) and refuses on `task-not-terminal`, `busy-target` and
+  `gate-held`. It is `close-worker.py` that emits the signal, never a hand-run `kill` (see
+  `commands/steps/fleet-triage-act.md` § CLOSED). Killing a worker to
   unstick it is the opposite of this command's job.
 - **Every question ends the run carded.** A session classified OPERATOR with no open card is
   the run's failure, named in Step 6's `uncarded` count — never a note in passing.

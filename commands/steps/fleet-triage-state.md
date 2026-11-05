@@ -261,6 +261,16 @@ last line mid-sentence"* and was classified STUCK; it was in fact `blocked-on-pe
 immediately. A suspended tool call leaves **exactly** the signature of a finished turn — the
 turn never ended, so nothing was written to the transcript.
 
+⚠️ **`<pid>` has no source in the sweep — `sessions[]` carries `session_id`, not a pid.** The
+registry file is keyed on the pid, so resolve the pair in one read:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-liveness.py" --list --json
+```
+
+It returns `sessionId` / `pid` / `status` together (`agents/goal-drive.md:123` owns that join);
+match on `sessionId` to get the pid, then read the registry file itself:
+
 ```bash
 jq -r '.status' ~/.claude/sessions/<pid>.json      # waiting = parked on a gate
 ```
@@ -373,12 +383,37 @@ python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervi
 
 ⚠️ **`--state` cannot tell an auto-quiet stand-down from a deliberate `/supervisor:stop`** — both
 read `STOPPED` with a marker. The distinguishing read is `manager-quiet.py`, which prints
-`<verdict>` TAB `<n_runnable>` TAB `<n_quiet>` on stdout; `stood-down` is the auto-quiet verdict,
+`<verdict>` TAB `<n_runnable>` TAB `<n_quiet>` TAB `<consecutive_quiet>` on stdout — **four
+fields**; `stood-down` is the auto-quiet verdict (field 1), so the decision reads the verdict
+without parsing the rest,
 and anything else means the marker was not quiet-driven:
+
+⚠️ **`--vault` takes the vault's ABSOLUTE ROOT, and neither the board nor this step supplies
+one.** The sweep's `sessions[]` carries no vault field, and `manager-quiet.py` runs
+`vault_root_error()` first, which rejects a registered *name* as well as a relative path — a
+name exits 2 and would then read as "unreadable" rather than as "auto-quiet". Resolve the root
+from the subject's own page: the vault is whichever registered entry's goals folder holds it.
+
+```bash
+vault-cli config list --output json | python3 -c '
+import json,os,sys
+subj=sys.argv[1]
+for v in json.load(sys.stdin):
+    if os.path.exists(os.path.join(v["path"], v["goals_dir"], subj + ".md")):
+        print(v["path"]); break
+else:
+    print("UNRESOLVED")
+' '<subject>'
+```
+
+`UNRESOLVED` means the subject has no page in any registered vault — report it as unread and
+**do not** run the quiet check. Otherwise the printed path is the vault root the check needs.
+(`scripts/resolve-folders.py` is not usable here: it takes no arguments and resolves the
+**current session's** vault from cwd, not a subject's.)
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-quiet.py" \
-  --subject '<subject>' --vault '<vault>'
+  --subject '<subject>' --vault '<the absolute vault root from above>'
 ```
 
 It exits 2 with a reason on stderr and writes nothing when it cannot read — **a failed read is
@@ -394,8 +429,8 @@ never an auto-quiet verdict**: report the manager as unread and leave the loop a
 | `UNARMED`, or `STALE` beyond one full observed period **and** the subject has runnable work | a genuine lapse | **drive it** — tell the manager to re-arm in its own pane |
 | `STALE` inside one observed period | round duration exceeded the declared interval | **no** — see the calibration note below |
 
-⚠️ **`STALE` is arithmetic, not a death verdict.** The limit has one home —
-`commands/steps/round-tail.md:39` — and is not restated here, and a
+⚠️ **`STALE` is arithmetic, not a death verdict.** The constant has one home —
+`scripts/manager-liveness.py:90` (`SLACK = 180`) — and is not restated here, and a
 round that dispatches a sweep reader, a drive leg and coverage sub-agents costs 10–12 minutes.
 A manager whose round exceeds its declared interval flaps `STALE` between arms with nothing
 wrong. Measured 2026-11-04: a manager was reported lapsed twice in one hour; it had a pending

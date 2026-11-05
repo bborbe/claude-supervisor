@@ -9,7 +9,7 @@ user-invocable: false
 When: every run — before any classification
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py" --json > "/tmp/fleet-triage-${CLAUDE_CODE_SESSION_ID:-default}.json"
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py" --json > "/tmp/fleet-triage-${CLAUDE_CODE_SESSION_ID:-$CLAUDE_PID}.json"
 echo "EXIT=$?"
 ```
 
@@ -22,6 +22,9 @@ clobber each other's before/after snapshots and the delta in Step 6 compares thi
 against another run's "before" — a clean-looking verdict built on someone else's fleet. The
 `${CLAUDE_CODE_SESSION_ID}` suffix keeps each run's file its own; two runs *within* one session
 still collide, which is why this command is one pass per session and not run twice at once.
+⚠️ **The fallback is `$CLAUDE_PID`, never a literal `default`** — a fixed fallback would put every
+session that lacks the variable back on one shared name, which is the clobber this paragraph
+exists to prevent. `$CLAUDE_PID` is set in every `Bash` call and is unique per live process.
 
 Per `sessions[]`: `session_id`, `role`, `label`, `subject`, `bucket`, `unblocks`,
 `task_title`, `age`, `parent`.

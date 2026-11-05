@@ -9,20 +9,21 @@ user-invocable: false
 When: every run — the last step, always
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py" --json > "/tmp/fleet-triage-after-${CLAUDE_CODE_SESSION_ID:-default}.json"
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py" --json > "/tmp/fleet-triage-after-${CLAUDE_CODE_SESSION_ID:-$CLAUDE_PID}.json"
 echo "EXIT=$?"
 ```
 
 ⚠️ **A non-zero exit or unparseable JSON here is a hard stop, exactly as in Step 1 — and it is
-worse here, because this is the sweep that certifies the run.** A failed re-sweep leaves the
-previous `…-after.json` on disk (or an empty file), and the delta then compares this run's
-*intent* against a stale snapshot while printing `✅ Fleet is moving`. If `EXIT` is non-zero or
+worse here, because this is the sweep that certifies the run.** The redirect truncates the
+target **before** `python3` runs, so a failed re-sweep leaves an empty or partial file, not the
+previous snapshot — and the delta then compares against nothing while the verdict block prints
+`✅ Fleet is moving`. If `EXIT` is non-zero or
 the file will not parse, print `⚠️ verify sweep failed — the run is unverified, not clean` and
 stop; never fall through to the verdict block.
 
 Re-derive the states from the fresh sweep and print one line. ⚠️ **`<n>` is read from disk, not
 from memory** — it is the stuck count in this run's *before* sweep, which Step 1 wrote to
-`/tmp/fleet-triage-${CLAUDE_CODE_SESSION_ID:-default}.json` (`commands/steps/fleet-triage-sweep.md`).
+`/tmp/fleet-triage-${CLAUDE_CODE_SESSION_ID:-$CLAUDE_PID}.json` (`commands/steps/fleet-triage-sweep.md`).
 Re-read that file and count the STUCK rows in it; after a compaction the number is gone from
 context and the delta cannot be reconstructed from the fresh sweep alone.
 
