@@ -718,9 +718,9 @@ def debt(topic: str, branch: str = "", now: float = None, only=None) -> int:
     saw before. Measured 2026-11-05 on the Fleet Manager: 2 of 25 keepalive gate
     calls exited 12 on `debt: digest` because the round reached row 5b while the
     sweep reader was still running in the background (06:57:39; digest recorded at
-    07:05:35). The keepalive procedures read `park-event.py`, `worker-keepalive.py`
-    and `topic-keepalive.py`, never the digest, so a digest owed is no reason to skip
-    them.
+    07:05:35). The keepalive procedures read `park-event.py`, `park-nudge.py`,
+    `worker-keepalive.py` and `topic-keepalive.py`, never the digest, so a digest
+    owed is no reason to skip them.
 
     ⚠️ **It RE-EVALUATES the round in progress, it does not merely read the file.**
     The gate runs at router rows 5 / 5b / 5c, and the tail's `--check` is row 19 — so
