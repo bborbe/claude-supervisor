@@ -41,9 +41,9 @@ in this order:
    signal** — it is the weaker word and it lags both ways. ⚠️ **`shell` carries the manager
    tier's carve-out, and dropping it turns a parked worker into a live one:** `shell` means
    in-flight **unless** the session's newest `event: Stop` record carries a non-empty `⏰ Ends:`
-   slot, in which case it is a declared wait and falls through to limbs 2 and 3
-   (`commands/steps/round-readings.md:31`, `agents/goal-drive.md:130-134`,
-   `agents/fleet-sweep-reader.md:110`). This is the one limb where "reuses the ladder" is not
+   slot, in which case it is a declared wait and falls through to the limbs below it
+   (`commands/steps/round-readings.md:31`, `agents/goal-drive.md:133-135`,
+   `agents/fleet-sweep-reader.md:109`). This is the one limb where "reuses the ladder" is not
    the whole story — take the carve-out with it.
 2. **`~/.claude/state/attention/<session-id>.tool.json`** — an open marker inside ~20 min ⇒
    **in flight**. Open **past** it ⇒ do **not** drop it; that is the stuck path.
@@ -126,8 +126,11 @@ round.** That is why it releases an idle session parked on a question in its own
 why it cannot touch a modal — the turn is blocked, so the next round never comes.
 
 ⚠️ **Never message another manager's worker to answer its gate.** The message goes to the
-owning manager (`parent`). If that manager's loop reads `STOPPED` or `UNARMED`, the message
-is never read — that is a fleet finding, not a nudge.
+owning manager (`parent`). ⚠️ **A `STOPPED` / `UNARMED` loop does not mean the message is
+lost** — the manager session may still be live and idle, and § 3.4b measured that a live-idle
+session wakes and replies to a cross-session `SendMessage`. What the missing loop costs is the
+manager's own *round*: it will not re-sweep on its own. So send the message, and record the
+unarmed loop as the fleet finding it is — never skip the message because the loop is down.
 
 ⚠️ **Never type into a pane** this command did not spawn. `wezterm cli send-text` into
 another session turns a question into a menu selection.
@@ -282,7 +285,9 @@ below matches it exactly. Apply these signals only to a session that fails that 
 Signals — any one:
 
 - idle with a non-terminal task and open boxes,
-- a dead session (`session-liveness.py --check <sid>` → `ABSENT`) whose task is
+- a session `session-liveness.py --check <sid>` reports as `ABSENT` **and** that `ABSENT` is
+  corroborated by a registry pid, a transcript mtime or pane text — never on the `ABSENT` alone
+  (§ 3.6, and `commands/steps/rules.md` § ABSENT-is-not-a-death-verdict) — whose task is
   `in_progress`,
 - an approved task with no worker at all,
 - a live worker whose owning manager's loop is `STOPPED` / `UNARMED`, so nothing will ever
@@ -355,8 +360,10 @@ it as `'\''`, and treat a name needing that as unreadable.
 
 Exit 0 is safe; **exit 1 means do not run the query** — report the name as unreadable and
 continue with the next manager. Same gate, same reasoning, and the same single-quoting, as
-`commands/steps/goal-closure.md:98-101` and `commands/steps/fleet-triage-act.md` § STUCK item 4;
-Step 4's arm path applies it again before it arms anything. **Only once it exits 0** is the
+`commands/steps/goal-closure.md:98-101`. ⚠️ **This is the only place the gate runs for a
+subject**, because Step 4 no longer arms anything itself: `manager-liveness.py --arm` is the
+manager's own verb, and running it from here would fake an arm on a loop that never ticked
+(`commands/steps/fleet-triage-act.md` § STUCK item 4). **Only once this exits 0** is the
 double-quoted `--state` call below safe — it is the sink this gate exists to protect.
 
 ```bash
@@ -364,17 +371,31 @@ python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervi
   --state --subject "<subject>" --branch <fleet|goal|topic>
 ```
 
+⚠️ **`--state` cannot tell an auto-quiet stand-down from a deliberate `/supervisor:stop`** — both
+read `STOPPED` with a marker. The distinguishing read is `manager-quiet.py`, which prints
+`<verdict>` TAB `<n_runnable>` TAB `<n_quiet>` on stdout; `stood-down` is the auto-quiet verdict,
+and anything else means the marker was not quiet-driven:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-quiet.py" \
+  --subject '<subject>' --vault '<vault>'
+```
+
+It exits 2 with a reason on stderr and writes nothing when it cannot read — **a failed read is
+never an auto-quiet verdict**: report the manager as unread and leave the loop alone.
+
 | Reading | Cause | Is it a finding? |
 |---|---|---|
 | `OK` | loop armed | no |
 | `STOPPED` + subject page reads `status: completed` / `aborted` | the subject is **terminal** | **no** — a loop on a closed subject is the bug |
 | `STOPPED` + subject page reads `status: hold` | a **pause**, not a closure — see `commands/steps/goal-closure.md` | **no** — a `hold` subject never reports `CLOSE` and never authorises a stop, so an armed loop on one is correct, not a defect |
-| `STOPPED` + `manager-quiet.py` stood it down on N quiet ticks and `runnable` is 0 | **auto-quiet** | **no** — re-arming without adding work just reproduces the stand-down. The lever is the quiet threshold, not the marker |
+| `STOPPED` + `manager-quiet.py` reports `stood-down` for the subject | **auto-quiet** | **no** — re-arming without adding work just reproduces the stand-down. The lever is the quiet threshold, not the marker |
 | `STOPPED` with a marker and a **live, non-terminal** subject carrying runnable work | a deliberate `/supervisor:stop` | **operator row** — only they release it |
 | `UNARMED`, or `STALE` beyond one full observed period **and** the subject has runnable work | a genuine lapse | **drive it** — tell the manager to re-arm in its own pane |
 | `STALE` inside one observed period | round duration exceeded the declared interval | **no** — see the calibration note below |
 
-⚠️ **`STALE` is arithmetic, not a death verdict.** The limit is `observed_period + 180`, and a
+⚠️ **`STALE` is arithmetic, not a death verdict.** The limit has one home —
+`commands/steps/round-tail.md:39` — and is not restated here, and a
 round that dispatches a sweep reader, a drive leg and coverage sub-agents costs 10–12 minutes.
 A manager whose round exceeds its declared interval flaps `STALE` between arms with nothing
 wrong. Measured 2026-11-04: a manager was reported lapsed twice in one hour; it had a pending

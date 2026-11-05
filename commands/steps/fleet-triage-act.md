@@ -123,8 +123,8 @@ of the question, never from a timestamp — a second triage of the same unchange
 collapse onto the first card, not mint a twin. ⚠️ **`<question-slug>` is `[a-z0-9-]+`** — derive
 it by lowercasing and replacing every run of other characters with `-`, never by quoting pane
 text into the key. The key is a single-quoted word, so a slug carrying a literal `'` closes the
-quoting; constraining it to that alphabet removes the case instead of relying on the escape
-rule at line 96.
+quoting; constraining it to that alphabet removes the case instead of relying on the
+single-quote/escape rule stated above the card command.
 
 ### EXTERNAL → report
 

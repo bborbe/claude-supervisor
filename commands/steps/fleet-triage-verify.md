@@ -10,7 +10,15 @@ When: every run — the last step, always
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py" --json > "/tmp/fleet-triage-after-${CLAUDE_CODE_SESSION_ID:-default}.json"
+echo "EXIT=$?"
 ```
+
+⚠️ **A non-zero exit or unparseable JSON here is a hard stop, exactly as in Step 1 — and it is
+worse here, because this is the sweep that certifies the run.** A failed re-sweep leaves the
+previous `…-after.json` on disk (or an empty file), and the delta then compares this run's
+*intent* against a stale snapshot while printing `✅ Fleet is moving`. If `EXIT` is non-zero or
+the file will not parse, print `⚠️ verify sweep failed — the run is unverified, not clean` and
+stop; never fall through to the verdict block.
 
 Re-derive the states from the fresh sweep and print one line. ⚠️ **`<n>` is read from disk, not
 from memory** — it is the stuck count in this run's *before* sweep, which Step 1 wrote to
@@ -24,6 +32,12 @@ Stuck: <n> → <m> · Closed: <c> · Drove: <d> · Operator: <o> (uncarded <u>) 
 
 - **`m == 0 && u == 0 && f == 0`** → `✅ Fleet is moving.` Every session is working, closed,
   or waiting on a named producer or an open card — nothing else. Say nothing further.
+  ⚠️ **This shorthand is not the whole green condition** — the verdict block further down
+  requires all five: `STUCK == 0`, `UNCARDED == 0`, `FINISHED-OPEN == 0`, `NO-LOOP == 0`, and
+  `accounted for == sessions`. The one-liner cannot carry the last two, so read the block
+  before calling the run clean: a run whose counters are all zero but which left an
+  unclassified session, or a manager with a live non-terminal subject and no loop, is **not**
+  `✅ Fleet is moving` — it is a hole in the sweep.
 - **any of them non-zero** → list every offending row with the reason it survived, and say
   plainly that the run did not meet its invariant. **Never report a non-zero count as a clean
   result.**
