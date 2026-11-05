@@ -99,6 +99,9 @@ check-handback-keys:
 check-round-overlap:
 	@python3 scripts/check-round-overlap.py
 
+check-resume-flag-clause:
+	@python3 scripts/check-resume-flag-clause.py
+
 check-drive-ledger-writes:
 	@python3 scripts/check-drive-ledger-writes.py
 
@@ -162,6 +165,6 @@ test: check check-server-deps
 # a reader following the wrong directory gets no feedback that they did. `server/package.json`'s
 # own `start` script is `bun install --no-summary && node supervisor.mjs`, so `bun install`
 # inside `server/` works too.
-precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-target check-open-manager-resolution check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-drive-ledger-writes check-drive-audit-budget check-drive-unverifiable-paste test
+precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-target check-open-manager-resolution check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-ledger-writes check-drive-audit-budget check-drive-unverifiable-paste test
 
-.PHONY: default hooks check-versions check-changelog check-changelog-size check-changelog-unreleased-fold changelog-archive check-spawn-mode check-spawn-target check-open-manager-resolution check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-drive-audit-budget check-drive-unverifiable-paste check-manager-allowlist check check-server-deps test precommit
+.PHONY: default hooks check-versions check-changelog check-changelog-size check-changelog-unreleased-fold changelog-archive check-spawn-mode check-spawn-target check-open-manager-resolution check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-audit-budget check-drive-unverifiable-paste check-manager-allowlist check check-server-deps test precommit
