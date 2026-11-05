@@ -122,6 +122,42 @@ parked session has exited and nothing else survives to remember it.
 surfaces the row in every manager's open queue, so a missed round delays a resume and
 never strands it. Never let this step become the sole record that a task is parked.
 
+## Nudge a watcher past the park threshold
+
+The park rule is always loaded and was measured ignored: a session sat `watching` 31 min
+while a 12-min one beside it was legal. `agents/fleet-drive.md` excludes
+`parked-on-watcher` rows from nudge candidacy on purpose, so no other leg reaches this
+population. This leg is the enforcement point; `scripts/park-nudge.py` holds the
+selection, the suppression and the text, so the round runs it and does not re-derive it.
+
+```bash
+P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
+python3 "<vault>/.claude/scripts/session-activity.py" --json | python3 "$P/park-nudge.py"
+```
+
+⚠️ **The instrument is vault-local, not part of this plugin.** If
+`<vault>/.claude/scripts/session-activity.py` does not exist, print
+`park-nudge: unknown — instrument absent` and skip the leg. Never render that as
+`0 nudged`. Exit **2** prints `park-nudge: unknown — …`; render it verbatim.
+
+**Act on each `NUDGE <session-id> quiet <N>m (<name>) :: <message>` line.** Send the
+text after `::` with `SendMessage(to: <the roster name for that session id>, message:
+<text>)`. ⚠️ **Do not apply the drive leg's busy/`shell` skip here.** A `watching` row is
+`shell` because its watcher is running, and that watcher is what the nudge targets. A
+send that fails, or a session with no roster name (headless, pane-less), is reported as
+`undelivered: <id8>`. The ledger already counts it as nudged, so it is not retried every
+tick. Never park, kill or exit the session yourself: the nudge asks, and the session acts.
+
+The selection is `bucket == watching` AND quiet strictly above `park-event.py threshold`.
+`gated`, `working`, `idle` and `unclassified` rows never qualify, whatever their quiet.
+Suppression is one nudge per watching episode, keyed on the session id and never on the
+quiet minutes, which grow every round. Leaving the bucket, leaving the fleet, or a quiet
+that dropped re-arms it.
+
+**Report the line.** Print the `park-nudge:` summary verbatim
+(`<n> nudged · <s> suppressed · <w> within 15m · <m> watching · <l> live`) beside the
+other `unactioned:` counts.
+
 ## Resume a worker whose session died
 
 ⚠️ **This reverses `agents/fleet-drive.md`'s *"orphan → escalate, never nudge"*.** That note
