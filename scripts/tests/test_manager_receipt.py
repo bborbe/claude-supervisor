@@ -1065,8 +1065,8 @@ class FleetDebt(unittest.TestCase):
     def test_a_leg_scoped_to_re_arm_runs_while_the_digest_is_still_owed(self):
         # The measured defect, 2026-11-05: row 5b reached the gate with the arm paid
         # and the sweep reader still running, so the whole-round gate read
-        # `debt: digest` and skipped the keepalive leg every tick. The keepalive
-        # procedures never read the digest, so scoped to `re-arm` the leg runs.
+        # `debt: digest` and skipped the keepalive leg (2 of 25 gate calls). The
+        # keepalive procedures never read the digest, so scoped to `re-arm` it runs.
         self.skipped_round()
         rc, out = self.debt()
         self.assertEqual(rc, 12, out)  # the control: unscoped, the leg is stopped
