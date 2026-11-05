@@ -298,12 +298,42 @@ class Observer(StoreTestCase):
         self.assertIn("sender=unavailable(", self._lines()[0])
 
     def test_the_parents_report_wins_over_the_observers_inference(self):
-        """The trap runs before the shell exits, so its line is already on disk."""
-        self._run("append", "--pane", "2156", "--rc", "137", "--now", "t1")
-        self._run("observe", "--pane", "2156", "--pid", str(self._gone_pid()), "--foreground")
+        """The trap runs before the shell exits, so its line is already on disk.
+
+        The trap passes `--pid $$`, the pid the observer watches, so the end it wrote is
+        this run's end.
+        """
+        pid = str(self._gone_pid())
+        self._run("append", "--pane", "2156", "--pid", pid, "--rc", "137", "--now", "t1")
+        self._run("observe", "--pane", "2156", "--pid", pid, "--foreground")
         lines = self._lines()
         self.assertEqual(len(lines), 1)
         self.assertIn("kind=signalled kill", lines[0])
+
+    def test_an_earlier_runs_end_does_not_silence_this_run(self):
+        """A pane id is reused, so one log holds many runs.
+
+        Measured 2026-11-05 on pane 115: a 2026-10-28 `kind=exited` for another pid sat in
+        the file, the observer read it as this run's end, and a killed pane left no record.
+        """
+        self._run("append", "--pane", "2156", "--pid", "56446", "--rc", "0", "--now", "t0")
+        pid = str(self._gone_pid())
+        self._run("append", "--pane", "2156", "--kind", "spawn", "--pid", pid, "--now", "t1")
+        self._run("observe", "--pane", "2156", "--pid", pid, "--foreground")
+        lines = self._lines()
+        self.assertEqual(len(lines), 3)
+        self.assertIn("kind=unknown-end", lines[2])
+        self.assertIn(f"pid={pid}", lines[2])
+
+    def test_a_reused_pid_does_not_borrow_its_earlier_lifes_end(self):
+        """A `spawn` line for the pid starts a new run; an end before it belongs to the old one."""
+        pid = str(self._gone_pid())
+        self._run("append", "--pane", "2156", "--pid", pid, "--rc", "0", "--now", "t0")
+        self._run("append", "--pane", "2156", "--kind", "spawn", "--pid", pid, "--now", "t1")
+        self._run("observe", "--pane", "2156", "--pid", pid, "--foreground")
+        lines = self._lines()
+        self.assertEqual(len(lines), 3)
+        self.assertIn("kind=unknown-end", lines[2])
 
     def test_a_nonpositive_pid_is_refused(self):
         result = self._run("observe", "--pane", "2156", "--pid", "0", "--foreground")

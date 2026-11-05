@@ -250,16 +250,34 @@ def sender_for(kind):
     return "-"
 
 
-def has_end(path):
-    """Whether the record already carries an end line for this pane."""
+def has_end(path, pid):
+    """Whether the record already carries an end line for THIS run of the pane — `pid`'s.
+
+    Scoped to the pid, never to the file: a pane id is reused across sessions, so one log
+    holds many runs, and an end line from an earlier run must not silence this run's
+    observer. Measured 2026-11-05 on pane 115: the file carried a 2026-10-28 `kind=exited`
+    for pid 56446, so when pid 72157's pane was killed the observer saw "already ended",
+    wrote nothing and exited, and the kill left no record at all.
+
+    A `spawn` line for `pid` resets the scan, so a reused pid in the same file cannot borrow
+    an end from its earlier life. Every trap writer passes `--pid $$`, the same pid the
+    observer watches, so the parent's own report still wins.
+    """
+    pid = str(pid)
+    found = False
     try:
         with open(path, encoding="utf-8") as handle:
             for line in handle:
-                if parse_field(line, "kind") in END_KINDS:
-                    return True
+                if parse_field(line, "pid") != pid:
+                    continue
+                kind = parse_field(line, "kind")
+                if kind == KIND_SPAWN:
+                    found = False
+                elif kind in END_KINDS:
+                    found = True
     except FileNotFoundError:
         return False
-    return False
+    return found
 
 
 def alive(pid):
@@ -381,7 +399,7 @@ def cmd_observe(args):
     heartbeats = 0
     while True:
         if not alive(args.pid):
-            if not has_end(path):
+            if not has_end(path, args.pid):
                 append_line(
                     path,
                     format_line(
