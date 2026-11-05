@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **`session-scope.py` no longer drops a task's goal when `goals:` is a bare list item.** `_goals()` extracted `[[...]]` matches only, so `goals:` then `    - Some Goal` — and the plain scalar and nested list-of-list shapes — returned `[]`: `gate-owner-filter.py` then read a foreign page as `owner-unknown` instead of `foreign-goal:<goal>`, and a manager whose own task declared its goal that way never widened its scope, so its own workers' gates left its feed. `_goals()` now delegates to the shared `scripts/goals-declaration.py` `goal_names`, the reader `manager-predispatch.py`, `reset.py` and `topic-spawn.py` already use; the now-unused `_GOALS_BLOCK` regex is removed and `_task_links` keeps its wikilink reader. `test_session_scope.py` § `GoalsDeclarationShapes` feeds all four shapes to `_goals()` and runs a bare-item manager task through `load()` (`self_goals == ["Some Goal"]`); it failed on four assertions before the change.
+
 ## v0.238.5
 
 - docs: state that `hold` is never for a task waiting on an operator decision or answer. `docs/worker-session-states.md` § *Closed* carries the rule — such a task is `decision`, not `closed` — and names the status fix rather than a close; `commands/worker-drive.md` § *Park a clock-bound session* points at it from its "a deferred task is not `hold`" sentence. `scripts/budget-baseline.json` raises that file's entry 49673 → 49817 for the added pointer (deliberate growth; the file sat exactly at its ceiling).
