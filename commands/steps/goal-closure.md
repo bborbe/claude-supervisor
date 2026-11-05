@@ -22,9 +22,9 @@ For the subject, then each page of the tracked set:
 
 1. **Read it with the reader script — never a whole-page count:**
    ```bash
-   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/goal-closure-read.py --kind goal  "<path to the goal page>"
-   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/goal-closure-read.py --kind task  "<path to the task page>"
-   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/goal-closure-read.py --kind topic "<path to the topic page>"
+   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/goal-closure-read.py" --kind goal  "<path to the goal page>"
+   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/goal-closure-read.py" --kind task  "<path to the task page>"
+   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/goal-closure-read.py" --kind topic "<path to the topic page>"
    ```
    ⚠️ **The argument is a page PATH, not a name** — the reader opens it as a file and exits 2
    with `cannot read` on anything else. The resolution step prints the subject's path
@@ -98,7 +98,7 @@ For the subject, then each page of the tracked set:
    ⚠️ **Check the name first, with the script rather than with your own eye — and single-quote
    the check, which is the opposite of how the verb itself is quoted:**
    ```bash
-   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/closure-name-safe.py '<name>'
+   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/closure-name-safe.py" '<name>'
    ```
    ⚠️ **The single quotes are the gate.** Inside `"…"` the shell expands `$`, a backtick and `\`
    **before** the script runs, so a name carrying `$(…)` executes on the way in and the script
@@ -131,7 +131,7 @@ Once every page in the set has been examined, and **only** if the SUBJECT itself
 `CLOSE`:
 
 - **Goal branch** — report the verdict, record the stand-down with
-  `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py --stop --subject "<subject>" --branch goal`,
+  `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py" --stop --subject "<subject>" --branch goal`,
   and end the tick without re-arming. A loop that keeps arming on a completed subject reports
   work where there is none.
 - **Topic branch** — report the verdict and **hand off to the tail**: do not stop here, because
