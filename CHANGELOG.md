@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.239.1
 
 - fix: `session-exit-record.py observe` now records a killed pane on a reused pane id. `has_end()` scanned the whole `pane-<id>.log` for any end line, and pane ids are reused, so an end line left by an earlier session made the observer conclude the current run had already ended. It then wrote nothing and exited. Measured 2026-11-05: `wezterm cli kill-pane` on pane 115 (pid 72157) left no end line at all, because the file still held a 2026-10-28 `kind=exited` for pid 56446. The check now counts only end lines carrying the watched pid, written after that pid's last `spawn` line. Every trap writer passes `--pid $$`, so the trap's own report still wins. The log is also read with `errors="replace"`, because a single undecodable byte raised inside the detached observer and lost the end line the same way. Four new tests (an earlier run's end, another pid's end after this spawn, a reused pid, an undecodable byte) each fail against the old check and pass with the fix.
 
