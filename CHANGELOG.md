@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: a headless worker whose last `result` carries `num_turns: 0` now settles `status: error` with `error: zero-turn: …` and `result.zero_turn: true` instead of `done`, and the idle-worker end-of-life no longer stops a session on a zero-turn `result` — on resume the CLI's own `<task-notification>` for orphaned background agents settled as that zero-turn result ahead of the caller's queued prompt, the wrapper counted it against `pending_turns`, and the supervisor stopped the session before the prompt ran
+
 ## v0.240.2
 
 - fix: `round-readings.py` matches padded `[ 417]` and headless `[ hst]` gate rows through `gate-owner-filter.py`'s `feed_rows`, resolves `hst:<item id>` to its owning session from the attention store, and reads `unread` — never `clear` — when a `[   ?]` row, an unkeyed `[ hst]` row, a failed events-log read or an unresolved store key leaves a gate's owner unknown

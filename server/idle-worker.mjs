@@ -19,9 +19,17 @@
  * @param {object}  args
  * @param {object|null|undefined} args.session the wrapper's session record, or null when unreadable
  * @param {Array|null|undefined}  args.cards   the session's open attention cards, or null when the store was unreadable
+ * @param {object|null}           [args.lastResult] the worker's most recent captured `result`, if any
  * @returns {{end: boolean, reason: string}}
  */
-export function shouldEndIdleWorker({ session, cards } = {}) {
+export function shouldEndIdleWorker({ session, cards, lastResult = null } = {}) {
+  // ⚠️ A `result` carrying `num_turns: 0` closed NO turn this server sent. On resume the CLI
+  // injects its own `<task-notification>` for background agents the previous process orphaned,
+  // ahead of the caller's prompt; that synthetic input settles with a zero-turn `result`, which
+  // the wrapper counts against `pending_turns` (pkg/supervisor.go `case "result"`), so the record
+  // reads idle with nothing pending while the real prompt still sits in the CLI's queue.
+  // Ending here killed that prompt — measured 2026-11-05, agent_12 / agent_13.
+  if (lastResult && lastResult.num_turns === 0) return { end: false, reason: 'zero-turn-result' }
   if (!session || typeof session !== 'object') return { end: false, reason: 'unreadable-wrapper' }
   // ⚠️ `undefined` is not "no turn in flight" — it is a record this build does not understand.
   // Without this branch an older wrapper that omits either field would make every worker a

@@ -3017,12 +3017,15 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // Decide everything except the card check first, so an incomplete wrapper record is reported
     // before we spend an attention-store round trip on it — and is reported at all, because a
     // silent keep would let the idle-worker leak survive the fix that exists to remove it.
-    const pre = shouldEndIdleWorker({ session, cards: [] })
+    const pre = shouldEndIdleWorker({ session, cards: [], lastResult: current.result })
     if (pre.reason === 'wrapper-record-incomplete') {
       log(`WARNING: the wrapper's record for ${current.id} carries no state/pending_turns — the idle-worker end-of-life is a no-op for it until it does`)
       return
     }
-    if (!pre.end) return
+    if (!pre.end) {
+      if (pre.reason === 'zero-turn-result') log(`agent ${current.id}: zero-turn result — keeping the session so a queued prompt can still run`)
+      return
+    }
     // ⚠️ **A deliberately-absent store is NOT an unreadable one.** With
     // `SUPERVISOR_ATTENTION_STORE=off`, `config.attentionStoreUrl` is null and `fetchOpenCards`
     // returns null without issuing a request — which the predicate would read as
@@ -3033,7 +3036,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     const cards = config.attentionStoreUrl
       ? await fetchOpenCards({ storeUrl: config.attentionStoreUrl, sessionId: current.sessionId })
       : []
-    const verdict = shouldEndIdleWorker({ session, cards })
+    const verdict = shouldEndIdleWorker({ session, cards, lastResult: current.result })
     if (!verdict.end) {
       // The two keeps that explain a worker which is never reaped are logged; `not-idle` and
       // `turn-in-flight` are the ordinary mid-turn path and would log on every result.

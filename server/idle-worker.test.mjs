@@ -89,3 +89,12 @@ test('an unreadable attention store keeps the worker', () => {
     assert.equal(verdict.reason, 'unreadable-cards')
   }
 })
+
+test('a zero-turn last result keeps the worker even when the wrapper reads idle with nothing pending', () => {
+  const session = { state: 'idle', pending_turns: 0 }
+  assert.deepEqual(
+    shouldEndIdleWorker({ session, cards: [], lastResult: { num_turns: 0 } }),
+    { end: false, reason: 'zero-turn-result' },
+  )
+  assert.equal(shouldEndIdleWorker({ session, cards: [], lastResult: { num_turns: 3 } }).end, true)
+})
