@@ -1,0 +1,8 @@
+Needs you (2)
+  [ hst]     1m  headless-worker                                     awaiting-operator · permission: Bash: date '+%Y-%m-%dT%H:%M:
+         burn:/tmp · Bash
+         headless — no pane to jump to; answer with the command below
+         answer: python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/attention-answer.py answer f712443d00000000000000000000aaaa --decision allow|deny
+  [ 417]     2m  tab-worker                                          awaiting-operator · permission: Bash: ls
+         burn:/tmp · Bash
+         wezterm cli activate-pane --pane-id 417
