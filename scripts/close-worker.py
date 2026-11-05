@@ -35,6 +35,9 @@ Eight refusals, each exit 1 with a stable reason token as the first line of outp
                       restart, nothing comes back to finish the work.
   gate-held           the target's transcript tail carries an unanswered `👤 You:` gate.
                       Closing it discards a question the operator never answered.
+                      A pane-less target whose gate no channel can answer classifies
+                      `gate-unanswerable` instead (see `restart-precheck.py`) and is
+                      closed — holding it would keep the slot until the process dies.
   task-unresolved     no task file in the session's vault carries this session id as
                       `claude_session_id` — and no goal or topic page does either (see
                       the goal/topic anchor below). Absent evidence is not evidence of a

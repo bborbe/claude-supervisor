@@ -30,6 +30,15 @@ Classifications:
   gate-held      the transcript tail carries a real gate. The resumed pane replays it,
                  so nothing is typed — typing into a pane showing `Enter to select`
                  turns any keystroke into a menu selection.
+  gate-unanswerable
+                 a headless (`sdk-cli`, no pane) session whose closer names no channel
+                 an answer can still travel by. A headless session's only channel is an
+                 attention-store card, so its gate is answerable only when the closer
+                 names a full store id whose card is `open`, or whose answer the store
+                 records as `delivered`. Everything else — a truncated id, a card closed
+                 without an answer, an answer never delivered, a command or pane with no
+                 route back — is a gate nobody can release; holding it only keeps the
+                 slot forever. ⚠️ Fails closed: an unreadable store keeps `gate-held`.
   undetermined   the transcript could not be read. Fail closed: nothing is typed.
 
 Exit codes: 0 classified, 1 refusal (`unknown-session-id`, `ambiguous-pid`,
@@ -41,11 +50,102 @@ makes it safe to run as a dry check on any session.
 """
 import argparse
 import importlib.util
+import json
 import os
+import re
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# The store the board answers through — the same env names `attention-ask.py` reads.
+STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
+STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "5"))
+
+# A full store item id. ⚠️ Shape only: `attention-ask.py` `STORE_ITEM_ID_LEN` is 32 and
+# `poll` refuses anything shorter, so a shorter hex run is not a channel even when a
+# prefix lookup would resolve it.
+STORE_ID_RE = re.compile(r"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])")
+
+HEADLESS_ENTRYPOINT = "sdk-cli"
+
+
+class StoreUnreadable(Exception):
+    """The store could not answer — the caller must fail closed."""
+
+
+def store_get(path):
+    """GET one store path → parsed JSON, `None` on 404, `StoreUnreadable` otherwise."""
+    headers = {}
+    token = os.environ.get("ATTENTION_STORE_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(f"{STORE}{path}", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=STORE_TIMEOUT) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as err:
+        if err.code == 404:
+            return None
+        raise StoreUnreadable(f"store returned {err.code}") from err
+    except (urllib.error.URLError, OSError, ValueError) as err:
+        raise StoreUnreadable(str(err)) from err
+
+
+def card_is_live_channel(item_id, get=store_get):
+    """True when an answer can still reach the asker through this card.
+
+    Open → the board can still answer it. Answered → only when the store records the
+    answer as `delivered`: an answered record with no observed delivery is the
+    `attention-answer.py` trap whose `DELIVERY: supervisor poll` line names a route
+    without observing it, so the store reads answered and the worker never hears it.
+    Closed without an answer → a clear, not an answer (`answered-attribution.py`).
+    Absent → nothing left to answer.
+    """
+    item = get(f"/api/1.0/attention/{item_id}")
+    if not item:
+        return False
+    if item.get("state") == "open":
+        return True
+    if not item.get("answered_at"):
+        return False
+    report = get(f"/api/1.0/attention/{item_id}/attempt") or {}
+    return report.get("status") == "delivered"
+
+
+def gate_is_answerable(rec, closer, get=store_get):
+    """Whether any channel can still release `closer`'s gate for session `rec`.
+
+    A session with a pane is always answerable — the operator can type into it; that is
+    the behaviour before this check and it is deliberately unchanged. A headless session
+    has only the store.
+    """
+    if (rec.get("entrypoint") or "") != HEADLESS_ENTRYPOINT:
+        return True
+    ids = STORE_ID_RE.findall((closer or "").lower())
+    try:
+        if has_open_own_card(rec.get("sessionId"), get):
+            return True
+        return any(card_is_live_channel(i, get) for i in ids)
+    except StoreUnreadable:
+        return True
+
+
+def has_open_own_card(sid, get=store_get):
+    """Whether the store holds an open card this session produced.
+
+    ⚠️ The `Stop` hook mirrors every waiting closer into a card produced by the session
+    itself, and that card's id is never in the closer text. So a headless closer naming
+    no id can still be answerable — through its own mirror. `GET /api/1.0/attention`
+    returns open items only; it ignores a `producer_id` filter, so the match is here.
+    """
+    if not sid:
+        return False
+    listing = get("/api/1.0/attention?limit=1000")
+    items = listing if isinstance(listing, list) else (listing or {}).get("items") or []
+    return any(i.get("producer_id") == sid and i.get("state", "open") == "open" for i in items)
 
 SESSIONS_DIR = os.path.expanduser(
     os.environ.get("SUPERVISOR_SESSIONS_DIR") or "~/.claude/sessions"
@@ -130,7 +230,7 @@ def worktree_probe(cwd):
     return ("dirty" if tracked else "clean"), tracked, untracked
 
 
-def classify(rec, wnm):
+def classify(rec, wnm, get=store_get):
     """The cause-of-death branch, derived from the transcript tail.
 
     `undetermined` is checked FIRST and on its own signal — an absent transcript — so
@@ -151,6 +251,8 @@ def classify(rec, wnm):
     closer = wnm.closer_from_transcript({"session_id": sid})
     if not closer or closer.startswith("nothing") or wnm.is_parked_verb(closer):
         return "mid-work", closer or "(none)"
+    if not gate_is_answerable(rec, closer, get):
+        return "gate-unanswerable", closer
     return "gate-held", closer
 
 
