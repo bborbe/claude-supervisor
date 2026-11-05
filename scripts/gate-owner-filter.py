@@ -651,6 +651,11 @@ def gate_fingerprint(pane, items):
     text changes exactly when the gate does: a new question on the same pane is a
     new gate, and a re-render of the same question is not.
     """
+    # A headless key IS the store item id, so it already names exactly one gate.
+    # Its text comes from a per-poll store read that may fail, and mixing it in
+    # would flip the fingerprint on every flap and re-wake the manager each time.
+    if is_headless_key(pane):
+        return hashlib.sha256(str(pane).encode("utf-8")).hexdigest()[:16]
     record = newest_item_for_pane(pane, items)
     payload = f"{pane}\x1f{normalise(gate_text(record))}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
@@ -923,19 +928,99 @@ def feed_rows(stream):
     minutes, 2 real.** The mark is carried, never re-derived: it is a property
     of the read that produced the row, and `--pane` callers have no line to
     read it from.
+
+    ⚠️ **A pane-less headless row is a gate too, keyed on its store item id.**
+    `who-needs-me.py` renders a headless worker's answerable gate `[ hst]` — a
+    headless worker owns no pane by construction — and the digit-only match used
+    to skip it, so the filter read `gates: 0` over a feed carrying the gate and
+    the armed watcher never woke. Measured 2026-11-03 01:06: 11 of 13 live gates
+    were `[ hst]`. The row's own identity is the store item id its `answer:`
+    continuation line names (`hst` is rendered ONLY when that line exists), so
+    the key is `hst:<store item id>` — never a pane, which this row cannot have.
+    `headless_items` resolves the session behind that key from the store.
     """
     import re
 
+    lines = list(stream)
     out, marks = [], {}
-    for line in stream:
+    for index, line in enumerate(lines):
         match = re.match(r"\s*\[\s*(\d+)\s*\]", line)
-        if not match:
+        if match:
+            pane = match.group(1)
+        elif re.match(r"\s*\[\s*hst\s*\]", line):
+            pane = headless_key(lines, index)
+            if pane is None:
+                continue
+        else:
             continue
-        pane = match.group(1)
         if pane not in marks:
             marks[pane] = REPLAY_MARK in line
             out.append(pane)
     return [(pane, marks[pane]) for pane in out]
+
+
+HEADLESS_PREFIX = "hst:"
+
+
+def headless_key(lines, index):
+    """`hst:<store item id>` for the `[ hst]` row at `lines[index]`, or None.
+
+    Reads the row's continuation lines only — up to the next `[...]` row marker —
+    so an `answer:` line can never be borrowed from a neighbouring row.
+    """
+    import re
+
+    for line in lines[index + 1:]:
+        if re.match(r"\s*\[", line):
+            return None
+        match = re.search(r"attention-answer\.py answer (\S+)", line)
+        if match:
+            return HEADLESS_PREFIX + match.group(1)
+    return None
+
+
+def is_headless_key(pane):
+    return str(pane).startswith(HEADLESS_PREFIX)
+
+
+def headless_items(keys, endpoint=None):
+    """Synthetic event-log records for the `hst:<id>` keys, read from the store.
+
+    The second read of the attention store this route costs, made only when the
+    feed carried a headless row. Each record carries `pane: hst:<id>` so the
+    pane-keyed hops (`session_for_pane`, `gate_fingerprint`) resolve it unchanged:
+    `session_id` from the store's `producer_id`, the text from its `payload`.
+
+    ⚠️ **An unreachable store fails OPEN** — no record, so the session reads
+    `unowned` and the gate EMITS. Silence is the failure this route removes; a
+    store read that failed must not reintroduce it.
+    """
+    wanted = {str(k)[len(HEADLESS_PREFIX):] for k in keys if is_headless_key(k)}
+    if not wanted:
+        return []
+    import urllib.request
+
+    base = (endpoint or os.environ.get("ATTENTION_STORE_URL") or "http://localhost:18080").rstrip("/")
+    try:
+        with urllib.request.urlopen(base + "/api/1.0/attention", timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8") or "[]")
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    out, now = [], time.time()
+    for item in data:
+        if not isinstance(item, dict) or item.get("item_id") not in wanted:
+            continue
+        out.append(
+            {
+                "pane": HEADLESS_PREFIX + item["item_id"],
+                "session_id": item.get("producer_id") or "",
+                "detail": item.get("payload") or "",
+                "ts": now,
+            }
+        )
+    return out
 
 
 def panes_from_feed(stream):
@@ -1061,7 +1146,15 @@ def render(rows, args, new_panes=None):
                 continue
             if new_panes is not None and r["pane"] not in new_panes:
                 continue
-            print(f"{r['pane']}{'  ' + REPLAY_MARK if r['replayed'] else ''}")
+            # A headless key names the store item but no pane to jump to, so the
+            # wake line also names the session it belongs to — the one handle the
+            # manager can act on. A pane row renders exactly as before.
+            who = (
+                f"  session={r['session_id'] or 'unresolved'}"
+                if is_headless_key(r["pane"])
+                else ""
+            )
+            print(f"{r['pane']}{who}{'  ' + REPLAY_MARK if r['replayed'] else ''}")
         return
 
     for r in rows:
@@ -1118,6 +1211,7 @@ def one_shot(panes, args, ledger, live, items, claims, missing=(), scope=None):
     feed. Naming it separates "the feed does not carry it" from "the feed was never
     consulted" — the defect this flag carried.
     """
+    items = items + headless_items([pane for pane, _ in panes], args.endpoint)
     rows = evaluate_panes(panes, ledger, live, items, args.self_id, claims, scope)
     render(rows, args)
     if args.explain:
@@ -1238,11 +1332,15 @@ def poll(args, items, scope=None):
         # ordering matters too: the marker is checked before the status, because
         # a refusal is the more specific verdict and `who-needs-me.py` exits
         # non-zero on that path as well.
+        feed = feed_rows(lines)
+        # Headless rows resolve through the store, re-read per poll: a headless gate is
+        # new by definition, so the arm-time `items` snapshot never carries it.
+        poll_items = items + headless_items([pane for pane, _ in feed], args.endpoint)
         rows = evaluate_panes(
-            feed_rows(lines),
+            feed,
             load_ledger(args.endpoint),
             live_ids(args.registry_dir),
-            items,
+            poll_items,
             args.self_id,
             load_claims(args.claims_file),
             scope,
@@ -1255,7 +1353,7 @@ def poll(args, items, scope=None):
         # open against a loop that already spawns a producer per poll.
         now = time.time()
         new_panes, next_state = emit_decisions(
-            kept, load_feed_state(state_path), items, now, args.reemit_after
+            kept, load_feed_state(state_path), poll_items, now, args.reemit_after
         )
         # ⚠️ A store this arm cannot write is reported ONCE, never swallowed.
         # Silent failure here is the worst shape available: the arm looks healthy,
