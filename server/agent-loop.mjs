@@ -51,6 +51,18 @@ import { config } from './config.mjs'
 // test with a synthetic stream and no filesystem.
 const NO_HEARTBEAT = { start() {}, stop() {} }
 
+// The reason a zero-turn worker settles `error`, exported so a manager-side check and the tests
+// match the same literal.
+export const ZERO_TURN_ERROR = 'zero-turn: the session produced a result with num_turns 0 — no model turn ran, the prompt was not executed'
+
+const isZeroTurn = (result) => !result.is_error && result.num_turns === 0
+
+const markZeroTurn = (agent) => {
+  agent.status = 'error'
+  agent.error = ZERO_TURN_ERROR
+  agent.result = { ...agent.result, zero_turn: true }
+}
+
 export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_HEARTBEAT, onTurnComplete = null }) {
   try {
     for await (const message of q) {
@@ -106,11 +118,18 @@ export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_
     // settle.
     if (agent.status === 'running') agent.status = 'done'
     if (agent.result) {
-      agent.status = agent.result.is_error ? 'error' : 'done'
+      // ⚠️ **A zero-turn result is never success.** `num_turns: 0` means the model ran no turn —
+      // on resume, the CLI's own `<task-notification>` for orphaned background agents settles that
+      // way while the caller's prompt is still queued behind it (measured 2026-11-05, agent_12 /
+      // agent_13). Reporting it `done` let a manager record a resume that did nothing as one that
+      // acted. It settles `error` with a named reason instead, so `status` alone tells them apart.
+      if (isZeroTurn(agent.result)) markZeroTurn(agent)
+      else agent.status = agent.result.is_error ? 'error' : 'done'
       writeLedger(agent, {
         status: agent.status,
         ended_at: new Date().toISOString(),
         result: agent.result,
+        ...(agent.error ? { error: agent.error } : {}),
       })
     }
   } catch (error) {
@@ -134,7 +153,7 @@ export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_
     // `done` would resurrect the exact "a lag looks like a finished worker" defect the adapter was
     // built to prevent, which is a worse failure than the `error` it replaces.
     const terminal = { ended_at: new Date().toISOString() }
-    const turnClosed = agent.result && !agent.result.is_error && error?.name !== 'StreamLaggedError'
+    const turnClosed = agent.result && !isZeroTurn(agent.result) && !agent.result.is_error && error?.name !== 'StreamLaggedError'
     if (turnClosed) {
       agent.status = 'done'
       writeLedger(agent, { ...terminal, status: 'done', result: agent.result })

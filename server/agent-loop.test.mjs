@@ -250,3 +250,51 @@ test('a throwing turn-complete hook does not settle the worker as error', async 
 
   assert.equal(agent.status, 'done', 'a hook bug must not be recorded as a worker error — the turn completed')
 })
+
+// Zero-turn resume (measured 2026-11-05, agent_12 / agent_13): the CLI's own
+// `<task-notification>` for orphaned background agents settled with a `result` carrying
+// `num_turns: 0` and an empty result, and the worker read `done` though no turn ran.
+test('a stream whose last result has num_turns 0 settles error, never done', async () => {
+  const { ZERO_TURN_ERROR } = await import('./agent-loop.mjs')
+  const agent = makeAgent()
+  const ledgerCalls = []
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-z' }
+    yield { type: 'user', message: { content: '<task-notification>…</task-notification>' } }
+    yield { type: 'result', subtype: 'success', is_error: false, result: '', num_turns: 0, permission_denials: [] }
+  }
+  await runAgentLoop({ q: stream(), agent, writeLedger: (...a) => { ledgerCalls.push(a); return {} }, log: () => {} })
+  assert.equal(agent.status, 'error')
+  assert.equal(agent.error, ZERO_TURN_ERROR)
+  assert.equal(agent.result.zero_turn, true)
+  const terminal = ledgerCalls.at(-1)[1]
+  assert.equal(terminal.status, 'error')
+  assert.equal(terminal.error, ZERO_TURN_ERROR)
+})
+
+test('positive control: a resume whose last result ran turns still settles done', async () => {
+  const agent = makeAgent()
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-p' }
+    yield { type: 'result', subtype: 'success', is_error: false, result: '', num_turns: 0, permission_denials: [] }
+    yield { type: 'assistant', message: { content: 'working' } }
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'did it', num_turns: 4, permission_denials: [] }
+  }
+  await runAgentLoop({ q: stream(), agent, writeLedger: () => ({}), log: () => {} })
+  assert.equal(agent.status, 'done')
+  assert.equal(agent.error, undefined)
+  assert.equal(agent.result.zero_turn, undefined)
+})
+
+test('a zero-turn result followed by a stream throw is not read as a completed turn', async () => {
+  const agent = makeAgent()
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-t' }
+    yield { type: 'result', subtype: 'success', is_error: false, result: '', num_turns: 0, permission_denials: [] }
+    throw new Error('socket closed')
+  }
+  const ledgerCalls = []
+  await runAgentLoop({ q: stream(), agent, writeLedger: (...a) => { ledgerCalls.push(a); return {} }, log: () => {} })
+  assert.equal(agent.status, 'error')
+  assert.equal(ledgerCalls.at(-1)[1].status, 'error')
+})

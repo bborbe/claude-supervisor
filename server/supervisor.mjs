@@ -3006,6 +3006,8 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // `question` is waiting on a manager; a worker with an open attention card is waiting on a
   // person. Neither is finished, and stopping either would orphan exactly the card this whole
   // task exists to protect.
+  // How long a session whose last result ran zero turns is kept for a queued prompt to start.
+  const ZERO_TURN_GRACE_MS = 120_000
   const endWorkerIfIdle = async (current) => {
     let session
     try {
@@ -3017,12 +3019,28 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // Decide everything except the card check first, so an incomplete wrapper record is reported
     // before we spend an attention-store round trip on it — and is reported at all, because a
     // silent keep would let the idle-worker leak survive the fix that exists to remove it.
-    const pre = shouldEndIdleWorker({ session, cards: [] })
+    const pre = shouldEndIdleWorker({ session, cards: [], lastResult: current.result })
     if (pre.reason === 'wrapper-record-incomplete') {
       log(`WARNING: the wrapper's record for ${current.id} carries no state/pending_turns — the idle-worker end-of-life is a no-op for it until it does`)
       return
     }
-    if (!pre.end) return
+    if (!pre.end) {
+      if (pre.reason === 'zero-turn-result') {
+        // Bounded keep: give a queued prompt the grace window to start. If no newer result has
+        // replaced this one by then, the session really did nothing — stop it, so the stream ends
+        // and the loop settles `error: zero-turn` instead of leaking a process that reads `running`.
+        const zeroTurnResult = current.result
+        log(`WARNING: agent ${current.id}: zero-turn result — keeping the session ${ZERO_TURN_GRACE_MS} ms so a queued prompt can still run`)
+        setTimeout(() => {
+          if (current.result !== zeroTurnResult || current.status !== 'running') return
+          log(`WARNING: agent ${current.id}: still zero-turn after ${ZERO_TURN_GRACE_MS} ms — stopping the session`)
+          stopWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id }).catch((error) => {
+            log(`WARNING: could not stop zero-turn ${current.id}: ${error.message}`)
+          })
+        }, ZERO_TURN_GRACE_MS).unref?.()
+      }
+      return
+    }
     // ⚠️ **A deliberately-absent store is NOT an unreadable one.** With
     // `SUPERVISOR_ATTENTION_STORE=off`, `config.attentionStoreUrl` is null and `fetchOpenCards`
     // returns null without issuing a request — which the predicate would read as
@@ -3033,7 +3051,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     const cards = config.attentionStoreUrl
       ? await fetchOpenCards({ storeUrl: config.attentionStoreUrl, sessionId: current.sessionId })
       : []
-    const verdict = shouldEndIdleWorker({ session, cards })
+    const verdict = shouldEndIdleWorker({ session, cards, lastResult: current.result })
     if (!verdict.end) {
       // The two keeps that explain a worker which is never reaped are logged; `not-idle` and
       // `turn-in-flight` are the ordinary mid-turn path and would log on every result.
