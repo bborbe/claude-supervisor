@@ -1,7 +1,8 @@
 ---
-description: One pass over every live Claude Code session — classify each into CLOSED / WORKING / EXTERNAL / OPERATOR / STUCK / LIVE-IDLE HEADLESS, close the finished (headless workers included, via `close-worker.py`), drive everything that is not genuinely blocked on something outside the fleet, post a card for every question that has none, and hand the operator only what only they can release. Ends by re-sweeping and asserting every session is working, closed, or parked on a named producer or an open card — with the stuck, uncarded and finished-open counts all zero.
+description: One pass over every live Claude Code session — classify each into CLOSED / WORKING / EXTERNAL / OPERATOR / STUCK / LIVE-IDLE HEADLESS, close the finished (headless workers included, via `close-worker.py`), drive everything that is not genuinely blocked on something outside the fleet, post a card for every question that has none, and hand the operator only what only they can release. Ends by re-sweeping and asserting all five green conditions — zero stuck, zero uncarded, zero finished-but-open, zero no-loop, and every live session accounted for.
 allowed-tools:
   - Read
+  - Skill
   - ListAgents
   - SendMessage
   - mcp__supervisor__agent_status

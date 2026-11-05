@@ -96,8 +96,8 @@ carrying runnable work and no loop. Terminal subjects and auto-quiet stand-downs
 separately on the managers line and never make the verdict red. A run that reports a finished
 goal as "manager without a loop" has replaced one wrong number with another.
 
-When any of the four is non-zero, the same block prints with the failure list instead of the
-green line:
+When any of the four zero-counters is non-zero, **or `accounted for` ≠ `sessions`**, the same
+block prints with the failure list instead of the green line:
 
 ```
   RESULT: ⚠️ 3 THINGS OFF
