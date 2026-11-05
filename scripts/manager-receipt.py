@@ -715,11 +715,10 @@ def debt(topic: str, branch: str = "", now: float = None, only=None) -> int:
     ⚠️ **`only` scopes the GATE, never the record.** A leg passes the steps it actually
     consumes, and only those can stop it; the debt file is still rewritten with every
     step the round owes, so `--check` and the other gated legs see exactly what they
-    saw before. Measured 2026-11-05 on the Fleet Manager: row 5b's keepalive leg
-    gated on the whole round's debt, and the round reached it while the sweep reader
-    was still running in the background — `debt: digest`, exit 12 at 06:57:39, the
-    digest recorded at 07:05:35 — so the leg skipped every tick and no parked worker
-    was resumed. The keepalive procedures read `park-event.py`, `worker-keepalive.py`
+    saw before. Measured 2026-11-05 on the Fleet Manager: 2 of 25 keepalive gate
+    calls exited 12 on `debt: digest` because the round reached row 5b while the
+    sweep reader was still running in the background (06:57:39; digest recorded at
+    07:05:35). The keepalive procedures read `park-event.py`, `worker-keepalive.py`
     and `topic-keepalive.py`, never the digest, so a digest owed is no reason to skip
     them.
 
