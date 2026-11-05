@@ -203,6 +203,12 @@ state does not survive between `Bash` calls), so it would expand empty, the glob
 `~/.claude/projects/*/.jsonl`, match nothing, and every headless row would print `(no closer)`
 — a clean-looking sweep that read nothing.
 
+⚠️ **Open the transcript in BINARY, never text mode.** `TextIOWrapper` rejects a nonzero
+end-relative seek with `io.UnsupportedOperation: can't do nonzero end-relative seeks`, so the
+text-mode form of this read raised on **exactly the transcripts the size guard selects** — every
+long-running headless worker, the whole population 3.2d exists to classify — and those rows ended
+the step unread. Read bytes, seek, decode; `scripts/fleet-sessions.py:76-80` does the same.
+
 ```bash
 python3 - '<session-id>' <<'PY'
 import json,glob,os,re,sys
@@ -210,18 +216,19 @@ sid=sys.argv[1]
 TAIL=256*1024          # the repo's own agent_status bound — transcripts reach MBs
 tail=None
 for p in glob.glob(os.path.expanduser(f"~/.claude/projects/*/{sid}.jsonl")):
-    with open(p,errors="ignore") as f:
+    with open(p,"rb") as f:                       # binary: a text file rejects the seek below
         if os.path.getsize(p)>TAIL:
             f.seek(-TAIL,os.SEEK_END); f.readline()   # drop the partial first line
-        for line in f:
-            try: d=json.loads(line)
-            except Exception: continue
-            if not isinstance(d,dict) or d.get("type")!="assistant": continue
-            c=(d.get("message") or {}).get("content")
-            if isinstance(c,list):
-                for b in c:
-                    if not isinstance(b,dict): continue
-                    if b.get("type")=="text" and (b.get("text") or "").strip(): tail=b["text"]
+        lines=f.read().decode("utf-8","replace").splitlines()
+    for line in lines:
+        try: d=json.loads(line)
+        except Exception: continue
+        if not isinstance(d,dict) or d.get("type")!="assistant": continue
+        c=(d.get("message") or {}).get("content")
+        if isinstance(c,list):
+            for b in c:
+                if not isinstance(b,dict): continue
+                if b.get("type")=="text" and (b.get("text") or "").strip(): tail=b["text"]
 m=[l.strip() for l in (tail or "").splitlines() if re.search(r"👤 You:|⏰ Next:|⏰ Ends:|⚪ DONE", l)]
 print("\n".join(m[-2:]) or "(no closer)")
 PY
