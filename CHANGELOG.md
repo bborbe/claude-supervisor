@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.238.5
 
 - docs: state that `hold` is never for a task waiting on an operator decision or answer. `docs/worker-session-states.md` § *Closed* carries the rule — such a task is `decision`, not `closed` — and names the status fix rather than a close; `commands/worker-drive.md` § *Park a clock-bound session* points at it from its "a deferred task is not `hold`" sentence. `scripts/budget-baseline.json` raises that file's entry 49673 → 49817 for the added pointer (deliberate growth; the file sat exactly at its ceiling).
 
