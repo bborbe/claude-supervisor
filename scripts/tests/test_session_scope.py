@@ -245,6 +245,47 @@ class GoalsBlockAsLastFrontmatterKey(unittest.TestCase):
             vault.close()
 
 
+class GoalsDeclarationShapes(unittest.TestCase):
+    """Every `goals:` shape the vault writes must name its goal.
+
+    `_goals()` used to extract `[[...]]` matches only, so a bare list item
+    (`goals:` then `    - Some Goal`) yielded `[]` with no error: a foreign page then named
+    no owner (`owner-unknown`) and a manager whose own task declared the goal that way never
+    widened its scope, so its own workers' gates left the feed it exists to see. The plain
+    scalar and the nested list-of-list were dropped the same way. The parsing now belongs to
+    `scripts/goals-declaration.py`; these cases pin that `_goals()` reaches it.
+    """
+
+    SHAPES = {
+        "wikilink list": "goals:\n    - '[[Some Goal]]'\n",
+        "plain scalar": "goals: Some Goal\n",
+        "nested list-of-list": "goals:\n    - - Some Goal\n",
+        "plain-list item": "goals:\n    - Some Goal\n",
+    }
+
+    def test_every_shape_yields_the_bare_goal_name(self):
+        for label, front in self.SHAPES.items():
+            with self.subTest(shape=label):
+                self.assertEqual(ss._goals(front), ["Some Goal"])
+
+    def test_a_task_page_manager_whose_goals_is_a_bare_item_scopes_its_goal(self):
+        """End to end through `load()`: the bare item widens the manager's own scope."""
+        vault = Vault()
+        try:
+            vault.goal(
+                "Some Goal",
+                "claude_session_id: 12341234-1234-4123-8123-123412341234\n",
+                ["Manager Task", "Own Task"],
+            )
+            vault.task("Manager Task", f"claude_session_id: {ME}\ngoals:\n    - Some Goal\n")
+            vault.task("Own Task", f"claude_session_id: {LAST_KEY_OWN}\n")
+            scope = ss.load(ME, [vault.root])
+            self.assertEqual(scope.self_goals, ["Some Goal"])
+            self.assertEqual(scope.exclusion(LAST_KEY_OWN, ME), (False, ""))
+        finally:
+            vault.close()
+
+
 class Unresolved(unittest.TestCase):
     """A scope that cannot be read must exclude NOTHING — never "nothing is mine"."""
 
