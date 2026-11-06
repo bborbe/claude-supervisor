@@ -207,13 +207,13 @@ def lex(cmd):
         if cmd.startswith(("$(", "<(", ">("), i):
             inner, i = _read_balanced(cmd, i + 2, "(", ")")
             nested.append(inner)
-            buf.append("__SUBST__")
+            buf.append("$__SUBST__")
             at_word_start = False
             continue
         if c == "`":
             k = _find_backtick(cmd, i + 1)
             nested.append(cmd[i + 1:k])
-            buf.append("__SUBST__")
+            buf.append("$__SUBST__")
             i = k + 1
             at_word_start = False
             continue
@@ -343,7 +343,7 @@ _DEV_WRAPPERS = {"kubectlnukedev", "kubectldev", "kubectlsmalldev", "kubectlquan
                  "kubectlsun", "kubectlstaging"}
 _SECRET_PATH = re.compile(
     r"(^|[/~\s=])(\.ssh/|\.netrc\b|\.aws/|\.config/gh\b|\.kube/config\b|\.env(\.[\w-]+)?$|"
-    r"id_(rsa|ed25519|ecdsa)\b|\.npmrc\b|\.pypirc\b|\.docker/config\.json\b|\.gnupg/)")
+    r"id_(rsa|ed25519|ecdsa)\b|\.npmrc\b|\.git-credentials\b|\.pgpass\b|\.pypirc\b|\.docker/config\.json\b|\.gnupg/)")
 _PROTECTED_REF = re.compile(r"^(?:[^:]*:)?(refs/heads/)?(master|main)$")
 
 
@@ -713,7 +713,10 @@ def classify_bash(cmd, depth=0):
                 return "prod"
             continue
         head = argv[0]
-        if head in _NOOP_HEADS:
+        if head in _NOOP_HEADS:  # `for f in ~/.netrc` — the operands still feed the loop body
+            form = _prod(env, argv[1:]) or ("secret" if any(_SECRET_PATH.search(a) for a in argv[1:]) else None)
+            if form:
+                return form
             continue
         if head.startswith("$") or "__SUBST__" in head:
             raise Unverifiable(f"command word is an expansion: {head!r}")
@@ -771,7 +774,7 @@ def classify_bash(cmd, depth=0):
 # Matched with or without a leading directory, so a relative `.claude/settings.json` counts.
 _SETTINGS = re.compile(
     r"(^|/)\.claude/(settings(\.local)?\.json$|hooks/|plugins/)|(^|/)\.claude\.json$")
-_WRITE_CMDS = {"cp", "mv", "tee", "ln", "install", "rsync", "chmod", "chown", "truncate", "touch"}
+_WRITE_CMDS = {"cp", "mv", "tee", "uniq", "ln", "install", "rsync", "chmod", "chown", "truncate", "touch"}
 
 
 def classify_tool(tool, tool_input):
@@ -798,7 +801,7 @@ def classify_tool(tool, tool_input):
         low = tool.lower()
         if "trading-prod" in low and re.search(r"(update|trigger|create|close|replay)", low):
             return "live-trade"
-        if re.search(r"(send|post|reply|publish|delete|transition|addcomment|create(issue|page|comment))", low):
+        if re.search(r"(send|post|reply|publish|merge|push|delete|transition|addcomment|create(issue|page|comment))", low):
             return "publish"
     return None
 
@@ -807,7 +810,7 @@ def classify_tool(tool, tool_input):
 # Allowlist: the same whole-token prefix match server/manager-allowlist.mjs performs.
 # --------------------------------------------------------------------------------------------
 
-_SHELL_META = re.compile(r"[;&|`<>\n(){}]")
+_SHELL_META = re.compile(r"[;&|`<>\n(){}*?\[\]$'\"\\]")  # + globs/expansion/quoting: the shell rewrites them
 _NON_SHELL_WS = re.compile(r"[^\S \t]")
 
 
