@@ -73,7 +73,7 @@ class KeeperBase(unittest.TestCase):
         )
         # Every ABSENT tick now asks the board for an answer. Unpatched, a test would poll the
         # LIVE attention store with a fixture card id — and a resume could never be ruled out.
-        fk.answer_of = lambda item: None
+        fk.answer_of = lambda item: (None, None)
         fk.death_corroborated = lambda sid, now: (False, "not corroborated in a test", False)
         fk.resume_absent_session = lambda sid: self.fail("resume reached from an unpatched test")
         self.register_fleet()
@@ -299,6 +299,12 @@ class NoKillPathTest(unittest.TestCase):
         self.assertIsInstance(argv, ast.List)
         self.assertEqual(["sys.executable", "script", "sid", "'--absent'"],
                          [ast.unparse(e) for e in argv.elts])
+        # ...and `script` must BE restart-worker.py: checking the name alone would pass
+        # `script = os.path.join(HERE, "close-worker.py")`.
+        assigns = [a for a in ast.walk(node) if isinstance(a, ast.Assign)
+                   and any(isinstance(t, ast.Name) and t.id == "script" for t in a.targets)]
+        self.assertEqual(1, len(assigns))
+        self.assertEqual("os.path.join(HERE, 'restart-worker.py')", ast.unparse(assigns[0].value))
 
     def test_the_executor_is_reachable_only_from_the_answer_gate(self):
         """Any reference — a call, an alias, a `getattr` string — outside the gate fails."""
@@ -336,10 +342,11 @@ class AnsweredResumeTest(KeeperBase):
                             ("answer_of", "death_corroborated", "resume_absent_session")}
         self.addCleanup(lambda: [setattr(fk, k, v) for k, v in self._saved_exec.items()])
         self.answer = None
+        self.answered_at = None
         self.corroborated = (True, "registry empty, transcript quiet 900s", False)
         self.resumes = []
         self.options = {}
-        fk.answer_of = lambda item: self.answer
+        fk.answer_of = lambda item: (self.answer, self.answered_at)
         fk.death_corroborated = lambda sid, now: self.corroborated
         fk.resume_absent_session = lambda sid: (self.resumes.append(sid) or (True, "pane 9"))
 
@@ -424,6 +431,28 @@ class AnsweredResumeTest(KeeperBase):
         self.tick(T0 + fk.RESUME_DEFER_MAX + 2 * MIN)
         self.assertEqual([], self.resumes)
         self.assertTrue(any(k.startswith("fleet-keeper-resume-dropped-") for k in self.cards))
+
+    def test_an_hours_old_answer_gets_no_fresh_window(self):
+        """The bound runs from the STORE's answer time, not from when the keeper first saw it."""
+        self.answer = fk.RESUME_OPTION
+        self.answered_at = T0 - 2 * 3600  # answered while the keeper was down
+        self.corroborated = (False, "transcript written 30s ago", True)
+        self.tick(T0)
+        self.corroborated = (True, "quiet now", False)
+        self.tick(T0 + 5 * MIN)
+        self.assertEqual([], self.resumes, "an hours-old answer was handed a fresh 30-min window")
+        self.assertTrue(any(k.startswith("fleet-keeper-resume-dropped-") for k in self.cards))
+
+    def test_an_unwritable_record_does_not_repost_the_held_card(self):
+        self.answer = fk.RESUME_OPTION
+        self.corroborated = (False, "transcript written 30s ago", True)
+        real = fk._save_episodes
+        self.addCleanup(setattr, fk, "_save_episodes", real)
+        fk._save_episodes = lambda rec: False
+        for m in range(4):
+            self.tick(T0 + m * MIN)
+        self.assertEqual([], [k for k in self.cards if k.startswith("fleet-keeper-resume-held-")])
+        self.assertEqual([], self.resumes)
 
     def test_the_held_notice_is_posted_once_not_every_tick(self):
         """A launchd producer cannot rely on the store's dedup — every tick is a new process."""
@@ -518,7 +547,7 @@ class AnswerOfTest(unittest.TestCase):
     def answer(self, stdout):
         done = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
         with mock.patch.object(fk.subprocess, "run", return_value=done):
-            return fk.answer_of("item-1")
+            return fk.answer_of("item-1")[0]
 
     def test_the_exact_option_reads_as_resume(self):
         self.assertEqual(fk.RESUME_OPTION, self.answer("ANSWERED: option: resume it\nANSWERED_BY: board\n"))
@@ -530,9 +559,19 @@ class AnswerOfTest(unittest.TestCase):
                        "ANSWERED: option: acknowledge\n", ""):
             self.assertNotEqual(fk.RESUME_OPTION, self.answer(stdout), stdout)
 
+    def test_the_store_answer_time_is_read(self):
+        done = subprocess.CompletedProcess([], 0, stdout=(
+            "ANSWERED: option: resume it\nANSWERED_BY: board\n"
+            "ANSWERED_AT: 2026-11-06T15:07:54.588302Z\n"), stderr="")
+        with mock.patch.object(fk.subprocess, "run", return_value=done) as run:
+            option, answered = fk.answer_of("item-1")
+        self.assertEqual(fk.RESUME_OPTION, option)
+        self.assertAlmostEqual(1793977674.588302, answered, places=3)
+        self.assertIn("--answered-at", run.call_args.args[0])
+
     def test_an_unrunnable_poll_is_no_answer(self):
         with mock.patch.object(fk.subprocess, "run", side_effect=OSError("gone")):
-            self.assertIsNone(fk.answer_of("item-1"))
+            self.assertEqual((None, None), fk.answer_of("item-1"))
 
 
 class ResumeOutcomeTest(unittest.TestCase):

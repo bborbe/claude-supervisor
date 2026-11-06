@@ -860,6 +860,12 @@ def resume_absent(sid, sessions_dir, dry_run):
       `held-session`       an operator hold; outranks everything, exactly as on the normal path
       `unknown-session-id` no manager registration, so no vault to resume into
     """
+    # FIRST, before anything reads a record's fields: a file that is half-written, or valid
+    # JSON that is not an object, must refuse with its token rather than crash `find_target`.
+    bad = unparseable_registry_entries(sessions_dir or SESSIONS_DIR)
+    if bad is None or bad:
+        return refuse("not-absent", f"registry entries could not be parsed ({', '.join(bad or ['the directory'])}); "
+                                    f"a half-written record may be {sid} itself, so its absence is unproven")
     entries = registry_entries(sessions_dir)
     if entries is None:
         return refuse("not-absent", f"the registry at {sessions_dir or SESSIONS_DIR} could not "
@@ -868,10 +874,6 @@ def resume_absent(sid, sessions_dir, dry_run):
     if path is not None:
         return refuse("not-absent", f"a registry entry still carries session {sid}; the process "
                                     "may be alive — use the normal restart, never --absent")
-    bad = unparseable_registry_entries(sessions_dir or SESSIONS_DIR)
-    if bad is None or bad:
-        return refuse("not-absent", f"registry entries could not be parsed ({', '.join(bad or ['the directory'])}); "
-                                    f"a half-written record may be {sid} itself, so its absence is unproven")
     in_flight = recent_pane_for(sid)
     if in_flight is not None:
         return refuse("not-absent", f"{in_flight[0]} names session {sid} within the last "

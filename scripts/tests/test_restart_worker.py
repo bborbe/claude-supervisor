@@ -1059,6 +1059,14 @@ class AbsentMode(unittest.TestCase):
         self.assertEqual(code, 1, lines)
         self.assertEqual(lines[0], "not-absent", lines)
 
+    def test_a_registry_file_that_is_valid_json_but_not_an_object_refuses_not_crashes(self):
+        self.register()
+        with open(os.path.join(self.reg, "778.json"), "w") as fh:
+            fh.write('["not", "an", "object"]')
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "not-absent", lines)
+
     def _pane_line(self, kind, age):
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - age))
         with open(os.path.join(self.exits, "pane-51.log"), "a") as fh:

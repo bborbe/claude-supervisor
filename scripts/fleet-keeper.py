@@ -69,6 +69,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import subprocess
@@ -362,18 +363,30 @@ PROJECTS_DIR = os.path.expanduser(
 
 
 def answer_of(item):
-    """The option the operator chose on card `item`, or `None` when unanswered or unreadable."""
+    """`(option, answered_epoch)` for card `item` — `(None, None)` when unanswered or unreadable.
+
+    `answered_epoch` is the STORE's answer time (`poll --answered-at`), or `None` when the
+    store gives none. The wait bound in `act_on_answer` runs from it, so a keeper that was
+    down for hours does not hand an hours-old answer a fresh window.
+    """
     if not item:
-        return None
+        return None, None
     try:
-        out = subprocess.run([sys.executable, ATTENTION_ASK, "poll", item],
+        out = subprocess.run([sys.executable, ATTENTION_ASK, "poll", item, "--answered-at"],
                              capture_output=True, text=True, timeout=PROBE_TIMEOUT)
     except (OSError, subprocess.SubprocessError):
-        return None
+        return None, None
+    option, answered = None, None
     for line in (out.stdout or "").splitlines():
         if line.startswith("ANSWERED: option:"):
-            return line.split(":", 2)[2].strip()
-    return None
+            option = line.split(":", 2)[2].strip()
+        elif line.startswith("ANSWERED_AT:"):
+            stamp = line.split(":", 1)[1].strip().replace("Z", "+00:00")
+            try:
+                answered = datetime.datetime.fromisoformat(stamp).timestamp()
+            except ValueError:
+                answered = None
+    return option, answered
 
 
 #: How long an answered `resume it` may wait on a too-fresh transcript before it is consumed
@@ -470,23 +483,27 @@ def act_on_answer(sid, condition, item, now):
     ep = episodes.get(condition) or {}
     if ep.get("consumed_item") == item:
         return None
-    if answer_of(item) != RESUME_OPTION:
+    option, answered = answer_of(item)
+    if option != RESUME_OPTION:
         return None
+    # The bound runs from the STORE's answer time when it has one, else from first sight.
     seen = ep.get("answer_seen_at")
     if ep.get("answer_seen_item") != item or not isinstance(seen, (int, float)):
-        seen = now
+        seen = answered if isinstance(answered, (int, float)) else now
         ep["answer_seen_at"], ep["answer_seen_item"] = seen, item
     ok, why, retryable = death_corroborated(sid, now)
     if not ok and retryable and now - seen < RESUME_DEFER_MAX:
         log(f"resume answered for {sid[:8]}, waiting — {why}", now)
-        if ep.get("held_noticed") != item:
+        first_notice = ep.get("held_noticed") != item
+        ep["held_noticed"] = item
+        episodes[condition] = ep
+        # Posted only once the marker that suppresses the NEXT post is on disk: an unwritable
+        # record would otherwise repost the held card every tick, for the whole wait.
+        if _save_episodes(episodes) and first_notice:
             notify(f"fleet-keeper-resume-held-{item}",
                    f"You answered '{RESUME_OPTION}' for the fleet manager (session {sid[:8]}). "
-                   f"Not run yet: {why}. The keeper waits at most {RESUME_DEFER_MAX // 60} min for "
-                   f"that to clear, then drops the answer unrun.", ["acknowledge"])
-            ep["held_noticed"] = item
-        episodes[condition] = ep
-        _save_episodes(episodes)
+                   f"Not run yet: {why}. The keeper waits at most {RESUME_DEFER_MAX // 60} min from "
+                   f"your answer for that to clear, then drops it unrun.", ["acknowledge"])
         return None
     ep["consumed_item"] = item
     episodes[condition] = ep
