@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: `session-exit-record.py observe` now records the real exit status of a process-group kill — it arms a `kqueue` `NOTE_EXITSTATUS` watch on the pane pid, so the out-of-group observer writes `kind=signalled kill … signal=SIGTERM writer=observer` instead of `unknown-end … signal=unavailable`; no privilege needed. Polling + `unknown-end` stays as the fallback when no watch can be armed.
+
 ## v0.241.0
 
 - fix: **the `--flagged` batch opens every operator-flagged row even when its `role`/`mode`/`phase` are missing.** `commands/open.md` § Step 0.6 no longer refuses a row whose body carries no role signal: it writes the default (`role: agent`, `mode` per the matrix) and prints `🏷️ defaulted <field>=<value>`. Judgement skips ("bot rows") are gone; the only non-open outcomes are provenance REFUSED, LIVE, HOLD, session hold, cap refusal and a declared `role: manager`. The footer's `refused U (undecidable)` counter is replaced by `defaulted D fields`.
