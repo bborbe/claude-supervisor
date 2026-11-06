@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -921,14 +922,20 @@ class AbsentMode(unittest.TestCase):
         self.bin = os.path.join(self.dir, "bin")
         for d in (self.reg, self.mgr, self.vault, self.bin):
             os.makedirs(d)
+        # Three DISTINCT launchers, so the test can tell the manager-default rule from the
+        # `claude_script` fallback as well as from the worker launcher.
         self.launcher = os.path.join(self.dir, "cc-manager")
-        with open(self.launcher, "w") as fh:
-            fh.write("#!/bin/sh\n")
-        os.chmod(self.launcher, 0o755)
+        self.vault_script = os.path.join(self.dir, "cc-vault")
+        for path in (self.launcher, self.vault_script):
+            with open(path, "w") as fh:
+                fh.write("#!/bin/sh\n")
+            os.chmod(path, 0o755)
         self.cfg = os.path.join(self.dir, "vaults.json")
         with open(self.cfg, "w") as fh:
-            json.dump([{"name": "v1", "path": self.vault, "claude_script": self.launcher,
+            json.dump([{"name": "v1", "path": self.vault, "claude_script": self.vault_script,
                         "manager_launcher": self.launcher, "worker_launcher": "/no/worker"}], fh)
+        self.exits = os.path.join(self.dir, "session-exit")
+        os.makedirs(self.exits)
         self.holds = os.path.join(self.dir, "holds.json")
         with open(self.holds, "w") as fh:
             fh.write('{"version": 1, "holds": {}}')
@@ -950,13 +957,18 @@ class AbsentMode(unittest.TestCase):
         with open(os.path.join(self.mgr, f"{self.SID}.json"), "w") as fh:
             json.dump(rec, fh)
 
-    def run_absent(self, *extra, dry=True):
+    def run_absent(self, *extra, dry=True, path=None, wezterm=None):
         env = dict(os.environ)
         env.pop("SUPERVISOR_LAUNCHER", None)
+        env.pop("SUPERVISOR_WEZTERM", None)
         env["SUPERVISOR_VAULT_CONFIG"] = self.cfg
         env["SUPERVISOR_WORKER_MANAGER_DIR"] = self.mgr
         env["SUPERVISOR_SESSION_HOLDS"] = self.holds
-        env["PATH"] = self.bin + os.pathsep + env.get("PATH", "")
+        # Never the real store: the in-flight scan reads it and the resume lock writes to it.
+        env["SUPERVISOR_SESSION_EXIT_DIR"] = self.exits
+        env["PATH"] = path if path is not None else self.bin + os.pathsep + env.get("PATH", "")
+        if wezterm is not None:
+            env["SUPERVISOR_WEZTERM"] = wezterm
         argv = [sys.executable, SCRIPT, self.SID, "--absent", "--sessions-dir", self.reg]
         if dry:
             argv.append("--dry-run")
@@ -1019,6 +1031,70 @@ class AbsentMode(unittest.TestCase):
         self.assertIn(f"--resume {self.SID}", argv)
         self.assertNotIn("killing-pid", "\n".join(lines))
         self.assertIn("re-arm", "\n".join(lines).lower())
+
+    def test_it_resumes_under_the_launchd_path_where_wezterm_is_not_on_path(self):
+        """M1, the bug the suite missed: the keeper's plist PATH is system dirs only.
+
+        A bare `wezterm` is FileNotFoundError there, so every answered resume would have
+        failed. `wezterm` must be resolved by absolute path, not looked up on PATH.
+        """
+        self.register()
+        code, lines = self.run_absent(dry=False, path="/usr/bin:/bin:/usr/sbin:/sbin",
+                                      wezterm=os.path.join(self.bin, "wezterm"))
+        self.assertEqual(code, 0, lines)
+        self.assertTrue(os.path.exists(self.spawned), "nothing was spawned under the launchd PATH")
+
+    def test_no_wezterm_anywhere_is_an_error_before_any_spawn(self):
+        self.register()
+        code, lines = self.run_absent(dry=False, wezterm="/no/such/wezterm")
+        self.assertEqual(code, 1, lines)
+        self.assertIn("no wezterm", "\n".join(lines))
+        self.assertFalse(os.path.exists(self.spawned))
+
+    def test_a_half_written_registry_entry_is_never_proof_of_absence(self):
+        self.register()
+        with open(os.path.join(self.reg, "777.json"), "w") as fh:
+            fh.write('{"sessionId": "' + self.SID[:10])  # truncated mid-write
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "not-absent", lines)
+
+    def _pane_line(self, kind, age):
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - age))
+        with open(os.path.join(self.exits, "pane-51.log"), "a") as fh:
+            fh.write(f"{stamp}\tkind={kind}\tpane=51\tsession={self.SID}\tpid=9\trc=-\t"
+                     f"signal=-\tsender=-\twriter=observer\n")
+
+    def test_a_pane_already_running_the_session_is_refused(self):
+        """A resume through another path heartbeats before it registers — two copies otherwise."""
+        self.register()
+        self._pane_line("heartbeat", age=20)
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "not-absent", lines)
+
+    def test_an_old_pane_record_does_not_block_a_resume(self):
+        self.register()
+        self._pane_line("heartbeat", age=3600)
+        code, lines = self.run_absent()
+        self.assertEqual(code, 0, lines)
+
+    def test_a_pane_that_ended_does_not_block_a_resume(self):
+        self.register()
+        self._pane_line("heartbeat", age=40)
+        self._pane_line("signalled kill", age=30)
+        code, lines = self.run_absent()
+        self.assertEqual(code, 0, lines)
+
+    def test_a_second_resume_inside_the_window_is_refused(self):
+        self.register()
+        first, lines = self.run_absent(dry=False)
+        self.assertEqual(first, 0, lines)
+        os.remove(self.spawned)
+        second, lines = self.run_absent(dry=False)
+        self.assertEqual(second, 1, lines)
+        self.assertEqual(lines[0], "not-absent", lines)
+        self.assertFalse(os.path.exists(self.spawned), "a second copy was spawned")
 
 
 class HeldSession(Cli):

@@ -11,6 +11,7 @@ cannot tell a slow round from a dead loop. These tests pin the replacement:
   SC3  an ABSENT fleet manager is reported      SC6  the heartbeat survives a failed tick
 """
 
+import ast
 import importlib.util
 import io
 import json
@@ -73,7 +74,7 @@ class KeeperBase(unittest.TestCase):
         # Every ABSENT tick now asks the board for an answer. Unpatched, a test would poll the
         # LIVE attention store with a fixture card id — and a resume could never be ruled out.
         fk.answer_of = lambda item: None
-        fk.death_corroborated = lambda sid, now: (False, "not corroborated in a test")
+        fk.death_corroborated = lambda sid, now: (False, "not corroborated in a test", False)
         fk.resume_absent_session = lambda sid: self.fail("resume reached from an unpatched test")
         self.register_fleet()
 
@@ -249,12 +250,25 @@ class NoKillPathTest(unittest.TestCase):
     #: The one function allowed to hold a resume, by operator decision 2026-11-06 (card
     #: `7653b7b6…`, "add a resume option to the keeper's card, gated on your answer").
     EXECUTOR = "resume_absent_session"
+    CALLER = "act_on_answer"
 
-    def executor_body(self):
-        src = self.code_only("fleet-keeper.py")
-        m = re.search(rf"^def {self.EXECUTOR}\(.*?(?=^def |\Z)", src, re.S | re.M)
-        self.assertIsNotNone(m, "the answered-resume executor is missing")
-        return src, m.group(0)
+    @staticmethod
+    def strip(src):
+        """Docstrings and full-line comments removed, so prose can neither pass nor fail."""
+        src = re.sub(r'"""[\s\S]*?"""', "", src)
+        return "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
+
+    def parsed(self):
+        """`(source, tree, executor node)` — extracted by `ast`, never by a regex.
+
+        A regex body ("from `def X` to the next `def`") swallows any module-level code placed
+        after the function, which would let a kill shape or a second call escape both pins.
+        """
+        src = (_SCRIPTS / "fleet-keeper.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == self.EXECUTOR]
+        self.assertEqual(1, len(nodes), "the answered-resume executor is missing or duplicated")
+        return src, tree, nodes[0]
 
     def test_the_keeper_source_has_no_kill_or_resume_path(self):
         """Narrowed 2026-11-06, NOT deleted: outside the one executor, nothing may match.
@@ -263,20 +277,43 @@ class NoKillPathTest(unittest.TestCase):
         keeper killed a healthy manager. The operator's 2026-11-06 answer admits exactly one
         resume, gated on their answer, so the pin now holds everywhere but that function.
         """
-        src, body = self.executor_body()
-        self.assertEqual([], self.KILL_SHAPES.findall(src.replace(body, "")))
+        src, _tree, node = self.parsed()
+        rest = src.replace(ast.get_source_segment(src, node), "")
+        self.assertEqual([], self.KILL_SHAPES.findall(self.strip(rest)))
 
     def test_the_executor_can_only_resume_an_absent_session_never_kill(self):
-        _src, body = self.executor_body()
-        self.assertIn('"--absent"', body)
-        for forbidden in (r"os\.kill", "send-text", "killing-pid", "wezterm", "Popen",
-                          "launchctl", r"\"spawn\"", "--reason"):
+        """Every KILL_SHAPE but the one script it must call stays forbidden inside it."""
+        src, _tree, node = self.parsed()
+        body = self.strip(ast.get_source_segment(src, node))
+        self.assertEqual(["restart-worker"], sorted(set(self.KILL_SHAPES.findall(body))))
+        for forbidden in (r"--reason", r"\bkill\b", r"signal"):
             self.assertIsNone(re.search(forbidden, body), f"{forbidden} in the executor")
 
-    def test_the_executor_has_one_call_site(self):
-        src, body = self.executor_body()
-        calls = re.findall(rf"\b{self.EXECUTOR}\(", src.replace(body, ""))
-        self.assertEqual(1, len(calls), "the resume must be reachable from exactly one place")
+    def test_the_executor_runs_exactly_the_absent_argv(self):
+        """`"--absent"` merely appearing in the body (a message string) is not enough."""
+        _src, _tree, node = self.parsed()
+        runs = [c for c in ast.walk(node) if isinstance(c, ast.Call)
+                and ast.unparse(c.func) == "subprocess.run"]
+        self.assertEqual(1, len(runs), "the executor must make exactly one subprocess call")
+        argv = runs[0].args[0]
+        self.assertIsInstance(argv, ast.List)
+        self.assertEqual(["sys.executable", "script", "sid", "'--absent'"],
+                         [ast.unparse(e) for e in argv.elts])
+
+    def test_the_executor_is_reachable_only_from_the_answer_gate(self):
+        """Any reference — a call, an alias, a `getattr` string — outside the gate fails."""
+        _src, tree, _node = self.parsed()
+        holders = []
+        for top in tree.body:
+            if isinstance(top, ast.FunctionDef) and top.name == self.EXECUTOR:
+                continue
+            for n in ast.walk(top):
+                named = (isinstance(n, ast.Name) and n.id == self.EXECUTOR) or \
+                        (isinstance(n, ast.Constant) and n.value == self.EXECUTOR) or \
+                        (isinstance(n, ast.Attribute) and n.attr == self.EXECUTOR)
+                if named:
+                    holders.append(getattr(top, "name", type(top).__name__))
+        self.assertEqual([self.CALLER], holders)
 
     def test_positive_control_the_pattern_fires_on_stripped_real_kill_code(self):
         """Runs through the SAME stripping as the check above, so a stripper that deleted code
@@ -299,7 +336,7 @@ class AnsweredResumeTest(KeeperBase):
                             ("answer_of", "death_corroborated", "resume_absent_session")}
         self.addCleanup(lambda: [setattr(fk, k, v) for k, v in self._saved_exec.items()])
         self.answer = None
-        self.corroborated = (True, "registry empty, transcript quiet 900s")
+        self.corroborated = (True, "registry empty, transcript quiet 900s", False)
         self.resumes = []
         self.options = {}
         fk.answer_of = lambda item: self.answer
@@ -336,7 +373,7 @@ class AnsweredResumeTest(KeeperBase):
     def test_an_uncorroborated_death_is_never_resumed(self):
         """The ABSENT trap: the strong limb (no registry entry) must hold, or nothing runs."""
         self.answer = fk.RESUME_OPTION
-        self.corroborated = (False, "a registry entry still carries the session")
+        self.corroborated = (False, "a registry entry still carries the session", False)
         self.tick(T0)
         self.tick(T0 + MIN)
         self.assertEqual([], self.resumes)
@@ -357,6 +394,164 @@ class AnsweredResumeTest(KeeperBase):
         self.assertTrue(lapse, self.cards)
         self.assertNotIn(fk.RESUME_OPTION, self.options[lapse[0]])
         self.assertEqual([], self.resumes)
+
+    # ---- M4: an answer that fails corroboration must not stay armed --------------
+
+    def test_a_live_session_consumes_the_answer_and_it_never_fires_later(self):
+        """The registry says ALIVE. Even if the reads agree an hour later, nothing runs."""
+        self.answer = fk.RESUME_OPTION
+        self.corroborated = (False, "registry entry still carries the session — it is alive", False)
+        self.tick(T0)
+        self.corroborated = (True, "now dead", False)
+        self.tick(T0 + 60 * MIN)
+        self.assertEqual([], self.resumes, "a consumed answer fired later — the reads became the trigger")
+        self.assertTrue(any(k.startswith("fleet-keeper-resume-dropped-") for k in self.cards))
+
+    def test_a_too_fresh_transcript_may_be_waited_out_within_the_bound(self):
+        self.answer = fk.RESUME_OPTION
+        self.corroborated = (False, "transcript written 30s ago", True)
+        self.tick(T0)
+        self.corroborated = (True, "quiet now", False)
+        self.tick(T0 + 10 * MIN)
+        self.assertEqual([SID], self.resumes)
+
+    def test_a_wait_that_outlasts_the_bound_is_dropped_unrun(self):
+        self.answer = fk.RESUME_OPTION
+        self.corroborated = (False, "transcript written 30s ago", True)
+        self.tick(T0)
+        self.tick(T0 + fk.RESUME_DEFER_MAX + MIN)
+        self.corroborated = (True, "quiet now", False)
+        self.tick(T0 + fk.RESUME_DEFER_MAX + 2 * MIN)
+        self.assertEqual([], self.resumes)
+        self.assertTrue(any(k.startswith("fleet-keeper-resume-dropped-") for k in self.cards))
+
+    def test_the_held_notice_is_posted_once_not_every_tick(self):
+        """A launchd producer cannot rely on the store's dedup — every tick is a new process."""
+        self.answer = fk.RESUME_OPTION
+        self.corroborated = (False, "transcript written 30s ago", True)
+        for m in range(5):
+            self.tick(T0 + m * MIN)
+        held = [k for k in self.cards if k.startswith("fleet-keeper-resume-held-")]
+        self.assertEqual(1, len(held), self.cards)
+
+    # ---- #10: the marker is written BEFORE the resume, so a crash cannot repeat it -----
+
+    def test_a_resume_that_crashes_is_never_run_again(self):
+        self.answer = fk.RESUME_OPTION
+
+        def boom(sid):
+            self.resumes.append(sid)
+            raise RuntimeError("died mid-resume")
+        fk.resume_absent_session = boom
+        with self.assertRaises(RuntimeError):
+            self.tick(T0)
+        fk.resume_absent_session = lambda sid: (self.resumes.append(sid) or (True, "pane 9"))
+        self.tick(T0 + MIN)
+        self.assertEqual([SID], self.resumes, "the marker was written after the run, not before")
+
+    def test_an_unpersistable_marker_refuses_to_resume(self):
+        self.answer = fk.RESUME_OPTION
+        fk._save_episodes_real = fk._save_episodes
+        self.addCleanup(setattr, fk, "_save_episodes", fk._save_episodes_real)
+        fk._save_episodes = lambda rec: False
+        self.tick(T0)
+        self.assertEqual([], self.resumes)
+
+
+class DeathCorroboratedTest(unittest.TestCase):
+    """M2: the REAL corroboration, never a stub — replacing its body must turn this red."""
+
+    SID = "ffff0000-0000-0000-0000-000000000006"
+    NOW = 1_800_000_000.0
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = pathlib.Path(self.tmp.name)
+        self.reg, self.proj = root / "sessions", root / "projects"
+        self.reg.mkdir()
+        (self.proj / "-vault").mkdir(parents=True)
+        saved = (fk.SESSIONS_DIR, fk.PROJECTS_DIR)
+        self.addCleanup(lambda: (setattr(fk, "SESSIONS_DIR", saved[0]),
+                                 setattr(fk, "PROJECTS_DIR", saved[1])))
+        fk.SESSIONS_DIR, fk.PROJECTS_DIR = str(self.reg), str(self.proj)
+
+    def transcript(self, age):
+        path = self.proj / "-vault" / f"{self.SID}.jsonl"
+        path.write_text("{}\n", encoding="utf-8")
+        os.utime(path, (self.NOW - age, self.NOW - age))
+
+    def test_dead_and_quiet_is_corroborated(self):
+        self.transcript(age=900)
+        ok, _why, _retry = fk.death_corroborated(self.SID, self.NOW)
+        self.assertTrue(ok)
+
+    def test_a_registry_entry_means_alive_and_is_final(self):
+        self.transcript(age=900)
+        (self.reg / "42.json").write_text(json.dumps({"sessionId": self.SID}), encoding="utf-8")
+        ok, _why, retry = fk.death_corroborated(self.SID, self.NOW)
+        self.assertFalse(ok)
+        self.assertFalse(retry, "a live session must consume the answer, never defer it")
+
+    def test_a_half_written_registry_entry_is_not_absence(self):
+        self.transcript(age=900)
+        (self.reg / "42.json").write_text('{"sessionId": "' + self.SID[:9], encoding="utf-8")
+        ok, _why, retry = fk.death_corroborated(self.SID, self.NOW)
+        self.assertFalse(ok)
+        self.assertTrue(retry)
+
+    def test_a_fresh_transcript_is_not_yet_corroborated(self):
+        self.transcript(age=30)
+        ok, _why, retry = fk.death_corroborated(self.SID, self.NOW)
+        self.assertFalse(ok)
+        self.assertTrue(retry)
+
+    def test_no_transcript_cannot_be_measured_and_is_final(self):
+        ok, _why, retry = fk.death_corroborated(self.SID, self.NOW)
+        self.assertFalse(ok)
+        self.assertFalse(retry)
+
+
+class AnswerOfTest(unittest.TestCase):
+    """M2: only the exact single option `resume it` may read as a resume answer."""
+
+    def answer(self, stdout):
+        done = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
+        with mock.patch.object(fk.subprocess, "run", return_value=done):
+            return fk.answer_of("item-1")
+
+    def test_the_exact_option_reads_as_resume(self):
+        self.assertEqual(fk.RESUME_OPTION, self.answer("ANSWERED: option: resume it\nANSWERED_BY: board\n"))
+
+    def test_nothing_else_reads_as_resume(self):
+        for stdout in ("OPEN\n", "DECLINED\n", "ANSWERED: skip\n",
+                       "ANSWERED: option: resume it, acknowledge\n",
+                       "ANSWERED: text: resume it\n", "NOT_OPERATOR_ANSWERED: resume it\n",
+                       "ANSWERED: option: acknowledge\n", ""):
+            self.assertNotEqual(fk.RESUME_OPTION, self.answer(stdout), stdout)
+
+    def test_an_unrunnable_poll_is_no_answer(self):
+        with mock.patch.object(fk.subprocess, "run", side_effect=OSError("gone")):
+            self.assertIsNone(fk.answer_of("item-1"))
+
+
+class ResumeOutcomeTest(unittest.TestCase):
+    """#6: a crash or a timeout in restart-worker is reported honestly, never swallowed."""
+
+    def run_with(self, **kw):
+        with mock.patch.object(fk.subprocess, "run", **kw):
+            return fk.resume_absent_session("s")
+
+    def test_a_traceback_with_empty_stdout_is_reported_not_raised(self):
+        done = subprocess.CompletedProcess([], 1, stdout="", stderr="Traceback ...\nKeyError: 'x'\n")
+        ok, detail = self.run_with(return_value=done)
+        self.assertFalse(ok)
+        self.assertIn("KeyError", detail)
+
+    def test_a_timeout_is_an_unknown_outcome_not_nothing_happened(self):
+        ok, detail = self.run_with(side_effect=subprocess.TimeoutExpired("x", 120))
+        self.assertFalse(ok)
+        self.assertIn("UNKNOWN", detail)
 
 
 class VerdictTest(unittest.TestCase):

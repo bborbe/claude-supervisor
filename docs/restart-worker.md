@@ -188,9 +188,17 @@ jq -r '.permissions.allow[]' ~/.claude/settings.json | grep -E 'Bash\([^)]*p?kil
 The normal path cannot bring back a dead session: it refuses `unknown-session-id` when no
 registry entry carries the id, and a dead session's `~/.claude/sessions/<pid>.json` is deleted
 with it. `--absent` is a separate entry that inverts that precondition and **holds no kill
-path at all** — it never reaches `os.kill`, so it cannot touch a live process even when called
-by mistake. Its only caller is `scripts/fleet-keeper.py`, and only behind the operator's
-`resume it` answer on a dead-Fleet-Manager card.
+path at all** — it never reaches `os.kill`, so it cannot signal a live process. ⚠️ That is not
+the same as being harmless: it CAN start a second copy of a live conversation, which is the real
+hazard. So it also refuses while any registry entry is unparseable, while a pane record names
+the session within the last 10 min with no end after it (a resume through another path
+heartbeats before it registers), and while another `--absent` of the same session holds its
+lock. Its only caller is `scripts/fleet-keeper.py`, and only behind the operator's `resume it`
+answer on a dead-Fleet-Manager card.
+
+`wezterm` is resolved by absolute path (`SUPERVISOR_WEZTERM`, then `PATH`, then known install
+locations), never looked up on `PATH` alone: the keeper runs under launchd with a system-only
+`PATH`, where a bare `wezterm` is not found.
 
 It sources what the registry used to carry from the manager registration
 (`~/.claude/state/worker-manager/<sid>.json`, written by `fleet-register.py`), which outlives

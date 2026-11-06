@@ -12,9 +12,10 @@ earlier. The trigger cannot tell a dead loop from a slow round: across 10 measur
 healthy arm→digest time was median 18 min, p90 38 min and max 51 min, while the keepalive
 reads `stale` past 18 min. Roughly half of all healthy rounds therefore cross the trigger. No
 settle window fixes that. One below ~40 min kills healthy managers, and one above it leaves
-any restart cap unreachable. So this keeper **holds no kill, re-arm or spawn path, and no
-resume of its own**. `scripts/tests/test_fleet_keeper.py` pins that absence with a grep and a
-positive control.
+any restart cap unreachable. So this keeper **holds no kill or re-arm path, and starts nothing
+on its own judgement**. Its one route to a spawn is the answer-gated resume below, which reaches
+`wezterm` only through `restart-worker.py --absent`. `scripts/tests/test_fleet_keeper.py` pins
+the rest of the file against every kill, resume and spawn shape, with a positive control.
 
 ⚠️ **One exception, by operator decision (2026-11-06, card `7653b7b6…`): a resume gated on
 the operator's answer.** It narrows the ruling above by exactly one path, and every condition
@@ -203,8 +204,10 @@ def fleet_session():
 
     Read from the `fleet-register.py` registration, the same record `answer-path-check.py`
     treats as the identity assertion. Nothing deletes a registration, so the newest one is the
-    current manager. This keeper never acts on the session, so a stale older record cannot
-    cause harm; it only names who the card is about.
+    current manager. ⚠️ It is no longer only a label: since the answer-gated resume, the newest
+    registration is also the session `act_on_answer` resumes. A stale newest record would be
+    offered for resume — which is why the operator's answer, a corroborated death and
+    `--absent`'s own refusals all stand between this read and any spawn.
     """
     try:
         names = os.listdir(REGISTER_DIR)
@@ -373,30 +376,43 @@ def answer_of(item):
     return None
 
 
+#: How long an answered `resume it` may wait on a too-fresh transcript before it is consumed
+#: unrun. Without a bound the answer stays armed and fires whenever the reads later agree —
+#: `RESUME_SETTLE` would become the trigger, which is exactly the autonomous resume the
+#: operator's answer-gating forbids.
+RESUME_DEFER_MAX = 1800
+
+
 def death_corroborated(sid, now):
-    """`(True, why)` only when every independent read agrees the session is gone.
+    """`(ok, why, retryable)` — `ok` only when every independent read agrees the session is gone.
 
     `session-liveness.py` ABSENT is the branch's own precondition, and on its own it is NOT
     enough: it published ABSENT for live sessions three times on 2026-11-06. Two more reads
     must agree, and the first is the strong one — a live session's registry file exists:
 
-      1. no `~/.claude/sessions/*.json` carries the id (an unreadable registry proves nothing);
+      1. no `~/.claude/sessions/*.json` carries the id;
       2. the session's transcript has been silent for at least `RESUME_SETTLE` seconds.
+
+    `retryable` says whether a miss may be waited out. A registry entry that carries the id
+    means the session is ALIVE, and an unmeasurable transcript never gets better — both are
+    final, and the answer is consumed. An unreadable or half-written registry file and a
+    too-fresh transcript are transient and may be waited out, within `RESUME_DEFER_MAX`.
     """
     try:
         names = os.listdir(SESSIONS_DIR)
     except OSError:
-        return False, f"the registry at {SESSIONS_DIR} could not be read"
+        return False, f"the registry at {SESSIONS_DIR} could not be read", True
     for name in names:
         if not name.endswith(".json"):
             continue
         try:
             with open(os.path.join(SESSIONS_DIR, name), encoding="utf-8") as fh:
                 rec = json.load(fh)
-        except (OSError, ValueError):
-            continue
+        except (OSError, ValueError, RecursionError):
+            # Half-written — possibly this very session mid-rewrite. Never proof of absence.
+            return False, f"registry entry {name} could not be parsed", True
         if isinstance(rec, dict) and rec.get("sessionId") == sid:
-            return False, f"registry entry {name} still carries the session"
+            return False, f"registry entry {name} still carries the session — it is alive", False
     newest = None
     try:
         for project in os.listdir(PROJECTS_DIR):
@@ -405,67 +421,94 @@ def death_corroborated(sid, now):
                 mtime = os.path.getmtime(path)
                 newest = mtime if newest is None else max(newest, mtime)
     except OSError:
-        return False, f"the transcripts under {PROJECTS_DIR} could not be read"
+        return False, f"the transcripts under {PROJECTS_DIR} could not be read", True
     if newest is None:
-        return False, "no transcript found for the session, so its silence cannot be measured"
+        return False, "no transcript found for the session, so its silence cannot be measured", False
     quiet = now - newest
     if quiet < RESUME_SETTLE:
-        return False, f"the transcript was written {int(quiet)}s ago (< {RESUME_SETTLE}s)"
-    return True, f"no registry entry, transcript silent {int(quiet)}s"
+        return False, f"the transcript was written {int(quiet)}s ago (< {RESUME_SETTLE}s)", True
+    return True, f"no registry entry, transcript silent {int(quiet)}s", False
 
 
 def resume_absent_session(sid):
     """Resume a DEAD fleet manager. The only resume this file holds; returns `(ok, detail)`.
 
     Reached from exactly one place — `act_on_answer`, behind the operator's `resume it` and a
-    corroborated death. `--absent` refuses unless no registry entry carries the id and
-    signals nothing, so even a mistaken call here cannot reach a live process.
+    corroborated death. `--absent` signals nothing and refuses while any registry entry or
+    recent pane record names the session, so a mistaken call cannot kill a live process — but
+    it CAN start a second copy of a live conversation, which is why the gates above it exist.
     """
     script = os.path.join(HERE, "restart-worker.py")
     try:
         out = subprocess.run([sys.executable, script, sid, "--absent"],
                              capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return False, ("outcome UNKNOWN — restart-worker did not finish within 120 s, so a pane "
+                       "may have been spawned; check for one before starting it again")
     except (OSError, subprocess.SubprocessError) as exc:
-        return False, f"could not run: {exc}"
+        return False, f"could not run restart-worker, nothing was spawned: {exc}"
     lines = [ln for ln in (out.stdout or "").splitlines() if ln.strip()]
-    return out.returncode == 0, (lines[0] if out.returncode else lines[-1] if lines else "") \
-        or (out.stderr or "").strip()[:200]
+    stderr = (out.stderr or "").strip()
+    if out.returncode == 0:
+        return True, lines[-1] if lines else "resumed"
+    # A traceback has an empty stdout: report stderr's last line, never index an empty list.
+    reason = lines[0] if lines else (stderr.splitlines()[-1] if stderr else "no output")
+    return False, f"exit {out.returncode}: {reason}"
 
 
 def act_on_answer(sid, condition, item, now):
     """Run the resume once for this card, only on `resume it`, only on a corroborated death.
 
-    ⚠️ The once-per-answer marker is written BEFORE the resume runs: at-most-once. A tick
-    that dies mid-resume must not become a second resume on the next tick — an answer that
-    turned into a loop is the failure the 2026-11-01 ruling exists to prevent.
+    ⚠️ **Every answer is used at most once.** The `consumed_item` marker is written BEFORE the
+    resume runs, so a tick that dies mid-resume never becomes a second resume. A final
+    corroboration miss (the session is alive, or its transcript cannot be measured) consumes
+    the answer UNRUN, and so does a transient miss that outlasts `RESUME_DEFER_MAX` — an
+    answer that could fire hours later, when the reads happen to agree, would be the timer the
+    operator's answer-gating forbids. A consumed answer is told to the operator on a card, once.
     """
     episodes = _load_episodes()
     ep = episodes.get(condition) or {}
-    if ep.get("resumed_item") == item:
+    if ep.get("consumed_item") == item:
         return None
     if answer_of(item) != RESUME_OPTION:
         return None
-    ok, why = death_corroborated(sid, now)
-    if not ok:
-        log(f"resume answered for {sid[:8]} but death not corroborated — {why}; nothing run", now)
-        notify(f"fleet-keeper-resume-held-{item}",
-               f"You answered '{RESUME_OPTION}' for the fleet manager (session {sid[:8]}), but the "
-               f"keeper did not run it: {why}. It will not act on that answer until the reads agree.",
-               ["acknowledge"])
+    seen = ep.get("answer_seen_at")
+    if ep.get("answer_seen_item") != item or not isinstance(seen, (int, float)):
+        seen = now
+        ep["answer_seen_at"], ep["answer_seen_item"] = seen, item
+    ok, why, retryable = death_corroborated(sid, now)
+    if not ok and retryable and now - seen < RESUME_DEFER_MAX:
+        log(f"resume answered for {sid[:8]}, waiting — {why}", now)
+        if ep.get("held_noticed") != item:
+            notify(f"fleet-keeper-resume-held-{item}",
+                   f"You answered '{RESUME_OPTION}' for the fleet manager (session {sid[:8]}). "
+                   f"Not run yet: {why}. The keeper waits at most {RESUME_DEFER_MAX // 60} min for "
+                   f"that to clear, then drops the answer unrun.", ["acknowledge"])
+            ep["held_noticed"] = item
+        episodes[condition] = ep
+        _save_episodes(episodes)
         return None
-    ep["resumed_item"] = item
+    ep["consumed_item"] = item
     episodes[condition] = ep
     if not _save_episodes(episodes):
-        log(f"cannot persist the resume marker for {sid[:8]}; refusing to resume", now)
+        log(f"cannot persist the answer marker for {sid[:8]}; refusing to resume", now)
         return None
+    if not ok:
+        reason = why if not retryable else f"{why}, still after {int(now - seen)}s"
+        log(f"resume answer for {sid[:8]} consumed UNRUN — {reason}", now)
+        notify(f"fleet-keeper-resume-dropped-{item}",
+               f"Your '{RESUME_OPTION}' for the fleet manager (session {sid[:8]}) was NOT run and "
+               f"is now used up: {reason}. If it is still dead, the next card asks again.",
+               ["acknowledge"])
+        return False
     done, detail = resume_absent_session(sid)
     log(f"resume of {sid[:8]} on answer {item}: {'ok' if done else 'FAILED'} — {detail}", now)
     notify(f"fleet-keeper-resumed-{item}",
            (f"Resumed the fleet manager (session {sid[:8]}) on your answer: {detail}. It must "
             f"re-arm its loop (/supervisor:fleet-loop) — a dead session's jobs died with it.")
            if done else
-           (f"The resume you asked for did NOT run cleanly for session {sid[:8]}: {detail}. "
-            f"Nothing was killed; start it by hand."),
+           (f"The resume you asked for did NOT complete for session {sid[:8]}: {detail}. "
+            f"Nothing was killed."),
            ["acknowledge"])
     return done
 
@@ -583,10 +626,15 @@ def main(argv):
         log(f"liveness {live} for {sid[:8]} — carded; lapse timing continues", now)
     if live == "ABSENT":
         condition = f"absent-{sid[:8]}"
+        # This card carries an action, so an unreadable stop state is said ON it: a manager
+        # stood down on purpose and then closed is ABSENT too, and must not be resumed blind.
+        stop_caveat = (" ⚠️ The keeper could not read whether the fleet was stood down on "
+                       "purpose — if it was (/supervisor:stop), do not resume it."
+                       if stood is None else "")
         item = raise_once(condition, f"The fleet manager (session {sid[:8]}) is ABSENT — the session is gone, not merely "
             f"lapsed. Nothing supervises the fleet until one is started. Answer "
             f"'{RESUME_OPTION}' to have the keeper resume it once, after it confirms the death; it "
-            f"never starts or restarts one on its own.", now, detail,
+            f"never starts or restarts one on its own.{stop_caveat}", now, detail,
             options=(RESUME_OPTION, "acknowledge"))
         if item:
             act_on_answer(sid, condition, item, now)
