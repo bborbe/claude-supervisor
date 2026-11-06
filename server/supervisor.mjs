@@ -33,7 +33,7 @@ import { fileURLToPath } from 'node:url'
 import { A2A_DEFAULT_CLUSTER, a2aTargetsForClusters, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, clusterAllowlistRefusal, clusterOfTarget, collectWorkerTurn, configuredA2AClusters, createWorkerOnController, fetchWorkerCard, isA2ATarget, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pendingPushRegistration, pollA2A, pushDiagnosticPatch, readPushCallbackFromWorker, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
 import { createA2APushRegistry } from './a2a-push-registry.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
-import { parseLauncherModel, resolveManagerLauncher, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
+import { applyHumanLauncherRule, parseLauncherModel, resolveManagerLauncher, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { readTaskLaunchers } from './task-launcher.mjs'
 import { CLUSTER_ANSWER_MAX, classifyClusterAnswer, newSessionId, resolveClusterTarget, startClusterSession } from './cluster-spawn.mjs'
 import { resolveMessageChannel } from './message-channel.mjs'
@@ -2512,6 +2512,16 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       vaultLauncher: workerTarget.launcher,
       workerLauncher: workerTarget.workerLauncher,
       ...read,
+    })
+    // A `role: human` row is the operator's own session, not a delegate (operator ruling
+    // 2026-11-06, card 25c99a35): it opens on the vault's Claude launcher, never the
+    // `-deepseek` worker default. Only the task's own `launcher:` still wins over that.
+    taskLauncher = applyHumanLauncherRule({
+      role: roleResolution.role,
+      resolved: taskLauncher,
+      vaultLauncher: workerTarget.launcher,
+      managerDefault: workerTarget.managerLauncher,
+      exists: existsSync,
     })
   }
   // ONE check, after every branch. The manager branch could not fail before `managerDefault`
