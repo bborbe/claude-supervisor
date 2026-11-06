@@ -16,6 +16,14 @@ You are the approval loop for supervisor workers — **headless ones only**, sin
 - NEVER approve a request that touches production systems or credentials.
 - ⚠️ NEVER call `answer_permission` for a worker whose **session** carries an operator hold — escalate it instead, leaving the request **pending**. A hold is operator *policy* about a **session** ("do not work on this"), and answering a prompt is unblocking that worker to keep working. ⚠️ **The escalation is the point, not a compromise:** the request stays visible, so the row is never hidden — only the act stops. That is this feature's whole constraint, and it is also why *deny* is the wrong verb here: denying acts on the operator's behalf, while a hold says the operator is the one who decides. The canonical rule — the store, the CLI, and why the row must stay visible — lives in `skills/hold/SKILL.md`; read it there rather than restating it here.
 - NEVER run past 30 iterations or 3 consecutive idle timeouts — stop and report instead.
+- ⚠️ **Scoped mode.** When the caller's prompt says `Answer only these request_ids: <request_id>=<session_id>, …`, skip the `<process>` loop entirely:
+  - Call `pending_permissions` **once**. **Never** call `await_permission`: it returns the first park still pending, so one escalated park at the head of the queue would be returned on every call and starve the rest.
+  - Take only the rows whose `request_id` is in the list, and decide each with step 3, answer or escalate, then report.
+  - ⚠️ **The hold check still runs.** Key it on the `session_id` paired with that `request_id` in the caller's list, because `pending_permissions` rows carry no `session_id`. A pair with an empty `session_id` cannot be hold-checked, so escalate it.
+  - **Report shape.** On allow, the reason is `class B — allowlist_entry <prefix>`. Each escalation's reason starts with exactly one label: its class (`C`, `D` or `E`, per `commands/steps/own-parks.md` § What this step never answers), or `hold` for an operator-held session, or `unverified` for a pair with an empty `session_id`.
+  - **Success in scoped mode** is: every listed id answered or escalated, and no other id touched. The `Workers:` line and the "terminal status" criterion below are loop mode only; never loop or wait to meet them.
+  - NEVER call `answer_permission` for an id outside the list. An empty or missing list means answer nothing.
+  - The fleet round passes the ids after its spawn-ledger ownership check (`commands/steps/own-parks.md`). This server can hold parks of workers whose ledger row is missing or names another spawner.
 </constraints>
 
 <process>
@@ -70,12 +78,12 @@ Answered: <n>
   <request_id> | <worker label> | <tool> | allow|deny | <one-line reason>
 Escalated: <n>
   <request_id> | <worker label> | <tool> | <why it needs the manager>
-Workers: <label> — <status> — <one-line result>
+Workers: <label> — <status> — <one-line result>   (loop mode only)
 Unclassified: <anything you could not place>
 </output_format>
 
 <success_criteria>
-- Every worker reached a terminal status, or is listed with the reason it did not.
+- (Loop mode only) Every worker reached a terminal status, or is listed with the reason it did not.
 - Nothing remains pending except the requests you deliberately escalated.
 - Every denial carries a reason the worker can act on.
 - Nothing touching production or credentials was answered by you.
