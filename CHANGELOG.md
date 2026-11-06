@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.246.0
 
 - fix: **`attention-answer.py answer` no longer prints `ANSWERED` for a permission verdict it never saw delivered.** It used to POST the verdict, print `ANSWERED` plus an unconditional `DELIVERY: supervisor poll -- no session to send to` line, and exit 0 whatever happened next — measured 2026-11-05, a manager read that as answered while the poller refused with `wrapper holds no question for session bdc2f1ed` and the worker stayed parked. It now waits (bounded, `ATTENTION_DELIVERY_WAIT`, default 35 s — past the poller's 30 s idle interval) for the store's delivery report: `delivered` → `ANSWERED` + `DELIVERY: delivered by <carrier>`, exit 0; `failed` / `held` → `RECORDED` + `NOT_DELIVERED`, exit 3; no report or an unreadable one → `RECORDED` + `UNCONFIRMED`, exit 3. `commands/attention-next.md` branches on the new lines.
 - fix: `scripts/permission-answer-poll.py` records a `delivered` attempt (carrier `supervisor:permission-answer-poll`) after it emits a decision, so a tab worker's delivered answer reads `delivered` in the store instead of `never_attempted` — without it the arm above would report every delivered tab-worker answer as unconfirmed.
