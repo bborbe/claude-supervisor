@@ -266,6 +266,8 @@ _PASSTHROUGH = {"command", "builtin", "nohup", "time", "exec", "nice", "caffeina
 _KEYWORDS = {"if", "then", "elif", "else", "do", "while", "until", "!", "{", "}"}
 _NOOP_HEADS = {"for", "case", "esac", "fi", "done", "in", "select", "function", "}", "]]", "[["}
 _SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+_WRAPPERS = _PASSTHROUGH | {"env", "xargs", "stdbuf", "ionice", "chrt", "taskset", "watch",
+                            "parallel", "flock", "unbuffer", "script", "nsenter"}
 
 
 def words(segment):
@@ -534,12 +536,16 @@ def _publish(env, argv):
     if name in ("curl", "http", "wget"):
         if _localhost(a):
             return None
+        writes = ("POST", "PUT", "PATCH", "DELETE")
         for i, x in enumerate(a):
-            if x in ("-X", "--request") and i + 1 < len(a) and a[i + 1].upper() in ("POST", "PUT", "PATCH", "DELETE"):
+            if x in ("-X", "--request", "--method") and i + 1 < len(a) and a[i + 1].upper() in writes:
                 return "publish"
-            if (x.startswith(("-XPOST", "-XPUT", "-XPATCH", "-XDELETE"))
-                    or x in ("-d", "--data", "--data-raw", "--data-binary", "-F", "--form", "-T",
-                             "--upload-file", "--post-data")):
+            if re.match(r"^(-X|--request=|--method=)(POST|PUT|PATCH|DELETE)$", x, re.IGNORECASE):
+                return "publish"
+            # Any body-carrying flag makes the call a write: `-d`, every `--data*`, `-F`/`--form*`,
+            # `--json`, `-T`/`--upload-file`, wget's `--post-data` / `--post-file` / `--body-*`.
+            if x in ("-d", "-F", "-T") or x.startswith(("--data", "--form", "--json", "--upload-file",
+                                                         "--post-", "--body-")):
                 return "publish"
         return None
     if name in ("ssh", "scp", "rsync", "sftp"):
@@ -720,10 +726,21 @@ def classify_bash(cmd, depth=0):
                 form = _check_argv(env, rest)
                 if form:
                     return form
-        if base == "find" and "-exec" in argv:
-            form = _check_argv(env, argv[argv.index("-exec") + 1:])
-            if form:
-                return form
+        # A wrapper runs the program named somewhere in its arguments, and an option VALUE
+        # (`timeout --signal KILL 5 rm …`, `env -u VAR rm …`) can sit where `words()` expects the
+        # program. So every suffix is checked: the real program is found wherever it starts.
+        # `find`'s action flags (`-exec`, `-execdir`, `-ok`, `-okdir`) are the same shape.
+        raw = shlex.split(seg)
+        heads = [os.path.basename(t) for t in raw if not _ENV.match(t)][:1]
+        if base == "find" or (heads and heads[0] in _WRAPPERS):
+            for i in range(1, len(raw)):
+                form = _check_argv(env, raw[i:])
+                if not form and os.path.basename(raw[i]) in _SHELLS:
+                    j = _inline_program_index(raw[i:], "c")
+                    if j is not None and j < len(raw) - i:
+                        form = classify_bash(raw[i + j], depth + 1)
+                if form:
+                    return form
         form = _check_argv(env, argv)
         if form:
             return form

@@ -1,5 +1,5 @@
 {
-  "note": "Shared cases for the permission-tier classifier. Both scripts/permission-tier.py and server/permission-tier.mjs must return `tier` (and `form`, when given) for every case. The three `bad-example-*` cases are the operator's own cards from 2026-11-06 that must stop reaching the board. Edit a case here and both suites move together. `scripts/tests/test_permission_tier.py` also asserts every form the classifier can return has at least one case.",
+  "note": "Shared cases for the permission-tier classifier. Both scripts/permission-tier.py and server/permission-tier.mjs must return `tier` (and `form`, when given) for every case. The three `bad-example-*` cases are the operator's own cards from 2026-11-06 that must stop reaching the board. Edit a case here and every suite that runs this fixture moves with it.",
   "cases": [
     { "id": "sc1-git-status", "tool": "Bash", "input": { "command": "git status" }, "tier": "manager" },
     { "id": "sc1-git-log", "tool": "Bash", "input": { "command": "git log --oneline -5" }, "tier": "manager" },
@@ -70,6 +70,12 @@
     { "id": "review-docker-prune", "tool": "Bash", "input": { "command": "docker system prune -af" }, "tier": "operator", "form": "irreversible-delete" },
     { "id": "review-workflow-run", "tool": "Bash", "input": { "command": "gh -R a/b workflow run deploy.yml" }, "tier": "operator", "form": "publish" },
     { "id": "review-pkill", "tool": "Bash", "input": { "command": "pkill -f dark-factory" }, "tier": "operator", "form": "service-restart" },
+    { "id": "review2-timeout-option-value", "tool": "Bash", "input": { "command": "timeout --signal KILL 5 rm -rf ~/x" }, "tier": "operator", "form": "irreversible-delete" },
+    { "id": "review2-env-unset-value", "tool": "Bash", "input": { "command": "env -u VAR rm -rf ~/x" }, "tier": "operator", "form": "irreversible-delete" },
+    { "id": "review2-find-execdir", "tool": "Bash", "input": { "command": "find . -execdir rm -rf {} +" }, "tier": "operator", "form": "irreversible-delete" },
+    { "id": "review2-curl-json", "tool": "Bash", "input": { "command": "curl --json '{}' https://api.example.com/x" }, "tier": "operator", "form": "publish" },
+    { "id": "review2-curl-request-eq", "tool": "Bash", "input": { "command": "curl --request=POST https://api.example.com/x" }, "tier": "operator", "form": "publish" },
+    { "id": "review2-timeout-routine", "tool": "Bash", "input": { "command": "timeout 30 git push origin feat/x" }, "tier": "manager" },
     { "id": "review-data-heredoc-still-manager", "tool": "Bash", "input": { "command": "cat <<'EOF' > /tmp/x.md\nhello\nEOF" }, "tier": "manager" },
     { "id": "review-stderr-redirect-still-manager", "tool": "Bash", "input": { "command": "git status 2>&1 | tail -3" }, "tier": "manager" },
     { "id": "review-script-file-is-manager", "tool": "Bash", "input": { "command": "bash scripts/x.sh" }, "tier": "manager" },
