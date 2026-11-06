@@ -72,6 +72,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -381,12 +382,35 @@ def answer_of(item):
         if line.startswith("ANSWERED: option:"):
             option = line.split(":", 2)[2].strip()
         elif line.startswith("ANSWERED_AT:"):
-            stamp = line.split(":", 1)[1].strip().replace("Z", "+00:00")
-            try:
-                answered = datetime.datetime.fromisoformat(stamp).timestamp()
-            except ValueError:
-                answered = None
+            answered = parse_rfc3339(line.split(":", 1)[1].strip())
+            if answered is None:
+                log(f"unparseable ANSWERED_AT for card {item}: {line!r} — the resume wait is "
+                    f"bounded from first sight instead")
     return option, answered
+
+
+_RFC3339 = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d+))?(Z|[+-]\d\d:\d\d)")
+
+
+def parse_rfc3339(stamp):
+    """Epoch seconds for an RFC 3339 time, or `None`. Any fraction length, any Python ≥ 3.7.
+
+    ⚠️ Not `datetime.fromisoformat` alone: the launchd job runs `/usr/bin/python3` (3.9.6),
+    which accepts only 3- or 6-digit fractions, while the store writes Go's `RFC3339Nano`,
+    which drops trailing zeros (1–9 digits). Measured 2026-11-06: `…54.5883+00:00` and a
+    9-digit fraction both raise there, and the bound would silently fall back to first sight.
+    The fraction is normalised to exactly 6 digits first.
+    """
+    m = _RFC3339.fullmatch(stamp or "")
+    if not m:
+        return None
+    base, frac, zone = m.groups()
+    frac = ((frac or "") + "000000")[:6]
+    zone = "+00:00" if zone == "Z" else zone
+    try:
+        return datetime.datetime.fromisoformat(f"{base}.{frac}{zone}").timestamp()
+    except ValueError:
+        return None
 
 
 #: How long an answered `resume it` may wait on a too-fresh transcript before it is consumed

@@ -569,6 +569,26 @@ class AnswerOfTest(unittest.TestCase):
         self.assertAlmostEqual(1793977674.588302, answered, places=3)
         self.assertIn("--answered-at", run.call_args.args[0])
 
+    def test_every_rfc3339nano_fraction_length_parses(self):
+        """Go's RFC3339Nano drops trailing zeros: 0–9 fraction digits all occur in production.
+
+        The 6-digit case above passes on `fromisoformat` everywhere; the launchd Python (3.9)
+        rejects 4- and 9-digit fractions, which is exactly what this pins.
+        """
+        whole = 1793977674.0
+        for stamp, expect in (
+            ("2026-11-06T15:07:54Z", whole),
+            ("2026-11-06T15:07:54.5Z", whole + 0.5),
+            ("2026-11-06T15:07:54.5883Z", whole + 0.5883),
+            ("2026-11-06T15:07:54.123456789Z", whole + 0.123456),
+            ("2026-11-06T16:07:54.25+01:00", whole + 0.25),
+        ):
+            self.assertAlmostEqual(expect, fk.parse_rfc3339(stamp), places=5, msg=stamp)
+
+    def test_garbage_is_none_not_a_crash(self):
+        for stamp in ("", "yesterday", "2026-11-06", "2026-11-06T15:07:54.5"):
+            self.assertIsNone(fk.parse_rfc3339(stamp), stamp)
+
     def test_an_unrunnable_poll_is_no_answer(self):
         with mock.patch.object(fk.subprocess, "run", side_effect=OSError("gone")):
             self.assertEqual((None, None), fk.answer_of("item-1"))
