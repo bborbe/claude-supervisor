@@ -169,7 +169,7 @@ The count is a property of the day, not of the command — **never hardcode it a
 
 **A missing field is a default, never a veto** (operator ruling 2026-11-06). Rules and defaults have one home, [`docs/role-mode-matrix.md`](../docs/role-mode-matrix.md), also cited by `vault-cli` `create-task`.
 
-**Defaults:** missing `role` → `agent`; missing `mode` → matrix Rule 2; empty `phase` → the existing approval path. Never skip a row by judgement ("bot rows") — the only non-open outcomes are provenance `REFUSED`, LIVE, `⛔ HOLD`, a session hold, a cap refusal, and a declared `role: manager` (`👤 YOURS`).
+**Defaults:** missing `role` → `agent`; missing `mode` → matrix Rule 2; empty `phase` → the existing approval path. Never skip a row by judgement ("bot rows") — non-open outcomes are gates only: provenance `REFUSED`, LIVE, `⛔ HOLD`, a session hold, a cap refusal, the answer-path probe, a readiness hold, and a declared `role: manager` (`👤 YOURS`).
 
 Resolve the task in this order — each selected row on the batch path, the single resolved task otherwise:
 
@@ -185,7 +185,7 @@ Resolve the task in this order — each selected row on the batch path, the sing
 
 ### Then decide `mode` — the rule lives in one place, and this is not it
 
-**The classifier is not restated here.** It has its single home in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker **item 6** — the classifying question, the `role` → `mode` mapping, and the five closed watch-need signals that are the only thing keeping a `role: agent` task `interactive`. Read it there. ⚠️ **This line previously described item 6 as carrying *"the asymmetry that makes `interactive` a floor rather than a tie-break"* — the rule this change flipped** — and that wording is recorded rather than quietly dropped, because a reader following it would classify exactly backwards at the one section that decides `mode`.
+**The classifier is not restated here.** The `role` → `mode` mapping is matrix Rule 2 ([`docs/role-mode-matrix.md`](../docs/role-mode-matrix.md)); the five watch-need signals it reads live in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker **item 6**. ⚠️ **This line previously described item 6 as carrying *"the asymmetry that makes `interactive` a floor rather than a tie-break"* — the rule this change flipped** — and that wording is recorded rather than quietly dropped, because a reader following it would classify exactly backwards at the one section that decides `mode`.
 
 What this file owns is the **storage and the write**: resolve `mode` per that rule, write the field, and read it back at Step 3.
 

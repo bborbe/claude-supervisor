@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a taskless `spawn_agent(role: human)` now takes the Claude launcher too** — `applyHumanLauncherRule` runs after every launcher branch, not only the task branch. Doc follow-ups from the #644 review: `commands/open.md` points the `role` → `mode` mapping at the matrix and lists every gate among the non-open outcomes; `docs/fleet-surface.md` item 6 cites matrix Rule 2 instead of restating it; matrix Rule 4 states its `claude_script` fallback.
+
 ## v0.241.0
 
 - fix: **the `--flagged` batch opens every operator-flagged row even when its `role`/`mode`/`phase` are missing.** `commands/open.md` § Step 0.6 no longer refuses a row whose body carries no role signal: it writes the default (`role: agent`, `mode` per the matrix) and prints `🏷️ defaulted <field>=<value>`. Judgement skips ("bot rows") are gone; the only non-open outcomes are provenance REFUSED, LIVE, HOLD, session hold, cap refusal and a declared `role: manager`. The footer's `refused U (undecidable)` counter is replaced by `defaulted D fields`.
