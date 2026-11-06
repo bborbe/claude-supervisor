@@ -8,6 +8,12 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the `--flagged` batch opens every operator-flagged row even when its `role`/`mode`/`phase` are missing.** `commands/open.md` § Step 0.6 no longer refuses a row whose body carries no role signal: it writes the default (`role: agent`, `mode` per the matrix) and prints `🏷️ defaulted <field>=<value>`. Judgement skips ("bot rows") are gone; the only non-open outcomes are provenance REFUSED, LIVE, HOLD, session hold, cap refusal and a declared `role: manager`. The footer's `refused U (undecidable)` counter is replaced by `defaulted D fields`.
+- feat: **one role × mode decision matrix, `docs/role-mode-matrix.md`**, cited by `/supervisor:open` and `vault-cli` `create-task` instead of restating the mapping; `docs/fleet-surface.md` item 6 points at it.
+- fix: **a `role: human` row always opens into Direct on the vault's Claude launcher.** `spawn_agent` applies `applyHumanLauncherRule` (`server/spawn-cwd.mjs`): a human row with no own `launcher:` takes the manager launcher chain (`manager_launcher`, else the `-claude` sibling) instead of the `-deepseek` worker default; a previous run's "leave closed" answer never carries over.
+
 ## v0.240.4
 
 - fix: goal round now reaches row 5b — `commands/steps/goal-drive.md` hands off to `steps/goal-parked.md` before the tail, so parked tracked workers get their lever row every tick (previously no step chained to it and rounds skipped it)
