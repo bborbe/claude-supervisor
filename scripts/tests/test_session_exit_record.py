@@ -10,8 +10,9 @@ The load-bearing properties are the ones a death would expose:
 - a record path is derived from the pane id and nothing else, and a pane id that could
   escape the store is refused rather than joined into a filename;
 - appending never truncates, so the trap and the observer cannot lose each other's line;
-- the observer records a disappearance as `unknown-end` — an inference, never
-  `signalled kill` — and stays silent when the parent already reported an end;
+- the observer names a signal only from a kernel-delivered wait status (`kqueue`
+  `NOTE_EXITSTATUS`); a pid already gone when it starts is an `unknown-end` inference,
+  never `signalled kill`; and it stays silent when the parent already reported an end;
 - an absent record reads as *nothing*, not as an error — absence is the state this tool
   exists to make visible.
 
@@ -22,9 +23,12 @@ import datetime
 import importlib.util
 import json
 import os
+import select
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -285,13 +289,58 @@ class Observer(StoreTestCase):
         self.assertEqual(len(lines), 1)
         self.assertIn("kind=unknown-end", lines[0])
 
-    def test_the_observer_never_claims_a_signal(self):
-        """A signal is a fact only the parent's `waitpid` holds; the observer infers."""
+    def test_a_pid_gone_before_the_watch_never_claims_a_signal(self):
+        """No wait status was delivered, so absence alone is an inference, not a signal."""
         self._run("observe", "--pane", "2156", "--pid", str(self._gone_pid()), "--foreground")
         line = self._lines()[0]
         self.assertNotIn("signalled kill", line)
         self.assertIn("rc=unavailable", line)
         self.assertIn("signal=unavailable", line)
+
+    @staticmethod
+    def _skip_without_kqueue():
+        if not hasattr(select, "kqueue"):
+            raise unittest.SkipTest("kqueue exit-status watch is macOS/BSD only")
+
+    def _observe_then_kill(self, sig):
+        """A live target in its own group, an observer that is NOT its parent, a group kill.
+
+        The pane-243 shape (2026-11-06): a group kill takes the trap's shell down with the
+        child, so the observer is the only writer left.
+        """
+        self._skip_without_kqueue()
+        target = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
+        observer = subprocess.Popen(
+            [sys.executable, _SCRIPT, "observe", "--pane", "2156", "--pid", str(target.pid),
+             "--interval", "5", "--foreground"],
+            env=dict(os.environ),
+        )
+        log = os.path.join(self.dir, "pane-2156.log")
+        deadline = time.time() + 5
+        while not os.path.exists(log) and time.time() < deadline:
+            time.sleep(0.05)
+        if not os.path.exists(log):
+            target.kill()
+            observer.kill()
+            self.fail("observer wrote no heartbeat within 5 s — watch never armed")
+        os.killpg(target.pid, sig)
+        target.wait()
+        observer.wait(timeout=10)
+        return [line for line in self._lines() if "kind=heartbeat" not in line]
+
+    def test_a_group_kill_of_a_live_pid_records_the_signal(self):
+        """`kqueue` `NOTE_EXITSTATUS` hands a non-parent the wait status, with no privilege."""
+        ends = self._observe_then_kill(signal.SIGTERM)
+        self.assertEqual(len(ends), 1, ends)
+        self.assertIn("kind=signalled kill", ends[0])
+        self.assertIn("rc=143", ends[0])
+        self.assertIn("signal=SIGTERM", ends[0])
+        self.assertIn("writer=observer", ends[0])
+
+    def test_a_group_sigkill_is_named(self):
+        ends = self._observe_then_kill(signal.SIGKILL)
+        self.assertIn("signal=SIGKILL", ends[0])
+        self.assertIn("rc=137", ends[0])
 
     def test_the_observers_end_carries_an_unavailable_sender(self):
         self._run("observe", "--pane", "2156", "--pid", str(self._gone_pid()), "--foreground")
