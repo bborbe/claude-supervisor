@@ -550,7 +550,7 @@ substitute for one another.
 |---|---|---|
 | a task declared **`mode: interactive`** | **B** — `/supervisor:open "<task>"`, the wezterm `--resume` branch | Path A is headless-only and **refuses** `resume` + `interactive:true` rather than silently downgrading it, so on such a row A is not a path at all. `mode:` is chosen for how the worker must *run*, and a tab is what it asks for |
 | a session **proven dead** whose mode is `headless` or absent | **A**, `interactive=false, resume="<id>"` — or **B** where headless is not permitted (below) | A is headless, so prompts park for the manager. On A, `resume` **requires** `interactive:false` — the pair is refused there, not silently downgraded |
-| a session whose liveness **cannot be determined** | **B**, `wezterm cli spawn --resume` | A refuses an unverifiable resume by design |
+| a session whose liveness **cannot be determined** | **B** — the raw `wezterm cli spawn` recipe above, which hands `--resume` to the launcher directly | A refuses an unverifiable resume by design |
 
 ⚠️ **B is the manager's own path, not the operator's.** The manager runs `/supervisor:open "<task>"` itself; handing the operator a `you run:` line for a mechanical resume is the defect the `mode:` row above closes (`commands/goal-loop.md` § Procedure, the `To resume` bullet, is the call site). ⚠️ **And a path-B resume writes no ledger row, so that worker is counted against the fleet cap** — item 5 above owns that rule and is not restated here.
 
