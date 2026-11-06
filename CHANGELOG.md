@@ -13,6 +13,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - fix: **a `role: human` row prefers the vault's `-claude` sibling over `manager_launcher`** — both private-personal and seibert-brogrammers configure `manager_launcher` to their `-deepseek` script, so the manager chain left human rows on the worker model (found by the first live `--flagged` run).
 - fix: **a taskless `spawn_agent(role: human)` now takes the Claude launcher too** — `applyHumanLauncherRule` runs after every launcher branch, not only the task branch. Doc follow-ups from the #644 review: `commands/open.md` points the `role` → `mode` mapping at the matrix and lists every gate among the non-open outcomes; `docs/fleet-surface.md` item 6 cites matrix Rule 2 instead of restating it; matrix Rule 4 states its `claude_script` fallback.
 
+## v0.242.0
+
+- fix: **`/supervisor:open`'s resume branch selects its path by the row's resolved `mode:` and liveness instead of always opening a wezterm tab.** `commands/open.md` § 3.1 no longer claims the resume branch is unconditionally the tab path: a `mode: headless` row with an **ABSENT** session resumes through `spawn_agent(resume=, interactive=false)` with an explicit `cwd` (server-paced, so it skips `start-rate.mjs`), while `mode: interactive` and UNKNOWN/AMBIGUOUS liveness still take the tab path unchanged. The selector's single home stays `docs/fleet-surface.md` § Spawn a worker's resume-path table; the call site only cites it. Under a `spawn.mode: headless` fleet default this is what stops a `--flagged` batch returning 26 headless rows as operator-watched tabs.
+- feat: `scripts/check-open-resume-mode.py`, wired into `precommit` as `check-open-resume-mode` — fails on the pre-fix text (both unconditional sentences) and on any selector paragraph missing an arm, the rule-home citation, or the headless arm's `cwd` requirement.
+
 ## v0.241.1
 
 - fix: `session-exit-record.py observe` now records the real exit status of a process-group kill — it arms a `kqueue` `NOTE_EXITSTATUS` watch on the pane pid, so the out-of-group observer writes `kind=signalled kill … signal=SIGTERM writer=observer` instead of `unknown-end … signal=unavailable`; no privilege needed. Polling + `unknown-end` stays as the fallback when no watch can be armed.
