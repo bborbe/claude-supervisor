@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: goal round now reaches row 5b — `commands/steps/goal-drive.md` hands off to `steps/goal-parked.md` before the tail, so parked tracked workers get their lever row every tick (previously no step chained to it and rounds skipped it)
+
 ## v0.240.3
 
 - fix: `restart-precheck.classify()` returns `gate-unanswerable` for a pane-less (`sdk-cli`) session whose closer no channel can answer — no open card of its own, and no named full-id card that is open or answered-and-delivered — so `/supervisor:close` frees a finished headless worker instead of refusing `gate-held` forever. An answered card with no recorded delivery counts as unanswerable; an unreadable store fails closed to `gate-held`.
