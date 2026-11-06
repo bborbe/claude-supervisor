@@ -2513,6 +2513,8 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       workerLauncher: workerTarget.workerLauncher,
       ...read,
     })
+  }
+  if (!config.claudeCmd) {
     // A `role: human` row is the operator's own session, not a delegate (operator ruling
     // 2026-11-06, card 25c99a35): it opens on the vault's Claude launcher, never the
     // `-deepseek` worker default. Only the task's own `launcher:` still wins over that.

@@ -101,6 +101,13 @@ SITE_LIST = {
     # `0 footers` from a mux socket that never answered — precisely the false green it
     # exists to prevent. Both are driven into the three states below rather than listed.
     ("manager-menu-footer.py", "wezterm_panes"), ("manager-menu-footer.py", "pane_lines"),
+    # added 2026-11-06 — `session-exit-record.py`'s process-tree read, behind the observer's
+    # session-id stamp. One `ps -Ao pid=,ppid=,comm=` snapshot per heartbeat, walked to the
+    # pane's own `claude`. It returns `None` for a failed query, never `{}`: a `ps` that did
+    # not answer cannot prove the pane holds no `claude`, and the caller then keeps the id it
+    # already carries rather than reading the tree as empty. Driven into the three states
+    # below.
+    ("session-exit-record.py", "_process_table"),
     # in-repo callers that hold no transport call of their own
     ("who-needs-me.py", "panes"),          # present pre-audit only; deleted by this change
     ("who-needs-me.py", "pane_for"), ("who-needs-me.py", "live_pane_ids"),
@@ -207,6 +214,7 @@ POPULATED = {
     ("mmf", "wezterm_panes"): '[{"pane_id": "204", "title": "t"}]',
     ("mmf", "pane_lines"): "context\nEnter to select",
     ("sg", "pane_text"): "  ⎿  Goal set: Task \"t\" is finished.",
+    ("ser", "_process_table"): "101 1 claude",
 }
 
 
@@ -281,6 +289,7 @@ def main():
             ("wnmh", "who-needs-my-help.py"),
             ("mmf", "manager-menu-footer.py"),
             ("sg", "spawn-goal.py"),
+            ("ser", "session-exit-record.py"),
         )
     }
 
@@ -319,6 +328,8 @@ def main():
         # same reason as the pair above: an entry this loop never reaches is a false green
         # for exactly the read it claims to protect.
         ("sg", "pane_text", (1,)),
+        # added 2026-11-06 — the observer's process-tree read, driven like `pvc._pid_ttys`.
+        ("ser", "_process_table", ()),
     ]
     if args.capture:
         print(f"== three-state captures — {os.path.abspath(args.tree)}")
