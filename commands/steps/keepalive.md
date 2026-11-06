@@ -166,9 +166,11 @@ quiet minutes, which grow every round. Leaving the bucket, leaving the fleet, or
 that dropped re-arms it.
 
 **Report the line.** Print the `park-nudge:` summary verbatim
-(`<n> nudged · <s> suppressed · <w> within 15m · <m> watching · <l> live`) inside the
-`Legs` block that `commands/steps/output-shape.md` item 14 defines, beside the other
-`unactioned:` counts.
+(`<n> nudged · <s> suppressed · <w> within 15m · <m> watching · <l> live`) beside the
+three counts that `commands/steps/output-shape.md` item 14 renders. ⚠️ **It is not one of
+them** — item 14's block is the digest's `LEGS` section, which admits exactly three
+`unactioned:` lines, so a `park-nudge:` line printed inside it would fail that item's own
+`--check`.
 
 ## Resume a worker whose session died
 
@@ -243,9 +245,18 @@ the dead-worker scan cannot finish inside its own timeout the floor is the only 
 Both flags are refused on any other key. Format, not-run form and rationale:
 `commands/steps/output-shape.md` item 14, the single home.
 
-⚠️ **A leg that does not execute records WHY, in the same file.** When the debt gate skips this
-leg (exit 12 or 2), or the scan's own instrument is absent, write
-`fleet-legs.py --leg keep-alive --not-run "<reason>"` — never leave the sweep's seeded
-`not run — no reading recorded this round` standing, and never render a `0` the leg did not
-measure. A suppressed leg and a leg that ran and found nothing must never print the same.
+⚠️ **A leg that does not execute records WHY, in the same file — at the granularity that failed.**
+When the debt gate skips the whole leg (exit 12 or 2), write
+`fleet-legs.py --leg keep-alive --not-run "<reason>"`, which covers both of its keys.
+⚠️ **When only one half failed, name that KEY, never the leg** — a scan whose instrument is
+absent is `fleet-legs.py --leg dead-workers --not-run "scan instrument absent"`, because
+`--leg keep-alive` would wipe the lapsed-manager reading this leg already recorded. Never
+leave the sweep's seeded `not run — no reading recorded this round` standing: `--check`
+treats that text as "nobody has spoken for this key", so a round that renders it is reported
+as incomplete. A suppressed leg and a leg that ran and found nothing must never print the same.
+
+⚠️ **A failed write is reported, never swallowed.** If `fleet-legs.py` itself exits 2 the digest
+could not be read or written (the sweep may not have written it yet); render
+`legs: UNKNOWN — <reason>` for this round and retry the record once the digest exists. A
+reading that never landed must not read as a leg that never ran.
 

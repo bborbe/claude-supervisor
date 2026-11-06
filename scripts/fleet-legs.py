@@ -64,6 +64,11 @@ FLOOR_KEY = "dead-workers"
 FLOOR_SUFFIX = " (lower bound, scan incomplete)"
 SECTION = "LEGS"
 NOT_RUN = "not run — "
+#: The sweep reader's seed reason. `--check` treats it as NOT RECORDED: the shape exists,
+#: but no leg has spoken for that key, so a round that reached the render with this text
+#: still standing is a round whose leg neither counted nor said why — the failure the check
+#: exists for. A leg that genuinely did not run writes its OWN reason, which reads as recorded.
+SEED_REASON = "no reading recorded this round"
 
 COUNT_RE = re.compile(
     r"^(?P<leg>[\w-]+): unactioned: (?P<n>\d+) (?P<key>[\w-]+)(?P<floor> \(lower bound, scan incomplete\))?$"
@@ -181,36 +186,58 @@ def set_not_run(entries, leg, keys, reason):
 
 
 def check(entries, errors):
-    """-> [problems]. Empty means the shape is complete."""
+    """-> [problems]. Empty means every key carries a RECORDED reading.
+
+    A key covered by a count is recorded. A key covered by a `not run` line is recorded
+    only when the reason is not the sweep's seed — the seed says "nobody has spoken for
+    this key", which is the state a render must not mistake for a leg that ran and found
+    nothing.
+    """
     problems = ["unparseable LEGS line: %r" % e for e in errors]
     seen = {}
-    for leg, kind, _payload, keys in entries:
+    for leg, kind, payload, keys in entries:
         for key in keys:
             if key not in LEG_OF:
                 problems.append("unknown key %r in a LEGS line" % key)
                 continue
-            seen.setdefault(key, []).append(kind)
+            seen.setdefault(key, []).append((kind, payload))
             if LEG_OF[key] != leg:
                 problems.append(
                     "key %r is rendered under leg %r but belongs to %r"
                     % (key, leg, LEG_OF[key])
                 )
     for key in KEYS:
-        kinds = seen.get(key, [])
-        if not kinds:
+        readings = seen.get(key, [])
+        if not readings:
             problems.append("no line for %r" % key)
-        elif len(kinds) > 1:
-            problems.append("%r is covered %d times" % (key, len(kinds)))
+        elif len(readings) > 1:
+            problems.append("%r is covered %d times" % (key, len(readings)))
+        elif readings[0][0] == "notrun" and readings[0][1] == SEED_REASON:
+            problems.append(
+                "no reading recorded for %r — the sweep's seed is still standing, so the "
+                "leg neither counted nor said why" % key
+            )
     return problems
 
 
-def write_atomic(path, lines):
+def write_atomic(path, lines, keep=None):
+    """Replace `path` atomically, preserving the mode and mtime of the file it replaces.
+
+    ⚠️ **The mtime is not cosmetic.** `scripts/fleet-digest.py` ages a round by this file's
+    mtime whenever its `snapshot written:` line names no parseable baseline (`join-degraded`
+    and the other `skipped` forms), so a leg rewrite that bumped the mtime would make a
+    lapsed round read fresh to the staleness watcher — a leg write must not be able to
+    silence the check that reports a dead loop.
+    """
     directory = os.path.dirname(os.path.abspath(path))
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".fleet-legs-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
         os.replace(tmp, path)
+        if keep is not None:
+            os.chmod(path, keep.st_mode & 0o777)
+            os.utime(path, (keep.st_atime, keep.st_mtime))
     except BaseException:
         try:
             os.unlink(tmp)
@@ -246,6 +273,19 @@ def main(argv=None):
         parser.error("--count and --not-run are mutually exclusive")
     if args.floor and args.exact:
         parser.error("--floor and --exact are mutually exclusive")
+    if args.check and (args.leg or args.count is not None or args.not_run is not None):
+        parser.error("--check takes no --leg, --count or --not-run")
+    if args.count is not None and args.count < 0:
+        parser.error("--count cannot be negative — a negative reading is not a count")
+    if args.not_run is not None:
+        reason = args.not_run.strip()
+        if not reason:
+            parser.error("--not-run needs a reason — an empty one reads as no line at all")
+        if " · " in reason:
+            parser.error(
+                "--not-run cannot contain ' · ' — that separator introduces the key list, "
+                "so the reason would be read as keys"
+            )
 
     try:
         with open(args.digest, encoding="utf-8") as fh:
@@ -271,7 +311,7 @@ def main(argv=None):
             for p in problems:
                 print("fleet-legs: %s" % p, file=sys.stderr)
             return EXIT_INCOMPLETE
-        print("legs ok: %s carries all %d count lines" % (args.digest, len(KEYS)))
+        print("legs ok: %s carries a recorded reading for all %d keys" % (args.digest, len(KEYS)))
         return 0
 
     resolved = resolve(args.leg or "")
@@ -322,9 +362,16 @@ def main(argv=None):
         new_body = render(set_not_run(entries, leg, keys, args.not_run))
 
     if body is None:
-        before = before + [SECTION]
+        # A digest that carries no LEGS section is the pre-fix shape. Insert the section in
+        # its template position — immediately before NOTES — rather than after it, so a
+        # hand-run cannot leave the render's section order broken.
+        cut = next(
+            (i for i, line in enumerate(before) if line.strip().startswith("NOTES")),
+            len(before),
+        )
+        before = before[:cut] + [SECTION] + before[cut:]
     try:
-        write_atomic(args.digest, before + new_body + after)
+        write_atomic(args.digest, before + new_body + after, keep=os.stat(args.digest))
     except OSError as exc:
         print("fleet-legs: cannot write %s: %s" % (args.digest, exc), file=sys.stderr)
         return EXIT_FAILED

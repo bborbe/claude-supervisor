@@ -72,6 +72,12 @@ class Base(unittest.TestCase):
     def run_legs(self, *argv):
         return legs.main(["--digest", self.path] + list(argv))
 
+    def record_all(self, *, lapsed=0, dead=0, flagged=0):
+        """Record a reading for all three keys, the shape a completed round writes."""
+        self.run_legs("--leg", "lapsed-managers", "--count", str(lapsed))
+        self.run_legs("--leg", "dead-workers", "--count", str(dead), "--exact")
+        self.run_legs("--leg", "operator-flagged", "--count", str(flagged))
+
 
 class TestCheck(Base):
     def test_a_digest_without_the_legs_section_fails_check(self):
@@ -79,9 +85,16 @@ class TestCheck(Base):
         self.write(PREFIX_DIGEST)
         self.assertEqual(self.run_legs("--check"), legs.EXIT_INCOMPLETE)
 
-    def test_the_seeded_section_passes_check(self):
-        """Every leg not run is a complete shape — the lines exist, none claims a count."""
+    def test_a_seeded_section_is_not_a_recorded_reading(self):
+        """The shape exists, but no leg has spoken — a render must not call that complete."""
         self.write(digest_with_legs())
+        self.assertEqual(self.run_legs("--check"), legs.EXIT_INCOMPLETE)
+
+    def test_a_leg_recorded_not_run_passes_check(self):
+        """A leg that genuinely did not run writes its own reason, which reads as recorded."""
+        self.write(digest_with_legs())
+        self.run_legs("--leg", "keep-alive", "--not-run", "debt gate (re-arm, exit 12)")
+        self.run_legs("--leg", "flagged-open", "--not-run", "debt gate (exit 12)")
         self.assertEqual(self.run_legs("--check"), 0)
 
     def test_a_missing_key_fails_check(self):
@@ -132,6 +145,9 @@ class TestCount(Base):
             "keep-alive: not run — no reading recorded this round · dead-workers", text
         )
         self.assertIn("flagged-open: not run — no reading recorded this round", text)
+        # Dead-workers and operator-flagged are still seeded, so the shape is not complete.
+        self.assertEqual(self.run_legs("--check"), legs.EXIT_INCOMPLETE)
+        self.record_all(lapsed=2)
         self.assertEqual(self.run_legs("--check"), 0)
 
     def test_all_three_counts_render_and_check_clean(self):
@@ -189,6 +205,7 @@ class TestNotRun(Base):
         text = self.read()
         self.assertIn("keep-alive: not run — debt gate (re-arm, exit 12)", text)
         self.assertNotIn("unactioned:", text)
+        self.run_legs("--leg", "flagged-open", "--not-run", "debt gate (exit 12)")
         self.assertEqual(self.run_legs("--check"), 0)
 
     def test_a_partial_not_run_reading_names_the_keys_it_still_covers(self):
@@ -225,10 +242,54 @@ class TestNotRun(Base):
         text = self.read()
         self.assertIn("keep-alive: unactioned: 4 lapsed-managers", text)
         self.assertIn("keep-alive: not run — debt gate · dead-workers", text)
+        self.run_legs("--leg", "operator-flagged", "--not-run", "debt gate (exit 12)")
         self.assertEqual(self.run_legs("--check"), 0)
 
 
+class TestRefusals(Base):
+    """The tool refuses the writes that would leave the digest unreadable.
+
+    Argument validation goes through argparse, which exits 2 — the same code a failed
+    read/write returns, and distinct from `--check`'s 1.
+    """
+
+    def refused(self, *argv):
+        with self.assertRaises(SystemExit) as ctx:
+            self.run_legs(*argv)
+        self.assertEqual(ctx.exception.code, 2)
+
+    def test_a_negative_count_is_refused(self):
+        self.write(digest_with_legs())
+        self.refused("--leg", "lapsed-managers", "--count", "-5")
+        self.assertIn("no reading recorded this round", self.read())
+
+    def test_an_empty_not_run_reason_is_refused(self):
+        self.write(digest_with_legs())
+        self.refused("--leg", "keep-alive", "--not-run", "   ")
+        self.assertIn("no reading recorded this round", self.read())
+
+    def test_a_reason_containing_the_key_separator_is_refused(self):
+        self.write(digest_with_legs())
+        self.refused("--leg", "keep-alive", "--not-run", "a · b")
+
+    def test_check_refuses_to_run_with_a_write_flag(self):
+        self.write(digest_with_legs())
+        self.refused("--check", "--leg", "lapsed-managers", "--count", "1")
+
+
 class TestDigestPreservation(Base):
+    def test_the_section_lands_before_notes_on_a_pre_fix_digest(self):
+        self.write(PREFIX_DIGEST)  # no LEGS section, NOTES present
+        self.run_legs("--leg", "lapsed-managers", "--count", "1")
+        text = self.read()
+        self.assertLess(text.index("LEGS"), text.index("NOTES"))
+
+    def test_the_write_preserves_the_digest_mtime(self):
+        """`fleet-digest.py` ages some rounds by this file's mtime — a leg must not reset it."""
+        self.write(digest_with_legs())
+        os.utime(self.path, (1700000000, 1700000000))
+        self.run_legs("--leg", "lapsed-managers", "--count", "1")
+        self.assertEqual(int(os.stat(self.path).st_mtime), 1700000000)
     def test_the_rest_of_the_digest_is_untouched(self):
         self.write(digest_with_legs())
         self.run_legs("--leg", "operator-flagged", "--count", "1")
