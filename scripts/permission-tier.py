@@ -270,11 +270,42 @@ _SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
 
 def words(segment):
     """(env, argv) for one segment, or raise Unverifiable."""
+    env, toks, _ = segment_words(segment)
+    return env, toks
+
+
+def segment_words(segment):
+    """(env, argv, writes) for one segment — `writes` are output-redirect targets."""
     try:
         toks = shlex.split(segment, comments=False, posix=True)
     except ValueError as err:
         raise Unverifiable(f"cannot split segment: {err}")
-    toks = [t for t in toks if not _REDIRECT_TOKEN.match(t)]
+    # A redirect is dropped as an operator but its TARGET is kept as an argument AND recorded
+    # as a write, so the path checks see it: `echo k >~/.ssh/authorized_keys` must not lose
+    # `~/.ssh/` with the `>`, and `echo x > ~/.claude/settings.json` is a write, not a read.
+    kept, writes, next_is_write = [], [], False
+    for t in toks:
+        if next_is_write:
+            next_is_write = False
+            kept.append(t)
+            writes.append(t)
+            continue
+        m = _REDIRECT_TOKEN.match(t)
+        if not m:
+            kept.append(t)
+            continue
+        op, target = m.group(1), t[m.end(1):].lstrip("&")
+        is_output = op != "<"
+        if not target:
+            next_is_write = is_output
+            if not is_output:
+                next_is_write = False
+            continue
+        if not re.fullmatch(r"\d+|-", target):
+            kept.append(target)
+            if is_output:
+                writes.append(target)
+    toks = kept
     while toks and toks[0] in _KEYWORDS:
         toks = toks[1:]
     env = {}
@@ -293,7 +324,7 @@ def words(segment):
                 k, _, v = toks[0].partition("=")
                 env[k] = v
             toks = toks[1:]
-    return env, toks
+    return env, toks, writes
 
 
 # --------------------------------------------------------------------------------------------
@@ -376,7 +407,7 @@ def _git(env, argv):
 
 
 def _gh(env, argv):
-    if not argv or argv[0] != "gh":
+    if not argv or os.path.basename(argv[0]) != "gh":
         return None
     a = argv[1:]
     while a and a[0] in ("-R", "--repo"):
@@ -384,6 +415,8 @@ def _gh(env, argv):
     a = [x for x in a if not x.startswith("--repo=")]
     if a[:2] == ["pr", "merge"]:
         return "merge-to-protected"
+    if a[:2] == ["workflow", "run"]:
+        return "publish"  # dispatches a workflow, which may deploy
     if a[:1] == ["release"] and a[1:2] and a[1] in ("create", "edit", "delete", "upload"):
         return "publish"
     if a[:2] in (["pr", "comment"], ["issue", "create"], ["issue", "comment"], ["pr", "review"]):
@@ -495,6 +528,9 @@ def _publish(env, argv):
         return "publish"
     if name == "docker" and a[:1] and a[0] in ("push", "login"):
         return "publish"
+    if name == "docker" and (a[:1] and a[0] in ("rm", "rmi", "prune")
+                             or a[1:2] and a[1] in ("rm", "prune")):
+        return "irreversible-delete"  # `docker rm`, `docker volume rm`, `docker system prune`
     if name in ("curl", "http", "wget"):
         if _localhost(a):
             return None
@@ -539,6 +575,8 @@ def _deploy(env, argv):
         return "prod"
     if name in ("sudo", "doas", "su"):
         return "privilege"
+    if name in ("kill", "pkill", "killall"):
+        return "service-restart"  # stops a running process; a pattern can hit a sibling's
     return None
 
 
@@ -574,6 +612,38 @@ def _check_argv(env, argv):
     return None
 
 
+def _inline_program_index(argv, letters, long_flags=()):
+    """Index of the inline-program argument after `-c` (or a combined `-lc`, `-ec`, `-Bc`), or None.
+
+    A combined short-flag cluster counts when its LAST letter is one of `letters`: `bash -lc X`
+    and `python3 -Bc X` take X as the program, exactly as `-c X` does. Missing this sent
+    `bash -lc 'git push --force …'` to the manager tier unread.
+    """
+    for i, a in enumerate(argv[1:], start=1):
+        if a in long_flags:
+            return i + 1
+        if re.fullmatch(r"-[A-Za-z]+", a) and a[-1] in letters:
+            return i + 1
+        if not a.startswith("-"):
+            return None  # first operand: a script file, not an inline program
+    return None
+
+
+def _reads_program_from_stdin(argv):
+    """A shell or ssh invocation whose program comes from stdin: no inline program, no script."""
+    if not argv:
+        return False
+    base = os.path.basename(argv[0])
+    if base == "ssh":
+        return len([a for a in argv[1:] if not a.startswith("-")]) <= 1  # host only, no command
+    if base not in _SHELLS:
+        return False
+    if _inline_program_index(argv, "c") is not None:
+        return False
+    operands = [a for a in argv[1:] if not a.startswith("-")]
+    return not operands or "-s" in argv
+
+
 def classify_bash(cmd, depth=0):
     """The first operator form found anywhere in `cmd`, or None. Raises Unverifiable."""
     if depth > 8:
@@ -583,17 +653,22 @@ def classify_bash(cmd, depth=0):
         form = classify_bash(inner, depth + 1)
         if form:
             return form
+    # A shell (or ssh) that reads its program from stdin — no `-c`, no script file — runs
+    # whatever is piped or redirected into it. Every heredoc in the command may be that
+    # program (`cat <<EOF | bash`), so all of them are split as shell. With no heredoc the
+    # input is unseen (`curl … | sh`), which is unverifiable.
+    stdin_shell = any(_reads_program_from_stdin(words(s)[1]) for s in segments)
+    if stdin_shell and not heredocs:
+        raise Unverifiable("a shell reads its program from stdin this check cannot see")
     for body, quoted, seg_index in heredocs:
         form = _scan_text(body)
         if form:
             return form
-        if seg_index < len(segments):
-            _, argv = words(segments[seg_index])
-            if argv and os.path.basename(argv[0]) in _SHELLS | {"ssh"}:
-                form = classify_bash(body, depth + 1)
-                if form:
-                    return form
-                continue
+        if stdin_shell:
+            form = classify_bash(body, depth + 1)
+            if form:
+                return form
+            continue
         if not quoted:
             # An unquoted heredoc expands `$(…)` in its body before the program reads it.
             for m in re.finditer(r"\$\(", body):
@@ -602,7 +677,16 @@ def classify_bash(cmd, depth=0):
                 if form:
                     return form
     for seg in segments:
-        env, argv = words(seg)
+        env, argv, writes = segment_words(seg)
+        targets = list(writes)
+        if argv and (os.path.basename(argv[0]) in _WRITE_CMDS
+                     or (os.path.basename(argv[0]) == "sed" and any(a.startswith("-i") for a in argv))):
+            targets += [a for a in argv[1:] if not a.startswith("-")]
+        for t in targets:
+            if _SETTINGS.search(t):
+                return "permission-grant"
+            if _SECRET_PATH.search(t):
+                return "secret"
         if not argv:
             if any(v in ("prod",) for k, v in env.items() if k == "BRANCH"):
                 return "prod"
@@ -615,22 +699,21 @@ def classify_bash(cmd, depth=0):
         if head in ("eval", "source", "."):
             raise Unverifiable(f"{head} runs text this check cannot see")
         base = os.path.basename(head)
-        if base in _SHELLS and "-c" in argv:
-            i = argv.index("-c")
-            if i + 1 >= len(argv):
-                raise Unverifiable("sh -c with no command")
-            form = classify_bash(argv[i + 1], depth + 1)
-            if form:
-                return form
-            continue
+        if base in _SHELLS:
+            i = _inline_program_index(argv, "c")
+            if i is not None:
+                if i >= len(argv):
+                    raise Unverifiable("sh -c with no command")
+                form = classify_bash(argv[i], depth + 1)
+                if form:
+                    return form
+                continue
         if base in _INTERPRETERS:
-            for flag in ("-c", "-e", "--eval"):
-                if flag in argv:
-                    i = argv.index(flag)
-                    if i + 1 < len(argv):
-                        form = _scan_text(argv[i + 1])
-                        if form:
-                            return form
+            i = _inline_program_index(argv, "ce", long_flags=("--eval",))
+            if i is not None and i < len(argv):
+                form = _scan_text(argv[i])
+                if form:
+                    return form
         if base == "xargs":
             rest = [x for x in argv[1:] if not x.startswith("-")]
             if rest:
@@ -651,7 +734,12 @@ def classify_bash(cmd, depth=0):
 # Non-Bash tools.
 # --------------------------------------------------------------------------------------------
 
-_SETTINGS = re.compile(r"/\.claude/settings(\.local)?\.json$|/\.claude\.json$")
+# The harness's own permission and execution surface: settings, hooks and installed plugins.
+# Writing any of them changes what runs next, and how — a permission grant by another name.
+# Matched with or without a leading directory, so a relative `.claude/settings.json` counts.
+_SETTINGS = re.compile(
+    r"(^|/)\.claude/(settings(\.local)?\.json$|hooks/|plugins/)|(^|/)\.claude\.json$")
+_WRITE_CMDS = {"cp", "mv", "tee", "ln", "install", "rsync", "chmod", "chown", "truncate", "touch"}
 
 
 def classify_tool(tool, tool_input):
@@ -715,8 +803,10 @@ def match_allowlist(entries, tool, cmd, context=None):
             continue
         if toks[:len(prefix)] != prefix:
             continue
-        if e.get("confine") == "clean-runner-config" and context.get("runnerConfigClean") is not True:
-            continue
+        confine = e.get("confine")
+        if confine is not None and (confine != "clean-runner-config"
+                                    or context.get("runnerConfigClean") is not True):
+            continue  # an unknown confine is one nothing enforces: fail closed, never allowlist
         return e
     return None
 

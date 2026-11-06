@@ -598,8 +598,8 @@ const publicPerm = (p) => ({
   // The manager-allowlist entry covering this prompt, so the answering manager can see WHY it
   // is allowed to answer before it does — rather than re-deriving a match from the command text.
   allowlist_entry: p.allowlistEntry?.prefix ?? null,
-  // allowlist | manager | operator — see docs/permission-allowlist.md § The three tiers. A manager
-  // answers `manager`-tier prompts on the written rubric; `operator` is never a manager's to answer.
+  // allowlist | manager | operator, from scripts/permission-tier.py. `operator` is never a
+  // manager's to answer; how a manager decides a `manager`-tier prompt is the doc's to state.
   permission_tier: p.permissionTier?.tier ?? 'operator',
   permission_tier_reason: p.permissionTier?.reason ?? null,
   requested_at: p.requestedAt,
