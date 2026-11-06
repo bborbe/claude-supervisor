@@ -51,8 +51,11 @@ mere absence (2026-11-06: pane 243's group kill left `signal=unavailable` under 
 **Keyed on the pane, not the session.** The pane is the process container that dies, and a
 resumed session gets a new pane (it is a new process in a new container), so two panes are
 two ends and must not overwrite each other. The session id rides as a *field* because for
-a fresh manager spawn it is not known at spawn time — the pane id is the join key, and the
-session registry maps pane → session for the rest.
+a fresh manager spawn it is not known at spawn time — the spawn line says `session=-`. The
+observer fills it in: it reads the id from the pane's `claude` registry record on every
+heartbeat (`session_of`) and carries it onto the end line. That is load-bearing, because the
+registry (`~/.claude/sessions/<pid>.json`) is deleted when the process dies, so a join
+deferred to read time has nothing left to read.
 
 Storage: `~/.claude/state/session-exit/pane-<pane_id>.log`, one tab-separated line per
 event. Override the directory with `SUPERVISOR_SESSION_EXIT_DIR`.
@@ -350,6 +353,78 @@ def _rc_of(status):
     return os.WEXITSTATUS(status)
 
 
+#: Where Claude Code writes `<pid>.json` for each live session. The same override the rest of
+#: the plugin's registry readers honour, so one fixture tree drives them all.
+SESSIONS_DIR_ENV = "SUPERVISOR_SESSIONS_DIR"
+
+#: How far below the watched pid to look. The Fleet Manager's `claude` is a direct child of
+#: its pane shell; a supervisor-spawned pane's is a grandchild (shell → bash → claude, pane
+#: 344 on 2026-11-06). Four levels covers both with room for a launcher wrapper.
+_DESCENT_DEPTH = 4
+
+#: A session id is written into a tab-separated record, so only an id that cannot forge a
+#: field is accepted — every real one is a UUID.
+_SESSION_ID = re.compile(r"^[0-9A-Za-z-]{1,64}$")
+
+
+def _children(pid):
+    """Direct children of `pid`, or `[]` when they cannot be listed."""
+    try:
+        out = subprocess.run(
+            ["pgrep", "-P", str(pid)], capture_output=True, text=True, timeout=5, check=False
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [int(tok) for tok in out.split() if tok.isdigit()]
+
+
+def _registry_session(directory, pid):
+    """The `sessionId` in `<directory>/<pid>.json`, or `""` when absent or unusable."""
+    try:
+        with open(os.path.join(directory, f"{pid}.json"), encoding="utf-8") as handle:
+            sid = json.load(handle).get("sessionId")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return sid if isinstance(sid, str) and _SESSION_ID.match(sid) else ""
+
+
+def session_of(pid):
+    """The session id of the Claude process at or below `pid`, or `""`.
+
+    A fresh spawn does not know its own session id, so the spawn line carries `session=-`;
+    Claude Code writes it to `~/.claude/sessions/<claude pid>.json` moments later and deletes
+    that file when the process ends. The observer is the one writer alive for the pane's
+    whole life, so it reads the id while it exists and stamps it into every line it writes —
+    after which the append-only record keeps the identity the registry discards. Measured
+    2026-11-06: the 06:44 and 08:50 Fleet Manager-era deaths carry `session=-`, and nothing
+    on disk could name the session afterwards.
+
+    Breadth-first, nearest first, bounded by `_DESCENT_DEPTH`: the pane's own `claude` is the
+    shallowest process with a record. Re-read on every call, so a `/clear` — a new session
+    id inside the same process — is followed rather than frozen at the first value.
+    """
+    directory = os.path.expanduser(os.environ.get(SESSIONS_DIR_ENV) or "~/.claude/sessions")
+    found = _registry_session(directory, pid)
+    if found:
+        return found
+    frontier, seen = [pid], {pid}
+    for _ in range(_DESCENT_DEPTH):
+        nxt = []
+        for parent in frontier:
+            for child in _children(parent):
+                if child in seen:
+                    continue
+                seen.add(child)
+                found = _registry_session(directory, child)
+                if found:
+                    return found
+                nxt.append(child)
+        if not nxt:
+            return ""
+        frontier = nxt
+    return ""
+
+
 def _daemonize():
     """Detach into a new session, so a process-group kill cannot reach this process.
 
@@ -435,8 +510,11 @@ def cmd_observe(args):
     kernel's wait status — `rc`, `signal` and kind — exactly as the trap would. Without a
     watch it falls back to polling, and the disappearance is an `unknown-end` inference.
 
-    Writes a `heartbeat` line every `--interval` seconds and one `unknown-end` line when the
-    pid is gone. Stays silent when the record already carries an end line, so the parent's
+    Writes a `heartbeat` line every `--interval` seconds and one end line when the pid is gone
+    — the kernel's status where a watch is armed, `unknown-end` otherwise. Every line carries
+    the session id `session_of` last resolved, falling back to `--session`, so the end line
+    names the session even though its registry record is already deleted by then. Stays
+    silent when the record already carries an end line, so the parent's
     report always wins over this process's inference — the trap runs before the shell exits,
     so by the time this process sees the pid gone, any line the trap was going to write is
     already on disk.
@@ -462,6 +540,9 @@ def cmd_observe(args):
     kq = _exit_watch(args.pid)
     heartbeats = 0
     status = None
+    # The last id seen, carried past the registry's deletion: the end line is written after
+    # the process is gone, when `session_of` can no longer answer.
+    session = args.session
     while True:
         if status is not None:
             if not has_end(path, args.pid):
@@ -473,7 +554,7 @@ def cmd_observe(args):
                         now_utc(),
                         kind,
                         pane,
-                        args.session,
+                        session,
                         args.pid,
                         rc,
                         signal,
@@ -490,7 +571,7 @@ def cmd_observe(args):
                         now_utc(),
                         KIND_UNKNOWN,
                         pane,
-                        args.session,
+                        session,
                         args.pid,
                         "unavailable",
                         "unavailable",
@@ -499,13 +580,14 @@ def cmd_observe(args):
                     ),
                 )
             return 0
+        session = session_of(args.pid) or session
         append_line(
             path,
             format_line(
                 now_utc(),
                 KIND_HEARTBEAT,
                 pane,
-                args.session,
+                session,
                 args.pid,
                 "-",
                 "-",

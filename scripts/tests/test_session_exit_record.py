@@ -411,6 +411,128 @@ class Observer(StoreTestCase):
         self.assertEqual(os.listdir(self.dir), [])
 
 
+#: A stand-in for `claude`: writes its own registry record, keyed on its own pid exactly as
+#: Claude Code writes `~/.claude/sessions/<pid>.json`, then lives until killed.
+_FAKE_CLAUDE = (
+    "import json, os, sys, time\n"
+    "d, sid = sys.argv[1], os.environ['FAKE_SESSION_ID']\n"
+    "with open(os.path.join(d, f'{os.getpid()}.json'), 'w') as h:\n"
+    "    json.dump({'pid': os.getpid(), 'sessionId': sid}, h)\n"
+    "time.sleep(60)\n"
+)
+
+
+class ObserverBindsSession(StoreTestCase):
+    """A fresh spawn does not know its session id; the observer must learn it while it can.
+
+    Measured 2026-11-06: the 06:44 and 08:50 deaths carry `session=-`, and the registry that
+    could have named them (`~/.claude/sessions/<pid>.json`) is deleted when the process dies.
+    So the identity has to be copied into the append-only log while the session is alive.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.sessions = tempfile.mkdtemp()
+        self._saved_sessions = os.environ.get("SUPERVISOR_SESSIONS_DIR")
+        os.environ["SUPERVISOR_SESSIONS_DIR"] = self.sessions
+        self.procs = []
+
+    def tearDown(self):
+        for proc in self.procs:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+        if self._saved_sessions is None:
+            os.environ.pop("SUPERVISOR_SESSIONS_DIR", None)
+        else:
+            os.environ["SUPERVISOR_SESSIONS_DIR"] = self._saved_sessions
+        super().tearDown()
+
+    def _pane(self, sid):
+        """shell → bash → claude: the supervisor-spawn shape, where claude is a GRANDCHILD.
+
+        Pane 344 (2026-11-06) is this shape. The Fleet Manager's claude is a direct child, so
+        a binding that read children only would resolve on one and silently miss the other.
+        """
+        fake = os.path.join(self.sessions, "..", f"fake-claude-{os.getpid()}.py")
+        with open(fake, "w", encoding="utf-8") as handle:
+            handle.write(_FAKE_CLAUDE)
+        self.addCleanup(os.remove, fake)
+        # shell → bash → python: the inner bash is a real intermediate process because the
+        # trailing `; wait` stops it from exec-ing its last command.
+        # The id travels in the environment: argv would be word-split by the inner shell,
+        # and the malformed-id case carries a tab.
+        shell = subprocess.Popen(
+            ["/bin/bash", "-c", '/bin/bash -c "$0 $1 $2; wait"; wait',
+             sys.executable, fake, self.sessions],
+            env={**os.environ, "FAKE_SESSION_ID": sid},
+            start_new_session=True,
+        )
+        self.procs.append(shell)
+        deadline = time.time() + 5
+        while len(os.listdir(self.sessions)) == 0 and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(os.listdir(self.sessions), "fake claude never wrote its registry record")
+        return shell
+
+    def _observe(self, shell, *extra):
+        observer = subprocess.Popen(
+            [sys.executable, _SCRIPT, "observe", "--pane", "2156", "--pid", str(shell.pid),
+             "--interval", "1", "--foreground", *extra],
+            env=dict(os.environ),
+        )
+        self.procs.append(observer)
+        return observer
+
+    def _wait_for(self, needle, timeout=5):
+        log = os.path.join(self.dir, "pane-2156.log")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if os.path.exists(log) and needle in open(log, encoding="utf-8").read():
+                return
+            time.sleep(0.05)
+        self.fail(f"{needle!r} never appeared in the record")
+
+    def test_a_heartbeat_carries_the_session_of_a_grandchild(self):
+        shell = self._pane("aaaa1111-2222-3333-4444-555566667777")
+        self._observe(shell)
+        self._wait_for("session=aaaa1111-2222-3333-4444-555566667777")
+        line = next(ln for ln in self._lines() if "aaaa1111" in ln)
+        self.assertIn("kind=heartbeat", line)
+
+    def test_the_end_line_keeps_the_session_after_the_registry_is_gone(self):
+        """The registry dies with the process; the record must not."""
+        Observer._skip_without_kqueue()
+        shell = self._pane("bbbb1111-2222-3333-4444-555566667777")
+        observer = self._observe(shell)
+        self._wait_for("session=bbbb1111-2222-3333-4444-555566667777")
+        for name in os.listdir(self.sessions):  # Claude deletes its record on exit
+            os.remove(os.path.join(self.sessions, name))
+        os.killpg(shell.pid, signal.SIGHUP)
+        shell.wait()
+        observer.wait(timeout=10)
+        ends = [ln for ln in self._lines() if "kind=heartbeat" not in ln]
+        self.assertEqual(len(ends), 1, ends)
+        self.assertIn("signal=SIGHUP", ends[0])
+        self.assertIn("session=bbbb1111-2222-3333-4444-555566667777", ends[0])
+
+    def test_an_explicit_session_stands_when_no_descendant_has_a_record(self):
+        shell = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
+        self.procs.append(shell)
+        self._observe(shell, "--session", "cccc1111-2222-3333-4444-555566667777")
+        self._wait_for("session=cccc1111-2222-3333-4444-555566667777")
+
+    def test_a_malformed_session_id_is_never_written(self):
+        """The record is tab-separated; a hostile id must not be able to forge a field."""
+        shell = self._pane("evil\tkind=exited")
+        self._observe(shell)
+        self._wait_for("kind=heartbeat")
+        time.sleep(0.5)
+        for line in self._lines():
+            self.assertNotIn("evil", line)
+            self.assertEqual(line.count("\t"), 8, line)
+
+
 class PaneFromEnvironment(StoreTestCase):
     """The trap passes no `--pane`: the writer reads `$WEZTERM_PANE`, which the pane inherits."""
 
