@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.242.0
 
 - fix: **`/supervisor:open`'s resume branch selects its path by the row's resolved `mode:` and liveness instead of always opening a wezterm tab.** `commands/open.md` § 3.1 no longer claims the resume branch is unconditionally the tab path: a `mode: headless` row with an **ABSENT** session resumes through `spawn_agent(resume=, interactive=false)` with an explicit `cwd` (server-paced, so it skips `start-rate.mjs`), while `mode: interactive` and UNKNOWN/AMBIGUOUS liveness still take the tab path unchanged. The selector's single home stays `docs/fleet-surface.md` § Spawn a worker's resume-path table; the call site only cites it. Under a `spawn.mode: headless` fleet default this is what stops a `--flagged` batch returning 26 headless rows as operator-watched tabs.
 - feat: `scripts/check-open-resume-mode.py`, wired into `precommit` as `check-open-resume-mode` — fails on the pre-fix text (both unconditional sentences) and on any selector paragraph missing an arm, the rule-home citation, or the headless arm's `cwd` requirement.
