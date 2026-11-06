@@ -128,8 +128,22 @@ single-quote/escape rule stated above the card command.
 
 ### EXTERNAL → report
 
-One line: the watcher and the ETA. Nothing else. Do not re-arm a watcher that is already
-armed; do arm one that was never armed.
+One line: the watcher and the ETA. Nothing else.
+
+⚠️ **This command arms no watcher, and the router grants no `Monitor` — deliberately.** A run is
+one pass; a watcher armed here would outlive the run that created it and fire into a session that
+is no longer triaging, which is noise dressed as a guard. So the branch's whole job on a row whose
+wait has **no watcher at all** is to *report* that, not to fix it:
+
+```
+EXTERNAL — <label> (<sid-prefix>): waiting on <named producer>, ETA <when> · ⚠️ no watcher armed
+```
+
+…and then hand the arming to whoever owns the wait: one `SendMessage` to the row's owning manager
+naming the session, the producer and the missing watcher. For a manager row, the missing watcher is
+its own loop, and the same message names that. **Never re-arm a watcher that is already armed, and
+never invent a second one from here** — a duplicate watch is worse than none, because it doubles
+every notification and hides which one is authoritative.
 
 ### 4b LIVE-IDLE HEADLESS → `SendMessage` first
 
