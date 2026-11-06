@@ -39,7 +39,7 @@ def _load(path, name):
 
 # A moved card the independent regex calls operator is a DISAGREEMENT, and each one is either a
 # known coarse spot in that regex or a classifier miss. These are the only coarse spots accepted;
-# anything else is `unexplained` and fails SC3. Each rule re-derives its class from the payload —
+# anything else is `unexplained`, and one unexplained card fails the replay. Each rule re-derives its class from the payload —
 # a label alone is never enough.
 _RM = re.compile(r"(?:^|[\s;&|(])rm\s+((?:-\S+\s+)*)([^;&|\n]+)")
 

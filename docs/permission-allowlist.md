@@ -211,6 +211,11 @@ tier the attention watcher records on the held gate). Never re-derive it from th
    - **(c) not scope-changing** — it does not create or close a task or goal, edit Success
      Criteria or DoD, change a policy file, grant a permission, or spawn/stop a session.
 
+   ⚠️ **A script file is unseen code.** The classifier reads `sh -c '…'`, `python3 -c '…'` and
+   shell heredocs, but never the body of a file: `bash /tmp/x.sh`, `python3 tool.py` and `./run`
+   are `manager` tier with their content unchecked. Allow one only after reading the file and
+   finding no operator-only form in it; otherwise it is "cannot verify".
+
    **Cannot verify (a), (b) or (c) → escalate to the operator.** Not a deny: escalation tells the
    operator it is their call, which is the truth for a call you could not place.
 4. **Quote the tier and the rubric clause** in the answer's reason, so the record says *why*.
@@ -231,13 +236,12 @@ POST /api/1.0/sessions/<session-id>/answer   {"request_id": "<id>", "behavior": 
 The endpoint is the contract; the wrapper listens on `localhost:18090`. ⚠️ **Take `request_id`
 from `GET /api/1.0/sessions` (each row's `question.request_id`), never from the attention events
 log or the feed.** Those print *store item ids*, a different namespace, and passing one to
-`/answer` returns `409 no pending request`, which reads exactly like "already answered". An example
-caller, outside this plugin and machine-local: `~/.claude/scripts/wrapper-answer.sh <session-uuid>
-<request-id> <allow|deny>`, which validates both id shapes and exits non-zero on a non-2xx.
-`GET /api/1.0/sessions/<session-id>/question/<request_id>` reads one pending request. ⚠️ **Never
-answer a wrapper-backed gate through the attention store's `/attention/{id}/answer`** — that
-records an answer and releases nothing (see the task *A Board Answer on a Headless Permission Card
-Records an Answer and Releases Nothing*).
+`/answer` returns `409 no pending request`, which reads exactly like "already answered". This
+plugin ships no caller; a manager's own one should validate both id shapes and fail loudly on a
+non-2xx. `GET /api/1.0/sessions/<session-id>/question/<request_id>` reads one pending request.
+⚠️ **Never answer a wrapper-backed gate through the attention store's `/attention/{id}/answer`** —
+a store answer on a headless permission card records the answer and releases nothing, so the
+worker stays parked while the board reads it as answered.
 
 ### When the manager does not act
 

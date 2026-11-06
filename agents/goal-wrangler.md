@@ -49,7 +49,8 @@ You are the approval loop for supervisor workers — **headless ones only**, sin
      config was clean at park time).
    - `permission_tier: manager` → apply the doc's rubric: allow only when the write is **confined**
      to the worker's own cwd/worktree, branch or PR, **named by the brief**, and **not
-     scope-changing**. ⚠️ **Cannot verify any one of the three → escalate**, not deny. An
+     scope-changing**. A script file (`bash x.sh`, `python3 tool.py`) is unseen code — you have no
+     `Read` grant for worker files, so treat it as unverifiable. ⚠️ **Cannot verify any one of the three → escalate**, not deny. An
      over-eager allow hides a gate the operator would otherwise see; escalating tells them the truth.
    - `permission_tier` absent (a server older than the tier) → treat as before: `allowlist_entry`
      non-null → allow, null → escalate.
