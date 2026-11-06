@@ -61,6 +61,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 5 | Drive leg | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/drive.md` |
 | 5b | Keep alive | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/keepalive.md` |
 | 5c | Flagged open | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/flagged-open.md` |
+| 5d | Own parks | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/own-parks.md` |
 | 6 | Reap contract | the drive leg runs | `${CLAUDE_PLUGIN_ROOT}/commands/steps/reap.md` |
 | 7 | Answer a parked or exited worker | a worker is parked on a question or has exited | `${CLAUDE_PLUGIN_ROOT}/commands/steps/worker-channels.md` |
 | 8 | Act on the open-items ledger | the ledger holds ≥1 open entry | `${CLAUDE_PLUGIN_ROOT}/commands/steps/act.md` · `${CLAUDE_PLUGIN_ROOT}/commands/steps/open-items.md` |

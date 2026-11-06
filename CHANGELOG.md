@@ -8,6 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **the fleet round answers its own workers' routine permission parks.** New router row 5d → `commands/steps/own-parks.md`. A headless worker's prompt parks with its spawner and no other session can answer it, yet `fleet-drive.md` held `answer_permission` and no step called it, so every routine park of a Fleet-Manager-spawned worker reached the operator's board. The step dispatches `supervisor:goal-wrangler` (class B, `docs/permission-allowlist.md` only) for workers the spawn ledger names this session as spawner of. It fails closed: an unavailable `answer_permission`/`list_agents`, an unreadable ledger or a non-owned worker means nothing is answered. Classes C, D and E are an explicit list that always stays pending for the operator. Parks are read from `list_agents`' per-row `pending_permissions`, so the command's `allowed-tools` and its tick budget are unchanged apart from the router row.
+- feat: `scripts/own-park-check.py` — the ownership check (`OWN` / `REFUSE <reason>`, exit 2 when nothing can be verified), reading the spawn edge under both `parent_session` and `spawner_session_id`. `goal-wrangler` honours an `Answer only for agent_ids:` scope, because a server's roster also carries workers rehydrated from other sessions. Pinned by `scripts/tests/test_own_park_check.py`.
+
 ## v0.243.1
 
 - fix: **a wrapper-backed headless worker's policy-allowed prompt is answered by the policy again, not by a human.** The wrapper owns the child's single `--permission-prompt-tool`, so the `PermissionRequest` hook never fired. Every `Edit`/`Write` in the worker's own cwd parked for a manager, and `permissions.jsonl` had gone unwritten since 2026-10-30. `server/wrapper-policy.mjs` now polls the wrapper's parks every 2 s and runs the same `decide()` once per request id. `allow`/`deny` are answered through `POST /sessions/{id}/answer`, `escalate` stays parked, and each decision is logged with `via: "wrapper"`. A manager that answered first gets the wrapper's 409 and is not overridden. A wrapper outage decides nothing and logs once. `decide()` is gone from `policy_gap.not_run`, and `policy_via` names the poll.
