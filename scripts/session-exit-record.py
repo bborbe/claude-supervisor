@@ -24,10 +24,14 @@ that survives the death it is describing, and no single writer covers every end:
    how `137` becomes visible at all). Does NOT survive a signal delivered to the whole
    process group, because the shell dies with the child.
 2. **A detached observer** (`observe`) — `os.setsid()` puts it in its own session and
-   process group, so `kill -9 -<pane pgid>` cannot reach it. It polls the pane's pid,
-   writes a `heartbeat` line every interval, and on the pid's disappearance writes
-   `unknown-end`. Its report is an *inference*, so it never claims `signalled kill` — a
-   signal is a fact only the parent's `waitpid` can report.
+   process group, so `kill -9 -<pane pgid>` cannot reach it. It arms a `kqueue`
+   `EVFILT_PROC` watch with `NOTE_EXITSTATUS` on the pane's pid, writes a `heartbeat` line
+   every interval, and when the pid exits writes the kernel's own wait status — `exited` or
+   `signalled kill` with the named signal. That status is the same fact the parent's
+   `waitpid` reads, delivered by the kernel to a same-user non-parent with no privilege, so
+   it covers the group kill the trap cannot. Only where no watch can be armed (no `kqueue`,
+   or the pid already gone at start) does it fall back to polling and the `unknown-end`
+   inference.
 
 ⚠️ **The heartbeat lives in the observer, not in a third pane-side loop.** An earlier
 design put a 30-second heartbeat in the pane shell as a separate writer. It was dropped:
@@ -37,12 +41,12 @@ process and a second timer. The heartbeat's purpose is unchanged — under a gro
 record's last line is stamped at most one interval before the death, which attributes the
 death to a window — but one process now produces both the liveness and the end line.
 
-⚠️ **Exit status is parent-only, and that is the whole point of dropping `exec`.** With
-`exec "<launcher>"` the pane's shell *becomes* Claude, so no process is left to `waitpid`
-and `137` is unobservable by construction. The spawn recipe therefore runs the launcher as
-a child and traps `EXIT`. A record naming `137` is necessarily written *after* the kill,
-by that parent — which is why the observer can never claim `signalled kill`, only
-`unknown-end`.
+⚠️ **Why `exec` is dropped.** With `exec "<launcher>"` the pane's shell *becomes* Claude,
+so no parent is left to `waitpid` and the trap cannot run. The spawn recipe therefore runs
+the launcher as a child and traps `EXIT`. The observer watches the shell's pid (`$$`), and
+reads its wait status through `kqueue` rather than `waitpid` — which is why it may now
+claim `signalled kill`, but only from a status the kernel delivered, never from the pid's
+mere absence (2026-11-06: pane 243's group kill left `signal=unavailable` under polling).
 
 **Keyed on the pane, not the session.** The pane is the process container that dies, and a
 resumed session gets a new pane (it is a new process in a new container), so two panes are
@@ -101,6 +105,7 @@ import datetime
 import json
 import os
 import re
+import select
 import subprocess
 import sys
 import time
@@ -293,6 +298,56 @@ def alive(pid):
     return True
 
 
+#: `NOTE_EXITSTATUS` from `<sys/event.h>`. Python's `select` module does not export it.
+#: With it, a `NOTE_EXIT` event's `data` carries the target's wait status.
+_NOTE_EXITSTATUS = 0x04000000
+
+
+def _exit_watch(pid):
+    """A kqueue armed on `pid`'s exit, or `None` where the platform or the pid refuses one.
+
+    `EVFILT_PROC` with `NOTE_EXITSTATUS` hands the wait status to *any* process run by the
+    same user, not only the parent, and needs no privilege. This is how the observer, a
+    non-parent in its own session, can name the signal from a process-group kill that took
+    the trap's shell down with the child. Measured 2026-11-06: a `killpg(SIGTERM)` on a target
+    reparented to launchd reported `signaled True sig 15` to a non-parent watcher.
+    """
+    kqueue = getattr(select, "kqueue", None)
+    if kqueue is None:
+        return None
+    try:
+        kq = kqueue()
+        kq.control(
+            [
+                select.kevent(
+                    pid,
+                    filter=select.KQ_FILTER_PROC,
+                    flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                    fflags=select.KQ_NOTE_EXIT | _NOTE_EXITSTATUS,
+                )
+            ],
+            0,
+        )
+    except OSError:
+        return None
+    return kq
+
+
+def _wait_exit(kq, timeout):
+    """The pid's wait status if it exited within `timeout` seconds, else `None`."""
+    events = kq.control(None, 1, timeout)
+    if not events:
+        return None
+    return events[0].data
+
+
+def _rc_of(status):
+    """A wait status in the shell's `$?` form: `128+n` for a signal, else the exit code."""
+    if os.WIFSIGNALED(status):
+        return 128 + os.WTERMSIG(status)
+    return os.WEXITSTATUS(status)
+
+
 def _daemonize():
     """Detach into a new session, so a process-group kill cannot reach this process.
 
@@ -372,7 +427,11 @@ def cmd_append(args):
 
 
 def cmd_observe(args):
-    """Poll a pane's pid and record its disappearance. The out-of-group writer.
+    """Watch a pane's pid and record its end. The out-of-group writer.
+
+    Arms a `kqueue` exit watch first (see `_exit_watch`): the end line then carries the
+    kernel's wait status — `rc`, `signal` and kind — exactly as the trap would. Without a
+    watch it falls back to polling, and the disappearance is an `unknown-end` inference.
 
     Writes a `heartbeat` line every `--interval` seconds and one `unknown-end` line when the
     pid is gone. Stays silent when the record already carries an end line, so the parent's
@@ -398,9 +457,30 @@ def cmd_observe(args):
         return 2
     if not args.foreground and not _daemonize():
         return 0
+    kq = _exit_watch(args.pid)
     heartbeats = 0
+    status = None
     while True:
-        if not alive(args.pid):
+        if status is not None:
+            if not has_end(path, args.pid):
+                rc = _rc_of(status)
+                kind, signal = classify(rc)
+                append_line(
+                    path,
+                    format_line(
+                        now_utc(),
+                        kind,
+                        pane,
+                        args.session,
+                        args.pid,
+                        rc,
+                        signal,
+                        sender_for(kind),
+                        WRITER_OBSERVER,
+                    ),
+                )
+            return 0
+        if kq is None and not alive(args.pid):
             if not has_end(path, args.pid):
                 append_line(
                     path,
@@ -434,7 +514,10 @@ def cmd_observe(args):
         heartbeats += 1
         if args.ticks and heartbeats >= args.ticks:
             return 0
-        time.sleep(args.interval)
+        if kq is None:
+            time.sleep(args.interval)
+        else:
+            status = _wait_exit(kq, args.interval)
 
 
 def cmd_path(args):
