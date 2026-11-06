@@ -80,7 +80,7 @@ class Vault:
 class Scope(unittest.TestCase):
     def setUp(self):
         self.vault = Vault()
-        self.vault.goal(SELF_GOAL, f"manager_session_id: {ME}\n", ["Own Task"])
+        self.vault.goal(SELF_GOAL, f"claude_session_id: {ME}\n", ["Own Task"])
         self.vault.task("Own Task", f"claude_session_id: {OWN_TASK_SESSION}\n")
         self.vault.task(
             "Foreign Task",
@@ -109,6 +109,25 @@ class Scope(unittest.TestCase):
         """An operator-opened manager is never spawned, so this stamp is its only identity."""
         self.assertTrue(self.scope.resolved, self.scope.reason)
         self.assertEqual(self.scope.self_goals, [SELF_GOAL])
+
+    def test_a_mixed_goal_page_resolves_claude_session_id_first(self):
+        """A re-armed legacy page carries both keys; the surviving one wins.
+
+        The writer sets `claude_session_id` without clearing the retired key, so the
+        stale manager id is still on the page. Reading it first would scope this
+        manager to no goal at all and EXCLUDE its own gates as foreign.
+        """
+        vault = Vault()
+        vault.goal(
+            SELF_GOAL,
+            "manager_session_id: 77777777-7777-4777-8777-777777777777\n"
+            f"claude_session_id: {ME}\n",
+            ["Own Task"],
+        )
+        vault.task("Own Task", f"claude_session_id: {OWN_TASK_SESSION}\n")
+        scope = ss.load(ME, [vault.root])
+        self.assertTrue(scope.resolved, scope.reason)
+        self.assertEqual(scope.self_goals, [SELF_GOAL])
 
     def test_an_own_task_is_not_excluded(self):
         self.assertEqual(self.scope.exclusion(OWN_TASK_SESSION, ME), (False, ""))
@@ -191,7 +210,7 @@ class GoalsBlockAsLastFrontmatterKey(unittest.TestCase):
     def test_a_foreign_page_whose_goals_block_is_last_still_names_its_goal(self):
         vault = Vault()
         try:
-            vault.goal(SELF_GOAL, f"manager_session_id: {ME}\n", ["Own Task"])
+            vault.goal(SELF_GOAL, f"claude_session_id: {ME}\n", ["Own Task"])
             vault.task("Own Task", f"claude_session_id: {OWN_TASK_SESSION}\n")
             vault.task_ending_at(
                 "Last Key Foreign",
@@ -211,7 +230,7 @@ class GoalsBlockAsLastFrontmatterKey(unittest.TestCase):
         try:
             vault.goal(
                 "Some Goal",
-                "manager_session_id: 12341234-1234-4123-8123-123412341234\n",
+                "claude_session_id: 12341234-1234-4123-8123-123412341234\n",
                 ["Manager Task", "Own Task"],
             )
             vault.task_ending_at(
@@ -226,12 +245,53 @@ class GoalsBlockAsLastFrontmatterKey(unittest.TestCase):
             vault.close()
 
 
+class GoalsDeclarationShapes(unittest.TestCase):
+    """Every `goals:` shape the vault writes must name its goal.
+
+    `_goals()` used to extract `[[...]]` matches only, so a bare list item
+    (`goals:` then `    - Some Goal`) yielded `[]` with no error: a foreign page then named
+    no owner (`owner-unknown`) and a manager whose own task declared the goal that way never
+    widened its scope, so its own workers' gates left the feed it exists to see. The plain
+    scalar and the nested list-of-list were dropped the same way. The parsing now belongs to
+    `scripts/goals-declaration.py`; these cases pin that `_goals()` reaches it.
+    """
+
+    SHAPES = {
+        "wikilink list": "goals:\n    - '[[Some Goal]]'\n",
+        "plain scalar": "goals: Some Goal\n",
+        "nested list-of-list": "goals:\n    - - Some Goal\n",
+        "plain-list item": "goals:\n    - Some Goal\n",
+    }
+
+    def test_every_shape_yields_the_bare_goal_name(self):
+        for label, front in self.SHAPES.items():
+            with self.subTest(shape=label):
+                self.assertEqual(ss._goals(front), ["Some Goal"])
+
+    def test_a_task_page_manager_whose_goals_is_a_bare_item_scopes_its_goal(self):
+        """End to end through `load()`: the bare item widens the manager's own scope."""
+        vault = Vault()
+        try:
+            vault.goal(
+                "Some Goal",
+                "claude_session_id: 12341234-1234-4123-8123-123412341234\n",
+                ["Manager Task", "Own Task"],
+            )
+            vault.task("Manager Task", f"claude_session_id: {ME}\ngoals:\n    - Some Goal\n")
+            vault.task("Own Task", f"claude_session_id: {LAST_KEY_OWN}\n")
+            scope = ss.load(ME, [vault.root])
+            self.assertEqual(scope.self_goals, ["Some Goal"])
+            self.assertEqual(scope.exclusion(LAST_KEY_OWN, ME), (False, ""))
+        finally:
+            vault.close()
+
+
 class Unresolved(unittest.TestCase):
     """A scope that cannot be read must exclude NOTHING — never "nothing is mine"."""
 
     def setUp(self):
         self.vault = Vault()
-        self.vault.goal("Some Goal", "manager_session_id: 12341234-1234-4123-8123-123412341234\n", [])
+        self.vault.goal("Some Goal", "claude_session_id: 12341234-1234-4123-8123-123412341234\n", [])
         self.vault.task("A Task", f"claude_session_id: {FOREIGN_SESSION}\n"
                                   "goals:\n    - '[[Some Goal]]'\n")
 
@@ -254,7 +314,7 @@ class Unresolved(unittest.TestCase):
         attributable outside it is foreign. Unresolved is a MISSING page, not an empty one."""
         vault = Vault()
         try:
-            vault.goal("Lonely Goal", "manager_session_id: 12341234-1234-4123-8123-123412341234\n", [])
+            vault.goal("Lonely Goal", "claude_session_id: 12341234-1234-4123-8123-123412341234\n", [])
             vault.task("Elsewhere", f"claude_session_id: {FOREIGN_SESSION}\n"
                                     "goals:\n    - '[[Another Goal]]'\n")
             scope = ss.load("12341234-1234-4123-8123-123412341234", [vault.root])
@@ -292,7 +352,7 @@ class DuplicateGoalBasename(unittest.TestCase):
         self.second.close()
 
     def test_a_second_page_with_the_same_basename_merges_rather_than_replaces(self):
-        self.first.goal(SELF_GOAL, f"manager_session_id: {ME}\n", ["Own Task"])
+        self.first.goal(SELF_GOAL, f"claude_session_id: {ME}\n", ["Own Task"])
         self.first.task("Own Task", f"claude_session_id: {OWN_TASK_SESSION}\n")
         self.second.goal(SELF_GOAL, "", ["Some Other Task"])
 
@@ -305,7 +365,7 @@ class DuplicateGoalBasename(unittest.TestCase):
 
     def test_an_empty_second_page_does_not_wipe_the_first(self):
         """A duplicate-basename page with no `# Tasks` heading is an empty set, not an eraser."""
-        self.first.goal(SELF_GOAL, f"manager_session_id: {ME}\n", ["Own Task"])
+        self.first.goal(SELF_GOAL, f"claude_session_id: {ME}\n", ["Own Task"])
         self.first.task("Own Task", f"claude_session_id: {OWN_TASK_SESSION}\n")
         self.second.goal(SELF_GOAL, "", [])
 
@@ -375,7 +435,7 @@ class Cli(unittest.TestCase):
 
         vault = Vault()
         try:
-            vault.goal(SELF_GOAL, f"manager_session_id: {ME}\n", ["Own Task"])
+            vault.goal(SELF_GOAL, f"claude_session_id: {ME}\n", ["Own Task"])
             vault.task("Own Task", f"claude_session_id: {OWN_TASK_SESSION}\n")
             vault.task("Foreign Task", f"claude_session_id: {FOREIGN_SESSION}\n"
                                        "goals:\n    - '[[Some Other Goal]]'\n")
@@ -401,7 +461,7 @@ class Cli(unittest.TestCase):
     def test_json_dump_carries_goals_and_sessions(self):
         vault = Vault()
         try:
-            vault.goal(SELF_GOAL, f"manager_session_id: {ME}\n", ["Own Task"])
+            vault.goal(SELF_GOAL, f"claude_session_id: {ME}\n", ["Own Task"])
             vault.task("Own Task", f"claude_session_id: {OWN_TASK_SESSION}\n")
             scope = ss.load(ME, [vault.root])
             self.assertEqual(scope.own_titles, {"Own Task", SELF_GOAL})

@@ -32,7 +32,14 @@ Seven refusals, each exit 1 with a stable reason token as the first line of outp
                       file and no launcher script is newer than the session's own
                       start, so restarting it buys nothing.
 
-Exit codes: 0 success, 1 refusal, 2 usage error.
+Exit codes: 0 success, 1 refusal, 2 usage error, 3 environment fault.
+
+An environment fault is NOT a refusal. `environment-fault` (exit 3) means this script's
+own environment is broken — today, `vault-cli` cannot be found, so no launcher can be
+resolved for ANY session. A refusal is a decision about one target; an environment fault
+is a defect in the caller, and it must never print as a refusal. Measured 2026-11-01: a
+launchd agent whose `PATH` lacked `vault-cli` printed a launcher refusal on ~1000 ticks,
+so an agent that had never worked read as a guard correctly declining.
 
 ⚠️ **A manager IS restarted — there is no `manager-target` refusal.** The role predicate
 still runs, but it now selects the resume colour and the re-arm note rather than a
@@ -65,6 +72,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -347,6 +355,44 @@ def mcp_config_paths(argv):
 SAFE_LAUNCHER = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 
+# Where `vault-cli` is installed when the caller's `PATH` does not carry it. launchd gives a
+# job no login shell, so a bare-name lookup is only as good as the plist's `PATH`; resolve
+# the lookup here instead of depending on it (`go install` → GOPATH/bin, Homebrew).
+VAULT_CLI_LOCATIONS = (
+    "~/Documents/workspaces/go/bin/vault-cli",
+    "~/go/bin/vault-cli",
+    "/opt/homebrew/bin/vault-cli",
+    "/usr/local/bin/vault-cli",
+)
+
+ENV_FAULT = "environment-fault"
+
+
+def find_vault_cli():
+    """Absolute path of an executable `vault-cli`, or `None` when none exists.
+
+    `SUPERVISOR_VAULT_CLI` overrides the search (tests, drills). Otherwise `PATH`, then
+    `$GOPATH/bin`, then `VAULT_CLI_LOCATIONS`.
+    """
+    override = os.environ.get("SUPERVISOR_VAULT_CLI")
+    if override is not None:
+        path = os.path.expanduser(override)
+        return path if os.path.isfile(path) and os.access(path, os.X_OK) else None
+    found = shutil.which("vault-cli")
+    if found:
+        return os.path.abspath(found)
+    candidates = []
+    gopath = os.environ.get("GOPATH")
+    if gopath:
+        candidates.append(os.path.join(gopath, "bin", "vault-cli"))
+    candidates.extend(VAULT_CLI_LOCATIONS)
+    for cand in candidates:
+        path = os.path.expanduser(cand)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
 def vault_configs():
     """`[{name, path, claude_script}]` from vault-cli config, or `None` when unreadable.
 
@@ -359,8 +405,11 @@ def vault_configs():
             with open(os.path.expanduser(override), encoding="utf-8") as fh:
                 data = json.load(fh)
         else:
+            vault_cli = find_vault_cli()
+            if vault_cli is None:
+                return None
             out = subprocess.run(
-                ["vault-cli", "config", "list", "--output", "json"],
+                [vault_cli, "config", "list", "--output", "json"],
                 capture_output=True, text=True, timeout=15,
             )
             if out.returncode != 0:
@@ -419,6 +468,13 @@ def resolve_launcher(sid, cwd, fb, subject=None):
     override = os.environ.get("SUPERVISOR_LAUNCHER")
     if override:
         return override, "override"
+    # A missing `vault-cli` is the caller's environment, not this session's state: report
+    # it under its own token so `main` exits 3, never as a launcher refusal.
+    if not os.environ.get("SUPERVISOR_VAULT_CONFIG") and find_vault_cli() is None:
+        return None, (
+            f"{ENV_FAULT}: vault-cli not found on PATH ({os.environ.get('PATH', '')}) "
+            f"nor at {', '.join(VAULT_CLI_LOCATIONS)}"
+        )
     configs = vault_configs()
     if configs is None:
         return None, "vault-cli config could not be read"
@@ -769,6 +825,12 @@ def main():
     argv = worker_argv(pid)
     subject = fb.manager_subject(name, index, slugs) if role == "manager" and index is not None else None
     launcher, launcher_source = resolve_launcher(sid, (rec.get("cwd") or "").strip(), fb, subject)
+    if launcher is None and launcher_source.startswith(ENV_FAULT):
+        # Checked before every refusal below: a broken environment must never be masked
+        # by, or printed as, a decision about the target.
+        print(ENV_FAULT)
+        print(f"🛑 environment fault (not a refusal): {launcher_source[len(ENV_FAULT) + 2:]}")
+        return 3
 
     # ⚠️ Precondition 4 applies to a CODE-staleness restart only. `--reason lapse` restarts a
     # session whose LOOP stopped, not one whose code changed: a lapsed fleet round writes no

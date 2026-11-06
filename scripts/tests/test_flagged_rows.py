@@ -8,6 +8,7 @@ store. The live behaviour is exercised by the task's DoD run, not here.
 import importlib.util
 import json
 import os
+import shutil
 import tempfile
 import unittest
 import unittest.mock
@@ -760,6 +761,75 @@ class PaneCache(unittest.TestCase):
             self.assertIsNone(fr.pane_of(ctx, "sid"))
             self.assertIsNone(fr.pane_of(ctx, "sid"))
             self.assertEqual(run.call_count, 1)
+
+
+class SubjectLivenessPrecedence(unittest.TestCase):
+    """`subject_liveness` feeds `owner_live`, so its read order is load-bearing."""
+
+    def test_a_mixed_page_resolves_claude_session_id_first(self):
+        # A re-armed legacy page carries both keys; the surviving one is the live
+        # manager. Reading the retired key first would probe the stale id and mark
+        # a healthy subject's owner dead.
+        with tempfile.TemporaryDirectory() as tmp:
+            page = os.path.join(tmp, "A Goal.md")
+            with open(page, "w", encoding="utf-8") as fh:
+                fh.write(
+                    "---\nmanager_session_id: old-sid\nclaude_session_id: new-sid\n---\n"
+                )
+            ctx = {"liveness_cache": {}, "no_liveness": False}
+            seen = []
+
+            def live(sid):
+                seen.append(sid)
+                return "LIVE"
+
+            with unittest.mock.patch.object(fr, "subject_page", return_value=page), \
+                 unittest.mock.patch.object(fr, "liveness_of", side_effect=live):
+                verdict = fr.subject_liveness(ctx, "/v", "goal", "A Goal")
+
+        self.assertEqual(["new-sid"], seen)
+        self.assertTrue(verdict)
+
+    def test_a_page_carrying_only_the_retired_key_reads_as_no_recorded_manager(self):
+        # The retired key is gone from every page in both vaults and nothing writes it,
+        # so a page carrying only that key has no recorded manager — and probing it
+        # would resurrect an id no writer produces.
+        with tempfile.TemporaryDirectory() as tmp:
+            page = os.path.join(tmp, "Old Goal.md")
+            with open(page, "w", encoding="utf-8") as fh:
+                fh.write("---\nmanager_session_id: old-sid\n---\n")
+            ctx = {"liveness_cache": {}, "no_liveness": False}
+            seen = []
+
+            def live(sid):
+                seen.append(sid)
+                return "LIVE"
+
+            with unittest.mock.patch.object(fr, "subject_page", return_value=page), \
+                 unittest.mock.patch.object(fr, "liveness_of", side_effect=live):
+                verdict = fr.subject_liveness(ctx, "/v", "goal", "Old Goal")
+
+        self.assertEqual([], seen)
+        self.assertFalse(verdict)
+
+    def test_the_row_builder_ignores_the_retired_key_too(self):
+        # `row_for` carried the second copy of the removed fallback. Pinning it here keeps
+        # the two sites from drifting apart again — the pair disagreeing on one page is
+        # what the pre-migration review caught.
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        tasks = os.path.join(root, "25 Tasks")
+        write(os.path.join(tasks, "Old Task.md"),
+              page("page_type: task\nflag: true\nstatus: in_progress\nrole: agent\n"
+                   "manager_session_id: old-sid"))
+        cfg = {"tasks_dir": "25 Tasks", "path": root, "worker_launcher": "/opt/l/cc-v"}
+        ctx = {"today": "2026-10-31", "role_map": {}, "template_root": None,
+               "no_liveness": True, "managers": set(), "topic_map": {},
+               "mode_default": "interactive", "normalised": [],
+               "subjects": {}, "liveness_cache": {}}
+        row, reason = fr.row_for("v", cfg, "task", os.path.join(tasks, "Old Task.md"), ctx)
+        self.assertIsNone(reason)
+        self.assertIsNone(row["session_id"])
 
 
 if __name__ == "__main__":

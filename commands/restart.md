@@ -85,6 +85,7 @@ Branch on Step 1's `classification:`. **The transcript tail classifies; the pane
 | `classification:` | Then |
 |---|---|
 | `gate-held` | **Type nothing.** The resumed pane comes up holding its own unanswered gate; idling there is the correct state. Driving it answers a question on the operator's behalf. |
+| `gate-unanswerable` | **Type nothing.** Pane-less only: a gate no channel can answer. Treat as `gate-held` here; it exists so `/supervisor:close` can free the slot. |
 | `undetermined` | **Type nothing.** An unreadable transcript proves nothing about what the pane is holding. |
 | `mid-work` | **Check the pane, then type.** Read it first — the veto is not optional. |
 

@@ -96,15 +96,28 @@ reason as `approved-not-started.py`.
 Exit codes: 0 selected (including zero rows) · 2 a read failed, reason on stderr.
 """
 import argparse
+import importlib.util
 import json
 import os
 import re
 import shlex
 import subprocess
 import sys
-from datetime import date
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load(name, filename):
+    """Import a sibling script by path — the filenames carry hyphens."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: `defer_date` is an instant, not a date — see `defer-date.py` for the accepted shapes.
+defer_date = _load("defer_date", "defer-date.py")
+
 APPROVED = os.path.join(HERE, "approved-not-started.py")
 WORKER_SESSIONS = os.path.join(HERE, "worker-sessions.py")
 WORKER_TARGET = os.path.join(HERE, "worker-target.py")
@@ -221,8 +234,12 @@ def guards(block, today):
         return "waiting approval"
     if has_blocked_by(block):
         return "blocked"
-    defer = (field(block, "defer_date") or "").strip()[:10]
-    if defer and defer > today:
+    state, detail = defer_date.defer_state(field(block, "defer_date"), today)
+    if state == "invalid":
+        # A value this script cannot vouch for is NOT "due now": read as deferred, and
+        # say why, so a malformed defer parks the row instead of opening it early.
+        print("open-queue: %s — treating as deferred" % detail, file=sys.stderr)
+    if state in ("deferred", "invalid"):
         return "deferred"
     return None
 
@@ -379,7 +396,8 @@ def main(argv=None):
         description="Rank the approved queue and select the rows a fleet round may open"
     )
     parser.add_argument("--tasks-dir", required=True, help="the vault's task directory")
-    parser.add_argument("--now", default=None, help="ISO date for the defer guard (default: today)")
+    parser.add_argument("--now", default=None,
+                        help="ISO date or datetime for the defer guard (default: now)")
     parser.add_argument("--vault", default=None,
                         help="vault name, used to compose each row's ready-to-run action")
     parser.add_argument("--json", action="store_true", help="emit the selection as JSON")
@@ -392,7 +410,19 @@ def main(argv=None):
         print("❌ tasks dir not found: %s" % args.tasks_dir, file=sys.stderr)
         return 2
 
-    today = (args.now or date.today().isoformat())[:10]
+    # Not sliced: `defer-date.py` reads a date-only value as the start of that local day
+    # and a full datetime as itself, so truncating here would throw the time away.
+    # Default to the CURRENT INSTANT, not today's date: a date reads as local midnight,
+    # which would park a defer to 02:00 until the next day and reopen the very bug this
+    # guard was fixed for.
+    try:
+        today = defer_date.as_now(args.now)
+    except ValueError:
+        # A bad --now is a refusal, not a traceback: the round reads exit 2 and renders
+        # "open leg: unknown" rather than losing the whole line to a stack dump.
+        print("open leg: unknown")
+        print("❌ bad --now: %s" % args.now, file=sys.stderr)
+        return 2
     rows, skipped, err = collect(args.tasks_dir, today)
     if err:
         print("open leg: unknown")

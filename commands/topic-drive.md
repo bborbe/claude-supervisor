@@ -49,6 +49,7 @@ tiers). A worker row is reported downward.
 
 | # | Step | When | File |
 |---|---|---|---|
+| 0a | Write the liveness record | every round, before the pre-dispatch gate | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-liveness.md` |
 | 1 | Resolve the topic and its declared goals | manager start; the declaration read re-runs every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/topic-resolve.md` |
 | 2 | Take the round's readings | every tick, **before** the sweep dispatch | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-readings.md` |
 | 2b | Quiet check | every tick, after the readings | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-quiet.md` |
@@ -75,14 +76,12 @@ arm or the step file — do not act from memory of a previous round.
 
 ## Keep alive — inline, because it runs every tick
 
-⚠️ **First, drop every goal whose page reads a terminal `status` (`completed`/`aborted`).**
-Row 4c has already run this tick and may have just closed one, and `topic-keepalive.py` decides
-`jump`/`resume`/`restart` from `manager_session_id` liveness and the armed-loop state only — it
-never reads `status`, and `/supervisor:open --goal` gates on `phase`, not on `status`. So a goal
-closed at 4c whose manager is `ABSENT` reaches the `resume` arm below in the same tick, and
-`/supervisor:open --goal` re-opens a finished goal. That is the *"finished goal silently restarts"*
-failure this round exists to prevent, and it is the round's job to skip the row — the keep-alive
-probe cannot see it.
+⚠️ **Row 0a — this topic manager's own liveness record — runs here, once per round, before the per-goal loop.** It records the **topic's** cadence, not a goal's, so a subject taken from the loop would arm a goal under the topic branch. Rule: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-liveness.md` — `--branch topic`, `--subject` the topic name.
+
+⚠️ **First, drop every goal whose page reads a terminal `status`.** Row 4c may have just closed
+one, and `topic-keepalive.py` reads `claude_session_id` liveness and the armed-loop state, never
+`status` — so an `ABSENT` manager of a finished goal would reach `resume`, and
+`/supervisor:open --goal` would re-open it. Skip the row here; the probe cannot see it.
 
 For **each remaining goal this topic declares**, one call decides:
 
@@ -95,10 +94,10 @@ The **first line is the verdict**:
 
 | verdict | meaning | what this round does |
 |---|---|---|
-| `jump` | live session, loop `OK` **or `UNARMED`** | render the row. ⚠️ `UNARMED` means no record exists under either name — the loop was **never armed**, not lost; the lever is `/supervisor:goal-loop "<goal>"`, never `restart` (a restart resumes a session that never armed anything) |
+| `jump` | live session, loop `OK` **or `UNARMED`** | render the row. ⚠️ `UNARMED` = never armed, not lost; lever is `/supervisor:goal-loop "<goal>"`, never `restart` |
 | `open` | no recorded id, **and the goal carries the flag** (any setter) | run `/supervisor:open --goal "<goal>"`. This is an **open**, and the flag is what licenses it |
 | `open-unflagged` | no recorded id, **no flag** | ⚠️ **Report, never open.** Render the row with its rank and say it is held for a flag. Rule 4: a manager is opened only for a flagged page, so a round may not create one |
-| `resume` | a recorded `manager_session_id` whose session is `ABSENT` | run `/supervisor:open --goal "<goal>"`, then `topic-keepalive.py --vault "<vault>" --subject "<goal>" --record-resume <the id>` **once the liveness instrument shows it live** |
+| `resume` | a recorded `claude_session_id` whose session is `ABSENT` | run `/supervisor:open --goal "<goal>"`, then `topic-keepalive.py --vault "<vault>" --subject "<goal>" --record-resume <the id>` **once the liveness instrument shows it live** |
 | `restart` | live session, `STALE`/`INVALID` cadence | `/supervisor:restart <session-id>`; its `busy-target` refusal means mid-turn — wait a tick, never kill in-flight work |
 | `leave` | `STOPPED` — a deliberate stand-down | nothing; the operator stood it down |
 | `cannot-tell` | the probe could not decide | render `UNVERIFIED` and name the input; **never act** |

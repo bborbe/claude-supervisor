@@ -52,6 +52,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -71,6 +72,10 @@ STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "10"))
 # EVERY stream (re)connect, under the unchanged 10 s STORE_TIMEOUT. Correctness
 # over cost is the right trade — a missed wake is the worse failure — but the
 # budget is deliberate, not incidental, so do not shrink this back to a bare read.
+# ⚠️ Since attention-controller v0.67.0 the read is narrowed server-side to this
+# session's own cards (`producer_id`, see `fetch_history`), so on a current store
+# the page is this session's history, not ~22 MB. The limit still bounds the
+# fallback: an older store ignores the parameter and answers the whole history.
 HISTORY_LIMIT = int(os.environ.get("ATTENTION_HISTORY_LIMIT", "50000"))
 # A long-lived stream: the read blocks between events, so this timeout is
 # generous and its expiry is treated as a drop-and-reconnect, not as an error.
@@ -128,9 +133,17 @@ def fetch_json(url, timeout):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def fetch_history(store, limit=HISTORY_LIMIT):
+def fetch_history(store, limit=HISTORY_LIMIT, session=None):
+    # ⚠️ `producer_id` narrows the page server-side to this session's own cards —
+    # honoured by attention-controller >= v0.67.0. An older store ignores the
+    # unknown parameter (it reads only `limit` / `offset`) and answers every
+    # producer, and `is_mine` still filters below — so the narrowing is a cost
+    # cut, never a correctness dependency, and either deploy order is safe.
+    query = f"limit={limit}"
+    if session:
+        query += "&producer_id=" + urllib.parse.quote(session, safe="")
     items = items_of(
-        fetch_json(f"{store}/api/1.0/attention/history?limit={limit}", STORE_TIMEOUT)
+        fetch_json(f"{store}/api/1.0/attention/history?{query}", STORE_TIMEOUT)
     )
     if len(items) >= limit:
         # ⚠️ A full page is the ONLY signal the read has a ceiling at all. Past
@@ -167,7 +180,11 @@ def emit(item_id, out):
 
 
 def reconcile(store, session, seen, started_at, attribution, out, err):
-    """Fold the store's full history into `seen`, emitting only post-start answers.
+    """Fold this session's history into `seen`, emitting only post-start answers.
+
+    The read is narrowed to this session's `producer_id` on a store that honours
+    it (attention-controller >= v0.67.0); an older store answers its full
+    history and `is_mine` narrows it here instead.
 
     Called on every (re)connect. On the first call `seen` is empty, so every one
     of this session's answered cards is adopted — and those answered **before**
@@ -176,7 +193,7 @@ def reconcile(store, session, seen, started_at, attribution, out, err):
     catch-up for anything answered while the stream was down.
     """
     try:
-        items = fetch_history(store)
+        items = fetch_history(store, session=session)
     except (urllib.error.URLError, OSError) as exc:
         # ⚠️ An unreadable history must not kill the watch. This read runs on
         # EVERY (re)connect, and it is the widened ~22 MB one, so a slow or

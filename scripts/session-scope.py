@@ -29,7 +29,7 @@ this module cannot resolve.
 
 ## The four reads
 
-  1. `manager_session_id:` on a **goal** page — the goal manager's own session. Its scope is
+  1. `claude_session_id:` on a **goal** page — the goal manager's own session. Its scope is
      that goal's `# Tasks` list. This is how an operator-opened manager is identified at all:
      it was never spawned, so the spawn ledger has no record of it.
   2. `claude_session_id:` on a **task** page — the task's owning session.
@@ -67,7 +67,8 @@ exclusion removes a WAKE, never the gate.
 
 ⚠️ **A TOPIC manager is unresolved today, and that is a named limitation rather than an
 oversight.** `--self` is matched against task pages (`claude_session_id`) and goal pages
-(`manager_session_id`); a topic page (`23 Topics/`) is not read, so a topic manager resolves
+(`claude_session_id`); a topic page
+(`23 Topics/`) is not read, so a topic manager resolves
 no scope, prints the `SCOPE  unresolved:` line, and excludes nothing — its behaviour is exactly
 what shipped before this module existed. Widening it to topics is a separate question (a
 topic's scope is its member goals, not a `# Tasks` list) and is deliberately not guessed here.
@@ -111,17 +112,9 @@ VAULTS_ROOT = os.environ.get("SUPERVISOR_VAULTS_ROOT") or os.path.expanduser(
 
 _UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 _CLAUDE_STAMP = re.compile(r'^claude_session_id:\s*["\']?(' + _UUID + r')', re.M)
-_MANAGER_STAMP = re.compile(r'^manager_session_id:\s*["\']?(' + _UUID + r')', re.M)
 _SESSION_ENTRY = re.compile(r'^\s*-\s+session_id:\s*["\']?(' + _UUID + r')', re.M)
-#: ⚠️ **The trailing newline is OPTIONAL, and that is load-bearing.** `_frontmatter()` returns
-#: `text[3:end]`, which drops the closing delimiter's newline — so a `goals:` block that is the
-#: LAST frontmatter key ends mid-line. Requiring `\n` made that block match ZERO items and
-#: `_goals()` return `[]` with no error at all: a foreign page then named no owner
-#: (`owner-unknown` instead of `foreign-goal:<goal>`), and a manager whose own task declares the
-#: goal never widened its scope, so its own workers' gates were excluded from the feed it exists
-#: to see. Only the last-key shape regressed — any page carrying a key after the block matched
-#: exactly as before, which is why every page in the vault's own frontmatter ordering missed it.
-_GOALS_BLOCK = re.compile(r"^goals:\s*\n((?:[ \t]+-[^\n]*\n?)*)", re.M)
+#: The `# Tasks`-section link reader's pattern. ⚠️ Not used for `goals:` — that declaration
+#: has five shapes, and only one of them is a wikilink (see `_goals`).
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)")
 _TASKS_HEADING = re.compile(r"^# Tasks\s*$", re.M)
 _NEXT_HEADING = re.compile(r"^# ", re.M)
@@ -148,12 +141,43 @@ def _frontmatter(text):
     return text[3:end] if end > 0 else ""
 
 
+_GOALS_DECLARATION = None
+
+
+def _goals_declaration():
+    """Import goals-declaration.py — the shared `goals:` reader.
+
+    ⚠️ **This module carried its own wikilink-only extractor, and it dropped three of the
+    four block/scalar shapes silently.** A bare list item (`goals:` then `    - Some Goal`),
+    a plain scalar and a nested list-of-list all returned `[]`, so a foreign page named no
+    owner (`owner-unknown` instead of `foreign-goal:<goal>`) and a manager whose own task
+    declared its goal that way never widened its scope — its own workers' gates left the
+    feed it exists to see. `manager-predispatch.py`, `reset.py` and `topic-spawn.py` read
+    through the same shared module for the same reason.
+    """
+    global _GOALS_DECLARATION
+    if _GOALS_DECLARATION is None:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "goals_declaration",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "goals-declaration.py"),
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _GOALS_DECLARATION = mod
+    return _GOALS_DECLARATION
+
+
 def _goals(front):
-    """The `[[...]]` names under `goals:`, in file order."""
-    match = _GOALS_BLOCK.search(front)
-    if not match:
-        return []
-    return [name.strip() for name in _WIKILINK.findall(match.group(1))]
+    """The goal names `goals:` declares, in file order, in every shape the vault writes.
+
+    The parsing is the shared module's. ⚠️ `front` comes from `_frontmatter()`, whose
+    `text[3:end]` drops the closing delimiter's newline, so a `goals:` block that is the LAST
+    key ends mid-line — the shared reader walks lines rather than requiring a trailing `\\n`,
+    which is the shape a previous regex here regressed on.
+    """
+    return _goals_declaration().goal_names(front)
 
 
 def _task_links(text):
@@ -428,7 +452,11 @@ def load(self_id, vault_paths=None):
         goals.setdefault(title, set()).update(_task_links(text))
         front = _frontmatter(text)
         if front:
-            match = _MANAGER_STAMP.search(front)
+            # `claude_session_id` is the only field a goal page records its manager in.
+            # The retired-key fallback was removed once every page in both vaults was
+            # migrated, so a page carrying only the retired key now
+            # resolves to no manager — which is the correct answer, since nothing writes it.
+            match = _CLAUDE_STAMP.search(front)
             if match:
                 managers.setdefault(match.group(1), []).append(title)
 

@@ -93,6 +93,33 @@ DECISION_ALLOW, DECISION_BLOCK = "allow", "block"
 # simply perform.
 GATE_RE = re.compile(r"^(approve|review):\s*(.+)$", re.IGNORECASE)
 
+# The handle check reads a WIDER verb set than the allow-list: a `you run:` that names a
+# card is an instruction to poll or answer it, and an unpollable handle there freezes the
+# reader exactly as it does under `review:`.
+HANDLE_GATE_RE = re.compile(r"^(approve|review|you run):\s*(.+)$", re.IGNORECASE)
+
+# A card handle is hex named AS a card — after `card`, `item` or `poll`, optionally
+# backticked. ⚠️ Keyed on that word, never on bare hex: closers cite commit SHAs (7–40
+# hex) all the time, and a bare-hex rule would refuse every one of them.
+CARD_HANDLE_RE = re.compile(
+    r"(?:\b(?:card|item)(?:[ _-]?id)?|\bpoll)\b[\s:#`'\"=]*([0-9a-f]{4,})\b", re.IGNORECASE)
+
+# ⚠️ An all-digit run is a number (`item 202611`, a PR, a date), never a store id: the
+# store mints lowercase hex, and a run with no a–f letter is overwhelmingly a count.
+_HEX_LETTER_RE = re.compile(r"[a-f]", re.IGNORECASE)
+
+# `attention-ask.py` `STORE_ITEM_ID_LEN`: `poll` refuses any other length. ⚠️ The
+# predicate is "not pollable", never "not resolvable" — an 8-char prefix DOES resolve
+# through `attention-card-lookup.py`, so a resolvability test would pass the very input
+# this exists to refuse.
+STORE_ITEM_ID_LEN = 32
+
+
+def unpollable_handles(body):
+    """Card handles in `body` that `poll` cannot address."""
+    return [h for h in CARD_HANDLE_RE.findall(body)
+            if len(h) != STORE_ITEM_ID_LEN and _HEX_LETTER_RE.search(h)]
+
 # Derived from `~/.claude/CLAUDE.md` § After Opening a PR and § Execution Phase No Re-Ask
 # § Named No-Ask Actions. ⚠️ Order is irrelevant; the name is what the record carries.
 ALLOW = (
@@ -263,6 +290,13 @@ def evaluate(payload, environ=None):
 
     _ts, line = found
     body = closer_body(line)
+    handle_gate = HANDLE_GATE_RE.match(body)
+    if handle_gate:
+        bad = unpollable_handles(body)
+        if bad:
+            code, _text, record = verdict(2, "unpollable-handle",
+                                          verb=handle_gate.group(1).lower(), closer=line)
+            return code, _handle_message(bad), record
     gate = GATE_RE.match(body)
     if not gate:
         return verdict(0, "not-a-gate", closer=line)
@@ -271,6 +305,16 @@ def evaluate(payload, environ=None):
     if matched is None:
         return verdict(0, "not-allow-listed", verb=verb, closer=line)
     return verdict(2, "allow-listed", verb=verb, matched=matched, closer=line)
+
+
+def _handle_message(handles):
+    named = ", ".join(f"`{h}`" for h in handles)
+    return (
+        f"closer-gate-lint: the closer names card handle {named}, which is not a full "
+        f"{STORE_ITEM_ID_LEN}-hex store item id — `attention-ask.py poll` refuses it, so "
+        "nobody can answer this gate through the store. Replace it with the full id from "
+        "the post's `ITEM_ID:` line, then end the turn.\n"
+    )
 
 
 def _message(reason, verb, matched):

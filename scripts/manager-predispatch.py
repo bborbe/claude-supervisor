@@ -657,7 +657,10 @@ def read_task(path: str) -> dict | None:
         "phase": fm_scalar(fm, "phase"),
         "session": fm_scalar(fm, "claude_session_id").strip("'\""),
         "sessions": session_id_set(fm),
-        "goals": fm_wikilinks(fm, "goals"),
+        # ⚠️ The shared normaliser, never `fm_wikilinks`: that one returns only `[[...]]`
+        # matches, so a bare `- Name` block item reads as "declares no goal" and the task
+        # silently leaves the tracked set. See `_goals_declaration` for the measurement.
+        "goals": _goals_declaration().goal_names(fm),
         "progress_hash": progress_hash(text),
         "met": checkbox_count(text),
         "mtime": mtime,
@@ -857,6 +860,38 @@ def _declared_wait():
         spec.loader.exec_module(mod)
         _DECLARED_WAIT = mod
     return _DECLARED_WAIT
+
+
+_GOALS_DECLARATION = None
+
+
+def _goals_declaration():
+    """Import goals-declaration.py — the shared `goals:` reader.
+
+    ⚠️ **Shared, not re-derived, and the reason is a measured silent drop.** `read_task`
+    used to read `goals:` through `fm_wikilinks`, which returns only `[[...]]` matches — so
+    a task declaring its goal as a bare list item (`goals:` then `    - Name`, no brackets)
+    contributed nothing to `resolve_tracked`, vanished from the tracked set, and never
+    received a liveness probe. `reset.py` read the same declaration with a normaliser that
+    DID handle that shape, so the two disagreed while both looked self-consistent. Measured
+    2026-11-02 on the live `private-personal` vault: caller scan 61 names, gate snapshot 60,
+    differing by exactly the one task in the bare-list shape.
+
+    ⚠️ `blocked_by` deliberately stays on `fm_wikilinks`. Its contract is different —
+    `blocked_by_verdict` has to tell "declares no blocker" from "declares a blocker that
+    did not parse as a name", and widening the accepted shapes there changes which rows
+    read as blocked. That is not this fix.
+    """
+    global _GOALS_DECLARATION
+    if _GOALS_DECLARATION is None:
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "goals-declaration.py"
+        )
+        spec = importlib.util.spec_from_file_location("goals_declaration", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _GOALS_DECLARATION = mod
+    return _GOALS_DECLARATION
 
 
 _DECLARED_WAIT_IDS = None

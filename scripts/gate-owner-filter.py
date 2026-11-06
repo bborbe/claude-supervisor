@@ -144,7 +144,7 @@ for a gate flipped with the health of a manager that did not own it — and it c
 the real owner, because `verdict()` has no notion of goals or tasks at all.
 
 `session-scope.py` supplies that notion from the VAULT, which is durable: `--self` resolves to
-a goal page's `manager_session_id` (or a task's `claude_session_id`), the manager's scope is
+a goal page's `claude_session_id`, the manager's scope is
 that goal's `# Tasks` list, and every gated session resolves to the page it is stamped on. A
 pane whose page is outside the scope is **EXCLUDED, not dropped**: the row stays in
 `--explain --json` carrying `foreign-goal:<goal>` (or `owner-unknown` when the task declares no
@@ -198,11 +198,45 @@ rejected:
     would then read its own workers as `peer-manager`. Inert in its target
     window.
 
+## ROLE — the operator's own workspace, and why it is excluded rather than dropped
+
+`verdict()` had no notion of the spawn's declared `role`, so a `role: human` row — the
+operator's own session, opened into the Direct window by `/supervisor:open --flagged`
+(`commands/open.md` § Step 0.6: *"A `role: human` row is never opened as a WORKER — it is
+opened into the Direct window instead"*) — was judged by the spawn edge alone. When the
+manager was its spawner that read `own-worker`, the branch that exists for the panes a
+manager EXISTS to see. Measured 2026-10-27 on Fleet Manager `ac24db61`: pane 2165
+(`Check Prometheus Alerts - 2026-10-27`, `role: human`) fired the feed **three times**
+across three consecutive 30-minute windows, each firing a full manager turn spent
+re-establishing that the gate was the operator's own and relaying nothing.
+
+A human row is answered in its own tab, so no manager ever acts on it, and the exclusion is
+a third EXCLUDE reason beside the two the vault supplies. EXCLUDE and not DROP, for the
+reason § GOAL SCOPE gives: the row must stay visible in `--explain` / `--json` naming what
+it is, and only the bare feed omits it. `counts_line()` therefore reports it in its own
+`excluded(role-human)` bucket — folded into `dropped(...)` it would read as a spawn-edge
+drop, and printed nowhere at all it would be the silence `--explain` exists to prevent.
+
+⚠️ **THE PREDICATE FAILS CLOSED, IN THE OPPOSITE DIRECTION FROM `is_manager`'s.** `is_human`
+matches ONLY an explicit `role: "human"`; a record with no `role`, `role: null`, or no
+record at all is NOT human. The two defaults point opposite ways because the failure
+directions do: `is_manager` defaults to worker so a pre-field record cannot drop the whole
+fleet's gates, and this defaults to not-human so an unrecorded session cannot be silently
+excluded — which is that same fleet-wide silence reached from the other side.
+
+⚠️ **It sits ABOVE the `own-worker` branch and above the scope block.** Above `own-worker`
+because that branch returns EMIT for every pane this watcher spawned, which is exactly the
+reported case; above the scope block so the reason always names the durable fact rather
+than whichever goal page happens to claim the row. The match is deliberately NOT scoped to
+this watcher's own spawns: `role` is a global ledger fact, so a human row spawned by another
+manager is excluded too — a human row is never a manager's to route, whoever spawned it.
+
 ⚠️ A filter that silently matches nothing is indistinguishable from a quiet
 fleet (a broken watcher is indistinguishable from a quiet one). So `--explain`
 prints the reason for every verdict, and every run prints a
 `gates: N  emit: N  dropped(peer-manager): N  dropped(peer-manager-own): N
-dropped(claimed): N  excluded(foreign-goal): N  excluded(owner-unknown): N` line on
+dropped(claimed): N  excluded(foreign-goal): N  excluded(owner-unknown): N
+excluded(role-human): N` line on
 stderr — which is what makes an empty result legible as "nothing to filter" rather
 than "the filter is broken". `excluded` is a separate family from `dropped` on
 purpose: see § GOAL SCOPE.
@@ -233,11 +267,12 @@ EMIT = "emit"
 DROP = "drop"
 #: A THIRD outcome, and it exists so an exclusion can never be read as a drop. A row is
 #: EXCLUDE when the gated session's own page belongs to another goal (`foreign-goal:<goal>`)
-#: or to no goal at all (`owner-unknown`). The row stays in `--explain` / `--json` with that
-#: owner named; only the bare feed omits it. Measured 2026-10-29: a manager was handed five
-#: gates from five other goals in one afternoon, and the filter had no vocabulary to say
-#: whose they were — `verdict()` has no notion of goals or tasks, so its only answers were a
-#: liveness-derived drop or an emit.
+#: or to no goal at all (`owner-unknown`), or — since 2026-11-02 — when its own ledger
+#: `role` is `human` (`role-human`), the operator's workspace: see § ROLE. The row stays in
+#: `--explain` / `--json` with that owner named; only the bare feed omits it. Measured
+#: 2026-10-29: a manager was handed five gates from five other goals in one afternoon, and
+#: the filter had no vocabulary to say whose they were — `verdict()` has no notion of goals
+#: or tasks, so its only answers were a liveness-derived drop or an emit.
 EXCLUDE = "exclude"
 
 # The token `who-needs-me.py` writes to its STDOUT when it refuses a read, so the
@@ -447,6 +482,28 @@ def is_manager(session_id, ledger):
     return record.get("role") == "manager"
 
 
+def is_human(session_id, ledger):
+    """The gated session is the OPERATOR'S own workspace, not a delegate.
+
+    `role: human` is what `spawn_agent` writes for a row opened into the Direct window
+    (`commands/open.md` § Step 0.6), so its gate is answered in that tab and no manager ever
+    acts on it. Measured 2026-10-27 on Fleet Manager `ac24db61`: pane 2165
+    (`Check Prometheus Alerts - 2026-10-27`, `role: human`) fired the feed three times across
+    three consecutive 30-minute windows — see the module header § ROLE.
+
+    ⚠️ **ONLY an explicit `human` counts, and the default is the OPPOSITE of `is_manager`'s.**
+    A record with no `role`, `role: null`, or no record at all is NOT human. The two defaults
+    point opposite ways because the failure directions do: `is_manager` defaults to worker so
+    a pre-field record cannot drop the whole fleet's gates, and this defaults to not-human so
+    an unrecorded session cannot be silently excluded — that same fleet-wide silence, reached
+    from the other side. `role` is a positive assertion here, never an absence.
+    """
+    if not session_id:
+        return False
+    record = ledger.get(session_id) or {}
+    return record.get("role") == "human"
+
+
 def live_ids(registry_dir=REGISTRY):
     """Session ids the registry lists, or None when the registry is unreadable.
 
@@ -594,6 +651,11 @@ def gate_fingerprint(pane, items):
     text changes exactly when the gate does: a new question on the same pane is a
     new gate, and a re-render of the same question is not.
     """
+    # A headless key IS the store item id, so it already names exactly one gate.
+    # Its text comes from a per-poll store read that may fail, and mixing it in
+    # would flip the fingerprint on every flap and re-wake the manager each time.
+    if is_headless_key(pane):
+        return hashlib.sha256(str(pane).encode("utf-8")).hexdigest()[:16]
     record = newest_item_for_pane(pane, items)
     payload = f"{pane}\x1f{normalise(gate_text(record))}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
@@ -691,9 +753,10 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None, scope=None)
 
     The keep-set is wide on purpose: drop ONLY on a live peer manager -- reached
     by the spawn edge (its spawner), by the gated session being one itself, or by
-    a claim a live peer manager holds. EXCLUDE is the third answer and it comes
-    from the vault, not from any live store: the gated session's own page belongs
-    to another goal.
+    a claim a live peer manager holds. EXCLUDE is the third answer and it has two
+    sources: the vault (the gated session's own page belongs to another goal) and
+    the ledger's `role: human` (the operator's own workspace, which no manager
+    routes — see § ROLE).
 
     ⚠️ **The scope check sits ABOVE the spawner path, deliberately.** For a
     positively-foreign pane the spawn edge may say `peer-manager`, `dead-manager`
@@ -705,6 +768,18 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None, scope=None)
         return EMIT, "unowned"
     if self_id and session_id == self_id:
         return EMIT, "self"
+
+    # THE OPERATOR'S OWN WORKSPACE. A `role: human` row is opened into the Direct window
+    # (`commands/open.md` § Step 0.6), so its gate is answered there and a manager never acts
+    # on it -- yet the spawn edge emits it, and when this watcher IS the spawner it emits
+    # `own-worker`, the branch that exists for the panes the manager EXISTS to see. Placed
+    # above that branch for exactly that reason, and above the scope block so the reason
+    # always names the durable fact rather than whichever goal page happens to claim the row.
+    # `is_human` fails closed -- only an explicit `human` matches -- so a record with no
+    # `role`, a `null` role or no record at all keeps every existing verdict. See § ROLE.
+    if is_human(session_id, ledger):
+        return EXCLUDE, "role-human"
+
     if self_id and spawner == self_id:
         # Above both the spawner path and the claim branch, deliberately: a
         # manager's own workers are the panes it EXISTS to see, so neither a
@@ -853,19 +928,99 @@ def feed_rows(stream):
     minutes, 2 real.** The mark is carried, never re-derived: it is a property
     of the read that produced the row, and `--pane` callers have no line to
     read it from.
+
+    ⚠️ **A pane-less headless row is a gate too, keyed on its store item id.**
+    `who-needs-me.py` renders a headless worker's answerable gate `[ hst]` — a
+    headless worker owns no pane by construction — and the digit-only match used
+    to skip it, so the filter read `gates: 0` over a feed carrying the gate and
+    the armed watcher never woke. Measured 2026-11-03 01:06: 11 of 13 live gates
+    were `[ hst]`. The row's own identity is the store item id its `answer:`
+    continuation line names (`hst` is rendered ONLY when that line exists), so
+    the key is `hst:<store item id>` — never a pane, which this row cannot have.
+    `headless_items` resolves the session behind that key from the store.
     """
     import re
 
+    lines = list(stream)
     out, marks = [], {}
-    for line in stream:
+    for index, line in enumerate(lines):
         match = re.match(r"\s*\[\s*(\d+)\s*\]", line)
-        if not match:
+        if match:
+            pane = match.group(1)
+        elif re.match(r"\s*\[\s*hst\s*\]", line):
+            pane = headless_key(lines, index)
+            if pane is None:
+                continue
+        else:
             continue
-        pane = match.group(1)
         if pane not in marks:
             marks[pane] = REPLAY_MARK in line
             out.append(pane)
     return [(pane, marks[pane]) for pane in out]
+
+
+HEADLESS_PREFIX = "hst:"
+
+
+def headless_key(lines, index):
+    """`hst:<store item id>` for the `[ hst]` row at `lines[index]`, or None.
+
+    Reads the row's continuation lines only — up to the next `[...]` row marker —
+    so an `answer:` line can never be borrowed from a neighbouring row.
+    """
+    import re
+
+    for line in lines[index + 1:]:
+        if re.match(r"\s*\[", line):
+            return None
+        match = re.search(r"attention-answer\.py answer (\S+)", line)
+        if match:
+            return HEADLESS_PREFIX + match.group(1)
+    return None
+
+
+def is_headless_key(pane):
+    return str(pane).startswith(HEADLESS_PREFIX)
+
+
+def headless_items(keys, endpoint=None):
+    """Synthetic event-log records for the `hst:<id>` keys, read from the store.
+
+    The second read of the attention store this route costs, made only when the
+    feed carried a headless row. Each record carries `pane: hst:<id>` so the
+    pane-keyed hops (`session_for_pane`, `gate_fingerprint`) resolve it unchanged:
+    `session_id` from the store's `producer_id`, the text from its `payload`.
+
+    ⚠️ **An unreachable store fails OPEN** — no record, so the session reads
+    `unowned` and the gate EMITS. Silence is the failure this route removes; a
+    store read that failed must not reintroduce it.
+    """
+    wanted = {str(k)[len(HEADLESS_PREFIX):] for k in keys if is_headless_key(k)}
+    if not wanted:
+        return []
+    import urllib.request
+
+    base = (endpoint or os.environ.get("ATTENTION_STORE_URL") or "http://localhost:18080").rstrip("/")
+    try:
+        with urllib.request.urlopen(base + "/api/1.0/attention", timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8") or "[]")
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    out, now = [], time.time()
+    for item in data:
+        if not isinstance(item, dict) or item.get("item_id") not in wanted:
+            continue
+        out.append(
+            {
+                "pane": HEADLESS_PREFIX + item["item_id"],
+                "session_id": item.get("producer_id") or "",
+                "detail": item.get("payload") or "",
+                "ts": now,
+            }
+        )
+    return out
 
 
 def panes_from_feed(stream):
@@ -991,7 +1146,15 @@ def render(rows, args, new_panes=None):
                 continue
             if new_panes is not None and r["pane"] not in new_panes:
                 continue
-            print(f"{r['pane']}{'  ' + REPLAY_MARK if r['replayed'] else ''}")
+            # A headless key names the store item but no pane to jump to, so the
+            # wake line also names the session it belongs to — the one handle the
+            # manager can act on. A pane row renders exactly as before.
+            who = (
+                f"  session={r['session_id'] or 'unresolved'}"
+                if is_headless_key(r["pane"])
+                else ""
+            )
+            print(f"{r['pane']}{who}{'  ' + REPLAY_MARK if r['replayed'] else ''}")
         return
 
     for r in rows:
@@ -1013,7 +1176,10 @@ def counts_line(rows):
     would make a scope exclusion read as a spawn-edge drop, which is the exact
     misattribution the exclusion exists to end. The two buckets are split by
     owner-named vs owner-unknown for the same reason the dropped ones are split by
-    rule.
+    rule, and a third — `excluded(role-human)` — is the ledger's `role`, not the
+    vault: the operator's own workspace, which no manager routes (see § ROLE). It
+    gets its own bucket for the same reason: a row excluded because the operator
+    owns it is a different fact from one excluded because another goal does.
     """
     kept = [r for r in rows if r["verdict"] == EMIT]
     dropped = [r for r in rows if r["verdict"] == DROP]
@@ -1023,13 +1189,15 @@ def counts_line(rows):
     excluded = [r for r in rows if r["verdict"] == EXCLUDE]
     excluded_goal = [r for r in excluded if r["reason"].startswith("foreign-goal:")]
     excluded_unknown = [r for r in excluded if r["reason"] == "owner-unknown"]
+    excluded_human = [r for r in excluded if r["reason"] == "role-human"]
     return (
         f"gates: {len(rows)}  emit: {len(kept)}  "
         f"dropped(peer-manager): {len(dropped_peer)}  "
         f"dropped(peer-manager-own): {len(dropped_own)}  "
         f"dropped(claimed): {len(dropped_claimed)}  "
         f"excluded(foreign-goal): {len(excluded_goal)}  "
-        f"excluded(owner-unknown): {len(excluded_unknown)}"
+        f"excluded(owner-unknown): {len(excluded_unknown)}  "
+        f"excluded(role-human): {len(excluded_human)}"
     )
 
 
@@ -1043,6 +1211,7 @@ def one_shot(panes, args, ledger, live, items, claims, missing=(), scope=None):
     feed. Naming it separates "the feed does not carry it" from "the feed was never
     consulted" — the defect this flag carried.
     """
+    items = items + headless_items([pane for pane, _ in panes], args.endpoint)
     rows = evaluate_panes(panes, ledger, live, items, args.self_id, claims, scope)
     render(rows, args)
     if args.explain:
@@ -1163,11 +1332,15 @@ def poll(args, items, scope=None):
         # ordering matters too: the marker is checked before the status, because
         # a refusal is the more specific verdict and `who-needs-me.py` exits
         # non-zero on that path as well.
+        feed = feed_rows(lines)
+        # Headless rows resolve through the store, re-read per poll: a headless gate is
+        # new by definition, so the arm-time `items` snapshot never carries it.
+        poll_items = items + headless_items([pane for pane, _ in feed], args.endpoint)
         rows = evaluate_panes(
-            feed_rows(lines),
+            feed,
             load_ledger(args.endpoint),
             live_ids(args.registry_dir),
-            items,
+            poll_items,
             args.self_id,
             load_claims(args.claims_file),
             scope,
@@ -1180,7 +1353,7 @@ def poll(args, items, scope=None):
         # open against a loop that already spawns a producer per poll.
         now = time.time()
         new_panes, next_state = emit_decisions(
-            kept, load_feed_state(state_path), items, now, args.reemit_after
+            kept, load_feed_state(state_path), poll_items, now, args.reemit_after
         )
         # ⚠️ A store this arm cannot write is reported ONCE, never swallowed.
         # Silent failure here is the worst shape available: the arm looks healthy,
@@ -1243,7 +1416,8 @@ def main():
         action="store_true",
         help=(
             "skip the vault scope read entirely — the filter then behaves exactly "
-            "as it did before that input existed (no row is ever excluded)"
+            "as it did before that input existed (no row is excluded by the SCOPE; "
+            "the `role: human` exclusion is not a scope input and still applies)"
         ),
     )
     parser.add_argument(
@@ -1315,8 +1489,9 @@ def main():
         scope = _session_scope().load(args.self_id, args.scope_vault or None)
         if not scope.resolved:
             print(
-                f"SCOPE  unresolved: {scope.reason} — no row is excluded; "
-                f"every gate emits exactly as before",
+                f"SCOPE  unresolved: {scope.reason} — no row is excluded by the scope; "
+                f"every gate emits exactly as before, except a `role: human` row, which "
+                f"is excluded by the role rule and not by this input",
                 file=sys.stderr,
             )
             scope = None

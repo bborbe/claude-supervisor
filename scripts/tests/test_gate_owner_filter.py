@@ -1772,6 +1772,170 @@ class ScopeExclusion(unittest.TestCase):
                          (gf.EXCLUDE, "foreign-goal:Some Other Goal"))
 
 
+class RoleHumanExclusion(unittest.TestCase):
+    """A `role: human` row is the operator's own workspace, so no manager routes it.
+
+    The reported case (2026-10-27, Fleet Manager `ac24db61`, pane 2165) is a human row the
+    MANAGER ITSELF spawned, so it travels the `own-worker` branch -- the one that exists for
+    the panes a manager EXISTS to see, and which returned EMIT before any role was read. The
+    first test pins that ordering; the controls pin that the exclusion does not widen into
+    silence, which is the failure direction every other hop here fails open to avoid.
+    """
+
+    HUMAN = "human-1"
+    AGENT = "agent-1"
+    MGR = "mgr-1"
+    LEDGER = {
+        HUMAN: {"session_id": HUMAN, "spawner_session_id": ME, "role": "human"},
+        AGENT: {"session_id": AGENT, "spawner_session_id": ME, "role": "agent"},
+        MGR: {"session_id": MGR, "role": "manager"},
+        "nobody": {"session_id": "nobody"},
+    }
+    # `other-manager` is LIVE so the peer-manager test exercises the `DROP` path rather
+    # than the dead-manager one: a spawner absent from LIVE emits, which would make the
+    # case pass for the wrong reason.
+    LIVE = {HUMAN, AGENT, MGR, ME, "other-manager"}
+
+    def call(self, session_id, spawner, ledger=None, live=None):
+        return gf.verdict(
+            session_id,
+            spawner,
+            self.LEDGER if ledger is None else ledger,
+            self.LIVE if live is None else live,
+            ME,
+        )
+
+    def test_the_reported_case_is_excluded_above_own_worker(self):
+        """The manager spawned the human row, so `own-worker` would have emitted it."""
+        self.assertEqual(self.call(self.HUMAN, ME), (gf.EXCLUDE, "role-human"))
+
+    def test_a_human_row_with_no_spawner_is_excluded_too(self):
+        """The operator-started half of the population: no spawner, still not routable."""
+        self.assertEqual(self.call(self.HUMAN, None), (gf.EXCLUDE, "role-human"))
+
+    def test_a_human_row_spawned_by_another_live_manager_is_excluded_too(self):
+        """The match is deliberately NOT scoped to this watcher's own spawns.
+
+        `role` is a global ledger fact, so a peer manager's human row is excluded as well —
+        and that case is the one where the spawn edge would otherwise return a `DROP`
+        (`peer-manager`), so it pins that the role rule outranks `spawner_verdict` and not
+        only the `own-worker` branch above it.
+        """
+        # The premise, asserted so the case cannot pass for the wrong reason: without the
+        # role rule this spawn edge resolves to a DROP, so the exclusion is what changes it.
+        self.assertEqual(gf.spawner_verdict("other-manager", self.LEDGER, self.LIVE),
+                         (gf.DROP, "peer-manager"))
+        self.assertEqual(self.call(self.HUMAN, "other-manager"),
+                         (gf.EXCLUDE, "role-human"))
+
+    def test_the_exclusion_outranks_the_scope_block(self):
+        """The role names the row better than whichever goal page happens to claim it."""
+        scope = _FakeScope({self.HUMAN: (True, "foreign-goal:Some Other Goal")})
+        self.assertEqual(
+            gf.verdict(self.HUMAN, ME, self.LEDGER, self.LIVE, ME, None, scope),
+            (gf.EXCLUDE, "role-human"),
+        )
+
+    def test_the_asking_session_is_still_kept(self):
+        """`self` returns above the role check: a watcher always sees its own gate."""
+        ledger = {ME: {"session_id": ME, "role": "human"}}
+        self.assertEqual(self.call(ME, None, ledger=ledger), (gf.EMIT, "self"))
+
+    def test_an_agent_row_the_watcher_spawned_still_emits(self):
+        """The control that stops the exclusion widening into silence."""
+        self.assertEqual(self.call(self.AGENT, ME), (gf.EMIT, "own-worker"))
+
+    def test_a_manager_row_is_unaffected(self):
+        self.assertEqual(self.call(self.MGR, None), (gf.DROP, "peer-manager-own"))
+
+    def test_a_record_with_no_role_is_not_human(self):
+        """A pre-field record must keep every existing verdict -- `role` is positive only."""
+        self.assertEqual(self.call("nobody", ME), (gf.EMIT, "own-worker"))
+
+    def test_a_null_role_is_not_human(self):
+        ledger = {"x": {"session_id": "x", "spawner_session_id": ME, "role": None}}
+        self.assertEqual(self.call("x", ME, ledger=ledger), (gf.EMIT, "own-worker"))
+
+    def test_a_session_with_no_record_is_not_human(self):
+        self.assertEqual(self.call("unrecorded", ME), (gf.EMIT, "own-worker"))
+
+    def test_is_human_matches_only_an_explicit_human(self):
+        self.assertTrue(gf.is_human(self.HUMAN, self.LEDGER))
+        for session_id in (self.AGENT, self.MGR, "nobody", "unrecorded", None, ""):
+            self.assertFalse(gf.is_human(session_id, self.LEDGER), session_id)
+
+    def test_counts_line_reports_the_human_exclusion_in_its_own_bucket(self):
+        """Never folded into `dropped(...)`, and never into the vault's exclusions."""
+        rows = [
+            {"pane": "1", "replayed": False, "verdict": gf.EXCLUDE,
+             "reason": "role-human", "session_id": "h", "spawner": ME},
+            {"pane": "2", "replayed": False, "verdict": gf.EXCLUDE,
+             "reason": "foreign-goal:Some Goal", "session_id": "f", "spawner": ME},
+        ]
+        line = gf.counts_line(rows)
+        self.assertIn("excluded(role-human): 1", line)
+        self.assertIn("excluded(foreign-goal): 1", line)
+
+
+class RoleHumanEndToEnd(unittest.TestCase):
+    """The whole path the watcher's arm runs, not just `verdict()`.
+
+    A `verdict()`-level pin cannot catch a renderer that prints an EXCLUDE row on the bare
+    `--feed` shape, and that shape IS the watcher's input -- so the exclusion is asserted
+    where the manager would actually be woken: two panes, one human and one agent, both
+    spawned by this watcher.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = self._tmp.name
+        self.state = os.path.join(self.dir, "state")
+        self.registry = os.path.join(self.dir, "registry")
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
+        for path in (self.state, self.registry):
+            os.makedirs(path)
+        with open(os.path.join(self.state, "a.events.jsonl"), "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(
+                {"type": "open", "item_id": "1", "pane": "2165", "session_id": "human-1"}
+            ) + "\n")
+            handle.write(json.dumps(
+                {"type": "open", "item_id": "2", "pane": "2106", "session_id": "agent-1"}
+            ) + "\n")
+        self.endpoint.add_ledger_row(
+            ledger_row("human-1", spawner_session_id=ME, role="human")
+        )
+        self.endpoint.add_ledger_row(
+            ledger_row("agent-1", spawner_session_id=ME, role="agent")
+        )
+
+    def run_filter(self, *extra):
+        return subprocess.run(
+            [sys.executable, _SCRIPT, "--feed", "--self", ME,
+             "--state-dir", self.state, "--registry-dir", self.registry,
+             "--endpoint", self.endpoint.url,
+             "--claims-file", os.path.join(self.dir, "no-claims.json"),
+             "--no-scope", *extra],
+            input="[2165]\n[2106]\n", capture_output=True, text=True,
+        )
+
+    def test_the_bare_feed_drops_the_human_pane_and_keeps_the_agent_pane(self):
+        result = self.run_filter()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), ["2106"], result.stdout)
+        self.assertIn("excluded(role-human): 1", result.stderr)
+
+    def test_explain_names_the_human_row_instead_of_hiding_it(self):
+        result = self.run_filter("--explain")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("exclude role-human", result.stdout, result.stdout)
+        # The verdict column is padded to the widest verdict on the run, so match the
+        # reason rather than a fixed-width prefix -- the padding is not the contract.
+        self.assertIn("own-worker", result.stdout, result.stdout)
+        self.assertIn("2106", result.stdout, result.stdout)
+
+
 class ScopeCli(unittest.TestCase):
     """The scope CLI seam, end to end through `_session_scope()` / `main()`.
 
@@ -1927,6 +2091,113 @@ class ForeignGoalFixture(unittest.TestCase):
         printed = self.unscoped["feed"].stdout.split()
         self.assertEqual([pane for pane in printed if pane in self.replay.FOREIGN],
                          list(self.replay.FOREIGN))
+
+
+
+
+_PANELESS_FIXTURE = os.path.join(_HERE, "fixtures", "paneless-gate-feed.txt")
+_HST_ITEM = "f712443d00000000000000000000aaaa"
+
+
+class PanelessHeadlessGateReachesTheKeptSet(unittest.TestCase):
+    """A `[ hst]` row is a gate, keyed `hst:<store item id>`.
+
+    ⚠️ The digit-only row match skipped every headless worker's gate, so the filter
+    read `gates: 0` over a feed carrying the gate and the armed watcher never woke —
+    measured 2026-11-03, 11 of 13 live gates rendered `[ hst]`. The fixture is the
+    two-row feed the task names: it read `gates: 1` before this change.
+    """
+
+    def feed(self):
+        with open(_PANELESS_FIXTURE, encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_feed_rows_keys_the_headless_row_on_its_store_item(self):
+        rows = gf.feed_rows(self.feed().splitlines(keepends=True))
+        self.assertEqual(rows, [("hst:" + _HST_ITEM, False), ("417", False)])
+
+    def test_a_headless_row_without_an_answer_line_is_not_a_gate(self):
+        feed = ["  [ hst]  1m  x\n", "         headless\n", "  [ 417]  2m  y\n"]
+        self.assertEqual(gf.feed_rows(feed), [("417", False)])
+
+    def test_an_answer_line_is_never_borrowed_from_the_next_row(self):
+        feed = [
+            "  [ hst]  1m  x\n",
+            "  [ 417]  2m  y\n",
+            "         answer: python3 a/attention-answer.py answer abc\n",
+        ]
+        self.assertEqual(gf.feed_rows(feed), [("417", False)])
+
+    def test_the_question_mark_row_stays_unparsed(self):
+        """A pane-less row with nothing to answer may be an exited session."""
+        self.assertEqual(gf.feed_rows(["  [   ?]  5m  ⟳replay  x\n"]), [])
+
+    def test_the_fixture_reads_two_gates_two_emits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [sys.executable, _SCRIPT, "--feed", "--no-scope",
+                 "--state-dir", tmp, "--registry-dir", tmp,
+                 "--endpoint", dead_url(),
+                 "--claims-file", os.path.join(tmp, "none.json")],
+                input=self.feed(), capture_output=True, text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("gates: 2  emit: 2", result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["hst:" + _HST_ITEM + "  session=unresolved", "417"],
+        )
+
+    def test_the_store_resolves_the_session_and_ownership_applies(self):
+        """The store's `producer_id` is the session; a live peer manager's worker drops."""
+        payload = json.dumps(
+            [{"item_id": _HST_ITEM, "producer_id": GATED, "payload": "Bash: date"}]
+        ).encode("utf-8")
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = payload
+        with mock.patch("urllib.request.urlopen", return_value=response):
+            items = gf.headless_items(["hst:" + _HST_ITEM, "417"], "http://x")
+        self.assertEqual(gf.session_for_pane("hst:" + _HST_ITEM, items), GATED)
+        ledger = {
+            GATED: {"session_id": GATED, "parent_session": PEER},
+            PEER: {"session_id": PEER, "label": "manager", "role": "manager"},
+        }
+        with mock.patch.object(gf, "is_manager", side_effect=lambda s, _l: s == PEER):
+            call, reason, sid, _ = gf.evaluate(
+                "hst:" + _HST_ITEM, ledger, {GATED, PEER}, items, ME
+            )
+        self.assertEqual((call, reason, sid), (gf.DROP, "peer-manager", GATED))
+
+    def test_an_unreachable_store_fails_open(self):
+        self.assertEqual(gf.headless_items(["hst:" + _HST_ITEM], dead_url()), [])
+
+    def test_a_headless_fingerprint_survives_a_flapping_store(self):
+        """The store read can fail on one poll and answer on the next; the key is the gate."""
+        key = "hst:" + _HST_ITEM
+        resolved = [{"pane": key, "session_id": GATED, "detail": "Bash: date", "ts": 1}]
+        self.assertEqual(gf.gate_fingerprint(key, []), gf.gate_fingerprint(key, resolved))
+
+    def test_a_second_poll_on_the_same_headless_gate_emits_nothing(self):
+        key = "hst:" + _HST_ITEM
+        first, state = gf.emit_decisions([key], {}, [], 100.0, 3600)
+        self.assertEqual(first, {key})
+        again, _ = gf.emit_decisions([key], state, [], 160.0, 3600)
+        self.assertEqual(again, set())
+
+    def test_the_wake_line_names_the_session_or_says_unresolved(self):
+        args = mock.Mock(json=False, explain=False, feed=True)
+        rows = [
+            {"pane": "hst:a", "replayed": False, "verdict": gf.EMIT, "session_id": GATED},
+            {"pane": "hst:b", "replayed": False, "verdict": gf.EMIT, "session_id": None},
+            {"pane": "417", "replayed": False, "verdict": gf.EMIT, "session_id": GATED},
+        ]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            gf.render(rows, args)
+        self.assertEqual(
+            out.getvalue().splitlines(),
+            [f"hst:a  session={GATED}", "hst:b  session=unresolved", "417"],
+        )
 
 
 if __name__ == "__main__":

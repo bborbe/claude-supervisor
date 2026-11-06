@@ -40,7 +40,7 @@ import { resolveMessageChannel } from './message-channel.mjs'
 import { bindSessionToTask } from './task-binding.mjs'
 import { windowIdArgument } from './window-id.mjs'
 import { tabSpawnInner } from './tab-spawn.mjs'
-import { resolveRole } from './role-map.mjs'
+import { resolveRole, chipForRole } from './role-map.mjs'
 import { managerSessions } from './manager-sessions.mjs'
 import { mtimeReloadedConfig } from './config-reload.mjs'
 import { mtimeReloadedAllowlist } from './cluster-allowlist.mjs'
@@ -77,7 +77,45 @@ const agents = new Map() // id -> agent record
 // pre-change worker. `ensureListening()` is called at boot so the port is ready before the first
 // spawn, and again by `beginCreate` — which is what keeps a boot-time failure from being the only
 // attempt, without ever retrying per spawn.
-const a2aPushRegistry = createA2APushRegistry()
+const a2aPushRegistry = createA2APushRegistry({
+  // A cluster worker reaches this receiver through an in-cluster relay, and a relay's upstream
+  // port is deployed configuration — so a k8s deployment pins the port here and the relay is
+  // told the same number. `0` (ephemeral) stays the default: the docker path has no relay.
+  // ⚠️ A ROUTER SUPERSEDES THE HOST/PORT PAIR, IT DOES NOT JOIN IT. With a router, this
+  // session's receiver MUST stay on loopback at an ephemeral port: the router forwards to
+  // `127.0.0.1:<that port>`, so a receiver bound to the LAN address would refuse every forward
+  // (502), and a receiver pinned to the fixed port would hit EADDRINUSE on the second session —
+  // reintroducing exactly the contention the router exists to remove. The two are one decision,
+  // so the router wins and the pair is ignored rather than merged.
+  ...(config.a2aPushRouterUrl
+    ? { routerUrl: config.a2aPushRouterUrl }
+    : {
+        receiverPort: Number(config.a2aPushPort) || 0,
+        // Loopback unless the operator widens it — the pre-router shape, kept for a
+        // deployment that has not adopted the router yet.
+        ...(config.a2aPushHost ? { receiverHost: config.a2aPushHost } : {}),
+      }),
+})
+
+/**
+ * The callback URL a `k8s` worker must be told to POST to — `undefined` when this process was
+ * not configured with a relay, which leaves the caller on the default Docker-gateway URL.
+ *
+ * ⚠️ A CLUSTER WORKER CANNOT USE THE DEFAULT, AND THIS IS MEASURED RATHER THAN INFERRED.
+ * `host.docker.internal` does not resolve inside a pod (CoreDNS: `no such host`), and a pod
+ * cannot reach this machine's LAN address either: the worker's generated egress NetworkPolicy
+ * permits only `kube-system`, its own `agent` namespace, `monitoring`, and two named `dev`
+ * pods — nothing on the LAN. The egress proxy is a third wall behind those two. So the only
+ * route out of the pod that exists today is a service INSIDE `agent`, which the policy already
+ * permits: `SUPERVISOR_A2A_K8S_CALLBACK_URL` names that relay, and it is the operator's job to
+ * deploy it. Unset means "no relay exists", and a cluster spawn then registers the Docker
+ * gateway exactly as it did before — visibly broken, rather than silently pretending.
+ */
+function a2aCallbackUrlForTarget(target) {
+  if (!String(target ?? '').startsWith('k8s')) return undefined
+  const relay = config.a2aK8sCallbackUrl
+  return typeof relay === 'string' && relay.trim() !== '' ? relay.trim() : undefined
+}
 
 // A headless worker's liveness, published where a process that did NOT spawn it can read it.
 //
@@ -1887,7 +1925,9 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
   // without it produces exactly the pre-change worker, and failing here would lose a live worker
   // to an optional transport. The degradation is visible where it matters — `status_messages`
   // stays empty, and the surfacing criterion is written so an empty array satisfies nothing.
-  const pushBegun = await a2aPushRegistry.beginCreate()
+  const pushBegun = await a2aPushRegistry.beginCreate({
+    callbackUrl: a2aCallbackUrlForTarget(canonicalTarget),
+  })
   const push = pushBegun.error ? undefined : pushBegun.push
 
   // A fresh `messageId` and `contextId` per attempt: a retry is a NEW turn on the controller's
@@ -2431,6 +2471,15 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   const workerTarget = resolveWorkerTarget({ cwd, vault, vaults: loadVaults(), serverCwd: process.cwd() })
   if (workerTarget.error) return { error: workerTarget.error }
   const workerCwd = workerTarget.cwd
+
+  // A HUMAN session's chip follows the vault FAMILY rather than the role alone — green for a
+  // `seibert-*` vault, cyan for a `private-*` one — because colour is the operator's only
+  // at-a-glance cue for which employer a tab belongs to. Resolved HERE, after `workerTarget`,
+  // because the family comes from the RESOLVED vault: the raw `vault` argument is absent on
+  // every cwd-only spawn. This is a refinement of the chip, not a second role lookup, so
+  // `resolveRole` keeps its place above the answer-path probe — a bad role is still refused
+  // before that probe's ten `spawnSync('ps')` calls.
+  const resolvedChip = chipForRole({ resolution: roleResolution, vault: workerTarget.vault })
   // `SUPERVISOR_CLAUDE_CMD` stays the top override: an explicit operator setting rather
   // than a fallback, and the documented way to force a launcher for a one-off spawn.
   //
@@ -2740,7 +2789,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
 
   if (opensInteractive) {
     agent.status = 'interactive'
-    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, launcher: agent.launcher, label: agent.label, windowId: targetWindowId, chip: roleResolution.chip, env: tabShippingEnv ? { ...envOverrides, ...tabShippingEnv } : envOverrides })
+    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, launcher: agent.launcher, label: agent.label, windowId: targetWindowId, chip: resolvedChip, env: tabShippingEnv ? { ...envOverrides, ...tabShippingEnv } : envOverrides })
     if (res.error) {
       agents.delete(id)
       return { error: res.error }
@@ -3151,7 +3200,7 @@ const TOOLS = [
           type: 'string',
           enum: ['manager', 'agent', 'human'],
           description:
-            'The role this session plays, which resolves BOTH its colour and its window from the role map the WezTerm config publishes (~/.cache/wezterm-role-map.json) — manager → orange/Managers, agent → pink/Agents, human → cyan/Direct. Omit for agent, which is the correct default for every task that has not declared a role. PREFER THIS OVER window_id: a role is a word, so it cannot be mistyped or dropped in transit, and the id is looked up in-process at the moment of spawn instead of being carried across the tool boundary — which is where `window_id: 0` was lost intermittently (measured 2026-09-20: 4 of 6 spawns routed, and the two failures were a run\'s first spawn). Passing a role alone is the reliable path.',
+            'The role this session plays, which resolves BOTH its colour and its window from the role map the WezTerm config publishes (~/.cache/wezterm-role-map.json) — manager → orange/Managers, agent → pink/Agents, human → Direct, whose CHIP follows the vault family rather than the map: green for a `seibert-*` vault, cyan for a `private-*` one, and the map\'s own chip for any other family. Omit for agent, which is the correct default for every task that has not declared a role. PREFER THIS OVER window_id: a role is a word, so it cannot be mistyped or dropped in transit, and the id is looked up in-process at the moment of spawn instead of being carried across the tool boundary — which is where `window_id: 0` was lost intermittently (measured 2026-09-20: 4 of 6 spawns routed, and the two failures were a run\'s first spawn). Passing a role alone is the reliable path.',
         },
         window_id: {
           type: 'string',

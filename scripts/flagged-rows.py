@@ -44,7 +44,6 @@ import os
 import re
 import subprocess
 import sys
-from datetime import date
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROLE_MAP = os.path.expanduser("~/.cache/wezterm-role-map.json")
@@ -165,8 +164,14 @@ def eligible(block, kind, today):
     status = (open_queue.field(block, "status") or "").strip()
     if status != "in_progress":
         return "status is %s" % (status or "<none>")
-    defer = (open_queue.field(block, "defer_date") or "").strip()[:10]
-    if defer and defer > today:
+    state, detail = open_queue.defer_date.defer_state(
+        open_queue.field(block, "defer_date"), today
+    )
+    if state == "invalid":
+        # Not a deferral this script can vouch for, so not "due now" either: the row is
+        # withheld, and the reason reaches stderr rather than being swallowed.
+        print("flagged-rows: %s — treating as deferred" % detail, file=sys.stderr)
+    if state in ("deferred", "invalid"):
         return "deferred"
     return None
 
@@ -577,7 +582,7 @@ def subject_page(ctx, vault, kind, name):
 def subject_live(ctx, vault, kind, name):
     """Is a manager for this subject LIVE? Registry by name — `manager_on_chain`'s own
     signal, which is what SELECTS an owner. Never the subject page's
-    `manager_session_id`; that is a lead for the `--check` probe below, and the two
+    `claude_session_id`; that is a lead for the `--check` probe below, and the two
     are different questions (`docs/fleet-surface.md` § Which manager owns a subject)."""
     if ctx["no_liveness"] or ctx["managers"] is None:
         # `None` = the registry probe failed, so "no live manager" is NOT proven. Every
@@ -591,7 +596,7 @@ def subject_live(ctx, vault, kind, name):
 def subject_liveness(ctx, vault, kind, name):
     """`true` / `false` / `null` for one subject's recorded manager session.
 
-    `session-liveness.py --check` on the owner page's `manager_session_id` — the
+    `session-liveness.py --check` on the owner page's `claude_session_id` — the
     section's own "treat it as a lead only, never as a verdict" table: `true` or
     `false` when it answers, `null` when it answers UNKNOWN / AMBIGUOUS / MALFORMED.
     A subject with NO recorded manager session is `false` — absence is a fact, an
@@ -607,8 +612,9 @@ def subject_liveness(ctx, vault, kind, name):
     block = read_block(path) if path else None
     sid = None
     if block is not None:
-        sid = ((open_queue.field(block, "manager_session_id") or "").strip()
-               or (open_queue.field(block, "claude_session_id") or "").strip()
+        # `claude_session_id` is the only field a subject page records its manager in;
+        # the retired-key fallback was removed once both vaults were migrated.
+        sid = ((open_queue.field(block, "claude_session_id") or "").strip()
                or None)
     if not sid:
         verdict = False
@@ -619,7 +625,7 @@ def subject_liveness(ctx, vault, kind, name):
     return verdict
 
 
-#: The fleet sentinel has no page to read a `manager_session_id` off, so its session
+#: The fleet sentinel has no page to read a `claude_session_id` off, so its session
 #: id comes from the registry and is still checked through `--check`. The cache key
 #: is a plain subject triple so fixtures can seed it like any other.
 FLEET_KEY = ("fleet", "fleet", "Fleet Manager")
@@ -759,7 +765,6 @@ def row_for(vault, cfg, kind, path, ctx):
     if not launcher:
         return None, "no launcher resolved"
     sid = ((open_queue.field(block, "claude_session_id") or "").strip()
-           or (open_queue.field(block, "manager_session_id") or "").strip()
            or None)
     live = "none" if ctx["no_liveness"] else row_liveness(ctx, sid)
     # A pane is only meaningful for a LIVE session, and `pane_of` re-imports a
@@ -814,7 +819,9 @@ def collect(args):
         # fire and `owner_live` reads `null` — the operator must see why.
         sessions = {}
     ctx = {
-        "today": date.today().isoformat(),
+        # The CURRENT INSTANT, not today's date: a date reads as local midnight, which
+        # would park a defer that already came due today for another full day.
+        "today": open_queue.defer_date.as_now(),
         "role_map": role_map(args.role_map),
         "template_root": args.template_root,
         "no_liveness": args.no_liveness,

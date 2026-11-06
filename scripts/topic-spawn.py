@@ -53,6 +53,7 @@ not recognise and never refuses the empty one.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -190,7 +191,7 @@ def fleet_goal_managers(goals: list[str]) -> set:
     """Session ids of live goal managers on `goals`, from the fleet registry.
 
     ⚠️ **The page id alone undercounts, and the shortfall is not rare.** The
-    resolve step is the only writer of `manager_session_id`, so a goal manager
+    resolve step is the only writer of the page's session id (`claude_session_id`), so a goal manager
     started by any other path (a hand-opened `/supervisor:open`, a manager
     re-adopted after a reconnect) runs with no page record at all — measured
     2026-10-20: the live goal manager for one topic read as unmanaged, and the
@@ -226,7 +227,7 @@ def live_goal_managers(vault: str, topics_dir: str, goals: list[str]) -> int:
 
     Two independent sources, and neither is complete on its own:
 
-    * each goal page's `manager_session_id`, probed through
+    * each goal page's `claude_session_id`, probed through
       `session-liveness.py --check`, which answers LIVE / ABSENT / UNKNOWN. Only
       LIVE counts — an UNKNOWN is not a dead manager, but it is also not a running
       one, and counting it would refuse a start on evidence nothing produced.
@@ -242,7 +243,9 @@ def live_goal_managers(vault: str, topics_dir: str, goals: list[str]) -> int:
             continue
         try:
             with open(page, encoding="utf-8") as fh:
-                sid = scalar(frontmatter(fh.read()), "manager_session_id")
+                # `claude_session_id` is the only field a goal page records its manager in.
+                _fm = frontmatter(fh.read())
+                sid = scalar(_fm, "claude_session_id")
         except OSError:
             continue
         if not sid:
@@ -330,36 +333,33 @@ def ready_work(vault: str, goal: str) -> int:
     return count
 
 
+_GOALS_DECLARATION = None
+
+
+def _goals_declaration():
+    """Import goals-declaration.py — the shared `goals:` reader.
+
+    ⚠️ **Shared, and it was not before.** This module carried the third private copy of
+    the same extractor (`manager-predispatch.py` and `reset.py` held the other two), and
+    the three disagreed on which shapes they read. One implementation is what stops the
+    drift recurring; `test_topic_spawn.py`'s shape assertions are unchanged by the
+    move and now pin the shared reader too.
+    """
+    global _GOALS_DECLARATION
+    if _GOALS_DECLARATION is None:
+        here = os.path.dirname(os.path.abspath(__file__))
+        spec = importlib.util.spec_from_file_location(
+            "goals_declaration", os.path.join(here, "goals-declaration.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _GOALS_DECLARATION = mod
+    return _GOALS_DECLARATION
+
+
 def goals_of(fm: str) -> list[str]:
-    """The goal names a task's `goals:` frontmatter names, across all three shapes."""
-    m = re.search(r"^goals:(.*)$", fm, re.MULTILINE)
-    if not m:
-        return []
-    inline = m.group(1).strip()
-    if inline and inline not in ("[]", "null", "~"):
-        names = re.findall(r"\[\[([^\]|#]+)", inline)
-        return names or [inline.strip("\"' ")] if inline.strip("\"' ") else []
-    # Block form: every following indented `- …` entry, with any `- - ` nesting.
-    # ⚠️ Blank lines are SKIPPED, not treated as the end of the block: `m.end()` lands
-    # before the newline that follows the `goals:` key, so the first item of
-    # `splitlines()` is always empty and a `break` there returns `[]` for every block-form
-    # task — the shape most of the vault uses.
-    names = []
-    for line in fm[m.end():].splitlines():
-        if not line.strip():
-            continue
-        if not line.startswith((" ", "\t")):
-            break
-        s = line.strip()
-        if not s.startswith("-"):
-            continue
-        s = re.sub(r"^-\s*", "", s)
-        s = re.sub(r"^-\s*", "", s)
-        w = re.search(r"\[\[([^\]|#]+)", s)
-        name = (w.group(1) if w else s).strip().strip("\"' ")
-        if name:
-            names.append(name)
-    return names
+    """The goal names a task's `goals:` frontmatter names, across every shape."""
+    return _goals_declaration().goal_names(fm)
 
 
 def operator_pin(topic_text: str, goal_fm: str, goal: str) -> bool:

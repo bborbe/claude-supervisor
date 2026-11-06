@@ -98,7 +98,7 @@
       "enum": ["pink", "orange", "cyan"]
     },
     "session_id": {
-      "description": "Producer: the page's `claude_session_id:`, else `manager_session_id:`. Null is 'this subject has never run'.",
+      "description": "Producer: the page's `claude_session_id:`. Null is 'this subject has never run'.",
       "type": ["string", "null"],
       "minLength": 1
     },

@@ -43,6 +43,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -163,7 +164,7 @@ class PostBatchTest(unittest.TestCase):
         captured = {}
         calls = []
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             calls.append(req.full_url)
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": "batch1"})
@@ -192,7 +193,7 @@ class PostBatchTest(unittest.TestCase):
     def test_offers_no_options_so_the_answer_is_the_operators_own_words(self):
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": "batch1"})
 
@@ -213,7 +214,7 @@ class PostBatchTest(unittest.TestCase):
         """
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": "batch1"})
 
@@ -233,7 +234,7 @@ class PostBatchTest(unittest.TestCase):
     def test_refuses_a_blank_row_without_reaching_the_store(self):
         out = io.StringIO()
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             raise AssertionError("a refused batch must not reach the store")
 
         with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
@@ -415,7 +416,7 @@ class PostTest(unittest.TestCase):
     def test_posts_the_declaration_and_prints_the_item_id(self):
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["url"] = req.full_url
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
@@ -447,7 +448,7 @@ class PostTest(unittest.TestCase):
     def test_posts_the_declared_risk(self):
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
@@ -467,7 +468,7 @@ class PostTest(unittest.TestCase):
         """
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
@@ -494,7 +495,7 @@ class PostTest(unittest.TestCase):
         """
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
@@ -521,7 +522,7 @@ class PostTest(unittest.TestCase):
         """The default must not swallow a caller who knows its own bound."""
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
@@ -543,7 +544,7 @@ class PostTest(unittest.TestCase):
         """
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
@@ -571,7 +572,7 @@ class PostTest(unittest.TestCase):
         """
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
@@ -692,7 +693,7 @@ class PostTest(unittest.TestCase):
     def test_empty_optionals_are_omitted_not_sent_blank(self):
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
@@ -712,7 +713,7 @@ class PostTest(unittest.TestCase):
     def test_present_optionals_are_sent(self):
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
@@ -734,7 +735,7 @@ class PostTest(unittest.TestCase):
         self.assertEqual(len(body["options"]), 1)
 
     def test_store_rejection_is_reported_with_its_detail(self):
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             raise urllib.error.HTTPError(
                 req.full_url, 400, "Bad Request", None, io.BytesIO(b'{"error":"options not allowed"}')
             )
@@ -769,7 +770,7 @@ def answered_lines(text):
 class PollTest(unittest.TestCase):
     def poll(self, item):
         with mock.patch.object(
-            ask.urllib.request, "urlopen", lambda req, timeout=None: FakeResponse(item)
+            ask.urllib.request, "urlopen", lambda req, timeout=None, **kwargs: FakeResponse(item)
         ):
             out = io.StringIO()
             rc = ask.cmd_poll(STORE_ITEM_ID, out=out)
@@ -979,10 +980,9 @@ class PollTest(unittest.TestCase):
         self.assertNotIn("OPEN", text)
 
     def poll_error(self, code, body=b""):
-        # fetch_item passes a URL string to urlopen, not a Request, so the fake
-        # takes a str — reading `.full_url` here would be an AttributeError, not
-        # a raised HTTPError.
-        def fake(url, timeout=None):
+        # fetch_item passes a Request to urlopen (it carries the auth header), so
+        # the fake takes one and hands it straight back as the HTTPError's url.
+        def fake(url, timeout=None, **kwargs):
             raise urllib.error.HTTPError(url, code, "err", None, io.BytesIO(body))
 
         with mock.patch.object(ask.urllib.request, "urlopen", fake):
@@ -1017,7 +1017,7 @@ class PollTest(unittest.TestCase):
         # The store is mocked to blow up if it is reached at all: a refusal that
         # still issued the request would be a message change, not a guard.
         # `70eb5521` is the tick-127 id from the incident, verbatim.
-        def explode(url, timeout=None):
+        def explode(url, timeout=None, **kwargs):
             raise AssertionError(f"poll reached the store with {url!r}")
 
         with mock.patch.object(ask.urllib.request, "urlopen", explode):
@@ -1036,7 +1036,7 @@ class PollTest(unittest.TestCase):
         # `cmd_list` renders it. It is NOT a truncation of a store id -- it is
         # an unrelated uuid -- and it is equally unpollable, so the refusal has
         # to cover it without claiming it was truncated.
-        def explode(url, timeout=None):
+        def explode(url, timeout=None, **kwargs):
             raise AssertionError(f"poll reached the store with {url!r}")
 
         with mock.patch.object(ask.urllib.request, "urlopen", explode):
@@ -1070,7 +1070,7 @@ class TransportFailureReportingTest(unittest.TestCase):
     """
 
     def post(self, error):
-        def explode(req, timeout=None):
+        def explode(req, timeout=None, **kwargs):
             raise error
 
         with mock.patch.object(ask.urllib.request, "urlopen", explode):
@@ -1081,7 +1081,7 @@ class TransportFailureReportingTest(unittest.TestCase):
     def poll(self, error):
         # `fetch_item` passes a URL string, not a Request — the same asymmetry
         # `PollTest.poll_error` documents.
-        def explode(url, timeout=None):
+        def explode(url, timeout=None, **kwargs):
             raise error
 
         with mock.patch.object(ask.urllib.request, "urlopen", explode):
@@ -1268,7 +1268,7 @@ class MechanismTest(unittest.TestCase):
     def _post(self, **overrides):
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
@@ -1452,6 +1452,264 @@ class ManagerCallSitesPassTheKindTest(unittest.TestCase):
                         "not pass --producer-kind manager",
                     )
         self.assertGreaterEqual(seen, 10, "the site list stopped covering the tree")
+
+
+class StoreTokenTest(unittest.TestCase):
+    """`$ATTENTION_STORE_TOKEN` reaches the request only when it is set.
+
+    Four cases, and the last two are the ones a regression misses: `fetch_item`
+    was converted from a bare URL string to a `Request` solely to carry this
+    header, so the GET is pinned separately from the POST. The unset cases are
+    the backwards-compatibility claim — an unauthenticated store must see exactly
+    the request it saw before this change.
+    """
+
+    def _auth_header(self, token, invoke):
+        seen = {}
+
+        def fake(request, timeout=None, **kwargs):
+            seen["auth"] = request.get_header("Authorization")
+            return FakeResponse({"item_id": STORE_ITEM_ID, "state": "open"})
+
+        with mock.patch.object(ask, "TOKEN", token):
+            with mock.patch.object(ask.urllib.request, "urlopen", fake):
+                invoke()
+        return seen.get("auth")
+
+    def _post(self):
+        ask.post_question(
+            producer_id="p",
+            producer_kind="session",
+            liveness_ref="heartbeat:/tmp/none",
+            dedup_key="k",
+            interrupt_class="pick",
+            risk="",
+            payload="x",
+            context="",
+            options=[],
+            expires_at="",
+        )
+
+    def test_post_carries_the_token_when_set(self):
+        self.assertEqual(
+            self._auth_header("secret-token", self._post), "Bearer secret-token"
+        )
+
+    def test_post_carries_no_header_when_unset(self):
+        self.assertIsNone(self._auth_header("", self._post))
+
+    def test_poll_carries_the_token_when_set(self):
+        self.assertEqual(
+            self._auth_header("secret-token", lambda: ask.fetch_item(STORE_ITEM_ID)),
+            "Bearer secret-token",
+        )
+
+    def test_poll_carries_no_header_when_unset(self):
+        self.assertIsNone(self._auth_header("", lambda: ask.fetch_item(STORE_ITEM_ID)))
+
+
+class SslContextTest(unittest.TestCase):
+    """A python.org build trusts nothing, so HTTPS needs a bundle from somewhere.
+
+    `ssl.get_default_verify_paths()` returns None for both `cafile` and `capath`
+    on that build, and `urlopen` then rejects every certificate with
+    `CERTIFICATE_VERIFY_FAILED` before the request is sent. The store's chain is
+    fine — `curl` and `openssl` both validate it — so the failure reads as a bad
+    server certificate and is a missing trust store.
+
+    The first case is the backwards-compatibility claim: a machine whose
+    interpreter already carries a bundle keeps its own default untouched, and
+    every other case pins one step of the resolution order.
+    """
+
+    def _resolve(
+        self,
+        *,
+        default_roots=("root",),
+        env=None,
+        certifi=None,
+        existing=(),
+        unreadable=(),
+        certless=(),
+    ):
+        """Run `_ssl_context()` against a fake filesystem and a fake ssl.
+
+        `default_roots` is what the interpreter's own default context loads —
+        an empty tuple models the python.org build, whose compiled-in bundle is
+        reported but absent. Returns `(context_or_None, tried)`, where `tried`
+        is every `cafile` handed to `create_default_context`, in order; the
+        sequence is the resolution order the fall-through cases assert on.
+        """
+        tried = []
+
+        def fake_create(cafile=None):
+            if cafile is None:  # the probe of the interpreter's own default
+                return mock.Mock(get_ca_certs=lambda: list(default_roots))
+            tried.append(cafile)
+            if cafile in unreadable:
+                raise OSError("cannot read bundle")
+            loaded = [] if cafile in certless else ["root"]
+            return mock.Mock(get_ca_certs=lambda: loaded)
+
+        env = dict(env or {})
+        env.setdefault("SSL_CERT_FILE", "")
+        modules = {"certifi": None}
+        if certifi is not None:
+            modules["certifi"] = mock.Mock(where=lambda: certifi)
+
+        with mock.patch.dict(os.environ, env, clear=False):
+            with mock.patch.object(ask.ssl, "create_default_context", fake_create):
+                with mock.patch.object(
+                    ask.os.path, "exists", lambda p: p in existing
+                ):
+                    with mock.patch.dict(sys.modules, modules):
+                        result = ask._ssl_context()
+        return result, tried
+
+    def test_a_working_default_is_left_alone(self):
+        result, tried = self._resolve(default_roots=("root",))
+        self.assertIsNone(result)
+        self.assertEqual(tried, [])
+
+    def test_a_reported_but_rootless_default_falls_through(self):
+        """The python.org macOS trap: a default that is *reported*, not working.
+
+        `get_default_verify_paths()` names the compiled-in OpenSSL bundle, which
+        on that build does not exist until `Install Certificates.command` runs.
+        Trusting the report would return the default, `urlopen` would use the
+        same dead path, and the original `CERTIFICATE_VERIFY_FAILED` would
+        persist with no sign the fix did nothing.
+        """
+        result, tried = self._resolve(
+            default_roots=(), existing=("/etc/ssl/cert.pem",)
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/etc/ssl/cert.pem"])
+
+    def test_ssl_cert_file_wins_over_every_other_source(self):
+        result, tried = self._resolve(
+            default_roots=(),
+            env={"SSL_CERT_FILE": "/custom/bundle.pem"},
+            certifi="/certifi/cacert.pem",
+            existing=("/custom/bundle.pem", "/etc/ssl/cert.pem"),
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/custom/bundle.pem"])
+
+    def test_certifi_is_used_when_the_caller_sets_nothing(self):
+        result, tried = self._resolve(
+            default_roots=(),
+            certifi="/certifi/cacert.pem",
+            existing=("/certifi/cacert.pem", "/etc/ssl/cert.pem"),
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/certifi/cacert.pem"])
+
+    def test_the_platform_bundle_is_the_last_resort(self):
+        result, tried = self._resolve(
+            default_roots=(), existing=("/etc/ssl/cert.pem",)
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/etc/ssl/cert.pem"])
+
+    def test_no_bundle_anywhere_keeps_the_loud_failure(self):
+        result, tried = self._resolve(default_roots=())
+        self.assertIsNone(result)
+        self.assertEqual(tried, [])
+
+    def test_a_stale_ssl_cert_file_falls_through_to_the_platform_bundle(self):
+        """An env var naming a path that is not there must not become the answer.
+
+        `create_default_context(cafile=...)` raises on a missing file, and the
+        caller catches `OSError` and reports a transport failure — so a stale
+        variable would turn a working machine into a failing one. Falling
+        through keeps the resolver's promise: the caller named a preference, not
+        a requirement.
+        """
+        result, tried = self._resolve(
+            default_roots=(),
+            env={"SSL_CERT_FILE": "/gone/bundle.pem"},
+            existing=("/etc/ssl/cert.pem",),
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/etc/ssl/cert.pem"])
+
+    def test_a_bundle_that_parses_to_zero_roots_falls_through(self):
+        """An existing bundle with no certificates is a silent no-op, not a fix.
+
+        This is the failure the existence check cannot see: the path is there,
+        `create_default_context` succeeds, and the context carries no trust
+        anchors — so the original `CERTIFICATE_VERIFY_FAILED` persists and looks
+        exactly like the bug this change was written to cure.
+        """
+        result, tried = self._resolve(
+            default_roots=(),
+            env={"SSL_CERT_FILE": "/empty/bundle.pem"},
+            existing=("/empty/bundle.pem", "/etc/ssl/cert.pem"),
+            certless=("/empty/bundle.pem",),
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/empty/bundle.pem", "/etc/ssl/cert.pem"])
+
+    def test_an_unreadable_bundle_falls_through(self):
+        result, tried = self._resolve(
+            default_roots=(),
+            env={"SSL_CERT_FILE": "/locked/bundle.pem"},
+            existing=("/locked/bundle.pem", "/etc/ssl/cert.pem"),
+            unreadable=("/locked/bundle.pem",),
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/locked/bundle.pem", "/etc/ssl/cert.pem"])
+
+
+CONTEXT_SENTINEL = object()
+
+
+class UrlopenContextWiringTest(unittest.TestCase):
+    """`context=` must actually reach `urlopen`, or the fix is dead code.
+
+    Widening every fake to `**kwargs` is what let this argument disappear
+    quietly: the fakes accept `context` and none inspects it, so deleting the
+    kwarg from either call site left the whole suite green — a fix that could
+    not fail. These two assertions are what make that deletion a red run.
+    """
+
+    def _captured_context(self, invoke):
+        seen = {}
+
+        def fake(request, timeout=None, **kwargs):
+            seen["context"] = kwargs.get("context")
+            return FakeResponse({"item_id": STORE_ITEM_ID, "state": "open"})
+
+        with mock.patch.object(ask, "_ssl_context", lambda: CONTEXT_SENTINEL):
+            with mock.patch.object(ask.urllib.request, "urlopen", fake):
+                invoke()
+        return seen.get("context")
+
+    def test_post_passes_the_context_to_urlopen(self):
+        self.assertIs(
+            self._captured_context(
+                lambda: ask.post_question(
+                    producer_id="p",
+                    producer_kind="session",
+                    liveness_ref="heartbeat:/tmp/none",
+                    dedup_key="k",
+                    interrupt_class="pick",
+                    risk="",
+                    payload="x",
+                    context="",
+                    options=[],
+                    expires_at="",
+                )
+            ),
+            CONTEXT_SENTINEL,
+        )
+
+    def test_poll_passes_the_context_to_urlopen(self):
+        self.assertIs(
+            self._captured_context(lambda: ask.fetch_item(STORE_ITEM_ID)),
+            CONTEXT_SENTINEL,
+        )
 
 
 if __name__ == "__main__":
