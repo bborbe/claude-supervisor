@@ -26,6 +26,7 @@ import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { confinedCandidate, loadManagerAllowlist, matchManagerEntry } from './manager-allowlist.mjs'
+import { permissionTier } from './permission-tier.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
@@ -596,6 +597,10 @@ const publicPerm = (p) => ({
   // The manager-allowlist entry covering this prompt, so the answering manager can see WHY it
   // is allowed to answer before it does — rather than re-deriving a match from the command text.
   allowlist_entry: p.allowlistEntry?.prefix ?? null,
+  // allowlist | manager | operator — see docs/permission-allowlist.md § The three tiers. A manager
+  // answers `manager`-tier prompts on the written rubric; `operator` is never a manager's to answer.
+  permission_tier: p.permissionTier?.tier ?? 'operator',
+  permission_tier_reason: p.permissionTier?.reason ?? null,
   requested_at: p.requestedAt,
 })
 
@@ -687,6 +692,13 @@ function makeCanUseTool(agent) {
         allowlistEntry: managerAllowlistEntry(toolName, inputKey(input), agent.cwd),
         settle,
       }
+      // The tier is computed at park time for the same reason as the entry: the answer record
+      // should carry what the server decided, not what the answering manager claims. A confined
+      // entry only matched above when its runner config was verified clean, so that verdict is
+      // what the classifier is told.
+      record.permissionTier = permissionTier(toolName, input, {
+        runnerConfigClean: record.allowlistEntry?.confine === 'clean-runner-config',
+      })
       // Fail safe: an unanswered prompt must not park a worker forever.
       // ⚠️ The timeout writes a record BEFORE it settles, and that ordering is the point:
       // this path used to settle with no `permissions.jsonl` row at all, so a timeout and a

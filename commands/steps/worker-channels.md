@@ -14,6 +14,8 @@ When: a worker is parked on a question or has exited
 |---|---|---|---|
 | **headless, parked on a question** | the **operator's** | supervisor permission channel — no pane | `mcp__supervisor__answer_permission(request_id, behavior="deny", message="Operator answer, via supervisor: <option>")` |
 | **headless, parked on a question** | **your own** | supervisor permission channel — no pane | `mcp__supervisor__answer_permission(request_id, behavior="deny", message="Manager answer, via supervisor: <option>")` |
+| **headless, parked on a permission gate** (server worker) | **yours when `permission_tier` is `allowlist` or `manager`**, the operator's when `operator` | supervisor permission channel — no pane | `mcp__supervisor__answer_permission(request_id, behavior="allow"\|"deny")` — decide by the tier and rubric in `${CLAUDE_PLUGIN_ROOT}/docs/permission-allowlist.md` § *How a manager applies it*; cannot verify → escalate |
+| **wrapper-backed (`cc-*` child), parked on a permission gate** | same tier rule — a `manager`-tier gate is **held off the operator's board** for you for 10 min, then falls through naming you | the wrapper, never the attention store | `POST localhost:18090/api/1.0/sessions/<session-id>/answer {"request_id", "behavior"}`, `request_id` from `GET /api/1.0/sessions` — see the doc § *Releasing a wrapper-backed gate* |
 | **headless, already exited** (turn end, or ~11 min question timeout) | either | a fresh turn | `mcp__supervisor__spawn_agent(prompt="<the answer>", resume="<session-id>", interactive=false, cwd="<explicit>")` — **spawn readiness precondition first** |
 | **a tab worker** | either | its pane — `send_agent_message`, or by hand | the relay protocol (`${CLAUDE_PLUGIN_ROOT}/commands/steps/needs-input.md`) |
 
