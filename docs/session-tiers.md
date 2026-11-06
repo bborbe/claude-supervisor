@@ -49,8 +49,11 @@ nothing new, while opening one decides who supervises. Four rules follow:
    subject, so the restart decides nothing new. ⚠️ **The fleet tier is the one exception: its
    lapse is REPORTED, never restarted** (operator decision 2026-11-01). `scripts/fleet-keepalive.py`
    detects a lapsed fleet round, and `scripts/fleet-keeper.py` posts one attention card once it
-   has read `stale` continuously for 40 minutes. The keeper holds no kill, resume or spawn path
-   at all. **Why the exception:** a restart-on-stale keeper killed a healthy Fleet Manager,
+   has read `stale` continuously for 40 minutes. The keeper holds no kill path and starts nothing
+   on its own judgement. **The one exception is answer-gated** (operator decision 2026-11-06): the
+   card for a *dead* fleet manager offers `resume it`, and only that answer — after the death is
+   corroborated — runs `restart-worker.py --absent` once; a lapsed (live) manager is never offered
+   it. See `scripts/fleet-keeper.py`'s docstring. **Why the exception:** a restart-on-stale keeper killed a healthy Fleet Manager,
    because the trigger cannot tell a dead loop from a slow round. Measured healthy arm→digest
    ran median 18 min, p90 38 min and max 51 min, against an 18-minute `stale` threshold, so about
    half of healthy rounds cross it. No settle window fixes that: one under ~40 min kills healthy
