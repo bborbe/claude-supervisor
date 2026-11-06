@@ -10,7 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- feat: `session-exit-record.py observe` stamps the session id into every heartbeat and the end line — it reads `sessionId` from the `~/.claude/sessions/<pid>.json` record of the `claude` process at or below the watched pid (breadth-first, four levels, so both a direct child and the supervisor-spawn grandchild resolve) and carries the last id past the registry's deletion on death. A fresh spawn's record no longer ends `session=-` with nothing left on disk to name it. Ids that could forge a tab-separated field are refused.
+- feat: exit records now name the session on a fresh spawn. `session-exit-record.py observe` stamps the session id into every heartbeat: it reads `sessionId` from the `~/.claude/sessions/<pid>.json` record of the pane's own `claude` (breadth-first, four levels, so a direct child and the supervisor-spawn grandchild both resolve) and carries the last id past the registry's deletion on death. `append` reads the id back from those heartbeats when the trap passes `--session ""`, so trap-written ends carry it too. The descent stops at the first `claude` and accepts only `entrypoint: cli` records, so a headless worker spawned below a manager can never be bound to the manager's pane. Ids that could forge a field — tab or trailing newline — are refused.
 
 ## v0.242.1
 

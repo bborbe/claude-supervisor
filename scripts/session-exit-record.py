@@ -53,9 +53,12 @@ resumed session gets a new pane (it is a new process in a new container), so two
 two ends and must not overwrite each other. The session id rides as a *field* because for
 a fresh manager spawn it is not known at spawn time — the spawn line says `session=-`. The
 observer fills it in: it reads the id from the pane's `claude` registry record on every
-heartbeat (`session_of`) and carries it onto the end line. That is load-bearing, because the
-registry (`~/.claude/sessions/<pid>.json`) is deleted when the process dies, so a join
-deferred to read time has nothing left to read.
+heartbeat (`session_of`) and carries it onto any end line it writes. The trap's end line is
+written after `claude` exited, so the trap passes `--session ""`; `append` then reads the id
+back from this pid's heartbeats (`last_session`). Both end writers therefore name the session,
+provided at least one heartbeat resolved it. That is load-bearing, because the registry
+(`~/.claude/sessions/<pid>.json`) is deleted when the process dies, so a join deferred to read
+time has nothing left to read.
 
 Storage: `~/.claude/state/session-exit/pane-<pane_id>.log`, one tab-separated line per
 event. Override the directory with `SUPERVISOR_SESSION_EXIT_DIR`.
@@ -363,66 +366,132 @@ SESSIONS_DIR_ENV = "SUPERVISOR_SESSIONS_DIR"
 _DESCENT_DEPTH = 4
 
 #: A session id is written into a tab-separated record, so only an id that cannot forge a
-#: field is accepted — every real one is a UUID.
-_SESSION_ID = re.compile(r"^[0-9A-Za-z-]{1,64}$")
+#: field is accepted — every real one is a UUID. Checked with `fullmatch`: `$` also matches
+#: before a trailing newline, and an id ending in one would split a record line in two.
+_SESSION_ID = re.compile(r"[0-9A-Za-z-]{1,64}")
+
+#: The registry `entrypoint` of a session that owns a pane. Headless workers a manager's
+#: supervisor server starts below its own `claude` write `sdk-cli`, and `kind` cannot tell
+#: them apart — measured 2026-11-06, every one of 29 live records said `kind: interactive`.
+_PANE_ENTRYPOINT = "cli"
+
+#: The process name that ends the descent. Everything below the pane's own `claude` belongs
+#: to that session — its tools, its MCP servers, the workers its supervisor server spawns.
+_CLAUDE_COMM = "claude"
 
 
-def _children(pid):
-    """Direct children of `pid`, or `[]` when they cannot be listed."""
+def _process_table():
+    """`{pid: (ppid, command basename)}` from one `ps` snapshot, or `{}` when unreadable.
+
+    One snapshot per heartbeat rather than one `pgrep` per level: the walk then sees a single
+    consistent tree, and a process that exits mid-walk cannot make two levels disagree.
+    """
     try:
         out = subprocess.run(
-            ["pgrep", "-P", str(pid)], capture_output=True, text=True, timeout=5, check=False
+            ["ps", "-Ao", "pid=,ppid=,comm="],
+            capture_output=True, text=True, timeout=5, check=False,
         ).stdout
     except (OSError, subprocess.SubprocessError):
-        return []
-    return [int(tok) for tok in out.split() if tok.isdigit()]
+        return {}
+    table = {}
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isascii() and parts[0].isdigit() \
+                and parts[1].isascii() and parts[1].isdigit():
+            table[int(parts[0])] = (int(parts[1]), os.path.basename(parts[2].strip()))
+    return table
 
 
 def _registry_session(directory, pid):
-    """The `sessionId` in `<directory>/<pid>.json`, or `""` when absent or unusable."""
+    """The `sessionId` of a pane-owning record `<directory>/<pid>.json`, or `""`.
+
+    `""` for an absent, unreadable or half-written file, a non-pane `entrypoint`, or an id
+    that fails `_SESSION_ID`.
+    """
     try:
         with open(os.path.join(directory, f"{pid}.json"), encoding="utf-8") as handle:
-            sid = json.load(handle).get("sessionId")
-    except (OSError, ValueError, AttributeError):
+            rec = json.load(handle)
+    except (OSError, ValueError, RecursionError):
         return ""
-    return sid if isinstance(sid, str) and _SESSION_ID.match(sid) else ""
+    if not isinstance(rec, dict) or rec.get("entrypoint") != _PANE_ENTRYPOINT:
+        return ""
+    sid = rec.get("sessionId")
+    return sid if isinstance(sid, str) and _SESSION_ID.fullmatch(sid) else ""
 
 
 def session_of(pid):
-    """The session id of the Claude process at or below `pid`, or `""`.
+    """The session id of the pane's own `claude` at or below `pid`, or `""`.
 
     A fresh spawn does not know its own session id, so the spawn line carries `session=-`;
     Claude Code writes it to `~/.claude/sessions/<claude pid>.json` moments later and deletes
     that file when the process ends. The observer is the one writer alive for the pane's
     whole life, so it reads the id while it exists and stamps it into every line it writes —
     after which the append-only record keeps the identity the registry discards. Measured
-    2026-11-06: the 06:44 and 08:50 Fleet Manager-era deaths carry `session=-`, and nothing
-    on disk could name the session afterwards.
+    2026-11-06: the Fleet Manager died three times that day and every record says
+    `session=-`, so nothing on disk could name it afterwards.
 
-    Breadth-first, nearest first, bounded by `_DESCENT_DEPTH`: the pane's own `claude` is the
-    shallowest process with a record. Re-read on every call, so a `/clear` — a new session
-    id inside the same process — is followed rather than frozen at the first value.
+    Breadth-first, bounded by `_DESCENT_DEPTH`, and **the descent stops at the first
+    `claude`**. Without that stop, a pane `claude` whose record is momentarily unreadable
+    (missing, or caught mid-rewrite) would let the walk continue into the headless workers
+    its supervisor server spawns, and stamp a worker's id onto the manager's pane. A
+    `claude` with no usable record therefore answers `""`, and the caller keeps the id it
+    already holds. Records are also filtered on `entrypoint == "cli"`, so a worker can never
+    be chosen even if it were reached.
+
+    Re-read on every call, so a `/clear` — a new session id inside the same process — is
+    followed rather than frozen at the first value.
     """
     directory = os.path.expanduser(os.environ.get(SESSIONS_DIR_ENV) or "~/.claude/sessions")
     found = _registry_session(directory, pid)
     if found:
         return found
+    table = _process_table()
+    children = {}
+    for child, (parent, _) in table.items():
+        children.setdefault(parent, []).append(child)
     frontier, seen = [pid], {pid}
     for _ in range(_DESCENT_DEPTH):
         nxt = []
         for parent in frontier:
-            for child in _children(parent):
+            for child in sorted(children.get(parent, ())):
                 if child in seen:
                     continue
                 seen.add(child)
                 found = _registry_session(directory, child)
                 if found:
                     return found
+                if table[child][1] == _CLAUDE_COMM:
+                    return ""  # the pane's claude, unreadable right now: never look below it
                 nxt.append(child)
         if not nxt:
             return ""
         frontier = nxt
     return ""
+
+
+def last_session(path, pid):
+    """The newest session id the record holds for `pid` in its current run, or `""`.
+
+    The trap writes the end line after `claude` has exited, when its registry record is
+    already gone — so `append` reads the id back from the observer's heartbeats instead.
+    Only lines after this pid's own `spawn` count, so a reused pane id never lends an
+    earlier run's session.
+    """
+    found = ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if parse_field(line, "pid") != str(pid):
+                    continue
+                if parse_field(line, "kind") == KIND_SPAWN:
+                    found = ""
+                    continue
+                sid = parse_field(line, "session")
+                if sid and sid != "-" and _SESSION_ID.fullmatch(sid):
+                    found = sid
+    except OSError:
+        return ""
+    return found
 
 
 def _daemonize():
@@ -487,11 +556,20 @@ def cmd_append(args):
         kind, signal = args.kind, (args.signal or "-")
     else:
         kind, signal = classify(args.rc)
+    session = args.session
+    if not session and args.pid and kind != KIND_SPAWN:
+        # The trap's end line is written after `claude` exited and its registry record was
+        # deleted, so the trap passes `--session ""`. The observer's heartbeats for this pid
+        # still hold the id; without this, every trap-written end reads `session=-`.
+        try:
+            session = last_session(path, args.pid)
+        except Exception:  # noqa: BLE001 — an extra, never worth losing the end line over
+            session = ""
     line = format_line(
         now,
         kind,
         pane,
-        args.session,
+        session,
         args.pid,
         args.rc,
         signal,
@@ -580,7 +658,10 @@ def cmd_observe(args):
                     ),
                 )
             return 0
-        session = session_of(args.pid) or session
+        try:
+            session = session_of(args.pid) or session
+        except Exception:  # noqa: BLE001 — this process is the only writer left after a
+            pass  # group kill; an unexpected lookup error must not cost the end line
         append_line(
             path,
             format_line(
