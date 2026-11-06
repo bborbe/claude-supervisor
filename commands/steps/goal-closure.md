@@ -22,9 +22,9 @@ For the subject, then each page of the tracked set:
 
 1. **Read it with the reader script — never a whole-page count:**
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/goal-closure-read.py --kind goal  "<path to the goal page>"
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/goal-closure-read.py --kind task  "<path to the task page>"
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/goal-closure-read.py --kind topic "<path to the topic page>"
+   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/goal-closure-read.py" --kind goal  "<path to the goal page>"
+   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/goal-closure-read.py" --kind task  "<path to the task page>"
+   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/goal-closure-read.py" --kind topic "<path to the topic page>"
    ```
    ⚠️ **The argument is a page PATH, not a name** — the reader opens it as a file and exits 2
    with `cannot read` on anything else. The resolution step prints the subject's path
@@ -95,11 +95,18 @@ For the subject, then each page of the tracked set:
    subject in any other vault lands on the wrong page or nowhere at all. It is the same
    explicit-`--vault` contract `commands/steps/goal-resolve.md` carries for the manager's write.
 
-   ⚠️ **Double-quote, as the rest of the tree does — and check the name first, with the
-   script rather than with your own eye:**
+   ⚠️ **Check the name first, with the script rather than with your own eye — and single-quote
+   the check, which is the opposite of how the verb itself is quoted:**
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT}/scripts/closure-name-safe.py "<name>"
+   python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/closure-name-safe.py" '<name>'
    ```
+   ⚠️ **The single quotes are the gate.** Inside `"…"` the shell expands `$`, a backtick and `\`
+   **before** the script runs, so a name carrying `$(…)` executes on the way in and the script
+   is handed the *result* and prints `SAFE` — the check would pass exactly the names it exists
+   to refuse. Inside `'…'` all four reach it literally, which is what lets it exit 1. A literal
+   `'` in the name closes the single-quoting: escape it as `'\''`, and treat a name needing that
+   as one you do not complete.
+
    It exits 0 on a safe name and 1 on one carrying `$`, a backtick, `"` or `\` — the entire
    injection surface inside a double-quoted word. **On exit 1, do not run the verb** — report
    the name and stop. ⚠️ **The check is a script, not a convention:** this line runs unattended
@@ -124,7 +131,7 @@ Once every page in the set has been examined, and **only** if the SUBJECT itself
 `CLOSE`:
 
 - **Goal branch** — report the verdict, record the stand-down with
-  `python3 ${CLAUDE_PLUGIN_ROOT}/scripts/manager-liveness.py --stop --subject "<subject>" --branch goal`,
+  `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py" --stop --subject "<subject>" --branch goal`,
   and end the tick without re-arming. A loop that keeps arming on a completed subject reports
   work where there is none.
 - **Topic branch** — report the verdict and **hand off to the tail**: do not stop here, because
@@ -133,6 +140,16 @@ Once every page in the set has been examined, and **only** if the SUBJECT itself
 
 ⚠️ **A tracked page closing is not this** — a task or a member goal closing just leaves the
 tracked set; only the subject ends the round.
+
+⚠️ **`hold` is a pause, not a closure — and a manager stopped on one is not thereby
+"correctly stopped".** `${CLAUDE_PLUGIN_ROOT}/commands/topic-spawn.md:50` states it for goals
+(*"not `hold`, which is a pause, not a closure"*), and the consequence here is that a `hold`
+subject never reports `CLOSE`, never authorises the `--stop` above, and never justifies an
+armed loop being read as a defect. A `hold` subject is a **parked** round: it may resume
+without anything being re-armed by hand, so the loop staying armed is correct. The error is
+the opposite one — an armed loop on a subject that has already reported `CLOSE`, which the
+goal branch above stops, because a loop still arming on a `completed` subject reports work
+where there is none.
 
 ## Which pages this covers
 

@@ -49,8 +49,11 @@ nothing new, while opening one decides who supervises. Four rules follow:
    subject, so the restart decides nothing new. ⚠️ **The fleet tier is the one exception: its
    lapse is REPORTED, never restarted** (operator decision 2026-11-01). `scripts/fleet-keepalive.py`
    detects a lapsed fleet round, and `scripts/fleet-keeper.py` posts one attention card once it
-   has read `stale` continuously for 40 minutes. The keeper holds no kill, resume or spawn path
-   at all. **Why the exception:** a restart-on-stale keeper killed a healthy Fleet Manager,
+   has read `stale` continuously for 40 minutes. The keeper holds no kill path and starts nothing
+   on its own judgement. **The one exception is answer-gated** (operator decision 2026-11-06): the
+   card for a *dead* fleet manager offers `resume it`, and only that answer — after the death is
+   corroborated — runs `restart-worker.py --absent` once; a lapsed (live) manager is never offered
+   it. See `scripts/fleet-keeper.py`'s docstring. **Why the exception:** a restart-on-stale keeper killed a healthy Fleet Manager,
    because the trigger cannot tell a dead loop from a slow round. Measured healthy arm→digest
    ran median 18 min, p90 38 min and max 51 min, against an 18-minute `stale` threshold, so about
    half of healthy rounds cross it. No settle window fixes that: one under ~40 min kills healthy
@@ -135,6 +138,7 @@ other side.
 | `/supervisor:fleet-drive` | fleet manager | worker; topic manager (use `topic-drive`); goal manager (use `goal-drive`) |
 | `/supervisor:fleet-workers` | fleet manager | worker |
 | `/supervisor:fleet-verify` | fleet manager | worker; topic manager (use `topic-verify`); goal manager (use `goal-verify`) |
+| `/supervisor:fleet-triage` | fleet manager — one pass over every live session: classify, close, drive, card; ends green only on all five of zero stuck, zero uncarded, zero finished-but-open, zero no-loop, and every live session accounted for | worker; topic manager (use `topic-drive` — it serves one subject); goal manager (use `goal-drive` — same) |
 | `/supervisor:topic-loop` | topic manager | worker; goal manager — arming it collapses the two roles silently |
 | `/supervisor:topic-status` | topic manager | worker; goal manager |
 | `/supervisor:topic-drive` | topic manager | worker; goal manager |

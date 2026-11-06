@@ -75,6 +75,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -721,6 +722,258 @@ def held_reason(session_id):
     return entry.get("reason") or "held"
 
 
+#: The manager registration `fleet-register.py` writes — `{subject, branch, vault}` keyed on
+#: the session id. It is the one record that outlives the process: the registry entry
+#: (`~/.claude/sessions/<pid>.json`) is deleted on death, this is not. Same override chain
+#: `fleet-keeper.py` reads it through.
+WORKER_MANAGER_DIR = os.path.expanduser(
+    os.environ.get("SUPERVISOR_WORKER_MANAGER_DIR")
+    or os.environ.get("WORKER_MANAGER_STATE_DIR")
+    or "~/.claude/state/worker-manager"
+)
+
+
+#: Where `wezterm` lives when no `PATH` reaches it. ⚠️ The fleet keeper is a launchd job whose
+#: PATH is `/usr/bin:/bin:/usr/sbin:/sbin` by design (user-writable dirs would shadow system
+#: tools), so a bare `wezterm` is FileNotFoundError there — the failure that left the
+#: 2026-11-01 keeper unable to resume a manager it had killed. Resolved by absolute path, the
+#: same way `find_vault_cli` resolves `vault-cli`, rather than by widening that PATH.
+WEZTERM_LOCATIONS = (
+    "/Applications/WezTerm.app/Contents/MacOS/wezterm",
+    "~/Applications/WezTerm.app/Contents/MacOS/wezterm",
+    "/opt/homebrew/bin/wezterm",
+    "/usr/local/bin/wezterm",
+)
+
+#: The exit-record store. Since v0.243.0 every heartbeat carries the session id, so a pane
+#: already running — or just spawned for — a session is visible here before the session
+#: registers itself in `~/.claude/sessions/`.
+SESSION_EXIT_DIR = os.path.expanduser(
+    os.environ.get("SUPERVISOR_SESSION_EXIT_DIR") or "~/.claude/state/session-exit"
+)
+
+#: How recent a pane line naming the session must be to count as "that session is running
+#: or starting somewhere". Comfortably above the observer's 30 s heartbeat interval.
+IN_FLIGHT_WINDOW = 600
+
+
+def find_wezterm():
+    """Absolute path of an executable `wezterm`, or `None`. `SUPERVISOR_WEZTERM` overrides."""
+    override = os.environ.get("SUPERVISOR_WEZTERM")
+    if override is not None:
+        path = os.path.expanduser(override)
+        return path if os.path.isfile(path) and os.access(path, os.X_OK) else None
+    found = shutil.which("wezterm")
+    if found:
+        return os.path.abspath(found)
+    for cand in WEZTERM_LOCATIONS:
+        path = os.path.expanduser(cand)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def unparseable_registry_entries(directory):
+    """Names of `*.json` registry files that cannot be parsed, or `None` when unreadable.
+
+    On the normal path a skipped file fails safe. On `--absent`, absence IS the licence, so a
+    half-written file — possibly the very session, mid-rewrite — must never count as absence.
+    """
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return None
+    bad = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as fh:
+                rec = json.load(fh)
+        except (OSError, ValueError, RecursionError):
+            bad.append(name)
+            continue
+        if not isinstance(rec, dict):
+            bad.append(name)
+    return bad
+
+
+def recent_pane_for(sid, now=None, window=IN_FLIGHT_WINDOW):
+    """`(pane file, line)` of a recent pane record naming `sid` with no end after it, or `None`.
+
+    A resume through any OTHER path (`/supervisor:open`, `/supervisor:restart`, by hand) writes
+    a `spawn` line before `claude` boots and registers itself, so for that window the registry
+    check alone would pass and two copies would run. This closes it.
+    """
+    now = time.time() if now is None else now
+    try:
+        names = [n for n in os.listdir(SESSION_EXIT_DIR) if n.startswith("pane-") and n.endswith(".log")]
+    except OSError:
+        return None
+    for name in names:
+        last = None
+        try:
+            with open(os.path.join(SESSION_EXIT_DIR, name), encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if f"\tsession={sid}\t" in line:
+                        last = line
+        except OSError:
+            continue
+        if last is None:
+            continue
+        kind = next((f[5:] for f in last.split("\t") if f.startswith("kind=")), "")
+        if kind not in ("spawn", "heartbeat"):
+            continue
+        try:
+            stamp = datetime.datetime.strptime(last.split("\t", 1)[0], "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            continue
+        age = now - stamp.replace(tzinfo=datetime.timezone.utc).timestamp()
+        if age <= window:
+            return name, last.rstrip("\n")
+    return None
+
+
+def read_registration(sid):
+    """The manager registration for `sid`, or `None` when absent or unreadable."""
+    if not sid or any(ch in sid for ch in ("/", "\\", "\x00")) or sid in (".", ".."):
+        return None
+    try:
+        with open(os.path.join(WORKER_MANAGER_DIR, f"{sid}.json"), encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def resume_absent(sid, sessions_dir, dry_run):
+    """Resume a session whose process is GONE. Signals nothing; exits 0 only on a resume.
+
+    The normal path cannot do this: it refuses `unknown-session-id` when no registry entry
+    carries the id, and a dead session's entry is deleted with it — so a Fleet Manager that
+    died could never be brought back (measured 2026-11-06: three deaths in one day). This
+    entry inverts the precondition and holds no kill path at all.
+
+    Refusals, each first-line token + exit 1, every one before the spawn:
+      `not-absent`         a registry entry carries the id, or the registry is unreadable —
+                           the process may be alive, and resuming it would run two copies
+      `held-session`       an operator hold; outranks everything, exactly as on the normal path
+      `unknown-session-id` no manager registration, so no vault to resume into
+    """
+    # FIRST, before anything reads a record's fields: a file that is half-written, or valid
+    # JSON that is not an object, must refuse with its token rather than crash `find_target`.
+    bad = unparseable_registry_entries(sessions_dir or SESSIONS_DIR)
+    if bad is None or bad:
+        return refuse("not-absent", f"registry entries could not be parsed ({', '.join(bad or ['the directory'])}); "
+                                    f"a half-written record may be {sid} itself, so its absence is unproven")
+    entries = registry_entries(sessions_dir)
+    if entries is None:
+        return refuse("not-absent", f"the registry at {sessions_dir or SESSIONS_DIR} could not "
+                                    f"be read, so it cannot be proved that {sid} is gone")
+    path, _rec = find_target(entries, sid)
+    if path is not None:
+        return refuse("not-absent", f"a registry entry still carries session {sid}; the process "
+                                    "may be alive — use the normal restart, never --absent")
+    in_flight = recent_pane_for(sid)
+    if in_flight is not None:
+        return refuse("not-absent", f"{in_flight[0]} names session {sid} within the last "
+                                    f"{IN_FLIGHT_WINDOW}s with no end — it is running or being "
+                                    "resumed elsewhere; a second copy would split the conversation")
+
+    held = held_reason(sid)
+    if held is not None:
+        return refuse("held-session", f"session {sid} carries an operator hold ({held}); only the "
+                                      "operator releases it -- see the /supervisor:hold skill")
+
+    reg = read_registration(sid)
+    if reg is None:
+        return refuse("unknown-session-id", f"no manager registration for {sid} under "
+                                            f"{WORKER_MANAGER_DIR}, so there is no vault to resume into")
+
+    vault_name = str(reg.get("vault") or "").strip()
+    configs = vault_configs()
+    vault = next((v for v in (configs or []) if isinstance(v, dict) and v.get("name") == vault_name), None)
+    cwd = os.path.expanduser(str(vault.get("path") or "").strip()) if vault else ""
+    if not cwd or not os.path.isdir(cwd):
+        print(f"❌ error: the registration names vault {vault_name!r}, which resolves to no "
+              f"existing directory — resuming without a cwd strands the session on a "
+              f"workspace-trust dialog")
+        return 1
+
+    fb = load_sibling("fleet-board.py")
+    subject = str(reg.get("subject") or "").strip() or sid[:8]
+    branch = str(reg.get("branch") or "").strip() or "fleet"
+    # An explicit manager subject: `fleet-board.py`'s `manager_subject` knows only topic and
+    # goal, so a fleet manager resolved through it would fall to the WORKER launcher rule.
+    launcher, launcher_source = resolve_launcher(sid, cwd, fb, subject=(branch, subject))
+    if launcher is None:
+        if launcher_source.startswith(ENV_FAULT):
+            print(ENV_FAULT)
+            print(f"🛑 environment fault (not a refusal): {launcher_source[len(ENV_FAULT) + 2:]}")
+            return 3
+        print(f"❌ error: no launcher could be resolved for {sid} ({launcher_source})")
+        return 1
+
+    wezterm = find_wezterm()
+    if wezterm is None:
+        print("❌ error: no wezterm found on PATH or at a known install location "
+              f"({', '.join(WEZTERM_LOCATIONS)}) — nothing was spawned")
+        return 1
+
+    chip = fb.MANAGER_COLOUR
+    header = (f"🔄 restart-worker --absent · session {sid[:8]} · {subject!r}"
+              f"{' · dry-run' if dry_run else ''}")
+    if dry_run:
+        print(header)
+        print(f"   launcher: {launcher} ({launcher_source})")
+        print(f"   wezterm: {wezterm}")
+        print(f"   ✅ would resume session {sid} — nothing to kill, the process is gone")
+        print(f"   ↪ would resume into {cwd}")
+        return 0
+
+    # One resume per session per window, across every --absent caller: an O_EXCL lock that
+    # outlives this process for `IN_FLIGHT_WINDOW`, so a second call during the new pane's
+    # boot (before it registers or heartbeats) is refused instead of starting a second copy.
+    # Taken BEFORE any output, so a refusal's token stays the first line a caller reads.
+    lock = os.path.join(SESSION_EXIT_DIR, f"absent-resume-{sid}.lock")
+    try:
+        os.makedirs(SESSION_EXIT_DIR, exist_ok=True)
+        if os.path.exists(lock) and time.time() - os.path.getmtime(lock) > IN_FLIGHT_WINDOW:
+            os.remove(lock)
+        os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    except FileExistsError:
+        return refuse("not-absent", f"another --absent resume of {sid} started within the last "
+                                    f"{IN_FLIGHT_WINDOW}s ({lock})")
+    except OSError as exc:
+        print(f"❌ error: cannot take the resume lock {lock}: {exc} — nothing was spawned")
+        return 1
+    print(header)
+    print(f"   launcher: {launcher} ({launcher_source})")
+    print(f"   wezterm: {wezterm}")
+
+    argv = resume_command(sid, subject, chip, cwd, launcher)
+    argv[0] = wezterm
+    try:
+        spawned = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        # The spawn may well have happened — a second, hand-started copy is the hazard.
+        print(f"❌ error: resume outcome UNKNOWN — wezterm did not answer within 30 s; check for "
+              f"a pane running {sid} before starting it again")
+        return 1
+    except Exception as error:
+        print(f"❌ error: resume failed before spawning: {error}")
+        return 1
+    if spawned.returncode != 0:
+        print(f"❌ error: resume failed (exit {spawned.returncode}): {(spawned.stderr or '').strip()}")
+        return 1
+    pane = (spawned.stdout or "").strip().splitlines()
+    print(f"   ✅ resumed session {sid} in a new tab (pane {pane[-1] if pane else '?'}); "
+          "nothing was signalled")
+    print("   ↪ manager: the resumed session must RE-ARM its loop (`/supervisor:fleet-loop`) — "
+          "a dead session's scheduled jobs died with it")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Restart one stale idle session — worker or manager — registry-guarded.",
@@ -734,11 +987,18 @@ def main():
                          "writes no file, so no input changed — and skips precondition 4 and "
                          "nothing else: a held, busy or headless target is still refused")
     ap.add_argument("--sessions-dir", help=f"registry dir (default: {SESSIONS_DIR})")
+    ap.add_argument("--absent", action="store_true",
+                    help="resume a session whose process is GONE: refuses unless no registry "
+                         "entry carries the id, signals nothing, and takes cwd and launcher from "
+                         "the manager registration")
     args = ap.parse_args()
 
     sid = args.session_id.strip()
     if not sid:
         ap.error("session id must not be empty")  # exits 2
+
+    if args.absent:
+        return resume_absent(sid, args.sessions_dir, args.dry_run)
 
     fb = load_sibling("fleet-board.py")
 

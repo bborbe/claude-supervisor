@@ -1063,7 +1063,7 @@ def cmd_post_batch(args, out=sys.stdout):
     return _post_and_report(args, *producer, payload, [], out)
 
 
-def cmd_poll(item_id, out=sys.stdout):
+def cmd_poll(item_id, out=sys.stdout, answered_at=False):
     if not is_store_item_id(item_id):
         # ⚠️ Refused here rather than at the store's 404, and that placement is
         # the whole point: a short id and an unknown full id both printed
@@ -1158,6 +1158,12 @@ def cmd_poll(item_id, out=sys.stdout):
         print(f"ANSWERED: {content}", file=out)
         if answered_by:
             print(f"ANSWERED_BY: {answered_by}", file=out)
+        # Opt-in, so every existing consumer's output is byte-identical. The fleet keeper
+        # bounds how long an answered resume may wait from when the OPERATOR answered, not
+        # from when the keeper first noticed — a keeper asleep for hours must not hand an
+        # hours-old answer a fresh window.
+        if answered_at and item.get("answered_at"):
+            print(f"ANSWERED_AT: {item.get('answered_at')}", file=out)
         return 0
     # ⚠️ Two terminals of their own, from 2026-10-20. Both are answers the
     # operator GAVE, so neither is `NOT_OPERATOR_ANSWERED`, and neither is
@@ -1275,6 +1281,9 @@ def main(argv=None):
 
     poll = sub.add_parser("poll")
     poll.add_argument("item_id")
+    poll.add_argument("--answered-at", action="store_true",
+                      help="also print `ANSWERED_AT: <rfc3339>` for an answered item (opt-in; "
+                           "the default output is unchanged)")
 
     args = parser.parse_args(argv)
     try:
@@ -1282,7 +1291,7 @@ def main(argv=None):
             return cmd_post(args)
         if args.cmd == "post-batch":
             return cmd_post_batch(args)
-        return cmd_poll(args.item_id)
+        return cmd_poll(args.item_id, answered_at=args.answered_at)
     except urllib.error.HTTPError as err:
         # Each command handles its own HTTP errors, so reaching here means the
         # failure predates the item lookup — which is why no item is named: this

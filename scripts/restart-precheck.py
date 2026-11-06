@@ -101,8 +101,9 @@ def card_is_live_channel(item_id, get=store_get):
 
     Open → the board can still answer it. Answered → only when the store records the
     answer as `delivered`: an answered record with no observed delivery is the
-    `attention-answer.py` trap whose `DELIVERY: supervisor poll` line names a route
-    without observing it, so the store reads answered and the worker never hears it.
+    `attention-answer.py` trap (fixed: it used to print a `DELIVERY: supervisor poll`
+    line naming a route without observing it), so the store reads answered and the
+    worker never hears it.
     Closed without an answer → a clear, not an answer (`answered-attribution.py`).
     Absent → nothing left to answer.
     """
