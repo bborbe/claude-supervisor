@@ -111,4 +111,30 @@ if (mismatched.length > 0) {
   die(`the two artifacts disagree about what an entry DOES:\n  ${mismatched.join('\n  ')}`)
 }
 
-console.log(`check-manager-allowlist: ${jsonEntries.size} entries agree between the doc and the JSON, including tool, exact and confine.`)
+// The operator-only class: the doc's `| Form |` table must name exactly the forms the shared
+// fixture exercises. A form documented but untested is a promise nothing checks; a form tested but
+// undocumented is a gate the operator cannot read about. Both directions fail, as above.
+const FIXTURE = join(ROOT, 'server', 'permission-tier.fixtures.json')
+let fixture
+try {
+  fixture = JSON.parse(readFileSync(FIXTURE, 'utf8'))
+} catch (err) {
+  die(`${FIXTURE} is unreadable or not JSON (${err.code ?? err.message}) — the tier classifier has no contract.`)
+}
+const fixtureForms = new Set((fixture.cases ?? []).filter((c) => c.form).map((c) => c.form))
+const formHeader = lines.findIndex((line) => /^\|\s*Form\s*\|/.test(line))
+if (formHeader === -1) die(`${DOC} has no operator-only table with a "Form" header.`)
+const docForms = new Set()
+for (const line of lines.slice(formHeader + 2)) {
+  if (!line.startsWith('|')) break
+  const cell = line.split('|')[1].trim()
+  const m = cell.match(/^`([^`]+)`$/)
+  if (!m) die(`${DOC} operator-only row has a Form cell that is not one backticked name: ${cell}`)
+  docForms.add(m[1])
+}
+const formsOnlyDoc = [...docForms].filter((f) => !fixtureForms.has(f))
+const formsOnlyFixture = [...fixtureForms].filter((f) => !docForms.has(f))
+if (formsOnlyDoc.length > 0) die(`documented operator-only forms no fixture case exercises: ${formsOnlyDoc.join(', ')}`)
+if (formsOnlyFixture.length > 0) die(`fixture forms the doc never describes: ${formsOnlyFixture.join(', ')}`)
+
+console.log(`check-manager-allowlist: ${jsonEntries.size} entries agree between the doc and the JSON, including tool, exact and confine; ${docForms.size} operator-only forms agree between the doc and the fixture.`)

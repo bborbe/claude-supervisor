@@ -1,9 +1,23 @@
-# The manager permission allowlist — what a manager may answer on its own
+# The manager permission tiers — what a manager answers, and what only the operator does
 
-**Anything not listed here goes to the operator.** This page is a closed list, not a
-starting point: a command absent from it is not "probably fine", it is unlisted, and an
-unlisted command is never answered by a manager. There is no wildcard entry, no
-"obviously safe" class, and no entry a reader has to interpret to apply.
+Every parked call has a **tier**, computed by one classifier (`scripts/permission-tier.py`) and
+carried on the park record as `permission_tier`:
+
+| Tier | Who answers | What it is |
+|---|---|---|
+| `allowlist` | the manager, without judgment | a match in [The list](#the-list) below — the 13 entries, unchanged |
+| `manager` | the **owning manager**, on the rubric in [How a manager applies it](#how-a-manager-applies-it) | every call not in the operator-only class: writes, git reads, cluster reads |
+| `operator` | **the operator, always** | the [operator-only class](#the-operator-only-class), plus anything the classifier cannot fully take apart |
+
+This is the operator's ruling of 2026-11-06, in their words: *"read only => allowed · write =>
+send to manager ... that is a second gate and can allow it · only if manager is unsure or is some
+prod deploy stuff or so ... it should reach me always"*. Before it, everything off the list went
+to the operator; now only the operator-only class does, and a manager decides the rest.
+
+⚠️ **The tier routes the gate; the classifier never answers it.** `manager` means "a manager may
+decide this", not "allow". `operator` is the only tier a manager must never answer, and it is
+enforced by the classifier's negative cases (`server/permission-tier.fixtures.json`), not by the
+manager's discretion.
 
 The list exists because `agents/goal-wrangler.md` decides routine approvals from the
 worker's brief alone, and a brief is not a policy: the same command is answered differently
@@ -24,10 +38,41 @@ when a prompt does reach one. Two consequences, both load-bearing:
 - Adding an entry here does **not** stop a prompt being raised. It only tells the manager
   what to answer when one is.
 
-## The deny list — three classes a manager never answers
+## The operator-only class
 
-A command in any of these classes goes to the operator **even if it also matches an
-allowlisted prefix**. The deny list is checked first and wins.
+The classifier checks **every segment** of a compound command (`;`, `&&`, `||`, `|`, `&`,
+newline, subshell parens), recursing into `$(…)`, backticks, `<(…)` and `sh -c '…'`, scanning
+heredoc bodies as text and splitting them as shell when they feed a shell. A call that matches any
+form below is `operator` **even if it also matches an allowlist entry** — `cat ~/.netrc` matches
+`cat` and is still `secret`. The `form` column is machine-read: `make check-manager-allowlist`
+fails when it disagrees with the forms the fixture exercises.
+
+| Form | What it covers |
+|---|---|
+| `prod` | `BRANCH=prod`, a `*-prod` path component, a prod cluster wrapper, `/nuke-deploy prod`, `make buca`/`apply`/`deploy` with no `BRANCH=dev`, `helm`/`terraform` mutations |
+| `merge-to-protected` | `gh pr merge`, a push whose refspec targets `master`/`main` or `HEAD` |
+| `push-unverifiable-target` | a `git push` with no refspec — its target is whatever upstream is set |
+| `force-push/ref-delete` | `--force*`, `-f`, `--delete`, `--mirror`, a `+` or `:` refspec |
+| `ref-delete` | `git branch -d/-D`, `git tag -d`, `git update-ref -d` |
+| `irreversible-delete` | `rm` outside `/tmp/`, `git reset --hard`, `git clean`, `stash drop`, `find -delete`, `gh repo delete` |
+| `cluster-mutation` | `delete`, `apply` without `--dry-run`, `create`, `patch`, `edit`, `exec`, `port-forward`, `cp` on a dev wrapper |
+| `cluster-unknown-env` | bare `kubectl` or an unknown wrapper — the environment cannot be read from the command |
+| `secret` | a credential path (`.ssh/`, `.netrc`, `.aws/`, `.env`, …), a secret CLI (`teamvault-cli`, `security find-*`), `kubectl get secret`, any `kubectl get -o yaml/json` |
+| `permission-grant` | writing `~/.claude/settings*.json`, `git config --global` |
+| `publish` | email/chat send, `gh release`, a tag push, `gh pr comment`/`review`, `gh api` writes, `curl` writes to a non-localhost URL, `docker push`, `npm publish` |
+| `remote-host` | `ssh`, `scp`, `rsync` |
+| `live-trade` | `trade-create`/`trade-close`, `trading-api-write`, a trading-prod MCP mutation |
+| `service-restart` | `launchctl`/`systemctl` restarts — except `launchctl kickstart … com.bborbe.attention-watcher` |
+| `privilege` | `sudo`, `doas`, `su` |
+| `unverifiable` | an unterminated quote or heredoc (a truncated payload ends in one), a command word that is an expansion, `eval`, `source` |
+
+⚠️ **Deliberate carve-out: `rm` confined to `/tmp/`.** Every target under `/tmp/` (no `..`) is a
+worker's own scratch and goes to the manager; any other `rm` is `irreversible-delete`.
+
+## The old deny list — the four classes the forms above implement
+
+The classes below are the rationale; the forms above are what the classifier enforces. A manager
+applying the rubric still treats them as its own red lines for anything the forms miss.
 
 **prod** — anything that reaches a production system. Recognisable by, and not limited to: a
 prod-cluster wrapper (`kubectlprod`, `kubectlnukeprod`), a `BRANCH=prod` or `*-prod`
@@ -154,19 +199,51 @@ that admits them and for why `make` as a whole stays excluded.
 
 ## How a manager applies it
 
-1. **Deny list first.** If the command is prod, irreversible or scope-changing, it goes to
-   the operator. Stop.
-2. **Then the list.** Match the command's token prefix against the table. A match is
-   answered `allow`. A command that is not a whole-token prefix match is not a match —
-   `lsblk` does not match `ls`.
-3. **Everything else goes to the operator.** Not a deny — an escalation. A denial tells the
-   worker it may not do the thing; escalation tells the operator it is their call, which is
-   the truth for a command this page does not cover.
-4. **Quote the entry.** The answer's reason names the entry that matched, so the record
-   says *why* the manager allowed it, not just that it did.
+Read the park's `permission_tier` (server workers: the request field; wrapper-backed workers: the
+tier the attention watcher records on the held gate). Never re-derive it from the command text.
 
-⚠️ **A manager never answers a prompt it cannot place on this page.** "The brief probably
-authorises it" is not a match. The brief is what the worker says it is doing; this page is
-what the fleet has decided is safe.
+1. **`operator` → escalate. Stop.** Never answer it, whatever the brief says.
+2. **`allowlist` → `allow`**, quoting the entry.
+3. **`manager` → decide on the rubric.** Allow only when **all three** hold:
+   - **(a) confined** — every write target is inside the worker's own cwd/worktree, or is its own
+     feature branch or its own PR;
+   - **(b) in the brief** — the worker's task names this work;
+   - **(c) not scope-changing** — it does not create or close a task or goal, edit Success
+     Criteria or DoD, change a policy file, grant a permission, or spawn/stop a session.
+
+   **Cannot verify (a), (b) or (c) → escalate to the operator.** Not a deny: escalation tells the
+   operator it is their call, which is the truth for a call you could not place.
+4. **Quote the tier and the rubric clause** in the answer's reason, so the record says *why*.
+
+⚠️ **An over-eager manager tier is worse than a park.** A park reaches the operator; a wrong
+allow hides the gate. When the rubric does not clearly hold, escalate.
+
+### Releasing a wrapper-backed gate
+
+A wrapper-backed worker (a `cc-*` launcher child, `mode: headless`) is parked inside
+`claude-wrapper`, and **only the wrapper can release it**:
+
+```
+POST /api/1.0/sessions/<session-id>/answer   {"request_id": "<id>", "behavior": "allow"|"deny"}
+→ 200 {"status": "answered"}
+```
+
+The endpoint is the contract; the wrapper listens on `localhost:18090`. ⚠️ **Take `request_id`
+from `GET /api/1.0/sessions` (each row's `question.request_id`), never from the attention events
+log or the feed.** Those print *store item ids*, a different namespace, and passing one to
+`/answer` returns `409 no pending request`, which reads exactly like "already answered". An example
+caller, outside this plugin and machine-local: `~/.claude/scripts/wrapper-answer.sh <session-uuid>
+<request-id> <allow|deny>`, which validates both id shapes and exits non-zero on a non-2xx.
+`GET /api/1.0/sessions/<session-id>/question/<request_id>` reads one pending request. ⚠️ **Never
+answer a wrapper-backed gate through the attention store's `/attention/{id}/answer`** — that
+records an answer and releases nothing (see the task *A Board Answer on a Headless Permission Card
+Records an Answer and Releases Nothing*).
+
+### When the manager does not act
+
+The attention watcher holds a `manager`-tier gate off the operator's board only while its owning
+manager is live, and only for a bounded wait (default 10 minutes). After that the gate posts to the
+board **saying so on its face** — naming the owning manager and that the hand-off wait expired — so
+the operator reads it as a missed hand-off, not a fresh question.
 
 Load this page, with the rest of `docs/`, via `/supervisor:read-guides`.
