@@ -75,17 +75,26 @@ Fleet triage — <YYYY-MM-DD HH:MM>
   ⚪ CLOSED          5   closed this run
   🟡 EXTERNAL        8   waiting on a named producer
   🔵 OPERATOR        2   carded, waiting on you
+  🔒 LIVE-IDLE       1   headless, nudged this run (record on disk)
   ────────────────────────────────────────────────────────
   🟠 STUCK           0
   ⬜ UNCARDED        0
   ⬜ FINISHED-OPEN   0
   ⬜ NO-LOOP         0
   ────────────────────────────────────────────────────────
-  sessions 27 · accounted for 27 · unclassified 0
+  sessions 28 · accounted for 28 · unclassified 0
   managers 7 · armed 5 · terminal 1 · auto-quiet 1
 
   RESULT: ✅ ALL GOOD — every session is working, closed, or waiting with a named reason.
 ```
+
+**`🔒 LIVE-IDLE` is a census row, not a red counter** — it is the 4b outcome the router's
+invariant calls `NUDGED` (`commands/fleet-triage.md` § The invariant, `commands/steps/fleet-triage-act.md`
+§ 4b), and it is green **only while its nudge record exists** at
+`~/.claude/state/fleet-triage/nudges/<session-id>.json`. A row with no record was not driven at
+all and belongs in `STUCK`; a row whose record shows two consecutive unanswered nudges has already
+become an OPERATOR card and appears there instead. That is why the row carries no counter of its
+own: the record, not the count, is what makes it legitimate.
 
 **Green requires all five of:** `STUCK == 0`, `UNCARDED == 0`, `FINISHED-OPEN == 0`,
 `NO-LOOP == 0`, and `accounted for == sessions` (every live session landed in exactly one row —

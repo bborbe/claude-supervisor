@@ -41,11 +41,13 @@ The same invariant stated as the exit condition, which is what Step 6 asserts:
 
 ⚠️ **`NUDGED` is a driven outcome, not a fifth way of being idle, and it expires.** The
 session was acted on — the only channel that reaches a live-idle headless worker is a
-cross-session `SendMessage` (`commands/steps/fleet-triage-act.md` § 4b) — and the run records
-it so the next run re-classifies the row rather than rediscovering it. **A nudge that goes
-unanswered on two consecutive runs becomes an OPERATOR card**, because a third identical send
-is not a drive action; that rule lives in the 4b step and is what keeps this outcome from
-becoming a standing exemption.
+cross-session `SendMessage` (`commands/steps/fleet-triage-act.md` § 4b) — and the run **writes a
+durable record** of it to `~/.claude/state/fleet-triage/nudges/<session-id>.json` so the next run
+re-classifies the row instead of rediscovering it. ⚠️ **The record is what makes the expiry real:**
+a report is chat, and a later run or a compacted one sees none of it, so without the file every
+run looks like a first nudge. **A nudge that goes unanswered on two consecutive runs becomes an
+OPERATOR card**, because a third identical send is not a drive action; that rule and the record's
+shape live in the 4b step, which is what keeps this outcome from becoming a standing exemption.
 
 That is the whole point. A good-looking table with three idle workers on it is a failed
 run. The stuck list is the deliverable, and the target is zero.

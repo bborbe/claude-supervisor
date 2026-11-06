@@ -152,18 +152,60 @@ verb does not exist: no *supervisor* command reaches a session with `pane: null`
 `/supervisor:open`, a pane nudge and a `wezterm` keystroke all have nothing to act on. The one
 channel that does reach it is a cross-session `SendMessage`.
 
-1. **`SendMessage` the session directly**, naming its next open box. This is the only drive
-   verb for this state — never the owning manager (that is STUCK item 3, a different row), and
-   never a pane write.
-2. **Re-read its status once, after the send.** Still `idle` with the same open box and no
+1. **Read the nudge record first — this is what makes the expiry real.** The count lives on
+   disk, not in a report. ⚠️ **Read it through `python3`, not `cat`** — `cat` and `mkdir` are not
+   in this command's grant list, and a read that parks on a permission prompt is the same
+   non-drive this branch exists to end:
+   ```bash
+   python3 - '<session-id>' <<'PY'
+   import json,os,sys
+   p=os.path.expanduser(f"~/.claude/state/fleet-triage/nudges/{sys.argv[1]}.json")
+   try: print(json.dumps(json.load(open(p))))
+   except Exception: print(json.dumps({"session_id":sys.argv[1],"open_box":None,
+                                       "nudges":[],"carded_at":None}))
+   PY
+   ```
+   Shape: `{"session_id": "<target>", "open_box": "<the box it was nudged about>", "nudges":
+   [{"at": "<ISO8601Z>", "run": "<this triage session's id>"}], "carded_at": null}`. ⚠️ **A
+   record is the only thing that survives the run** — the report is chat, and a compaction or a
+   different session sees none of it, so without this file every run looks like a first nudge
+   and the two-run expiry below can never fire.
+2. **Decide from the record, then act — exactly one of three:**
+   - **`carded_at` is set** → already escalated. Report the row and **do not nudge again**.
+   - **`open_box` matches AND the last entry's `run` is a different session id** → this is the
+     second-or-later run on an unchanged box: **post the OPERATOR card now** (step 5) and stop.
+   - **otherwise** (no record, a different `open_box`, or the only entry is this run) → **`SendMessage`
+     the session directly**, naming its next open box, then **write the record back**:
+     ```bash
+     python3 - '<session-id>' '<open box>' <<'PY'
+     import json,os,sys,datetime
+     sid,box=sys.argv[1],sys.argv[2]
+     p=os.path.expanduser(f"~/.claude/state/fleet-triage/nudges/{sid}.json")
+     try: d=json.load(open(p))
+     except Exception: d={"session_id":sid,"open_box":None,"nudges":[],"carded_at":None}
+     if d.get("open_box")!=box: d["nudges"]=[]          # the worker moved: the count restarts
+     d["open_box"]=box
+     d["nudges"].append({"at":datetime.datetime.now(datetime.timezone.utc)
+                         .strftime("%Y-%m-%dT%H:%M:%SZ"),
+                         "run":os.environ.get("CLAUDE_CODE_SESSION_ID","")})
+     os.makedirs(os.path.dirname(p),exist_ok=True)
+     json.dump(d,open(p,"w"),indent=2)
+     PY
+     ```
+     ⚠️ **Write it only after the send succeeded** — a record for a nudge that never left is a
+     false count that escalates a worker nobody ever contacted.
+   **`SendMessage` is the only drive verb for this state** — never the owning manager (that is
+   STUCK item 3, a different row), and never a pane write.
+3. **Re-read its status once, after the send.** Still `idle` with the same open box and no
    reply → it is parked, not stuck.
-3. **Card a kill only if the send produced no reply and the task is finished** — an OPERATOR row
+4. **Card a kill only if the send produced no reply and the task is finished** — an OPERATOR row
    carrying the session id, the question, and the `close-worker.py` command you propose. Never
    signal a headless pid by hand, and never close a live worker that still has open work.
-4. ⚠️ **A nudge unanswered on two consecutive runs is a card either way, finished task or not.**
-   The question changes from *"shall I close it"* to *"this worker has ignored two nudges —
-   close it, or take the pane?"*, and it goes to the operator as an OPERATOR row with the
-   session id, the open box it was nudged about, and both nudges' timestamps. A third identical
+5. ⚠️ **A nudge unanswered on two consecutive runs is a card either way, finished task or not**
+   — that is step 2's second branch, and it is the reason the record exists. The question changes
+   from *"shall I close it"* to *"this worker has ignored two nudges — close it, or take the
+   pane?"*, and it goes to the operator as an OPERATOR row with the session id, the open box it
+   was nudged about, and **both nudges' timestamps read from the record**. A third identical
    `SendMessage` is not a drive action: it is the same input against the same state, and the
    run's own `NUDGED` outcome (`commands/fleet-triage.md` § The invariant) is only legitimate
    because it expires. Left uncarded, a worker that ignores every nudge is exactly the
