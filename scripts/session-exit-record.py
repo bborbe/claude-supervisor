@@ -381,18 +381,26 @@ _CLAUDE_COMM = "claude"
 
 
 def _process_table():
-    """`{pid: (ppid, command basename)}` from one `ps` snapshot, or `{}` when unreadable.
+    """`{pid: (ppid, command basename)}` from one `ps` snapshot.
 
     One snapshot per heartbeat rather than one `pgrep` per level: the walk then sees a single
     consistent tree, and a process that exits mid-walk cannot make two levels disagree.
+
+    ⚠️ **`None` when the query failed, `{}` only when `ps` answered with no rows** — the
+    three-state contract `scripts/transport-read-check.py` enforces on every transport read.
+    A failed `ps` collapsed into `{}` would read as "this pane has no processes", which is the
+    broken-as-empty defect that check exists to catch.
     """
     try:
-        out = subprocess.run(
+        proc = subprocess.run(
             ["ps", "-Ao", "pid=,ppid=,comm="],
             capture_output=True, text=True, timeout=5, check=False,
-        ).stdout
+        )
     except (OSError, subprocess.SubprocessError):
-        return {}
+        return None
+    if proc.returncode != 0:
+        return None
+    out = proc.stdout or ""
     table = {}
     for line in out.splitlines():
         parts = line.split(None, 2)
@@ -446,6 +454,8 @@ def session_of(pid):
     if found:
         return found
     table = _process_table()
+    if table is None:
+        return ""  # the tree could not be read; the caller keeps the id it already holds
     children = {}
     for child, (parent, _) in table.items():
         children.setdefault(parent, []).append(child)

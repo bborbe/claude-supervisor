@@ -628,6 +628,10 @@ class SessionOfTree(unittest.TestCase):
         self.assertEqual(sx.session_of(self.SHELL), "")
 
     def test_an_unreadable_table_answers_nothing_rather_than_raising(self):
+        sx._process_table = lambda: None
+        self.assertEqual(sx.session_of(self.SHELL), "")
+
+    def test_an_empty_table_answers_nothing(self):
         sx._process_table = lambda: {}
         self.assertEqual(sx.session_of(self.SHELL), "")
 
