@@ -16,7 +16,7 @@ permanently false, and the branch behind it silently never runs.
       stops dispatching, and a reader that drops one value of a family leaves the caller a
       cell it cannot evaluate — both silently. `docs/handback-contract.md` § The shape — the
       readings leg's required set — requires **every value of every family, including the
-      zeros**, and the spawn leg's requires one line per handed-over row. ⚠️ **Cited by bullet,
+      zeros**, and the spawn leg's required set is one line per handed-over row. ⚠️ **Cited by bullet,
       never by line number:** this PR re-flowed that file, and a `:NN` citation is a second
       counter that silently points at whatever now sits on that line.
 
