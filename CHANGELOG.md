@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **every parked call now carries a permission tier — `allowlist`, `manager` or `operator` — computed by one classifier, `scripts/permission-tier.py`.** It splits every compound segment (recursing into `$(…)`, backticks, `sh -c` and shell heredocs) and returns `operator` only for the operator-only class: prod, merge to master/main, force push or ref delete, irreversible delete, secrets, publishing, remote hosts, live trades, service restarts, privilege, or a shape it cannot take apart. Git reads are `manager`, never `allowlist`, because `git status` runs `core.fsmonitor`. `server/supervisor.mjs` puts `permission_tier` on every park through a fail-closed wrapper (`server/permission-tier.mjs`); both suites run one shared fixture (`server/permission-tier.fixtures.json`). Routing and the manager rubric follow in a separate change.
+
 ## v0.244.0
 
 - feat: **the fleet round answers its own workers' routine permission parks.** New router row 5d → `commands/steps/own-parks.md`. A headless worker's prompt parks with its spawner and no other session can answer it, yet `fleet-drive.md` held `answer_permission` and no step called it, so every routine park of a Fleet-Manager-spawned worker reached the operator's board. The step dispatches `supervisor:goal-wrangler` (class B, `docs/permission-allowlist.md` only) for workers the spawn ledger names this session as spawner of. It fails closed: an unavailable `answer_permission`/`list_agents`, an unreadable ledger or a non-owned worker means nothing is answered. Classes C, D and E are an explicit list that always stays pending for the operator. Parks are read from `list_agents`' per-row `pending_permissions`, so the command's `allowed-tools` is unchanged and `fleet-drive.md` stays within its 10,240-byte budget. The step's runtime cost per tick is one ledger read plus, when owned parks exist, one bounded wrangler dispatch.
