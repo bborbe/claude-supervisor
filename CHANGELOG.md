@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.240.3
 
 - fix: `restart-precheck.classify()` returns `gate-unanswerable` for a pane-less (`sdk-cli`) session whose closer no channel can answer — no open card of its own, and no named full-id card that is open or answered-and-delivered — so `/supervisor:close` frees a finished headless worker instead of refusing `gate-held` forever. An answered card with no recorded delivery counts as unanswerable; an unreadable store fails closed to `gate-held`.
 - fix: `closer-gate-lint.py` blocks (exit 2) an `approve:` / `review:` / `you run:` closer naming a card handle that is not a full 32-hex store id — `poll` refuses those, so the gate could never be answered. Hex is read as a handle only after `card`, `item` or `poll`, so commit SHAs pass.
