@@ -179,8 +179,8 @@ below, obeying `${CLAUDE_PLUGIN_ROOT}/docs/handback-contract.md` for the form.
 path step 6 wrote:
 
 ```text
-rows=<n> · open=<n> · resume=<n> · held=<n> · refused=<n> · truncated=<n> · workers=<n>|unknown · target=<n>|unknown · cap=open|soft|hard|unknown · payload=<path>
-open: <task> · role=<role> · mode=<headless|interactive> · mode_source=<field|classify> · target=<value>|— · task=<task>|— · shipping=<true>|— · vault=<path> · cwd=<path> · prompt=<command>
+rows=<n> · open=<n> · resume=<n> · held=<n> · refused=<n> · truncated=<n> · workers=<n>|unknown · target=<n>|unknown · cap=open|soft|unknown · payload=<path>
+open: <task> · role=<role> · mode=<headless|interactive> · mode_source=<role|role-corrected|classify|unread> · target=<value>|— · task=<task>|— · shipping=<true>|— · vault=<path> · cwd=<path> · prompt=<command>
 resume: <task> · id=<session id> · mode=<headless|interactive> · cwd=<path>
 held: <task> · <gate> (<the value that held it>)
 refused: <task> · <gate> (<reason>)
@@ -191,7 +191,12 @@ warn: ⚠️ target "<t>" is not eligible for "<task>": needs <disqualifier>
 `refused:`, and `open=resume=held=refused` sums to `rows`. ⚠️ **A held or refused row carries no
 call shape** — a shape beside a hold invites the caller to spawn a row the gate excluded.
 ⚠️ **The `warn:` line never changes a row's bucket** — it rides beside an `open:` or `resume:`
-line. ⚠️ **The hand-back carries no rules**: no gate definitions, no ladder, no mechanics. Those
+line. ⚠️ **`cap=` carries no `hard` value, and that is deliberate:** this leg holds at the
+**target**, which *is* the soft cap, so `soft` already means "at or above the target" — a `hard`
+reading would be a second threshold no caller rule consumes, and reporting it invites the one
+mistake the cap gate exists to prevent, a manager treating the hard cap as its tick limit
+(`docs/fleet-surface.md` § Spawn a worker item 5 — the numbers' single home).
+⚠️ **The hand-back carries no rules**: no gate definitions, no ladder, no mechanics. Those
 live in this file and in `docs/fleet-surface.md`; the caller executes the shape and prints the
 warnings. ⚠️ **When the per-row lines would push the hand-back past 1 KB, the truncation rule is
 `docs/handback-contract.md`'s and is not restated here** — emit the counts and the first rows

@@ -14,9 +14,11 @@ permanently false, and the branch behind it silently never runs.
       (`agents/round-readings-reader.md`, `agents/goal-spawn-reader.md`) that returns the
       verdicts the step no longer computes itself. A step reverted to its pre-split text
       stops dispatching, and a reader that drops one value of a family leaves the caller a
-      cell it cannot evaluate — both silently. `docs/handback-contract.md:14` requires the
-      readings leg to emit **every value of every family, including the zeros**, and line 16
-      requires one line per handed-over row for the spawn leg.
+      cell it cannot evaluate — both silently. `docs/handback-contract.md` § The shape — the
+      readings leg's required set — requires **every value of every family, including the
+      zeros**, and the spawn leg's requires one line per handed-over row. ⚠️ **Cited by bullet,
+      never by line number:** this PR re-flowed that file, and a `:NN` citation is a second
+      counter that silently points at whatever now sits on that line.
 
 It is not hypothetical. The fleet hand-back was introduced with the class `held` present in
 the digest render and absent from the key set, and `held` is the class the render treats as

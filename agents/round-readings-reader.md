@@ -70,17 +70,9 @@ step 2 of the goal round and of the topic round alike; nothing here is tier-spec
    the `REFUSED:` line verbatim and stop** — a refusal is not a degradation, and a partial
    document renders a table that reads as a completed sweep.
 
-3. **Record it on the round's receipt** — the artifact is what lets the tail tell a round that
-   read from one that skipped the step:
-
-   ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-receipt.py \
-     --record --topic "<subject>" --step readings --path "<the path step 2 printed>"
-   ```
-
-4. **Verify the document before you report it.** Read the file and check four things — they are
-   the shape the sweep reader consumes, and a document that fails one is a caller bug, not a
-   reading:
+3. **Verify the document before you report it — and before it reaches the receipt.** Read the
+   file and check four things; they are the shape the sweep reader consumes, and a document that
+   fails one is a caller bug, not a reading:
 
    - **Every tracked row appears exactly once**, and the row count equals the tracked-set line
      count. A row the document dropped is a row the sweep renders from a stale cell.
@@ -96,6 +88,19 @@ step 2 of the goal round and of the topic round alike; nothing here is tier-spec
      `N more — pass --all`; a tracked row past the cap is absent from a capped read, and *a
      section you read and found empty is `clear`* would otherwise record it `clear`. If the
      header count exceeds the rows rendered, the truncated rows are `unread`.
+
+   ⚠️ **This runs BEFORE the receipt is written, and the order is the check.** The receipt is what
+   the tail reads to decide the round took its readings; recording a document that fails one of
+   these four leaves the round looking complete against a table the sweep will render wrong, and
+   no later step re-opens it. A failure here reports the caller bug and records nothing.
+
+4. **Record it on the round's receipt** — the artifact is what lets the tail tell a round that
+   read from one that skipped the step:
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-receipt.py \
+     --record --topic "<subject>" --step readings --path "<the path step 2 printed>"
+   ```
 
 5. **Return the hand-back** — the counts, the payload path, and nothing else.
 
@@ -138,7 +143,8 @@ failed carries its `unread` count, never a `0` in the `clear`/`none`/`quiet` slo
 family's `unread` has its own key:** `unread=` is the **feed** family's, while the in-flight and
 external-wait families carry `inflight-unread=` and `external-unread=` — `in_flight()` and
 `external_wait()` both return `unread`, and one shared key would lose two of the three values
-each family can take, which `docs/handback-contract.md:14` requires be emitted. ⚠️
+each family can take, which `docs/handback-contract.md` § The shape — the readings leg's
+required set — requires be emitted. ⚠️
 **`stuck=<n>` counts the rows whose stuck verdict fired** (a denial marker, a frozen transcript,
 a park past its threshold); name those rows on one line under the counts,
 `stuck: <task> · <cause>`, because a count cannot be reconciled against a task list.
