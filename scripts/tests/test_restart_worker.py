@@ -897,6 +897,130 @@ SID_HELD = "aaaaaaaa-1111-2222-3333-444444444444"
 SID_NEAR_MISS = "aaaaaaab-1111-2222-3333-444444444444"
 
 
+class AbsentMode(unittest.TestCase):
+    """`--absent`: resume a session whose process is GONE — no registry entry, nothing to kill.
+
+    The normal path refuses `unknown-session-id` when no registry entry carries the id, and a
+    dead session's `~/.claude/sessions/<pid>.json` is deleted on death, so it could never
+    bring back a Fleet Manager that died (measured 2026-11-06: three deaths in one day). The
+    absent mode inverts the precondition — the id must be ABSENT — sources `cwd` and launcher
+    from the manager registration that outlives death, and never signals anything.
+
+    Both directions are asserted: a too-loose build (resumes a live session) and a too-tight
+    one (refuses a genuinely dead one) fail in opposite directions.
+    """
+
+    SID = "eeee0000-0000-0000-0000-000000000005"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+        self.reg = os.path.join(self.dir, "sessions")
+        self.mgr = os.path.join(self.dir, "worker-manager")
+        self.vault = os.path.join(self.dir, "vault")
+        self.bin = os.path.join(self.dir, "bin")
+        for d in (self.reg, self.mgr, self.vault, self.bin):
+            os.makedirs(d)
+        self.launcher = os.path.join(self.dir, "cc-manager")
+        with open(self.launcher, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.chmod(self.launcher, 0o755)
+        self.cfg = os.path.join(self.dir, "vaults.json")
+        with open(self.cfg, "w") as fh:
+            json.dump([{"name": "v1", "path": self.vault, "claude_script": self.launcher,
+                        "manager_launcher": self.launcher, "worker_launcher": "/no/worker"}], fh)
+        self.holds = os.path.join(self.dir, "holds.json")
+        with open(self.holds, "w") as fh:
+            fh.write('{"version": 1, "holds": {}}')
+        # A fake `wezterm` that records its argv and prints a pane id, so a non-dry run is
+        # observable without opening a tab.
+        self.spawned = os.path.join(self.dir, "spawned.txt")
+        fake = os.path.join(self.bin, "wezterm")
+        with open(fake, "w") as fh:
+            fh.write(f'#!/bin/sh\nprintf "%s\\n" "$@" > "{self.spawned}"\necho 999\n')
+        os.chmod(fake, 0o755)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def register(self, **over):
+        rec = {"subject": "Fleet Manager", "branch": "fleet", "vault": "v1",
+               "resolved_at": "2026-11-06T09:00:00+00:00"}
+        rec.update(over)
+        with open(os.path.join(self.mgr, f"{self.SID}.json"), "w") as fh:
+            json.dump(rec, fh)
+
+    def run_absent(self, *extra, dry=True):
+        env = dict(os.environ)
+        env.pop("SUPERVISOR_LAUNCHER", None)
+        env["SUPERVISOR_VAULT_CONFIG"] = self.cfg
+        env["SUPERVISOR_WORKER_MANAGER_DIR"] = self.mgr
+        env["SUPERVISOR_SESSION_HOLDS"] = self.holds
+        env["PATH"] = self.bin + os.pathsep + env.get("PATH", "")
+        argv = [sys.executable, SCRIPT, self.SID, "--absent", "--sessions-dir", self.reg]
+        if dry:
+            argv.append("--dry-run")
+        out = subprocess.run(argv + list(extra), capture_output=True, text=True, env=env)
+        return out.returncode, out.stdout.strip().splitlines()
+
+    def test_a_dead_registered_manager_resumes_into_its_vault_on_its_manager_launcher(self):
+        self.register()
+        code, lines = self.run_absent()
+        self.assertEqual(code, 0, lines)
+        text = "\n".join(lines)
+        self.assertIn(f"launcher: {self.launcher}", text)
+        self.assertIn(f"would resume into {self.vault}", text)
+        self.assertNotIn("/no/worker", text, "the fleet manager took the worker launcher")
+
+    def test_a_live_session_is_refused_not_absent(self):
+        """The too-loose direction: a registry entry means the process may be alive."""
+        self.register()
+        with open(os.path.join(self.reg, "4242.json"), "w") as fh:
+            json.dump(entry(self.SID), fh)
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "not-absent", lines)
+
+    def test_an_unreadable_registry_cannot_prove_absence(self):
+        self.register()
+        os.rmdir(self.reg)
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "not-absent", lines)
+
+    def test_no_registration_means_no_resume(self):
+        """Without the registration there is no vault, so no cwd and no launcher."""
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "unknown-session-id", lines)
+
+    def test_a_held_session_is_never_resumed(self):
+        self.register()
+        with open(self.holds, "w") as fh:
+            fh.write('{"version": 1, "holds": {"%s": {"reason": "operator"}}}' % self.SID)
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "held-session", lines)
+
+    def test_an_unknown_vault_is_an_error_before_any_spawn(self):
+        self.register(vault="nope")
+        code, lines = self.run_absent(dry=False)
+        self.assertEqual(code, 1, lines)
+        self.assertFalse(os.path.exists(self.spawned), "spawned with no resolvable cwd")
+
+    def test_a_real_resume_spawns_once_and_signals_nothing(self):
+        self.register()
+        code, lines = self.run_absent(dry=False)
+        self.assertEqual(code, 0, lines)
+        with open(self.spawned) as fh:
+            argv = fh.read()
+        self.assertIn("spawn", argv)
+        self.assertIn(self.vault, argv)
+        self.assertIn(f"--resume {self.SID}", argv)
+        self.assertNotIn("killing-pid", "\n".join(lines))
+        self.assertIn("re-arm", "\n".join(lines).lower())
+
+
 class HeldSession(Cli):
     """A held session is refused with `held-session` -- an EIGHTH refusal.
 

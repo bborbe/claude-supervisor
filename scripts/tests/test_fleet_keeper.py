@@ -39,7 +39,8 @@ MIN = 60
 
 class KeeperBase(unittest.TestCase):
     PATCHED = ("STATE_DIR", "HEARTBEAT", "KEEPER_LOG", "LAPSE", "EPISODES", "REGISTER_DIR",
-               "verdict", "liveness", "notify", "stand_down")
+               "verdict", "liveness", "notify", "stand_down",
+               "answer_of", "death_corroborated", "resume_absent_session")
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -69,6 +70,11 @@ class KeeperBase(unittest.TestCase):
         fk.notify = lambda key, payload, options, context="": (
             self.cards.append(key) or f"item-{len(self.cards)}"
         )
+        # Every ABSENT tick now asks the board for an answer. Unpatched, a test would poll the
+        # LIVE attention store with a fixture card id — and a resume could never be ruled out.
+        fk.answer_of = lambda item: None
+        fk.death_corroborated = lambda sid, now: (False, "not corroborated in a test")
+        fk.resume_absent_session = lambda sid: self.fail("resume reached from an unpatched test")
         self.register_fleet()
 
     def register_fleet(self, sid=SID):
@@ -240,13 +246,117 @@ class NoKillPathTest(unittest.TestCase):
         src = re.sub(r'"""[\s\S]*?"""', "", src)
         return "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
 
+    #: The one function allowed to hold a resume, by operator decision 2026-11-06 (card
+    #: `7653b7b6…`, "add a resume option to the keeper's card, gated on your answer").
+    EXECUTOR = "resume_absent_session"
+
+    def executor_body(self):
+        src = self.code_only("fleet-keeper.py")
+        m = re.search(rf"^def {self.EXECUTOR}\(.*?(?=^def |\Z)", src, re.S | re.M)
+        self.assertIsNotNone(m, "the answered-resume executor is missing")
+        return src, m.group(0)
+
     def test_the_keeper_source_has_no_kill_or_resume_path(self):
-        self.assertEqual([], self.KILL_SHAPES.findall(self.code_only("fleet-keeper.py")))
+        """Narrowed 2026-11-06, NOT deleted: outside the one executor, nothing may match.
+
+        The 2026-11-01 ruling (card efc771fb) removed every kill/resume/spawn path after the
+        keeper killed a healthy manager. The operator's 2026-11-06 answer admits exactly one
+        resume, gated on their answer, so the pin now holds everywhere but that function.
+        """
+        src, body = self.executor_body()
+        self.assertEqual([], self.KILL_SHAPES.findall(src.replace(body, "")))
+
+    def test_the_executor_can_only_resume_an_absent_session_never_kill(self):
+        _src, body = self.executor_body()
+        self.assertIn('"--absent"', body)
+        for forbidden in (r"os\.kill", "send-text", "killing-pid", "wezterm", "Popen",
+                          "launchctl", r"\"spawn\"", "--reason"):
+            self.assertIsNone(re.search(forbidden, body), f"{forbidden} in the executor")
+
+    def test_the_executor_has_one_call_site(self):
+        src, body = self.executor_body()
+        calls = re.findall(rf"\b{self.EXECUTOR}\(", src.replace(body, ""))
+        self.assertEqual(1, len(calls), "the resume must be reachable from exactly one place")
 
     def test_positive_control_the_pattern_fires_on_stripped_real_kill_code(self):
         """Runs through the SAME stripping as the check above, so a stripper that deleted code
         would make this fail rather than let the real check pass blind."""
         self.assertTrue(self.KILL_SHAPES.search(self.code_only("restart-worker.py")))
+
+
+class AnsweredResumeTest(KeeperBase):
+    """The resume runs ONLY on the operator's `resume it` answer to a `dead` card.
+
+    Operator decision 2026-11-06 (card `7653b7b6…`). The goal manager's four conditions:
+    the resume exists only behind that answer; the old pin is narrowed, not deleted;
+    `acknowledge` is not resolution; and death is corroborated before anything runs —
+    `session-liveness.py` ABSENT published for live sessions three times in one day.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._saved_exec = {k: getattr(fk, k) for k in
+                            ("answer_of", "death_corroborated", "resume_absent_session")}
+        self.addCleanup(lambda: [setattr(fk, k, v) for k, v in self._saved_exec.items()])
+        self.answer = None
+        self.corroborated = (True, "registry empty, transcript quiet 900s")
+        self.resumes = []
+        self.options = {}
+        fk.answer_of = lambda item: self.answer
+        fk.death_corroborated = lambda sid, now: self.corroborated
+        fk.resume_absent_session = lambda sid: (self.resumes.append(sid) or (True, "pane 9"))
+
+        def notify(key, payload, options, context=""):
+            self.cards.append(key)
+            self.options[key] = list(options)
+            return f"item-{len(self.cards)}"
+        fk.notify = notify
+        self.live = "ABSENT"
+
+    def absent_cards(self):
+        return [k for k in self.cards if "-absent-" in k]
+
+    def test_the_dead_card_offers_resume(self):
+        self.tick(T0)
+        key = self.absent_cards()[0]
+        self.assertIn(fk.RESUME_OPTION, self.options[key])
+        self.assertIn("acknowledge", self.options[key])
+
+    def test_no_answer_resumes_nothing(self):
+        self.tick(T0)
+        self.tick(T0 + MIN)
+        self.assertEqual([], self.resumes)
+
+    def test_acknowledge_is_not_resolution_and_resumes_nothing(self):
+        self.answer = "acknowledge"
+        self.tick(T0)
+        self.tick(T0 + MIN)
+        self.assertEqual([], self.resumes)
+
+    def test_an_uncorroborated_death_is_never_resumed(self):
+        """The ABSENT trap: the strong limb (no registry entry) must hold, or nothing runs."""
+        self.answer = fk.RESUME_OPTION
+        self.corroborated = (False, "a registry entry still carries the session")
+        self.tick(T0)
+        self.tick(T0 + MIN)
+        self.assertEqual([], self.resumes)
+
+    def test_a_resume_answer_on_a_corroborated_death_resumes_exactly_once(self):
+        self.answer = fk.RESUME_OPTION
+        self.tick(T0)
+        self.tick(T0 + MIN)
+        self.tick(T0 + 2 * MIN)
+        self.assertEqual([SID], self.resumes, "an answer must never become a loop")
+
+    def test_a_live_but_lapsed_manager_is_never_offered_a_resume(self):
+        """The lapse card's target is alive: resuming it would mean a kill."""
+        self.live = "LIVE"
+        self.answer = fk.RESUME_OPTION
+        self.stale_run(T0, 45)
+        lapse = [k for k in self.cards if k.startswith("fleet-keeper-lapse-")]
+        self.assertTrue(lapse, self.cards)
+        self.assertNotIn(fk.RESUME_OPTION, self.options[lapse[0]])
+        self.assertEqual([], self.resumes)
 
 
 class VerdictTest(unittest.TestCase):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The fleet tier's keeper: REPORT a lapsed fleet round to the operator. It never acts on it.
+"""The fleet tier's keeper: REPORT a lapsed fleet round to the operator; act only on their answer.
 
 `fleet-keepalive.py` answers *is the fleet round still running?* This turns a sustained "no" into
 one attention card. A lapse used to be measured, announced once to a log, then suppressed
@@ -12,9 +12,28 @@ earlier. The trigger cannot tell a dead loop from a slow round: across 10 measur
 healthy arm→digest time was median 18 min, p90 38 min and max 51 min, while the keepalive
 reads `stale` past 18 min. Roughly half of all healthy rounds therefore cross the trigger. No
 settle window fixes that. One below ~40 min kills healthy managers, and one above it leaves
-any restart cap unreachable. So this keeper **holds no kill, resume, re-arm or spawn path at
-all**. `scripts/tests/test_fleet_keeper.py` pins that absence with a grep and a positive
-control.
+any restart cap unreachable. So this keeper **holds no kill, re-arm or spawn path, and no
+resume of its own**. `scripts/tests/test_fleet_keeper.py` pins that absence with a grep and a
+positive control.
+
+⚠️ **One exception, by operator decision (2026-11-06, card `7653b7b6…`): a resume gated on
+the operator's answer.** It narrows the ruling above by exactly one path, and every condition
+on it is load-bearing:
+
+  * only the **dead** card offers `resume it` — a lapsed manager is alive, and resuming a live
+    session means killing it first, which is what the 2026-11-01 ruling forbids;
+  * nothing runs without the answer: no timer, no staleness threshold, no autonomous branch
+    reaches `resume_absent_session`, which has a single call site in `act_on_answer`;
+  * `acknowledge` is not resolution, and never starts anything;
+  * death is corroborated first — `session-liveness.py` ABSENT alone is not trusted (it read
+    ABSENT for live sessions three times on 2026-11-06), so no registry entry may carry the
+    id and the transcript must be silent `RESUME_SETTLE` seconds (`death_corroborated`);
+  * once per answer, marked before it runs — an answer never becomes a loop;
+  * the resume is `restart-worker.py --absent`, which refuses unless the process is gone and
+    signals nothing.
+
+The pin is narrowed, not deleted: outside `resume_absent_session` the source still matches no
+kill, resume or spawn shape, and that function may hold only the `--absent` resume.
 
 ⚠️ **The trigger is `fleet-keepalive.py`'s verdict and nothing else.** The word and the exit
 code must agree (`ok`/0, `stale`/10, `unknown`/2). There is no `age=`/`limit=` parse here, so no
@@ -322,7 +341,136 @@ def _save_episodes(rec):
         return False
 
 
-def raise_once(condition, payload, now, detail=""):
+#: The one answer that may start anything. Operator decision 2026-11-06 (card `7653b7b6…`):
+#: "add a resume option to the keeper's card, gated on your answer". It narrows the
+#: 2026-11-01 report-only ruling (card efc771fb) by exactly this one gated path.
+RESUME_OPTION = "resume it"
+
+#: How long the dead session's transcript must have been silent before a resume may run.
+#: The third limb of the death corroboration below.
+RESUME_SETTLE = 300
+
+SESSIONS_DIR = os.path.expanduser(
+    os.environ.get("SUPERVISOR_SESSIONS_DIR") or "~/.claude/sessions"
+)
+PROJECTS_DIR = os.path.expanduser(
+    os.environ.get("SUPERVISOR_PROJECTS_DIR") or "~/.claude/projects"
+)
+
+
+def answer_of(item):
+    """The option the operator chose on card `item`, or `None` when unanswered or unreadable."""
+    if not item:
+        return None
+    try:
+        out = subprocess.run([sys.executable, ATTENTION_ASK, "poll", item],
+                             capture_output=True, text=True, timeout=PROBE_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in (out.stdout or "").splitlines():
+        if line.startswith("ANSWERED: option:"):
+            return line.split(":", 2)[2].strip()
+    return None
+
+
+def death_corroborated(sid, now):
+    """`(True, why)` only when every independent read agrees the session is gone.
+
+    `session-liveness.py` ABSENT is the branch's own precondition, and on its own it is NOT
+    enough: it published ABSENT for live sessions three times on 2026-11-06. Two more reads
+    must agree, and the first is the strong one — a live session's registry file exists:
+
+      1. no `~/.claude/sessions/*.json` carries the id (an unreadable registry proves nothing);
+      2. the session's transcript has been silent for at least `RESUME_SETTLE` seconds.
+    """
+    try:
+        names = os.listdir(SESSIONS_DIR)
+    except OSError:
+        return False, f"the registry at {SESSIONS_DIR} could not be read"
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(SESSIONS_DIR, name), encoding="utf-8") as fh:
+                rec = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict) and rec.get("sessionId") == sid:
+            return False, f"registry entry {name} still carries the session"
+    newest = None
+    try:
+        for project in os.listdir(PROJECTS_DIR):
+            path = os.path.join(PROJECTS_DIR, project, f"{sid}.jsonl")
+            if os.path.isfile(path):
+                mtime = os.path.getmtime(path)
+                newest = mtime if newest is None else max(newest, mtime)
+    except OSError:
+        return False, f"the transcripts under {PROJECTS_DIR} could not be read"
+    if newest is None:
+        return False, "no transcript found for the session, so its silence cannot be measured"
+    quiet = now - newest
+    if quiet < RESUME_SETTLE:
+        return False, f"the transcript was written {int(quiet)}s ago (< {RESUME_SETTLE}s)"
+    return True, f"no registry entry, transcript silent {int(quiet)}s"
+
+
+def resume_absent_session(sid):
+    """Resume a DEAD fleet manager. The only resume this file holds; returns `(ok, detail)`.
+
+    Reached from exactly one place — `act_on_answer`, behind the operator's `resume it` and a
+    corroborated death. `--absent` refuses unless no registry entry carries the id and
+    signals nothing, so even a mistaken call here cannot reach a live process.
+    """
+    script = os.path.join(HERE, "restart-worker.py")
+    try:
+        out = subprocess.run([sys.executable, script, sid, "--absent"],
+                             capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"could not run: {exc}"
+    lines = [ln for ln in (out.stdout or "").splitlines() if ln.strip()]
+    return out.returncode == 0, (lines[0] if out.returncode else lines[-1] if lines else "") \
+        or (out.stderr or "").strip()[:200]
+
+
+def act_on_answer(sid, condition, item, now):
+    """Run the resume once for this card, only on `resume it`, only on a corroborated death.
+
+    ⚠️ The once-per-answer marker is written BEFORE the resume runs: at-most-once. A tick
+    that dies mid-resume must not become a second resume on the next tick — an answer that
+    turned into a loop is the failure the 2026-11-01 ruling exists to prevent.
+    """
+    episodes = _load_episodes()
+    ep = episodes.get(condition) or {}
+    if ep.get("resumed_item") == item:
+        return None
+    if answer_of(item) != RESUME_OPTION:
+        return None
+    ok, why = death_corroborated(sid, now)
+    if not ok:
+        log(f"resume answered for {sid[:8]} but death not corroborated — {why}; nothing run", now)
+        notify(f"fleet-keeper-resume-held-{item}",
+               f"You answered '{RESUME_OPTION}' for the fleet manager (session {sid[:8]}), but the "
+               f"keeper did not run it: {why}. It will not act on that answer until the reads agree.",
+               ["acknowledge"])
+        return None
+    ep["resumed_item"] = item
+    episodes[condition] = ep
+    if not _save_episodes(episodes):
+        log(f"cannot persist the resume marker for {sid[:8]}; refusing to resume", now)
+        return None
+    done, detail = resume_absent_session(sid)
+    log(f"resume of {sid[:8]} on answer {item}: {'ok' if done else 'FAILED'} — {detail}", now)
+    notify(f"fleet-keeper-resumed-{item}",
+           (f"Resumed the fleet manager (session {sid[:8]}) on your answer: {detail}. It must "
+            f"re-arm its loop (/supervisor:fleet-loop) — a dead session's jobs died with it.")
+           if done else
+           (f"The resume you asked for did NOT run cleanly for session {sid[:8]}: {detail}. "
+            f"Nothing was killed; start it by hand."),
+           ["acknowledge"])
+    return done
+
+
+def raise_once(condition, payload, now, detail="", options=("acknowledge",)):
     """Post ONE card per episode of `condition`. Returns the item id (existing or new), or None.
 
     ⚠️ Two failure modes this exists to close, both measured against the store's own source
@@ -352,9 +500,9 @@ def raise_once(condition, payload, now, detail=""):
     ep_day = int((now - since) // 86400)
     if ep and ep.get("item") and ep.get("day", 0) == ep_day:
         return ep["item"]
-    item = notify(f"fleet-keeper-{condition}-{int(since)}-d{ep_day}", payload, ["acknowledge"],
+    item = notify(f"fleet-keeper-{condition}-{int(since)}-d{ep_day}", payload, list(options),
                   context=detail)
-    episodes[condition] = {"since": since, "item": item, "day": ep_day}
+    episodes[condition] = {**(ep or {}), "since": since, "item": item, "day": ep_day}
     if not _save_episodes(episodes):
         notify(f"fleet-keeper-state-unwritable-{day(now)}",
                f"The fleet keeper cannot write {EPISODES}, so it cannot remember which conditions "
@@ -434,9 +582,14 @@ def main(argv):
             f"{sid[:8]}) answers {live}, so the keeper cannot tell whether the session is alive.", now, detail)
         log(f"liveness {live} for {sid[:8]} — carded; lapse timing continues", now)
     if live == "ABSENT":
-        item = raise_once(f"absent-{sid[:8]}", f"The fleet manager (session {sid[:8]}) is ABSENT — the session is gone, not merely "
-            f"lapsed. Nothing supervises the fleet until one is started. The keeper never "
-            f"starts or restarts one itself.", now, detail)
+        condition = f"absent-{sid[:8]}"
+        item = raise_once(condition, f"The fleet manager (session {sid[:8]}) is ABSENT — the session is gone, not merely "
+            f"lapsed. Nothing supervises the fleet until one is started. Answer "
+            f"'{RESUME_OPTION}' to have the keeper resume it once, after it confirms the death; it "
+            f"never starts or restarts one on its own.", now, detail,
+            options=(RESUME_OPTION, "acknowledge"))
+        if item:
+            act_on_answer(sid, condition, item, now)
         report("dead", f"fleet manager {sid[:8]} is ABSENT — reported{card(item)}", now)
         return 1
 

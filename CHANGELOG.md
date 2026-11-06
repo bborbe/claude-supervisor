@@ -8,6 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **a dead Fleet Manager can be resumed from its card, on the operator's answer only.** `fleet-keeper.py`'s ABSENT card now offers `resume it` next to `acknowledge`; that answer — and nothing else, no timer or threshold — runs `restart-worker.py --absent` once, after the death is corroborated (no registry entry carries the id, and the transcript has been silent 5 min; `session-liveness.py` ABSENT alone is not trusted). A lapsed but live manager is never offered it. Operator decision 2026-11-06 narrows the 2026-11-01 report-only ruling by this one path; the no-kill/no-resume pin in `test_fleet_keeper.py` is narrowed to everything outside the single executor, not deleted.
+- feat: `restart-worker.py --absent <sid>` resumes a session whose process is gone. It refuses `not-absent` while any registry entry carries the id, holds no kill path, and takes `cwd` and the **manager** launcher from the `fleet-register.py` registration that outlives death.
+
 ## v0.242.1
 
 - fix: **a `role: human` row prefers the vault's `-claude` sibling over `manager_launcher`** — both private-personal and seibert-brogrammers configure `manager_launcher` to their `-deepseek` script, so the manager chain left human rows on the worker model (found by the first live `--flagged` run).

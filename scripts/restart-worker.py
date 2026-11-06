@@ -721,6 +721,112 @@ def held_reason(session_id):
     return entry.get("reason") or "held"
 
 
+#: The manager registration `fleet-register.py` writes — `{subject, branch, vault}` keyed on
+#: the session id. It is the one record that outlives the process: the registry entry
+#: (`~/.claude/sessions/<pid>.json`) is deleted on death, this is not. Same override chain
+#: `fleet-keeper.py` reads it through.
+WORKER_MANAGER_DIR = os.path.expanduser(
+    os.environ.get("SUPERVISOR_WORKER_MANAGER_DIR")
+    or os.environ.get("WORKER_MANAGER_STATE_DIR")
+    or "~/.claude/state/worker-manager"
+)
+
+
+def read_registration(sid):
+    """The manager registration for `sid`, or `None` when absent or unreadable."""
+    if not sid or any(ch in sid for ch in ("/", "\\", "\x00")) or sid in (".", ".."):
+        return None
+    try:
+        with open(os.path.join(WORKER_MANAGER_DIR, f"{sid}.json"), encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def resume_absent(sid, sessions_dir, dry_run):
+    """Resume a session whose process is GONE. Signals nothing; exits 0 only on a resume.
+
+    The normal path cannot do this: it refuses `unknown-session-id` when no registry entry
+    carries the id, and a dead session's entry is deleted with it — so a Fleet Manager that
+    died could never be brought back (measured 2026-11-06: three deaths in one day). This
+    entry inverts the precondition and holds no kill path at all.
+
+    Refusals, each first-line token + exit 1, every one before the spawn:
+      `not-absent`         a registry entry carries the id, or the registry is unreadable —
+                           the process may be alive, and resuming it would run two copies
+      `held-session`       an operator hold; outranks everything, exactly as on the normal path
+      `unknown-session-id` no manager registration, so no vault to resume into
+    """
+    entries = registry_entries(sessions_dir)
+    if entries is None:
+        return refuse("not-absent", f"the registry at {sessions_dir or SESSIONS_DIR} could not "
+                                    f"be read, so it cannot be proved that {sid} is gone")
+    path, _rec = find_target(entries, sid)
+    if path is not None:
+        return refuse("not-absent", f"a registry entry still carries session {sid}; the process "
+                                    "may be alive — use the normal restart, never --absent")
+
+    held = held_reason(sid)
+    if held is not None:
+        return refuse("held-session", f"session {sid} carries an operator hold ({held}); only the "
+                                      "operator releases it -- see the /supervisor:hold skill")
+
+    reg = read_registration(sid)
+    if reg is None:
+        return refuse("unknown-session-id", f"no manager registration for {sid} under "
+                                            f"{WORKER_MANAGER_DIR}, so there is no vault to resume into")
+
+    vault_name = str(reg.get("vault") or "").strip()
+    configs = vault_configs()
+    vault = next((v for v in (configs or []) if isinstance(v, dict) and v.get("name") == vault_name), None)
+    cwd = os.path.expanduser(str(vault.get("path") or "").strip()) if vault else ""
+    if not cwd or not os.path.isdir(cwd):
+        print(f"❌ error: the registration names vault {vault_name!r}, which resolves to no "
+              f"existing directory — resuming without a cwd strands the session on a "
+              f"workspace-trust dialog")
+        return 1
+
+    fb = load_sibling("fleet-board.py")
+    subject = str(reg.get("subject") or "").strip() or sid[:8]
+    branch = str(reg.get("branch") or "").strip() or "fleet"
+    # An explicit manager subject: `fleet-board.py`'s `manager_subject` knows only topic and
+    # goal, so a fleet manager resolved through it would fall to the WORKER launcher rule.
+    launcher, launcher_source = resolve_launcher(sid, cwd, fb, subject=(branch, subject))
+    if launcher is None:
+        if launcher_source.startswith(ENV_FAULT):
+            print(ENV_FAULT)
+            print(f"🛑 environment fault (not a refusal): {launcher_source[len(ENV_FAULT) + 2:]}")
+            return 3
+        print(f"❌ error: no launcher could be resolved for {sid} ({launcher_source})")
+        return 1
+
+    chip = fb.MANAGER_COLOUR
+    print(f"🔄 restart-worker --absent · session {sid[:8]} · {subject!r}"
+          f"{' · dry-run' if dry_run else ''}")
+    print(f"   launcher: {launcher} ({launcher_source})")
+    if dry_run:
+        print(f"   ✅ would resume session {sid} — nothing to kill, the process is gone")
+        print(f"   ↪ would resume into {cwd}")
+        return 0
+
+    try:
+        spawned = subprocess.run(resume_command(sid, subject, chip, cwd, launcher),
+                                 capture_output=True, text=True, timeout=30)
+    except Exception as error:
+        print(f"❌ error: resume failed: {error}")
+        return 1
+    if spawned.returncode != 0:
+        print(f"❌ error: resume failed (exit {spawned.returncode}): {(spawned.stderr or '').strip()}")
+        return 1
+    pane = (spawned.stdout or "").strip().splitlines()
+    print(f"   ✅ resumed session {sid} in a new tab (pane {pane[-1] if pane else '?'}); "
+          "nothing was signalled")
+    print("   ↪ manager: the resumed session must RE-ARM its loop (`/supervisor:fleet-loop`) — "
+          "a dead session's scheduled jobs died with it")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Restart one stale idle session — worker or manager — registry-guarded.",
@@ -734,11 +840,18 @@ def main():
                          "writes no file, so no input changed — and skips precondition 4 and "
                          "nothing else: a held, busy or headless target is still refused")
     ap.add_argument("--sessions-dir", help=f"registry dir (default: {SESSIONS_DIR})")
+    ap.add_argument("--absent", action="store_true",
+                    help="resume a session whose process is GONE: refuses unless no registry "
+                         "entry carries the id, signals nothing, and takes cwd and launcher from "
+                         "the manager registration")
     args = ap.parse_args()
 
     sid = args.session_id.strip()
     if not sid:
         ap.error("session id must not be empty")  # exits 2
+
+    if args.absent:
+        return resume_absent(sid, args.sessions_dir, args.dry_run)
 
     fb = load_sibling("fleet-board.py")
 
