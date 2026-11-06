@@ -74,7 +74,7 @@ All three:
    the session on it"*. So a `hold` task is a **report row, never a close**: route it to the
    EXTERNAL/OPERATOR buckets by what it waits on, name the hold, and leave the session running.
    ⚠️ **`close-worker.py` would happily close it** — its task `TERMINAL` set includes `hold`
-   (`scripts/close-worker.py:117`) — so nothing downstream will stop you; the rule has to hold
+   (`scripts/close-worker.py:120`) — so nothing downstream will stop you; the rule has to hold
    here. It is also the same distinction this release makes for subjects
    (`commands/steps/goal-closure.md` — a `hold` subject is a pause, not a closure).
 3. `grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]' '<task file>'` prints **0**.
@@ -185,6 +185,14 @@ on a healthy pane and on a parked one alike. Test each line for a **marker that 
 
 ⚠️ **This is the only place the sweep reads a pane, and it is a read — never a write.**
 
+⚠️ **The per-row cost is accepted, deliberately.** One `get-text` per idle row, one transcript
+scan per idle headless row (3.2d) and three script calls per manager (3.6) is 50+ `Bash`
+invocations on a 28-session fleet — the price of a one-pass command that must classify every live
+session, not a defect. Each read targets a different pane, transcript or subject, `wezterm`
+exposes no bulk `get-text`, and the board read is already one `fleet-board.py --json`. If it ever
+needs to shrink, batch the pane reads into a single `python3` loop over the collected pane ids —
+never drop a read the classification depends on.
+
 ### 3.2d Headless sessions — read the transcript's closer, not a pane
 
 **A headless worker (`~/.claude/sessions/<pid>.json` → `entrypoint: sdk-cli`) has no pane, so
@@ -207,7 +215,7 @@ state does not survive between `Bash` calls), so it would expand empty, the glob
 end-relative seek with `io.UnsupportedOperation: can't do nonzero end-relative seeks`, so the
 text-mode form of this read raised on **exactly the transcripts the size guard selects** — every
 long-running headless worker, the whole population 3.2d exists to classify — and those rows ended
-the step unread. Read bytes, seek, decode; `scripts/fleet-sessions.py:76-80` does the same.
+the step unread. Read bytes, seek, decode; `scripts/fleet-sessions.py:79-84` does the same.
 
 ```bash
 python3 - '<session-id>' <<'PY'
@@ -239,6 +247,8 @@ PY
   **post the card** — this is the case that branch exists for.
 - **`👤 You: nothing` + a named `⏰ Ends:`** → **EXTERNAL**, using that watcher and its ETA.
 - **`👤 You: you run: /exit`** → the session is asking to be closed and cannot close itself.
+  ⚠️ **This is the one explicit exception to the `you run:` → OPERATOR bullet above**, which
+  would otherwise claim it: the two are evaluated in this order, so the specific case wins.
   Treat as CLOSED for the close path (see Step 4's headless branch), because its task is done
   by its own account.
 - **no closer at all, or `⚪ DONE`** → CLOSED if 3.1's evidence holds, else STUCK.
@@ -406,12 +416,21 @@ vault-cli config list --output json | python3 -c '
 import json,os,sys
 subj=sys.argv[1]
 for v in json.load(sys.stdin):
-    if os.path.exists(os.path.join(v["path"], v["goals_dir"], subj + ".md")):
+    g=v.get("goals_dir") or ""          # a vault entry without the key is a real shape, not a crash
+    if g and os.path.exists(os.path.join(v["path"], g, subj + ".md")):
         print(v["path"]); break
 else:
     print("UNRESOLVED")
 ' '<subject>'
 ```
+
+⚠️ **`goals_dir` is read with `.get("goals_dir") or ""`, never indexed.** A registered vault that
+carries no `goals_dir` raises `KeyError` on a bare index and aborts the whole subject→vault loop
+before a later matching vault is reached — `scripts/resolve-task-file.py:111`,
+`scripts/session-scope.py:258` and `commands/steps/keepalive.md:191` all guard it the same way,
+and `scripts/tests/test_resolve_folders.py` treats the missing key as a real shape. An empty
+value is "not this vault", so the loop continues and an unmatched subject still prints
+`UNRESOLVED` rather than a traceback.
 
 `UNRESOLVED` means the subject has no page in any registered vault — report it as unread and
 **do not** run the quiet check. Otherwise the printed path is the vault root the check needs.
@@ -435,6 +454,7 @@ never an auto-quiet verdict**: report the manager as unread and leave the loop a
 | `STOPPED` with a marker and a **live, non-terminal** subject carrying runnable work | a deliberate `/supervisor:stop` | **operator row** — only they release it |
 | `UNARMED`, or `STALE` beyond one full observed period **and** the subject has runnable work | a genuine lapse | **drive it** — tell the manager to re-arm in its own pane |
 | `STALE` inside one observed period | round duration exceeded the declared interval | **no** — see the calibration note below |
+| `INVALID` | a record **exists and cannot be read** — the manager's state is unknown, a probe failure, not a fact about the fleet | **no** — report the manager as unread and leave the loop alone. ⚠️ **Never read `INVALID` as a lapse** — the script says the two "must never be collapsed" (`scripts/manager-liveness.py:366-374`), because `UNARMED` means *no manager ever armed this subject* while `INVALID` means *we could not tell* |
 
 ⚠️ **`STALE` is arithmetic, not a death verdict.** The constant has one home —
 `scripts/manager-liveness.py:90` (`SLACK = 180`) — and is not restated here, and a

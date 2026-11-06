@@ -153,9 +153,9 @@ verb does not exist: no *supervisor* command reaches a session with `pane: null`
 channel that does reach it is a cross-session `SendMessage`.
 
 1. **Read the nudge record first — this is what makes the expiry real.** The count lives on
-   disk, not in a report. ⚠️ **Read it through `python3`, not `cat`** — `cat` and `mkdir` are not
-   in this command's grant list, and a read that parks on a permission prompt is the same
-   non-drive this branch exists to end:
+   disk, not in a report. ⚠️ **Read it through `python3`, not `cat`** — `cat` is not in this
+   command's grant list, and a read that parks on a permission prompt is the same non-drive
+   this branch exists to end:
    ```bash
    python3 - '<session-id>' <<'PY'
    import json,os,sys
@@ -166,34 +166,60 @@ channel that does reach it is a cross-session `SendMessage`.
    PY
    ```
    Shape: `{"session_id": "<target>", "open_box": "<the box it was nudged about>", "nudges":
-   [{"at": "<ISO8601Z>", "run": "<this triage session's id>"}], "carded_at": null}`. ⚠️ **A
-   record is the only thing that survives the run** — the report is chat, and a compaction or a
-   different session sees none of it, so without this file every run looks like a first nudge
-   and the two-run expiry below can never fire.
+   [{"at": "<ISO8601Z>", "run": "<this triage session's id>"}], "carded_at": "<ISO8601Z>" | null}`.
+   ⚠️ **A record is the only thing that survives the run** — the report is chat, and a
+   compaction or a different session sees none of it, so without this file every run looks like
+   a first nudge and the two-run expiry below can never fire.
 2. **Decide from the record, then act — exactly one of three:**
    - **`carded_at` is set** → already escalated. Report the row and **do not nudge again**.
    - **`open_box` matches AND the last entry's `run` is a different session id** → this is the
-     second-or-later run on an unchanged box: **post the OPERATOR card now** (step 5) and stop.
-   - **otherwise** (no record, a different `open_box`, or the only entry is this run) → **`SendMessage`
-     the session directly**, naming its next open box, then **write the record back**:
-     ```bash
-     python3 - '<session-id>' '<open box>' <<'PY'
-     import json,os,sys,datetime
-     sid,box=sys.argv[1],sys.argv[2]
-     p=os.path.expanduser(f"~/.claude/state/fleet-triage/nudges/{sid}.json")
-     try: d=json.load(open(p))
-     except Exception: d={"session_id":sid,"open_box":None,"nudges":[],"carded_at":None}
-     if d.get("open_box")!=box: d["nudges"]=[]          # the worker moved: the count restarts
-     d["open_box"]=box
-     d["nudges"].append({"at":datetime.datetime.now(datetime.timezone.utc)
-                         .strftime("%Y-%m-%dT%H:%M:%SZ"),
-                         "run":os.environ.get("CLAUDE_CODE_SESSION_ID","")})
-     os.makedirs(os.path.dirname(p),exist_ok=True)
-     json.dump(d,open(p,"w"),indent=2)
-     PY
-     ```
-     ⚠️ **Write it only after the send succeeded** — a record for a nudge that never left is a
-     false count that escalates a worker nobody ever contacted.
+     second-or-later run on an unchanged box: **post the OPERATOR card now** (step 5), then
+     **write the record back with `--carded`** and stop.
+   - **otherwise** (no record, a different `open_box`, or the only entry is this run) →
+     **`SendMessage` the session directly**, naming its next open box, then **write the record
+     back** without `--carded`.
+
+   ⚠️ **One write path for both branches — the difference is the flag, not a second copy of the
+   code.** `--carded` appends the current run's nudge **and** stamps `carded_at`, which is what
+   makes branch 1 reachable and what lets step 5 read *both* nudges' timestamps back from the
+   record:
+   ```bash
+   python3 - '<session-id>' '<open box>' [--carded] <<'PY'
+   import json,os,sys,datetime
+   sid,box=sys.argv[1],sys.argv[2]
+   carded="--carded" in sys.argv[3:]
+   run=(os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDE_PID")
+        or str(os.getpid()))                            # never empty: the expiry compares run ids
+   p=os.path.expanduser(f"~/.claude/state/fleet-triage/nudges/{sid}.json")
+   try: d=json.load(open(p))
+   except Exception: d={"session_id":sid,"open_box":None,"nudges":[],"carded_at":None}
+   if d.get("open_box")!=box:                           # the worker moved: count AND escalation restart
+       d["nudges"]=[]; d["carded_at"]=None
+   d["open_box"]=box
+   d["nudges"].append({"at":datetime.datetime.now(datetime.timezone.utc)
+                       .strftime("%Y-%m-%dT%H:%M:%SZ"),"run":run})
+   if carded: d["carded_at"]=d["nudges"][-1]["at"]
+   os.makedirs(os.path.dirname(p),exist_ok=True)
+   tmp=f"{p}.{os.getpid()}.tmp"                         # tmp + os.replace: never a truncating write
+   with open(tmp,"w") as f: json.dump(d,f,indent=2)
+   os.replace(tmp,p)
+   PY
+   ```
+   ⚠️ **Write it only after the send (or the card post) succeeded** — a record for a nudge that
+   never left is a false count that escalates a worker nobody ever contacted.
+   ⚠️ **`<open box>` is task-file checkbox text, so it needs the single-quote escape.** A box
+   reading `Fix the user's login` closes the quoting and the write fails **after** the nudge was
+   delivered — the record is lost and Step 6 then counts the row as STUCK. Escape a literal `'`
+   as `'\''`, the same rule every other text-carrying value in this file follows.
+   ⚠️ **The write is tmp + `os.replace`, and the readers' `except` is not a licence to truncate.**
+   A kill mid-write on a plain `open(p,"w")` leaves a partial file that the next run reads as
+   "no record", silently resetting the count — the exact collapse `check-drive-ledger-writes.py`
+   was written after (`scripts/drive-ledger.py:219-228` is the repo's form).
+   ⚠️ **The run id is never empty.** `CLAUDE_CODE_SESSION_ID` is absent in some spawned children
+   (`commands/worker-drive.md:428`), and an empty-string fallback would make branch 2 compare
+   `""` with `""` and never fire — so the fallback chain ends at the python pid, which is
+   distinct for every run. `commands/steps/fleet-triage-sweep.md:25-27` takes the same
+   `${…:-$CLAUDE_PID}` view of the variable.
    **`SendMessage` is the only drive verb for this state** — never the owning manager (that is
    STUCK item 3, a different row), and never a pane write.
 3. **Re-read its status once, after the send.** Still `idle` with the same open box and no

@@ -9,7 +9,8 @@ user-invocable: false
 When: every run — the last step, always
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py" --json > "/tmp/fleet-triage-after-${CLAUDE_CODE_SESSION_ID:-$CLAUDE_PID}.json"
+mkdir -p ~/.claude/state/fleet-triage
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-board.py" --json > ~/.claude/state/fleet-triage/after-${CLAUDE_CODE_SESSION_ID:-$CLAUDE_PID}.json
 echo "EXIT=$?"
 ```
 
@@ -21,11 +22,16 @@ previous snapshot — and the delta then compares against nothing while the verd
 the file will not parse, print `⚠️ verify sweep failed — the run is unverified, not clean` and
 stop; never fall through to the verdict block.
 
-Re-derive the states from the fresh sweep and print one line. ⚠️ **`<n>` is read from disk, not
-from memory** — it is the stuck count in this run's *before* sweep, which Step 1 wrote to
-`/tmp/fleet-triage-${CLAUDE_CODE_SESSION_ID:-$CLAUDE_PID}.json` (`commands/steps/fleet-triage-sweep.md`).
-Re-read that file and count the STUCK rows in it; after a compaction the number is gone from
-context and the delta cannot be reconstructed from the fresh sweep alone.
+Re-derive the states from the fresh sweep and print one line. ⚠️ **`<n>` is re-derived from disk,
+not recalled from memory** — it is the stuck count of this run's *before* sweep, which Step 1
+wrote to `~/.claude/state/fleet-triage/sweep-${CLAUDE_CODE_SESSION_ID:-$CLAUDE_PID}.json`
+(`commands/steps/fleet-triage-sweep.md`). ⚠️ **That file is the raw board document and holds no
+STUCK column** — its rows carry `bucket` ∈ {`problem`, `needs-input`, `running`, `idle`}. So
+`<n>` is **re-derived by re-applying § 3.4 to that snapshot**, never "counted" as a stored
+value; after a compaction the number is gone from context and the delta cannot be reconstructed
+from the fresh sweep alone. ⚠️ **If the before snapshot is missing or unparseable, the run is
+unverified** — print `⚠️ verify sweep failed — the run is unverified, not clean` and stop; a
+delta computed against an absent baseline is worse than no delta, because it reads green.
 
 ```
 Stuck: <n> → <m> · Closed: <c> · Drove: <d> · Operator: <o> (uncarded <u>) · External: <e> · Finished-but-open: <f>

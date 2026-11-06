@@ -24,12 +24,22 @@ Under it, and only for rows that are not WORKING:
 
 **Closed** — `sid-prefix · task · closed` or `· refused: <token>`.
 **Drove** — `action | what it targeted | observed result`.
-**Needs you** — one row per OPERATOR: **jump link**, the question in the session's own
-words, your recommended answer.
+**Needs you** — one row per OPERATOR: **jump link** for a tab session, **card handle** for a
+pane-less one, the question in the session's own words, your recommended answer.
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/jump-link.py" <pane-id>
 ```
 
 ⚠️ **`jump-link.py` takes an integer pane id only.** Resolve it by joining `label` against
-`wezterm cli list`. No match → hand over `/supervisor:jump <sid-prefix>` and say so.
+`wezterm cli list`.
+
+⚠️ **A pane-less OPERATOR row has no pane, so no jump link can exist for it — hand over the card
+instead.** This is the headless session § 3.2d classifies OPERATOR (a `👤 You:` closer with no
+gate), and **both** jump forms fail on it: `jump-link.py` needs an integer pane id, and
+`/supervisor:jump <sid-prefix>` resolves a session id through tab titles, so a session with no tab
+never matches. Give the operator the **card's `item_id`** — posted by Step 4's OPERATOR branch —
+plus `/supervisor:attention-next`, which reads the board rather than a pane. ⚠️ **Never hand over
+a command that cannot work for the row** — a jump link for a pane-less session is a dead end the
+operator cannot diagnose from the board. The same substitution applies to a tab session whose
+`label` matches no live pane.

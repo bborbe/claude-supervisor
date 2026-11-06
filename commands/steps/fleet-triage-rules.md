@@ -30,7 +30,7 @@ When: not already in this session's context
 - **A signal is the last resort of the close path, never of the drive path.** The close path's
   signal is used only for a session whose CLOSED evidence holds **and which `close-worker.py`
   agrees to close** — it discriminates a headless target by `entrypoint == "sdk-cli"`
-  (`scripts/close-worker.py:527`) and refuses on `task-not-terminal`, `busy-target` and
+  (`scripts/close-worker.py:530`) and refuses on `task-not-terminal`, `busy-target` and
   `gate-held`. It is `close-worker.py` that emits the signal, never a hand-run `kill` (see
   `commands/steps/fleet-triage-act.md` § CLOSED). Killing a worker to
   unstick it is the opposite of this command's job.

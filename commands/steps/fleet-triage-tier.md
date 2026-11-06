@@ -11,7 +11,7 @@ When: the sweep's JSON parsed
 | tier | rule |
 |---|---|
 | `fleet-manager` | `role: manager` and `label` is `Fleet Manager` |
-| `goal-manager` | `role: manager` and `<goals_dir>/<subject>.md` exists — **either registered name**, `24 Goals` or `23 Goals` (`scripts/close-worker.py:101` `GOAL_DIRS`, `scripts/fleet-board.py:104` `GOAL_SUBDIRS`; the `24 Tasks` vaults use `23 Goals`) |
+| `goal-manager` | `role: manager` and `<goals_dir>/<subject>.md` exists — **either registered name**, `24 Goals` or `23 Goals` (`scripts/close-worker.py:104` `GOAL_DIRS`, `scripts/fleet-board.py:104` `GOAL_SUBDIRS`; the `24 Tasks` vaults use `23 Goals`) |
 | `topic-manager` | `role: manager` and `23 Topics/<subject>.md` exists |
 | `manager` (unresolved) | `role: manager`, neither page found |
 | `worker` | `role: worker` |
