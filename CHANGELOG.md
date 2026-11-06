@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.240.4
 
 - fix: goal round now reaches row 5b — `commands/steps/goal-drive.md` hands off to `steps/goal-parked.md` before the tail, so parked tracked workers get their lever row every tick (previously no step chained to it and rounds skipped it)
 
