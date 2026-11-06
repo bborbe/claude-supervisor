@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.243.1
 
 - fix: **a wrapper-backed headless worker's policy-allowed prompt is answered by the policy again, not by a human.** The wrapper owns the child's single `--permission-prompt-tool`, so the `PermissionRequest` hook never fired. Every `Edit`/`Write` in the worker's own cwd parked for a manager, and `permissions.jsonl` had gone unwritten since 2026-10-30. `server/wrapper-policy.mjs` now polls the wrapper's parks every 2 s and runs the same `decide()` once per request id. `allow`/`deny` are answered through `POST /sessions/{id}/answer`, `escalate` stays parked, and each decision is logged with `via: "wrapper"`. A manager that answered first gets the wrapper's 409 and is not overridden. A wrapper outage decides nothing and logs once. `decide()` is gone from `policy_gap.not_run`, and `policy_via` names the poll.
 
