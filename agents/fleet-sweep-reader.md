@@ -146,7 +146,7 @@ The caller forwards this path verbatim to `agents/fleet-drive.md`, which reads i
 
 ⚠️ **Sanitize the timestamp into the filename, and treat this clause as its single home.** Replace every character outside `[0-9A-Za-z._-]` with `-`, so a caller passing `2026-10-11T18:09:40Z` yields `2026-10-11T18-09-40Z.digest`. The round timestamp's format is the caller's and is not fixed anywhere, so the sanitization is what keeps the path printable and re-readable — and it is what keeps this file's name aligned with the drive leg's, which applies the same rule by pointing here rather than copying it. The caller never recomputes the path; it forwards your `payload=` value verbatim.
 
-Return **≤ 40 lines** in the payload, exactly these sections, each printed as `(none)` rather than dropped:
+Return **≤ 43 lines** in the payload, exactly these sections, each printed as `(none)` rather than dropped — the cap is 40 plus the `LEGS` section's three lines, which are fixed-size and never trimmed:
 
 ```
 DIGEST <round timestamp> · <N> sessions · snapshot written: <swept_at from fleet-snapshot.py>
@@ -168,10 +168,15 @@ CONTEXT ≥70% (idle, not in tool)
   <name> · <pct>
 LEDGER (open)
   <id> · <kind> · <what> · <state> · <age>          — or: (none) / UNKNOWN (read failed)
+LEGS
+  keep-alive: not run — no reading recorded this round
+  flagged-open: not run — no reading recorded this round
 NOTES   runbook/command disagreements, unreadable inputs
 ```
 
-⚠️ **The `<link>` column is what removes the manager's per-row pane read** — it is the rendered one-line link from step 7b, and it is the field `agents/fleet-drive.md` copies onto its `ESCALATION` rows. Carry it on **every** row that has a resolvable pane: `BLOCKED`, `CLOSERS`, and a non-progressing `CLASSIFICATION` row — `parked`, `parked-on-watcher`, `waiting-on-human` or `finished — reap candidate`, which is the same four step 7b attempts the lookup for. Emit `—` only where step 7b's lookup genuinely failed, and quote that failure in NOTES. **The link is inline on an existing row, so it costs characters, not lines** — the ≤ 40-line cap still holds; keep the link and trim the row's prose if a section runs long.
+⚠️ **The `LEGS` section is seeded here and owned by `commands/steps/output-shape.md` item 14 — never restate its formats.** Rows 5b/5c run *after* this digest is written, so no reading exists yet, and a fabricated `0` would be indistinguishable from a leg that ran and found nothing. Write the two `not run` lines verbatim; each leg replaces its own through `scripts/fleet-legs.py`. ⚠️ **Never write a count here** — this leg does not measure those populations.
+
+⚠️ **The `<link>` column is what removes the manager's per-row pane read** — it is the rendered one-line link from step 7b, and it is the field `agents/fleet-drive.md` copies onto its `ESCALATION` rows. Carry it on **every** row that has a resolvable pane: `BLOCKED`, `CLOSERS`, and a non-progressing `CLASSIFICATION` row — `parked`, `parked-on-watcher`, `waiting-on-human` or `finished — reap candidate`, which is the same four step 7b attempts the lookup for. Emit `—` only where step 7b's lookup genuinely failed, and quote that failure in NOTES. **The link is inline on an existing row, so it costs characters, not lines** — the ≤ 43-line cap still holds; keep the link and trim the row's prose if a section runs long.
 
 ⚠️ **The `CLASSIFICATION` line is arithmetic, not prose — pin it, and make it reconcile with its own rows.** Render a stated total followed by one `<class>=<n>` term per class, and **the terms must sum to that total**. `progressing` is a class like every other and belongs in the sum even though it renders no row. For every class that *does* render rows beneath, `<n>` must equal **the number of rows of that class actually printed** — a header reading `parked=9` above 7 parked rows is the defect this pins, and it has been measured twice: v0.39.1's `idle=22 (21 parked, 1 finished, 2 unclassified)`, where 21+1+2 = 24 ≠ 22, and v0.46.0's `parked 9` against 7 listed rows. If the counts cannot be made to agree with the rows, print `UNKNOWN (counts do not reconcile)` in place of the numbers rather than a figure that contradicts the section below it — a header that reads as a measurement while disagreeing with its own rows is worse than one that admits the failure, and the same discipline already governs a starved pass, which prints `UNKNOWN (pass not run)` and never a count.
 

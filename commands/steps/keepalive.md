@@ -76,9 +76,7 @@ restarting that subject for the round, say so, and let a later round retry.
 stand-down on a non-`execution` subject, and this leg must not undo it — restarting one would
 turn a refused arm into a restart loop that still runs a round every tick.
 
-**Report the count.** Print `unactioned: <n> lapsed-managers` with the topic rows this leg
-found and did not act on — the `# Regression metric` on the task that installed this leg reads
-it, and a round that prints the number without moving it is the defect it exists to remove.
+**Record the count — in the digest, not only in chat.** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg lapsed-managers --count <n>`, with `<n>` the topic rows this leg found and did not act on — the `# Regression metric` on the task that installed this leg reads it, and a round that prints the number without moving it is the defect it exists to remove. The line's format, its not-run form and the dead-worker floor have their **single home in `commands/steps/output-shape.md` item 14** — read it there and never restate it here. ⚠️ **The reading must land in the digest, which is the file that outlives the round.** A count spoken into chat and nowhere else dies with the round: measured 2026-11-06, a real 69-line digest over 24 sessions carried **zero** `unactioned:` lines while this file instructed the round to print them.
 
 ## Resume the park watches whose re-check has passed
 
@@ -168,8 +166,9 @@ quiet minutes, which grow every round. Leaving the bucket, leaving the fleet, or
 that dropped re-arms it.
 
 **Report the line.** Print the `park-nudge:` summary verbatim
-(`<n> nudged · <s> suppressed · <w> within 15m · <m> watching · <l> live`) beside the
-other `unactioned:` counts.
+(`<n> nudged · <s> suppressed · <w> within 15m · <m> watching · <l> live`) inside the
+`Legs` block that `commands/steps/output-shape.md` item 14 defines, beside the other
+`unactioned:` counts.
 
 ## Resume a worker whose session died
 
@@ -235,5 +234,18 @@ task"* — the fleet leg never acts on a row the goal tier owns. This leg takes 
 whose goal has no live manager, the same fallback `docs/fleet-surface.md` § Which manager owns a
 subject already states.
 
-**Report the count.** Print `unactioned: <n> dead-workers` alongside the manager count.
+**Record the count — in the digest, and labelled as a floor while the scan cannot finish.**
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg dead-workers --count <n> --floor`
+alongside the manager count. `--floor` is what renders `(lower bound, scan incomplete)`;
+`--exact` asserts the scan completed. ⚠️ **The script refuses a bare `dead-workers` count** —
+one of the two is mandatory, because a number with no label reads as a measurement, and while
+the dead-worker scan cannot finish inside its own timeout the floor is the only honest form.
+Both flags are refused on any other key. Format, not-run form and rationale:
+`commands/steps/output-shape.md` item 14, the single home.
+
+⚠️ **A leg that does not execute records WHY, in the same file.** When the debt gate skips this
+leg (exit 12 or 2), or the scan's own instrument is absent, write
+`fleet-legs.py --leg keep-alive --not-run "<reason>"` — never leave the sweep's seeded
+`not run — no reading recorded this round` standing, and never render a `0` the leg did not
+measure. A suppressed leg and a leg that ran and found nothing must never print the same.
 
