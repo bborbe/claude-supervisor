@@ -104,10 +104,17 @@ class LoadRegistryTest(unittest.TestCase):
 class AnswerGateTest(unittest.TestCase):
     REG = [_session("p1", "Asker")]
 
-    def _run(self, item, post=None, decision=""):
+    def _run(self, item, post=None, decision="", delivery=None):
+        # A permission answer now reads the store's delivery report before it
+        # claims anything; the default here is the delivered case, so the gate
+        # tests below keep asserting the gate rather than the wait.
+        if delivery is None:
+            delivery = {"item_id": "i1", "status": "delivered", "carrier": "supervisor:attention-poll"}
         out = io.StringIO()
         with mock.patch.object(aa, "fetch_item", return_value=item), \
-             mock.patch.object(aa, "post_answer", side_effect=post) as posted:
+             mock.patch.object(aa, "post_answer", side_effect=post) as posted, \
+             mock.patch.object(aa, "fetch_delivery", return_value=delivery), \
+             mock.patch.object(aa, "_sleep", lambda _s: None):
             rc = aa.cmd_answer("i1", "arm", self.REG, out=out, decision=decision)
         return rc, out.getvalue(), posted
 
@@ -420,6 +427,219 @@ class AttemptOutcomeGateTest(unittest.TestCase):
         self.assertEqual(code, 0)
         posted.assert_called_once_with("i1", "arm", "delivered")
         self.assertIn("ATTEMPT: i1 delivered by arm", out.getvalue())
+
+
+class PermissionDeliveryTruthTest(unittest.TestCase):
+    """A permission answer claims only the delivery the store observed.
+
+    The CLI only POSTs the verdict; the spawning server's poller settles the
+    park and records the attempt. The pre-fix arm printed `ANSWERED` and an
+    unconditional `DELIVERY: supervisor poll` line and exited 0 whatever
+    happened next — measured 2026-11-05, a manager read that as answered while
+    the worker stayed parked (`wrapper holds no question for session …`).
+    """
+
+    ITEM = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1"}
+    POSTED = {"answered_at": "t", "answered_by": "arm"}
+
+    def _run(self, reports, wait=35.0, poll=1.0):
+        """Answer `allow` while the store's delivery report walks `reports`.
+
+        Each entry is a report dict, or an exception the read raises. The last
+        entry repeats, and a fake clock advances one `poll` per read, so the
+        bounded wait is exercised without sleeping.
+        """
+        seq = list(reports)
+        reads = []
+        timeouts = []
+        clock = [0.0]
+
+        def fetch(item_id, timeout=None):
+            reads.append(item_id)
+            timeouts.append(timeout)
+            entry = seq.pop(0) if len(seq) > 1 else seq[0]
+            if isinstance(entry, Exception):
+                raise entry
+            return entry
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        out = io.StringIO()
+        with mock.patch.object(aa, "fetch_item", return_value=self.ITEM), \
+             mock.patch.object(aa, "post_answer", return_value=self.POSTED), \
+             mock.patch.object(aa, "fetch_delivery", side_effect=fetch), \
+             mock.patch.object(aa, "_sleep", sleep), \
+             mock.patch.object(aa, "_clock", lambda: clock[0]), \
+             mock.patch.object(aa, "DELIVERY_WAIT_SECONDS", wait), \
+             mock.patch.object(aa, "DELIVERY_POLL_SECONDS", poll):
+            rc = aa.cmd_answer("i1", "arm", [], out=out, decision="allow")
+        self.timeouts = timeouts
+        return rc, out.getvalue(), reads
+
+    def test_delivered_reports_the_observed_delivery(self):
+        rc, out, _ = self._run([{"status": "delivered", "carrier": "supervisor:attention-poll"}])
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED: i1", out)
+        self.assertIn("DELIVERY: delivered by supervisor:attention-poll", out)
+        self.assertNotIn("NOT_DELIVERED", out)
+        # The pre-fix line stated a route and checked nothing; it must be gone.
+        self.assertNotIn("no session to send to", out)
+
+    def test_delivery_landing_after_a_few_polls_is_waited_for(self):
+        rc, out, reads = self._run([
+            {"status": "never_attempted"},
+            {"status": "never_attempted"},
+            {"status": "delivered", "carrier": "supervisor:attention-poll"},
+        ])
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED: i1", out)
+        self.assertEqual(len(reads), 3)
+
+    def test_failed_attempt_is_not_answered(self):
+        # The bdc2f1ed shape: a poller owned the item and the wrapper held no
+        # question, so it recorded `failed`.
+        rc, out, _ = self._run([{"status": "failed", "carrier": "supervisor:attention-poll"}])
+        self.assertEqual(rc, aa.EXIT_NOT_DELIVERED)
+        self.assertNotIn("ANSWERED:", out)
+        self.assertIn("RECORDED: i1", out)
+        self.assertIn("NOT_DELIVERED: failed by supervisor:attention-poll", out)
+
+    def test_held_attempt_is_not_answered(self):
+        rc, out, _ = self._run([{"status": "held", "carrier": "supervisor:attention-poll"}])
+        self.assertEqual(rc, aa.EXIT_NOT_DELIVERED)
+        self.assertNotIn("ANSWERED:", out)
+        self.assertIn("NOT_DELIVERED: held by supervisor:attention-poll", out)
+
+    def test_no_attempt_within_the_bound_is_a_failure_not_a_success(self):
+        # ⚠️ The third state must never read as success: a wait that times out
+        # and exits 0 is the pre-fix bug on a different clock.
+        rc, out, reads = self._run([{"status": "never_attempted"}], wait=35.0, poll=1.0)
+        self.assertEqual(rc, aa.EXIT_NOT_DELIVERED)
+        self.assertNotIn("ANSWERED:", out)
+        self.assertIn("RECORDED: i1", out)
+        self.assertIn("UNCONFIRMED: never_attempted", out)
+        self.assertGreaterEqual(len(reads), 35)
+
+    def test_unreadable_report_is_unconfirmed(self):
+        # Same guard as restart-precheck.py: a report without `status` decides nothing.
+        rc, out, _ = self._run([{"item_id": "i1"}], wait=3.0)
+        self.assertEqual(rc, aa.EXIT_NOT_DELIVERED)
+        self.assertNotIn("ANSWERED:", out)
+        self.assertIn("UNCONFIRMED: delivery report unreadable", out)
+
+    def test_an_unreadable_read_then_a_delivered_one_still_succeeds(self):
+        # The recovery path the wait most depends on: a failed read resets
+        # status/reason but must keep polling rather than give up.
+        rc, out, reads = self._run([
+            urllib.error.URLError("refused"),
+            {"status": "delivered", "carrier": "supervisor:attention-poll"},
+        ])
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED: i1", out)
+        self.assertIn("DELIVERY: delivered by supervisor:attention-poll", out)
+        self.assertEqual(len(reads), 2)
+
+    def test_every_read_is_clamped_to_the_budget_that_is_left(self):
+        # The printed bound must be the enforced one: a read allowed its full
+        # STORE_TIMEOUT could overshoot DELIVERY_WAIT_SECONDS.
+        self._run([{"status": "never_attempted"}], wait=5.0, poll=1.0)
+        self.assertTrue(self.timeouts)
+        self.assertLessEqual(max(self.timeouts), 5.0)
+        self.assertLess(self.timeouts[-1], 2.0)
+
+    def test_unreachable_report_is_unconfirmed(self):
+        rc, out, _ = self._run([urllib.error.URLError("refused")], wait=3.0)
+        self.assertEqual(rc, aa.EXIT_NOT_DELIVERED)
+        self.assertNotIn("ANSWERED:", out)
+        self.assertIn("UNCONFIRMED: delivery report unreadable", out)
+        self.assertIn("refused", out)
+
+    def test_delivered_and_undelivered_outputs_are_distinguishable(self):
+        _, delivered, _ = self._run([{"status": "delivered", "carrier": "c"}])
+        _, failed, _ = self._run([{"status": "failed", "carrier": "c"}])
+        delivered_lines = {line.split(":", 1)[0] for line in delivered.splitlines()}
+        failed_lines = {line.split(":", 1)[0] for line in failed.splitlines()}
+        self.assertIn("ANSWERED", delivered_lines - failed_lines)
+        self.assertIn("NOT_DELIVERED", failed_lines - delivered_lines)
+
+    def test_default_wait_outlasts_the_idle_poll_interval(self):
+        # server/attention-poll.mjs reads at idleIntervalMs = 30000 when nothing
+        # is open; an answer landing then is picked up up to 30 s later, so a
+        # shorter bound would call a slow-but-working delivery unconfirmed.
+        self.assertGreater(aa.DELIVERY_WAIT_SECONDS, 30.0)
+
+    def test_wait_is_overridable_from_the_environment(self):
+        self.assertEqual(aa.delivery_wait_seconds({"ATTENTION_DELIVERY_WAIT": "5"}), 5.0)
+        self.assertEqual(aa.delivery_wait_seconds({}), aa.DEFAULT_DELIVERY_WAIT_SECONDS)
+
+    def test_non_finite_wait_falls_back_instead_of_hanging(self):
+        # ⚠️ A `nan` deadline makes `_clock() >= deadline` permanently False, so
+        # the loop would never exit; `inf` blocks for ever. Neither may parse.
+        for raw in ("nan", "inf", "-inf", "Infinity"):
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    aa.delivery_wait_seconds({"ATTENTION_DELIVERY_WAIT": raw}),
+                    aa.DEFAULT_DELIVERY_WAIT_SECONDS,
+                )
+
+    def test_non_positive_wait_falls_back(self):
+        for raw in ("0", "-5"):
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    aa.delivery_wait_seconds({"ATTENTION_DELIVERY_WAIT": raw}),
+                    aa.DEFAULT_DELIVERY_WAIT_SECONDS,
+                )
+
+    def test_oversized_wait_is_clamped(self):
+        self.assertEqual(
+            aa.delivery_wait_seconds({"ATTENTION_DELIVERY_WAIT": "999999"}),
+            aa.MAX_DELIVERY_WAIT_SECONDS,
+        )
+
+    def test_a_nan_wait_cannot_make_the_command_hang(self):
+        # The end-to-end shape of the MAJOR: with a nan bound the pre-fix loop
+        # never returned. The clamp is what makes this terminate.
+        seq = [{"status": "never_attempted"}]
+        reads, clock = [], [0.0]
+        out = io.StringIO()
+
+        def fetch(item_id, timeout=None):
+            reads.append(item_id)
+            return seq[0]
+
+        with mock.patch.object(aa, "fetch_item", return_value={"item_id": "i1", "answer_mechanism": "permission"}), \
+             mock.patch.object(aa, "post_answer", return_value={"answered_at": "t", "answered_by": "a"}), \
+             mock.patch.object(aa, "fetch_delivery", side_effect=fetch), \
+             mock.patch.object(aa, "_sleep", lambda s: clock.__setitem__(0, clock[0] + s)), \
+             mock.patch.object(aa, "_clock", lambda: clock[0]), \
+             mock.patch.object(aa, "DELIVERY_WAIT_SECONDS",
+                               aa.delivery_wait_seconds({"ATTENTION_DELIVERY_WAIT": "nan"})), \
+             mock.patch.object(aa, "DELIVERY_POLL_SECONDS", 1.0):
+            rc = aa.cmd_answer("i1", "arm", [], out=out, decision="allow")
+        self.assertEqual(rc, aa.EXIT_NOT_DELIVERED)
+        self.assertIn("UNCONFIRMED:", out.getvalue())
+
+
+class FetchDeliveryTest(unittest.TestCase):
+    def test_reads_the_attempt_endpoint(self):
+        captured = {}
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def _urlopen(url, timeout=None):
+            captured["url"] = url
+            return _Resp(json.dumps({"item_id": "i1", "status": "delivered"}).encode())
+
+        with mock.patch.object(aa.urllib.request, "urlopen", _urlopen):
+            report = aa.fetch_delivery("i1")
+        self.assertTrue(captured["url"].endswith("/api/1.0/attention/i1/attempt"))
+        self.assertEqual(report["status"], "delivered")
 
 
 if __name__ == "__main__":

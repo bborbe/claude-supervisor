@@ -266,9 +266,11 @@ export function startAttentionPoll({
   //
   // ⚠️ This is the permission class's carrier. The message class is delivered by the
   // command wrapping `attention-answer.py`, and `commands/attention-next.md` records
-  // nothing on its `DELIVERY: supervisor poll` branch precisely because this runs
-  // instead — so if this write is missing, a delivered permission verdict reads as
-  // `never_attempted`, the absence the trail exists to make readable.
+  // nothing on its permission branch precisely because this runs instead — so if
+  // this write is missing, a delivered permission verdict reads as
+  // `never_attempted`, the absence the trail exists to make readable. ⚠️
+  // `attention-answer.py` now reads this record back and claims `ANSWERED` only
+  // on `delivered`, so a missing write here makes the CLI report UNCONFIRMED.
   //
   // ⚠️ Called AFTER the settle, never before: an attempt is a fact about a delivery
   // that happened, and writing it first would record an attempt that may not occur.
