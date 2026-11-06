@@ -176,6 +176,10 @@ def lex(cmd):
             i += 2
             at_word_start = False
             continue
+        if cmd.startswith(("$'", '$"'), i):
+            # ANSI-C / locale quoting: `git $'push' --force` is `git push --force` to bash but
+            # `$push` to shlex, so the subcommand check would never see it.
+            raise Unverifiable("ANSI-C or locale quoting ($'…' / $\"…\")")
         if c == "'":
             k = cmd.find("'", i + 1)
             if k < 0:
@@ -370,6 +374,11 @@ def _git(env, argv):
     if g is None:
         return None
     sub, args = g
+    # An expansion where the decision is made (`git $SUB`, `git push $FLAGS origin x`) can be
+    # any subcommand or flag at run time.
+    if "$" in sub or (sub in ("push", "branch", "tag", "reset", "clean", "update-ref", "stash")
+                      and any("$" in a for a in args)):
+        raise Unverifiable(f"git {sub}: an expansion decides what runs")
     if sub == "push":
         flags = [a for a in args if a.startswith("-")]
         refs = [a for a in args if not a.startswith("-")]
@@ -415,6 +424,8 @@ def _gh(env, argv):
     while a and a[0] in ("-R", "--repo"):
         a = a[2:]
     a = [x for x in a if not x.startswith("--repo=")]
+    if any("$" in x for x in a[:2]):
+        raise Unverifiable("gh: an expansion decides the subcommand")
     if a[:2] == ["pr", "merge"]:
         return "merge-to-protected"
     if a[:2] == ["workflow", "run"]:
@@ -456,6 +467,8 @@ def _kubectl(env, argv):
     if any(a[i] == "prod" for i in values if i < len(a) and a[i - 1] in ("-n", "--namespace")):
         return "prod"
     positional = [x for i, x in enumerate(a) if i not in values and not x.startswith("-")]
+    if positional and "$" in positional[0] or any(a[i].startswith("$") for i in values if i < len(a)):
+        raise Unverifiable("kubectl: an expansion decides the verb or namespace")
     verb = positional[0] if positional else ""
     if verb in ("delete", "drain", "cordon", "taint", "replace", "edit", "patch", "create",
                 "exec", "port-forward", "cp", "attach", "debug"):
@@ -534,6 +547,8 @@ def _publish(env, argv):
                              or a[1:2] and a[1] in ("rm", "prune")):
         return "irreversible-delete"  # `docker rm`, `docker volume rm`, `docker system prune`
     if name in ("curl", "http", "wget"):
+        if any(x.startswith("$") for x in a):
+            raise Unverifiable(f"{name}: an expansion may carry the method or body")
         if _localhost(a):
             return None
         writes = ("POST", "PUT", "PATCH", "DELETE")
