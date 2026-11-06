@@ -347,6 +347,21 @@ _SECRET_PATH = re.compile(
 _PROTECTED_REF = re.compile(r"^(?:[^:]*:)?(refs/heads/)?(master|main)$")
 
 
+_SECRET_FILES = ("~/.netrc", "~/.pgpass", "~/.git-credentials", "~/.ssh/id_rsa", "~/.ssh/id_ed25519",
+                 "~/.aws/credentials", "~/.kube/config", "~/.docker/config.json", "~/.npmrc", ".env")
+
+
+def _glob_hits_secret(arg):
+    """True when a glob (`~/.netr?`, `~/.ss*/id_*`) could expand to a known credential file."""
+    if not re.search(r"[*?\[]", arg):
+        return False
+    rx = re.sub(r"\\\[((?:[^\\\[\]]|\\.)+?)\\\]", r"[\1]", re.escape(arg).replace(r"\*", ".*").replace(r"\?", "."))
+    try:
+        return any(re.fullmatch(rx, f) for f in _SECRET_FILES)
+    except re.error:  # an unbalanced `[` (the `[ -f x ]` test word) is literal to the shell too
+        return False
+
+
 def _prod(env, argv):
     if env.get("BRANCH") == "prod" or "BRANCH=prod" in argv:
         return "prod"
@@ -501,7 +516,7 @@ def _files(env, argv):
         return "irreversible-delete"
     if name == "find" and "-delete" in rest:
         return "irreversible-delete"
-    if any(_SECRET_PATH.search(x) for x in argv):
+    if any(_SECRET_PATH.search(x) or _glob_hits_secret(x) for x in argv):
         return "secret"
     return None
 
@@ -645,8 +660,9 @@ def _inline_program_index(argv, letters, long_flags=()):
             return i + 1
         if re.fullmatch(r"-[A-Za-z]+", a) and a[-1] in letters:
             return i + 1
-        if not a.startswith("-"):
-            return None  # first operand: a script file, not an inline program
+    # No early stop at the first operand: option VALUES (`-o pipefail`, `-X importtime`) look
+    # like operands, and stopping there sent `bash -o pipefail -c '…'` to manager unread. A
+    # `-c` after a real script operand is read as inline too — the conservative direction.
     return None
 
 
