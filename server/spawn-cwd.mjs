@@ -267,6 +267,17 @@ export function resolveManagerLauncher({
   return { launcher: vaultLauncher, source: 'vault' }
 }
 
+// The launcher a `role: human` session opens with, given the worker-rule result for its task.
+//
+// A human row is the operator's own session, not a delegate (operator ruling 2026-11-06): it
+// opens on the vault's Claude launcher — the manager rule's chain — never the `-deepseek` worker
+// default. The task's own `launcher:` still wins, and an error is passed through unchanged.
+// Any other role gets `resolved` back as-is.
+export function applyHumanLauncherRule({ role, resolved, vaultLauncher, managerDefault, exists } = {}) {
+  if (role !== 'human' || !resolved || resolved.error || resolved.source === 'task') return resolved
+  return resolveManagerLauncher({ vaultLauncher, managerDefault, exists })
+}
+
 // The model a launcher script starts its session with, or `null` when it cannot be read.
 //
 // Read from the script rather than from vault-cli config, because the model is not in that

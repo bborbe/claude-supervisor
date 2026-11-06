@@ -30,8 +30,8 @@ The command **resolves** and **dispatches**. It never does the work, never runs 
 /supervisor:open --flagged → batch: select flag:true · in_progress · due today,
                              classify + WRITE any missing role: and mode: from the
                              task body, print the table, then open each eligible
-                             row in stable order. role: human is SKIPPED; a body
-                             with no signal is REFUSED and left unwritten.
+                             row in stable order. role: human → DIRECT; a field
+                             with no signal takes the role-mode-matrix default.
                              mode: by § Spawn a worker item 6, never ad hoc.
 ```
 
@@ -167,23 +167,17 @@ The count is a property of the day, not of the command — **never hardcode it a
 
 ⚠️ **This step runs on EVERY open — the batch and the single-task path alike.** On the single-task path, every "selected row" below is the one resolved task.
 
-**A missing `role:` is a question to answer, not a row to drop** — classify it from the body.
+**A missing field is a default, never a veto** (operator ruling 2026-11-06). Rules and defaults have one home, [`docs/role-mode-matrix.md`](../docs/role-mode-matrix.md), also cited by `vault-cli` `create-task`.
+
+**Defaults:** missing `role` → `agent`; missing `mode` → matrix Rule 2; empty `phase` → the existing approval path. Never skip a row by judgement ("bot rows") — the only non-open outcomes are provenance `REFUSED`, LIVE, `⛔ HOLD`, a session hold, a cap refusal, and a declared `role: manager` (`👤 YOURS`).
 
 Resolve the task in this order — each selected row on the batch path, the single resolved task otherwise:
 
 1. **`role:` present** → use it. Never re-derive over a value already on disk; the field exists so the decision is made once. **`role: manager` is never a spawn target** — render `👤 YOURS` and skip the row (see the manager guard below).
-2. **`role:` absent** → classify it now from the task's **body**, then write the result.
-3. **Body gives no basis to decide** → refuse this row, write nothing, and say so. This is the one case that still stops — see the undecidable guard below.
+2. **`role:` absent** → classify it now from the task's **body** per matrix Rule 1, then write the result.
+3. **Body gives no basis to decide** → the default (below) — never a refusal.
 
-**The classifying question is `role`'s own, not the mode question.** Ask: *does finishing this task need the operator's own hands, their presence, or a judgement only they can make?* Yes → `human`. No → `agent`.
-
-Three signals mean `human`, and each has to come from reading the body:
-
-- **the physical world** — a tank to drain, a machine to power off, a device to hold
-- **a GUI-only surface with no agent interface** — an app this session cannot drive at all
-- **the operator's own approval IS the work** — a live trade, a sign-off, a decision reserved to them
-
-Everything else is `agent`. A task naming `kubectl`, `ssh` or a deploy is still `agent`: operationally weighty is not the same as human-only, and conflating those two is precisely the error the keyword derivation made.
+**The classifying question and the three `human` signals are matrix Rule 1** — read them there, never restated here.
 
 ⚠️ **Classify from the BODY, never from the title or the frontmatter.**
 
@@ -222,19 +216,20 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/answer-path-check.py" --session-id "$CLAU
 
 This is the same probe `server/supervisor.mjs`'s `spawnAgent` enforces, so a spawn that skips this step is still refused — this step exists so the refusal is seen before the row is opened rather than as an error after it. A headless worker's prompts park with **this** session and die unanswered after 15 minutes (§ Spawn a worker item 6, constraint (a)).
 
-⚠️ **A machine-written role is indistinguishable from an operator-written one on disk.** Nothing in the frontmatter records who decided. So **print every auto-filled row distinctly** (`🏷️ filled now`) instead of folding it into the opened count. That report line is the only provenance this decision has, and it exists for exactly one read — the first one, while objecting is still cheap.
+⚠️ **A machine-written role is indistinguishable from an operator-written one on disk.** Nothing in the frontmatter records who decided. So **print every auto-filled row distinctly** (`🏷️ filled now` if classified, `🏷️ defaulted <field>=<value>` per defaulted field, nothing if on disk) instead of folding it into the opened count. That report line is the only provenance this decision has, and it exists for exactly one read — the first one, while objecting is still cheap.
 
-⚠️ **The undecidable guard still refuses; never soften it into a default.** When the body genuinely does not say, do **not** guess and do **not** write the field — print `⛔ REFUSED — role: undecidable (body carries no signal; not written)`. **This applies to `role` only.** `mode` never blocks either — but it resolves the other way: a `role: agent` body carrying none of item 6's five watch-need signals is `headless`, so an undecidable `mode` is `headless`, never a refusal.
+⚠️ **A body that carries no signal takes the default — there is no refusal branch.** Write `role: agent` and print `🏷️ defaulted role=agent`; `mode` then resolves per matrix Rule 2 (an `agent` body with none of item 6's five watch-need signals is `headless`) and prints `🏷️ defaulted mode=headless`.
 
-**A `role: human` row is never opened as a WORKER — it is opened into the Direct window instead.**
+**A `role: human` row is never opened as a WORKER — it is opened into the Direct window instead, and it is ALWAYS opened.** A previous run's "leave them closed" never carries over (matrix Rule 4).
 
 Open a `human` row as **the operator's own session**, not a delegate:
 
 - window → `Direct` (`~/.cache/wezterm-role-map.json` → `Direct.window_id`), never `Agents`
 - chip → `cyan`, never `pink` — the colour is the fleet's only cue for which role a session plays
 - prompt → the same `/vault-cli:work-on-task "<task>"`, because anchoring the task is useful to a human too
+- launcher → matrix Rule 4 (Claude launcher); pass `role` to `spawn_agent` — the server applies it only when passed
 
-Print it as `→ DIRECT` rather than `⛔ SKIPPED`. The distinction that matters is **who drives the session**, not whether a session exists: a cyan tab in `Direct` with the task loaded is a workspace, and spawning a pink agent worker onto the same row would be the failure. One of those is a window assignment; the other is a delegation.
+Print it as `→ DIRECT`. The distinction that matters is **who drives the session**, not whether a session exists: a cyan tab in `Direct` with the task loaded is a workspace, and spawning a pink agent worker onto the same row would be the failure. One of those is a window assignment; the other is a delegation.
 
 ⚠️ **Some `human` rows are useful in a tab and some are not** — a water change gets nothing from a terminal. Do **not** invent a third category to sort them: open both, and let the operator close the one that does not help. A fourth bucket guessed from prose would be the keyword derivation again, wearing yet another hat.
 
@@ -250,8 +245,8 @@ approve  a routine task - 2026W39
   1  a monitoring task - 2026W38-sun                  agent   interactive   🏷️ filled now
   2  a routine task (my-vault) - 2026-09-20   agent   interactive   (on disk)
   3  a routine task - 2026W39                       human   interactive   🏷️ filled now
-     → DIRECT — role: human, opened as the operator's own session, never as a worker  4  Untitled Stub - 2026-09-21                    —       —
-     ⛔ REFUSED — role: undecidable (body carries no signal; not written)
+     → DIRECT — role: human, opened as the operator's own session, never as a worker
+  4  Untitled Stub - 2026-09-21                    agent   headless      🏷️ defaulted role=agent · 🏷️ defaulted mode=headless
  10  a routine task - 2026W38-sun                   agent   interactive   (on disk)
      ⛔ HOLD — blocked by two other in-flight tasks
   ...
@@ -261,7 +256,7 @@ approve  a routine task - 2026W39
 ⚠️  Ordering is NOT auto-detected. Every ⛔ row is skipped;
     the rest open in the stable order printed above.
 
-Opened N · approved A · filled F fields · skipped H (human) · yours Y (manager) · refused U (undecidable) · held K (blocked) · not ready R (readiness).
+Opened N · approved A · filled F fields · direct H (human) · yours Y (manager) · defaulted D fields · held K (blocked) · not ready R (readiness).
 ```
 
 **Readiness-gate every CREATE-bound row first, concurrently.** ⚠️ **Order differs by path**: on the `--flagged` batch this runs *before* the approval (§ below); on the single-task path the **operator has already approved the row before invoking the command**, so this dispatch normally sees a `planning` row — Gate 1, which runs later in Step 1.5, only verifies that and never writes the approval. For each CREATE-bound row (`role: agent`, no live pane, no `claude_session_id`), dispatch Step 1.5's readiness sub-agent — **all in ONE message**, one `Agent` call per row. Resume/jump-bound, `role: human` (→ DIRECT) and `task_type:` pipeline rows are not gated. `readiness` column: `✅ ready <score>/10`; `⚠️ opened <score>/10` (operator-flagged, below threshold — gap bullets under the row); `⛔ NOT READY` (still below after the improvement pass); `— (resume/jump/direct)`; `— (pipeline contract)` (an ungated `task_type:` row, defined at Gate 2). A not-ready row is **held, never opened** — **except an operator-flagged row below the ladder's open threshold, which opens with its gaps** (§ Step 1.5 Gate 2); held rows go in the footer (`… · not ready R (readiness)`). ⚠️ **Gate 1 does not refuse this batch** (`flag: true` on a `todo` row **is** the approval for `--flagged`). The batch runs **Gate 2 only** — ⚠️ **Gate 3 still runs at the spawn.**
@@ -607,7 +602,7 @@ CHIP=$(jq -r --arg r "${ROLE:-agent}" '
 | `manager` | Managers | `orange` |
 | `human` | Direct | `cyan` |
 
-**`role:` absent means agent, and that is the correct default** — it preserves today's behaviour for every task that has not declared a role, which is all but `Start Day`.
+**`role:` absent means agent, and that is the correct default** — matrix Rule 1 ([`docs/role-mode-matrix.md`](../docs/role-mode-matrix.md)).
 
 ⚠️ **If `$MAP` is missing or `WINDOW_ID` comes back empty, fall back to today's behaviour and SAY SO in the report** — spawn into the caller's window with `pink`. Do **not** silently proceed as if routing worked.
 
@@ -645,7 +640,7 @@ wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- env SE
 
 ⚠️ **`env` is load-bearing, not decoration.** A spawned pane inherits wezterm's *mux server* environment, not this shell's — which is also why the `unset` prefix exists. Pass the writer path as an `env` assignment before `bash`, never inline inside the single-quoted `bash -lc` string, where it cannot expand.
 
-⚠️ **For a task, `<claude_script>` is the task's resolved launcher, not the vault default** — this path bypasses the server, so apply the rule yourself: `vault-cli task get "<task>" launcher --vault <vault>`, and when that is empty use the vault's `worker_launcher`. ⚠️ **Do NOT read the goal's launcher** — a goal states how its manager runs, never its workers (rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8).
+⚠️ **For a task, `<claude_script>` is the task's resolved launcher, not the vault default** — this path bypasses the server, so apply the rule yourself: `vault-cli task get "<task>" launcher --vault <vault>`, and when that is empty use the vault's `worker_launcher` — or, for `ROLE=human`, `manager_launcher`, else the `-claude` sibling (matrix Rule 4). ⚠️ **Do NOT read the goal's launcher** — a goal states how its manager runs, never its workers (rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8).
 
 **`--window-id` is what puts the tab in the right window** — without it the new tab inherits `WEZTERM_PANE` from the calling session. `${WINDOW_ID:+...}` keeps the flag off entirely when the map is unavailable.
 
@@ -700,7 +695,7 @@ The `cc-*` launchers `cd` into their own vault before starting Claude, so a vaul
 
   `nameSource: user` → correct. `nameSource: peer` → the `unset` prefix was missing or ineffective; the session is named after its spawner and the title-match session-connect cannot resolve it (see below).
 - state the branch taken in one line: `↪️ jumped` / `♻️ resumed <sid-prefix>` / `🆕 created <sid-prefix>` — plus the resolved type **and the resolved vault**, so a mis-resolution is visible immediately
-- **the worker runs where you asked, under that vault's launcher** — read `vault`, `launcher` and `model` back from the spawn response: `launcher` must equal the launcher the task resolves to (its `launcher:` frontmatter, else the vault `worker_launcher`, else the vault `claude_script` — never its goal's; `launcher_source` names which — rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8); the returned `cwd` must **not** be the `claude-supervisor` repo, and `model` must be the one that launcher sets.
+- **the worker runs where you asked, under that vault's launcher** — read `vault`, `launcher` and `model` back from the spawn response: `launcher` must equal the launcher the task resolves to (its `launcher:` frontmatter, else the vault `worker_launcher` — for `role: human` the Claude launcher, matrix Rule 4 — else the vault `claude_script` — never its goal's; `launcher_source` names which — rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8); the returned `cwd` must **not** be the `claude-supervisor` repo, and `model` must be the one that launcher sets.
 
 ### 4.1 Bind the task explicitly — `-n` does not self-link
 
