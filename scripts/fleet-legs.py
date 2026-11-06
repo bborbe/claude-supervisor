@@ -234,10 +234,13 @@ def write_atomic(path, lines, keep=None):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
-        os.replace(tmp, path)
+        # ⚠️ Mode and mtime are set on the TEMP file, before the replace. Doing it after
+        # would mean a failed chmod/utime reports failure for a write that already landed —
+        # the render would say the count did not persist when it did.
         if keep is not None:
-            os.chmod(path, keep.st_mode & 0o777)
-            os.utime(path, (keep.st_atime, keep.st_mtime))
+            os.chmod(tmp, keep.st_mode & 0o777)
+            os.utime(tmp, (keep.st_atime, keep.st_mtime))
+        os.replace(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)
@@ -362,16 +365,19 @@ def main(argv=None):
         new_body = render(set_not_run(entries, leg, keys, args.not_run))
 
     if body is None:
-        # A digest that carries no LEGS section is the pre-fix shape. Insert the section in
-        # its template position — immediately before NOTES — rather than after it, so a
-        # hand-run cannot leave the render's section order broken.
+        # A digest that carries no LEGS section is the pre-fix shape. Insert the header AND
+        # its body together, in the template position — immediately before NOTES — rather
+        # than putting the header there and appending the body at EOF, which leaves a
+        # section whose lines are outside it and fails the very next `--check`.
         cut = next(
             (i for i, line in enumerate(before) if line.strip().startswith("NOTES")),
             len(before),
         )
-        before = before[:cut] + [SECTION] + before[cut:]
+        new_lines = before[:cut] + [SECTION] + new_body + before[cut:]
+    else:
+        new_lines = before + new_body + after
     try:
-        write_atomic(args.digest, before + new_body + after, keep=os.stat(args.digest))
+        write_atomic(args.digest, new_lines, keep=os.stat(args.digest))
     except OSError as exc:
         print("fleet-legs: cannot write %s: %s" % (args.digest, exc), file=sys.stderr)
         return EXIT_FAILED

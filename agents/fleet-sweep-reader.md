@@ -146,7 +146,7 @@ The caller forwards this path verbatim to `agents/fleet-drive.md`, which reads i
 
 ⚠️ **Sanitize the timestamp into the filename, and treat this clause as its single home.** Replace every character outside `[0-9A-Za-z._-]` with `-`, so a caller passing `2026-10-11T18:09:40Z` yields `2026-10-11T18-09-40Z.digest`. The round timestamp's format is the caller's and is not fixed anywhere, so the sanitization is what keeps the path printable and re-readable — and it is what keeps this file's name aligned with the drive leg's, which applies the same rule by pointing here rather than copying it. The caller never recomputes the path; it forwards your `payload=` value verbatim.
 
-Return **≤ 43 lines** in the payload, exactly these sections, each printed as `(none)` rather than dropped — the cap is 40 plus the `LEGS` section's fixed lines (three at most, two when keep-alive has not run):
+Return **≤ 43 lines** in the payload, exactly these sections, each printed as `(none)` rather than dropped — the cap is 40 plus the `LEGS` block as seeded here (header + two `not run` lines = three):
 
 ```
 DIGEST <round timestamp> · <N> sessions · snapshot written: <swept_at from fleet-snapshot.py>

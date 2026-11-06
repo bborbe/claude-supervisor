@@ -278,11 +278,15 @@ class TestRefusals(Base):
 
 
 class TestDigestPreservation(Base):
-    def test_the_section_lands_before_notes_on_a_pre_fix_digest(self):
+    def test_a_pre_fix_digest_gains_a_complete_section_before_notes(self):
+        """The header AND its lines must land together, or the next --check reads an empty body."""
         self.write(PREFIX_DIGEST)  # no LEGS section, NOTES present
         self.run_legs("--leg", "lapsed-managers", "--count", "1")
         text = self.read()
         self.assertLess(text.index("LEGS"), text.index("NOTES"))
+        self.assertLess(text.index("keep-alive: unactioned: 1 lapsed-managers"), text.index("NOTES"))
+        self.record_all(lapsed=1)
+        self.assertEqual(self.run_legs("--check"), 0)
 
     def test_the_write_preserves_the_digest_mtime(self):
         """`fleet-digest.py` ages some rounds by this file's mtime — a leg must not reset it."""
