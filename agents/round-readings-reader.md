@@ -128,13 +128,17 @@ form.
 
 ```text
 readings=written|REFUSED · rows=<n> · payload=<path>
-live=<n> · absent=<n> · unknown=<n> · inflight=<n> · quiet=<n>
-gated=<n> · clear=<n> · unread=<n> · external=<n> · none=<n> · stuck=<n>
+live=<n> · absent=<n> · unknown=<n> · inflight=<n> · quiet=<n> · inflight-unread=<n>
+gated=<n> · clear=<n> · unread=<n> · external=<n> · none=<n> · external-unread=<n> · stuck=<n>
 ```
 
 ⚠️ **Every family carries all three of its values, including the zeros** — the caller's render
 tests the counts, and a missing key is a cell it cannot evaluate. ⚠️ **A family whose read
-failed carries its `unread` count, never a `0` in the `clear`/`none`/`quiet` slot.** ⚠️
+failed carries its `unread` count, never a `0` in the `clear`/`none`/`quiet` slot.** ⚠️ **Each
+family's `unread` has its own key:** `unread=` is the **feed** family's, while the in-flight and
+external-wait families carry `inflight-unread=` and `external-unread=` — `in_flight()` and
+`external_wait()` both return `unread`, and one shared key would lose two of the three values
+each family can take, which `docs/handback-contract.md:14` requires be emitted. ⚠️
 **`stuck=<n>` counts the rows whose stuck verdict fired** (a denial marker, a frozen transcript,
 a park past its threshold); name those rows on one line under the counts,
 `stuck: <task> · <cause>`, because a count cannot be reconciled against a task list.
