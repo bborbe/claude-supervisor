@@ -41,6 +41,15 @@ test('a classifier printing an unknown tier fails closed to operator', () => {
   assert.equal(permissionTier('Bash', { command: 'ls' }, { script }).tier, 'operator')
 })
 
+// supervisor.mjs cannot be imported by a test (it starts the server), so its two call sites are
+// pinned by source text — the same convention the timeout-record test uses.
+test('supervisor.mjs computes the tier at park time and publishes it', () => {
+  const src = readFileSync(join(HERE, 'supervisor.mjs'), 'utf8')
+  assert.match(src, /import \{ permissionTier \} from '\.\/permission-tier\.mjs'/)
+  assert.match(src, /record\.permissionTier = permissionTier\(toolName, input,/)
+  assert.match(src, /permission_tier: p\.permissionTier\?\.tier \?\? 'operator',/)
+})
+
 test('no tool name fails closed', () => {
   assert.equal(permissionTier('', {}).tier, 'operator')
 })
