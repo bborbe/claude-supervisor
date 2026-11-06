@@ -86,6 +86,8 @@
     { "id": "review4-uniq-writes-settings", "tool": "Bash", "input": { "command": "uniq /tmp/x ~/.claude/settings.json" }, "tier": "operator", "form": "permission-grant" },
     { "id": "review4-mcp-merge", "tool": "mcp__github__merge_pull_request", "input": {}, "tier": "operator", "form": "publish" },
     { "id": "review4-for-loop-operand", "tool": "Bash", "input": { "command": "for f in ~/.netrc; do cat \"$f\"; done" }, "tier": "operator", "form": "secret" },
+    { "id": "review6-embedded-redirect", "tool": "Bash", "input": { "command": "echo x>~/.claude/settings.json" }, "tier": "operator", "form": "permission-grant" },
+    { "id": "review6-clustered-git-flags", "tool": "Bash", "input": { "command": "git push -uf origin feat/x" }, "tier": "operator", "form": "force-push/ref-delete" },
     { "id": "review2-timeout-routine", "tool": "Bash", "input": { "command": "timeout 30 git push origin feat/x" }, "tier": "manager" },
     { "id": "review-data-heredoc-still-manager", "tool": "Bash", "input": { "command": "cat <<'EOF' > /tmp/x.md\nhello\nEOF" }, "tier": "manager" },
     { "id": "review-stderr-redirect-still-manager", "tool": "Bash", "input": { "command": "git status 2>&1 | tail -3" }, "tier": "manager" },

@@ -30,10 +30,6 @@ it; the secret form is checked first. Same order the deny list has in the doc.
 
 Pure: no filesystem, no environment, no clock in `tier_for` — the caller passes the allowlist
 entries and the confinement context. `tier_for` and `tier_for_payload` are the entry points.
-
-CLI (for the replay and for hand checks):
-    permission-tier.py --tool Bash --input 'git push --force origin x'
-    permission-tier.py --payload 'Bash: git status'
 """
 
 import json
@@ -296,6 +292,8 @@ def segment_words(segment):
             kept.append(t)
             writes.append(t)
             continue
+        if ">" in t and not _REDIRECT_TOKEN.match(t):  # `x>~/f` is one shlex word: `x` + a redirect
+            kept.append(t[:t.index(">")]); t = t[t.index(">"):]
         m = _REDIRECT_TOKEN.match(t)
         if not m:
             kept.append(t)
@@ -304,8 +302,6 @@ def segment_words(segment):
         is_output = op != "<"
         if not target:
             next_is_write = is_output
-            if not is_output:
-                next_is_write = False
             continue
         if not re.fullmatch(r"\d+|-", target):
             kept.append(target)
@@ -397,7 +393,7 @@ def _git(env, argv):
     if sub == "push":
         flags = [a for a in args if a.startswith("-")]
         refs = [a for a in args if not a.startswith("-")]
-        if any(f in ("-f", "-d", "--mirror", "--prune", "--all") or f.startswith(("--force", "--delete"))
+        if any(re.fullmatch(r"-[A-Za-z]*[fd][A-Za-z]*", f) or f in ("--mirror", "--prune", "--all") or f.startswith(("--force", "--delete"))
                for f in flags):
             return "force-push/ref-delete"
         if "--tags" in flags or "--follow-tags" in flags:
@@ -413,9 +409,9 @@ def _git(env, argv):
             if r.startswith("refs/tags/") or re.match(r"^v\d", r.split(":")[-1]):
                 return "publish"
         return None
-    if sub == "branch" and any(a in ("-D", "-d", "--delete") for a in args):
+    if sub == "branch" and any(re.fullmatch(r"-[A-Za-z]*[dD][A-Za-z]*", a) or a == "--delete" for a in args):  # -Dr, -df
         return "ref-delete"
-    if sub == "tag" and any(a in ("-d", "--delete") for a in args):
+    if sub == "tag" and any(re.fullmatch(r"-[A-Za-z]*d[A-Za-z]*", a) or a == "--delete" for a in args):
         return "ref-delete"
     if sub == "update-ref" and "-d" in args:
         return "ref-delete"
