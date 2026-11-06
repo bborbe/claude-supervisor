@@ -10,6 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+- fix: **a `role: human` row prefers the vault's `-claude` sibling over `manager_launcher`** — both private-personal and seibert-brogrammers configure `manager_launcher` to their `-deepseek` script, so the manager chain left human rows on the worker model (found by the first live `--flagged` run).
 - fix: **a taskless `spawn_agent(role: human)` now takes the Claude launcher too** — `applyHumanLauncherRule` runs after every launcher branch, not only the task branch. Doc follow-ups from the #644 review: `commands/open.md` points the `role` → `mode` mapping at the matrix and lists every gate among the non-open outcomes; `docs/fleet-surface.md` item 6 cites matrix Rule 2 instead of restating it; matrix Rule 4 states its `claude_script` fallback.
 
 ## v0.241.1

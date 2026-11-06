@@ -329,6 +329,15 @@ test('a human row with no own launcher moves off the worker default onto the con
   assert.deepEqual(r, { launcher: '/s/cc-private-claude', source: 'manager-default' })
 })
 
+test('a human row takes the -claude sibling even when manager_launcher is configured to the -deepseek script', () => {
+  // The live config of 2026-11-06: manager_launcher == claude_script == cc-private-deepseek.
+  const r = applyHumanLauncherRule({
+    role: 'human', resolved: workerRule, vaultLauncher: '/s/cc-private-deepseek',
+    managerDefault: '/s/cc-private-deepseek', exists: (p) => p === '/s/cc-private-claude',
+  })
+  assert.deepEqual(r, { launcher: '/s/cc-private-claude', source: 'claude-sibling' })
+})
+
 test('a human row falls back to the -claude sibling when no manager default is configured', () => {
   const r = applyHumanLauncherRule({ role: 'human', resolved: workerRule, vaultLauncher: '/s/cc-private-deepseek', exists: (p) => p === '/s/cc-private-claude' })
   assert.deepEqual(r, { launcher: '/s/cc-private-claude', source: 'claude-sibling' })
