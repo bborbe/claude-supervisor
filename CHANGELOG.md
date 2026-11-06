@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- refactor: **two of the manager round's heaviest legs now delegate to sub-agents.** `commands/steps/round-readings.md` dispatches `supervisor:round-readings-reader` and `commands/steps/goal-spawn.md` dispatches `supervisor:goal-spawn-reader`; each returns a ≤ 1 KB `key=value` hand-back plus a `payload=` path, so the readings contract and the spawn gates stop re-injecting into the manager's context on every tick. `commands/steps/round-tail.md` stays inline — its wakeup re-arm, Monitor arms, attention cards and heal ladder are the manager's own tool calls.
+
 ## v0.241.1
 
 - fix: `session-exit-record.py observe` now records the real exit status of a process-group kill — it arms a `kqueue` `NOTE_EXITSTATUS` watch on the pane pid, so the out-of-group observer writes `kind=signalled kill … signal=SIGTERM writer=observer` instead of `unknown-end … signal=unavailable`; no privilege needed. Polling + `unknown-end` stays as the fallback when no watch can be armed.
