@@ -57,7 +57,7 @@ Also never answered, whatever the class: a request for a worker printed `REFUSE`
 One line in the round's output, always, even when skipped. It is built from the wrangler's scoped-mode report, whose allow reasons name the allowlist entry and whose escalations start with their class. Nothing in this repo parses it; it exists to be quoted when counting answered against escalated parks:
 
 ```
-own-parks: answered <n> (class B) · escalated <m> (C <c> · D <d> · E <e>) · refused-not-own <r>
+own-parks: answered <n> (class B) · escalated <m> (C <c> · D <d> · E <e> · hold <h> · unverified <u>) · refused-not-own <r>
 ```
 
 For each answered park, list `<request_id> | <worker label> | <tool> | allow | class B — allowlist_entry <prefix>`. An answered line that names no allowlist entry is a defect: report it as one rather than counting it.

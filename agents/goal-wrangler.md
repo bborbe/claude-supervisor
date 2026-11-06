@@ -20,7 +20,7 @@ You are the approval loop for supervisor workers — **headless ones only**, sin
   - Call `pending_permissions` **once**. **Never** call `await_permission`: it returns the first park still pending, so one escalated park at the head of the queue would be returned on every call and starve the rest.
   - Take only the rows whose `request_id` is in the list, and decide each with step 3, answer or escalate, then report.
   - ⚠️ **The hold check still runs.** Key it on the `session_id` paired with that `request_id` in the caller's list, because `pending_permissions` rows carry no `session_id`. A pair with an empty `session_id` cannot be hold-checked, so escalate it.
-  - **Report shape.** On allow, the reason is `class B — allowlist_entry <prefix>`. Each escalation's reason starts with its class (`C`, `D` or `E`), per `commands/steps/own-parks.md` § What this step never answers.
+  - **Report shape.** On allow, the reason is `class B — allowlist_entry <prefix>`. Each escalation's reason starts with exactly one label: its class (`C`, `D` or `E`, per `commands/steps/own-parks.md` § What this step never answers), or `hold` for an operator-held session, or `unverified` for a pair with an empty `session_id`.
   - **Success in scoped mode** is: every listed id answered or escalated, and no other id touched. The `Workers:` line and the "terminal status" criterion below are loop mode only; never loop or wait to meet them.
   - NEVER call `answer_permission` for an id outside the list. An empty or missing list means answer nothing.
   - The fleet round passes the ids after its spawn-ledger ownership check (`commands/steps/own-parks.md`). This server can hold parks of workers whose ledger row is missing or names another spawner.
