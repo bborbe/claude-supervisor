@@ -24,19 +24,21 @@ Check all three, in order. If any one fails, **do nothing**: answer no park, dis
    python3 $P/own-park-check.py --self "$CLAUDE_CODE_SESSION_ID" --session <worker-session-id> [--session …]
    ```
 
-   Only workers printed as `OWN <sid>` are in scope. `REFUSE` lines are out of scope, and so is any row whose `session_id` is empty. Exit `2` (unreadable ledger, or no session id of your own) → skip with `own-parks: skipped — ownership unverifiable`. A `rehydrated: true` row is another session's worker adopted into this roster; the ledger check refuses it unless this session spawned it.
+   Only workers printed as `OWN <sid>` are in scope. `REFUSE` lines are out of scope, and so is any row whose `session_id` is empty. **Any non-zero exit** (`2` = unreadable ledger or no session id of your own; anything else = the check itself failed) → skip with `own-parks: skipped — ownership unverifiable`. This server only holds its own workers' parks (a `rehydrated` row's `pending_permissions` is always `[]`). The check is still needed: a worker whose ledger row is missing, or names another spawner, is not provably this session's.
 
 ## Dispatch
 
-With ≥ 1 `OWN` worker, dispatch the wrangler. It owns the decision policy, so do not restate it:
+With ≥ 1 `OWN` worker, collect the request ids from those rows' `pending_permissions` and dispatch the wrangler in **scoped mode**. It owns the decision policy, so do not restate it:
 
 ```
 Task tool with:
   subagent_type: 'supervisor:goal-wrangler'
-  prompt: 'Answer only for agent_ids: <comma-separated OWN agent_ids>. Escalate every other request.'
+  prompt: 'Answer only these request_ids: <comma-separated ids from OWN rows>. Escalate every other request.'
 ```
 
-The wrangler answers `allow` only when the request's `allowlist_entry` is non-null and no deny class matches. Everything it does not answer stays pending, as an escalation.
+Scoped mode reads `pending_permissions` once and never waits on `await_permission`, so it costs the tick one bounded read rather than idle timeouts. The wrangler answers `allow` only when the request's `allowlist_entry` is non-null and no deny class matches. Everything it does not answer stays pending, as an escalation.
+
+⚠️ **Latency limit.** The step sees only what is parked when it runs. A park raised just after it waits for the next tick, and at a 15-minute interval it auto-denies first (`worker-channels.md`: *"Answer promptly or not at all"*). This step shortens the wait for routine parks; it does not make it zero.
 
 ## What this step never answers
 

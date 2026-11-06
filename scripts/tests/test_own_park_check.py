@@ -57,6 +57,12 @@ class Verdict(unittest.TestCase):
     def test_refuse_empty_worker(self):
         self.assertFalse(opc.verdict(SELF, "", {"": {"parent_session": SELF}})[0])
 
+    def test_refuse_empty_string_wire_spawner(self):
+        # the endpoint serves `spawner_session_id: ""` for an unresolved spawn edge
+        own, reason = opc.verdict(SELF, WORKER, {WORKER: {"spawner_session_id": ""}})
+        self.assertFalse(own)
+        self.assertEqual(reason, "ledger row names no spawner")
+
 
 class Main(unittest.TestCase):
     def _run(self, ledger, argv):
@@ -84,6 +90,15 @@ class Main(unittest.TestCase):
         code, lines = self._run({WORKER: {"parent_session": ""}}, ["--session", WORKER])
         self.assertEqual(code, 2)
         self.assertTrue(lines[0].startswith("REFUSE"))
+
+    def test_empty_ledger_is_read_but_refuses(self):
+        code, lines = self._run({}, ["--self", SELF, "--session", WORKER])
+        self.assertEqual(code, 0)
+        self.assertEqual(lines, ["REFUSE %s no spawn-ledger row for this worker" % WORKER])
+
+    def test_no_sessions_prints_nothing(self):
+        code, lines = self._run({WORKER: {"parent_session": SELF}}, ["--self", SELF])
+        self.assertEqual((code, lines), (0, []))
 
     def test_mixed_batch(self):
         ledger = {WORKER: {"spawner_session_id": SELF}, OTHER: {"spawner_session_id": WORKER}}
@@ -118,7 +133,12 @@ class StepFile(unittest.TestCase):
 
     def test_wrangler_honours_scope(self):
         with open(os.path.join(_ROOT, "agents", "goal-wrangler.md"), encoding="utf-8") as fh:
-            self.assertIn("Answer only for agent_ids:", fh.read())
+            text = fh.read()
+        self.assertIn("Answer only these request_ids:", text)
+        self.assertIn("Never** call `await_permission`", text)
+
+    def test_any_nonzero_exit_skips(self):
+        self.assertIn("Any non-zero exit", self.text)
 
 
 if __name__ == "__main__":
