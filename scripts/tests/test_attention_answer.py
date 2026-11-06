@@ -451,10 +451,12 @@ class PermissionDeliveryTruthTest(unittest.TestCase):
         """
         seq = list(reports)
         reads = []
+        timeouts = []
         clock = [0.0]
 
-        def fetch(item_id):
+        def fetch(item_id, timeout=None):
             reads.append(item_id)
+            timeouts.append(timeout)
             entry = seq.pop(0) if len(seq) > 1 else seq[0]
             if isinstance(entry, Exception):
                 raise entry
@@ -472,6 +474,7 @@ class PermissionDeliveryTruthTest(unittest.TestCase):
              mock.patch.object(aa, "DELIVERY_WAIT_SECONDS", wait), \
              mock.patch.object(aa, "DELIVERY_POLL_SECONDS", poll):
             rc = aa.cmd_answer("i1", "arm", [], out=out, decision="allow")
+        self.timeouts = timeouts
         return rc, out.getvalue(), reads
 
     def test_delivered_reports_the_observed_delivery(self):
@@ -525,6 +528,26 @@ class PermissionDeliveryTruthTest(unittest.TestCase):
         self.assertNotIn("ANSWERED:", out)
         self.assertIn("UNCONFIRMED: delivery report unreadable", out)
 
+    def test_an_unreadable_read_then_a_delivered_one_still_succeeds(self):
+        # The recovery path the wait most depends on: a failed read resets
+        # status/reason but must keep polling rather than give up.
+        rc, out, reads = self._run([
+            urllib.error.URLError("refused"),
+            {"status": "delivered", "carrier": "supervisor:attention-poll"},
+        ])
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED: i1", out)
+        self.assertIn("DELIVERY: delivered by supervisor:attention-poll", out)
+        self.assertEqual(len(reads), 2)
+
+    def test_every_read_is_clamped_to_the_budget_that_is_left(self):
+        # The printed bound must be the enforced one: a read allowed its full
+        # STORE_TIMEOUT could overshoot DELIVERY_WAIT_SECONDS.
+        self._run([{"status": "never_attempted"}], wait=5.0, poll=1.0)
+        self.assertTrue(self.timeouts)
+        self.assertLessEqual(max(self.timeouts), 5.0)
+        self.assertLess(self.timeouts[-1], 2.0)
+
     def test_unreachable_report_is_unconfirmed(self):
         rc, out, _ = self._run([urllib.error.URLError("refused")], wait=3.0)
         self.assertEqual(rc, aa.EXIT_NOT_DELIVERED)
@@ -549,6 +572,53 @@ class PermissionDeliveryTruthTest(unittest.TestCase):
     def test_wait_is_overridable_from_the_environment(self):
         self.assertEqual(aa.delivery_wait_seconds({"ATTENTION_DELIVERY_WAIT": "5"}), 5.0)
         self.assertEqual(aa.delivery_wait_seconds({}), aa.DEFAULT_DELIVERY_WAIT_SECONDS)
+
+    def test_non_finite_wait_falls_back_instead_of_hanging(self):
+        # ⚠️ A `nan` deadline makes `_clock() >= deadline` permanently False, so
+        # the loop would never exit; `inf` blocks for ever. Neither may parse.
+        for raw in ("nan", "inf", "-inf", "Infinity"):
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    aa.delivery_wait_seconds({"ATTENTION_DELIVERY_WAIT": raw}),
+                    aa.DEFAULT_DELIVERY_WAIT_SECONDS,
+                )
+
+    def test_non_positive_wait_falls_back(self):
+        for raw in ("0", "-5"):
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    aa.delivery_wait_seconds({"ATTENTION_DELIVERY_WAIT": raw}),
+                    aa.DEFAULT_DELIVERY_WAIT_SECONDS,
+                )
+
+    def test_oversized_wait_is_clamped(self):
+        self.assertEqual(
+            aa.delivery_wait_seconds({"ATTENTION_DELIVERY_WAIT": "999999"}),
+            aa.MAX_DELIVERY_WAIT_SECONDS,
+        )
+
+    def test_a_nan_wait_cannot_make_the_command_hang(self):
+        # The end-to-end shape of the MAJOR: with a nan bound the pre-fix loop
+        # never returned. The clamp is what makes this terminate.
+        seq = [{"status": "never_attempted"}]
+        reads, clock = [], [0.0]
+        out = io.StringIO()
+
+        def fetch(item_id, timeout=None):
+            reads.append(item_id)
+            return seq[0]
+
+        with mock.patch.object(aa, "fetch_item", return_value={"item_id": "i1", "answer_mechanism": "permission"}), \
+             mock.patch.object(aa, "post_answer", return_value={"answered_at": "t", "answered_by": "a"}), \
+             mock.patch.object(aa, "fetch_delivery", side_effect=fetch), \
+             mock.patch.object(aa, "_sleep", lambda s: clock.__setitem__(0, clock[0] + s)), \
+             mock.patch.object(aa, "_clock", lambda: clock[0]), \
+             mock.patch.object(aa, "DELIVERY_WAIT_SECONDS",
+                               aa.delivery_wait_seconds({"ATTENTION_DELIVERY_WAIT": "nan"})), \
+             mock.patch.object(aa, "DELIVERY_POLL_SECONDS", 1.0):
+            rc = aa.cmd_answer("i1", "arm", [], out=out, decision="allow")
+        self.assertEqual(rc, aa.EXIT_NOT_DELIVERED)
+        self.assertIn("UNCONFIRMED:", out.getvalue())
 
 
 class FetchDeliveryTest(unittest.TestCase):

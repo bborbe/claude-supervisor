@@ -61,6 +61,7 @@ import argparse
 import glob
 import http.client
 import json
+import math
 import os
 import sys
 import time
@@ -81,12 +82,30 @@ DEFAULT_DELIVERY_WAIT_SECONDS = 35.0
 DELIVERY_POLL_SECONDS = 1.0
 
 
+# A ceiling on the override. An unbounded wait is the pre-fix bug on a slower
+# clock: the caller still cannot tell a delivered answer from an undelivered one,
+# it just stops returning. Ten minutes outlasts every poller cadence with margin
+# and still guarantees the command comes back.
+MAX_DELIVERY_WAIT_SECONDS = 600.0
+
+
 def delivery_wait_seconds(environ=None):
+    """The bounded wait, from `ATTENTION_DELIVERY_WAIT` or the default.
+
+    ⚠️ A bare `float()` is not enough. `float("nan")` and `float("inf")` both
+    parse, and `wait_for_delivery` bounds itself with `_clock() >= deadline` —
+    a `nan` deadline makes that comparison permanently False, so the loop never
+    exits and the command hangs instead of reporting. Non-finite, non-positive
+    and oversized values all fall back to a bound rather than becoming one.
+    """
     raw = (os.environ if environ is None else environ).get("ATTENTION_DELIVERY_WAIT", "")
     try:
-        return float(raw) if raw else DEFAULT_DELIVERY_WAIT_SECONDS
+        value = float(raw) if raw else DEFAULT_DELIVERY_WAIT_SECONDS
     except ValueError:
         return DEFAULT_DELIVERY_WAIT_SECONDS
+    if not math.isfinite(value) or value <= 0:
+        return DEFAULT_DELIVERY_WAIT_SECONDS
+    return min(value, MAX_DELIVERY_WAIT_SECONDS)
 
 
 DELIVERY_WAIT_SECONDS = delivery_wait_seconds()
@@ -153,9 +172,12 @@ def fetch_item(item_id):
         return json.load(resp)
 
 
-def fetch_delivery(item_id):
+def fetch_delivery(item_id, timeout=None):
     """Return the store's delivery report for `item_id` (`GET …/attempt`)."""
-    with urllib.request.urlopen(f"{STORE}/api/1.0/attention/{item_id}/attempt", timeout=STORE_TIMEOUT) as resp:
+    with urllib.request.urlopen(
+        f"{STORE}/api/1.0/attention/{item_id}/attempt",
+        timeout=STORE_TIMEOUT if timeout is None else timeout,
+    ) as resp:
         return json.load(resp)
 
 
@@ -168,12 +190,20 @@ def wait_for_delivery(item_id):
 
     ⚠️ An unreadable report is never read as delivered, nor as failed: like
     `restart-precheck.py`, only a report carrying `status` decides anything.
+
+    ⚠️ Every read is clamped to the budget that is left, so the bound this
+    returns within is the one the caller is told about. A read allowed its full
+    `STORE_TIMEOUT` could push the real elapsed time past `DELIVERY_WAIT_SECONDS`
+    while the UNCONFIRMED line still printed the nominal figure.
     """
     deadline = _clock() + DELIVERY_WAIT_SECONDS
     status, carrier, reason = None, "", "no report read"
     while True:
+        remaining = deadline - _clock()
+        if remaining <= 0:
+            return status, carrier, reason
         try:
-            report = fetch_delivery(item_id)
+            report = fetch_delivery(item_id, timeout=min(STORE_TIMEOUT, remaining))
         except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as err:
             status, reason = None, f"delivery report unreadable ({err})"
         else:
@@ -183,9 +213,10 @@ def wait_for_delivery(item_id):
                     return status, carrier, reason
             else:
                 status, reason = None, "delivery report unreadable (no status field)"
-        if _clock() >= deadline:
+        remaining = deadline - _clock()
+        if remaining <= 0:
             return status, carrier, reason
-        _sleep(DELIVERY_POLL_SECONDS)
+        _sleep(min(DELIVERY_POLL_SECONDS, remaining))
 
 
 def resolved_session_id(environ=None):
