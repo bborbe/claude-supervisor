@@ -54,7 +54,7 @@ Also never answered, whatever the class: a request for a worker printed `REFUSE`
 
 ## Report
 
-One line in the round's output, always, even when skipped. It is the before/after count the fleet's metric reads:
+One line in the round's output, always, even when skipped. It is built from the wrangler's scoped-mode report, whose allow reasons name the allowlist entry and whose escalations start with their class. Nothing in this repo parses it; it exists to be quoted when counting answered against escalated parks:
 
 ```
 own-parks: answered <n> (class B) · escalated <m> (C <c> · D <d> · E <e>) · refused-not-own <r>
