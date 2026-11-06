@@ -338,6 +338,8 @@ def _wait_exit(kq, timeout):
     events = kq.control(None, 1, timeout)
     if not events:
         return None
+    if events[0].flags & select.KQ_EV_ERROR:
+        raise OSError(events[0].data, "kqueue exit watch failed")
     return events[0].data
 
 
@@ -517,7 +519,12 @@ def cmd_observe(args):
         if kq is None:
             time.sleep(args.interval)
         else:
-            status = _wait_exit(kq, args.interval)
+            try:
+                status = _wait_exit(kq, args.interval)
+            except OSError:
+                # An error event is no wait status: fall back to polling's inference
+                # rather than record an `rc` the kernel never reported.
+                kq = None
 
 
 def cmd_path(args):

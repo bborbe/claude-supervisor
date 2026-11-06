@@ -23,6 +23,7 @@ import datetime
 import importlib.util
 import json
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -296,12 +297,18 @@ class Observer(StoreTestCase):
         self.assertIn("rc=unavailable", line)
         self.assertIn("signal=unavailable", line)
 
+    @staticmethod
+    def _skip_without_kqueue():
+        if not hasattr(select, "kqueue"):
+            raise unittest.SkipTest("kqueue exit-status watch is macOS/BSD only")
+
     def _observe_then_kill(self, sig):
         """A live target in its own group, an observer that is NOT its parent, a group kill.
 
         The pane-243 shape (2026-11-06): a group kill takes the trap's shell down with the
         child, so the observer is the only writer left.
         """
+        self._skip_without_kqueue()
         target = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
         observer = subprocess.Popen(
             [sys.executable, _SCRIPT, "observe", "--pane", "2156", "--pid", str(target.pid),
@@ -312,9 +319,13 @@ class Observer(StoreTestCase):
         deadline = time.time() + 5
         while not os.path.exists(log) and time.time() < deadline:
             time.sleep(0.05)
+        if not os.path.exists(log):
+            target.kill()
+            observer.kill()
+            self.fail("observer wrote no heartbeat within 5 s — watch never armed")
         os.killpg(target.pid, sig)
-        observer.wait(timeout=10)
         target.wait()
+        observer.wait(timeout=10)
         return [line for line in self._lines() if "kind=heartbeat" not in line]
 
     def test_a_group_kill_of_a_live_pid_records_the_signal(self):
