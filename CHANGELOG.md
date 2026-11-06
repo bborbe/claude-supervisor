@@ -11,6 +11,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - fix: **a taskless `spawn_agent(role: human)` now takes the Claude launcher too** — `applyHumanLauncherRule` runs after every launcher branch, not only the task branch. Doc follow-ups from the #644 review: `commands/open.md` points the `role` → `mode` mapping at the matrix and lists every gate among the non-open outcomes; `docs/fleet-surface.md` item 6 cites matrix Rule 2 instead of restating it; matrix Rule 4 states its `claude_script` fallback.
+- fix: `session-exit-record.py observe` now records the real exit status of a process-group kill — it arms a `kqueue` `NOTE_EXITSTATUS` watch on the pane pid, so the out-of-group observer writes `kind=signalled kill … signal=SIGTERM writer=observer` instead of `unknown-end … signal=unavailable`; no privilege needed. Polling + `unknown-end` stays as the fallback when no watch can be armed.
 
 ## v0.241.0
 
