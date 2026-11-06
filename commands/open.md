@@ -32,7 +32,7 @@ The command **resolves** and **dispatches**. It never does the work, never runs 
                              task body, print the table, then open each eligible
                              row in stable order. role: human → DIRECT; a field
                              with no signal takes the role-mode-matrix default.
-                             mode: by § Spawn a worker item 6, never ad hoc.
+                             mode: by role-mode-matrix Rule 2, never ad hoc.
 ```
 
 ## Arguments
@@ -155,7 +155,7 @@ The count is a property of the day, not of the command — **never hardcode it a
 
 ✅ **Per-task mode is its own `mode:` field, never folded into `role:`** — a `role: agent` row with none of item 6's five watch-need signals is `headless`. Step 0.6 decides and writes it.
 
-⚠️ **Two fields, not one: `role` cannot answer the mode question.** The mapping is not restated here — owned by item 6 of § Spawn a worker.
+⚠️ **Two fields, not one: `role` cannot answer the mode question.** The mapping is matrix Rule 2 (`docs/role-mode-matrix.md`).
 
 **The asymmetry that justifies the fleet default staying `interactive` is owned by item 6 of § Spawn a worker**, together with the measurement behind it — stated once there rather than restated here.
 
@@ -169,7 +169,7 @@ The count is a property of the day, not of the command — **never hardcode it a
 
 **A missing field is a default, never a veto** (operator ruling 2026-11-06). Rules and defaults have one home, [`docs/role-mode-matrix.md`](../docs/role-mode-matrix.md), also cited by `vault-cli` `create-task`.
 
-**Defaults:** missing `role` → `agent`; missing `mode` → matrix Rule 2; empty `phase` → the existing approval path. Never skip a row by judgement ("bot rows") — the only non-open outcomes are provenance `REFUSED`, LIVE, `⛔ HOLD`, a session hold, a cap refusal, and a declared `role: manager` (`👤 YOURS`).
+**Defaults:** missing `role` → `agent`; missing `mode` → matrix Rule 2; empty `phase` → the existing approval path. Never skip a row by judgement ("bot rows") — non-open outcomes are gates only: provenance `REFUSED`, LIVE, `⛔ HOLD`, a session hold, a cap refusal, the answer-path probe, a readiness hold, and a declared `role: manager` (`👤 YOURS`).
 
 Resolve the task in this order — each selected row on the batch path, the single resolved task otherwise:
 
@@ -185,7 +185,7 @@ Resolve the task in this order — each selected row on the batch path, the sing
 
 ### Then decide `mode` — the rule lives in one place, and this is not it
 
-**The classifier is not restated here.** It has its single home in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker **item 6** — the classifying question, the `role` → `mode` mapping, and the five closed watch-need signals that are the only thing keeping a `role: agent` task `interactive`. Read it there. ⚠️ **This line previously described item 6 as carrying *"the asymmetry that makes `interactive` a floor rather than a tie-break"* — the rule this change flipped** — and that wording is recorded rather than quietly dropped, because a reader following it would classify exactly backwards at the one section that decides `mode`.
+**The classifier is not restated here.** The `role` → `mode` mapping is matrix Rule 2 ([`docs/role-mode-matrix.md`](../docs/role-mode-matrix.md)); the five watch-need signals it reads live in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker **item 6**. ⚠️ **This line previously described item 6 as carrying *"the asymmetry that makes `interactive` a floor rather than a tie-break"* — the rule this change flipped** — and that wording is recorded rather than quietly dropped, because a reader following it would classify exactly backwards at the one section that decides `mode`.
 
 What this file owns is the **storage and the write**: resolve `mode` per that rule, write the field, and read it back at Step 3.
 
@@ -567,7 +567,7 @@ Effective dir = the vault's `session_project_dir`, else no `cd`.
 
 **The carve-out is both-ways: pass the argument whenever the task's frontmatter declares a `mode:`, and omit it only when the field is absent.** `mode: headless` → `interactive=false`; `mode: interactive` → `interactive=true`. An absent `mode:` still means *omit the argument entirely*, not *pass interactive*. ⚠️ **Local rows only** — on a `docker` / `k8s` row this carve-out does not apply; `§ Spawn a worker` item 7 carries that branch.
 
-The rule that *produces* the value is not restated here — it has its single home in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6; this line is only the consumption.
+The rule that *produces* the value is not restated here — its home is matrix Rule 2 (`docs/role-mode-matrix.md`), whose signals live in fleet-surface item 6; this line is only the consumption.
 
 ⚠️ **A headless worker carries two standing constraints, and both are the spawner's, not the worker's** — its gates park with the session that spawned it, and its turn ends at READY rather than at completion. Both are stated in full in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6, together with the resume-path behaviour; read them there before opening one. ⚠️ **This paragraph previously concluded that `headless` was rare and never a guess**, which was the pre-2026-10-22 floor — recorded rather than quietly dropped, because it is what this file carried until the flip.
 
@@ -640,7 +640,7 @@ wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- env SE
 
 ⚠️ **`env` is load-bearing, not decoration.** A spawned pane inherits wezterm's *mux server* environment, not this shell's — which is also why the `unset` prefix exists. Pass the writer path as an `env` assignment before `bash`, never inline inside the single-quoted `bash -lc` string, where it cannot expand.
 
-⚠️ **For a task, `<claude_script>` is the task's resolved launcher, not the vault default** — this path bypasses the server, so apply the rule yourself: `vault-cli task get "<task>" launcher --vault <vault>`, and when that is empty use the vault's `worker_launcher` — or, for `ROLE=human`, `manager_launcher`, else the `-claude` sibling (matrix Rule 4). ⚠️ **Do NOT read the goal's launcher** — a goal states how its manager runs, never its workers (rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8).
+⚠️ **For a task, `<claude_script>` is the task's resolved launcher, not the vault default** — this path bypasses the server, so apply the rule yourself: `vault-cli task get "<task>" launcher --vault <vault>`, and when that is empty use the vault's `worker_launcher` — or, for `ROLE=human`, the `-claude` sibling, else `manager_launcher` (matrix Rule 4). ⚠️ **Do NOT read the goal's launcher** — a goal states how its manager runs, never its workers (rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8).
 
 **`--window-id` is what puts the tab in the right window** — without it the new tab inherits `WEZTERM_PANE` from the calling session. `${WINDOW_ID:+...}` keeps the flag off entirely when the map is unavailable.
 
