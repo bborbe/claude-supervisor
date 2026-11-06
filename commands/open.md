@@ -611,7 +611,7 @@ Then pass the pair to whichever spawn path runs:
 - **wezterm path (§ 3.1 / resume):** add `--window-id "$WINDOW_ID"` to the `wezterm cli spawn` call when it is non-empty, and replace the hardcoded `"/color pink"` with `"/color $CHIP"`.
 - **`spawn_agent` path (§ 3):** pass `role` — the server resolves the window **and** the colour from the published map in-process, so this path needs no `--window-id` and no separate colour step. It reports the resolved `role` and `window_id` back, so check those rather than the landing window alone.
 
-### 3.1 Spawn — the wezterm path (fallback, and always the resume branch)
+### 3.1 Spawn — the wezterm path (fallback, resume's tab arm)
 
 ```bash
 # Pace the start FIRST, and never skip this line on this branch. The resume branch bypasses
@@ -650,7 +650,7 @@ wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- env SE
 
 The trailing `"/color $CHIP"` is the initial prompt — Claude executes it at startup and reports `Session color set to: <chip>`, then idles. `$CHIP` is § 3.0's role-resolved value, so the colour follows the role rather than a fixed default. Override the colour with `--color <name>`; valid: `red, blue, green, yellow, purple, orange, pink, cyan, default`.
 
-**The resume branch always uses this path, never `spawn_agent`.** `spawn_agent` with a `resume` argument refuses a session whose liveness **cannot be determined** — and `/supervisor:open` resumes precisely the sessions its own probe could not classify as live (Step 2A). That refusal is correct behaviour, but it would block the resume rather than route it.
+**The resume branch selects its path; not always this one.** `mode:` first, then liveness — single home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker)'s resume table. `interactive` → this path; headless/absent + **ABSENT** → § 3 headless resume (`cwd`, paced); **LIVE** → neither; **UNKNOWN**/**AMBIGUOUS** → this path.
 
 **This shape's single home is `claude-supervisor/docs/fleet-surface.md` § Spawn a worker**. This block is the call site, not the recipe. Read that section before changing the shape; every call site must match it.
 
