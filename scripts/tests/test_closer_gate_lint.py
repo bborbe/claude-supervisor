@@ -91,6 +91,45 @@ class CloserGateLintTest(unittest.TestCase):
                 code, _text, _record = self.mod.evaluate(self.payload(name), environ={})
                 self.assertEqual(expected, code)
 
+    def _closer(self, text):
+        path = os.path.join(self.dir, "t.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "assistant", "timestamp": "2026-11-05T20:00:00Z",
+                                 "message": {"role": "assistant", "content": [
+                                     {"type": "text", "text": "done\n👤 You: " + text}]}}) + "\n")
+        return self.mod.evaluate({"transcript_path": path, "stop_hook_active": False,
+                                  "session_id": "test-session"}, environ={})
+
+    def test_truncated_card_handle_is_refused_under_review(self):
+        code, text, record = self._closer("review: dismiss card `7e55adaf` — reply `ok`")
+        self.assertEqual(2, code)
+        self.assertIn("7e55adaf", text)
+        self.assertEqual("unpollable-handle", record["reason"])
+
+    def test_truncated_card_handle_is_refused_under_you_run(self):
+        code, text, _record = self._closer("you run: python3 attention-ask.py poll 7e55adaf")
+        self.assertEqual(2, code)
+        self.assertIn("7e55adaf", text)
+
+    def test_full_store_id_passes(self):
+        code, text, _record = self._closer("review: card " + "7e55adaf" * 4 + " — reply `seen`")
+        self.assertEqual(0, code)
+        self.assertEqual("", text)
+
+    def test_handle_spelled_with_id_is_refused(self):
+        for body in ("review: card id 7e55adaf — reply `ok`",
+                     "review: ITEM_ID: 7e55adaf — reply `ok`",
+                     "review: card `e5af` — reply `ok`"):
+            with self.subTest(body=body):
+                self.assertEqual(2, self._closer(body)[0])
+
+    def test_an_all_digit_number_is_not_a_card_handle(self):
+        self.assertEqual(0, self._closer("review: item 202611 in the queue — reply `ok`")[0])
+
+    def test_a_commit_sha_is_not_a_card_handle(self):
+        code, _text, _record = self._closer("review: commit 4af7bc13 on fix/x — reply `ok`")
+        self.assertEqual(0, code)
+
     def test_observed_pane_809_closer_names_github_pr_watch(self):
         _code, text, record = self.mod.evaluate(
             self.payload("01-github-pr-watch.jsonl"), environ={})
