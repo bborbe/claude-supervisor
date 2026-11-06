@@ -20,9 +20,12 @@ Three properties, each of which fails silently on its own:
 1. **The carve-out exists, once.** A deleted carve-out satisfies a naive count vacuously — zero
    copies is still "exactly one home" — so it must be *found*; and a second copy is the counter
    a grep cannot tell from the real one.
-2. **It lives in the router's delegate rule**, not in a step file. The rule it excepts is
-   there, and a carve-out filed away from its rule is read by nobody. It must name both rows,
-   the write tools a delegated run needs, and the read-only case that is not a run.
+2. **It lives in the router file**, not in a step file. The rule it excepts is there, and a
+   carve-out filed away from its rule is read by nobody. It must name both rows, the write tools
+   a delegated run needs, and the read-only case that is not a run. ⚠️ **The granularity is the
+   FILE, not the paragraph** — this check asserts the carve-out sits in `commands/fleet-drive.md`,
+   and cannot tell whether it sits beside the delegate rule or a hundred lines from it. Placement
+   within the file is a review question; only the file is mechanical.
 3. **Each leg states its own acting property at its own home.** The router is read on every
    tick; a step file is read when the round reaches that row — the moment the leg runs. A leg
    whose own file never says it acts can be run read-only by a sub-agent that did exactly what

@@ -12,7 +12,7 @@ When: every tick
 run that only reports `unactioned: <n> operator-flagged` without invoking the command has measured
 nothing — `opened=0` because the leg was told to print it is a failure, not a quiet round. It is one
 of the round's two acting legs, so the round's delegate rule carves it out — a sub-agent may run it
-only with write tools (`commands/fleet-drive.md` § the delegate rule).
+only with write tools (`commands/fleet-drive.md`, the delegate rule's carve-out).
 
 ⚠️ **Gate this leg on the round's debt — chain it, do not merely read it:**
 
