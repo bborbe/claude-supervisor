@@ -136,6 +136,10 @@ class StepFile(unittest.TestCase):
             text = fh.read()
         self.assertIn("Answer only these request_ids:", text)
         self.assertIn("Never** call `await_permission`", text)
+        # scoped mode must still hold-check, keyed on the caller-supplied session id
+        self.assertIn("The hold check still runs", text)
+        self.assertIn("<request_id>=<session_id>", text)
+        self.assertIn("<request_id>=<session_id>", self.text)
 
     def test_any_nonzero_exit_skips(self):
         self.assertIn("Any non-zero exit", self.text)

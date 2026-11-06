@@ -28,12 +28,12 @@ Check all three, in order. If any one fails, **do nothing**: answer no park, dis
 
 ## Dispatch
 
-With ≥ 1 `OWN` worker, collect the request ids from those rows' `pending_permissions` and dispatch the wrangler in **scoped mode**. It owns the decision policy, so do not restate it:
+With ≥ 1 `OWN` worker, collect each request id from those rows' `pending_permissions`, paired with that row's `session_id`. Dispatch the wrangler in **scoped mode** with those pairs; the `session_id` is what its hold check keys on. It owns the decision policy, so do not restate it:
 
 ```
 Task tool with:
   subagent_type: 'supervisor:goal-wrangler'
-  prompt: 'Answer only these request_ids: <comma-separated ids from OWN rows>. Escalate every other request.'
+  prompt: 'Answer only these request_ids: <request_id>=<session_id>, … (OWN rows only). Escalate every other request.'
 ```
 
 Scoped mode reads `pending_permissions` once and never waits on `await_permission`, so it costs the tick one bounded read rather than idle timeouts. The wrangler answers `allow` only when the request's `allowlist_entry` is non-null and no deny class matches. Everything it does not answer stays pending, as an escalation.
