@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.241.1
 
 - fix: `session-exit-record.py observe` now records the real exit status of a process-group kill — it arms a `kqueue` `NOTE_EXITSTATUS` watch on the pane pid, so the out-of-group observer writes `kind=signalled kill … signal=SIGTERM writer=observer` instead of `unknown-end … signal=unavailable`; no privilege needed. Polling + `unknown-end` stays as the fallback when no watch can be armed.
 
