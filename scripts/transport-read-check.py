@@ -44,7 +44,14 @@ SITE_LIST = {
     ("jump.py", "activate_pane_by_id"), ("jump.py", "activate_tab"),
     ("jump.py", "current_window"), ("jump.py", "main"),
     ("jump.py", "pane_sessions"), ("jump.py", "wezterm_panes"),
-    ("session-holds.py", "pane_title"),
+    # ⚠️ As of 2026-10-12 `pane_title` is a CALLER here, not the transport call: the
+    # `wezterm cli list` read moved into `panes()`, which the walk derives as the seed.
+    # It keeps the three-state contract — `None` on a failed query, `[]` only for a
+    # reachable WezTerm holding nothing — because the Hold-window predicate joins
+    # through it, and a failed read collapsed into "no panes" would silently un-hold
+    # every pane in the Hold window. `pane_title` stays listed for the closure, the
+    # same way every other caller is.
+    ("session-holds.py", "panes"), ("session-holds.py", "pane_title"),
     # added 2026-10-05 — `open-items.py`'s pane-existence probe, the read half of the new
     # origin record. `classify` asks whether an entry's recorded raising pane still exists;
     # `live_panes` is that query, and it must keep the same three-state contract as every
@@ -215,6 +222,7 @@ POPULATED = {
     ("mmf", "pane_lines"): "context\nEnter to select",
     ("sg", "pane_text"): "  ⎿  Goal set: Task \"t\" is finished.",
     ("ser", "_process_table"): "101 1 claude",
+    ("sh", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
 }
 
 
@@ -290,6 +298,7 @@ def main():
             ("mmf", "manager-menu-footer.py"),
             ("sg", "spawn-goal.py"),
             ("ser", "session-exit-record.py"),
+            ("sh", "session-holds.py"),
         )
     }
 
@@ -330,6 +339,7 @@ def main():
         ("sg", "pane_text", (1,)),
         # added 2026-11-06 — the observer's process-tree read, driven like `pvc._pid_ttys`.
         ("ser", "_process_table", ()),
+        ("sh", "panes", ()),
     ]
     if args.capture:
         print(f"== three-state captures — {os.path.abspath(args.tree)}")
