@@ -2516,6 +2516,8 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // A `role: human` row is the operator's own session, not a delegate (operator ruling
     // 2026-11-06, card 25c99a35): it opens on the vault's Claude launcher, never the
     // `-deepseek` worker default. Only the task's own `launcher:` still wins over that.
+    // ⚠️ `roleResolution` comes from the caller's `role` argument only — the task file's `role:`
+    // is not read here, so `/supervisor:open` must pass it (commands/open.md § 3.0).
     taskLauncher = applyHumanLauncherRule({
       role: roleResolution.role,
       resolved: taskLauncher,

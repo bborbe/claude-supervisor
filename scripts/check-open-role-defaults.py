@@ -36,6 +36,9 @@ def main() -> int:
     open_text = OPEN.read_text(encoding="utf-8")
     if "role: undecidable" in open_text:
         return fail("commands/open.md still carries the `role: undecidable` refusal — a missing role defaults to agent")
+    for stale in ("role: human is SKIPPED", "skipped H (human)", "is REFUSED and left unwritten"):
+        if stale in open_text:
+            return fail(f"commands/open.md still carries {stale!r} — human rows open DIRECT, missing fields default")
     if "docs/role-mode-matrix.md" not in open_text:
         return fail("commands/open.md does not cite docs/role-mode-matrix.md")
     if "role-mode-matrix.md" not in SURFACE.read_text(encoding="utf-8"):

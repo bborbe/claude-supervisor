@@ -30,8 +30,8 @@ The command **resolves** and **dispatches**. It never does the work, never runs 
 /supervisor:open --flagged → batch: select flag:true · in_progress · due today,
                              classify + WRITE any missing role: and mode: from the
                              task body, print the table, then open each eligible
-                             row in stable order. role: human is SKIPPED; a body
-                             with no signal is REFUSED and left unwritten.
+                             row in stable order. role: human → DIRECT; a field
+                             with no signal takes the role-mode-matrix default.
                              mode: by § Spawn a worker item 6, never ad hoc.
 ```
 
@@ -175,9 +175,9 @@ Resolve the task in this order — each selected row on the batch path, the sing
 
 1. **`role:` present** → use it. Never re-derive over a value already on disk; the field exists so the decision is made once. **`role: manager` is never a spawn target** — render `👤 YOURS` and skip the row (see the manager guard below).
 2. **`role:` absent** → classify it now from the task's **body** per matrix Rule 1, then write the result.
-3. **Body gives no basis to decide** → write the default `role: agent`, print `🏷️ defaulted role=agent`, and open the row.
+3. **Body gives no basis to decide** → the default (below) — never a refusal.
 
-**The classifying question and the three `human` signals are matrix Rule 1** — read them there, never restated here. A task naming `kubectl`, `ssh` or a deploy is still `agent`.
+**The classifying question and the three `human` signals are matrix Rule 1** — read them there, never restated here.
 
 ⚠️ **Classify from the BODY, never from the title or the frontmatter.**
 
@@ -227,9 +227,9 @@ Open a `human` row as **the operator's own session**, not a delegate:
 - window → `Direct` (`~/.cache/wezterm-role-map.json` → `Direct.window_id`), never `Agents`
 - chip → `cyan`, never `pink` — the colour is the fleet's only cue for which role a session plays
 - prompt → the same `/vault-cli:work-on-task "<task>"`, because anchoring the task is useful to a human too
-- launcher → the vault's Claude launcher unless the task has its own `launcher:` (server: `applyHumanLauncherRule`; `launcher_source` reads `manager-default`/`claude-sibling`/`task`)
+- launcher → matrix Rule 4 (Claude launcher); pass `role` to `spawn_agent` — the server applies it only when passed
 
-Print it as `→ DIRECT` rather than `⛔ SKIPPED`. The distinction that matters is **who drives the session**, not whether a session exists: a cyan tab in `Direct` with the task loaded is a workspace, and spawning a pink agent worker onto the same row would be the failure. One of those is a window assignment; the other is a delegation.
+Print it as `→ DIRECT`. The distinction that matters is **who drives the session**, not whether a session exists: a cyan tab in `Direct` with the task loaded is a workspace, and spawning a pink agent worker onto the same row would be the failure. One of those is a window assignment; the other is a delegation.
 
 ⚠️ **Some `human` rows are useful in a tab and some are not** — a water change gets nothing from a terminal. Do **not** invent a third category to sort them: open both, and let the operator close the one that does not help. A fourth bucket guessed from prose would be the keyword derivation again, wearing yet another hat.
 
@@ -640,7 +640,7 @@ wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- env SE
 
 ⚠️ **`env` is load-bearing, not decoration.** A spawned pane inherits wezterm's *mux server* environment, not this shell's — which is also why the `unset` prefix exists. Pass the writer path as an `env` assignment before `bash`, never inline inside the single-quoted `bash -lc` string, where it cannot expand.
 
-⚠️ **For a task, `<claude_script>` is the task's resolved launcher, not the vault default** — this path bypasses the server, so apply the rule yourself: `vault-cli task get "<task>" launcher --vault <vault>`, and when that is empty use the vault's `worker_launcher`. ⚠️ **Do NOT read the goal's launcher** — a goal states how its manager runs, never its workers (rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8).
+⚠️ **For a task, `<claude_script>` is the task's resolved launcher, not the vault default** — this path bypasses the server, so apply the rule yourself: `vault-cli task get "<task>" launcher --vault <vault>`, and when that is empty use the vault's `worker_launcher` — or, for `ROLE=human`, `manager_launcher`, else the `-claude` sibling (matrix Rule 4). ⚠️ **Do NOT read the goal's launcher** — a goal states how its manager runs, never its workers (rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8).
 
 **`--window-id` is what puts the tab in the right window** — without it the new tab inherits `WEZTERM_PANE` from the calling session. `${WINDOW_ID:+...}` keeps the flag off entirely when the map is unavailable.
 
@@ -695,7 +695,7 @@ The `cc-*` launchers `cd` into their own vault before starting Claude, so a vaul
 
   `nameSource: user` → correct. `nameSource: peer` → the `unset` prefix was missing or ineffective; the session is named after its spawner and the title-match session-connect cannot resolve it (see below).
 - state the branch taken in one line: `↪️ jumped` / `♻️ resumed <sid-prefix>` / `🆕 created <sid-prefix>` — plus the resolved type **and the resolved vault**, so a mis-resolution is visible immediately
-- **the worker runs where you asked, under that vault's launcher** — read `vault`, `launcher` and `model` back from the spawn response: `launcher` must equal the launcher the task resolves to (its `launcher:` frontmatter, else the vault `worker_launcher`, else the vault `claude_script` — never its goal's; `launcher_source` names which — rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8); the returned `cwd` must **not** be the `claude-supervisor` repo, and `model` must be the one that launcher sets.
+- **the worker runs where you asked, under that vault's launcher** — read `vault`, `launcher` and `model` back from the spawn response: `launcher` must equal the launcher the task resolves to (its `launcher:` frontmatter, else the vault `worker_launcher` — for `role: human` the Claude launcher, matrix Rule 4 — else the vault `claude_script` — never its goal's; `launcher_source` names which — rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8); the returned `cwd` must **not** be the `claude-supervisor` repo, and `model` must be the one that launcher sets.
 
 ### 4.1 Bind the task explicitly — `-n` does not self-link
 
