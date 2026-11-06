@@ -25,6 +25,7 @@ import { startAttentionPoll, storeDecisionRecord, timeoutDecisionRecord } from '
 import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
+import { WRAPPER_POLICY_INTERVAL_MS, createWrapperPolicyPoller } from './wrapper-policy.mjs'
 import { confinedCandidate, loadManagerAllowlist, matchManagerEntry } from './manager-allowlist.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
@@ -1181,17 +1182,21 @@ function launcherMcpConfigFile(claudeCmd) {
 //
 // ⚠️ A summary ("policy unavailable") is not enough: a reader has to know WHICH parts went
 // quiet, because they differ in consequence. The 15-minute deny changes behaviour most — a
-// prompt that used to die now parks indefinitely — and `decide()` is the one whose absence
-// turns every policy-allowed prompt into a human wait. Named individually so an operator
-// reading a spawn response can decide what to depend on, and so an answered park in a
-// wrapper-backed run is attributable to the wrapper's hook rather than to a policy tier
-// that never ran.
+// prompt that used to die now parks indefinitely. Named individually so an operator
+// reading a spawn response can decide what to depend on.
+//
+// `decide()` is no longer on the list: `wrapper-policy.mjs` polls the wrapper's parks and
+// answers what the policy allows or denies, so a policy-allowed prompt no longer waits for a
+// human. Its decisions carry `via: 'wrapper'` in `permissions.jsonl`, which is what keeps an
+// answered park attributable — `decided_by: 'policy'` was the policy, anything else was not.
 function wrapperPolicyGap({ shipping }) {
   return {
     // Why: the wrapper spends the child's single --permission-prompt-tool on its own MCP
     // tool, and the supervisor sees the child only as an event stream.
     reason: 'wrapper owns the permission hook',
-    not_run: ['decide()', 'manager allowlist', 'carried decision', '15-minute deny'],
+    not_run: ['manager allowlist', 'carried decision', '15-minute deny'],
+    // How the policy tier reaches the wrapper path instead of the hook it cannot register.
+    policy_via: `wrapper poll every ${WRAPPER_POLICY_INTERVAL_MS} ms`,
     // The shipping tier is a SEPARATE loss, not a restatement: permission_mode survives,
     // the flag-tier `settings` object does not, so a wrapper-backed shipping worker hits
     // the permission channel for the edits and git verbs its flag tier was meant to skip.
@@ -2920,13 +2925,14 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // `POST /api/1.0/sessions/{id}/answer` releases the park from any manager.
   //
   // ⚠️ **What the seam costs, named rather than implied.** The wrapper spends the child's
-  // single `--permission-prompt-tool` on its own MCP tool, so this server never sees a
-  // prompt and none of its policy machinery can run. `wrapperPolicyGap` carries that on the
-  // agent record AND the spawn response, because a reader who has to infer which parts went
-  // quiet will infer wrong in the direction that matters — the 15-minute deny changes
-  // behaviour most. Naming it also keeps a later verification honest: an answered park in a
-  // wrapper-backed run was answered by the wrapper's hook, never by `decide()`, so it is not
-  // evidence that the policy tier works.
+  // single `--permission-prompt-tool` on its own MCP tool, so this server's hook never sees a
+  // prompt. `decide()` reaches these workers anyway, by polling the wrapper's parks
+  // (`wrapper-policy.mjs`); the rest of the policy machinery does not. `wrapperPolicyGap`
+  // carries what is still missing on the agent record AND the spawn response, because a
+  // reader who has to infer which parts went quiet will infer wrong in the direction that
+  // matters — the 15-minute deny changes behaviour most. A policy-answered park is the one
+  // with a `decided_by: 'policy'`, `via: 'wrapper'` row in `permissions.jsonl`; any other
+  // answered park was answered by a manager, and is no evidence that the policy tier works.
   // ⚠️ A refused SUPERVISOR_WRAPPER_URL is refused HERE, not at import. `config.mjs` returns
   // the refusal rather than throwing so one mistyped variable cannot make the module
   // unimportable and take the whole server down at load; the cost is that the refusal has to
@@ -3089,7 +3095,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // inferring it from the absence of an error.
     policy: agent.policyPath,
     shipping: agent.shipping === true,
-    // ⚠️ Reported, never omitted. A caller that needs `decide()` or the 15-minute deny must
+    // ⚠️ Reported, never omitted. A caller that needs the manager allowlist or the 15-minute deny must
     // be able to refuse to depend on them HERE, rather than discover their absence when a
     // prompt parks forever. Named field by field — see wrapperPolicyGap.
     policy_gap: wrapperPolicyGap({ shipping: agent.shipping }),
@@ -3977,6 +3983,23 @@ const clusterTimer = setInterval(async () => {
   }
 }, HEARTBEAT_INTERVAL_MS)
 clusterTimer.unref?.()
+
+// The policy tier for wrapper-backed headless workers — see wrapper-policy.mjs for why it is a
+// supervisor-side poll rather than a hook. One roster read per tick for the whole fleet, and
+// none at all while this server holds no wrapper-backed worker.
+const wrapperPolicy = createWrapperPolicyPoller({
+  agents: () => agents.values(),
+  listSessions: () => listWrappedSessions({ baseUrl: config.wrapperUrl }),
+  answer: ({ sessionId, requestId, behavior }) =>
+    answerWrappedSession({ baseUrl: config.wrapperUrl, sessionId, requestId, behavior }),
+  decide,
+  logPermission,
+  log,
+})
+const wrapperPolicyTimer = setInterval(() => {
+  wrapperPolicy.run()
+}, WRAPPER_POLICY_INTERVAL_MS)
+wrapperPolicyTimer.unref?.()
 
 // The A2A equivalent of the cluster mirror: list the controller's workers and stamp every ledger
 // session it still runs, so an A2A worker reads live while it runs and dead within one sweep of
