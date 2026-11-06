@@ -173,6 +173,41 @@ class TestHeadlessAnswerability(unittest.TestCase):
                          attempts={self.CARD: {"status": "delivered"}})
         self.assertEqual(self._classify(f"approve: {self.CARD}", get=get), "gate-held")
 
+    def test_open_card_without_mechanism_is_held(self):
+        """An absent `answer_mechanism` is kept as a channel — fail closed."""
+        get = fake_store(items={self.CARD: {"state": "open"}})
+        self.assertEqual(self._classify(f"review: {self.CARD}", get=get), "gate-held")
+
+    def test_malformed_store_responses_fail_closed(self):
+        """Every shape the store should never return keeps the gate held."""
+        def make(listing=(), item=None, attempt=None):
+            def get(path):
+                base = path.split("?", 1)[0]
+                if base == "/api/1.0/attention":
+                    return listing
+                return attempt if base.endswith("/attempt") else item
+            return get
+        cases = {
+            "listing 404": make(listing=None),
+            "listing odd shape": make(listing={"data": []}),
+            "listing at limit": make(listing=[{"producer_id": OTHER}] * rp.OPEN_LIST_LIMIT),
+            "listing non-object entry": make(listing=["x"]),
+            "item non-object": make(listing=[], item=["x"]),
+            "answered, attempt 404": make(listing=[], item={"state": "answered", "answered_at": "t"}),
+            "answered, attempt odd": make(listing=[], item={"state": "answered", "answered_at": "t"},
+                                          attempt={"carrier": "x"}),
+        }
+        for name, get in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(self._classify(f"review: {self.CARD}", get=get), "gate-held")
+
+    def test_unexpected_exception_fails_closed(self):
+        import http.client
+
+        def broken(path):
+            raise http.client.IncompleteRead(b"")
+        self.assertEqual(self._classify(f"review: {self.CARD}", get=broken), "gate-held")
+
     def test_unreadable_store_fails_closed(self):
         def down(path):
             raise rp.StoreUnreadable("down")

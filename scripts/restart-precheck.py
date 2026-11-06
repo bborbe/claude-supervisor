@@ -71,6 +71,8 @@ STORE_ID_RE = re.compile(r"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])")
 
 HEADLESS_ENTRYPOINT = "sdk-cli"
 
+OPEN_LIST_LIMIT = 1000
+
 
 class StoreUnreadable(Exception):
     """The store could not answer — the caller must fail closed."""
@@ -90,7 +92,7 @@ def store_get(path):
         if err.code == 404:
             return None
         raise StoreUnreadable(f"store returned {err.code}") from err
-    except (urllib.error.URLError, OSError, ValueError) as err:
+    except Exception as err:
         raise StoreUnreadable(str(err)) from err
 
 
@@ -105,13 +107,19 @@ def card_is_live_channel(item_id, get=store_get):
     Absent → nothing left to answer.
     """
     item = get(f"/api/1.0/attention/{item_id}")
-    if not item:
+    if item is None:
         return False
+    if not isinstance(item, dict):
+        raise StoreUnreadable(f"item {item_id} is not an object")
     if item.get("state") == "open":
         return reaches_headless(item)
     if not item.get("answered_at"):
         return False
-    report = get(f"/api/1.0/attention/{item_id}/attempt") or {}
+    # ⚠️ A missing or malformed delivery report must not read as "never delivered" — that
+    # would release a gate on an unreadable store. Only a well-formed report decides.
+    report = get(f"/api/1.0/attention/{item_id}/attempt")
+    if not isinstance(report, dict) or "status" not in report:
+        raise StoreUnreadable(f"no readable delivery report for {item_id}")
     return report.get("status") == "delivered"
 
 
@@ -129,7 +137,11 @@ def gate_is_answerable(rec, closer, get=store_get):
         if has_open_own_card(rec.get("sessionId"), get):
             return True
         return any(card_is_live_channel(i, get) for i in ids)
-    except StoreUnreadable:
+    except Exception:
+        # ⚠️ Deliberately broad: ANY failure reading the store — transport, protocol,
+        # a shape this code does not expect — fails closed to `gate-held`. A crash here
+        # would also abort `close-worker.py`, and a narrow list is exactly how an
+        # unanticipated error class would slip through as a release.
         return True
 
 
@@ -143,10 +155,19 @@ def has_open_own_card(sid, get=store_get):
     """
     if not sid:
         return False
-    listing = get("/api/1.0/attention?limit=1000")
-    items = listing if isinstance(listing, list) else (listing or {}).get("items") or []
+    listing = get(f"/api/1.0/attention?limit={OPEN_LIST_LIMIT}")
+    if isinstance(listing, dict) and isinstance(listing.get("items"), list):
+        listing = listing["items"]
+    if not isinstance(listing, list):
+        # A 404 or an unexpected shape is not "no open cards" — fail closed.
+        raise StoreUnreadable("open-card listing unreadable")
+    if len(listing) >= OPEN_LIST_LIMIT:
+        # A full page may have cut off this session's own mirror card.
+        raise StoreUnreadable(f"open-card listing hit limit={OPEN_LIST_LIMIT}")
+    if not all(isinstance(i, dict) for i in listing):
+        raise StoreUnreadable("open-card listing holds a non-object entry")
     return any(i.get("producer_id") == sid and i.get("state", "open") == "open"
-               and reaches_headless(i) for i in items)
+               and reaches_headless(i) for i in listing)
 
 
 def reaches_headless(item):

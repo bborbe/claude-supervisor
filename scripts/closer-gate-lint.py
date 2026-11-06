@@ -101,7 +101,12 @@ HANDLE_GATE_RE = re.compile(r"^(approve|review|you run):\s*(.+)$", re.IGNORECASE
 # A card handle is hex named AS a card — after `card`, `item` or `poll`, optionally
 # backticked. ⚠️ Keyed on that word, never on bare hex: closers cite commit SHAs (7–40
 # hex) all the time, and a bare-hex rule would refuse every one of them.
-CARD_HANDLE_RE = re.compile(r"\b(?:card|item|poll)\b[\s:#`'\"]*([0-9a-f]{6,})\b", re.IGNORECASE)
+CARD_HANDLE_RE = re.compile(
+    r"(?:\b(?:card|item)(?:[ _-]?id)?|\bpoll)\b[\s:#`'\"=]*([0-9a-f]{4,})\b", re.IGNORECASE)
+
+# ⚠️ An all-digit run is a number (`item 202611`, a PR, a date), never a store id: the
+# store mints lowercase hex, and a run with no a–f letter is overwhelmingly a count.
+_HEX_LETTER_RE = re.compile(r"[a-f]", re.IGNORECASE)
 
 # `attention-ask.py` `STORE_ITEM_ID_LEN`: `poll` refuses any other length. ⚠️ The
 # predicate is "not pollable", never "not resolvable" — an 8-char prefix DOES resolve
@@ -112,7 +117,8 @@ STORE_ITEM_ID_LEN = 32
 
 def unpollable_handles(body):
     """Card handles in `body` that `poll` cannot address."""
-    return [h for h in CARD_HANDLE_RE.findall(body) if len(h) != STORE_ITEM_ID_LEN]
+    return [h for h in CARD_HANDLE_RE.findall(body)
+            if len(h) != STORE_ITEM_ID_LEN and _HEX_LETTER_RE.search(h)]
 
 # Derived from `~/.claude/CLAUDE.md` § After Opening a PR and § Execution Phase No Re-Ask
 # § Named No-Ask Actions. ⚠️ Order is irrelevant; the name is what the record carries.

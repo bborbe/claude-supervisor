@@ -116,6 +116,16 @@ class CloserGateLintTest(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertEqual("", text)
 
+    def test_handle_spelled_with_id_is_refused(self):
+        for body in ("review: card id 7e55adaf — reply `ok`",
+                     "review: ITEM_ID: 7e55adaf — reply `ok`",
+                     "review: card `e5af` — reply `ok`"):
+            with self.subTest(body=body):
+                self.assertEqual(2, self._closer(body)[0])
+
+    def test_an_all_digit_number_is_not_a_card_handle(self):
+        self.assertEqual(0, self._closer("review: item 202611 in the queue — reply `ok`")[0])
+
     def test_a_commit_sha_is_not_a_card_handle(self):
         code, _text, _record = self._closer("review: commit 4af7bc13 on fix/x — reply `ok`")
         self.assertEqual(0, code)
