@@ -280,7 +280,10 @@ export function applyHumanLauncherRule({ role, resolved, vaultLauncher, managerD
   // script (measured 2026-11-06: private-personal and seibert-brogrammers both do), which would
   // leave a human row on the worker model with the rule reporting success.
   const sibling = managerLauncherSibling(vaultLauncher)
-  if (sibling && sibling !== vaultLauncher && typeof exists === 'function' && exists(sibling)) {
+  // A vault whose own `claude_script` already IS the `-claude` launcher keeps it, ahead of any
+  // configured manager default (which may be `-deepseek`).
+  if (sibling && sibling === vaultLauncher) return { launcher: vaultLauncher, source: 'vault' }
+  if (sibling && typeof exists === 'function' && exists(sibling)) {
     return { launcher: sibling, source: 'claude-sibling' }
   }
   return resolveManagerLauncher({ vaultLauncher, managerDefault, exists })

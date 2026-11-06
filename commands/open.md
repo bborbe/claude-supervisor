@@ -32,7 +32,7 @@ The command **resolves** and **dispatches**. It never does the work, never runs 
                              task body, print the table, then open each eligible
                              row in stable order. role: human → DIRECT; a field
                              with no signal takes the role-mode-matrix default.
-                             mode: by § Spawn a worker item 6, never ad hoc.
+                             mode: by role-mode-matrix Rule 2, never ad hoc.
 ```
 
 ## Arguments
@@ -155,7 +155,7 @@ The count is a property of the day, not of the command — **never hardcode it a
 
 ✅ **Per-task mode is its own `mode:` field, never folded into `role:`** — a `role: agent` row with none of item 6's five watch-need signals is `headless`. Step 0.6 decides and writes it.
 
-⚠️ **Two fields, not one: `role` cannot answer the mode question.** The mapping is not restated here — owned by item 6 of § Spawn a worker.
+⚠️ **Two fields, not one: `role` cannot answer the mode question.** The mapping is matrix Rule 2 (`docs/role-mode-matrix.md`).
 
 **The asymmetry that justifies the fleet default staying `interactive` is owned by item 6 of § Spawn a worker**, together with the measurement behind it — stated once there rather than restated here.
 
@@ -567,7 +567,7 @@ Effective dir = the vault's `session_project_dir`, else no `cd`.
 
 **The carve-out is both-ways: pass the argument whenever the task's frontmatter declares a `mode:`, and omit it only when the field is absent.** `mode: headless` → `interactive=false`; `mode: interactive` → `interactive=true`. An absent `mode:` still means *omit the argument entirely*, not *pass interactive*. ⚠️ **Local rows only** — on a `docker` / `k8s` row this carve-out does not apply; `§ Spawn a worker` item 7 carries that branch.
 
-The rule that *produces* the value is not restated here — it has its single home in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6; this line is only the consumption.
+The rule that *produces* the value is not restated here — its home is matrix Rule 2 (`docs/role-mode-matrix.md`), whose signals live in fleet-surface item 6; this line is only the consumption.
 
 ⚠️ **A headless worker carries two standing constraints, and both are the spawner's, not the worker's** — its gates park with the session that spawned it, and its turn ends at READY rather than at completion. Both are stated in full in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6, together with the resume-path behaviour; read them there before opening one. ⚠️ **This paragraph previously concluded that `headless` was rare and never a guess**, which was the pre-2026-10-22 floor — recorded rather than quietly dropped, because it is what this file carried until the flip.
 

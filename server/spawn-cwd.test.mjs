@@ -356,3 +356,13 @@ test('an error from the worker rule passes through the human rule unchanged', ()
   const err = { error: 'boom' }
   assert.equal(applyHumanLauncherRule({ role: 'human', resolved: err, managerDefault: 'cc-private-claude' }), err)
 })
+
+test('a human row on a vault whose claude_script is already -claude keeps it over a -deepseek manager_launcher', () => {
+  const r = applyHumanLauncherRule({ role: 'human', resolved: { launcher: '/s/cc-private-deepseek', source: 'worker-default' }, vaultLauncher: '/s/cc-private-claude', managerDefault: '/s/cc-private-deepseek', exists: () => true })
+  assert.deepEqual(r, { launcher: '/s/cc-private-claude', source: 'vault' })
+})
+
+test('a human row with no sibling and no manager default falls back to claude_script', () => {
+  const r = applyHumanLauncherRule({ role: 'human', resolved: workerRule, vaultLauncher: '/s/cc-assistant-bro', exists: () => false })
+  assert.deepEqual(r, { launcher: '/s/cc-assistant-bro', source: 'vault' })
+})
