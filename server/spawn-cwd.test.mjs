@@ -329,6 +329,15 @@ test('a human row with no own launcher moves off the worker default onto the con
   assert.deepEqual(r, { launcher: '/s/cc-private-claude', source: 'manager-default' })
 })
 
+test('a human row takes the -claude sibling even when manager_launcher is configured to the -deepseek script', () => {
+  // The live config of 2026-11-06: manager_launcher == claude_script == cc-private-deepseek.
+  const r = applyHumanLauncherRule({
+    role: 'human', resolved: workerRule, vaultLauncher: '/s/cc-private-deepseek',
+    managerDefault: '/s/cc-private-deepseek', exists: (p) => p === '/s/cc-private-claude',
+  })
+  assert.deepEqual(r, { launcher: '/s/cc-private-claude', source: 'claude-sibling' })
+})
+
 test('a human row falls back to the -claude sibling when no manager default is configured', () => {
   const r = applyHumanLauncherRule({ role: 'human', resolved: workerRule, vaultLauncher: '/s/cc-private-deepseek', exists: (p) => p === '/s/cc-private-claude' })
   assert.deepEqual(r, { launcher: '/s/cc-private-claude', source: 'claude-sibling' })
@@ -346,4 +355,14 @@ test('an agent row is untouched by the human rule', () => {
 test('an error from the worker rule passes through the human rule unchanged', () => {
   const err = { error: 'boom' }
   assert.equal(applyHumanLauncherRule({ role: 'human', resolved: err, managerDefault: 'cc-private-claude' }), err)
+})
+
+test('a human row on a vault whose claude_script is already -claude keeps it over a -deepseek manager_launcher', () => {
+  const r = applyHumanLauncherRule({ role: 'human', resolved: { launcher: '/s/cc-private-deepseek', source: 'worker-default' }, vaultLauncher: '/s/cc-private-claude', managerDefault: '/s/cc-private-deepseek', exists: () => true })
+  assert.deepEqual(r, { launcher: '/s/cc-private-claude', source: 'vault' })
+})
+
+test('a human row with no sibling and no manager default falls back to claude_script', () => {
+  const r = applyHumanLauncherRule({ role: 'human', resolved: workerRule, vaultLauncher: '/s/cc-assistant-bro', exists: () => false })
+  assert.deepEqual(r, { launcher: '/s/cc-assistant-bro', source: 'vault' })
 })
