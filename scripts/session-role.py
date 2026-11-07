@@ -61,9 +61,11 @@ passes its own `_ssl_context()` / `_headers()`. The default (None) is the plain
 local HTTP store the watcher already talks to.
 """
 
+import glob
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -104,10 +106,29 @@ TIMEOUT = _timeout()
 _CACHE = {}
 _CACHE_LIMIT = 4096
 
+#: Where a manager records itself. `session-scope.py` states the rule: a goal page
+#: carries `claude_session_id:` for **the goal manager's own session**. That is a
+#: DECLARATION the manager writes on the page it runs, not an inference — and it
+#: is the source that covers the managers the ledger does not: measured 2026-11-07
+#: on the live fleet, **6 of 11** manager sessions had a ledger row and **3 more**
+#: were declared only by their goal page. Only directory listings and the first
+#: 600 bytes of each page are read, which is what keeps this cheap enough for a
+#: per-post path.
+PAGE_STAMP_DIRS = ("24 Goals", "23 Goals", "23 Topics")
+OBSIDIAN_DIR = os.environ.get("OBSIDIAN_DIR") or "~/Documents/Obsidian"
+
+#: session id -> (declared_by_page, checked_at). A positive is permanent (the
+#: page does not un-stamp itself); a negative is re-checked after this many
+#: seconds, because a manager's page is written around the time it opens and a
+#: premature "no" must not stick.
+_PAGE_CACHE = {}
+_PAGE_NEGATIVE_TTL = 300.0
+
 
 def reset_cache():
     """Drop the memoized roles. Tests use this; production never needs it."""
     _CACHE.clear()
+    _PAGE_CACHE.clear()
 
 
 def _ledger_role(session_id, endpoint=None, ssl_context=None, headers=None):
@@ -146,6 +167,44 @@ def _ledger_role(session_id, endpoint=None, ssl_context=None, headers=None):
     return str(row.get("role") or "").strip()
 
 
+def _scan_pages(session_id):
+    """True when a goal/topic page stamps `session_id` as its manager."""
+    root = os.path.expanduser(OBSIDIAN_DIR)
+    try:
+        vaults = [d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))]
+    except OSError:
+        return False
+    for vault in vaults:
+        for sub in PAGE_STAMP_DIRS:
+            directory = os.path.join(root, vault, sub)
+            if not os.path.isdir(directory):
+                continue
+            for path in glob.glob(os.path.join(directory, "*.md")):
+                try:
+                    with open(path, encoding="utf-8", errors="ignore") as fh:
+                        head = fh.read(600)
+                except OSError:
+                    continue
+                if session_id in head:
+                    return True
+    return False
+
+
+def _page_declares_manager(session_id):
+    """Memoized `_scan_pages`, with a TTL on the negative answer only."""
+    now = time.time()
+    hit = _PAGE_CACHE.get(session_id)
+    if hit is not None:
+        declared, checked_at = hit
+        if declared or (now - checked_at) < _PAGE_NEGATIVE_TTL:
+            return declared
+    declared = _scan_pages(session_id)
+    if len(_PAGE_CACHE) >= _CACHE_LIMIT:
+        _PAGE_CACHE.clear()
+    _PAGE_CACHE[session_id] = (declared, now)
+    return declared
+
+
 def resolve_producer_kind(
     session_id,
     declared="session",
@@ -172,13 +231,29 @@ def resolve_producer_kind(
         return _CACHE[key]
 
     role = _ledger_role(session_id, endpoint, ssl_context, headers)
+    if role == "manager":
+        return _remember(key, "manager")
+
+    # ⚠️ The ledger alone does not cover the fleet: measured 2026-11-07, only 6 of
+    # 11 live manager sessions had a ledger row — the hand-started and
+    # `/supervisor:open` wezterm-branch managers write none, and those are exactly
+    # the sessions whose cards need to read `manager`. The goal page is the other
+    # declaration: the manager writes `claude_session_id:` on the page it runs.
+    if _page_declares_manager(session_id):
+        return _remember(key, "manager")
+
     if role is None:
-        # Unreadable — answer the pre-change value and do NOT memoize it, or one
-        # transient blip would pin this session to `session` for the life of a
-        # weeks-long consumer.
+        # Neither source gave a definitive answer (the ledger was unreadable and
+        # no page declares it). Answer the pre-change value and do NOT memoize it,
+        # or one transient blip would pin this session to `session` for the life
+        # of a weeks-long consumer.
         return "session"
 
-    kind = "manager" if role == "manager" else "session"
+    return _remember(key, "session")
+
+
+def _remember(key, kind):
+    """Memoize a definitive answer, bounded."""
     if len(_CACHE) >= _CACHE_LIMIT:
         _CACHE.clear()
     _CACHE[key] = kind

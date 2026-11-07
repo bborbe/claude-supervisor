@@ -70,9 +70,14 @@ class ResolveProducerKindTest(unittest.TestCase):
         self.mod.reset_cache()
         self._original_urlopen = self.mod.urllib.request.urlopen
         self.calls = []
+        # The page scan reads the real vault; stub it out so every case below is
+        # about the ledger, and the page cases opt in explicitly.
+        self._original_scan = self.mod._scan_pages
+        self.mod._scan_pages = lambda session_id: False
 
     def tearDown(self):
         self.mod.urllib.request.urlopen = self._original_urlopen
+        self.mod._scan_pages = self._original_scan
         self.mod.reset_cache()
 
     def stub(self, role=None, error=None, raw=None):
@@ -180,6 +185,34 @@ class ResolveProducerKindTest(unittest.TestCase):
             self.calls[0].endswith("/session-ledger/a%2F..%2Fb%3Fx%3D1%23f"),
             self.calls[0],
         )
+
+    # --- the goal-page declaration ----------------------------------------
+    # Measured 2026-11-07: only 6 of 11 live manager sessions had a ledger row.
+    # The hand-started and `/supervisor:open` wezterm-branch managers write none,
+    # and their goal page is where they declare themselves.
+
+    def test_a_goal_page_declaration_resolves_manager_without_a_ledger_row(self):
+        self.stub(error=urllib.error.HTTPError("u", 404, "not found", {}, None))
+        self.mod._scan_pages = lambda session_id: session_id == MANAGER_ID
+        self.assertEqual(self.mod.resolve_producer_kind(MANAGER_ID), "manager")
+
+    def test_a_goal_page_declaration_does_not_override_an_explicit_kind(self):
+        self.stub(role="manager")
+        self.mod._scan_pages = lambda session_id: True
+        self.assertEqual(self.mod.resolve_producer_kind(MANAGER_ID, "cron"), "cron")
+
+    def test_a_page_declared_manager_is_memoized(self):
+        self.stub(error=urllib.error.URLError("down"))
+        scans = {"n": 0}
+
+        def scan(session_id):
+            scans["n"] += 1
+            return True
+
+        self.mod._scan_pages = scan
+        self.mod.resolve_producer_kind(MANAGER_ID)
+        self.mod.resolve_producer_kind(MANAGER_ID)
+        self.assertEqual(scans["n"], 1)
 
     def test_empty_session_id_resolves_session_without_a_read(self):
         self.stub(role="manager")
