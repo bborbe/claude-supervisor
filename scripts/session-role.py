@@ -64,6 +64,7 @@ local HTTP store the watcher already talks to.
 import glob
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -117,18 +118,30 @@ _CACHE_LIMIT = 4096
 PAGE_STAMP_DIRS = ("24 Goals", "23 Goals", "23 Topics")
 OBSIDIAN_DIR = os.environ.get("OBSIDIAN_DIR") or "~/Documents/Obsidian"
 
-#: session id -> (declared_by_page, checked_at). A positive is permanent (the
-#: page does not un-stamp itself); a negative is re-checked after this many
-#: seconds, because a manager's page is written around the time it opens and a
-#: premature "no" must not stick.
-_PAGE_CACHE = {}
-_PAGE_NEGATIVE_TTL = 300.0
+#: The `claude_session_id:` FRONTMATTER FIELD, not a bare substring. ⚠️ A page
+#: can mention a session id anywhere — `metrics_sessions`, a Progress line, a
+#: link — and matching the raw id would label that worker's card `manager`, the
+#: exact inverse of the property this module protects. Anchored to the key, the
+#: same shape `session-scope.py` reads.
+_PAGE_STAMP = re.compile(r'^claude_session_id:\s*["\']?([0-9a-fA-F-]{36})', re.M)
+
+#: The whole stamp index, rebuilt at most once per TTL. ⚠️ A scan per SESSION
+#: measured 257 ms cold, which is too slow for a producer mid-turn; one shared
+#: scan per window makes every lookup O(1) and bounds the cost to one walk.
+_PAGE_INDEX = {"ids": None, "built_at": 0.0}
+_PAGE_INDEX_TTL = 300.0
+
+#: Sessions already proven to be declared managers. Grows only — a page does not
+#: un-stamp itself — so a manager pays no scan after the first hit.
+_KNOWN_MANAGERS = set()
 
 
 def reset_cache():
     """Drop the memoized roles. Tests use this; production never needs it."""
     _CACHE.clear()
-    _PAGE_CACHE.clear()
+    _PAGE_INDEX["ids"] = None
+    _PAGE_INDEX["built_at"] = 0.0
+    _KNOWN_MANAGERS.clear()
 
 
 def _ledger_role(session_id, endpoint=None, ssl_context=None, headers=None):
@@ -167,13 +180,18 @@ def _ledger_role(session_id, endpoint=None, ssl_context=None, headers=None):
     return str(row.get("role") or "").strip()
 
 
-def _scan_pages(session_id):
-    """True when a goal/topic page stamps `session_id` as its manager."""
+def _scan_pages():
+    """Every session id a goal/topic page stamps as its manager.
+
+    Returns a set, so one walk serves every session rather than one walk per
+    session. An unreadable root is an empty set — the safe direction.
+    """
+    ids = set()
     root = os.path.expanduser(OBSIDIAN_DIR)
     try:
         vaults = [d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))]
     except OSError:
-        return False
+        return ids
     for vault in vaults:
         for sub in PAGE_STAMP_DIRS:
             directory = os.path.join(root, vault, sub)
@@ -185,24 +203,31 @@ def _scan_pages(session_id):
                         head = fh.read(600)
                 except OSError:
                     continue
-                if session_id in head:
-                    return True
-    return False
+                match = _PAGE_STAMP.search(head)
+                if match:
+                    ids.add(match.group(1).lower())
+    return ids
+
+
+def _page_stamp_index():
+    """The stamp set, rebuilt at most once per `_PAGE_INDEX_TTL`."""
+    now = time.time()
+    if _PAGE_INDEX["ids"] is not None and (now - _PAGE_INDEX["built_at"]) < _PAGE_INDEX_TTL:
+        return _PAGE_INDEX["ids"]
+    _PAGE_INDEX["ids"] = _scan_pages()
+    _PAGE_INDEX["built_at"] = now
+    return _PAGE_INDEX["ids"]
 
 
 def _page_declares_manager(session_id):
-    """Memoized `_scan_pages`, with a TTL on the negative answer only."""
-    now = time.time()
-    hit = _PAGE_CACHE.get(session_id)
-    if hit is not None:
-        declared, checked_at = hit
-        if declared or (now - checked_at) < _PAGE_NEGATIVE_TTL:
-            return declared
-    declared = _scan_pages(session_id)
-    if len(_PAGE_CACHE) >= _CACHE_LIMIT:
-        _PAGE_CACHE.clear()
-    _PAGE_CACHE[session_id] = (declared, now)
-    return declared
+    """True when a goal/topic page stamps this session as its manager."""
+    key = session_id.lower()
+    if key in _KNOWN_MANAGERS:
+        return True
+    if key in _page_stamp_index():
+        _KNOWN_MANAGERS.add(key)
+        return True
+    return False
 
 
 def resolve_producer_kind(

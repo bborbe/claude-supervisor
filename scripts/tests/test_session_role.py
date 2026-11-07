@@ -25,6 +25,8 @@ Run: python3 -m unittest discover -s scripts/tests -v
 import importlib.util
 import json
 import os
+import shutil
+import tempfile
 import unittest
 import urllib.error
 
@@ -73,7 +75,7 @@ class ResolveProducerKindTest(unittest.TestCase):
         # The page scan reads the real vault; stub it out so every case below is
         # about the ledger, and the page cases opt in explicitly.
         self._original_scan = self.mod._scan_pages
-        self.mod._scan_pages = lambda session_id: False
+        self.mod._scan_pages = lambda: set()
 
     def tearDown(self):
         self.mod.urllib.request.urlopen = self._original_urlopen
@@ -193,26 +195,27 @@ class ResolveProducerKindTest(unittest.TestCase):
 
     def test_a_goal_page_declaration_resolves_manager_without_a_ledger_row(self):
         self.stub(error=urllib.error.HTTPError("u", 404, "not found", {}, None))
-        self.mod._scan_pages = lambda session_id: session_id == MANAGER_ID
+        self.mod._scan_pages = lambda: {MANAGER_ID.lower()}
         self.assertEqual(self.mod.resolve_producer_kind(MANAGER_ID), "manager")
 
     def test_a_goal_page_declaration_does_not_override_an_explicit_kind(self):
         self.stub(role="manager")
-        self.mod._scan_pages = lambda session_id: True
+        self.mod._scan_pages = lambda: {MANAGER_ID.lower()}
         self.assertEqual(self.mod.resolve_producer_kind(MANAGER_ID, "cron"), "cron")
 
-    def test_a_page_declared_manager_is_memoized(self):
+    def test_one_page_walk_serves_every_session(self):
+        """A per-session walk measured 257 ms; the index must be shared."""
         self.stub(error=urllib.error.URLError("down"))
-        scans = {"n": 0}
+        walks = {"n": 0}
 
-        def scan(session_id):
-            scans["n"] += 1
-            return True
+        def scan():
+            walks["n"] += 1
+            return {MANAGER_ID.lower()}
 
         self.mod._scan_pages = scan
-        self.mod.resolve_producer_kind(MANAGER_ID)
-        self.mod.resolve_producer_kind(MANAGER_ID)
-        self.assertEqual(scans["n"], 1)
+        self.assertEqual(self.mod.resolve_producer_kind(MANAGER_ID), "manager")
+        self.assertEqual(self.mod.resolve_producer_kind(WORKER_ID), "session")
+        self.assertEqual(walks["n"], 1, "the second session must reuse the index")
 
     def test_empty_session_id_resolves_session_without_a_read(self):
         self.stub(role="manager")
@@ -238,6 +241,62 @@ class ResolveProducerKindTest(unittest.TestCase):
         self.mod.reset_cache()
         self.mod.resolve_producer_kind(MANAGER_ID)
         self.assertEqual(len(self.calls), 2)
+
+
+class ScanPagesTest(unittest.TestCase):
+    """The REAL filesystem walk — every other case stubs it out.
+
+    ⚠️ The distinction under test is the one the review caught: the page must
+    declare the session through the `claude_session_id:` FRONTMATTER FIELD, not
+    by merely mentioning the id. A goal page that lists a worker's id in
+    `metrics_sessions` or a Progress line would otherwise label that worker's
+    card `manager` — the inverse of the property this module protects.
+    """
+
+    def setUp(self):
+        self.mod = load()
+        self.mod.reset_cache()
+        self._original_dir = self.mod.OBSIDIAN_DIR
+        self.tmp = tempfile.mkdtemp()
+        self.mod.OBSIDIAN_DIR = self.tmp
+
+    def tearDown(self):
+        self.mod.OBSIDIAN_DIR = self._original_dir
+        self.mod.reset_cache()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def page(self, vault, sub, name, body):
+        directory = os.path.join(self.tmp, vault, sub)
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, name), "w", encoding="utf-8") as fh:
+            fh.write(body)
+
+    def test_frontmatter_stamp_declares_the_manager(self):
+        self.page("v", "24 Goals", "G.md", f"---\nclaude_session_id: {MANAGER_ID}\n---\n")
+        self.assertIn(MANAGER_ID.lower(), self.mod._scan_pages())
+
+    def test_a_bare_mention_does_not_declare(self):
+        """The review's defect: an id listed anywhere is not a declaration."""
+        self.page(
+            "v", "24 Goals", "G.md",
+            f"---\nclaude_session_id: {MANAGER_ID}\n---\n\n"
+            f"metrics_sessions:\n  - session_id: {WORKER_ID}\n",
+        )
+        stamps = self.mod._scan_pages()
+        self.assertNotIn(WORKER_ID.lower(), stamps, "a listed worker must not read manager")
+        self.assertIn(MANAGER_ID.lower(), stamps)
+
+    def test_an_unstamped_page_declares_nothing(self):
+        self.page("v", "24 Goals", "G.md", "---\ntitle: x\n---\n")
+        self.assertNotIn(MANAGER_ID.lower(), self.mod._scan_pages())
+
+    def test_a_topic_page_stamp_also_declares(self):
+        self.page("v", "23 Topics", "T.md", f"---\nclaude_session_id: {MANAGER_ID}\n---\n")
+        self.assertIn(MANAGER_ID.lower(), self.mod._scan_pages())
+
+    def test_an_unreadable_root_declares_nothing(self):
+        self.mod.OBSIDIAN_DIR = os.path.join(self.tmp, "does-not-exist")
+        self.assertEqual(self.mod._scan_pages(), set())
 
 
 if __name__ == "__main__":
