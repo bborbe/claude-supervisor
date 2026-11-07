@@ -398,19 +398,15 @@ the caller reads to know which flag was used**: `complete` = `--exact`, `incompl
 could not execute, never omitted and never a bare `0` in its place. ⚠️ **The three row lists
 (`crash-loop:`, `cannot-tell:`, `park-nudge:`) carry no `=` and so are not counts** — they are
 printed by the caller as the round's report, and a count cannot be reconciled against a subject
-list. ⚠️ **Those lines and the 1 KB cap meet at a limit, and the counts win.** When the row lines
-would push the hand-back past 1 KB, emit the counts plus as many lines as fit, add
-`truncated=<n>` naming how many you dropped, and write the full lists to
-`~/.claude/state/fleet-handback/<round timestamp>.keepalive` (`mkdir -p` the directory, write
-`<path>.tmp` with `Write`, publish it with `mv`; the round timestamp is sanitized by the rule
-`agents/fleet-sweep-reader.md` § `<output_format>` states, so this file and the round's `.digest`
-cannot drift apart). ⚠️ **It is pruned, not left to grow:** the store's bound is
+list. ⚠️ **Those three lines are the only ones that truncate — never a count.** When they do, the
+full lists go to `~/.claude/state/fleet-handback/<round timestamp>.keepalive` (`mkdir -p` the
+directory, write `<path>.tmp` with `Write`, publish it with `mv`; the round timestamp is sanitized
+by the rule `agents/fleet-sweep-reader.md` § `<output_format>` states, so this file and the round's
+`.digest` cannot drift apart). ⚠️ **It is pruned, not left to grow:** the store's bound is
 `agents/fleet-sweep-reader.md`'s prune clause, which covers `.keepalive` beside `.digest` and
-`.drive` — that clause is its single home, not restated here. The caller reads those `n` from
-that file. The rule is
-`docs/handback-contract.md` § The shape — the truncation exception — and is not restated here. A
-round small enough to fit is never truncated, which is the normal case; when nothing is truncated,
-`payload=—`. ⚠️ **The hand-back carries no rules**: no procedure text, no population, no guard — those
+`.drive` — that clause is its single home, not restated here. ⚠️ **The cap, `truncated=`, and what
+the caller does with the payload are `docs/handback-contract.md` § The shape — the truncation
+exception — and are not restated here.** When nothing is truncated, `payload=—`. ⚠️ **The hand-back carries no rules**: no procedure text, no population, no guard — those
 live in this file, and a caller that re-reads them here pays for them every round.
 
 **Digest** — never restate it in the hand-back, and never write a count the digest does not

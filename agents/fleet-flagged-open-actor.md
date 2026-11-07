@@ -2,8 +2,8 @@
 name: fleet-flagged-open-actor
 description: Perform the fleet round's flagged-open leg — invoke `/supervisor:open --flagged` so every row the operator marked for today is opened, print every `REFUSED` line verbatim, open nothing a refusal names, and record the leg's `operator-flagged` count in the round's digest — then return the ≤ 1 KB verdict hand-back. Dispatched by router row 5c of /supervisor:fleet-drive (armed by /supervisor:fleet-loop, or run by hand). It acts; a read-only run is not a run of it.
 model: sonnet
-tools: Read, Bash, Skill, Write
-allowed-tools: Bash(python3:*), Bash(mkdir:*), Bash(mv:*)
+tools: Read, Bash, Skill, Write, mcp__supervisor__spawn_agent, mcp__supervisor__send_agent_message
+allowed-tools: Bash(python3:*), Bash(mkdir:*), Bash(mv:*), mcp__supervisor__spawn_agent, mcp__supervisor__send_agent_message
 color: red
 ---
 
@@ -17,8 +17,26 @@ measured nothing — `opened=0` because the leg was told to print it is a failur
 round. It is one of the round's two acting legs, so the round's delegate rule carves it out —
 and you are the write-granted delegate that carve-out names (`commands/fleet-drive.md`, the
 delegate rule's carve-out). You hold `Bash` (the digest count), `Skill` (the command
-invocation below) and `Write` (only the truncation payload `<output_format>` names) for exactly
-that reason.
+invocation below), `Write` (only the truncation payload `<output_format>` names) and the two
+supervisor tools the batch's create path needs for exactly that reason.
+
+⚠️ **Those two tools are the leg, not a convenience.** `commands/open.md` § 3 states that the
+`spawn_agent` path *"requires `mcp__supervisor__*` in this session — its absence fails silently"*,
+and its fallback spawns through wezterm, which the same section states *"cannot produce a headless
+worker — a wezterm spawn is a tab by construction"* and writes no spawn-ledger row. A leg holding
+`Skill` but neither tool therefore runs the batch on the fallback: it opens **tabs**, never a
+headless worker, and its `opened` count reports tabs. Each grant is held for one call and nothing
+else:
+
+- **`mcp__supervisor__spawn_agent`** — the create branch itself (§ 3). It takes the work prompt as
+  an argument, resolves the role's window and colour in-process, and is the only path that binds
+  the spawned session and writes the ledger row.
+- **`mcp__supervisor__send_agent_message`** — the transport a `goal_loop: true` row needs *after*
+  its spawn: that row's prompt is the `goal-condition.py` output, and the work command is sent
+  afterwards on the `spawn_agent` path (§ 3.2). Without it such a row is spawned and never told
+  what to do, which reads as opened.
+
+Neither is a decision: the selector, the gates and the refusals stay `commands/open.md`'s.
 
 `/supervisor:open --flagged` has been specified since before the `flag_set_by` field existed and
 had **no caller**: `commands/open.md` defines the batch, `commands/steps/goal-spawn.md`
@@ -43,7 +61,9 @@ the gate.
 - **Your only writes are the digest count step 3 names and, only when the hand-back must be
   truncated, the payload file `<output_format>` names.** Nothing else on disk. ⚠️ **A command
   you invoke writes its own page** — `/supervisor:open --flagged` approves and stamps the task
-  pages it opens; that is its write, not yours.
+  pages it opens; that is its write, not yours. ⚠️ **The spawn writes the ledger row** —
+  `spawn_agent` records each worker in the spawn ledger; that is the server's write, not yours
+  either, and it is why the headless path is the one this leg must take.
 </constraints>
 
 <inputs>
@@ -139,6 +159,13 @@ one `refused:` line per refusal after them:
 legs=written|UNKNOWN · operator-flagged=<n>|not-run · opened=<n> · refused=<n> · truncated=<n> · payload=<path>|—
 ```
 
+⚠️ **`opened` is the batch's own footer count, never a count you compute.** `/supervisor:open
+--flagged` closes its table with `Opened N · approved A · …` (`commands/open.md` § Step 0.6's
+footer), and that `N` is the value here. A hand-count of the rows you believe it opened is a
+second selector, and it can disagree with the batch it claims to report — the footer is the only
+place the command states what it actually opened. `refused` is likewise the number of `refused:`
+lines below, not a third reading.
+
 then, one line each, every refusal exactly as the command printed it:
 
 ```text
@@ -148,18 +175,16 @@ refused: REFUSED | <vault> | <name> | flag_set_by=<who> | not the operator — n
 ⚠️ **Every `REFUSED` line the command printed appears here verbatim**, one `refused:` line each,
 because the caller prints them and the operator reads them — a count cannot be reconciled
 against a list of names. ⚠️ **`flag_set_by=` inside a `refused:` line is the command's own text,
-not a hand-back key** — never emit a `flag_set_by=` count of your own. ⚠️ **When those lines would push the hand-back past 1 KB, the truncation
-rule is `docs/handback-contract.md`'s and is not restated here** — emit the counts plus as many
-lines as fit, add `truncated=<n>`, write the full list to
-`<state dir>/<round timestamp>.flagged-open` — `<state dir>` is the caller's when it passed one,
-`~/.claude/state/fleet-handback/` otherwise — (`mkdir -p` the directory, write `<path>.tmp` with
-`Write`, then publish it with `mv`; the round timestamp is sanitized by the rule
+not a hand-back key** — never emit a `flag_set_by=` count of your own. ⚠️ **Those `refused:` lines are the only ones that truncate — never a count.** When they do, the
+full list goes to `<state dir>/<round timestamp>.flagged-open` — `<state dir>` is the caller's when
+it passed one, `~/.claude/state/fleet-handback/` otherwise — (`mkdir -p` the directory, write
+`<path>.tmp` with `Write`, then publish it with `mv`; the round timestamp is sanitized by the rule
 `agents/fleet-sweep-reader.md` § `<output_format>` states, so this file and the round's `.digest`
 cannot drift apart). ⚠️ **It is pruned, not left to grow:** the store's bound is
 `agents/fleet-sweep-reader.md`'s prune clause, which covers `.flagged-open` beside `.digest` and
-`.drive` — that clause is its single home, not restated here. The caller prints the remaining
-`n` from that file verbatim. A batch small enough to fit is never truncated, which is the
-normal case; when nothing is truncated, `payload=—`. ⚠️ **The hand-back carries no rules**: no `flag_set_by`
+`.drive` — that clause is its single home, not restated here. ⚠️ **The cap, `truncated=`, and what
+the caller does with the payload are `docs/handback-contract.md` § The shape — the truncation
+exception — and are not restated here.** When nothing is truncated, `payload=—`. ⚠️ **The hand-back carries no rules**: no `flag_set_by`
 vocabulary, no blast-radius note, no selector description — those live in this file and in
 `commands/open.md`.
 
@@ -170,6 +195,8 @@ carry. The caller renders `LEGS` from the digest, not from your counts.
 <success_criteria>
 - `/supervisor:open --flagged` was invoked, and every row it opened was opened by it — no row
   opened by hand.
+- Every row opened through the **headless** create path (`spawn_agent`), never the wezterm
+  fallback: a tab is not an opened worker, and a fallback run reports `opened=` for tabs.
 - Every `REFUSED` line reaches the caller verbatim, and nothing it names was opened.
 - `operator-flagged` was written to the round's digest, or `not-run` with the reason at key
   granularity.
