@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the bundled Bash allow list no longer carries `sort`, `tree` or `rg`.** The list's own rule is that a prefix appears only when EVERY extension of it is read-only, and those three break it: `sort -o FILE`, `sort --output=FILE` and `sort --compress-program=PROG`, plus `tree -o FILE`, write a file or run a program, and `rg --pre=PROG` runs a program. A prefix rule cannot exclude a flag, so the only honest fix is not to list the command — exactly the rule `server/manager-allowlist.test.mjs` already pins for the manager allowlist. Caught after the allow list merged: `sort -o ~/.ssh/authorized_keys f` and `rg --pre "bash -c id" pat f` both read `allow`. New `server/policy-bundled.test.mjs` pins the shipped file, including every refusal the change was scoped to keep (`sed`, `find`, `git`, `python3`, `xargs`, `awk`, `env`, for-loops) and the `cd`-chain boundary.
+
 ## v0.248.0
 
 - feat: **`server/policy.json` gains anchored Bash allow rules, so read-only commands stop parking for the operator.** The file carried **no Bash allow rule at all**, so `decide()` escalated every Bash command — `ls -la /tmp` included — and a 7-day board readout measured **7 👍 / 874 👎 (score 1 %)** with roughly 800 of the 👎 permission cards. Each new entry sets `matchType: "command"` (an anchored whole-token prefix, so `ls` covers `ls -la /tmp` but not `lsblk`) and is listed only where EVERY extension of the prefix is read-only — which is why `sed` (`-n -i`), `find` (`-delete`) and every `git` prefix (a repo's own config runs code via `core.fsmonitor`) stay absent. `cd` is listed because `policy.mjs` splits a chained command and allows it only when every segment is allowed on its own, so `cd /tmp && git status` still escalates while `cd /tmp && rm -rf /` still reaches the deny rule. Verified: **30/30** in `server/policy.test.mjs`, and `git status`, `git push origin main`, `lsblk` and `for … do … done` all still escalate.
