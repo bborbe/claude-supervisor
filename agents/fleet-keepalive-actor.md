@@ -2,8 +2,8 @@
 name: fleet-keepalive-actor
 description: Perform the fleet round's keep-alive leg — restart lapsed topic managers, resume the park watches whose re-check has passed, nudge watchers past the park threshold, and resume workers whose session died — then record the leg's `lapsed-managers` and `dead-workers` counts in the round's digest and return the ≤ 1 KB verdict hand-back. Dispatched by router row 5b of /supervisor:fleet-drive (armed by /supervisor:fleet-loop, or run by hand). It acts; a read-only run is not a run of it.
 model: sonnet
-tools: Read, Bash, Skill, SendMessage
-allowed-tools: Bash(python3:*), Bash(vault-cli:*), Bash(grep:*), Bash(basename:*), Bash(printf:*), Bash(echo:*), Bash(head:*), Bash(tr:*)
+tools: Read, Bash, Skill, SendMessage, Write
+allowed-tools: Bash(python3:*), Bash(vault-cli:*), Bash(grep:*), Bash(basename:*), Bash(printf:*), Bash(echo:*), Bash(head:*), Bash(tr:*), Bash(mkdir:*), Bash(mv:*)
 color: red
 ---
 
@@ -46,7 +46,8 @@ whether you may act.
   this leg's `worker-keepalive.py` each own a different population (step 4's last clause).
 - **Your only writes are the ones the procedures name, and nothing else on disk:** the two digest
   counts (steps 1 and 4), the per-key `--not-run` reason (step 5), the `--record-resume` stamps,
-  and step 2's `park-event.py release` and `register --repark` calls. ⚠️ **A command you invoke
+  step 2's `park-event.py release` and `register --repark` calls, and — only when the hand-back
+  must be truncated — the payload file `<output_format>` names. ⚠️ **A command you invoke
   writes its own page** — `/supervisor:open` and `/supervisor:restart` stamp the task or topic
   they resume; that is their write, not yours.
 </constraints>
@@ -344,7 +345,7 @@ into its `LEGS` section, through `fleet-legs.py`, exactly as steps 1 and 4 above
 
 ```text
 legs=written|UNKNOWN · lapsed-managers=<n>|not-run · dead-workers=<n>|not-run · dead-scan=complete|incomplete
-restarted=<n> · resumed=<n> · parked-due=<n> · nudged=<n> · undelivered=<n>
+restarted=<n> · resumed=<n> · parked-due=<n> · nudged=<n> · undelivered=<n> · truncated=<n> · payload=<path>|—
 crash-loop: <subject> · <MANAGER|WORKER>
 cannot-tell: <name> · <what could not be decided>
 park-nudge: <the summary line, verbatim>
@@ -358,7 +359,16 @@ the caller reads to know which flag was used**: `complete` = `--exact`, `incompl
 could not execute, never omitted and never a bare `0` in its place. ⚠️ **The three row lists
 (`crash-loop:`, `cannot-tell:`, `park-nudge:`) carry no `=` and so are not counts** — they are
 printed by the caller as the round's report, and a count cannot be reconciled against a subject
-list. ⚠️ **The hand-back carries no rules**: no procedure text, no population, no guard — those
+list. ⚠️ **Those lines and the 1 KB cap meet at a limit, and the counts win.** When the row lines
+would push the hand-back past 1 KB, emit the counts plus as many lines as fit, add
+`truncated=<n>` naming how many you dropped, and write the full lists to
+`~/.claude/state/fleet-handback/<round timestamp>.keepalive` (`mkdir -p` the directory, write
+`<path>.tmp` with `Write`, publish it with `mv`; the round timestamp is sanitized by the rule
+`agents/fleet-sweep-reader.md` § `<output_format>` states, so this file and the round's `.digest`
+cannot drift apart). The caller reads those `n` from that file. The rule is
+`docs/handback-contract.md` § The shape — the truncation exception — and is not restated here. A
+round small enough to fit is never truncated, which is the normal case; when nothing is truncated,
+`payload=—`. ⚠️ **The hand-back carries no rules**: no procedure text, no population, no guard — those
 live in this file, and a caller that re-reads them here pays for them every round.
 
 **Digest** — never restate it in the hand-back, and never write a count the digest does not
@@ -373,5 +383,6 @@ carry. The caller renders `LEGS` from the digest, not from your counts.
   the half that could not run wrote its own `--not-run` reason at key granularity.
 - No fresh spawn happened where a recorded id existed, and no `--record-resume` was written for
   a resume the liveness instrument did not read `LIVE`.
-- The hand-back is ≤ 1 KB and carries every key above, including the zeros.
+- The hand-back is ≤ 1 KB (or carries its own `truncated=` plus a payload) and carries every key
+  above, including the zeros.
 </success_criteria>

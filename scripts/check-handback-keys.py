@@ -101,6 +101,9 @@ LEGS = {
         "required": (
             "legs", "lapsed-managers", "dead-workers", "dead-scan",
             "restarted", "resumed", "parked-due", "nudged", "undelivered",
+            # the size-cap exception's two keys — the per-subject row lists have no count to
+            # reconcile against, so a dropped row is invisible without them
+            "truncated", "payload",
         ),
     },
     "supervisor:fleet-flagged-open-actor": {
