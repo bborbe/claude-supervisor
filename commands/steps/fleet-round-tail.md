@@ -26,7 +26,7 @@ It prints `INCOMPLETE ROUND — skipped: <step> — <why>` for every field that 
 
 `commands/steps/output-shape.md` item 14 names `scripts/fleet-legs.py --check` as *"the mechanical guard"* for the acting legs. Nothing invoked it — no router row, no leg, no tail — so the guard was correct and its verdict never reached a render, and a round whose legs never spoke still printed the sweep's seed `not run — no reading recorded this round` as if it were a reading.
 
-Measured 2026-11-07 on `~/.claude/state/fleet-handback/2026-11-06T23-46Z.digest`: its `LEGS` section still held the sweep's seed and `--check` exited **1** naming all three keys. A correct verdict nobody read — and across the 100 digests then on disk, **0** carried any `unactioned:` line.
+Measured 2026-11-07 on `~/.claude/state/fleet-handback/2026-11-06T23-46Z.digest`: its `LEGS` section still held the sweep's seed, carried no `unactioned:` line, and `--check` exited **1** naming all three keys. A correct verdict nobody read.
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --check --digest "<this round's digest>" 2>&1
@@ -38,7 +38,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --check --digest "<this ro
 
 ⚠️ **Run it before the output-shape row**, for the same reason the receipt check runs here: a verdict discovered after the render cannot reach the block the operator reads. Like that check it is a report, not a brake — it never blocks the arm.
 
-⚠️ **What it does not catch.** A hand-typed count passes, and so does a leg-authored `not run — <reason>` written without the leg running; only the sweep's seed is proof nobody spoke for a key. The check proves the digest *carries a reading*, never that the reading is true.
+⚠️ **What it does not catch.** A hand-typed count passes, and so does a leg-authored `not run — <reason>` written without the leg running; of the lines that are present, only the sweep's seed reads as unspoken. Nor can it tell this round's digest from a stale one — a round that passes a previous round's path, whose keys are all recorded, reads green while its own legs never spoke. The check proves a digest *carries a reading*, never that the reading is this round's or true.
 
 ## The debt — what makes the verdict outlive its round
 
