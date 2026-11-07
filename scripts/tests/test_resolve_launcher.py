@@ -39,6 +39,8 @@ class ResolveLauncherCli(unittest.TestCase):
             open(os.path.join(self.scripts, name), "w").close()
         self.config = os.path.join(d, "vaults.json")
         self.role_map = os.path.join(d, "role-map.json")
+        self.sessions = os.path.join(d, "sessions")
+        os.makedirs(self.sessions)
         with open(self.role_map, "w") as fh:
             json.dump({
                 "Agents": {"chip": "pink", "window_id": 1},
@@ -61,15 +63,22 @@ class ResolveLauncherCli(unittest.TestCase):
         with open(os.path.join(self.vault, "25 Tasks", f"{title}.md"), "w") as fh:
             fh.write(f"---\n{fm}\n---\nbody\n")
 
-    def run_cli(self, sid, cwd=None, role_map=None):
+    def run_cli(self, sid, cwd=None, role_map=None, sessions_dir=None):
         env = dict(os.environ)
         env["SUPERVISOR_VAULT_CONFIG"] = self.config
         env["SUPERVISOR_ROLE_MAP"] = role_map or self.role_map
+        env["SUPERVISOR_SESSIONS_DIR"] = sessions_dir or self.sessions
         env.pop("SUPERVISOR_LAUNCHER", None)
         return subprocess.run(
             [sys.executable, SCRIPT, sid, "--cwd", cwd or self.vault],
             capture_output=True, text=True, env=env, timeout=30,
         )
+
+    def session(self, sid, name):
+        """A registry record, so the role predicate has the session's NAME to read."""
+        with open(os.path.join(self.sessions, f"{sid}.json"), "w") as fh:
+            json.dump({"sessionId": sid, "pid": 4242, "status": "idle",
+                       "kind": "interactive", "name": name, "cwd": self.vault}, fh)
 
     def fields(self, result):
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -104,6 +113,12 @@ class ResolveLauncherCli(unittest.TestCase):
         """Matrix Rule 1: no `role:` key is agent, and the chip follows the resolved role."""
         self.page("T", "claude_session_id: s1")
         self.assertEqual(self.fields(self.run_cli("s1"))[2:], ["agent", "pink"])
+
+    def test_a_manager_session_is_coloured_as_a_manager(self):
+        """A manager carries no task page, so the claimant lookup alone would read it as a
+        worker — the same defect the prose rule had, one layer down."""
+        self.session("m1", "Fleet Manager")
+        self.assertEqual(self.fields(self.run_cli("m1"))[2:], ["manager", "orange"])
 
     def test_an_unreadable_role_map_falls_back_to_the_roles_own_chip(self):
         """A missing map must not default every role to cyan — the role is the fact."""

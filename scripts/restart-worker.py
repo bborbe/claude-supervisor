@@ -531,6 +531,34 @@ def claimant_role(sid, cwd, fb):
     return _role_field(claimant[0]) if claimant else ""
 
 
+def resume_role(sid, cwd, fb):
+    """`(role, subject)` a resume must launch and colour by: `manager`, `human` or `agent`.
+
+    A MANAGER is checked first, and that ordering is load-bearing. A manager session
+    usually carries no task page, so the claimant lookup alone would read it as a worker
+    and resume it on the worker default — the same defect the prose rule had, one layer
+    down. `subject` is `manager_subject()`'s `(kind, title)`, passed straight to
+    `resolve_launcher`; it is `None` when the subject page cannot be resolved, which
+    leaves the launcher on the worker chain exactly as `main` does for a restart.
+
+    An unreadable registry or board is not a refusal here: there is no kill to authorise
+    and the row still has to open, so it answers `agent` and the chip follows.
+    """
+    entries = registry_entries()
+    _path, rec = find_target(entries, sid) if entries is not None else (None, None)
+    if isinstance(rec, dict):
+        name = (rec.get("name") or "").strip()
+        try:
+            index = fb.vault_index()
+        except Exception:
+            index = None
+        slugs = fb.loop_slugs()
+        if role_of(sid, name, fb, index, slugs, fb.colour_census()) == "manager":
+            subject = fb.manager_subject(name, index, slugs) if index is not None else None
+            return "manager", subject
+    return (claimant_role(sid, cwd, fb) or "agent"), None
+
+
 def resolve_launcher(sid, cwd, fb, subject=None):
     """`(launcher_path, source)` the session must resume through, or `(None, reason)`.
 

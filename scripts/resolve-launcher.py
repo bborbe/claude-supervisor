@@ -17,13 +17,18 @@ The rule itself is NOT restated here. The launcher comes from `restart-worker.py
 `resolve_launcher` — task `launcher:` → vault `worker_launcher` → vault `claude_script`,
 with the `role: human` Claude rule and the manager rule already applied there — so the
 resume path and the restart path can never disagree. This script adds only the two
-things a resume needs on top: the role (read from the same claimant page) and the chip
-(resolved from the role map, the same store `commands/open.md` § 3.0 reads).
+things a resume needs on top: the role and the chip.
+
+⚠️ **The role is read BEFORE the launcher, and that order is load-bearing.** A manager
+session usually carries no task page, so a claimant-only lookup reads it as a worker and
+resumes it on the worker default. `restart-worker.py`'s `resume_role` runs the same
+`role_of` predicate the restart path uses and hands `resolve_launcher` the manager's
+`subject`; without that a resumed goal or topic manager comes back on the worker model
+while every line of this file reports success.
 
 ⚠️ A missing or unreadable role map is NOT "default to cyan". The chip falls back to the
 role's own published default — `pink` for an agent, `orange` for a manager, `cyan` for a
-human — because the role is the fact and the map is only where its colour is stored. The
-report says which was used so a stale map is visible rather than silent.
+human — because the role is the fact and the map is only where its colour is stored.
 """
 import argparse
 import importlib.util
@@ -86,12 +91,13 @@ def resolve(session_id, cwd):
     """`(launcher, source, role, chip)` for resuming `session_id`, or `(None, reason, …)`."""
     rw = load_sibling("restart-worker.py")
     fb = load_sibling("fleet-board.py")
-    launcher, launcher_source = rw.resolve_launcher(session_id, cwd, fb)
+    # The role is read FIRST, because it decides whether `resolve_launcher` takes the
+    # manager arm: a manager session carries no task page, so passing no `subject` would
+    # resume it on the worker default.
+    role, subject = rw.resume_role(session_id, cwd, fb)
+    launcher, launcher_source = rw.resolve_launcher(session_id, cwd, fb, subject)
     if launcher is None:
         return None, launcher_source, "", ""
-    # An absent `role:` means agent — matrix Rule 1 — and that default lives here, at the
-    # consumer, so `claimant_role` can keep reporting "" for "the page said nothing".
-    role = rw.claimant_role(session_id, cwd, fb) or "agent"
     chip, _chip_source = chip_for(role, role_map())
     return launcher, launcher_source, role, chip
 
