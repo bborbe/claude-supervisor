@@ -24,21 +24,21 @@ It prints `INCOMPLETE ROUND — skipped: <step> — <why>` for every field that 
 
 ## The acting legs' verdict — the check item 14 names and nothing called
 
-`commands/steps/output-shape.md` item 14 specifies two renders for the acting legs — `legs: INCOMPLETE — <reason>` and `legs: UNKNOWN — <reason>` — and calls `scripts/fleet-legs.py --check` *"the mechanical guard"*. Nothing invoked it: no router row, no leg, no tail. So the guard existed, was correct, and its verdict never reached a render — a round whose legs never spoke still printed the sweep's seed `not run — no reading recorded this round` as if it were a reading.
+`commands/steps/output-shape.md` item 14 names `scripts/fleet-legs.py --check` as *"the mechanical guard"* for the acting legs. Nothing invoked it — no router row, no leg, no tail — so the guard was correct and its verdict never reached a render, and a round whose legs never spoke still printed the sweep's seed `not run — no reading recorded this round` as if it were a reading.
 
-Measured 2026-11-07: of the 100 digests in `~/.claude/state/fleet-handback/`, exactly **1** carried a `LEGS` section and it held the seed, **0** carried an `unactioned:` line, and `--check` on the newest digest exited **1** naming all three keys. A correct verdict nobody read.
+Measured 2026-11-07 on `~/.claude/state/fleet-handback/2026-11-06T23-46Z.digest`: its `LEGS` section still held the sweep's seed and `--check` exited **1** naming all three keys. A correct verdict nobody read — and across the 100 digests then on disk, **0** carried any `unactioned:` line.
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --check --digest "<this round's digest>" 2>&1
 ```
 
-⚠️ **Branch on the exit code, never on the output.** Exit **1** → render `legs: INCOMPLETE — <reason>`; exit **2** → render `legs: UNKNOWN — <reason>`; exit **0** → render **no `legs:` line at all**. ⚠️ **The verdict is written to stderr** — all three `--check` messages go there while only `legs ok: …` goes to stdout, so a read that captures stdout alone renders `legs: INCOMPLETE — ` with an empty reason. Capture both, and take `<reason>` from the tool's own text rather than composing one.
+⚠️ **Run it here and carry the exit code to the `Legs` render at row 20.** This section owns the call and the branch; `commands/steps/output-shape.md` item 14 owns what each exit code renders and every format string — read it there and never restate it here.
 
-⚠️ **A failed read and a suppressed leg must not print the same.** Exit 2 is not a clean round: render `legs: UNKNOWN — <reason>`, never `INCOMPLETE`, and never a partial section. Exit 1 covers both a missing `LEGS` section and one still carrying the sweep's seed — both mean nobody has spoken for the keys, which is the case this check exists to surface.
+⚠️ **Branch on the exit code, never on the output — and capture stderr.** Every `--check` message is written to stderr while only `legs ok: …` goes to stdout, so a read that captures stdout alone hands item 14 an empty `<reason>`.
 
-⚠️ **The formats have one home.** `commands/steps/output-shape.md` item 14 owns the two lines; this section names the call and the branch, and never restates their shape.
+⚠️ **Run it before the output-shape row**, for the same reason the receipt check runs here: a verdict discovered after the render cannot reach the block the operator reads. Like that check it is a report, not a brake — it never blocks the arm.
 
-⚠️ **Run it here, before the output-shape row, for the same reason the receipt check runs here** — a verdict discovered after the render cannot reach the block the operator reads. Like that check it is a report, not a brake: it never blocks the arm.
+⚠️ **What it does not catch.** A hand-typed count passes, and so does a leg-authored `not run — <reason>` written without the leg running; only the sweep's seed is proof nobody spoke for a key. The check proves the digest *carries a reading*, never that the reading is true.
 
 ## The debt — what makes the verdict outlive its round
 
