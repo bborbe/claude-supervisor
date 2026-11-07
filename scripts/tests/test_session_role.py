@@ -43,6 +43,11 @@ def load():
     return mod
 
 
+def url_of(request):
+    """The URL a stubbed `urlopen` was handed — a Request object or a bare str."""
+    return getattr(request, "full_url", request)
+
+
 class _Response:
     def __init__(self, body):
         # `urlopen` hands back bytes; a str body here would let a decode bug in
@@ -73,8 +78,8 @@ class ResolveProducerKindTest(unittest.TestCase):
     def stub(self, role=None, error=None, raw=None):
         """Answer every ledger GET with one row (or raise, or return raw bytes)."""
 
-        def fake_urlopen(url, timeout=None):
-            self.calls.append(url)
+        def fake_urlopen(request, timeout=None, context=None):
+            self.calls.append(url_of(request))
             if error is not None:
                 raise error
             if raw is not None:
@@ -118,7 +123,8 @@ class ResolveProducerKindTest(unittest.TestCase):
         """The discriminating test: a constant or an allow-list fails it."""
         roles = {MANAGER_ID: "manager", WORKER_ID: "agent"}
 
-        def fake_urlopen(url, timeout=None):
+        def fake_urlopen(request, timeout=None, context=None):
+            url = url_of(request)
             self.calls.append(url)
             session_id = url.rsplit("/", 1)[-1]
             return _Response(json.dumps({"role": roles[session_id]}))
@@ -145,6 +151,35 @@ class ResolveProducerKindTest(unittest.TestCase):
     def test_non_dict_row_resolves_session(self):
         self.stub(raw=json.dumps(["manager"]).encode())
         self.assertEqual(self.mod.resolve_producer_kind(MANAGER_ID), "session")
+
+    def test_non_string_role_does_not_raise(self):
+        """A malformed row must not break a helper documented as never raising."""
+        self.stub(raw=json.dumps({"role": 7}).encode())
+        self.assertEqual(self.mod.resolve_producer_kind(MANAGER_ID), "session")
+
+    def test_a_failed_read_is_not_cached(self):
+        """A transient blip must not pin a manager to `session` for the process."""
+        calls = {"n": 0}
+
+        def fake_urlopen(request, timeout=None, context=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise urllib.error.URLError("blip")
+            return _Response(json.dumps({"role": "manager"}))
+
+        self.mod.urllib.request.urlopen = fake_urlopen
+        self.assertEqual(self.mod.resolve_producer_kind(MANAGER_ID), "session")
+        self.assertEqual(self.mod.resolve_producer_kind(MANAGER_ID), "manager")
+        self.assertEqual(calls["n"], 2, "the failed read must be retried, not memoized")
+
+    def test_session_id_is_quoted_into_the_path(self):
+        """A caller-supplied id must address one row, not rewrite the request."""
+        self.stub(role="manager")
+        self.mod.resolve_producer_kind("a/../b?x=1#f")
+        self.assertTrue(
+            self.calls[0].endswith("/session-ledger/a%2F..%2Fb%3Fx%3D1%23f"),
+            self.calls[0],
+        )
 
     def test_empty_session_id_resolves_session_without_a_read(self):
         self.stub(role="manager")

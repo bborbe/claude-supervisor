@@ -556,25 +556,30 @@ def manager_guard():
         return None
 
 
-SESSION_ROLE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "session-role.py")
+_SESSION_ROLE = None
 
 
 def session_role():
-    """The declared-role resolver, or None when it cannot be loaded.
+    """The declared-role resolver, loaded ONCE and reused.
 
-    A card must still post when the resolver is missing, so every failure here is
-    a warning and the declared `--producer-kind` stands — the pre-change
-    behaviour, which is the safe direction.
+    ⚠️ Lazily loaded but memoized, **including a failure** — the `False`
+    sentinel stops a retry storm. Re-execing the module on every post would also
+    rebuild `session-role.py`'s own role cache from empty, turning its
+    one-call-per-session promise into a file read + compile + HTTP call per card.
+
+    A card must still post when the resolver is missing, so a load failure is a
+    warning and the declared `--producer-kind` stands — the pre-change behaviour,
+    which is the safe direction.
     """
-    try:
-        spec = importlib.util.spec_from_file_location("session_role", SESSION_ROLE)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod if hasattr(mod, "resolve_producer_kind") else None
-    except Exception as err:
-        _warn(f"session-role unavailable ({err}) — producer_kind stays as declared")
-        return None
+    global _SESSION_ROLE
+    if _SESSION_ROLE is None:
+        try:
+            mod = _load("session_role", "session-role.py")
+            _SESSION_ROLE = mod if hasattr(mod, "resolve_producer_kind") else False
+        except Exception as err:
+            _warn(f"session-role unavailable ({err}) — producer_kind stays as declared")
+            _SESSION_ROLE = False
+    return _SESSION_ROLE or None
 
 
 def producer_kind_for(producer_id, declared):
@@ -585,12 +590,21 @@ def producer_kind_for(producer_id, declared):
     worker: the caller is a manager, the `producer_id` is the worker, and the
     card must read `session`. Reading `$CLAUDE_CODE_SESSION_ID` here instead
     would relabel exactly the cards this resolver exists to get right.
+
+    The TLS context and auth headers are forwarded so an HTTPS or authenticated
+    store resolves the same way every other call in this file does; without them
+    the resolver would silently answer `session` for every session there.
     """
     mod = session_role()
     if mod is None:
         return declared
     try:
-        return mod.resolve_producer_kind(producer_id, declared)
+        return mod.resolve_producer_kind(
+            producer_id,
+            declared,
+            ssl_context=_ssl_context(),
+            headers=_headers(),
+        )
     except Exception as err:
         _warn(f"producer_kind resolution failed ({err}) — using {declared!r}")
         return declared
