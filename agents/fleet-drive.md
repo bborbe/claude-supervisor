@@ -76,6 +76,8 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
      **Fail closed on a missing row.** A candidate with **no** `CLOSERS` row is **unverifiable**, never revive — absence means the closer was not captured, not that there is none. A `pick` asked only in chat, with no rendered panel, reaches neither `CLOSERS` nor the task file ([`fleet-drive-rationale.md`](../docs/fleet-drive-rationale.md) § Why a missing `CLOSERS` row fails closed). **Revive therefore requires an observed `CLOSERS` row — either classed `routine`, or an `approve:` whose text passes the routine-continue table.** ⚠️ **A row whose class is `none` is NOT a missing row** — it is a captured absence and follows the class rule below.
 
+     **The channel is pane-free, and a headless row is expected to carry a row.** `CLOSERS` is built from `python3 $P/who-needs-me.py --section last-closers`, which takes its population from the **session registry** and reads each closer from the **transcript** — never from a pane. A headless worker owns no pane by construction and often raises no gate, so it has no store record at all; before 2026-11-07 that left it with no `CLOSERS` row and step 4a fail-closed every headless candidate to `unverifiable` on every round (measured: 237 of 242 candidates pane-less, 232 unverifiable, only 14 reaching the closer probe). Its row now renders with `hst` in the pane column and its class in the text column. ⚠️ **The fail-closed rule is unchanged** — a missing row still means *not captured*; what changed is that a live headless session is no longer *expected* to be missing. ⚠️ **Do not read `hst` as unroutable:** there is no jump to hand over and the row is still classifiable. Report the population as `headless=<H>` on the payload header and the counts line — `H` is the number of candidate rows you rendered `no pane — headless`, so a round that classified none prints `headless=0` rather than omitting the field.
+
      **The row's class decides the verdict — read it first.** `routine` → **revive**; `ask` → **blocked**; `parked-wait` / `none` → **unverifiable**. `python3 $P/closer-verdict.py --class <class>` prints it; `${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/docs/closer-classes.md` § The classes is the canonical table. ⚠️ **`routine` does not skip test 4** — the class describes the turn's LAST line, so a session whose last closer reads `nothing` but which carries another `BLOCKED` row is still blocked ([`fleet-drive-rationale.md`](../docs/fleet-drive-rationale.md) § Why `routine` does not skip the `BLOCKED` check).
 
      **Routine continue — the one `approve:` that is not a gate.** A worker in `phase: execution` often parks on `approve: <go on with my own next step>`, which its own execution-no-reask rules already let it take — so that closer asks nothing only the operator can decide. Its four tests are `${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/docs/closer-classes.md` § The routine-continue table; apply them from there, never from memory. If that file is missing, report the gap in NOTES and treat every `ask:` closer as blocked — a missing table is never a licence to judge one from memory. Any test fails → it is a gate, **blocked**. A routine continue is not an answer: the nudge says the operator has not answered and that the worker proceeds only under its own execution rules.
@@ -109,7 +111,8 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 Return exactly this in the payload, each section `(none)` rather than dropped:
 
 ```
-fleet-drive — <N> candidates (<L> retained from the ledger) · <F> finished (reaped) · <R> revive (<C> routine continue) · <B> blocked · <U> unverifiable
+fleet-drive — <N> candidates (<L> retained from the ledger) · <F> finished (reaped) · <R> revive (<C> routine continue) · <B> blocked · <U> unverifiable · headless=<H>
+  channel: pane-free-closer — <H> rows carried no pane and were classified from the transcript
   <name> [<sid8>] · <bucket> · <open boxes> · <verdict>
       probe: <command → result>   |   (revive: the CLOSERS row + the four step-4a rows)
       ledger: <drafted | suppressed: <reason> | excluded>
@@ -159,7 +162,7 @@ the caller prints what you hand it.
 **Hand-back** — obey `${CLAUDE_PLUGIN_ROOT}/docs/handback-contract.md` **for the form**: verdict lines and counts in `key=value` form, **≤ 1 KB**, non-empty, payload off the hand-back. ⚠️ **The contract's payload-path section does not cover this leg** — its table lists the manager store only and its keying rule is the subject slug, while the fleet loop keys on the round. The path rule that applies here is the one in this `<output_format>`. This leg's required set is the **drive verdicts — one line per candidate you decided, carrying the decision**:
 
 ```text
-candidates=<N> · finished=<F> · revive=<R> · blocked=<B> · unverifiable=<U> · truncated=<n> · payload=<path>
+candidates=<N> · finished=<F> · revive=<R> · blocked=<B> · unverifiable=<U> · headless=<H> · truncated=<n> · payload=<path>
 <name> [<sid8>] = <verdict>
 ```
 

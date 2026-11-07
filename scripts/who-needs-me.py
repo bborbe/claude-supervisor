@@ -891,9 +891,33 @@ def last_assistant_text(rec):
 _TAIL_WINDOWS = (200_000, 2_000_000, 20_000_000)
 
 
+def transcript_path(session_id):
+    """The session's transcript file, or `None`. One resolver for every caller.
+
+    Shared by the transcript reader and the age probe so the two cannot disagree
+    about which file a session owns.
+    """
+    if not session_id:
+        return None
+    path = next(iter(glob.glob(os.path.expanduser(
+        f"~/.claude/projects/*/{session_id}.jsonl"))), None)
+    return path if path and os.path.exists(path) else None
+
+
+def _transcript_mtime(session_id):
+    """The transcript's mtime as epoch seconds, or now when it cannot be read.
+
+    Used only as a row's age. A session with no readable transcript is still live —
+    the registry says so — so an unreadable mtime must not drop the row.
+    """
+    try:
+        return os.path.getmtime(transcript_path(session_id))
+    except (TypeError, OSError):
+        return time.time()
+
+
 def _read_last_assistant_text(rec):
-    path = rec.get("transcript") or next(iter(glob.glob(os.path.expanduser(
-        f"~/.claude/projects/*/{rec['session_id']}.jsonl"))), None)
+    path = rec.get("transcript") or transcript_path(rec.get("session_id"))
     if not path or not os.path.exists(path):
         return ""
     try:
@@ -1858,7 +1882,10 @@ def answer_handover(rec):
 
 def row(rec, pmap, what, registry=None):
     pane = rec.get("pane")
-    headless = False
+    # A synthetic `CLOSERS` row carries `headless: True` from the registry-live pass:
+    # the session is known live but owns no pane, so `?` — this column's marker for
+    # "may be an exited session" — would be a claim the record disproves.
+    headless = bool(rec.get("headless"))
     if pane and is_routable(rec, pmap, registry):
         jump = f"wezterm cli activate-pane --pane-id {pane}"
     else:
@@ -1866,6 +1893,8 @@ def row(rec, pmap, what, registry=None):
             # Present but unvalidatable. Never rendered as a route: the id may now
             # belong to a different session entirely.
             jump = f"unroutable — pane {pane} does not resolve to this session"
+        elif headless:
+            jump = "headless — no pane by construction"
         else:
             jump = "unroutable — no pane recorded for this item"
         # This branch is where the dead end used to be: no jump to hand over, and the
@@ -2263,6 +2292,46 @@ def main():
     _by_session = {}
     for r in sorted([r for r in needs if not answered(r)], key=lambda r: r["ts"]):
         _by_session[r.get("session_id") or id(r)] = r
+    # ⚠️ **A live session that never raised a gate has no store record at all**, so
+    # building this map from `needs` alone left it with no `CLOSERS` row — and step 4a
+    # fail-closes a candidate with no row to `unverifiable`, so a headless worker was
+    # unverifiable in every round, forever. Measured 2026-11-07: 237 of 242 drive
+    # candidates carried no pane, 232 landed `unverifiable`, and only 14 rows reached
+    # the closer probe at all. The registry is the population authority for liveness
+    # (an entry is deleted when its session exits), and the closer is read from the
+    # **transcript** — never from a pane — so the row can be built for a session that
+    # owns no pane. `resolve_missing_panes()` fills a pane where the registry's current
+    # name matches a live pane title, and leaves it empty otherwise; `row()` renders
+    # that as headless rather than as an exited session.
+    synthetic = []
+    # A store record may key on an 8-char prefix while the registry carries the full
+    # id, so the dedup is prefix-aware in both directions — an exact-key test alone
+    # would render the same session twice, once from each source.
+    covered = {str(k) for k in _by_session}
+    for sid, held_name in (registry or {}).items():
+        s = str(sid)
+        if any(s == c or s.startswith(c) or c.startswith(s) for c in covered):
+            continue
+        synthetic.append({
+            "session_id": sid,
+            "pane": "",
+            "cwd": "",
+            "kind": "idle",
+            "detail": "",
+            "ts": _transcript_mtime(sid),
+            "state": "open",
+            "event": "LastCloser",
+            "headless": True,
+            # The registry name is the current one; carried on the record as well so
+            # `name_of()` still resolves it if a later read of the same map misses.
+            "session_name": held_name if isinstance(held_name, str) else "",
+        })
+    resolve_missing_panes(synthetic, pmap, registry)
+    for rec in synthetic:
+        # A resolved pane is proof the session owns one; an unresolved one keeps the
+        # headless marker, which is what `row()` renders as `hst`.
+        rec["headless"] = not rec.get("pane")
+        _by_session[rec["session_id"]] = rec
     last_closers = list(_by_session.values())
 
     # Say which source answered, once, before any row. A silent fallback would
@@ -2312,7 +2381,12 @@ def main():
     # sections byte-for-byte. A consumer that asks for it gets every live session's
     # last-turn closer and its class — the digest's `CLOSERS` source.
     if a.section and wanted("last-closers"):
-        print(f"\nLast closers ({len(last_closers)})"
+        # The headless count is printed, not implied: it is the population the
+        # pane-free channel classified, and the drive leg's own `headless=<H>` count
+        # is checked against it (a printed 0 and a genuinely empty set must not read
+        # the same).
+        headless_n = sum(1 for r in last_closers if r.get("headless"))
+        print(f"\nLast closers ({len(last_closers)}, headless={headless_n})"
               f"  — last-turn closer and class (ask | routine | parked-wait | none)")
         for r in last_closers:
             print(row(r, pmap, f"{closer_class(r)}: "

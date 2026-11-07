@@ -1725,7 +1725,8 @@ class SupersededCloserPanel(unittest.TestCase):
         self.assertEqual(wnm.busy_session_ids("/nonexistent/registry"), set())
 
 
-def run_feed(panes, records, argv=(), full_registry=None, pid_ttys=None):
+def run_feed(panes, records, argv=(), full_registry=None, pid_ttys=None,
+             extra_registry=None):
     """Run `main()` against a stubbed transport; return (rc, stdout, stderr).
 
     `argv` appends flags after the program name, so a caller can exercise an option
@@ -1741,6 +1742,10 @@ def run_feed(panes, records, argv=(), full_registry=None, pid_ttys=None):
     means.
     """
     registry = {r["session_id"]: "Session %s" % r["pane"] for r in records}
+    # `extra_registry` is a live session with NO store record — the pane-free case:
+    # the registry is the only source that knows it exists, and its closer must still
+    # reach `CLOSERS`.
+    registry.update(extra_registry or {})
     patches = [
         mock.patch.object(wnm, "wezterm_panes", lambda: panes),
         mock.patch.object(wnm, "registry_records", lambda *_a, **_k: full_registry),
@@ -2616,7 +2621,7 @@ class LastClosersSection(unittest.TestCase):
     def test_the_section_prints_all_four_classes(self):
         rc, out, err = self.run_section(["--section", "last-closers"])
         self.assertEqual(0, rc, err)
-        self.assertIn("Last closers (4)", out)
+        self.assertIn("Last closers (4, headless=0)", out)
         for token in ("routine: nothing", "ask: pick", "parked-wait: later (on",
                       "none: no closer line"):
             self.assertIn(token, out)
@@ -2630,7 +2635,28 @@ class LastClosersSection(unittest.TestCase):
                                lambda rec: self.TEXTS["lc-routine"]):
             rc, out, err = run_feed(panes, records, argv=["--section", "last-closers"])
         self.assertEqual(0, rc, err)
-        self.assertIn("Last closers (1)", out)
+        self.assertIn("Last closers (1, headless=0)", out)
+
+    def test_a_live_session_with_no_store_record_still_gets_a_row(self):
+        """The pane-free channel: the registry is the population authority.
+
+        A headless worker raises no gate, so it has no store record at all — and
+        building `CLOSERS` from the store alone left it with no row, which step 4a
+        fail-closes to `unverifiable` every round. Its closer is read from the
+        transcript, which needs no pane.
+        """
+        with mock.patch.object(
+                wnm, "last_assistant_text",
+                lambda rec: "👤 You: nothing — I continue on step 1"), \
+                mock.patch.object(wnm, "_transcript_mtime", lambda _sid: 1):
+            rc, out, err = run_feed(
+                {}, [], argv=["--section", "last-closers"],
+                extra_registry={"headless-1": "Headless Worker"})
+        self.assertEqual(0, rc, err)
+        self.assertIn("Last closers (1, headless=1)", out)
+        self.assertIn("routine: nothing — I continue on step 1", out)
+        self.assertIn("hst", out)
+        self.assertIn("headless — no pane by construction", out)
 
 
 if __name__ == "__main__":
