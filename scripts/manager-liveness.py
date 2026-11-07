@@ -51,9 +51,33 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
                                     so an outage gap never counts as cadence.
                                     Prints one line per subject that TURNED stale (or
                                     recovered) since the last check; exits 10 if any
-                                    turned stale, else 0. The notified set lives in
-                                    liveness-notified.json, so one lapse notifies
-                                    once, not on every poll.
+                                    turned stale, else 0.
+                                    ⚠️ A lapse is re-emitted on EVERY poll until a
+                                    delivery is ACKED (`--delivered`), because the
+                                    transport that carries the report is a network call
+                                    that fails routinely — measured 2026-11-07: 43
+                                    failed sends in one ledger, none retried. Marking
+                                    the lapse reported at detection time made the next
+                                    poll silent, so a send that died left nothing behind
+                                    and the operator never learned the manager had
+                                    lapsed. The set of owed reports lives in
+                                    liveness-pending.json; the delivered set lives in
+                                    liveness-notified.json and is written ONLY by the
+                                    ack. One lapse still notifies once, not on every
+                                    poll — "once" now means once *delivered*, not once
+                                    *detected*.
+  --delivered SLUG                 ACK a lapse: move SLUG from the owed set to the
+                                    delivered set. Called by the sender after the
+                                    transport returns success. Carries the CROSSING
+                                    time, not the ack time, so a manager that re-armed
+                                    while the report was owed still starts a NEW lapse
+                                    on its next STALE. Idempotent: a slug that is not
+                                    owed prints `not-pending` and exits 0.
+  --failed SLUG --error TEXT       Record one failed delivery attempt against SLUG
+                                    (attempt count + the transport error), so the
+                                    durable record names why it could not be sent. The
+                                    entry stays owed, which is what makes the next poll
+                                    re-attempt it.
   --state --subject T --branch B   ONE subject's state, as `<STATE>\t<slug>\t<detail>`.
                                     `SLEEPING` is a fifth state: a future `.sleeping`
                                     instant, which suppresses the STALE report a frozen
@@ -97,6 +121,12 @@ STATE_DIR = os.path.expanduser(
     os.environ.get("MANAGER_LIVENESS_STATE_DIR", "~/.claude/state/sweep-gate")
 )
 NOTIFIED = "liveness-notified.json"
+# ⚠️ The OWED set is a second file, not a second field in `notified`. The two answer
+# different questions — "which lapses has the operator been told about" and "which are
+# still owed a report" — and collapsing them is what produced the defect this file's
+# `--check` now fixes: one entry meant both, so it was written at detection time and
+# the report it stood for was never sent.
+PENDING = "liveness-pending.json"
 # ⚠️ `fleet` is a THIRD tier, not a synonym for either of the others. The fleet loop answers
 # headless workers' parked prompts exactly as a goal manager does — it runs the wrangler and
 # watches the queue — but it manages no subject page, so it could not honestly register under
@@ -344,6 +374,105 @@ def write_notified(notified: dict) -> None:
     )
 
 
+def iso(epoch: float) -> str:
+    """An epoch as the UTC ISO-8601 second the ledger and the sender both speak."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def read_pending() -> dict:
+    """slug -> the lapse owed a report: {detected_at, detail, attempts, last_error}.
+
+    ⚠️ `detected_at` is the CROSSING time, and it is what the sender puts in the report
+    and what `--delivered` moves into `notified`. A poll timestamp would differ between
+    the failed attempt and the retry, so the same lapse would look like two.
+    """
+    try:
+        with open(os.path.join(STATE_DIR, PENDING), encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for k, v in raw.items():
+        if not isinstance(v, dict):
+            continue
+        try:
+            detected = float(v.get("detected_at", 0.0))
+        except (TypeError, ValueError):
+            detected = 0.0
+        try:
+            attempts = int(v.get("attempts", 0) or 0)
+        except (TypeError, ValueError):
+            attempts = 0
+        out[str(k)] = {
+            "detected_at": detected,
+            "detail": str(v.get("detail", "")),
+            "attempts": attempts,
+            "last_error": v.get("last_error"),
+            # Producer identity, carried through every rewrite: a normalising reader
+            # that dropped these would make the record indistinguishable from one
+            # written by hand, which is the property they exist to give it.
+            "pid": v.get("pid"),
+            "row_ts": v.get("row_ts"),
+        }
+    return out
+
+
+def write_pending(pending: dict) -> None:
+    write_atomic(
+        os.path.join(STATE_DIR, PENDING),
+        json.dumps({k: pending[k] for k in sorted(pending)}) + "\n",
+    )
+
+
+def delivered(s: str) -> int:
+    """Ack ONE lapse: it moves from owed to reported. Written ONLY by the sender.
+
+    The ack is the one event that proves the transport carried the report, so it is the
+    only thing allowed to stop `--check` re-emitting the lapse. It stores the CROSSING
+    time rather than now: a manager that re-armed while the report was owed has a newer
+    arm than the crossing, so `notified[s] < last_arm(s)` still starts a new lapse.
+    """
+    pending = read_pending()
+    entry = pending.pop(s, None)
+    if entry is None:
+        # Idempotent by design: the sender acks every slug it was told about, and a slug
+        # can be superseded between the check and the ack.
+        print(f"not-pending {s}")
+        return 0
+    notified = read_notified()
+    notified[s] = entry["detected_at"]
+    write_pending(pending)
+    write_notified(notified)
+    print(f"delivered {s}")
+    return 0
+
+
+def failed(s: str, error: str, pid: str = None, row_ts: str = None) -> int:
+    """Record ONE failed delivery attempt. The entry STAYS owed — that is the retry.
+
+    ⚠️ `pid` and `row_ts` are the PRODUCER's identity: the sender's own process id and
+    the timestamp of the ledger row it wrote in the same run. They exist so a durable
+    record can be shown to have been written by a real failed send rather than by hand —
+    a hand-written file reproduces every other field exactly.
+    """
+    pending = read_pending()
+    entry = pending.get(s)
+    if entry is None:
+        print(f"not-pending {s}")
+        return 0
+    entry["attempts"] = int(entry.get("attempts", 0)) + 1
+    entry["last_error"] = (error or "")[:500]
+    if pid:
+        entry["pid"] = str(pid)[:40]
+    if row_ts:
+        entry["row_ts"] = str(row_ts)[:40]
+    write_pending(pending)
+    print(f"failed {s} attempts={entry['attempts']}")
+    return 0
+
+
 def last_arm(s: str) -> float:
     """When the subject last armed, from its cadence file's mtime; 0 when unreadable."""
     p, _ = resolve(s, "cadence")
@@ -500,6 +629,8 @@ def check(now: float = None) -> int:
     names = [n for n in names if "--" in n or n not in prefixed_bases]
     notified = read_notified()
     before = dict(notified)
+    pending = read_pending()
+    before_pending = {k: dict(v) for k, v in pending.items()}
 
     turned_stale = False
     still = set()
@@ -507,22 +638,39 @@ def check(now: float = None) -> int:
         state, detail = classify(s, now)
         if state in ("STALE", "INVALID"):
             still.add(s)
-            # ⚠️ An entry alone is not proof this lapse was already reported. A manager
-            # may re-arm and lapse again between two polls, and then the RECOVERED
-            # branch below never runs — the entry survives and every later lapse is
-            # silent. An arm newer than the notification therefore starts a NEW lapse.
-            # (Measured 2026-10-20: a subject read STALE for 72 min while --check
-            # returned 0, and the topic had no live manager.)
-            if s not in notified or notified[s] < last_arm(s):
-                print(f"{state} {s} {detail}")
+            # ⚠️ A pending entry recorded BEFORE the subject's last re-arm describes a
+            # lapse the manager has already come back from; the newer lapse supersedes
+            # it. Without this, a subject that armed while its report was owed would
+            # keep re-announcing the old crossing.
+            if s in pending and pending[s]["detected_at"] < last_arm(s):
+                del pending[s]
+            if s not in pending and (s not in notified or notified[s] < last_arm(s)):
+                pending[s] = {
+                    "detected_at": now,
+                    "detail": detail,
+                    "attempts": 0,
+                    "last_error": None,
+                }
+            if s in pending:
+                # ⚠️ Re-emitted on EVERY poll until a delivery is acked. This is the
+                # retry: the transport is a network call that fails routinely, and a
+                # single failed send used to mark the lapse reported for ever.
+                print(f"{state} {s} {detail} crossing={iso(pending[s]['detected_at'])}")
                 turned_stale = True
-                notified[s] = now
+        elif s in pending:
+            # The manager came back before anyone was told. The lapse still happened and
+            # the operator is still owed the report, so it stays owed — but saying STALE
+            # would be a lie, so it is named for what it is.
+            print(f"RECOVERED-PENDING {s} {detail} crossing={iso(pending[s]['detected_at'])}")
+            turned_stale = True
         elif s in notified:
             print(f"RECOVERED {s} {state} {detail}")
             del notified[s]
     notified = {k: v for k, v in notified.items() if k in still}
     if notified != before:
         write_notified(notified)
+    if pending != before_pending:
+        write_pending(pending)
     return EXIT_STALE if turned_stale else 0
 
 
@@ -542,6 +690,19 @@ def main() -> int:
         action="store_true",
         help="print ONE subject's state: OK / STALE / STOPPED / SLEEPING / UNARMED / INVALID",
     )
+    mode.add_argument(
+        "--delivered",
+        metavar="SLUG",
+        help="ack a lapse as DELIVERED — only this stops --check re-emitting it",
+    )
+    mode.add_argument(
+        "--failed",
+        metavar="SLUG",
+        help="record one failed delivery attempt for SLUG (needs --error)",
+    )
+    ap.add_argument("--error", help="the transport error --failed records")
+    ap.add_argument("--pid", help="--failed: the sender's pid, so the record names its producer")
+    ap.add_argument("--row-ts", dest="row_ts", help="--failed: the ledger row's timestamp")
     ap.add_argument("--subject", help="the goal or topic name")
     ap.add_argument(
         "--topic",
@@ -568,6 +729,12 @@ def main() -> int:
         ap.error("--topic and --subject disagree")
     if a.check:
         return check()
+    if a.delivered:
+        return delivered(a.delivered)
+    if a.failed:
+        if not a.error:
+            ap.error("--failed needs --error (the transport error it records)")
+        return failed(a.failed, a.error, pid=a.pid, row_ts=a.row_ts)
     if a.state:
         if not a.subject:
             ap.error("--state requires --subject (or the deprecated --topic)")

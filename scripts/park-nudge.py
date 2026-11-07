@@ -8,27 +8,37 @@ WHY THIS EXISTS. The park rule (a wait on a machine event longer than the
 threshold parks with a `defer_date` and exits) is always loaded, and it was
 measured ignored: a session sat `watching` for 31 minutes after the rule landed,
 while a 12-minute one beside it was legal. The reading that tells the two apart
-already exists: the `watching` bucket and `quiet_min` of the session-activity
-instrument. No leg consumed it. `agents/fleet-drive.md` excludes
+already exists: the `watching` bucket and its state duration, published by the
+session-activity instrument. No leg consumed it. `agents/fleet-drive.md` excludes
 `parked-on-watcher` rows from nudge candidacy on purpose, because a declared
 machine wait is not a stalled row, so the only nudge path skipped exactly the
 population the park rule targets. This script is the enforcement point the
 round's keep-alive leg runs beside the park-watch resume.
 
 WHAT IT SELECTS. A row is a candidate only when its bucket is exactly
-`watching` AND its quiet duration exceeds `park-event.py`'s threshold. The
-comparison is strict: 15 min quiet is inside the allowance, 16 is not. The
-bucket is the gate, not the duration. A `working`, `light`, `gated`, `idle` or
-`unclassified` row is never a candidate however long it has been quiet: `gated`
-waits on the operator, and the others are not declared machine waits.
+`watching` AND its `watching_min` — the span from the session's first
+`🟡 WAITING` closer, published by `session-activity.py` — exceeds
+`park-event.py`'s threshold. The comparison is strict: 15 min is inside the
+allowance, 16 is not. The bucket is the gate, not the duration. A `working`,
+`light`, `gated`, `idle` or `unclassified` row is never a candidate however long
+it has waited: `gated` waits on the operator, and the others are not declared
+machine waits. A row with no `watching_min` (the instrument could not measure it)
+is skipped, never treated as 0.
+
+⚠️ THE DURATION IS NOT `quiet_min`. Transcript silence resets on every watcher
+re-arm, so a session parked 3 h 34 m across 20+ re-arms read `quiet 12m` and was
+never nudged — the defect this selection exists to remove. `watching_min` does
+not reset on a re-arm. The emitted line keeps its `quiet <N>m` field name for
+compatibility with the round's parser, but N is the watching-state duration.
 
 SUPPRESSION: ONE NUDGE PER WATCHING EPISODE. Keyed on the session id, never on
-the quiet value. `quiet_min` grows every round, so a key carrying it never
+the duration. `watching_min` grows every round, so a key carrying it never
 matches twice and the session would be re-nudged every tick. An episode ends,
 and the session becomes nudgeable again, when the session is seen outside the
-`watching` bucket, is absent from the reading, or its quiet duration went DOWN
-(it made a model call and re-armed a wait). The ledger lives at
-`$PARK_NUDGE_STATE`, default `~/.claude/state/park-nudge/ledger.json`.
+`watching` bucket, is absent from the reading, or its duration went DOWN (a
+fresh measurement, e.g. after a transcript rotation). The ledger lives at
+`$PARK_NUDGE_STATE`, default `~/.claude/state/park-nudge/ledger.json`; its
+`last_quiet` key holds the watching-state duration.
 
 WHAT IT DOES NOT DO. It never parks, kills, reaps or exits a session: the nudge
 asks, the session performs it. It does not deliver the nudge either. It prints
@@ -36,8 +46,10 @@ one `NUDGE` line per candidate and the round sends the message.
 
 OUTPUT. One `NUDGE <session-id> quiet <N>m (<name>) :: <message>` line per
 emitted nudge, then exactly one `park-nudge:` summary line. `--json` prints the
-same as one object. An unreadable reading prints `park-nudge: unknown — <why>`
-and exits 2: a reading that could not be taken is never reported as zero.
+same as one object; its `quiet_min` key carries the same watching-state duration
+the text line labels `quiet`. An unreadable reading prints
+`park-nudge: unknown — <why>` and exits 2: a reading that could not be taken is
+never reported as zero.
 
 EXIT CODES. 0 ok (with or without nudges) · 2 unreadable input or ledger.
 """
@@ -146,12 +158,12 @@ def evaluate(sessions: list, ledger: dict, limit_s: int, exit_script: str):
         sid = row.get("sid") or ""
         if not sid or row.get("bucket") != "watching":
             continue
-        quiet = row.get("quiet_min")
+        quiet = row.get("watching_min")
         if not isinstance(quiet, int) or isinstance(quiet, bool):
             continue
         stats["watching"] += 1
         prev = ledger.get(sid) or {}
-        # Quiet went DOWN: the session made a call and re-armed, a new episode.
+        # The duration went DOWN: a fresh measurement started, a new episode.
         nudged = bool(prev.get("nudged")) and quiet >= int(prev.get("last_quiet", 0))
         if quiet * 60 <= limit_s:
             stats["within"] += 1

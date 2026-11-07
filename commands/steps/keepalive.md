@@ -159,19 +159,25 @@ python3 "<vault>/.claude/scripts/session-activity.py" --json | python3 "$P/park-
 `park-nudge: unknown — instrument absent` and skip the leg. Never render that as
 `0 nudged`. Exit **2** prints `park-nudge: unknown — …`; render it verbatim.
 
-**Act on each `NUDGE <session-id> quiet <N>m (<name>) :: <message>` line.** Send the
-text after `::` with `SendMessage(to: <the roster name for that session id>, message:
-<text>)`. ⚠️ **Do not apply the drive leg's busy/`shell` skip here.** A `watching` row is
+**Act on each `NUDGE <session-id> quiet <N>m (<name>) :: <message>` line.** The field name
+is historical — **`N` is the watching-state duration, not transcript silence** (see the
+selection rule below). Send the text after `::` with
+`SendMessage(to: <the roster name for that session id>, message: <text>)`. ⚠️ **Do not
+apply the drive leg's busy/`shell` skip here.** A `watching` row is
 `shell` because its watcher is running, and that watcher is what the nudge targets. A
 send that fails, or a session with no roster name (headless, pane-less), is reported as
 `undelivered: <id8>`. The ledger already counts it as nudged, so it is not retried every
 tick. Never park, kill or exit the session yourself: the nudge asks, and the session acts.
 
-The selection is `bucket == watching` AND quiet strictly above `park-event.py threshold`.
-`gated`, `working`, `idle` and `unclassified` rows never qualify, whatever their quiet.
-Suppression is one nudge per watching episode, keyed on the session id and never on the
-quiet minutes, which grow every round. Leaving the bucket, leaving the fleet, or a quiet
-that dropped re-arms it.
+The selection is `bucket == watching` AND `watching_min` strictly above
+`park-event.py threshold`. `watching_min` is the span from the session's first
+`🟡 WAITING` closer to now, published by `session-activity.py`; `gated`, `working`, `idle`
+and `unclassified` rows never qualify, whatever their duration. ⚠️ **`quiet_min` must never
+be substituted for it** — a watcher re-arm writes to the transcript, so a session parked
+3 h 34 m read `quiet 12m` and was never nudged, which is the defect this selection exists
+to remove. Suppression is one nudge per watching episode, keyed on the session id and
+never on the duration, which grows every round. Leaving the bucket, leaving the fleet, or
+a duration that dropped re-arms it.
 
 **Report the line.** Print the `park-nudge:` summary verbatim
 (`<n> nudged · <s> suppressed · <w> within 15m · <m> watching · <l> live`) beside the
