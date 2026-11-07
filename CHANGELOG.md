@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.250.1
 
 - fix: **the manager allowlist no longer carries `uniq` or `diff`.** `server/manager-allowlist.json` is the file that decides which prompts a manager answers *on its own* instead of escalating, and its own note states the rule the worker policy was narrowed to in `v0.249.0` / `v0.250.0`: a whole-token prefix is listed only when **every** extension of it is read-only. Two entries broke it — `uniq IN OUT` writes `OUT`, an arbitrary-path write that bypasses the policy's `Write(cwd)` confinement, and `diff -l` / `--paginate` runs `pr(1)`. The worker tier lost both already; the manager tier was never touched, so `uniq /dev/null /etc/authorized_keys` and `diff --paginate a b` were auto-answered with no operator in the loop — strictly worse than the worker case, where an escalation at least parks the request with a human. Both entries are **removed** rather than special-cased: a prefix rule cannot exclude a positional or a flag. `docs/permission-allowlist.md` is updated in the same change (its *every extension* note now names all four failures), `server/manager-allowlist.test.mjs` pins both directions — `uniq /tmp/in /tmp/out` and `diff -l a b` refuse while `ls -la /tmp`, `cat f`, `grep -rn x .` and `jq -r .x f` still allow — and `make check-manager-allowlist` still reports the doc and the JSON agreeing.
 
