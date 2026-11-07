@@ -77,6 +77,10 @@ _SPAWN_LEDGER = None
 # ⚠️ **The window is 60 s and the fallback is labelled.** A count from minutes ago is not evidence
 # about the fleet now; past the window the refusal stands. It is never a fabricated `0` — the cache
 # holds a real earlier count, and an absent or unreadable cache is a refusal.
+#
+# ⚠️ **The SERVER deletes this file on every successful spawn** (`invalidateCountCache`), so a
+# failed read after a spawn refuses here too, instead of deciding on a number that predates the
+# spawn. This script only ever writes the cache — it never spawns, so it has nothing to invalidate.
 _CACHE_TTL_S = 60
 _CACHE_FILE = "last-worker-count.json"
 
