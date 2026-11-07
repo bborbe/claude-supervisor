@@ -38,6 +38,15 @@ else:
 
 Neither is a decision: the selector, the gates and the refusals stay `commands/open.md`'s.
 
+⚠️ **The mode is the command's to pass, never this leg's.** `/supervisor:open --flagged` decides
+whether a row opens headless or interactive and passes `interactive=false` / `interactive=true`
+accordingly; the rule that binds those two directions — and the five signals that keep a
+`role: agent` row interactive — has its single home in `docs/fleet-surface.md`
+§ Spawn a worker item 6. This leg passes no mode argument and re-derives nothing. It holds `spawn_agent` so that
+decision is reachable at all: without it the command falls back to the wezterm route, which opens
+a tab whatever the row's `mode:` says, and the grant would then be reporting a decision nobody
+made.
+
 `/supervisor:open --flagged` has been specified since before the `flag_set_by` field existed and
 had **no caller**: `commands/open.md` defines the batch, `commands/steps/goal-spawn.md`
 excluded the very rows it selects, and three rule files said the loop must never invoke it.
@@ -136,8 +145,8 @@ digest instead of spoken into chat.
 
 <error_handling>
 - **`fleet-legs.py` exits 2** → the digest could not be read or written (the sweep may not have
-  written it yet). Hand back `legs=UNKNOWN` with the reason; never hand back a count as if it
-  landed.
+  written it yet). Hand back `legs=UNKNOWN` with the reason in `legs-reason=<text>`; never hand
+  back a count as if it landed.
 - **The command opens nothing and prints no `REFUSED` line** → that is a real reading:
   `operator-flagged=0`, `opened=0`. Never substitute a hand-scan.
 - **The command errors** → report its output verbatim and record `operator-flagged=not-run` with
@@ -156,7 +165,7 @@ the form.
 one `refused:` line per refusal after them:
 
 ```text
-legs=written|UNKNOWN · operator-flagged=<n>|not-run · opened=<n> · refused=<n> · truncated=<n> · payload=<path>|—
+legs=written|UNKNOWN · legs-reason=<text>|— · operator-flagged=<n>|not-run · opened=<n> · refused=<n> · truncated=<n> · payload=<path>|—
 ```
 
 ⚠️ **`opened` is the batch's own footer count, never a count you compute.** `/supervisor:open
@@ -164,7 +173,11 @@ legs=written|UNKNOWN · operator-flagged=<n>|not-run · opened=<n> · refused=<n
 footer), and that `N` is the value here. A hand-count of the rows you believe it opened is a
 second selector, and it can disagree with the batch it claims to report — the footer is the only
 place the command states what it actually opened. `refused` is likewise the number of `refused:`
-lines below, not a third reading.
+lines below, not a third reading. ⚠️ **`legs-reason` is the channel the caller's failed-write
+render reads** — it carries the reason when `legs=UNKNOWN` (the `fleet-legs.py` exit and its
+message) and is `—` when `legs=written`. Without it a `legs=UNKNOWN` leaves `legs: UNKNOWN —
+<reason>` with nothing to put after the dash, and the reason survives only in this leg's own
+transcript, which the caller never reads.
 
 then, one line each, every refusal exactly as the command printed it:
 

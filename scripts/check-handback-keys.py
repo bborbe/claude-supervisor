@@ -99,10 +99,13 @@ LEGS = {
         "agent": "agents/fleet-keepalive-actor.md",
         "sites": ("commands/steps/keepalive.md",),
         "required": (
-            "legs", "lapsed-managers", "dead-workers", "dead-scan",
+            "legs", "legs-reason", "lapsed-managers", "dead-workers", "dead-scan",
             "restarted", "resumed", "parked-due", "nudged", "undelivered",
-            # the size-cap exception's two keys — the per-subject row lists have no count to
-            # reconcile against, so a dropped row is invisible without them
+            # one count per truncatable row list: the caller's reconciliation is
+            # `rows printed + truncated == this count`, so a list without its count has
+            # no arithmetic to check and a row dropped in transit is invisible
+            "crash-loop", "cannot-tell",
+            # the size-cap exception's two keys
             "truncated", "payload",
         ),
     },
@@ -110,7 +113,7 @@ LEGS = {
         "agent": "agents/fleet-flagged-open-actor.md",
         "sites": ("commands/steps/flagged-open.md",),
         "required": (
-            "legs", "operator-flagged", "opened", "refused", "truncated", "payload",
+            "legs", "legs-reason", "operator-flagged", "opened", "refused", "truncated", "payload",
         ),
     },
 }
