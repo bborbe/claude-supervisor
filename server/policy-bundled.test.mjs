@@ -59,6 +59,15 @@ test('rg is NOT allowed — --pre runs a program of the worker\'s choosing', () 
   }
 })
 
+test('file and diff are NOT allowed — --compile writes and --paginate runs a program', () => {
+  // `file -C -m PATH` / `--compile` compiles a magic file and writes PATH.mgc — an
+  // arbitrary-path write that bypasses Write(cwd); `diff -l` / `--paginate` runs pr(1).
+  // Both match a bare prefix. Catches anyone re-adding them.
+  for (const command of ['file README.md', 'file -C -m /tmp/magic', 'file --compile -m magic', 'diff a b', 'diff -l a b', 'diff --paginate a b']) {
+    assert.notEqual(verdict(command), 'allow', `must not be allowed: ${command}`)
+  }
+})
+
 test('the operator-decided refusals stay refused', () => {
   // These are the classes the change deliberately left out. Pinned so a later widening
   // has to argue with this test rather than slip through review.
