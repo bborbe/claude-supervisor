@@ -1,9 +1,9 @@
 """check-acting-legs.py: the delegate rule's carve-out, and each acting leg's own statement.
 
 The round's delegate rule sends everything that is not the sweep to a sub-agent, and rows 5b
-(keep alive) and 5c (flagged open) are exactly that — while being the only two rows whose
-purpose is to act. With no carve-out a round delegates them read-only and prints a count it was
-told to print: measured 2026-11-01 13:27 CET, a round instructed its sub-agent to print
+(keep alive), 5c (flagged open) and 5d (own parks) are exactly that — while being the only rows
+whose purpose is to act. With no carve-out a round delegates them read-only and prints a count it
+was told to print: measured 2026-11-01 13:27 CET, a round instructed its sub-agent to print
 `opened=0` and resumed none of the 8 `resume` rows it read.
 
 `test_flagged_leg_without_its_statement_fails` is the case this file exists for: a tree whose
@@ -24,13 +24,14 @@ SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-acting-legs.py"
 ROUTER = "commands/fleet-drive.md"
 KEEPALIVE = "commands/steps/keepalive.md"
 FLAGGED = "commands/steps/flagged-open.md"
+OWN_PARKS = "commands/steps/own-parks.md"
 
-CARVEOUT = "5b and 5c are acting legs"
+CARVEOUT = "5b, 5c and 5d are acting legs"
 MARKER = "a read-only execution is not a run of it"
 WHEN = "every tick"
 
 
-def router(with_carveout: bool = True, rows: tuple[tuple[str, str], ...] = (("5b", KEEPALIVE), ("5c", FLAGGED))) -> str:
+def router(with_carveout: bool = True, rows: tuple[tuple[str, str], ...] = (("5b", KEEPALIVE), ("5c", FLAGGED), ("5d", OWN_PARKS))) -> str:
     lines = [
         "# Fleet drive",
         "",
@@ -79,6 +80,7 @@ class Base(unittest.TestCase):
         self.write(ROUTER, router())
         self.write(KEEPALIVE, step("Keep alive"))
         self.write(FLAGGED, step("Flagged open"))
+        self.write(OWN_PARKS, step("Own parks"))
 
     def write(self, rel: str, text: str) -> None:
         (pathlib.Path(self.dir) / rel).write_text(text, encoding="utf-8")
@@ -117,6 +119,16 @@ class TestGuard(Base):
         r = self.guard()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("commands/steps/keepalive.md", r.stderr)
+
+    def test_own_parks_without_its_statement_fails(self) -> None:
+        # 5d shipped after the carve-out was written, so the row was never added to the list of
+        # exceptions: the round delegated it read-only, the sub-agent held no answer_permission,
+        # and the step skipped into a transcript nobody reads. Measured 2026-11-07.
+        self.write(OWN_PARKS, step("Own parks", with_marker=False))
+        r = self.guard()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("commands/steps/own-parks.md", r.stderr)
+        self.assertIn("carries no acting statement", r.stderr)
 
     def test_carveout_moved_off_the_router_fails(self) -> None:
         # One home, and that home is beside the rule it excepts.
