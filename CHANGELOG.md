@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.248.0
 
 - feat: **`server/policy.json` gains anchored Bash allow rules, so read-only commands stop parking for the operator.** The file carried **no Bash allow rule at all**, so `decide()` escalated every Bash command — `ls -la /tmp` included — and a 7-day board readout measured **7 👍 / 874 👎 (score 1 %)** with roughly 800 of the 👎 permission cards. Each new entry sets `matchType: "command"` (an anchored whole-token prefix, so `ls` covers `ls -la /tmp` but not `lsblk`) and is listed only where EVERY extension of the prefix is read-only — which is why `sed` (`-n -i`), `find` (`-delete`) and every `git` prefix (a repo's own config runs code via `core.fsmonitor`) stay absent. `cd` is listed because `policy.mjs` splits a chained command and allows it only when every segment is allowed on its own, so `cd /tmp && git status` still escalates while `cd /tmp && rm -rf /` still reaches the deny rule. Verified: **30/30** in `server/policy.test.mjs`, and `git status`, `git push origin main`, `lsblk` and `for … do … done` all still escalate.
 
