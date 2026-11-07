@@ -76,7 +76,7 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
      **Fail closed on a missing row.** A candidate with **no** `CLOSERS` row is **unverifiable**, never revive — absence means the closer was not captured, not that there is none. A `pick` asked only in chat, with no rendered panel, reaches neither `CLOSERS` nor the task file ([`fleet-drive-rationale.md`](../docs/fleet-drive-rationale.md) § Why a missing `CLOSERS` row fails closed). **Revive therefore requires an observed `CLOSERS` row — either classed `routine`, or an `approve:` whose text passes the routine-continue table.** ⚠️ **A row whose class is `none` is NOT a missing row** — it is a captured absence and follows the class rule below.
 
-     **The channel is pane-free, and a headless row is expected to carry a row.** `CLOSERS` is built from `python3 $P/who-needs-me.py --section last-closers`, which takes its population from the **session registry** and reads each closer from the **transcript** — never from a pane. A headless worker owns no pane by construction and often raises no gate, so it has no store record at all; before 2026-11-07 that left it with no `CLOSERS` row and step 4a fail-closed every headless candidate to `unverifiable` on every round (measured: 237 of 242 candidates pane-less, 232 unverifiable, only 14 reaching the closer probe). Its row now renders with `hst` in the pane column and its class in the text column. ⚠️ **The fail-closed rule is unchanged** — a missing row still means *not captured*; what changed is that a live headless session is no longer *expected* to be missing. ⚠️ **Do not read `hst` as unroutable:** there is no jump to hand over and the row is still classifiable. Report the population as `headless=<H>` on the payload header and the counts line — `H` is the number of candidate rows you rendered `no pane — headless`, so a round that classified none prints `headless=0` rather than omitting the field.
+     **The channel is pane-free** — `CLOSERS` reads the transcript, so a headless row carries a row with `hst` (pane-free, still classifiable; the fail-closed rule on a genuinely missing row is unchanged). [`closer-classes.md`](../docs/closer-classes.md) § The channel is pane-free.
 
      **The row's class decides the verdict — read it first.** `routine` → **revive**; `ask` → **blocked**; `parked-wait` / `none` → **unverifiable**. `python3 $P/closer-verdict.py --class <class>` prints it; `${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/docs/closer-classes.md` § The classes is the canonical table. ⚠️ **`routine` does not skip test 4** — the class describes the turn's LAST line, so a session whose last closer reads `nothing` but which carries another `BLOCKED` row is still blocked ([`fleet-drive-rationale.md`](../docs/fleet-drive-rationale.md) § Why `routine` does not skip the `BLOCKED` check).
 
@@ -111,8 +111,7 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 Return exactly this in the payload, each section `(none)` rather than dropped:
 
 ```
-fleet-drive — <N> candidates (<L> retained from the ledger) · <F> finished (reaped) · <R> revive (<C> routine continue) · <B> blocked · <U> unverifiable · headless=<H>
-  channel: pane-free-closer — <H> rows carried no pane and were classified from the transcript
+fleet-drive — <N> candidates (<L> retained from the ledger) · <F> finished (reaped) · <R> revive (<C> routine continue) · <B> blocked · <U> unverifiable · headless=<H> · channel=pane-free-closer
   <name> [<sid8>] · <bucket> · <open boxes> · <verdict>
       probe: <command → result>   |   (revive: the CLOSERS row + the four step-4a rows)
       ledger: <drafted | suppressed: <reason> | excluded>

@@ -34,9 +34,16 @@ carried no row for it. Step 4a then fail-closed it to `unverifiable` on **every*
 forever. Measured 2026-11-07: 237 of 242 drive candidates carried no pane, 232 landed
 `unverifiable`, and only 14 rows reached the closer probe at all.
 
+⚠️ **Registry presence is not liveness — `alive` is the verdict.** A crashed session
+leaves its `<pid>.json` behind, and a stale transcript whose last line reads `nothing`
+would then revive a dead worker. A store row is vouched server-side, which is why
+`read_registry()` skips `alive` for those; a synthetic row has no voucher, so only
+`alive is True` admits one. `None` (cannot tell) is excluded too — fail closed, which
+is the pre-change behaviour.
+
 A pane-less row renders `hst` in the pane column and prints
-`Last closers (<N>, headless=<H>)` in the section header. `hst` means *known live, no
-pane to jump to* — not unroutable, and not an exited session. The drive leg carries the
+`Last closers (<N>, headless=<H>)` in the section header. `hst` means *no pane resolved
+for this session* — not unroutable, and not an exited session. The drive leg carries the
 same count as `headless=<H>` on its payload header and counts line.
 
 ## The classes

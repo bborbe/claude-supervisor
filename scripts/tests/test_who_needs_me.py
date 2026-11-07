@@ -2651,12 +2651,33 @@ class LastClosersSection(unittest.TestCase):
                 mock.patch.object(wnm, "_transcript_mtime", lambda _sid: 1):
             rc, out, err = run_feed(
                 {}, [], argv=["--section", "last-closers"],
-                extra_registry={"headless-1": "Headless Worker"})
+                extra_registry={"headless-1": "Headless Worker"},
+                full_registry={"headless-1": {"alive": True, "name": "Headless Worker"}})
         self.assertEqual(0, rc, err)
         self.assertIn("Last closers (1, headless=1)", out)
         self.assertIn("routine: nothing — I continue on step 1", out)
         self.assertIn("hst", out)
-        self.assertIn("headless — no pane by construction", out)
+        self.assertIn("headless — no pane resolved for this session", out)
+
+    def test_a_registry_entry_whose_pid_is_dead_gets_no_row(self):
+        """Registry presence is not liveness — `alive` is the verdict.
+
+        A crashed session leaves its `<pid>.json` behind. Reading that as live would
+        class its stale transcript and revive a dead worker — the fail-open this
+        change must not introduce. `None` (cannot tell) fails closed the same way.
+        """
+        for alive in (False, None):
+            with mock.patch.object(
+                    wnm, "last_assistant_text",
+                    lambda rec: "👤 You: nothing — I continue on step 1"), \
+                    mock.patch.object(wnm, "_transcript_mtime", lambda _sid: 1):
+                rc, out, err = run_feed(
+                    {}, [], argv=["--section", "last-closers"],
+                    extra_registry={"dead-1": "Dead Worker"},
+                    full_registry={"dead-1": {"alive": alive, "name": "Dead Worker"}})
+            self.assertEqual(0, rc, err)
+            self.assertIn("Last closers (0, headless=0)", out,
+                          "alive=%r must not admit a row" % (alive,))
 
 
 if __name__ == "__main__":
