@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.248.1
 
 - fix: **the round's own-parks leg actually runs — row 5d joins the delegate rule's acting carve-out.** `commands/fleet-drive.md` sends *"anything not the sweep"* to a sub-agent and excepts the acting rows by name; the carve-out listed 5b and 5c only. Row 5d shipped in `v0.244.0` and the carve-out in `v0.244.1`, so the row was added to the router after the list of exceptions had been written and nobody noticed: a delegated sub-agent holds no `mcp__supervisor__answer_permission`, so the step reached its first precondition and skipped — into a sub-agent's transcript, which is not the round's. Measured 2026-11-07: the Fleet Manager's transcript holds nine `own-parks:` lines, every one `nothing parked`, all between `2026-11-06T18:54:17Z` and `18:58:37Z`, and **none in the ~16 hours after** while its loop armed every 15 minutes (`fleet--fleet-manager.arms`, cadence 900, last arm `2026-11-07T11:04:26`) and it spawned ten workers that morning. The step had never answered a park. Change set: the carve-out now names 5b, 5c and 5d (10,234 bytes, inside the 10,240 budget); `commands/steps/own-parks.md` states at its own home that a read-only execution is not a run of it and why; `scripts/check-acting-legs.py` carries 5d in `LEGS` and its `CARVEOUT` phrase, so deleting the row from the carve-out or the acting statement from the step fails the guard — `test_own_parks_without_its_statement_fails` is the shipped defect in a fixture.
 
