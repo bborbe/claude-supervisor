@@ -127,17 +127,23 @@ into its `LEGS` section, through `fleet-legs.py`, exactly as step 3 states. The 
 the ≤ 1 KB verdict summary below, obeying `${CLAUDE_PLUGIN_ROOT}/docs/handback-contract.md` for
 the form.
 
-**Hand-back** — verdict lines and counts in `key=value` form, non-empty, every `REFUSED` row
-verbatim:
+**Hand-back** — verdict lines and counts in `key=value` form, non-empty, the counts first and
+one `refused:` line per refusal after them:
 
 ```text
 legs=written|UNKNOWN · operator-flagged=<n>|not-run · opened=<n> · refused=<n> · truncated=<n> · payload=<path>|—
+```
+
+then, one line each, every refusal exactly as the command printed it:
+
+```text
 refused: REFUSED | <vault> | <name> | flag_set_by=<who> | not the operator — not opened, not approved
 ```
 
 ⚠️ **Every `REFUSED` line the command printed appears here verbatim**, one `refused:` line each,
 because the caller prints them and the operator reads them — a count cannot be reconciled
-against a list of names. ⚠️ **When those lines would push the hand-back past 1 KB, the truncation
+against a list of names. ⚠️ **`flag_set_by=` inside a `refused:` line is the command's own text,
+not a hand-back key** — never emit a `flag_set_by=` count of your own. ⚠️ **When those lines would push the hand-back past 1 KB, the truncation
 rule is `docs/handback-contract.md`'s and is not restated here** — emit the counts plus as many
 lines as fit, add `truncated=<n>`, write the full list to
 `~/.claude/state/fleet-handback/<round timestamp>.flagged-open` (`mkdir -p` the directory, write
