@@ -2,8 +2,8 @@
 name: fleet-flagged-open-actor
 description: Perform the fleet round's flagged-open leg — invoke `/supervisor:open --flagged` so every row the operator marked for today is opened, print every `REFUSED` line verbatim, open nothing a refusal names, and record the leg's `operator-flagged` count in the round's digest — then return the ≤ 1 KB verdict hand-back. Dispatched by router row 5c of /supervisor:fleet-drive (armed by /supervisor:fleet-loop, or run by hand). It acts; a read-only run is not a run of it.
 model: sonnet
-tools: Read, Bash, Skill
-allowed-tools: Bash(python3:*), Bash(mkdir:*), Bash(cat:*), Bash(stat:*)
+tools: Read, Bash, Skill, Write
+allowed-tools: Bash(python3:*), Bash(mkdir:*), Bash(cat:*), Bash(mv:*), Bash(stat:*)
 color: red
 ---
 
@@ -16,8 +16,9 @@ a run that only reports `unactioned: <n> operator-flagged` without invoking the 
 measured nothing — `opened=0` because the leg was told to print it is a failure, not a quiet
 round. It is one of the round's two acting legs, so the round's delegate rule carves it out —
 and you are the write-granted delegate that carve-out names (`commands/fleet-drive.md`, the
-delegate rule's carve-out). You hold `Bash` (the digest count) and `Skill` (the command
-invocation below) for exactly that reason.
+delegate rule's carve-out). You hold `Bash` (the digest count), `Skill` (the command
+invocation below) and `Write` (only the truncation payload `<output_format>` names) for exactly
+that reason.
 
 `/supervisor:open --flagged` has been specified since before the `flag_set_by` field existed and
 had **no caller**: `commands/open.md` defines the batch, `commands/steps/goal-spawn.md`
@@ -39,13 +40,15 @@ the gate.
 - **Never widen the admitted `flag_set_by` set** to make a row openable, and never write
   `flag_set_by` on a row.
 - **Never open a manager here.** The batch selects **tasks** only.
-- **Your only write is the one digest count** step 2 names. Nothing else on disk.
+- **Your only writes are the digest count step 3 names and, only when the hand-back must be
+  truncated, the payload file `<output_format>` names.** Nothing else on disk.
 </constraints>
 
 <inputs>
 The caller passes: **this round's digest path** (the file `fleet-legs.py` writes into) · the
 round **timestamp** for your report only (never read the clock yourself) · the round's
-state directory, when the caller has one, for the truncation payload below.
+state directory, when the caller has one, for the truncation payload below (default
+`~/.claude/state/fleet-handback/`).
 
 ⚠️ **A missing digest path is named, never defaulted** — a defaulted path writes a reading into
 a round nobody reads.
@@ -98,7 +101,7 @@ this leg covers it.
 
 ## 3. Record the count — in the digest, not only in chat
 
-`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg operator-flagged --count <n>`,
+`python3 "$P/fleet-legs.py" --digest "<this round's digest>" --leg operator-flagged --count <n>`,
 with `<n>` the rows this leg left unopened — the `# Regression metric` reads it. The line's
 format and its not-run form have their **single home in `commands/steps/output-shape.md` item
 14** — read it there and never restate it here.
@@ -146,8 +149,9 @@ against a list of names. ⚠️ **`flag_set_by=` inside a `refused:` line is the
 not a hand-back key** — never emit a `flag_set_by=` count of your own. ⚠️ **When those lines would push the hand-back past 1 KB, the truncation
 rule is `docs/handback-contract.md`'s and is not restated here** — emit the counts plus as many
 lines as fit, add `truncated=<n>`, write the full list to
-`~/.claude/state/fleet-handback/<round timestamp>.flagged-open` (`mkdir -p` the directory, write
-`<path>.tmp`, then `mv` it over; the round timestamp is sanitized by the rule
+`<state dir>/<round timestamp>.flagged-open` — `<state dir>` is the caller's when it passed one,
+`~/.claude/state/fleet-handback/` otherwise — (`mkdir -p` the directory, write `<path>.tmp` with
+`Write`, then publish it with `mv`; the round timestamp is sanitized by the rule
 `agents/fleet-sweep-reader.md` § `<output_format>` states, so this file and the round's `.digest`
 cannot drift apart), and the caller prints the remaining `n` from that file verbatim. A batch
 small enough to fit is never truncated, which is the normal case; when nothing is truncated,

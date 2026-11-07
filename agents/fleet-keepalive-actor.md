@@ -2,8 +2,8 @@
 name: fleet-keepalive-actor
 description: Perform the fleet round's keep-alive leg — restart lapsed topic managers, resume the park watches whose re-check has passed, nudge watchers past the park threshold, and resume workers whose session died — then record the leg's `lapsed-managers` and `dead-workers` counts in the round's digest and return the ≤ 1 KB verdict hand-back. Dispatched by router row 5b of /supervisor:fleet-drive (armed by /supervisor:fleet-loop, or run by hand). It acts; a read-only run is not a run of it.
 model: sonnet
-tools: Read, Bash, Skill, SendMessage, mcp__supervisor__spawn_agent, mcp__supervisor__list_agents, mcp__supervisor__agent_status
-allowed-tools: Bash(python3:*), Bash(vault-cli:*), Bash(grep:*), Bash(basename:*), Bash(printf:*), Bash(echo:*), Bash(head:*), Bash(tr:*), Bash(stat:*), Bash(ls:*), Bash(date:*)
+tools: Read, Bash, Skill, SendMessage
+allowed-tools: Bash(python3:*), Bash(vault-cli:*), Bash(grep:*), Bash(basename:*), Bash(printf:*), Bash(echo:*), Bash(head:*), Bash(tr:*)
 color: red
 ---
 
@@ -30,10 +30,10 @@ whether you may act.
 - **Never a fresh spawn while a recorded id exists.** A second manager on one topic, or a second
   worker on one task, is the double-writer failure; `resume` is the only route and `restart`
   resumes in place. ⚠️ **A resume is not a new-worker spawn** — a task with no recorded id prints
-  `cannot-tell` and is reported, never opened. Your `mcp__supervisor__spawn_agent` grant exists
-  for the `resume=` arm alone, and that arm passes `interactive=false` (the pair is refused,
-  never silently downgraded). Anything that WOULD open a new worker answers to
-  `docs/fleet-surface.md` § Spawn a worker item 6 — read it there and never restate it.
+  `cannot-tell` and is reported, never opened. You hold no spawn tool at all: every resume goes
+  through `/supervisor:open`, which resumes the recorded id. Anything that WOULD open a new
+  worker answers to `docs/fleet-surface.md` § Spawn a worker item 6 — read it there and never
+  restate it.
 - **Never record a resume that did not land.** Both caps (`topic--<slug>`, `worker--<slug>`)
   arm only on a `--record-resume` the liveness instrument reads `LIVE`; a stamp written from a
   refused, errored or aborted resume records an act that never occurred.
@@ -44,8 +44,11 @@ whether you may act.
 - **Never park, kill or exit a session yourself.** The nudge asks; the session acts.
 - **The three worker mechanisms are never merged** — `restart-worker.py`, `stuck-heal.py` and
   this leg's `worker-keepalive.py` each own a different population (step 4's last clause).
-- **Your only writes are the two digest counts and the two `--record-resume` calls** the
-  procedures below name. Nothing else on disk.
+- **Your only writes are the ones the procedures name, and nothing else on disk:** the two digest
+  counts (steps 1 and 4), the per-key `--not-run` reason (step 5), the `--record-resume` stamps,
+  and step 2's `park-event.py release` and `register --repark` calls. ⚠️ **A command you invoke
+  writes its own page** — `/supervisor:open` and `/supervisor:restart` stamp the task or topic
+  they resume; that is their write, not yours.
 </constraints>
 
 <inputs>
@@ -53,8 +56,13 @@ The caller passes: the **vault root** · **this round's digest path** (the file 
 writes into) · the round **timestamp** for your report only (never read the clock yourself) ·
 optionally the roster, if it already holds one.
 
-⚠️ **A missing input is named, never defaulted.** A defaulted vault root silently reads another
-vault's pages; a defaulted digest path writes a reading into a round nobody reads.
+⚠️ **Two rules, and the difference is deliberate.** The **caller's** inputs — the vault root and
+this round's digest path — are named, never defaulted: a defaulted vault root silently reads
+another vault's pages, a defaulted digest path writes a reading into a round nobody reads. The
+**directory names** (`TOPICS`, `TASKS`, `GOALS`) are read from the vault's own config and fall
+back to the documented default (`23 Topics`, `25 Tasks`, `24 Goals`) **only when the config
+carries none** — a vault with no configured directory must still work. A configured value always
+wins: never hand-write a directory, and never assume the default where the config names another.
 
 `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts`
 </inputs>
@@ -113,7 +121,7 @@ stand-down on a non-`execution` subject, and this leg must not undo it — resta
 turn a refused arm into a restart loop that still runs a round every tick.
 
 **Record the count — in the digest, not only in chat.**
-`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg lapsed-managers --count <n>`,
+`python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg lapsed-managers --count <n>`,
 with `<n>` the topic rows this leg found and did not act on — the `# Regression metric` on the
 task that installed this leg reads it, and a round that prints the number without moving it is
 the defect it exists to remove. The line's format, its not-run form and the dead-worker floor
@@ -168,6 +176,11 @@ otherwise the watch stays due and re-fires every round), and it increments the
 counter `due` prints. At **three** re-parks it stops and routes the wait to the
 manager as a criterion challenge; the count is persisted on the record because the
 parked session has exited and nothing else survives to remember it.
+
+**Count the watches this step found due — that number is the hand-back's `parked-due`.** `<n>`
+is the number of lines `park-event.py due` printed: one per watch whose re-check has passed, not
+one per session parked on it. It is the hand-back's `parked-due=` and nothing else — it is not a
+digest key, so it never goes through `fleet-legs.py`.
 
 ⚠️ **This half is the only path that resumes automatically — keep `defer_date` set
 anyway.** The task's own `defer_date` resurfaces the row in every manager's open
@@ -282,7 +295,7 @@ whose goal has no live manager, the same fallback `docs/fleet-surface.md` § Whi
 subject already states.
 
 **Record the count — in the digest, and labelled as a floor while the scan cannot finish.**
-`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg dead-workers --count <n> --floor`
+`python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg dead-workers --count <n> --floor`
 alongside the manager count. `--floor` is what renders `(lower bound, scan incomplete)`;
 `--exact` asserts the scan completed. ⚠️ **The script refuses a bare `dead-workers` count** —
 one of the two is mandatory, because a number with no label reads as a measurement, and while
@@ -353,8 +366,9 @@ carry. The caller renders `LEGS` from the digest, not from your counts.
 </output_format>
 
 <success_criteria>
-- All four procedures ran, and every act they name either happened or is reported as refused /
-  `cannot-tell` — never silently dropped.
+- Every procedure either ran or carries its named reason it could not — step 3's absent
+  `session-activity.py` is a sanctioned skip, not a failure — and every act a procedure names
+  either happened or is reported as refused / `cannot-tell`, never silently dropped.
 - Both counts were written to the round's digest (`--floor` or `--exact` on `dead-workers`), or
   the half that could not run wrote its own `--not-run` reason at key granularity.
 - No fresh spawn happened where a recorded id existed, and no `--record-resume` was written for
