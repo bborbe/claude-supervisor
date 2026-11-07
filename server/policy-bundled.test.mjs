@@ -30,7 +30,7 @@ test('the shipped file parses and carries rules', () => {
 
 test('every Bash allow rule is anchored — a substring allow is a universal bypass', () => {
   // A plain `match` is a substring test, so `{"match": "ls"}` also allows
-  // `rm -rf ~/Documents && ls`. Catches anyone adding a Bash allow without matchType.
+  // `rm -rf /etc && ls`. Catches anyone adding a Bash allow without matchType.
   const bashAllows = RULES.filter((r) => r.tool === 'Bash' && r.action === 'allow')
   assert.ok(bashAllows.length > 0)
   for (const rule of bashAllows) {
