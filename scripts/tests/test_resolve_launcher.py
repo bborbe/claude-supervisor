@@ -42,10 +42,13 @@ class ResolveLauncherCli(unittest.TestCase):
         self.sessions = os.path.join(d, "sessions")
         os.makedirs(self.sessions)
         with open(self.role_map, "w") as fh:
+            # Deliberately NOT the role defaults (`pink`/`orange`/`cyan`): a map carrying
+            # the defaults cannot distinguish "the map was read" from "the map was missing
+            # and the role default was used" — the two paths this file must keep apart.
             json.dump({
-                "Agents": {"chip": "pink", "window_id": 1},
-                "Managers": {"chip": "orange", "window_id": 2},
-                "Direct": {"chip": "cyan", "window_id": 3},
+                "Agents": {"chip": "purple", "window_id": 1},
+                "Managers": {"chip": "yellow", "window_id": 2},
+                "Direct": {"chip": "green", "window_id": 3},
             }, fh)
         self.configure()
 
@@ -90,7 +93,7 @@ class ResolveLauncherCli(unittest.TestCase):
         self.page("T", "claude_session_id: s1\nrole: agent")
         self.assertEqual(
             self.fields(self.run_cli("s1")),
-            [os.path.join(self.scripts, "cc-private-deepseek"), "worker-default", "agent", "pink"],
+            [os.path.join(self.scripts, "cc-private-deepseek"), "worker-default", "agent", "purple"],
         )
 
     def test_a_human_row_resolves_to_claude_and_cyan(self):
@@ -98,7 +101,7 @@ class ResolveLauncherCli(unittest.TestCase):
         self.page("T", "claude_session_id: s1\nrole: human")
         self.assertEqual(
             self.fields(self.run_cli("s1")),
-            [os.path.join(self.scripts, "cc-private-claude"), "claude-sibling", "human", "cyan"],
+            [os.path.join(self.scripts, "cc-private-claude"), "claude-sibling", "human", "green"],
         )
 
     def test_a_tasks_own_launcher_wins_over_both(self):
@@ -106,20 +109,20 @@ class ResolveLauncherCli(unittest.TestCase):
         self.page("T", "claude_session_id: s1\nrole: human\nlauncher: cc-private-glm")
         self.assertEqual(
             self.fields(self.run_cli("s1")),
-            [os.path.join(self.scripts, "cc-private-glm"), "task", "human", "cyan"],
+            [os.path.join(self.scripts, "cc-private-glm"), "task", "human", "green"],
         )
 
     def test_an_absent_role_reads_as_agent(self):
         """Matrix Rule 1: no `role:` key is agent, and the chip follows the resolved role."""
         self.page("T", "claude_session_id: s1")
-        self.assertEqual(self.fields(self.run_cli("s1"))[2:], ["agent", "pink"])
+        self.assertEqual(self.fields(self.run_cli("s1"))[2:], ["agent", "purple"])
 
     def test_a_manager_session_is_coloured_as_a_manager(self):
         """A manager carries no task page, so the claimant lookup alone would read it as a
         worker — the same defect the prose rule had, one layer down. Read from the goal
         page, never the registry: the registry is gone by the time a resume happens."""
         self.page("G", "claude_session_id: m1", sub="24 Goals")
-        self.assertEqual(self.fields(self.run_cli("m1"))[2:], ["manager", "orange"])
+        self.assertEqual(self.fields(self.run_cli("m1"))[2:], ["manager", "yellow"])
 
     def test_an_unreadable_role_map_falls_back_to_the_roles_own_chip(self):
         """A missing map must not default every role to cyan — the role is the fact."""
@@ -131,6 +134,18 @@ class ResolveLauncherCli(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("under no configured vault", result.stderr)
         self.assertEqual(result.stdout, "")
+
+    def test_the_launcher_override_wins_and_says_so(self):
+        """`SUPERVISOR_LAUNCHER` short-circuits the whole rule — the one branch that
+        returns a value no other check reads, so it needs its own case."""
+        self.page("T", "claude_session_id: s1\nrole: human")
+        env = dict(os.environ, SUPERVISOR_VAULT_CONFIG=self.config,
+                   SUPERVISOR_ROLE_MAP=self.role_map,
+                   SUPERVISOR_SESSIONS_DIR=self.sessions,
+                   SUPERVISOR_LAUNCHER="/override/cc-drill")
+        result = subprocess.run([sys.executable, SCRIPT, "s1", "--cwd", self.vault],
+                                capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(self.fields(result), ["/override/cc-drill", "override", "human", "green"])
 
     def test_missing_arguments_is_a_usage_error(self):
         env = dict(os.environ, SUPERVISOR_VAULT_CONFIG=self.config)
