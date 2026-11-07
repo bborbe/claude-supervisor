@@ -8,6 +8,8 @@ user-invocable: false
 
 When: every tick
 
+⚠️ **This leg acts, and a read-only execution is not a run of it.** It calls `mcp__supervisor__list_agents` and `mcp__supervisor__answer_permission`, which a read-only sub-agent does not hold — so a delegate that runs this file as written reaches precondition 1 and prints `own-parks: skipped — answer_permission unavailable` while the parks stay parked. Run it in the round session, or in a sub-agent granted write tools. See `commands/fleet-drive.md` § the delegate rule.
+
 A headless worker's permission prompt parks with the session that **spawned** it, and no other session can answer it (`scripts/answer-path-check.py`; `commands/open.md` § the answer-path probe). When this session is the spawner, every park it does not answer goes to the operator's board or auto-denies at 15 minutes. Goal managers already answer theirs through `supervisor:goal-wrangler` (`/supervisor:goal-drain`). Before this step the fleet tier held `answer_permission` but no step called it.
 
 This step answers **only** routine parks — those the written allowlist already decides — and **only** for workers the spawn ledger names this session as spawner of. It is class B of the runbook's Gate triage (*"already determined by a written source"*), where the written source is `${CLAUDE_PLUGIN_ROOT}/docs/permission-allowlist.md`. It adds no class-A mandate.
