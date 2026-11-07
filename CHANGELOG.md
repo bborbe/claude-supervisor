@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.247.5
 
 - fix: **a manager no longer restates a relayed gate on its own closer.** `commands/steps/needs-input.md` and `commands/steps/goal-gates.md` now carry the same rule in their two homes: a relayed gate's card belongs to the session that raised it, so the manager ends on `🟡 WAITING` naming that pane with **no `👤 You:` minting verb** — a `you run:` / `review:` / `pick —` / `approve:` line mints a fresh card for a decision the board already carries, while a cardable class-C relay keeps its ONE board line and no per-gate jump link. ⚠️ **This is the relay case, which v0.206.0's `--closer` rule does not reach in practice.** That release covered the post-then-close case — a session that posts a card and then closes on the same ask. A manager relaying a gate it never carded writes no `<sid>.posted.json`, so there is nothing for the echo to match; and even for a carded relay, `--closer` holds a single record per session, so a multi-card round overwrites the first closer. A verb-free closer mints no echo at all, which is why the closer's shape is the fix here; `scripts/attention-ask.py`'s docstring now states both limits and stops naming the relay as the flag's common case. ⚠️ **Master's later sentence making the relayed worker gate the `--closer` flag's *commonest case* is replaced by this rule** — the relay is never a `--closer` case at all, and the flag keeps only the post-then-close case, which is not a relay.
 
