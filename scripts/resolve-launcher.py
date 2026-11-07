@@ -49,6 +49,12 @@ ROLE_MAP = os.environ.get("SUPERVISOR_ROLE_MAP") or os.path.expanduser(
 ROLE_WINDOW = {"agent": "Agents", "manager": "Managers", "human": "Direct"}
 ROLE_CHIP = {"agent": "pink", "manager": "orange", "human": "cyan"}
 
+# The colours `/color` accepts, from `commands/open.md` § Arguments. A published chip
+# outside this set is refused rather than forwarded — see `chip_for`.
+VALID_CHIPS = frozenset(
+    ("red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan", "default")
+)
+
 
 def load_sibling(filename):
     """Import a sibling script by path — the repo's own convention for sharing code."""
@@ -77,18 +83,30 @@ def role_map(path=None):
 def chip_for(role, mapping=None):
     """`(chip, source)` for a resolved role — the map's value, else the role's own default.
 
-    `source` is `role-map` or `role-default`, so a caller can report that the map was
-    missing instead of passing a fallback off as a published value.
+    `source` is `role-map` or `role-default`.
+
+    ⚠️ **A published chip is only accepted when it is one of the eight valid colours.** The
+    value is re-emitted by `commands/open.md` as the spawn prompt `"/color <chip>"` inside a
+    `bash -lc` string, so a corrupt or hand-edited role map carrying shell text would be
+    parsed by that inner shell. Anything outside the allow list falls back to the role's own
+    default rather than reaching the spawn — the same fail-closed direction the repo takes
+    for every other value it executes.
     """
     published = (mapping or {}).get(ROLE_WINDOW.get(role, "Agents")) or {}
     chip = str(published.get("chip") or "").strip().lower()
-    if chip:
+    if chip in VALID_CHIPS:
         return chip, "role-map"
     return ROLE_CHIP.get(role, ROLE_CHIP["agent"]), "role-default"
 
 
 def resolve(session_id, cwd):
-    """`(launcher, source, role, chip)` for resuming `session_id`, or `(None, reason, …)`."""
+    """`(launcher, source, role, chip)` for resuming `session_id`, or `(None, reason, …)`.
+
+    ⚠️ The launcher is shape-checked before it is returned. `commands/open.md` re-emits it
+    inside a `bash -lc` string, where a value carrying a quote or a `$(…)` is parsed a
+    second time by that inner shell — `SUPERVISOR_LAUNCHER` is the one arm that skips
+    `resolve_launcher`'s own check, so the guard belongs here, at the boundary.
+    """
     rw = load_sibling("restart-worker.py")
     fb = load_sibling("fleet-board.py")
     # The role is read FIRST, because it decides whether `resolve_launcher` takes the
@@ -100,6 +118,8 @@ def resolve(session_id, cwd):
     launcher, launcher_source = rw.resolve_launcher(session_id, cwd, fb, subject)
     if launcher is None:
         return None, launcher_source, "", ""
+    if not rw.SAFE_LAUNCHER.match(launcher) or ".." in launcher.split("/"):
+        return None, f"launcher {launcher!r} is not a plain script name or path", "", ""
     chip, _chip_source = chip_for(role, role_map())
     return launcher, launcher_source, role, chip
 

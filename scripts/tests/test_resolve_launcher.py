@@ -78,7 +78,7 @@ class ResolveLauncherCli(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip().split("\t")
 
-    def test_an_agent_row_resolves_to_the_worker_default_and_pink(self):
+    def test_an_agent_row_resolves_to_the_worker_default_with_the_map_chip(self):
         """The regression: a `role: agent` row with no launcher must NOT come back on Opus."""
         self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"))
         self.page("T", "claude_session_id: s1\nrole: agent")
@@ -87,7 +87,7 @@ class ResolveLauncherCli(unittest.TestCase):
             [os.path.join(self.scripts, "cc-private-deepseek"), "worker-default", "agent", "purple"],
         )
 
-    def test_a_human_row_resolves_to_claude_and_cyan(self):
+    def test_a_human_row_resolves_to_claude_with_the_map_chip(self):
         self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"))
         self.page("T", "claude_session_id: s1\nrole: human")
         self.assertEqual(
@@ -113,7 +113,30 @@ class ResolveLauncherCli(unittest.TestCase):
         worker — the same defect the prose rule had, one layer down. Read from the goal
         page, never the registry: the registry is gone by the time a resume happens."""
         self.page("G", "claude_session_id: m1", sub="24 Goals")
-        self.assertEqual(self.fields(self.run_cli("m1"))[2:], ["manager", "yellow"])
+        self.assertEqual(
+            self.fields(self.run_cli("m1")),
+            [os.path.join(self.scripts, "cc-private-claude"), "claude-sibling", "manager", "yellow"],
+        )
+
+    def test_a_chip_outside_the_colour_allow_list_falls_back_to_the_role_default(self):
+        """The chip is re-emitted inside a `bash -lc` string; a corrupt map must not reach it."""
+        bad = os.path.join(os.path.dirname(self.role_map), "bad-map.json")
+        with open(bad, "w") as fh:
+            json.dump({"Direct": {"chip": 'cyan"; rm -rf / #'}}, fh)
+        self.page("T", "claude_session_id: s1\nrole: human")
+        self.assertEqual(self.fields(self.run_cli("s1", role_map=bad))[3], "cyan")
+
+    def test_a_launcher_carrying_shell_text_is_refused(self):
+        """`SUPERVISOR_LAUNCHER` skips the resolver's own shape check; the CLI is the boundary."""
+        self.page("T", "claude_session_id: s1")
+        env = dict(os.environ, SUPERVISOR_VAULT_CONFIG=self.config,
+                   SUPERVISOR_ROLE_MAP=self.role_map,
+                   SUPERVISOR_LAUNCHER='cc-x"; rm -rf / #')
+        result = subprocess.run([sys.executable, SCRIPT, "s1", "--cwd", self.vault],
+                                capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not a plain script name or path", result.stderr)
+        self.assertEqual(result.stdout, "")
 
     def test_an_unreadable_role_map_falls_back_to_the_roles_own_chip(self):
         """A missing map must not default every role to cyan — the role is the fact."""

@@ -251,10 +251,11 @@ for a vault-cli too old to emit the key.
 ⚠️ **A `role: human` task takes the Claude launcher**, mirroring `applyHumanLauncherRule` in
 `server/spawn-cwd.mjs` (operator ruling 2026-11-06, matrix Rule 4): the `-claude` sibling
 (`claude-sibling`), then the configured `manager_launcher` (`manager-default`), then the
-worker resolution. The sibling comes **first on purpose** — `private-personal` and
-`seibert-brogrammers` both point `manager_launcher` at a `-deepseek` script, so taking the
-configured value first would leave a human row on the worker model while the rule reported
-success. A task's own `launcher:` still wins, over both rules.
+vault's `claude_script` (`vault`) — never the worker default. The sibling comes **first on
+purpose** — `private-personal` and `seibert-brogrammers` both point `manager_launcher` at a
+`-deepseek` script, so taking the configured value first would leave a human row on the
+worker model while the rule reported success. A task's own `launcher:` still wins, over both
+rules.
 
 ## The one deliberate copy
 
