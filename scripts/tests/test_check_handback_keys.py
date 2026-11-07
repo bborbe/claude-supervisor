@@ -4,9 +4,10 @@ Two families are covered, and both are silent when broken:
 
   (1) the fleet tick's router `When` cells against `agents/fleet-sweep-reader.md`'s
       hand-back, and
-  (2) the manager round's two delegated legs — `commands/steps/round-readings.md` →
-      `agents/round-readings-reader.md` and `commands/steps/goal-spawn.md` →
-      `agents/goal-spawn-reader.md`.
+  (2) the delegated legs — `commands/steps/round-readings.md` → `agents/round-readings-reader.md`,
+      `commands/steps/goal-spawn.md` → `agents/goal-spawn-reader.md`, and the fleet round's two
+      acting legs, `commands/steps/keepalive.md` → `agents/fleet-keepalive-actor.md` and
+      `commands/steps/flagged-open.md` → `agents/fleet-flagged-open-actor.md`.
 
 The load-bearing cases are the PRE-CHANGE ones. Both reader agents shipped on 2026-11-06
 with a hand-back that omitted values its own contract requires — the readings leg collapsed
@@ -147,6 +148,30 @@ class CheckHandbackKeysTest(unittest.TestCase):
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("inflight-unread", result.stderr)
+
+    def test_pre_change_keepalive_fence_fails(self):
+        """The keep-alive leg's hand-back without `legs=` — the digest-write verdict.
+
+        The counts are not the whole hand-back: the caller branches on whether the digest
+        write landed, and a fence that drops that key leaves the failed-write render
+        unreachable — the round would print numbers no digest carries.
+        """
+        self.write(
+            "agents/fleet-keepalive-actor.md",
+            fence(self.legs["supervisor:fleet-keepalive-actor"]["required"], drop=("legs",)),
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("`legs=`", result.stderr)
+
+    def test_a_fleet_acting_leg_that_stops_dispatching_fails(self):
+        """The same split guard, on the fleet side: a reverted 5c is its pre-split text."""
+        site = self.legs["supervisor:fleet-flagged-open-actor"]["sites"][0]
+        self.write(site, "# Flagged open\n\n- Open what the operator marked, if any.\n")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(site, result.stderr)
+        self.assertIn("no longer dispatches", result.stderr)
 
 
 if __name__ == "__main__":
