@@ -94,7 +94,9 @@ def resolve(session_id, cwd):
     # The role is read FIRST, because it decides whether `resolve_launcher` takes the
     # manager arm: a manager session carries no task page, so passing no `subject` would
     # resume it on the worker default.
-    role, subject = rw.resume_role(session_id, cwd, fb)
+    role, subject, role_error = rw.resume_role(session_id, cwd, fb)
+    if role_error:
+        return None, role_error, "", ""
     launcher, launcher_source = rw.resolve_launcher(session_id, cwd, fb, subject)
     if launcher is None:
         return None, launcher_source, "", ""

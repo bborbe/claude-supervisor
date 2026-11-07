@@ -519,21 +519,36 @@ def session_subject(sid, root, fb):
     exactly where the resume happens. Caught in review on the first cut of `resume_role`,
     which read the registry and therefore left the bug it claimed to fix in place.
     `commands/open.md` reads the same page field to decide the resume, so the two agree.
+
+    Two pages claiming one id is an error, not a first-match — the same rule
+    `session_claimant` enforces, and for the same reason: picking one would resume the
+    session under a subject chosen by page ordering.
     """
+    claims = []
     for kind, subdirs in (("topic", fb.TOPIC_SUBDIRS), ("goal", fb.GOAL_SUBDIRS)):
         for path in fb._pages(root, subdirs):
             if _page_field(path, "claude_session_id") == sid:
-                return kind, os.path.basename(path)[:-3]
-    return None
+                claims.append((kind, os.path.basename(path)[:-3]))
+    if len(claims) > 1:
+        names = ", ".join(f"{k} {t}" for k, t in claims)
+        return None, f"{len(claims)} pages claim session {sid} ({names})"
+    return (claims[0] if claims else None), None
 
 
 def resume_role(sid, cwd, fb):
-    """`(role, subject)` a resume must launch and colour by: `manager`, `human` or `agent`.
+    """`(role, subject, error)` a resume must launch and colour by.
 
-    A MANAGER is checked first. A manager session usually carries no task page, so the
-    claimant lookup alone would read it as a worker and resume it on the worker default —
-    the same defect the prose rule had, one layer down. `subject` is passed straight to
-    `resolve_launcher`.
+    `role` is `manager`, `human` or `agent`. A MANAGER is checked first: a manager session
+    usually carries no task page, so the claimant lookup alone would read it as a worker
+    and resume it on the worker default — the same defect the prose rule had, one layer
+    down. `subject` is passed straight to `resolve_launcher`.
+
+    ⚠️ **The manager arm is page-keyed, so a manager with no goal or topic page reads as
+    `agent` here** — the root manager is the live case. Its LAUNCHER still matches (the
+    worker chain resolves the same script), but its chip comes out `pink` rather than
+    `orange`. The page is the only source that survives an exited session, which is the
+    case this function exists for; the registry could cover the page-less root but only
+    while it is live, when no resume is happening.
 
     An unreadable vault config is not a refusal here: there is no kill to authorise and
     the row still has to open, so it answers `agent` and the chip follows.
@@ -541,13 +556,17 @@ def resume_role(sid, cwd, fb):
     configs = vault_configs()
     best = vault_for_cwd(cwd, configs) if configs is not None else None
     if best is None:
-        return "agent", None
+        return "agent", None, None
     root = best[0]
-    subject = session_subject(sid, root, fb)
+    subject, error = session_subject(sid, root, fb)
+    if error:
+        return "agent", None, error
     if subject is not None:
-        return "manager", subject
-    claimant, _error = session_claimant(sid, root, fb)
-    return (_role_field(claimant[0]) if claimant else "") or "agent", None
+        return "manager", subject, None
+    claimant, claimant_error = session_claimant(sid, root, fb)
+    if claimant_error:
+        return "agent", None, claimant_error
+    return (_role_field(claimant[0]) if claimant else "") or "agent", None, None
 
 
 def resolve_launcher(sid, cwd, fb, subject=None):
@@ -652,7 +671,7 @@ def resolve_launcher(sid, cwd, fb, subject=None):
     # would leave a human row on the worker model while the rule reported success. A task's
     # own `launcher:` still wins — it is the operator's explicit choice for that row.
     if claimant and source != "task" and _role_field(claimant[0]) == "human":
-        name, source = _human_launcher(vault_launcher, vault, name, source)
+        name, source = _human_launcher(vault_launcher, vault)
         if name is None:
             return None, source
 
@@ -661,13 +680,18 @@ def resolve_launcher(sid, cwd, fb, subject=None):
     return name, source
 
 
-def _human_launcher(vault_launcher, vault, worker_name, worker_source):
+def _human_launcher(vault_launcher, vault):
     """`(name, source)` for a `role: human` row: the `-claude` sibling, else the manager chain.
 
     Reuses `manager-launcher.py`'s `sibling()` and `resolve()` rather than restating the
-    naming convention, so the compatibility rung has one home. The final fallback is the
-    worker resolution the caller already computed — a vault with neither a sibling nor a
-    configured manager launcher opens the row somewhere rather than refusing to open it.
+    naming convention, so the compatibility rung has one home.
+
+    ⚠️ **The last rung is the vault's `claude_script`, never the worker default.** That is
+    what matrix Rule 4 states and what `applyHumanLauncherRule` does (it falls through to
+    `resolveManagerLauncher`, whose final arm is `vaultLauncher`). Returning the worker
+    resolution here would put a `role: human` row on the `-deepseek` worker launcher in a
+    vault that configures `worker_launcher` but has neither a `-claude` sibling nor a
+    `manager_launcher` — the very outcome this rule exists to prevent. Caught in review.
 
     `(None, reason)` when the configured `manager_launcher` is unsafe or missing: the
     reason is `manager-launcher.py`'s own sentence and the caller refuses with it, rather
@@ -681,7 +705,7 @@ def _human_launcher(vault_launcher, vault, worker_name, worker_source):
         return sibling, "claude-sibling"
     manager_default = str(vault.get("manager_launcher") or "").strip()
     if not manager_default:
-        return worker_name, worker_source
+        return vault_launcher, "vault"
     if "/" not in manager_default:
         manager_default = os.path.join(os.path.dirname(vault_launcher), manager_default)
     return ml.resolve(manager_default, None, "manager-default")

@@ -39,8 +39,6 @@ class ResolveLauncherCli(unittest.TestCase):
             open(os.path.join(self.scripts, name), "w").close()
         self.config = os.path.join(d, "vaults.json")
         self.role_map = os.path.join(d, "role-map.json")
-        self.sessions = os.path.join(d, "sessions")
-        os.makedirs(self.sessions)
         with open(self.role_map, "w") as fh:
             # Deliberately NOT the role defaults (`pink`/`orange`/`cyan`): a map carrying
             # the defaults cannot distinguish "the map was read" from "the map was missing
@@ -66,22 +64,15 @@ class ResolveLauncherCli(unittest.TestCase):
         with open(os.path.join(self.vault, sub, f"{title}.md"), "w") as fh:
             fh.write(f"---\n{fm}\n---\nbody\n")
 
-    def run_cli(self, sid, cwd=None, role_map=None, sessions_dir=None):
+    def run_cli(self, sid, cwd=None, role_map=None):
         env = dict(os.environ)
         env["SUPERVISOR_VAULT_CONFIG"] = self.config
         env["SUPERVISOR_ROLE_MAP"] = role_map or self.role_map
-        env["SUPERVISOR_SESSIONS_DIR"] = sessions_dir or self.sessions
         env.pop("SUPERVISOR_LAUNCHER", None)
         return subprocess.run(
             [sys.executable, SCRIPT, sid, "--cwd", cwd or self.vault],
             capture_output=True, text=True, env=env, timeout=30,
         )
-
-    def session(self, sid, name):
-        """A registry record, so the role predicate has the session's NAME to read."""
-        with open(os.path.join(self.sessions, f"{sid}.json"), "w") as fh:
-            json.dump({"sessionId": sid, "pid": 4242, "status": "idle",
-                       "kind": "interactive", "name": name, "cwd": self.vault}, fh)
 
     def fields(self, result):
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -141,7 +132,6 @@ class ResolveLauncherCli(unittest.TestCase):
         self.page("T", "claude_session_id: s1\nrole: human")
         env = dict(os.environ, SUPERVISOR_VAULT_CONFIG=self.config,
                    SUPERVISOR_ROLE_MAP=self.role_map,
-                   SUPERVISOR_SESSIONS_DIR=self.sessions,
                    SUPERVISOR_LAUNCHER="/override/cc-drill")
         result = subprocess.run([sys.executable, SCRIPT, "s1", "--cwd", self.vault],
                                 capture_output=True, text=True, env=env, timeout=30)
