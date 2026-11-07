@@ -155,7 +155,7 @@ CLASSIFICATION  <total> classified · <class>=<n> · <class>=<n> …    — or: 
 BLOCKED (feed, raised — not verified open)
   <name> · pane <id> · <link> · <gate text, ≤80 chars>
 CLOSERS (last-turn closer and class)
-  <name> · pane <id> · <link> · <class> · <closer text, ≤80 chars>  ← CLASSIFICATION only, joined by pane id
+  <name> · pane <id|hst> · <link|—> · <class> · <closer text, ≤80 chars>  ← live sessions, joined by id
 ORPHAN CANDIDATES (park filter + 7d bound applied)  — or: UNKNOWN (check failed)
   <task> · claimed by <session id 8> · file age <h>
 REAP CANDIDATES (3 disk facts read this run)

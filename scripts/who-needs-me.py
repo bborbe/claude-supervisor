@@ -1889,6 +1889,80 @@ def answer_handover(rec):
     return cmd + " --decision allow|deny" if rec.get("kind") == "permission" else cmd
 
 
+LIVENESS_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "session-liveness.py")
+
+
+def liveness_rows():
+    """Every row the heartbeat store lists, or `None` when the read failed.
+
+    The plugin's one liveness reader, and the only population that includes an
+    in-process SDK headless worker — such a session holds **no** session-registry
+    entry, so `read_registry()` cannot see it. `--list --json` also lists
+    endpoint-only rows, which the registry cannot name at all.
+
+    `None` (refused, timed out, unparseable) is deliberately not `[]`: it means the
+    population could not be read, and the caller must add nothing rather than
+    presenting a failed read as an empty fleet.
+    """
+    try:
+        out = subprocess.run([sys.executable, LIVENESS_SCRIPT, "--list", "--json"],
+                             capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        rows = json.loads(out.stdout)
+    except ValueError:
+        return None
+    return rows if isinstance(rows, list) else None
+
+
+def pane_free_closer_rows(rows, by_session, pmap, registry):
+    """`CLOSERS` records for live sessions the attention store never saw.
+
+    A headless worker raises no gate, so it has no store record and — before this —
+    no `CLOSERS` row at all, which `agents/fleet-drive.md` step 4a fail-closes to
+    `unverifiable` on every round. Its closer is read from the transcript, so the row
+    needs no pane.
+
+    ⚠️ **`alive is True` is the admission test, not presence.** A crashed session can
+    leave a stale row behind, and a transcript whose last line reads `nothing` would
+    then revive a dead worker — the fail-open this channel must not introduce. `False`
+    and `None` both fail closed, which is the pre-change behaviour.
+    """
+    out = []
+    covered = {str(k) for k in by_session}
+    for row in rows or []:
+        sid = row.get("sessionId") or row.get("session_id")
+        if not sid or row.get("alive") is not True:
+            continue
+        s = str(sid)
+        # A store record may key on an 8-char prefix while the heartbeat row carries
+        # the full id, so the dedup runs both directions — an exact test alone would
+        # render one session twice, once from each source.
+        if any(s == c or s.startswith(c) or c.startswith(s) for c in covered):
+            continue
+        rec = {
+            "session_id": sid,
+            "pane": "",
+            "cwd": row.get("cwd") or "",
+            "kind": "idle",
+            "detail": "",
+            "ts": _transcript_mtime(sid),
+            "state": "open",
+            "event": "LastCloser",
+            "session_name": row.get("name") or "",
+        }
+        resolve_missing_panes([rec], pmap, registry)
+        # A resolved pane is proof the session owns one; an unresolved one keeps the
+        # marker `row()` renders as `hst`.
+        rec["headless"] = not rec.get("pane")
+        out.append(rec)
+    return out
+
+
 def renders_headless(rec):
     """True when this row will render `hst` — no pane, and known live or answerable.
 
@@ -2324,45 +2398,6 @@ def main():
     # owns no pane. `resolve_missing_panes()` fills a pane where the registry's current
     # name matches a live pane title, and leaves it empty otherwise; `row()` renders
     # that as headless rather than as an exited session.
-    synthetic = []
-    # A store record may key on an 8-char prefix while the registry carries the full
-    # id, so the dedup is prefix-aware in both directions — an exact-key test alone
-    # would render the same session twice, once from each source.
-    covered = {str(k) for k in _by_session}
-    # ⚠️ **Presence in the registry is not liveness — `alive` is the verdict.** A
-    # crashed session leaves its `<pid>.json` behind, and a stale transcript whose last
-    # line reads `nothing` would then revive a dead worker: a fail-OPEN on exactly the
-    # axis this change exists to fix. A store row is vouched server-side, which is why
-    # `read_registry()` deliberately skips `alive` for those; a synthetic row has no
-    # voucher, so only `alive is True` admits one. `None` (cannot tell) is excluded
-    # too — fail closed, which is the pre-change behaviour.
-    alive_map = {sid: (rec or {}).get("alive")
-                 for sid, rec in (registry_records() or {}).items()}
-    for sid, held_name in (registry or {}).items():
-        s = str(sid)
-        if any(s == c or s.startswith(c) or c.startswith(s) for c in covered):
-            continue
-        if alive_map.get(sid) is not True:
-            continue
-        synthetic.append({
-            "session_id": sid,
-            "pane": "",
-            "cwd": "",
-            "kind": "idle",
-            "detail": "",
-            "ts": _transcript_mtime(sid),
-            "state": "open",
-            "event": "LastCloser",
-            # The registry name is the current one; carried on the record as well so
-            # `name_of()` still resolves it if a later read of the same map misses.
-            "session_name": held_name if isinstance(held_name, str) else "",
-        })
-    resolve_missing_panes(synthetic, pmap, registry)
-    for rec in synthetic:
-        # A resolved pane is proof the session owns one; an unresolved one keeps the
-        # headless marker, which is what `row()` renders as `hst`.
-        rec["headless"] = not rec.get("pane")
-        _by_session[rec["session_id"]] = rec
     last_closers = list(_by_session.values())
 
     # Say which source answered, once, before any row. A silent fallback would
@@ -2412,6 +2447,16 @@ def main():
     # sections byte-for-byte. A consumer that asks for it gets every live session's
     # last-turn closer and its class — the digest's `CLOSERS` source.
     if a.section and wanted("last-closers"):
+        # ⚠️ **The registry is not the population — the heartbeat store is.** An
+        # in-process SDK headless worker holds no registry entry at all (this file's
+        # own `current_session_name()` says so: "0 of 21 in the registry"), so a
+        # `CLOSERS` section built from the registry alone still carried no row for
+        # exactly the sessions this channel exists for. `session-liveness.py --list`
+        # is the plugin's one reader over that store and lists endpoint-only rows
+        # too, so it is the population source. Paid only here, inside the opt-in
+        # section: the default render must not buy a subprocess and an HTTP read.
+        last_closers.extend(pane_free_closer_rows(liveness_rows(), _by_session,
+                                                  pmap, registry))
         # The headless count is printed, not implied: it is the population the
         # pane-free channel classified, and the drive leg's own `headless=<H>` count
         # is checked against it (a printed 0 and a genuinely empty set must not read

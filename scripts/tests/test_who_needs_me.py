@@ -56,6 +56,12 @@ _spec = importlib.util.spec_from_file_location("who_needs_me", _SCRIPT)
 wnm = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(wnm)
 
+#: The real reader, captured before any test can stub it. Several classes in this
+#: module swap `wnm.last_assistant_text` for a fixed string and restore whatever they
+#: found — so once one leaks, every later class inherits the stub and a test that
+#: means to exercise the real file read silently measures someone else's constant.
+_REAL_LAST_ASSISTANT_TEXT = wnm.last_assistant_text
+
 with open(_FIXTURE, encoding="utf-8") as _handle:
     CORPUS = json.load(_handle)
 
@@ -1726,7 +1732,7 @@ class SupersededCloserPanel(unittest.TestCase):
 
 
 def run_feed(panes, records, argv=(), full_registry=None, pid_ttys=None,
-             extra_registry=None):
+             extra_registry=None, live_rows=None):
     """Run `main()` against a stubbed transport; return (rc, stdout, stderr).
 
     `argv` appends flags after the program name, so a caller can exercise an option
@@ -1754,6 +1760,11 @@ def run_feed(panes, records, argv=(), full_registry=None, pid_ttys=None,
         # did -- so a zero-arg stub would fail on a caller that mirrors the real
         # signature rather than on the code under test.
         mock.patch.object(wnm, "read_registry", lambda *_a, **_k: dict(registry)),
+        # `liveness_rows()` shells out to `session-liveness.py`, which reads the
+        # heartbeat endpoint over HTTP. Default `None` = "could not read", so no test
+        # buys a subprocess or a network round trip by accident; the pane-free cases
+        # pass `live_rows` explicitly.
+        mock.patch.object(wnm, "liveness_rows", lambda: live_rows),
         mock.patch.object(
             wnm, "load",
             lambda suffix: list(records) if suffix == "needs" else []),
@@ -2651,8 +2662,8 @@ class LastClosersSection(unittest.TestCase):
                 mock.patch.object(wnm, "_transcript_mtime", lambda _sid: 1):
             rc, out, err = run_feed(
                 {}, [], argv=["--section", "last-closers"],
-                extra_registry={"headless-1": "Headless Worker"},
-                full_registry={"headless-1": {"alive": True, "name": "Headless Worker"}})
+                live_rows=[{"sessionId": "headless-1", "alive": True,
+                            "name": "Headless Worker", "cwd": "/tmp"}])
         self.assertEqual(0, rc, err)
         self.assertIn("Last closers (1, headless=1)", out)
         self.assertIn("routine: nothing — I continue on step 1", out)
@@ -2673,11 +2684,55 @@ class LastClosersSection(unittest.TestCase):
                     mock.patch.object(wnm, "_transcript_mtime", lambda _sid: 1):
                 rc, out, err = run_feed(
                     {}, [], argv=["--section", "last-closers"],
-                    extra_registry={"dead-1": "Dead Worker"},
-                    full_registry={"dead-1": {"alive": alive, "name": "Dead Worker"}})
+                    live_rows=[{"sessionId": "dead-1", "alive": alive,
+                                "name": "Dead Worker", "cwd": "/tmp"}])
             self.assertEqual(0, rc, err)
             self.assertIn("Last closers (0, headless=0)", out,
                           "alive=%r must not admit a row" % (alive,))
+
+
+class TranscriptRead(unittest.TestCase):
+    """The closer read against a REAL transcript file, not a stub.
+
+    The pane-free channel's whole claim is that the class comes from the transcript.
+    Stubbing `last_assistant_text` proves the plumbing but never that the file
+    resolution, the tail read and the `👤 You:` extraction agree on a real JSONL.
+    """
+
+    def test_the_closer_and_its_class_come_from_a_real_transcript_file(self):
+        root = tempfile.mkdtemp()
+        try:
+            sid = "abcdef01-0000-4000-8000-000000000000"
+            os.makedirs(os.path.join(root, "proj"), exist_ok=True)
+            path = os.path.join(root, "proj", sid + ".jsonl")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps({
+                    "type": "assistant",
+                    "message": {"content": [
+                        {"type": "text", "text": "working\n👤 You: nothing — I continue"}]},
+                }) + "\n")
+            with mock.patch.object(wnm, "PROJECTS_DIR", root), \
+                    mock.patch.object(wnm, "_PATH_CACHE", {}), \
+                    mock.patch.object(wnm, "last_assistant_text",
+                                      _REAL_LAST_ASSISTANT_TEXT), \
+                    mock.patch.object(wnm, "_TEXT_CACHE", {}):
+                self.assertEqual(path, wnm.transcript_path(sid))
+                rec = {"session_id": sid}
+                self.assertEqual("nothing — I continue",
+                                 wnm.closer_from_transcript(rec))
+                self.assertEqual("routine", wnm.closer_class(rec))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_a_session_with_no_transcript_is_none_not_a_crash(self):
+        with mock.patch.object(wnm, "PROJECTS_DIR", tempfile.mkdtemp()), \
+                mock.patch.object(wnm, "_PATH_CACHE", {}), \
+                mock.patch.object(wnm, "last_assistant_text",
+                                  _REAL_LAST_ASSISTANT_TEXT), \
+                mock.patch.object(wnm, "_TEXT_CACHE", {}):
+            rec = {"session_id": "00000000-0000-4000-8000-000000000000"}
+            self.assertIsNone(wnm.transcript_path(rec["session_id"]))
+            self.assertEqual("none", wnm.closer_class(rec))
 
 
 if __name__ == "__main__":
