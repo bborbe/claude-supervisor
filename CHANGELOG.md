@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.250.0
 
 - fix: **the bundled Bash allow list no longer carries `uniq`.** `uniq IN OUT` writes `OUT`, an arbitrary-path write that bypasses the `Write(cwd)` restriction, and a prefix rule cannot exclude a positional. `uniq /dev/null /etc/authorized_keys` read `allow` before this change. `server/policy-bundled.test.mjs` pins it alongside the other refusals.
 
