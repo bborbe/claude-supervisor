@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.249.0
 
 - fix: **the bundled Bash allow list no longer carries `sort`, `tree`, `rg`, `file` or `diff`.** The list's own rule is that a prefix appears only when EVERY extension of it is read-only, and those five break it: `sort -o FILE`, `sort --output=FILE` and `sort --compress-program=PROG`, plus `tree -o FILE`, write a file or run a program, `rg --pre=PROG` and `diff -l` / `--paginate` (which runs `pr(1)`) run a program, and `file -C -m PATH` / `--compile` writes `PATH.mgc` — an arbitrary-path write that bypasses the `Write(cwd)` restriction. A prefix rule cannot exclude a flag, so the only honest fix is not to list the command — exactly the rule `server/manager-allowlist.test.mjs` already pins for the manager allowlist. Caught after the allow list merged: `sort -o /etc/authorized_keys f`, `rg --pre "bash -c id" pat f`, `file -C -m /tmp/magic` and `diff --paginate a b` all read `allow`. New `server/policy-bundled.test.mjs` pins the shipped file, including every refusal the change was scoped to keep (`sed`, `find`, `git`, `python3`, `xargs`, `awk`, `env`, for-loops) and the `cd`-chain boundary.
 
