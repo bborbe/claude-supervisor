@@ -103,16 +103,89 @@ class Liveness(unittest.TestCase):
         self.assertFalse(os.path.exists(self.m.path("goal--manager-layer", "stopped")))
         self.assertEqual(self.check()[0], 10)
 
+    def deliver(self, s):
+        """Ack a lapse the way the sender does after the transport returns success."""
+        with redirect_stdout(io.StringIO()):
+            return self.m.delivered(s)
+
+    def fail_send(self, s, error):
+        """Record a failed delivery attempt the way the sender does."""
+        with redirect_stdout(io.StringIO()):
+            return self.m.failed(s, error)
+
     def test_one_lapse_notifies_once_then_recovers(self):
         self.arm("Manager Layer", 300, age=5000)
-        self.assertEqual(self.check()[0], 10)
-        self.assertEqual(self.check(), (0, ""))  # second poll: no repeat
+        self.assertEqual(self.check()[0], 10)  # detected: now OWED a report
+        self.assertEqual(self.check()[0], 10, "an owed lapse is re-emitted (the retry)")
+        self.deliver("goal--manager-layer")  # the transport carried it
+        self.assertEqual(self.check(), (0, ""))  # second poll after the ack: no repeat
         self.arm("Manager Layer", 300, age=0)
         rc, out = self.check()
         self.assertEqual(rc, 0)
         self.assertTrue(out.startswith("RECOVERED goal--manager-layer OK"), out)
         self.arm("Manager Layer", 300, age=5000)  # a NEW lapse notifies again
         self.assertEqual(self.check()[0], 10)
+
+    def test_a_failed_send_leaves_the_lapse_owed_and_re_emitted(self):
+        # The defect this file's `--check` fixes: 2026-11-07 03:26Z, the detector fired,
+        # the transport timed out, and the next poll was silent for ever because the
+        # entry had been written at DETECTION time. A failed send must not consume it.
+        self.arm("Manager Layer", 300, age=5000)
+        self.assertEqual(self.check()[0], 10)
+        self.fail_send("goal--manager-layer", "prod unreachable — timed out")
+        rc, out = self.check()
+        self.assertEqual(rc, 10, "a failed delivery must be retried on the next poll")
+        self.assertIn("STALE goal--manager-layer", out)
+        entry = self.m.read_pending()["goal--manager-layer"]
+        self.assertEqual(entry["attempts"], 1)
+        self.assertIn("prod unreachable", entry["last_error"])
+
+    def test_the_ack_is_the_only_thing_that_stops_the_re_emission(self):
+        # `notified` is what the sender writes; `pending` is what the detector owes.
+        # Detection alone must not write `notified`, or the lapse is reported to nobody.
+        self.arm("Manager Layer", 300, age=5000)
+        self.assertEqual(self.check()[0], 10)
+        self.assertNotIn("goal--manager-layer", self.m.read_notified())
+        self.assertIn("goal--manager-layer", self.m.read_pending())
+        self.deliver("goal--manager-layer")
+        self.assertIn("goal--manager-layer", self.m.read_notified())
+        self.assertNotIn("goal--manager-layer", self.m.read_pending())
+
+    def test_the_ack_records_the_crossing_not_the_ack_time(self):
+        # The report says when the lapse CROSSED, and that is what dedup compares
+        # against `last_arm`. Storing the ack time would make a manager that re-armed
+        # while the report was owed look already-reported on its next lapse.
+        t0 = time.time()
+        self.arm("Manager Layer", 300, age=5000)
+        self.assertEqual(self.check(t0)[0], 10)
+        crossing = self.m.read_pending()["goal--manager-layer"]["detected_at"]
+        self.assertEqual(crossing, t0)
+        self.deliver("goal--manager-layer")
+        self.assertEqual(self.m.read_notified()["goal--manager-layer"], t0)
+
+    def test_a_recovered_pending_lapse_is_still_reported(self):
+        # The manager came back before anyone was told. The lapse still happened, so it
+        # is still owed — but printing STALE would be a lie about the current state.
+        self.arm("Manager Layer", 300, age=5000)
+        self.assertEqual(self.check()[0], 10)
+        self.arm("Manager Layer", 300, age=0)  # recovered, still undelivered
+        rc, out = self.check()
+        self.assertEqual(rc, 10, "a recovery does not cancel an unreported lapse")
+        self.assertTrue(out.startswith("RECOVERED-PENDING goal--manager-layer"), out)
+        self.deliver("goal--manager-layer")
+        rc, out = self.check()
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("STALE", out)
+
+    def test_a_re_arm_supersedes_a_stale_pending_entry(self):
+        # A pending entry older than the subject's last arm describes a lapse it has
+        # already come back from; the newer crossing must replace it, not stack behind.
+        t0 = time.time()
+        self.arm("Manager Layer", 300, age=5000)
+        self.assertEqual(self.check(t0)[0], 10)
+        self.set_arm_time("Manager Layer", t0 + 100)
+        self.assertEqual(self.check(t0 + 100 + 2000)[0], 10)
+        self.assertEqual(self.m.read_pending()["goal--manager-layer"]["detected_at"], t0 + 2100)
 
     def test_a_lapse_after_a_rearm_notifies_again(self):
         # The production shape, 2026-10-20: the manager re-armed and lapsed again
@@ -160,10 +233,12 @@ class Liveness(unittest.TestCase):
         t0 = time.time()
         self.arm("Alpha", 300, age=5000)
         self.arm("Beta", 300, age=5000)
-        self.assertEqual(self.check(t0)[0], 10)  # both notified
+        self.assertEqual(self.check(t0)[0], 10)  # both owed
+        self.deliver("goal--alpha")
+        self.deliver("goal--beta")  # both delivered
         self.set_arm_time("Alpha", t0 + 100)  # Alpha recovers
         rc, out = self.check(t0 + 200)
-        self.assertEqual(rc, 0, out)  # Beta is still notified, so nothing new
+        self.assertEqual(rc, 0, out)  # Beta is still reported, so nothing new
         self.assertNotIn("STALE", out)
         self.assertIn("RECOVERED goal--alpha", out)
 
