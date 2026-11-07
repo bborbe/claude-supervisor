@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.250.4
 
 - fix: **a failed delivery's durable record now names its producer.** `--failed` accepts `--pid` and `--row-ts` — the sender's process id and the timestamp of the ledger row it wrote in the same run — and `read_pending` carries both through every rewrite. Without them a hand-written `liveness-pending.json` reproduces every field of a real failed send exactly, so "the record was written by the tick" could only be asserted, never shown. No behaviour change to the retry, the ack or the detection limb.
 
