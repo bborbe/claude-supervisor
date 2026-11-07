@@ -136,6 +136,21 @@ class ClassifyTest(unittest.TestCase):
             ["docs/production-guide.md", "scripts/x.py"]))
 
 
+class ChangelogDeltaTest(unittest.TestCase):
+    def test_an_unreadable_delta_is_refused_not_returned_empty(self):
+        """Empty bullets would resolve the conflict to master's side and drop the branch's."""
+        repo = tempfile.mkdtemp(prefix="rebase-agent-test-")
+        self.addCleanup(shutil.rmtree, repo, True)
+        git(repo, "init", "-q", "-b", "master")
+        git(repo, "config", "user.email", "t@example.com")
+        git(repo, "config", "user.name", "t")
+        write(repo, "CHANGELOG.md", "# Changelog\n\n## Unreleased\n\n- fix: base\n")
+        commit(repo, "base")
+        with self.assertRaises(ra.Refusal):
+            ra.changelog_delta(repo, "0000000000000000000000000000000000000000",
+                               "1111111111111111111111111111111111111111")
+
+
 class RebaseEndToEndTest(unittest.TestCase):
     def setUp(self):
         self.repo = make_repo()
