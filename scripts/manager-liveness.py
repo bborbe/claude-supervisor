@@ -7,7 +7,7 @@ signal. Nothing a peer session can probe (`ListAgents`, sockets, `ps`, transcrip
 mtime) tells a lapsed manager from a healthy one between ticks, so the manager leaves
 evidence on disk itself. This script writes that evidence and checks it.
 
-Four verbs, one file each, all in the sweep-gate state dir. **`<slug>` carries the
+Five verbs, one file each, all in the sweep-gate state dir. **`<slug>` carries the
 branch — `goal--<base>`, `topic--<base>` or `fleet--<base>`** — because a topic and a goal may share a
 name, and a flat slug let one subject's cadence record overwrite the other's:
 
@@ -15,7 +15,8 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
 
   --arm   --subject T --branch B --interval S
                                   <slug>.cadence = "<S>\\n" and an epoch appended to
-                                    <slug>.arms; clears <slug>.stopped. Run by the
+                                    <slug>.arms; clears <slug>.stopped and
+                                    <slug>.sleeping. Run by the
                                     manager at EVERY re-arm, so the cadence file's mtime
                                     marks the last re-arm that actually happened and
                                     <slug>.arms is the history the limit is measured
@@ -25,6 +26,19 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
   --stop  --subject T --branch B   <slug>.stopped. Run by `/supervisor:stop`, so a
                                     deliberately stood-down manager is not reported
                                     as a lapse. The next --arm clears it.
+  --sleep --subject T --branch B --until ISO
+                                  <slug>.sleeping = the ISO instant. A date-gated
+                                    subject whose remaining work is all future
+                                    `defer_date`s does not re-arm until that instant, so
+                                    its cadence file ages past the stale limit BY DESIGN.
+                                    While the instant is in the future the subject reads
+                                    SLEEPING, never STALE; once it has PASSED the marker
+                                    stops suppressing anything and the normal age
+                                    arithmetic runs, so a manager that failed to wake
+                                    still reads STALE. The next --arm clears it.
+                                    ⚠️ Distinct from --stop: a stop says "nothing left to
+                                    drive" and needs a human; a sleep says "nothing can
+                                    happen before this instant" and expires by itself.
   --check                          every <slug>.cadence -> OK / STALE / STOPPED.
                                     STALE = no marker AND age > PERIOD + SLACK,
                                     where PERIOD is the p90 of the manager's observed
@@ -41,6 +55,9 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
                                     liveness-notified.json, so one lapse notifies
                                     once, not on every poll.
   --state --subject T --branch B   ONE subject's state, as `<STATE>\t<slug>\t<detail>`.
+                                    `SLEEPING` is a fifth state: a future `.sleeping`
+                                    instant, which suppresses the STALE report a frozen
+                                    cadence file would otherwise produce.
                                     `--check` structurally cannot answer this: it prints
                                     only the subjects that TURNED stale, so STOPPED -- the
                                     state a deliberate stand-down produces -- is invisible
@@ -68,6 +85,7 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
 turns exit 10 into a push.
 """
 import argparse, json, os, re, sys, time
+from datetime import datetime
 
 # This namespace is the liveness layer's OWN. `arm`, `stop` and `check` all resolve
 # through it, so its reads and writes agree — it is a live namespace, not a retired
@@ -335,6 +353,47 @@ def last_arm(s: str) -> float:
         return 0.0
 
 
+def read_sleep(s: str):
+    """`(epoch, text)` for `<slug>.sleeping`, or `(None, None)`.
+
+    ⚠️ **An unreadable or empty marker reads as ABSENT, never as a future instant.**
+    This module fails toward ARMED everywhere else, and the same asymmetry applies here:
+    an unreadable sleep must not suppress a real `STALE` report, because a lapsed manager
+    hidden behind a corrupt file is exactly the loss the liveness layer exists to catch.
+    """
+    p, _ = resolve(s, "sleeping")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            text = fh.read().strip()
+    except OSError:
+        return None, None
+    if not text:
+        return None, None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp(), text
+    except ValueError:
+        return None, None
+
+
+def sleep(subject: str, branch: str, until: str) -> int:
+    """Record a sleep until `until` — a date-gated subject waiting on its own clock.
+
+    Distinct from `--stop` on purpose. A stand-down says "nothing left to drive"; a sleep
+    says "nothing can happen before this instant". They render differently to every reader
+    (SLEEPING vs STOPPED), and a sleep expires by itself while a stop needs a human.
+    """
+    s = slug(subject, branch)
+    try:
+        datetime.fromisoformat(until.replace("Z", "+00:00"))
+    except ValueError:
+        print(f"manager-liveness: --until is not an ISO 8601 instant: {until}", file=sys.stderr)
+        return 2
+    write_atomic(path(s, "sleeping"), until + "\n")
+    migrate_legacy(subject)
+    print(f"sleeping {s} until {until}")
+    return 0
+
+
 def arm(subject: str, branch: str, interval: int) -> int:
     s = slug(subject, branch)
     write_atomic(path(s, "cadence"), f"{interval}\n")
@@ -347,6 +406,12 @@ def arm(subject: str, branch: str, interval: int) -> int:
     write_atomic(path(s, "arms"), "".join(f"{v:.0f}\n" for v in arms))
     try:
         os.remove(path(s, "stopped"))
+    except FileNotFoundError:
+        pass
+    # An arm ENDS a sleep: the manager woke up (or a human woke it), so the marker that
+    # suppressed the STALE report must not outlive the state it described.
+    try:
+        os.remove(path(s, "sleeping"))
     except FileNotFoundError:
         pass
     migrate_legacy(subject)
@@ -363,7 +428,7 @@ def stop(subject: str, branch: str) -> int:
 
 
 def classify(s: str, now: float) -> tuple:
-    """(state, detail) for one subject: OK, STALE, STOPPED, UNARMED or INVALID.
+    """(state, detail) for one subject: OK, STALE, STOPPED, SLEEPING, UNARMED or INVALID.
 
     ⚠️ `UNARMED` and `INVALID` are different answers and must never be collapsed.
     `INVALID` means a record EXISTS and cannot be read — a probe failure, the
@@ -378,6 +443,14 @@ def classify(s: str, now: float) -> tuple:
         return "STOPPED", (
             "marker present (legacy record)" if stopped_legacy else "marker present"
         )
+    # SLEEPING, checked BEFORE the cadence age. A date-gated subject does not re-arm
+    # until its instant, so its cadence file ages far past the stale limit by design —
+    # measuring it as a lapse is the false STALE this state exists to remove. Once the
+    # instant has PASSED the marker stops suppressing anything and the normal age
+    # arithmetic runs, so a manager that failed to wake still reads STALE.
+    until, until_text = read_sleep(s)
+    if until is not None and now < until:
+        return "SLEEPING", f"until {until_text} ({int(until - now)}s remaining)"
     p, legacy = resolve(s, "cadence")
     try:
         with open(p, encoding="utf-8") as fh:
@@ -460,9 +533,14 @@ def main() -> int:
     mode.add_argument("--stop", action="store_true", help="mark a deliberate stand-down")
     mode.add_argument("--check", action="store_true", help="report subjects that turned stale")
     mode.add_argument(
+        "--sleep",
+        action="store_true",
+        help="record a sleep until --until (a date-gated subject, waiting on its own clock)",
+    )
+    mode.add_argument(
         "--state",
         action="store_true",
-        help="print ONE subject's state: OK / STALE / STOPPED / UNARMED / INVALID",
+        help="print ONE subject's state: OK / STALE / STOPPED / SLEEPING / UNARMED / INVALID",
     )
     ap.add_argument("--subject", help="the goal or topic name")
     ap.add_argument(
@@ -478,6 +556,10 @@ def main() -> int:
     )
     ap.add_argument("--vault", default=".", help="vault ROOT, used only to auto-detect --branch")
     ap.add_argument("--interval", type=int, help="the ScheduleWakeup delay just armed, seconds")
+    ap.add_argument(
+        "--until",
+        help="the ISO 8601 instant a sleep ends (with --sleep) — the earliest defer_date",
+    )
     a = ap.parse_args()
     if a.topic_alias and not a.subject:
         a.subject = a.topic_alias
@@ -495,12 +577,16 @@ def main() -> int:
         print(f"{state}\t{s}\t{detail}")
         return 0
     if not a.subject:
-        ap.error("--subject (or the deprecated --topic) is required with --arm/--stop")
+        ap.error("--subject (or the deprecated --topic) is required with --arm/--stop/--sleep")
     a.branch = a.branch or detect_branch(a.subject, a.vault)
     if a.arm:
         if not a.interval or a.interval <= 0:
             ap.error("--arm needs --interval > 0")
         return arm(a.subject, a.branch, a.interval)
+    if a.sleep:
+        if not a.until:
+            ap.error("--sleep needs --until <ISO 8601 instant>")
+        return sleep(a.subject, a.branch, a.until)
     return stop(a.subject, a.branch)
 
 
