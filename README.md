@@ -198,7 +198,7 @@ Under `"matchType": "command"`, `match` is a **whole-token prefix** of the comma
 - whitespace the shell does not split on (U+00A0, other Unicode spaces, `\r`), so this matcher and bash always agree on which program runs;
 - an empty prefix.
 
-**Only the prefix is anchored.** Tokens after it are unconstrained, so allow a prefix only when *every* extension of it is read-only. `ls` qualifies. `sed -n` does not (`sed -n -i`), nor `find` (`-delete`).
+**Only the prefix is anchored.** Tokens after it are unconstrained, so allow a prefix only when *every* extension of it is read-only. `ls` qualifies. `sed -n` does not (`sed -n -i`), nor `find` (`-delete`), nor `sort` (`-o`, `--output`, `--compress-program`), `tree` (`-o`), `rg` (`--pre`), `file` (`-C`, `--compile`), `diff` (`-l`, `--paginate`) or `uniq` (its second positional is an output file) — each of those writes a file or runs a program, and a prefix rule cannot exclude a flag. `server/manager-allowlist.test.mjs` pins the same rule for the manager allowlist.
 
 ⚠️ **No `git` prefix qualifies — not even `git status`.** Git runs commands named in the repository's own config, and the shipped defaults let a worker edit any file in its cwd, `.git/config` included. So a worker can set `core.fsmonitor` to a command of its choosing and then run an allowed `git status`, which executes it with no prompt (verified: `git status` runs `core.fsmonitor`). `core.pager`, `diff.external` and hooks are further routes. The same holds for any tool that reads config or plugins from the working tree.
 
