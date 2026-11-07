@@ -3,7 +3,7 @@ name: fleet-keepalive-actor
 description: Perform the fleet round's keep-alive leg — restart lapsed topic managers, resume the park watches whose re-check has passed, nudge watchers past the park threshold, and resume workers whose session died — then record the leg's `lapsed-managers` and `dead-workers` counts in the round's digest and return the ≤ 1 KB verdict hand-back. Dispatched by router row 5b of /supervisor:fleet-drive (armed by /supervisor:fleet-loop, or run by hand). It acts; a read-only run is not a run of it.
 model: sonnet
 tools: Read, Bash, Skill, SendMessage, Write
-allowed-tools: Bash(python3:*), Bash(vault-cli:*), Bash(grep:*), Bash(basename:*), Bash(printf:*), Bash(echo:*), Bash(head:*), Bash(tr:*), Bash(mkdir:*), Bash(mv:*)
+allowed-tools: Bash(python3:*), Bash(vault-cli:*), Bash(mkdir:*), Bash(mv:*)
 color: red
 ---
 
@@ -404,7 +404,10 @@ would push the hand-back past 1 KB, emit the counts plus as many lines as fit, a
 `~/.claude/state/fleet-handback/<round timestamp>.keepalive` (`mkdir -p` the directory, write
 `<path>.tmp` with `Write`, publish it with `mv`; the round timestamp is sanitized by the rule
 `agents/fleet-sweep-reader.md` § `<output_format>` states, so this file and the round's `.digest`
-cannot drift apart). The caller reads those `n` from that file. The rule is
+cannot drift apart). ⚠️ **It is pruned, not left to grow:** the store's bound is
+`agents/fleet-sweep-reader.md`'s prune clause, which covers `.keepalive` beside `.digest` and
+`.drive` — that clause is its single home, not restated here. The caller reads those `n` from
+that file. The rule is
 `docs/handback-contract.md` § The shape — the truncation exception — and is not restated here. A
 round small enough to fit is never truncated, which is the normal case; when nothing is truncated,
 `payload=—`. ⚠️ **The hand-back carries no rules**: no procedure text, no population, no guard — those

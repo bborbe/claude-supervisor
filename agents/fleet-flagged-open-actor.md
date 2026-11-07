@@ -3,7 +3,7 @@ name: fleet-flagged-open-actor
 description: Perform the fleet round's flagged-open leg — invoke `/supervisor:open --flagged` so every row the operator marked for today is opened, print every `REFUSED` line verbatim, open nothing a refusal names, and record the leg's `operator-flagged` count in the round's digest — then return the ≤ 1 KB verdict hand-back. Dispatched by router row 5c of /supervisor:fleet-drive (armed by /supervisor:fleet-loop, or run by hand). It acts; a read-only run is not a run of it.
 model: sonnet
 tools: Read, Bash, Skill, Write
-allowed-tools: Bash(python3:*), Bash(mkdir:*), Bash(cat:*), Bash(mv:*), Bash(stat:*)
+allowed-tools: Bash(python3:*), Bash(mkdir:*), Bash(mv:*)
 color: red
 ---
 
@@ -41,7 +41,9 @@ the gate.
   `flag_set_by` on a row.
 - **Never open a manager here.** The batch selects **tasks** only.
 - **Your only writes are the digest count step 3 names and, only when the hand-back must be
-  truncated, the payload file `<output_format>` names.** Nothing else on disk.
+  truncated, the payload file `<output_format>` names.** Nothing else on disk. ⚠️ **A command
+  you invoke writes its own page** — `/supervisor:open --flagged` approves and stamps the task
+  pages it opens; that is its write, not yours.
 </constraints>
 
 <inputs>
@@ -153,9 +155,11 @@ lines as fit, add `truncated=<n>`, write the full list to
 `~/.claude/state/fleet-handback/` otherwise — (`mkdir -p` the directory, write `<path>.tmp` with
 `Write`, then publish it with `mv`; the round timestamp is sanitized by the rule
 `agents/fleet-sweep-reader.md` § `<output_format>` states, so this file and the round's `.digest`
-cannot drift apart), and the caller prints the remaining `n` from that file verbatim. A batch
-small enough to fit is never truncated, which is the normal case; when nothing is truncated,
-`payload=—`. ⚠️ **The hand-back carries no rules**: no `flag_set_by`
+cannot drift apart). ⚠️ **It is pruned, not left to grow:** the store's bound is
+`agents/fleet-sweep-reader.md`'s prune clause, which covers `.flagged-open` beside `.digest` and
+`.drive` — that clause is its single home, not restated here. The caller prints the remaining
+`n` from that file verbatim. A batch small enough to fit is never truncated, which is the
+normal case; when nothing is truncated, `payload=—`. ⚠️ **The hand-back carries no rules**: no `flag_set_by`
 vocabulary, no blast-radius note, no selector description — those live in this file and in
 `commands/open.md`.
 
