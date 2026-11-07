@@ -153,9 +153,9 @@ python3 "<vault>/.claude/scripts/session-activity.py" --json | python3 "$P/park-
 
 **Act on each `NUDGE <session-id> quiet <N>m (<name>) :: <message>` line.** The field name
 is historical — **`N` is the watching-state duration, not transcript silence** (see the
-selection rule below). Send the
-text after `::` with `SendMessage(to: <the roster name for that session id>, message:
-<text>)`. ⚠️ **Do not apply the drive leg's busy/`shell` skip here.** A `watching` row is
+selection rule below). Send the text after `::` with
+`SendMessage(to: <the roster name for that session id>, message: <text>)`. ⚠️ **Do not
+apply the drive leg's busy/`shell` skip here.** A `watching` row is
 `shell` because its watcher is running, and that watcher is what the nudge targets. A
 send that fails, or a session with no roster name (headless, pane-less), is reported as
 `undelivered: <id8>`. The ledger already counts it as nudged, so it is not retried every
