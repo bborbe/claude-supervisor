@@ -71,6 +71,8 @@ For a worker whose prompts you intend to answer yourself rather than letting its
 | `/supervisor:reset` | re-discover a manager's state from disk — re-resolve the subject, force a full sweep, re-validate the asks ledger without discarding, re-read the tracked set |
 | `/supervisor:worker-drive` | a worker drives its own anchored task to done |
 | agent `worker-drive-reader` | the read half of a worker-drive round — the session diagnosis and the drive table, computed in a sub-agent so the reading instructions never re-inject on every run |
+| agent `round-readings-reader` | a manager round's readings — the four verdict families for every tracked row, computed by `scripts/round-readings.py` in a sub-agent that returns the counts plus the payload path, so the reading contract never re-injects on every tick |
+| agent `goal-spawn-reader` | the goal round's spawn decision — the per-row gates (approval, hold, role, dependency, cap) and the call shape (`mode`/`target`/`shipping`/`cwd`), returned as a ≤ 1 KB hand-back; the caller makes every spawn call |
 | `/supervisor:restart` | restart ONE named session — **worker or manager** — in one verb: kill, resume in its own role colour, and tell it what changed only when that is safe (a manager is told to re-arm its loop). `/supervisor:worker-restart` is a deprecated alias |
 | `/supervisor:open` | resolve a task, goal or topic by name, then jump to its live session, resume its recorded one, or spawn a new one (manager-only; needs `vault-cli`) |
 | `/supervisor:ready` | ready ONE named task to the spawn bar — audit → repair → re-audit inside a sub-agent — then open it or escalate naming the gap (cross-tier; needs `vault-cli`) |
