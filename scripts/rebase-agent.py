@@ -90,6 +90,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -98,6 +99,9 @@ from datetime import datetime, timezone
 
 STATE_DIR = os.path.expanduser("~/.local/state/claude-supervisor/rebase-agent")
 STATE_KEEP = 50
+# A hung `git rebase` or a stalled `gh` would otherwise hold the launchd job open
+# forever; the interval is 900 s, so nothing legitimate takes this long.
+TIMEOUT_SECONDS = 300
 SCRATCH_REF = "refs/rebase-agent"
 
 # The repo set is explicit, never "every repo". The conflict class exists only where a
@@ -137,8 +141,13 @@ class Refusal(Exception):
     """A candidate that must not produce a push line."""
 
 
-def run(cmd, cwd=None, env=None, check=False):
-    proc = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
+def run(cmd, cwd=None, env=None, check=False, timeout=TIMEOUT_SECONDS):
+    try:
+        proc = subprocess.run(
+            cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{' '.join(cmd)} timed out after {timeout}s")
     if check and proc.returncode != 0:
         raise RuntimeError(
             f"{' '.join(cmd)} failed ({proc.returncode}): {proc.stderr.strip()}"
@@ -167,7 +176,7 @@ def list_open_prs(cfg):
             "gh", "pr", "list", "--repo", cfg["repo"], "--state", "open",
             "--limit", "100", "--json",
             "number,title,headRefName,baseRefName,mergeable,mergeStateStatus,"
-            "isDraft,reviewDecision,additions,deletions,changedFiles",
+            "isDraft,reviewDecision,additions,deletions,changedFiles,headRepository",
         ]
     )
     if proc.returncode != 0:
@@ -446,6 +455,21 @@ def gate_noop(scratch):
 # ------------------------------------------------------------------------------ one PR
 
 
+def push_line(repo_path, branch, head_sha, number):
+    """The operator's one line.
+
+    Every interpolated value is shell-quoted. `branch` comes from the PR, and this line
+    is a shell command the operator pastes — an unquoted branch name is command
+    injection regardless of where it came from.
+    """
+    lease = shlex.quote(f"refs/heads/{branch}:{head_sha}")
+    refspec = shlex.quote(f"{SCRATCH_REF}/pr/{number}:refs/heads/{branch}")
+    return (
+        f"git -C {shlex.quote(repo_path)} push "
+        f"--force-with-lease={lease} origin {refspec}"
+    )
+
+
 def process_pr(cfg, pr, keep_scratch=False):
     repo_path = cfg["path"]
     number = pr["number"]
@@ -469,6 +493,15 @@ def process_pr(cfg, pr, keep_scratch=False):
     if not os.path.isdir(repo_path):
         row["verdict"] = "ERROR"
         row["reason"] = f"repo path does not exist: {repo_path}"
+        return row
+
+    head_repo = (pr.get("headRepository") or {}).get("nameWithOwner")
+    if head_repo and head_repo != cfg["repo"]:
+        row["verdict"] = "REFUSED"
+        row["reason"] = (
+            f"PR head lives in {head_repo}, not {cfg['repo']} — the push line would "
+            "target the wrong remote, so a fork PR is not a rebase candidate"
+        )
         return row
 
     changed = changed_paths(cfg, number)
@@ -520,11 +553,7 @@ def process_pr(cfg, pr, keep_scratch=False):
         git(repo_path, "update-ref", f"{SCRATCH_REF}/pr/{number}", new_sha, check=True)
 
         row["verdict"] = "PUSH"
-        row["push_line"] = (
-            f"git -C {repo_path} push "
-            f"--force-with-lease=refs/heads/{branch}:{head_sha} "
-            f"origin {SCRATCH_REF}/pr/{number}:refs/heads/{branch}"
-        )
+        row["push_line"] = push_line(repo_path, branch, head_sha, number)
     except Refusal as refusal:
         row["verdict"] = "REFUSED"
         row["reason"] = str(refusal)
