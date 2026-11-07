@@ -38,9 +38,24 @@ ra = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ra)
 
 
+def _isolated_env(extra=None):
+    """A developer's global git config must not decide what these tests measure."""
+    env = dict(
+        os.environ,
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_CONFIG_SYSTEM=os.devnull,
+        GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
+        GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com",
+    )
+    if extra:
+        env.update(extra)
+    return env
+
+
 def git(repo, *args, env=None):
     proc = subprocess.run(
-        ["git", "-C", repo, *args], capture_output=True, text=True, env=env
+        ["git", "-C", repo, *args], capture_output=True, text=True,
+        env=_isolated_env(env),
     )
     if proc.returncode != 0:
         raise AssertionError(f"git {' '.join(args)} failed: {proc.stderr}")
@@ -135,6 +150,23 @@ class ClassifyTest(unittest.TestCase):
         self.assertIsNone(ra.prod_pin_reason(
             {"title": "docs", "headRefName": "docs/x"},
             ["docs/production-guide.md", "scripts/x.py"]))
+
+
+class SingleUnreleasedGateTest(unittest.TestCase):
+    def _dir(self, text):
+        path = tempfile.mkdtemp(prefix="rebase-agent-test-")
+        self.addCleanup(shutil.rmtree, path, True)
+        write(path, "CHANGELOG.md", text)
+        return path
+
+    def test_a_duplicate_heading_is_caught(self):
+        path = self._dir("# Changelog\n\n## Unreleased\n\n- fix: a\n\n"
+                         "## Unreleased\n\n- fix: b\n")
+        self.assertIn("2", ra.gate_single_unreleased(path))
+
+    def test_exactly_one_heading_passes(self):
+        path = self._dir("# Changelog\n\n## Unreleased\n\n- fix: a\n")
+        self.assertIsNone(ra.gate_single_unreleased(path))
 
 
 class PushLineTest(unittest.TestCase):
