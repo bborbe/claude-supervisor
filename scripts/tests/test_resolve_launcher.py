@@ -59,8 +59,8 @@ class ResolveLauncherCli(unittest.TestCase):
         with open(self.config, "w") as fh:
             json.dump([entry], fh)
 
-    def page(self, title, fm):
-        with open(os.path.join(self.vault, "25 Tasks", f"{title}.md"), "w") as fh:
+    def page(self, title, fm, sub="25 Tasks"):
+        with open(os.path.join(self.vault, sub, f"{title}.md"), "w") as fh:
             fh.write(f"---\n{fm}\n---\nbody\n")
 
     def run_cli(self, sid, cwd=None, role_map=None, sessions_dir=None):
@@ -116,8 +116,9 @@ class ResolveLauncherCli(unittest.TestCase):
 
     def test_a_manager_session_is_coloured_as_a_manager(self):
         """A manager carries no task page, so the claimant lookup alone would read it as a
-        worker — the same defect the prose rule had, one layer down."""
-        self.session("m1", "Fleet Manager")
+        worker — the same defect the prose rule had, one layer down. Read from the goal
+        page, never the registry: the registry is gone by the time a resume happens."""
+        self.page("G", "claude_session_id: m1", sub="24 Goals")
         self.assertEqual(self.fields(self.run_cli("m1"))[2:], ["manager", "orange"])
 
     def test_an_unreadable_role_map_falls_back_to_the_roles_own_chip(self):

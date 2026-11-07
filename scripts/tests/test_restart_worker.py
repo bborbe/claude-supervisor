@@ -367,8 +367,28 @@ class ResolveLauncher(unittest.TestCase):
 
     def test_claimant_role_reports_the_bound_task_and_nothing_else(self):
         self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
-        self.assertEqual(rw.claimant_role("s1", self.vault, self.fb), "human")
-        self.assertEqual(rw.claimant_role("nobody", self.vault, self.fb), "")
+        self.assertEqual(rw._role_field(os.path.join(self.vault, "25 Tasks", "T.md")), "human")
+        self.assertEqual(rw._role_field(os.path.join(self.vault, "25 Tasks", "absent.md")), "")
+
+    def test_resume_role_reads_a_manager_from_its_goal_page(self):
+        """The registry is deleted when a session exits, and a manager only reaches the
+        resume path once it has exited — so the page field, not the registry, is the source."""
+        self.page("24 Goals", "G", "claude_session_id: m1")
+        self.assertEqual(rw.resume_role("m1", self.vault, self.fb), ("manager", ("goal", "G")))
+
+    def test_resume_role_reads_a_manager_from_its_topic_page(self):
+        os.makedirs(os.path.join(self.vault, "23 Topics"))
+        self.page("23 Topics", "Fleet", "claude_session_id: m1")
+        self.assertEqual(rw.resume_role("m1", self.vault, self.fb), ("manager", ("topic", "Fleet")))
+
+    def test_resume_role_reads_a_human_from_the_claimant_task(self):
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
+        self.assertEqual(rw.resume_role("s1", self.vault, self.fb), ("human", None))
+
+    def test_resume_role_defaults_to_agent(self):
+        self.page("25 Tasks", "T", "claude_session_id: s1")
+        self.assertEqual(rw.resume_role("s1", self.vault, self.fb), ("agent", None))
+        self.assertEqual(rw.resume_role("nobody", self.vault, self.fb), ("agent", None))
 
     def test_unsafe_configured_worker_launcher_is_none(self):
         self.configure(worker_launcher="cc;rm -rf")

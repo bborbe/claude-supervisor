@@ -428,8 +428,8 @@ def vault_configs():
     return data if isinstance(data, list) else None
 
 
-def _launcher_field(path):
-    """The `launcher:` frontmatter value of one page, or `''`."""
+def _page_field(path, key):
+    """One frontmatter scalar from a vault page, or `''` when absent or unreadable."""
     # Read whole: a long-lived task's `metrics_sessions` can push the closing `---` past
     # any fixed head, and a truncated read would drop `launcher:` without a word.
     try:
@@ -441,8 +441,13 @@ def _launcher_field(path):
         return ""
     end = head.find("\n---", 3)
     fm = head[3:end] if end != -1 else ""
-    match = re.search(r"^launcher:[ \t]*['\"]?([^'\"\n]*?)['\"]?[ \t]*$", fm, re.M)
+    match = re.search(rf"^{re.escape(key)}:[ \t]*['\"]?([^'\"\n]*?)['\"]?[ \t]*$", fm, re.M)
     return match.group(1).strip() if match else ""
+
+
+def _launcher_field(path):
+    """The `launcher:` frontmatter value of one page, or `''`."""
+    return _page_field(path, "launcher")
 
 
 def _role_field(path):
@@ -452,17 +457,7 @@ def _role_field(path):
     helper reporting `agent` for a page that says nothing would make "absent" and
     "declared agent" indistinguishable one layer up.
     """
-    try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            head = fh.read()
-    except OSError:
-        return ""
-    if not head.startswith("---"):
-        return ""
-    end = head.find("\n---", 3)
-    fm = head[3:end] if end != -1 else ""
-    match = re.search(r"^role:[ \t]*['\"]?([^'\"\n]*?)['\"]?[ \t]*$", fm, re.M)
-    return match.group(1).strip() if match else ""
+    return _page_field(path, "role")
 
 
 def vault_for_cwd(cwd, configs):
@@ -515,48 +510,44 @@ def session_claimant(sid, root, fb):
     return (claimants[0] if claimants else None), None
 
 
-def claimant_role(sid, cwd, fb):
-    """The `role:` of the task bound to `sid` — `''` when no task claims it.
+def session_subject(sid, root, fb):
+    """`(kind, title)` of the goal or topic page whose `claude_session_id` is `sid`.
 
-    Read through the same vault and claimant lookup `resolve_launcher` uses, so the
-    resume launcher and the resume chip can never be read from two different pages.
+    Scanned from the PAGES, never from the live session registry, and that is the whole
+    point: the registry is deleted when a session exits, and a manager only reaches the
+    resume path once it has exited — so a registry-based lookup answers "not a manager"
+    exactly where the resume happens. Caught in review on the first cut of `resume_role`,
+    which read the registry and therefore left the bug it claimed to fix in place.
+    `commands/open.md` reads the same page field to decide the resume, so the two agree.
     """
-    configs = vault_configs()
-    if configs is None:
-        return ""
-    best = vault_for_cwd(cwd, configs)
-    if best is None:
-        return ""
-    claimant, _error = session_claimant(sid, best[0], fb)
-    return _role_field(claimant[0]) if claimant else ""
+    for kind, subdirs in (("topic", fb.TOPIC_SUBDIRS), ("goal", fb.GOAL_SUBDIRS)):
+        for path in fb._pages(root, subdirs):
+            if _page_field(path, "claude_session_id") == sid:
+                return kind, os.path.basename(path)[:-3]
+    return None
 
 
 def resume_role(sid, cwd, fb):
     """`(role, subject)` a resume must launch and colour by: `manager`, `human` or `agent`.
 
-    A MANAGER is checked first, and that ordering is load-bearing. A manager session
-    usually carries no task page, so the claimant lookup alone would read it as a worker
-    and resume it on the worker default — the same defect the prose rule had, one layer
-    down. `subject` is `manager_subject()`'s `(kind, title)`, passed straight to
-    `resolve_launcher`; it is `None` when the subject page cannot be resolved, which
-    leaves the launcher on the worker chain exactly as `main` does for a restart.
+    A MANAGER is checked first. A manager session usually carries no task page, so the
+    claimant lookup alone would read it as a worker and resume it on the worker default —
+    the same defect the prose rule had, one layer down. `subject` is passed straight to
+    `resolve_launcher`.
 
-    An unreadable registry or board is not a refusal here: there is no kill to authorise
-    and the row still has to open, so it answers `agent` and the chip follows.
+    An unreadable vault config is not a refusal here: there is no kill to authorise and
+    the row still has to open, so it answers `agent` and the chip follows.
     """
-    entries = registry_entries()
-    _path, rec = find_target(entries, sid) if entries is not None else (None, None)
-    if isinstance(rec, dict):
-        name = (rec.get("name") or "").strip()
-        try:
-            index = fb.vault_index()
-        except Exception:
-            index = None
-        slugs = fb.loop_slugs()
-        if role_of(sid, name, fb, index, slugs, fb.colour_census()) == "manager":
-            subject = fb.manager_subject(name, index, slugs) if index is not None else None
-            return "manager", subject
-    return (claimant_role(sid, cwd, fb) or "agent"), None
+    configs = vault_configs()
+    best = vault_for_cwd(cwd, configs) if configs is not None else None
+    if best is None:
+        return "agent", None
+    root = best[0]
+    subject = session_subject(sid, root, fb)
+    if subject is not None:
+        return "manager", subject
+    claimant, _error = session_claimant(sid, root, fb)
+    return (_role_field(claimant[0]) if claimant else "") or "agent", None
 
 
 def resolve_launcher(sid, cwd, fb, subject=None):
