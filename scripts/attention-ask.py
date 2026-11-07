@@ -556,6 +556,46 @@ def manager_guard():
         return None
 
 
+SESSION_ROLE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "session-role.py")
+
+
+def session_role():
+    """The declared-role resolver, or None when it cannot be loaded.
+
+    A card must still post when the resolver is missing, so every failure here is
+    a warning and the declared `--producer-kind` stands — the pre-change
+    behaviour, which is the safe direction.
+    """
+    try:
+        spec = importlib.util.spec_from_file_location("session_role", SESSION_ROLE)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod if hasattr(mod, "resolve_producer_kind") else None
+    except Exception as err:
+        _warn(f"session-role unavailable ({err}) — producer_kind stays as declared")
+        return None
+
+
+def producer_kind_for(producer_id, declared):
+    """The kind to post: the declared value, or the session's ledger role.
+
+    ⚠️ Keyed on `producer_id` — the session the item is ABOUT — never on the
+    invoking process. `manager-attention-watch.py` posts on behalf of a parked
+    worker: the caller is a manager, the `producer_id` is the worker, and the
+    card must read `session`. Reading `$CLAUDE_CODE_SESSION_ID` here instead
+    would relabel exactly the cards this resolver exists to get right.
+    """
+    mod = session_role()
+    if mod is None:
+        return declared
+    try:
+        return mod.resolve_producer_kind(producer_id, declared)
+    except Exception as err:
+        _warn(f"producer_kind resolution failed ({err}) — using {declared!r}")
+        return declared
+
+
 def is_manager_session(guard, producer_id):
     """True when `producer_id` is a manager arm, by the guard's own rule.
 
@@ -943,7 +983,9 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out,
     try:
         item = post_question(
             producer_id=producer_id,
-            producer_kind=args.producer_kind,
+            # Resolved from the card's `producer_id`, not the caller — see
+            # `producer_kind_for`. An explicit non-`session` flag still wins.
+            producer_kind=producer_kind_for(producer_id, args.producer_kind),
             liveness_ref=liveness_ref,
             dedup_key=args.dedup_key,
             interrupt_class=args.interrupt_class,
