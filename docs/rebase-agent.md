@@ -35,7 +35,7 @@ sweeping it would rebase branches for nothing. The set is a constant in the scri
 | Repo | Why it is in the set |
 |---|---|
 | `bborbe/claude-supervisor` | the measured queue — 13 open PRs, 8 `CONFLICTING`/`DIRTY` on 2026-11-07 |
-| `bborbe/vault-cli` | the second repo the DoD requires, and it holds the exact pathology: two open PRs, both `CONFLICTING`, both APPROVED |
+| `bborbe/vault-cli` | the second repo in the set, and it holds the exact pathology: two open PRs, both `CONFLICTING`, both APPROVED |
 
 ## The poll trigger
 

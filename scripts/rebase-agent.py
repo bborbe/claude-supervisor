@@ -34,7 +34,7 @@ branch's own added bullets — never by guessing at the author's intent. The res
 refused rather than attempted when the branch does more to `CHANGELOG.md` than add
 bullets, because taking master's side would silently discard that edit.
 
-The four probes, and why the grep is not the authority
+The seven gates, and why the grep is not the authority
 ------------------------------------------------------
 1. `git log --merges origin/master..HEAD` is empty — the branch is linear.
 2. `git diff origin/master -- CHANGELOG.md | grep -E '^[-+]## '` prints only
@@ -46,12 +46,17 @@ The four probes, and why the grep is not the authority
 4. The `awk` placement assertion prints `sits under: ## Unreleased` for every bullet the
    branch adds — **this is the authority**, and it is what disambiguates (2).
 
-A fifth guard the task file does not name, added because it is the same failure:
+A fifth guard, added because it is the same failure:
 `grep -c '^## Unreleased$' CHANGELOG.md` must print **1**. Inserting an identical heading
 above master's existing one yields two sections that probes 2 and 4 both accept, since
 one added heading is still one `+## Unreleased` line and both sections read as
 `## Unreleased`. Measured 2026-11-01 on `bborbe/nuke#841`, caught only by reading the
 file head.
+
+Gates 6 and 7 are not CHANGELOG probes. A candidate over the repo's park size limit is
+refused rather than handed out — those thresholds are the reviewer's deployment env, so
+the defaults above are unverified. A rebase that leaves no commit ahead of master is
+refused as a no-op rather than reported as a successful push.
 
 The merge-time twin of probes 2–4 is the coding plugin's
 `check-changelog-unreleased-fold.sh` (`make check-changelog-unreleased-fold`), which
@@ -92,13 +97,14 @@ import tempfile
 from datetime import datetime, timezone
 
 STATE_DIR = os.path.expanduser("~/.local/state/claude-supervisor/rebase-agent")
+STATE_KEEP = 50
 SCRATCH_REF = "refs/rebase-agent"
 
 # The repo set is explicit, never "every repo". The conflict class exists only where a
 # release cut renames `## Unreleased` in a CHANGELOG that open branches also edit — a
 # repo without that convention cannot produce the conflict, so sweeping it would rebase
-# branches for nothing. `vault-cli` is here because it holds the exact pathology (two
-# open PRs, both CONFLICTING, both APPROVED) and is the second repo the DoD needs.
+# branches for nothing. `vault-cli` is here because it holds the exact pathology: two
+# open PRs, both CONFLICTING, both APPROVED.
 DEFAULT_REPOS = (
     {
         "repo": "bborbe/claude-supervisor",
@@ -194,11 +200,27 @@ def changed_paths(cfg, number):
          "--json", "files", "--jq", ".files[].path"]
     )
     if proc.returncode != 0:
-        return []
+        # None, not [] — an empty list would silently skip the prod-pin path check and
+        # leave the refusal resting on title/branch hints alone.
+        return None
     return [line for line in proc.stdout.splitlines() if line.strip()]
 
 
 # ---------------------------------------------------------------------------- rebase
+
+
+def fetch_master(repo_path):
+    """Refresh `origin/master` before the sweep.
+
+    The rebase and the behind-count both read the local remote-tracking ref, so a
+    stale checkout would rebase onto stale master, pass every gate, and still hand
+    out a push line for a branch that is behind the real one. Nothing else refreshes
+    this clone between runs, so the fetch is the agent's own responsibility.
+    """
+    proc = git(repo_path, "fetch", "--no-tags", "origin",
+               "+refs/heads/master:refs/remotes/origin/master")
+    if proc.returncode != 0:
+        raise RuntimeError(f"could not fetch origin/master: {proc.stderr.strip()}")
 
 
 def fetch_head(repo_path, number):
@@ -221,7 +243,12 @@ def changelog_delta(repo_path, base_sha, head_sha):
     """
     proc = git(repo_path, "diff", f"{base_sha}...{head_sha}", "--", "CHANGELOG.md")
     if proc.returncode != 0:
-        return [], False
+        # Never fall through with no bullets: the resolution would then write master's
+        # side and re-apply nothing, and the placement gate would pass vacuously
+        # because it has no bullet to look for. Refuse instead of dropping them.
+        raise Refusal(
+            f"could not read the branch's CHANGELOG delta: {proc.stderr.strip()}"
+        )
     added, other = [], False
     for line in proc.stdout.splitlines():
         if line.startswith("+++") or line.startswith("---"):
@@ -444,7 +471,13 @@ def process_pr(cfg, pr, keep_scratch=False):
         row["reason"] = f"repo path does not exist: {repo_path}"
         return row
 
-    pin = prod_pin_reason(pr, changed_paths(cfg, number))
+    changed = changed_paths(cfg, number)
+    if changed is None:
+        row["verdict"] = "ERROR"
+        row["reason"] = "could not read the PR's changed paths — prod-pin check unavailable"
+        return row
+
+    pin = prod_pin_reason(pr, changed)
     if pin:
         row["verdict"] = "REFUSED"
         row["reason"] = f"prod-pin PR — the operator's approval, not a rebase candidate ({pin})"
@@ -499,7 +532,7 @@ def process_pr(cfg, pr, keep_scratch=False):
         row["verdict"] = "ERROR"
         row["reason"] = str(error)
     finally:
-        if scratch and os.path.isdir(scratch):
+        if scratch and os.path.isdir(scratch) and not keep_scratch:
             git(repo_path, "worktree", "remove", "--force", scratch)
             shutil.rmtree(scratch, ignore_errors=True)
             git(repo_path, "worktree", "prune")
@@ -546,7 +579,26 @@ def write_state(rows, errors):
     for name in (f"{stamp}.json", "latest.json"):
         with open(os.path.join(STATE_DIR, name), "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)
+    prune_state()
     return os.path.join(STATE_DIR, f"{stamp}.json")
+
+
+def prune_state():
+    """Keep the newest STATE_KEEP runs — the loop writes one file per 900 s."""
+    try:
+        runs = sorted(
+            (os.path.join(STATE_DIR, name) for name in os.listdir(STATE_DIR)
+             if name.endswith(".json") and name != "latest.json"),
+            key=os.path.getmtime,
+            reverse=True,
+        )
+    except OSError:
+        return
+    for path in runs[STATE_KEEP:]:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def main(argv=None):
@@ -570,6 +622,7 @@ def main(argv=None):
     for cfg in cfgs:
         try:
             prs = list_open_prs(cfg)
+            fetch_master(cfg["path"])
         except Exception as error:  # noqa: BLE001
             errors.append(f"{cfg['repo']}: {error}")
             rows.append({
