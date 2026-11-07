@@ -420,6 +420,16 @@ Print `❓ SESSION UNREADABLE — <task> · vault-cli exited <rc> reading claude
 
 ⚠️ **`--vault` takes a name, not a path** — a path exits non-zero, and under `2>/dev/null` an empty id matches every session.
 
+⚠️ **A prefix is not a resume id — refuse it here, before any branch.** `session-liveness.py --check` accepts an 8-char prefix by design, but `--resume` needs the whole value: a truncated id resumes nothing, which is what the 2026-11-07 batch's `HTTP 400`s were. An empty id means "never worked" and falls through to CREATE; a non-empty one must be a full 36-character uuid.
+
+```bash
+[ -z "$PRIOR_SID" ] || printf '%s' "$PRIOR_SID" \
+  | grep -Eq '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$' \
+  || { echo '❌ TRUNCATED ID'; exit 1; }
+```
+
+Print `❌ TRUNCATED ID — <task> · claude_session_id holds <n> characters, not a full uuid · refused; re-stamp the field with the whole 36-character id, never a prefix.` and STOP: no JUMP, no RESUME, no CREATE.
+
 **Refuse first if that session carries an operator hold — before any branch, JUMP included.** A hold is operator *policy* about a **session**; it is **not** the `hold` *task status*, nor the `HOLD` marker for a `blocked` row — only the first is read here:
 
 ```bash
@@ -439,7 +449,9 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 pgrep -fl "<PRIOR_SID>" || echo "no process holding this session"
 ```
 
-A live pid → **wait for it to exit, then resume** (Step 3). JUMP is unavailable — there is no pane to activate, and the branch logic below would otherwise spawn onto it, putting two writers on one conversation.
+A live pid → **on the single-task path, wait for it to exit, then resume** (Step 3). JUMP is unavailable — there is no pane to activate, and the branch logic below would otherwise spawn onto it, putting two writers on one conversation.
+
+⚠️ **On the `--flagged` batch, waiting is not an option.** One live row would hold every later row behind a session that may never exit. Report `⏭️ LIVE HERE — <task> · <PRIOR_SID> · a local process holds this session · skipped; the batch continues`, take no branch for that row, and move to the next. ⚠️ **This is a different verdict from `🔒 LIVE ELSEWHERE` below**, not a rewording of it: that one means live with **no** local process and is a *refusal*; this one means live **here** and is a *skip*.
 
 **Then refuse if the session is live but reachable from nowhere here — this is the cluster worker.** Probe via the plugin's single reader; **do not open the registry here**:
 
