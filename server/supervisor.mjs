@@ -19,7 +19,7 @@ import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
 import { answerWrappedSession, listWrappedSessions, pendingQuestionOf, readWrappedSession, sendWrappedSession, spawnWrappedSession, stopWrappedSession, streamWrappedSession } from './wrapper-stream.mjs'
 import { HEARTBEAT_INTERVAL_MS, a2aStamp, clearStamp, heartbeatDir, selfStampRefusal, stampRecord, startSelfStamp } from './heartbeat.mjs'
-import { workerSessions } from './worker-sessions.mjs'
+import { invalidateCountCache, workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
 import { startAttentionPoll, storeDecisionRecord, timeoutDecisionRecord } from './attention-poll.mjs'
 import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs'
@@ -3452,8 +3452,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (typeof args.prompt !== 'string' || !args.prompt.trim()) {
         return reply({ error: 'prompt is required' })
       }
-      return reply(
-        await spawnAgent({
+      // ⚠️ A SUCCESSFUL SPAWN INVALIDATES THE COUNT CACHE, and it is done here rather than inside
+      // `spawnAgent` so one call covers every path — tab, headless, cluster and resume alike.
+      // Without it the cache can hold a number that predates this spawn, and the next spawn whose
+      // live read fails would decide on that pre-spawn number; a burst during a store outage would
+      // then be invisible to the very ceiling that bounds it. See `invalidateCountCache`.
+      const spawned = await spawnAgent({
           prompt: args.prompt,
           cwd: args.cwd,
           label: args.label,
@@ -3499,8 +3503,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // in 6 (measured 2026-09-20), and not crossing this boundary is the whole point
           // of resolving a role instead. See window-id.mjs and role-map.mjs.
           windowId: windowIdArgument(args.window_id),
-        }),
-      )
+      })
+      if (!spawned.error) await invalidateCountCache()
+      return reply(spawned)
 
     case 'send_agent_message': {
       // ⚠️ The request-time roster, for the same reason `list_agents` reads it: the worker a
