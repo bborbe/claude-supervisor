@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.250.6
 
 - fix: **the park nudge reads the watching-state duration instead of transcript silence, so a session that re-arms its watcher is finally nudged.** `park-nudge.py` selected on `quiet_min` — mtime age — and a watcher re-arm writes to the transcript, so the clock reset while the wait continued. Measured 2026-11-06: a session carried **49 `🟡 WAITING` closers** across **3 h 34 m** with no terminal closer after, was re-armed **20+ times**, and read `quiet 12m` — comfortably inside the 15-minute allowance, so it was never nudged and `~/.claude/state/park-nudge/ledger.json` stayed `{}`. The selection now reads **`watching_min`**, the span from the session's first `🟡 WAITING` closer, published by `session-activity.py` (vault-local, not part of this plugin — the two halves land separately). A row with no `watching_min` is skipped rather than treated as 0. The emitted line keeps its `quiet <N>m` field name for parser compatibility, but N is now the state duration; the ledger's `last_quiet` key carries it too. Suppression is unchanged in shape — one nudge per watching episode, keyed on the session id, never on the duration. Change set: `scripts/park-nudge.py`, `scripts/tests/test_park_nudge.py`, `scripts/tests/fixtures/park-nudge-activity.json`, `commands/steps/keepalive.md`, `CHANGELOG.md`.
 
