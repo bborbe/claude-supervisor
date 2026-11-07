@@ -11,6 +11,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - fix: **`/supervisor:open` now refuses a spawn whose session ends up named `agent_N`.** `server/supervisor.mjs` stores `label: label || id`, so a call that omits `label` is recorded under the minted agent id — the session is then unidentifiable in the fleet list and unmatchable to the row that opened it. `commands/open.md` marks `label` mandatory on the `spawn_agent` create branch, defines `<title>` as the row's subject on the wezterm fallback, and makes Step 4 refuse a result whose name matches `agent_\d+`. `scripts/budget-baseline.json` carries the recorded size for `commands/open.md`.
+- fix: **a `role: agent` row never opens `interactive`, even when its `mode:` says so.** Operator ruling 2026-11-07. `docs/role-mode-matrix.md` Rule 2 gains the narrowing and `docs/fleet-surface.md` § Spawn a worker item 6 records it against the both-ways carve-out, which still governs `human`, `manager` and an `agent` row that does carry a watch-need signal. `commands/open.md` § Step 0.6 rewrites the field and prints `normalised mode interactive -> headless`, and the batch's report legend no longer claims a row with no `mode:` opens on `spawn.mode` — by Step 3 every row carries the value Step 0.6 resolved.
 
 ## v0.250.3
 

@@ -204,6 +204,8 @@ vault-cli --vault "<vault>" task set "<task>" mode <interactive|headless>
 
 Writing them is the point, not a side effect. The next batch reads the fields instead of re-deciding, so one task cannot be classified one way today and the other way tomorrow. It also makes the call reviewable — a wrong value is visible on disk and the operator corrects it with that same one-line command.
 
+⚠️ **`role: agent` overrides a stored `mode: interactive`.** An agent row carrying none of item 6's five watch-need signals opens `headless` even when the field on disk says `interactive` (operator ruling 2026-11-07; matrix Rule 2 carries the narrowing). Rewrite the field and print `normalised mode interactive -> headless`. Every other case keeps item 6's both-ways carve-out — `human`, `manager`, and an `agent` row that *does* carry a signal all honour what is on disk.
+
 **`shipping:` is read here and passed at Step 3 — never inferred.** Pass `shipping: true` to `spawn_agent` only when the field reads `true`; omit it otherwise. Rule: § Spawn a worker item 9.
 
 **`goal_loop:` is read here and used at Step 3** — on `true` the spawn prompt is the condition alone; the work command follows. Rule: § Spawn a worker item 10.
@@ -250,8 +252,10 @@ approve  a routine task - 2026W39
  10  a routine task - 2026W38-sun                   agent   interactive   (on disk)
      ⛔ HOLD — blocked by two other in-flight tasks
   ...
-  Rows with no `mode:` on disk open per fleet config (`spawn.mode`); only an
-  explicit `headless` overrides it.
+  Rows always carry a `mode:` by the time Step 3 reads them — § Step 0.6 resolves
+  it per matrix Rule 2 and writes it. The fleet config (`spawn.mode`) is never the
+  decider for a row this command opens; it only reaches a spawn that omits the
+  argument, which this file never does.
 
 ⚠️  Ordering is NOT auto-detected. Every ⛔ row is skipped;
     the rest open in the stable order printed above.
