@@ -330,6 +330,46 @@ class ResolveLauncher(unittest.TestCase):
         path, source = rw.resolve_launcher("s1", self.vault, self.fb)
         self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "task"))
 
+    def test_a_human_row_takes_the_claude_sibling_over_the_worker_default(self):
+        """Operator ruling 2026-11-06 / matrix Rule 4: a human row is not a delegate."""
+        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"))
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "claude-sibling"))
+
+    def test_the_human_sibling_sits_ahead_of_a_configured_manager_launcher(self):
+        """Both private-personal and seibert-brogrammers point `manager_launcher` at `-deepseek`;
+        taking it first would leave the human row on the worker model while reporting success."""
+        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"),
+                       manager_launcher=os.path.join(self.scripts, "cc-private-glm"))
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "claude-sibling"))
+
+    def test_the_human_rule_falls_through_to_the_manager_default_without_a_sibling(self):
+        os.remove(os.path.join(self.scripts, "cc-private-claude"))
+        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"),
+                       manager_launcher="cc-private-glm")
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-glm"), "manager-default"))
+
+    def test_a_human_rows_own_launcher_still_wins(self):
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human\nlauncher: cc-private-glm")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-glm"), "task"))
+
+    def test_an_agent_row_is_unaffected_by_the_human_rule(self):
+        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"))
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: agent")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-deepseek"), "worker-default"))
+
+    def test_claimant_role_reports_the_bound_task_and_nothing_else(self):
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
+        self.assertEqual(rw.claimant_role("s1", self.vault, self.fb), "human")
+        self.assertEqual(rw.claimant_role("nobody", self.vault, self.fb), "")
+
     def test_unsafe_configured_worker_launcher_is_none(self):
         self.configure(worker_launcher="cc;rm -rf")
         self.page("25 Tasks", "T", "claude_session_id: s1")
