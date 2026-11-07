@@ -23,6 +23,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 
 import importlib.util
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -134,6 +135,25 @@ class ClassifyTest(unittest.TestCase):
         self.assertIsNone(ra.prod_pin_reason(
             {"title": "docs", "headRefName": "docs/x"},
             ["docs/production-guide.md", "scripts/x.py"]))
+
+
+class PushLineTest(unittest.TestCase):
+    def test_a_hostile_branch_name_stays_one_shell_word(self):
+        """The line is pasted into a shell; a branch name must never split or execute."""
+        line = ra.push_line("/tmp/r", "feat/x; rm -rf ~", "abc123", 7)
+        self.assertEqual(shlex.split(line), [
+            "git", "-C", "/tmp/r", "push",
+            "--force-with-lease=refs/heads/feat/x; rm -rf ~:abc123",
+            "origin", "refs/rebase-agent/pr/7:refs/heads/feat/x; rm -rf ~",
+        ])
+
+    def test_an_ordinary_branch_name_reads_normally(self):
+        line = ra.push_line("/tmp/r", "feat/plain", "abc123", 7)
+        self.assertEqual(
+            line,
+            "git -C /tmp/r push --force-with-lease=refs/heads/feat/plain:abc123 "
+            "origin refs/rebase-agent/pr/7:refs/heads/feat/plain",
+        )
 
 
 class ChangelogDeltaTest(unittest.TestCase):
