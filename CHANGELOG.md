@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.250.5
 
 - fix: **a successful spawn now invalidates the worker-count cache, so a failed liveness read after a spawn refuses instead of releasing the next spawn on a pre-spawn number.** The cache is written only by a successful live count, so a spawn that landed after the last count left a cached value that predated it; the next spawn whose live read failed decided on that value, and every further spawn in the same 60 s window was allowed on it — a burst during a store outage ran past the very ceiling that exists to bound it. `invalidateCountCache` (`server/worker-sessions.mjs`) deletes the file, and `spawn_agent` calls it on every non-error result (`server/supervisor.mjs`), covering the tab, headless, cluster and resume paths in one place. The fallback is unchanged where it was added for: a transient store failure with no spawn immediately before it still decides on a fresh count, labelled on stderr. Change set: `server/worker-sessions.mjs`, `server/supervisor.mjs`, `server/worker-sessions.test.mjs`, `docs/fleet-surface.md`, `CHANGELOG.md`.
 
