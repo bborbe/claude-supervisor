@@ -44,7 +44,24 @@ SITE_LIST = {
     ("jump.py", "activate_pane_by_id"), ("jump.py", "activate_tab"),
     ("jump.py", "current_window"), ("jump.py", "main"),
     ("jump.py", "pane_sessions"), ("jump.py", "wezterm_panes"),
-    ("session-holds.py", "pane_title"),
+    # ⚠️ As of 2026-10-12 `pane_title` is a CALLER here, not the transport call: the
+    # `wezterm cli list` read moved into `panes()`, which the walk derives as the seed.
+    # It keeps the three-state contract — `None` on a failed query, `[]` only for a
+    # reachable WezTerm holding nothing — because the Hold-window predicate joins
+    # through it, and a failed read collapsed into "no panes" would silently un-hold
+    # every pane in the Hold window. `pane_title` stays listed for the closure, the
+    # same way every other caller is.
+    ("session-holds.py", "panes"), ("session-holds.py", "pane_title"),
+    # added 2026-10-12 — the SAME Hold-window predicate inlined into the four
+    # consumers that decide whether a session is held: `manager-predispatch.py`
+    # (digest input), `notify-gate.py` (escalation suppression), `restart-worker.py`
+    # (restart refusal) and `orphan-candidates.py` (candidate drop). Each carries its
+    # own `panes()` with the identical three-state contract — `None` on a failed
+    # `wezterm cli list`, `[]` only for a reachable WezTerm holding nothing (or an
+    # absent `wezterm` binary). A failed read collapsed into "no panes" would silently
+    # un-hold every pane in the Hold window at that consumer.
+    ("manager-predispatch.py", "panes"), ("notify-gate.py", "panes"),
+    ("restart-worker.py", "panes"), ("orphan-candidates.py", "panes"),
     # added 2026-10-05 — `open-items.py`'s pane-existence probe, the read half of the new
     # origin record. `classify` asks whether an entry's recorded raising pane still exists;
     # `live_panes` is that query, and it must keep the same three-state contract as every
@@ -211,6 +228,11 @@ POPULATED = {
     ("oi", "live_panes"): '[{"pane_id": "204", "title": "t"}]',
     ("pvc", "wezterm_panes"): '[{"pane_id": "204", "tty_name": "/dev/ttys001"}]',
     ("pvc", "_pid_ttys"): "101 ttys001",
+    ("sh", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
+    ("mp", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
+    ("ng", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
+    ("rw", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
+    ("oc", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
     ("mmf", "wezterm_panes"): '[{"pane_id": "204", "title": "t"}]',
     ("mmf", "pane_lines"): "context\nEnter to select",
     ("sg", "pane_text"): "  ⎿  Goal set: Task \"t\" is finished.",
@@ -286,6 +308,11 @@ def main():
             ("sp", "stop-probe.py"),
             ("oi", "open-items.py"),
             ("pvc", "plugin-version-census.py"),
+            ("sh", "session-holds.py"),
+            ("mp", "manager-predispatch.py"),
+            ("ng", "notify-gate.py"),
+            ("rw", "restart-worker.py"),
+            ("oc", "orphan-candidates.py"),
             ("wnmh", "who-needs-my-help.py"),
             ("mmf", "manager-menu-footer.py"),
             ("sg", "spawn-goal.py"),
@@ -315,6 +342,9 @@ def main():
         ("fs", "live_processes", ()), ("sp", "gate_processes", ()),
         ("oi", "live_panes", ()),
         ("pvc", "wezterm_panes", ()), ("pvc", "_pid_ttys", ([1],)),
+        ("sh", "panes", ()),
+        ("mp", "panes", ()), ("ng", "panes", ()),
+        ("rw", "panes", ()), ("oc", "panes", ()),
         # The viewport read takes a pane id; any id reaches the subprocess, and the
         # three states are what matter — broken must be `None`, and a reachable
         # transport answering with nothing must not become a failure.

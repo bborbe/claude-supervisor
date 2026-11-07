@@ -69,5 +69,8 @@ flagged"* has no fleet executor; the operator opens one, or the topic tier's ran
 their instruction (`commands/topic-drive.md` § Start). Say that plainly rather than implying
 this leg covers it.
 
-**Report the count.** Print `unactioned: <n> operator-flagged` with the rows this leg left
-unopened — the `# Regression metric` reads it.
+**Record the count — in the digest, not only in chat.** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg operator-flagged --count <n>`, with `<n>` the rows this leg left unopened — the `# Regression metric` reads it. The line's format and its not-run form have their **single home in `commands/steps/output-shape.md` item 14** — read it there and never restate it here.
+
+⚠️ **A leg that does not execute records WHY.** When the debt gate skips this leg (exit 12 = a step is still owed, exit 2 = the gate could not read the debt file), write `fleet-legs.py --leg flagged-open --not-run "<reason>"` rather than leaving the sweep's seeded `not run — no reading recorded this round` standing — `--check` reads that seed as "nobody has spoken for this key". ⚠️ **Never render `unactioned: 0` for a leg that did not run** — a suppressed leg and a leg that opened nothing must never print the same, which is the whole reason the count is written to the digest instead of spoken into chat.
+
+⚠️ **A failed write is reported, never swallowed.** If `fleet-legs.py` exits 2 the digest could not be read or written (the sweep may not have written it yet); render `legs: UNKNOWN — <reason>` for this round and retry the record once the digest exists. A reading that never landed must not read as a leg that never ran.
