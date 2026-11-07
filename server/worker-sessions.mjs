@@ -6,7 +6,7 @@
 // **The definition takes one identity store and one liveness source.** A worker session is
 // one that is
 //
-//   (a) present in the **spawn ledger** (`config.ledgerDir`) — which is what makes it a
+//   (a) present in the **spawn ledger**, which the **session-ledger endpoint** answers — what makes it a
 //       session this supervisor opened, rather than a manager or one of the operator's own;
 //       and
 //   (b) **live**, which the **session-heartbeat endpoint** answers.
@@ -42,49 +42,98 @@
 // cap exists to bound. Managers started by hand — `/supervisor:open` in a plain wezterm tab —
 // write no record at all. `scripts/worker-sessions.py` carries the same definition for shell
 // callers.
-import { readdirSync, readFileSync } from 'node:fs'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { config } from './config.mjs'
 import { liveFromHeartbeat, readHeartbeat } from './session-heartbeat.mjs'
+import { ledgerBySessionId, readSessionLedger } from './session-ledger.mjs'
 
-// `{sessionId: record}`, or `null` when the ledger directory cannot be read.
+// The last successful count, written on every successful read and used when the live read fails.
 //
-// An absent directory is `{}` — nobody has ever been spawned — which is a different answer
-// from `null`, "could not read it". Collapsing them turns a permissions error into a
-// confident empty fleet, and an empty fleet is the answer that opens past a limit.
-export function readLedger(dir = config.ledgerDir) {
-  let names
-  try {
-    names = readdirSync(dir)
-  } catch (error) {
-    if (error?.code === 'ENOENT') return {}
-    return null
-  }
-  const known = {}
-  for (const name of names) {
-    if (!name.endsWith('.json')) continue
-    try {
-      const record = JSON.parse(readFileSync(join(dir, name), 'utf8'))
-      if (record && typeof record.session_id === 'string') known[record.session_id] = record
-    } catch {
-      continue // a half-written record is skipped, not fatal
-    }
-  }
-  return known
+// ⚠️ **A FILE, not an in-memory value, because the other counter is a short-lived process.**
+// `scripts/worker-sessions.py --count` exits after printing, so an in-memory cache could never
+// outlive it; a shared file is the only shape both readers can use. The path is the supervisor's
+// own state dir — `$XDG_STATE_HOME/claude-supervisor`, or the XDG default under the user's home —
+// and `worker-sessions.py` resolves the same one.
+//
+// ⚠️ **The window is 60 s and the fallback is labelled.** A count from minutes ago is not evidence
+// about the fleet now; past the window the refusal stands. And it is never `0`: the cache holds a
+// real earlier count, and an absent cache is a refusal.
+export const COUNT_CACHE_TTL_MS = 60_000
+export const COUNT_CACHE_FILE = 'last-worker-count.json'
+
+export function countCachePath(stateDir = config.stateDir) {
+  return join(stateDir, COUNT_CACHE_FILE)
 }
 
-// Live worker sessions as `[{sessionId, status, label}]`, or `null` when a store failed.
+// `{ count, ageMs }` when the cache holds a fresh-enough count, else `null`.
+//
+// Every malformed shape is `null`: a cache written by another tool, a truncated write, a future
+// timestamp (a clock step must not make a count look fresh forever). The cache is an optimisation
+// for a failure path, so anything it cannot read is simply not a fallback.
+export async function readCountCache({ stateDir = config.stateDir, now = Date.now } = {}) {
+  try {
+    const parsed = JSON.parse(await readFile(countCachePath(stateDir), 'utf8'))
+    if (!parsed || typeof parsed !== 'object') return null
+    if (!Number.isInteger(parsed.count) || parsed.count < 0) return null
+    const at = Date.parse(parsed.at)
+    if (!Number.isFinite(at)) return null
+    const ageMs = now() - at
+    if (ageMs < 0 || ageMs > COUNT_CACHE_TTL_MS) return null
+    return { count: parsed.count, ageMs }
+  } catch {
+    return null
+  }
+}
+
+// Best-effort: a cache that cannot be written must never fail the count it was recording.
+async function writeCountCache(count, { stateDir = config.stateDir, now = Date.now } = {}) {
+  try {
+    await mkdir(stateDir, { recursive: true })
+    await writeFile(
+      countCachePath(stateDir),
+      JSON.stringify({ count, at: new Date(now()).toISOString() }),
+    )
+  } catch {
+    // Swallowed on purpose — see above.
+  }
+}
+
+// `{sessionId: record}`, or `null` when the ledger cannot be read.
+//
+// ⚠️ **The source is the ENDPOINT, and the three-state contract survived the move.** An empty
+// store is `{}` — nobody has ever been spawned — which is a different answer from `null`,
+// "could not read it". Collapsing them turns a store outage into a confident empty fleet, and
+// an empty fleet is the answer that opens past a limit.
+//
+// ⚠️ **Async, because the endpoint is.** Both callers already await `workerSessions`, and a
+// count resolved after the spawn has already spent the budget it protects is the failure the
+// awaited read exists to prevent.
+export async function readLedger({ endpoint, fetchImpl, onFailure } = {}) {
+  const rows = await readSessionLedger({ endpoint, fetchImpl, onFailure })
+  if (rows === null) return null
+  return Object.fromEntries(ledgerBySessionId(rows))
+}
+
+// Live worker sessions as `{ workers, error }` — `workers: null` when a store failed, with
+// `error` naming what failed and how long it waited.
 //
 // The ledger supplies the worker identity; the **session-heartbeat endpoint** supplies
 // liveness. A session live at the endpoint but not in the ledger is a manager or one of the
 // operator's own; a session in the ledger and not live at the endpoint has exited.
 //
-// ⚠️ **`null` is "could not be read", and it is returned rather than folded into an empty
-// list.** The caller refuses on `null` and opens on `[]`, so collapsing the two turns a store
+// ⚠️ **`workers: null` is "could not be read", and it is returned rather than folded into an
+// empty list.** The caller refuses on it and opens on `[]`, so collapsing the two turns a store
 // outage into permission to spawn onto live work. That is the same rule the ledger read
 // carries one level up: an absent ledger directory is `{}` ("nobody has ever been spawned"),
 // which is a different answer from `null`.
+//
+// ⚠️ **`error` travels WITH a `null` count, and that is the change of 2026-10-19.** A bare `null`
+// left the refusal able to say only "the count could not be taken", so a slow store, a refused
+// socket and an unparseable body were one indistinguishable failure — measured on 2026-10-19,
+// when the fleet lost at least 5 spawns to exactly that message with no cause recorded. The
+// readers log every failure and report it here; the refusal prints it.
 //
 // ⚠️ **Asynchronous, because the endpoint is.** It reads over HTTP rather than the filesystem,
 // so both callers (`concurrentLimitError`'s two spawn paths) await it — and they must, because
@@ -94,14 +143,43 @@ export function readLedger(dir = config.ledgerDir) {
 // heartbeat, `cluster` for a mirrored cluster session. It is no longer the registry's own
 // `status`, because the registry is no longer on this path. Descriptive only — nothing decides
 // on it.
-export async function workerSessions({ endpoint, ledgerDir, fetchImpl, now } = {}) {
-  const ledger = readLedger(ledgerDir)
-  if (ledger === null) return null
+export async function workerSessions({
+  endpoint,
+  fetchImpl,
+  now = Date.now,
+  onFailure,
+  stateDir,
+} = {}) {
+  // ⚠️ `ledgerDir` left the signature with the file read, and a caller still passing it is
+  // harmless rather than broken — an extra key on a destructured parameter is ignored. It is
+  // named because a silent acceptance would let a reader believe a path is still in force.
+  //
+  // The failures are collected so the caller can print the cause; each reader still logs it, so a
+  // caller that passes no `onFailure` loses the message but not the record.
+  const failures = []
+  const observe = (message) => {
+    failures.push(message)
+    onFailure?.(message)
+  }
+  const cause = (fallback) => failures.join('; ') || fallback
+
+  // ⚠️ A failed read is `workers: null` AND, when the cache is fresh enough, a `stale` count the
+  // refusal may decide on instead. `stale` is never `0` unless a real earlier read counted 0.
+  const failed = async (fallback) => ({
+    workers: null,
+    error: cause(fallback),
+    stale: await readCountCache({ stateDir, now }),
+  })
+
+  const ledger = await readLedger({ endpoint, fetchImpl, onFailure: observe })
+  if (ledger === null) return failed('the session-ledger endpoint could not be read')
 
   // Read once, not once per ledger entry: the endpoint answers the whole fleet in one request,
   // where a per-id probe would be ~1000 round trips over this ledger.
-  const rows = await readHeartbeat({ endpoint, fetchImpl })
-  if (rows === null) return null
+  const rows = await readHeartbeat({ endpoint, fetchImpl, onFailure: observe })
+  if (rows === null) {
+    return failed('the session-heartbeat endpoint could not be read')
+  }
   const live = liveFromHeartbeat(rows)
 
   const workers = []
@@ -130,5 +208,8 @@ export async function workerSessions({ endpoint, ledgerDir, fetchImpl, now } = {
     if (record.role === 'manager') continue
     workers.push({ sessionId, status: live.get(sessionId), label: record.label })
   }
-  return workers
+  // Record the count for the next failed read. Best-effort: a cache that cannot be written must
+  // not fail a count that succeeded.
+  await writeCountCache(workers.length, { stateDir, now })
+  return { workers, error: null, stale: null }
 }

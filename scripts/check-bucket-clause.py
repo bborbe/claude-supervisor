@@ -2,7 +2,7 @@
 """The per-bucket shape clause must be byte-identical in every command that carries it.
 
 The clause telling a sweep reader what `--write-buckets` will accept lives in
-`commands/steps/manager-sweep.md` and `commands/manager-status.md` — one contract, carried
+`commands/steps/goal-sweep.md` and `commands/goal-status.md` — one contract, carried
 at each call site because each command is read on its own and a pointer alone is what
 `docs/subject-resolution.md` § Recording already records as the liability. But a contract
 with several call sites drifts unless something checks it: this clause was amended by hand
@@ -31,19 +31,19 @@ REPO = Path(__file__).resolve().parent.parent
 
 START = "Both doors into the record share one shape check"
 COMMANDS = (
-    # ⚠️ `commands/manager-loop.md` was replaced by `commands/steps/manager-sweep.md` on 2026-10-11,
+    # ⚠️ `commands/goal-loop.md` was replaced by `commands/steps/goal-sweep.md` on 2026-10-11,
     # when the loop was restructured into a router with per-round step files. The clause
     # describes what `--write-buckets` and `--save` accept, and both calls are made by the
     # sweep step — so the clause moved with the calls. The check follows the rule, not the
     # file it used to sit in.
-    "commands/steps/manager-sweep.md",
-    # ⚠️ `commands/manager-drive.md` left this set on 2026-10-11, when it became the loop's
-    # per-round router (`commands/manager-loop.md` is the arm). A router carries no
+    "commands/steps/goal-sweep.md",
+    # ⚠️ `commands/goal-drive.md` left this set on 2026-10-11, when it became the loop's
+    # per-round router (`commands/goal-loop.md` is the arm). A router carries no
     # executable rule — the clause's only in-tree call site is the sweep step above — so
     # leaving it there would be the second home this guard exists to prevent. The clause
     # still has two carriers, and a third appearing anywhere is caught by the same
     # byte-identity comparison below.
-    "commands/manager-status.md",
+    "commands/goal-status.md",
 )
 
 

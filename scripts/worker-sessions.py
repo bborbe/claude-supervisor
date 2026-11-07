@@ -15,8 +15,8 @@ for in-process workers (`server/supervisor.mjs` writes `mode: 'headless'`, from
 **The definition takes one identity store and one liveness source.** A worker session is one
 that is
 
-  (a) present in the **supervisor spawn ledger** (`~/.local/state/claude-supervisor/sessions/`)
-      — which is what makes it a session the supervisor opened, rather than a manager or one
+  (a) present in the **supervisor spawn ledger**, which the **session-ledger endpoint**
+      serves — what makes it a session the supervisor opened, rather than a manager or one
       of the operator's own; and
   (b) **live**, which the **session-heartbeat endpoint** answers.
 
@@ -54,8 +54,9 @@ would flip every pre-field worker into a manager and shrink the population the c
 bound. Managers started by hand — `/supervisor:open` in a plain wezterm tab — write no record
 at all.
 
-⚠️ **An unreadable store is UNKNOWN, never 0.** The ledger and the endpoint are read before any
-verdict, and either failing exits 2 with its message on **stderr** — so `$(… --count)` captures
+⚠️ **An unreadable store is UNKNOWN, never 0.** The ledger endpoint and the heartbeat endpoint
+are both read before any verdict — and since 2026-10-14 both are the SAME attention store, so one
+unreachable controller fails both reads and there is no longer a half-answer to fall back on. Either failing exits 2 with its message on **stderr** — so `$(… --count)` captures
 nothing and a caller must consult the exit code. Folding an I/O error into "no workers" is how
 a broken instrument reads as an idle fleet, which is the failure this file exists to correct.
 """
@@ -64,10 +65,61 @@ import importlib.util
 import json
 import os
 import sys
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 _SPAWN_LEDGER = None
+
+# The last successful count, shared with the server. See `server/worker-sessions.mjs` for why it is
+# a FILE: this process exits after printing, so an in-memory cache could never outlive it.
+#
+# ⚠️ **The window is 60 s and the fallback is labelled.** A count from minutes ago is not evidence
+# about the fleet now; past the window the refusal stands. It is never a fabricated `0` — the cache
+# holds a real earlier count, and an absent or unreadable cache is a refusal.
+_CACHE_TTL_S = 60
+_CACHE_FILE = "last-worker-count.json"
+
+
+def _state_dir():
+    home = os.environ.get("XDG_STATE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "state"
+    )
+    return os.path.join(home, "claude-supervisor")
+
+
+def _cache_path():
+    return os.path.join(_state_dir(), _CACHE_FILE)
+
+
+def _read_count_cache():
+    """`(count, age_seconds)` when the cache holds a fresh-enough count, else `None`."""
+    try:
+        with open(_cache_path(), encoding="utf-8") as fh:
+            parsed = json.load(fh)
+        count = parsed.get("count")
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return None
+        at = datetime.fromisoformat(str(parsed.get("at")).replace("Z", "+00:00"))
+        age = (datetime.now(timezone.utc) - at).total_seconds()
+        if age < 0 or age > _CACHE_TTL_S:
+            return None
+        return count, age
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def _write_count_cache(count):
+    """Best-effort: a cache that cannot be written must never fail the count it records."""
+    try:
+        os.makedirs(_state_dir(), exist_ok=True)
+        with open(_cache_path(), "w", encoding="utf-8") as fh:
+            json.dump(
+                {"count": count, "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")},
+                fh,
+            )
+    except OSError:
+        pass
 
 
 def _load(module_name, filename):
@@ -95,7 +147,16 @@ def _ledger():
     return _SPAWN_LEDGER
 
 
-def live_workers(endpoint=None, ledger=None):
+def _cause(failures):
+    """` — <cause>` when a reader named one, else the empty string.
+
+    The readers log their own line; this carries the same text into the UNKNOWN message so the
+    exit-2 line an operator (or a caller's captured stderr) reads is self-contained.
+    """
+    return (" — %s" % "; ".join(failures)) if failures else ""
+
+
+def live_workers(endpoint=None, ledger=None, on_failure=None):
     """Live worker sessions as `[{session_id, status, label}]`, or None when a store failed.
 
     The ledger supplies the worker identity; the **session-heartbeat endpoint** supplies
@@ -115,7 +176,7 @@ def live_workers(endpoint=None, ledger=None):
     on it.
     """
     liveness = _load("session_liveness", "session-liveness.py")
-    rows = liveness.read_endpoint(endpoint)
+    rows = liveness.read_endpoint(endpoint, on_failure=on_failure)
     if rows is None:
         return None
     if ledger is None:
@@ -171,33 +232,67 @@ def main(argv=None):
     parser.add_argument("--list", action="store_true", help="print every live worker session")
     parser.add_argument("--count", action="store_true", help="print only the number of live worker sessions")
     parser.add_argument("--endpoint", default=None, help="override the attention store base URL")
-    parser.add_argument("--ledger-dir", default=None, help="override the spawn-ledger path")
+    parser.add_argument("--ledger-dir", default=None, help="ACCEPTED AND IGNORED — the ledger comes from the endpoint")
     parser.add_argument("--dir", default=None, help="ACCEPTED AND IGNORED — the registry left the liveness path")
     parser.add_argument("--heartbeat-dir", default=None, help="ACCEPTED AND IGNORED — the endpoint computes freshness")
     args = parser.parse_args(argv)
 
-    # ⚠️ Both flags are kept and ignored rather than removed, the same call `session-liveness.py`
-    # made: callers pass them (`approved-not-started.py` passes one), so removing them breaks
-    # those callers, while accepting them in silence would let a reader believe a path or a
-    # window is in force when neither is.
-    for flag, value in (("--dir", args.dir), ("--heartbeat-dir", args.heartbeat_dir)):
+    # ⚠️ All three flags are kept and ignored rather than removed, the same call
+    # `session-liveness.py` made: callers pass them (`approved-not-started.py` passes one), so
+    # removing them breaks those callers, while accepting them in silence would let a reader
+    # believe a path or a window is in force when neither is. `--ledger-dir` joins them for the
+    # same reason — the ledger is the attention store's now, and a caller that set the directory
+    # would otherwise believe it had redirected a read that still went to the endpoint.
+    for flag, value, reason in (
+        ("--ledger-dir", args.ledger_dir, "the ledger is read from the session-ledger endpoint"),
+        ("--dir", args.dir, "liveness comes from the session-heartbeat endpoint, which resolves the registry"),
+        (
+            "--heartbeat-dir",
+            args.heartbeat_dir,
+            "liveness comes from the session-heartbeat endpoint, which resolves the store and its own window",
+        ),
+    ):
         if value:
-            print(
-                f"warning: {flag} is accepted and IGNORED — liveness comes from the "
-                "session-heartbeat endpoint, which resolves the store and its own window",
-                file=sys.stderr,
-            )
+            print(f"warning: {flag} is accepted and IGNORED — {reason}", file=sys.stderr)
 
-    directory = args.ledger_dir or _ledger().ledger_dir()
-    ledger = _ledger().read_ledger(directory)
+    # ⚠️ **The causes are collected so the UNKNOWN line NAMES them.** Until 2026-10-19 the line
+    # said only which endpoint failed, so a timeout, a refused socket and an unparseable body were
+    # one indistinguishable message — measured on 2026-10-19, when `--count` returned UNKNOWN at
+    # 21:49 and succeeded 20/20 at 22:07 with no cause captured for the gap.
+    def failed(message):
+        """The refusal — or, for `--count`, the last successful count when it is fresh enough.
+
+        ⚠️ **The stale path is labelled on stderr and the integer still goes to stdout**, so
+        `$(… --count)` keeps its contract and a reader can tell a live count from a stale one.
+        `--list` cannot fall back: a count has no rows to list, and inventing them would be worse
+        than the refusal.
+        """
+        if args.count:
+            stale = _read_count_cache()
+            if stale is not None:
+                count, age = stale
+                print(
+                    "STALE — using the last successful count (%d s old): %s" % (age, message),
+                    file=sys.stderr,
+                )
+                print(count)
+                return 0
+        print(message, file=sys.stderr)
+        return 2
+
+    failures = []
+    ledger = _ledger().read_ledger(args.endpoint, on_failure=failures.append)
     if ledger is None:
-        print(f"UNKNOWN — cannot read the spawn ledger at {directory}", file=sys.stderr)
-        return 2
+        return failed(
+            "UNKNOWN — cannot read the session-ledger endpoint at %s%s"
+            % (_ledger().endpoint_base(args.endpoint), _cause(failures))
+        )
 
-    workers = live_workers(args.endpoint, ledger)
+    workers = live_workers(args.endpoint, ledger, on_failure=failures.append)
     if workers is None:
-        print("UNKNOWN — cannot read the session-heartbeat endpoint", file=sys.stderr)
-        return 2
+        return failed("UNKNOWN — cannot read the session-heartbeat endpoint%s" % _cause(failures))
+
+    _write_count_cache(len(workers))
 
     if args.count:
         # The integer and nothing else — `$(… --count)` goes straight into a comparison.

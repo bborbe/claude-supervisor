@@ -1185,6 +1185,66 @@ class UnroutableHandover(unittest.TestCase):
         self.assertEqual("STOREID", rec["store_item_id"])
 
 
+class HeadlessRowIsAnswerableNotUnroutable(unittest.TestCase):
+    """A pane-less, answerable row is a headless gate — it is never `unroutable`.
+
+    A headless worker owns no pane by construction (`owned_pane()` refuses an
+    unprovable pane, so the hook records `pane: ""`), so every such row took the
+    "no pane recorded" branch and was labelled unroutable **while carrying a working
+    answer command**. Measured 2026-10-24: four operator-bound gates surfaced in one
+    sweep, all four rendered that way, and the operator acted on none of them — the
+    row read as a session that had exited rather than a question waiting.
+
+    Both halves are asserted, because the operator named both: the jump line's
+    wording, and the `?` in the pane column.
+    """
+
+    HEADLESS = {"session_id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "pane": "",
+                "ts": 0, "cwd": "/tmp/x", "kind": "permission", "detail": "d",
+                "store_item_id": "0f701f0b4b654e3338dcc97d9be8b314"}
+
+    def test_a_headless_gate_is_not_called_unroutable(self):
+        rendered = wnm.row(self.HEADLESS, {}, "d")
+        self.assertNotIn("unroutable", rendered)
+        self.assertIn("headless", rendered)
+
+    def test_a_headless_gate_still_hands_over_its_answer_command(self):
+        """The handover is what makes the row actionable — losing it would be worse."""
+        rendered = wnm.row(self.HEADLESS, {}, "d")
+        self.assertIn("attention-answer.py answer 0f701f0b4b654e3338dcc97d9be8b314", rendered)
+        self.assertIn("--decision allow|deny", rendered)
+
+    def test_a_headless_gate_marks_its_pane_column(self):
+        """`?` in the pane column is the other half of the exited-session reading."""
+        self.assertIn("[ hst]", wnm.row(self.HEADLESS, {}, "d"))
+
+    def test_a_pane_less_row_with_nothing_to_answer_stays_unroutable(self):
+        """The negative control: the relabel is scoped to rows that ARE answerable.
+
+        Without a store id there is no handover and no route, so the row is
+        genuinely unroutable and must keep saying so — otherwise this change would
+        dress up a dead end as actionable, which is the failure the original
+        `unroutable` wording existed to prevent.
+        """
+        rec = dict(self.HEADLESS)
+        del rec["store_item_id"]
+        rendered = wnm.row(rec, {}, "d")
+        self.assertIn("unroutable — no pane recorded for this item", rendered)
+        self.assertNotIn("attention-answer.py", rendered)
+        # The pane column is scoped with the jump line, not applied to every
+        # pane-less row: with no handover there is no route, and `hst` would claim
+        # a live headless worker where the row may be an exited session.
+        self.assertIn("[   ?]", rendered)
+        self.assertNotIn("hst", rendered)
+
+    def test_a_pane_backed_unroutable_row_is_unchanged(self):
+        """The other negative control: a stale pane is still unroutable, not headless."""
+        rec = dict(self.HEADLESS, pane="999")
+        rendered = wnm.row(rec, {"1": {}}, "d")
+        self.assertIn("unroutable — pane 999 does not resolve to this session", rendered)
+        self.assertNotIn("headless", rendered)
+
+
 class ProvenanceRendering(unittest.TestCase):
     """The row carries its provenance, and an absent value renders as absent.
 
@@ -2212,6 +2272,365 @@ class PostedCloserTtlFromEnv(unittest.TestCase):
                 os.environ.pop("ATTENTION_POSTED_CLOSER_TTL", None)
             else:
                 os.environ["ATTENTION_POSTED_CLOSER_TTL"] = original
+
+
+class CauseClassification(unittest.TestCase):
+    """SC1 -- one cause class per parked pane, grounded in BOTH directions.
+
+    The two-directional half is the load-bearing one. An assertion that only
+    checks "operator-gate panes classify `awaiting-operator`" is satisfied by a
+    classifier that labels EVERY pane `awaiting-operator` -- and every criterion
+    downstream of it then ticks on that stub. So each negative case asserts both
+    what the pane IS and what it is NOT.
+    """
+
+    def setUp(self):
+        self._real = wnm.last_assistant_text
+        self.addCleanup(lambda: setattr(wnm, "last_assistant_text", self._real))
+
+    def rec(self, **kw):
+        base = {"session_id": "s1", "pane": "7", "kind": "question",
+                "detail": "approve: /vault-cli:session-close", "ts": 0,
+                "state": "open"}
+        base.update(kw)
+        return base
+
+    def test_open_gate_is_awaiting_operator(self):
+        self.assertEqual(wnm.cause_class(self.rec()), wnm.CAUSE_OPERATOR)
+
+    def test_parked_verb_is_clock_bound_and_not_operator(self):
+        """`later (on <trigger>):` is parked, and not on the operator.
+
+        Both halves matter: `is_open_gate` already excludes it, so classifying it
+        `awaiting-operator` would invent a gate the feed does not list.
+        """
+        rec = self.rec(kind="idle", detail="later (on 2026-10-15): re-run")
+        self.assertEqual(wnm.cause_class(rec), wnm.CAUSE_CLOCK)
+        self.assertNotEqual(wnm.cause_class(rec), wnm.CAUSE_OPERATOR)
+
+    def test_peer_restatement_is_waiting_on_task_and_not_operator(self):
+        """The class exists to NAME what `is_open_gate` suppresses."""
+        rec = self.rec(detail="the approval in pane 42 is yours alone")
+        self.assertEqual(wnm.cause_class(rec, {"42"}), wnm.CAUSE_TASK)
+        self.assertNotEqual(wnm.cause_class(rec, {"42"}), wnm.CAUSE_OPERATOR)
+
+    def test_cap_refusal_on_a_manager_is_cap_blocked(self):
+        wnm.last_assistant_text = lambda _r: "refused: maxManagersHard reached"
+        rec = self.rec(kind="idle", detail="nothing", role="manager")
+        self.assertEqual(wnm.cause_class(rec), wnm.CAUSE_CAP)
+        self.assertNotEqual(wnm.cause_class(rec), wnm.CAUSE_OPERATOR)
+
+    def test_cap_text_on_a_worker_is_not_cap_blocked(self):
+        """Only a MANAGER can be cap-blocked. A worker quoting the string is not."""
+        wnm.last_assistant_text = lambda _r: "refused: maxManagersHard reached"
+        rec = self.rec(kind="idle", detail="nothing", role="agent")
+        self.assertNotEqual(wnm.cause_class(rec), wnm.CAUSE_CAP)
+
+    def test_unmatched_is_unknown(self):
+        wnm.last_assistant_text = lambda _r: ""
+        self.assertEqual(wnm.cause_class(self.rec(kind="idle", detail="nothing")),
+                         wnm.CAUSE_UNKNOWN)
+
+    def test_clock_label_carries_the_trigger(self):
+        rec = {"detail": "later (on 2026-10-15): re-run"}
+        self.assertEqual(wnm.cause_label(rec, wnm.CAUSE_CLOCK),
+                         "waiting-on-clock 2026-10-15")
+
+    def test_unresolvable_parameter_renders_bare(self):
+        """No placeholder: the class is still true without its parameter."""
+        self.assertEqual(wnm.cause_label({"detail": "nothing"}, wnm.CAUSE_CLOCK),
+                         "waiting-on-clock")
+
+
+class BoardFlags(unittest.TestCase):
+    """SC3 -- board hygiene is an ORTHOGONAL flag, and a failed read emits none."""
+
+    def rec(self, **kw):
+        base = {"session_id": "s1", "pane": "7", "kind": "question",
+                "detail": "q", "ts": 0, "state": "open"}
+        base.update(kw)
+        return base
+
+    def test_uncarded_operator_gate_is_missing(self):
+        self.assertEqual(wnm.board_flags(self.rec(), wnm.CAUSE_OPERATOR, set(), True),
+                         [wnm.FLAG_CARD_MISSING])
+
+    def test_previously_posted_card_is_expired_not_missing(self):
+        """The distinction is the whole reason `posted_closer` is consulted."""
+        with mock.patch.object(wnm, "posted_closer", lambda _sid: "approve: x"):
+            self.assertEqual(
+                wnm.board_flags(self.rec(), wnm.CAUSE_OPERATOR, set(), True),
+                [wnm.FLAG_CARD_EXPIRED])
+
+    def test_carded_gate_carries_no_flag(self):
+        self.assertEqual(wnm.board_flags(self.rec(), wnm.CAUSE_OPERATOR, {"s1"}, True),
+                         [])
+
+    def test_failed_store_read_emits_no_flag(self):
+        """pane-reads.md: an outage must not read as 'every card is missing'."""
+        self.assertEqual(wnm.board_flags(self.rec(), wnm.CAUSE_OPERATOR, set(), False),
+                         [])
+
+    def test_non_operator_cause_carries_no_flag(self):
+        self.assertEqual(wnm.board_flags(self.rec(), wnm.CAUSE_CLOCK, set(), True), [])
+
+
+class CauseTally(unittest.TestCase):
+    """SC2 -- the run count rises by exactly 1 per DAY, and the flag is seeded."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = os.path.join(self.dir, "causes.json")
+
+    def test_first_run_increments_by_one(self):
+        state = wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, "2026-10-14")
+        self.assertEqual(state["counts"][wnm.CAUSE_OPERATOR], 1)
+
+    def test_second_run_same_day_does_not_increment(self):
+        """Without the dedup the count measures the watcher's poll rate."""
+        wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, "2026-10-14")
+        state = wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, "2026-10-14")
+        self.assertEqual(state["counts"][wnm.CAUSE_OPERATOR], 1)
+
+    def test_a_new_day_increments_again(self):
+        wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, "2026-10-14")
+        state = wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, "2026-10-15")
+        self.assertEqual(state["counts"][wnm.CAUSE_OPERATOR], 2)
+
+    def test_seeded_class_at_threshold_with_no_owner_is_flagged(self):
+        state = None
+        for day in ("2026-10-14", "2026-10-15", "2026-10-16"):
+            state = wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, day)
+        self.assertEqual(wnm.unowned_causes(state), [wnm.CAUSE_OPERATOR])
+
+    def test_class_below_threshold_is_not_flagged(self):
+        wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, "2026-10-14")
+        state = wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, "2026-10-15")
+        self.assertEqual(wnm.unowned_causes(state), [])
+
+    def test_mapped_class_is_not_flagged(self):
+        state = None
+        for day in ("2026-10-14", "2026-10-15", "2026-10-16"):
+            state = wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, day)
+        state["owners"][wnm.CAUSE_OPERATOR] = "Some Task"
+        wnm.write_causes(state, self.path)
+        self.assertEqual(wnm.unowned_causes(wnm.read_causes(self.path)), [])
+
+    def test_corrupt_tally_reads_as_empty_not_as_a_raise(self):
+        """Fails OPEN: a broken counter must not refuse the feed it counts."""
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        self.assertEqual(wnm.read_causes(self.path)["counts"], {})
+
+    def test_unchanged_run_does_not_rewrite_the_file(self):
+        """A manager's attention watcher polls this on `--section needs-you`, so an
+        unconditional write would rewrite the file on every tick to byte-identical
+        content -- a disk write per poll for no change in state."""
+        wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, "2026-10-14")
+        with open(self.path, "rb") as handle:
+            first = handle.read()
+        before = os.stat(self.path).st_mtime_ns
+        wnm.record_causes([wnm.CAUSE_OPERATOR], self.path, "2026-10-14")
+        with open(self.path, "rb") as handle:
+            self.assertEqual(handle.read(), first)
+        self.assertEqual(os.stat(self.path).st_mtime_ns, before)
+
+
+class BoardMissingSection(unittest.TestCase):
+    """The uncarded gates are their OWN section, and only when the store answered."""
+
+    def test_no_store_read_means_no_board_missing_section(self):
+        """With the store unreachable EVERY row is store-less by construction, so
+        'no card' would be asserted about every pane on the machine."""
+        with mock.patch.object(wnm, "STORE_OK", False):
+            self.assertEqual(wnm.board_missing_gates([]), [])
+
+    def test_store_session_ids_reads_provenance_not_a_second_read(self):
+        recs = [{"session_id": "a", "store_vouched": True}, {"session_id": "b"}]
+        self.assertEqual(wnm.store_session_ids(recs), {"a"})
+
+    def test_board_missing_reads_the_held_events_not_a_second_read(self):
+        """`needs_source()` already read the event log; a second `load_events()`
+        would glob and re-read EVERY session's log, and the two reads could
+        disagree about what is open. `load_events` is stubbed to blow up, so this
+        fails the moment the second read comes back."""
+        rec = {"session_id": "a", "pane": "7", "kind": "question", "detail": "q",
+               "ts": 0, "state": "open"}
+        with mock.patch.object(wnm, "STORE_OK", True), \
+                mock.patch.object(wnm, "STORE_EVENTS", [rec]), \
+                mock.patch.object(wnm, "load_events",
+                                  side_effect=AssertionError("second event-log read")):
+            self.assertEqual([r["session_id"] for r in wnm.board_missing_gates([])],
+                             ["a"])
+
+
+class LastAssistantTextBeyondTheTail(unittest.TestCase):
+    """A closer followed by more than one tail window of non-assistant records.
+
+    Measured 2026-10-19 on the v0.184.5 sweep: pane 955's `later (on …)` closer was
+    followed by ~260 KB of `attachment` records, so the fixed 200 KB tail held no
+    assistant text and a readable transcript rendered `transcript unreadable`.
+    """
+
+    def write(self, records):
+        d = tempfile.mkdtemp(prefix="wnm-tail-")
+        self.addCleanup(shutil.rmtree, d)
+        path = os.path.join(d, "s.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+        return path
+
+    @staticmethod
+    def said(text):
+        return {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}
+
+    def test_a_closer_behind_a_large_attachment_is_still_read(self):
+        path = self.write([self.said("👤 You: later (on the next broker loss): count it"),
+                           {"type": "attachment", "attachment": {"content": "x" * 300_000}}])
+        self.assertIn("later (on the next broker loss)",
+                      wnm._read_last_assistant_text({"transcript": path, "session_id": "s"}))
+
+    def test_the_newest_text_still_wins_inside_the_first_window(self):
+        path = self.write([self.said("👤 You: nothing"),
+                           {"type": "attachment", "attachment": {"content": "x" * 300_000}},
+                           self.said("👤 You: approve: merge it")])
+        self.assertEqual("👤 You: approve: merge it",
+                         wnm._read_last_assistant_text({"transcript": path, "session_id": "s"}))
+
+    def test_a_transcript_with_no_assistant_text_reads_empty(self):
+        path = self.write([{"type": "attachment", "attachment": {"content": "x" * 300_000}}])
+        self.assertEqual("", wnm._read_last_assistant_text({"transcript": path, "session_id": "s"}))
+
+
+class CloserClass(unittest.TestCase):
+    """`closer_class()` — the digest's class token, which is not the feed's question.
+
+    The feed asks "is the operator being asked something" and answers by keeping a
+    routine closer OUT. The digest asks "what did the turn end on" and needs the
+    routine closer IN, classed, because `agents/fleet-drive.md` step 4a fail-closes a
+    candidate with no `CLOSERS` row to `unverifiable` — measured 2026-10-29, 7 parked
+    rows against 4 `CLOSERS` rows, the gap spanning all three non-ask classes.
+    """
+
+    def classify(self, closer_line):
+        # Restore after each test: a bare assignment leaks the stub into every class
+        # that sorts after this one, and one of them reads the closer too.
+        original = wnm.last_assistant_text
+        self.addCleanup(setattr, wnm, "last_assistant_text", original)
+        wnm.last_assistant_text = lambda _rec, _t=closer_line: _t
+        return wnm.closer_class({"session_id": "unit", "pane": "1", "cwd": "/tmp",
+                                 "kind": "idle", "detail": "OK", "ts": 0,
+                                 "state": "open"})
+
+    def test_a_real_ask_is_ask(self):
+        self.assertEqual("ask", self.classify("👤 You: pick — 1. hold prod"))
+
+    def test_a_routine_turn_end_is_routine(self):
+        # The case the task exists for: a session that ended its turn needing
+        # nothing must not read the same as one whose closer was never captured.
+        self.assertEqual("routine", self.classify("👤 You: nothing — I continue on step 1"))
+
+    def test_a_nbsp_padded_nothing_is_routine(self):
+        # Same parser trap `reclassify_idle` guards: `&nbsp;` is not whitespace.
+        self.assertEqual("routine", self.classify("👤 You: &nbsp;&nbsp;nothing"))
+
+    def test_a_capitalised_nothing_falls_through_to_ask(self):
+        """Fail-closed, and pinned so a later "fix" cannot flip it to routine.
+
+        The prefix test is lower-case by design — a closer that only *looks* like a
+        routine turn end reaches the drive leg as blocked, never as revivable.
+        """
+        self.assertEqual("ask", self.classify("👤 You: Nothing — I continue"))
+
+    def test_a_nothing_closer_naming_a_destructive_verb_is_not_routine(self):
+        """The one hole a `nothing …` prefix would otherwise open.
+
+        A `nothing …` closer is never promoted to a `BLOCKED` row, so step 4a test 4
+        can never fire on one and the routine-continue table's destructive-verb
+        blacklist (test 3) would be skipped — this closer would reach `revive`.
+        """
+        self.assertEqual("ask", self.classify("👤 You: nothing — approve: deploy prod"))
+
+    def test_the_destructive_matcher_over_matches_on_purpose(self):
+        """`produce` trips `prod` and `staged` trips `tag`; both are deliberate.
+
+        Over-matching costs a routine row one blocked verdict; under-matching would
+        revive a closer that names a destructive verb.
+        """
+        for line in ("👤 You: nothing — produce the report",
+                     "👤 You: nothing — staged the change"):
+            self.assertEqual("ask", self.classify(line), line)
+
+    def test_a_parked_wait_is_parked_wait(self):
+        self.assertEqual("parked-wait",
+                         self.classify("👤 You: later (on 2026-11-05T02:00): re-take SC(c)"))
+
+    def test_no_closer_line_is_none(self):
+        self.assertEqual("none", self.classify(""))
+
+    def test_every_class_is_in_the_declared_vocabulary(self):
+        for line in ("", "👤 You: nothing", "👤 You: later (on x): y", "👤 You: approve: x"):
+            self.assertIn(self.classify(line), wnm.CLOSER_CLASSES)
+
+
+class LastClosersSection(unittest.TestCase):
+    """The digest's `CLOSERS` source, end to end through `main()`.
+
+    Opt-in on purpose: the feed's five default sections are what the manager's
+    watchers arm on, and a row here is not a gate. The no-regression bar is the
+    unscoped render, which must stay byte-for-byte what it was.
+    """
+
+    RECORDS = [
+        {"session_id": "lc-routine", "pane": "901", "cwd": "/tmp", "kind": "idle",
+         "detail": "OK", "ts": 1, "state": "open", "event": "Stop"},
+        {"session_id": "lc-ask", "pane": "902", "cwd": "/tmp", "kind": "question",
+         "detail": "OK", "ts": 2, "state": "open", "event": "Stop"},
+        {"session_id": "lc-parked", "pane": "903", "cwd": "/tmp", "kind": "idle",
+         "detail": "OK", "ts": 3, "state": "open", "event": "Stop"},
+        {"session_id": "lc-none", "pane": "904", "cwd": "/tmp", "kind": "idle",
+         "detail": "OK", "ts": 4, "state": "open", "event": "Stop"},
+    ]
+    TEXTS = {
+        "lc-routine": "👤 You: nothing — I continue on step 1",
+        "lc-ask": "👤 You: pick — 1. hold prod",
+        "lc-parked": "👤 You: later (on 2026-11-05T02:00): re-take SC(c)",
+        "lc-none": "",
+    }
+
+    def run_section(self, argv=()):
+        panes = {r["pane"]: {"pane_id": int(r["pane"]), "title": "S"}
+                 for r in self.RECORDS}
+        with mock.patch.object(
+                wnm, "last_assistant_text",
+                lambda rec: self.TEXTS.get(rec.get("session_id"), "")):
+            return run_feed(panes, [dict(r) for r in self.RECORDS], argv=argv)
+
+    def test_the_default_render_does_not_carry_it(self):
+        rc, out, err = self.run_section()
+        self.assertEqual(0, rc, err)
+        self.assertNotIn("Last closers (", out)
+
+    def test_the_section_prints_all_four_classes(self):
+        rc, out, err = self.run_section(["--section", "last-closers"])
+        self.assertEqual(0, rc, err)
+        self.assertIn("Last closers (4)", out)
+        for token in ("routine: nothing", "ask: pick", "parked-wait: later (on",
+                      "none: no closer line"):
+            self.assertIn(token, out)
+
+    def test_one_row_per_session_not_per_open_item(self):
+        # `needs` holds one record per open item, so a session carrying two of them
+        # would otherwise spend two of the digest's 40 payload lines on one closer.
+        records = [dict(self.RECORDS[0]), dict(self.RECORDS[0], ts=9)]
+        panes = {"901": {"pane_id": 901, "title": "S"}}
+        with mock.patch.object(wnm, "last_assistant_text",
+                               lambda rec: self.TEXTS["lc-routine"]):
+            rc, out, err = run_feed(panes, records, argv=["--section", "last-closers"])
+        self.assertEqual(0, rc, err)
+        self.assertIn("Last closers (1)", out)
 
 
 if __name__ == "__main__":

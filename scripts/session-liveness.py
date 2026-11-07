@@ -77,10 +77,13 @@ the 2026-09-26 near-miss that this file's history records was two readers over o
 disagreeing about what an id argument means.
 """
 import argparse
+import errno
 import importlib.util
 import json
 import os
+import socket
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -104,10 +107,69 @@ _ID_MAX = 36
 ENDPOINT_DEFAULT = "http://localhost:18080"
 HEARTBEAT_PATH = "/api/1.0/session-heartbeat"
 
-# Seconds any one HTTP read may take. The store is local and answers in milliseconds; this is
-# a backstop against a wedged server, never a routine path. A slow store is a store this file
-# should report as UNKNOWN, not one it should hang on.
-_HTTP_TIMEOUT = 5
+# Seconds any one HTTP read may take. The store is local, but it is not fast under load: it
+# rebuilds and serialises a 318 KB list per request, measured 2026-10-19 at ~0.95 s per concurrent
+# read. 5 s sat inside the observed tail and refused healthy spawns fleet-wide, so it is 15 s.
+#
+# ⚠️ **Kept EQUAL to `server/session-heartbeat.mjs`'s `HEARTBEAT_TIMEOUT_MS`,
+# `server/session-ledger.mjs`'s `SESSION_LEDGER_TIMEOUT_MS` and `spawn-ledger.py`'s copy.** The two
+# halves of one count giving up at different points makes the failure depend on which store was
+# slower, and the refusal then names a channel for a reason that is only about timing.
+_HTTP_TIMEOUT = 15
+
+# One retry, ~250 ms apart, before a read declares failure. The failure this covers is
+# INTERMITTENT, not a dead store — measured 2026-10-19: the same `--count` returned UNKNOWN at
+# 21:49 and succeeded 20/20 at 22:07. A retry does not weaken the refusal: two failed attempts
+# still answer `None`.
+_READ_ATTEMPTS = 2
+_READ_RETRY_DELAY_S = 0.25
+
+
+def _describe_read_failure(error):
+    """The cause of a failed endpoint read, in the operator's terms.
+
+    ⚠️ **This exists because `None` was the whole answer until 2026-10-19.** A timeout, a
+    refused socket and a body that is not JSON all reached a caller as the same "could not read
+    the session-heartbeat endpoint", so the next occurrence could not be attributed without a
+    manual probe — measured on 2026-10-19, `worker-sessions.py --count` returned UNKNOWN at
+    21:49 and succeeded 20/20 at 22:07 with no cause captured for the gap.
+
+    The same vocabulary the `.mjs` twins use (`read-diagnostics.mjs`), so one failure reads the
+    same whichever language reported it: `timeout`, `ECONNREFUSED`, `unparseable body: …`.
+    """
+    if isinstance(error, (TimeoutError, socket.timeout)):
+        return "timeout"
+    if isinstance(error, urllib.error.URLError):
+        reason = error.reason
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return "timeout"
+        code = getattr(reason, "errno", None)
+        name = errno.errorcode.get(code) if code is not None else None
+        return "%s (%s)" % (name, reason) if name else "%s: %s" % (type(reason).__name__, reason)
+    if isinstance(error, ValueError):
+        # `json.JSONDecodeError` and `UnicodeDecodeError` both land here: the store answered, and
+        # what it answered was not the JSON array this reader can use.
+        return "unparseable body: %s" % error
+    code = getattr(error, "errno", None)
+    name = errno.errorcode.get(code) if code is not None else None
+    return "%s (%s)" % (name, error) if name else "%s: %s" % (type(error).__name__, error)
+
+
+def _log_read_failure(what, cause, started, on_failure=None):
+    """One stderr line naming what failed, why, and how long it waited — always `None`.
+
+    ⚠️ **The log line is emitted even when `on_failure` is passed.** The observer is how a caller
+    puts the cause into its own message (the count's UNKNOWN, a refusal); it is not a replacement
+    for the record. Without the line, a caller that collected the message and reported it as part
+    of some other text would leave the cause out of the one stream an operator actually reads.
+    """
+    elapsed_ms = int(round((time.monotonic() - started) * 1000))
+    message = "%s read failed after %d ms: %s" % (what, elapsed_ms, cause)
+    print(message, file=sys.stderr)
+    if on_failure is not None:
+        on_failure(message)
+    return None
+
 
 _IDENTITY = None
 _LIVE_WORKERS = None
@@ -163,7 +225,10 @@ def _spawn_ledger():
     Lazy and cached, and here the laziness matters for a different reason than the two
     above: the ledger is read ONLY by `unstamped()`, which is reached only by the two
     `--list` paths. A caller that asks `--check <id>` — the verdict path every resume
-    decision goes through — must not pay to open 1600 ledger files it will not read.
+    decision goes through — must not pay for a whole-ledger read it will not use. The
+    read was 1600 files until 2026-10-14 and is one request to the session-ledger
+    endpoint now; the laziness is kept because the cost is smaller, not because it went
+    away.
 
     ⚠️ **Why the ledger is a separate module and not `worker-sessions.py`.** That file
     already held this reader, but it loads *this* file through `_load` to reach
@@ -242,22 +307,65 @@ def _get_json(url, timeout=_HTTP_TIMEOUT):
             return exc.code, None
 
 
-def read_endpoint(endpoint=None, timeout=_HTTP_TIMEOUT):
+def read_endpoint(endpoint=None, timeout=_HTTP_TIMEOUT, on_failure=None):
     """Every row the heartbeat store serves, or `None` when the endpoint could not be read.
 
     `None` and `[]` are different answers and must stay so: `[]` is "read it, the store holds
     nothing", `None` is "could not read it". Collapsing them turns an unreachable store into a
     confident empty fleet — the failure this file exists to correct. A non-200 is not a
     liveness answer either, so it too is `None`.
+
+    ⚠️ **Every `None` is LOGGED with its cause and elapsed milliseconds**, and reported to
+    `on_failure` when the caller passes one — see `_describe_read_failure`. A bare `None` was the
+    whole answer until 2026-10-19, which is why the fleet's lost spawns could not be attributed:
+    a timeout, a refused socket and an unparseable body all read as the same message.
     """
     url = endpoint_base(endpoint) + HEARTBEAT_PATH
+    started = time.monotonic()
+    cause = "the read was never attempted"
+    for attempt in range(1, _READ_ATTEMPTS + 1):
+        if attempt > 1:
+            time.sleep(_READ_RETRY_DELAY_S)
+        payload, cause = _read_once(url, timeout)
+        if payload is not None:
+            return payload
+        if attempt < _READ_ATTEMPTS:
+            _log_read_failure(
+                "session-heartbeat",
+                "%s (attempt %d of %d, retrying)" % (cause, attempt, _READ_ATTEMPTS),
+                started,
+                on_failure,
+            )
+    return _log_read_failure("session-heartbeat", cause, started, on_failure)
+
+
+def _read_once(url, timeout):
+    """`(payload, cause)` — the rows when the read succeeded, the failure cause otherwise."""
     try:
         status, payload = _get_json(url, timeout)
-    except (OSError, ValueError):
-        return None
-    if status != 200 or not isinstance(payload, list):
-        return None
-    return payload
+    except (OSError, ValueError) as exc:
+        return None, _describe_read_failure(exc)
+    if status != 200:
+        return None, "HTTP %s" % status
+    if not isinstance(payload, list):
+        return None, "unparseable body: expected a JSON array, got %s" % type(payload).__name__
+    return payload, None
+
+
+def _get_json_with_retry(url, timeout=_HTTP_TIMEOUT):
+    """`(status, payload)` from `_get_json`, with one retry; re-raises the last transport error.
+
+    ⚠️ **The last error is RE-RAISED, not returned**, so `_check`'s existing handlers keep deciding
+    UNKNOWN-vs-ABSENT and the cause they print is the one that actually ended the read.
+    """
+    for attempt in range(1, _READ_ATTEMPTS + 1):
+        if attempt > 1:
+            time.sleep(_READ_RETRY_DELAY_S)
+        try:
+            return _get_json(url, timeout)
+        except (OSError, ValueError):
+            if attempt >= _READ_ATTEMPTS:
+                raise
 
 
 def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
@@ -419,15 +527,27 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
         return UNKNOWN, "no session id given", None
     base = endpoint_base(endpoint)
 
+    started = time.monotonic()
     try:
-        status, rows = _get_json(base + HEARTBEAT_PATH, timeout)
-    except (OSError, ValueError):
-        return UNKNOWN, "session-heartbeat endpoint unreachable at %s" % base, None
+        status, rows = _get_json_with_retry(base + HEARTBEAT_PATH, timeout)
+    except (OSError, ValueError) as exc:
+        return UNKNOWN, "session-heartbeat endpoint unreachable at %s after %d ms (%s)" % (
+            base,
+            int(round((time.monotonic() - started) * 1000)),
+            _describe_read_failure(exc),
+        ), None
     if status != 200 or not isinstance(rows, list):
         # ⚠️ **Not ABSENT.** A 5xx, a 403, a body that is not JSON — none of them is the store
         # saying "this session is gone", and reading one as ABSENT is the resume-onto-a-live-
         # conversation this file exists to prevent.
-        return UNKNOWN, "session-heartbeat endpoint returned HTTP %s" % status, None
+        #
+        # The elapsed time is reported here too: a slow store that answered with a wrong shape is
+        # a different fact from one that answered instantly, and the difference is what tells a
+        # loaded host from a misrouted endpoint.
+        return UNKNOWN, "session-heartbeat endpoint returned HTTP %s after %d ms" % (
+            status,
+            int(round((time.monotonic() - started) * 1000)),
+        ), None
 
     # The list carries every session the store has ever seen, live or stale — a stale row is
     # matched too, exactly as the registry's own keys were: the argument identifies a session,
@@ -489,17 +609,26 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
     # session the registry still calls non-dead is one the endpoint has simply never heard of.
     # The `--list` path already pays this precondition (`unstamped()`); until 2026-10-12 the
     # verdict path did not, which is how `ABSENT` was published for a demonstrably live session.
+    started = time.monotonic()
     try:
-        status, row = _get_json(
+        status, row = _get_json_with_retry(
             "%s%s/%s" % (base, HEARTBEAT_PATH, urllib.parse.quote(sid, safe="")), timeout
         )
-    except (OSError, ValueError):
-        return UNKNOWN, "session-heartbeat endpoint unreachable at %s" % base, None
+    except (OSError, ValueError) as exc:
+        return UNKNOWN, "session-heartbeat endpoint unreachable at %s after %d ms (%s)" % (
+            base,
+            int(round((time.monotonic() - started) * 1000)),
+            _describe_read_failure(exc),
+        ), None
     if status == 200 and isinstance(row, dict):
         return _verdict_for(row, sid)
     if status == 404:
         return _absent_licensed(sid, registry_dir)
-    return UNKNOWN, "session-heartbeat endpoint returned HTTP %s for %s" % (status, sid), None
+    return UNKNOWN, "session-heartbeat endpoint returned HTTP %s for %s after %d ms" % (
+        status,
+        sid,
+        int(round((time.monotonic() - started) * 1000)),
+    ), None
 
 
 def _verdict_for(row, sid):
@@ -645,9 +774,9 @@ def unstamped(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
     rather than liveness.
 
     Exit codes: 0 complete, 1 a ledger worker is registry-live with no row, 2 the
-    measurement could not be taken — an unreadable endpoint, registry **or ledger**, never
-    a fabricated `0`, because "could not measure" and "measured complete" are different
-    facts. The line carries `ledger_workers`, the narrowed denominator, so a reader can
+    measurement could not be taken — an unreadable heartbeat endpoint, session-ledger
+    endpoint or registry, never a fabricated `0`, because "could not measure" and
+    "measured complete" are different facts. The line carries `ledger_workers`, the narrowed denominator, so a reader can
     see what the guard now covers rather than having to infer it.
     """
     rows = read_endpoint(endpoint, timeout)
@@ -659,9 +788,9 @@ def unstamped(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
     # ⚠️ An unreadable ledger is UNKNOWN, never a pass. `{}` (nobody recorded) and None
     # (could not read) are different answers, and folding the second into the first would
     # let a failed read satisfy the guard — the resume-authorising direction.
-    ledger = _spawn_ledger().read_ledger()
+    ledger = _spawn_ledger().read_ledger(endpoint)
     if ledger is None:
-        return UNKNOWN, "UNKNOWN — cannot read the spawn ledger (%s)" % _spawn_ledger().ledger_dir()
+        return UNKNOWN, "UNKNOWN — cannot read the session-ledger endpoint at %s" % _spawn_ledger().endpoint_base(endpoint)
     stamped = {
         r["session_id"]
         for r in rows
@@ -686,6 +815,71 @@ def safe_unstamped(endpoint=None, registry_dir=None, timeout=_HTTP_TIMEOUT):
             type(exc).__name__,
             exc,
         )
+
+
+def _list_payload(identity, live_rows):
+    """`(payload, registry_live, degraded)` — every registry-live session, plus endpoint-only rows.
+
+    ⚠️ **A session the endpoint holds no `live: true` row for is DEGRADED, not omitted.** This
+    output is what `commands/open.md` Step 2C matches a roster row against, and an omitted
+    session reads there as "no such session" — the duplicate-spawn failure the coverage guard
+    was added for. Carrying the finding ON the row keeps both properties at once: every
+    registry-live session is listed, and the caller can see exactly which rows it cannot trust.
+
+    ⚠️ **Endpoint-only rows are listed too.** A cluster or a2a worker has a heartbeat row and no
+    registry entry — the registry is pid-keyed and local-only — so building the list from the
+    registry alone would drop exactly the population the endpoint exists to cover.
+    """
+    live_by_id = {}
+    for row in live_rows:
+        sid = row.get("session_id")
+        if isinstance(sid, str) and sid:
+            live_by_id[sid] = row
+
+    payload = []
+    registry_live = 0
+    for sid in sorted(identity):
+        ident = identity[sid]
+        if ident.get("alive") is False:
+            continue
+        registry_live += 1
+        row = live_by_id.pop(sid, None) or {}
+        payload.append(
+            {
+                "sessionId": sid,
+                "pid": ident.get("pid"),
+                "status": ident.get("status", ""),
+                "name": ident.get("name", ""),
+                "formerNames": ident.get("formerNames", []),
+                "cwd": ident.get("cwd", ""),
+                "nameSource": ident.get("nameSource", ""),
+                "alive": True,
+                "source": row.get("source") or "none",
+                "state": row.get("state") or "unstamped",
+                "age_seconds": row.get("age_seconds"),
+                "degraded": not row,
+            }
+        )
+    for sid in sorted(live_by_id):
+        row = live_by_id[sid]
+        payload.append(
+            {
+                "sessionId": sid,
+                "pid": None,
+                "status": "",
+                "name": "",
+                "formerNames": [],
+                "cwd": "",
+                "nameSource": "",
+                "alive": True,
+                "source": row.get("source") or "heartbeat",
+                "state": row.get("state") or "live",
+                "age_seconds": row.get("age_seconds"),
+                "degraded": False,
+            }
+        )
+    degraded = sum(1 for rec in payload if rec["degraded"])
+    return payload, registry_live, degraded
 
 
 def main(argv=None):
@@ -813,67 +1007,31 @@ def main(argv=None):
         row for row in rows
         if isinstance(row, dict) and row.get("session_id") and row.get("live") is True
     ]
-    if not live_rows:
-        # ⚠️ **An empty list is a POSITIVE claim about the whole fleet, so it pays the coverage
-        # precondition — the same one ABSENT pays, and for the same reason.** "No live rows"
-        # reads as "no session is live anywhere", which is exactly the ABSENT shape: during a
-        # partial rollout the endpoint holds no live row while the identity registry still lists
-        # live sessions, and `commands/open.md` Step 2C reads THIS call to decide whether to open
-        # a session — so a confident empty fleet there spawns a second session onto a live topic
-        # (the 2026-09-18 failure the non-empty path's names rule already guards against).
-        # `unstamped()` is the measurement: it is LIVE only when every registry-live session has
-        # a ROW at the endpoint — not necessarily a live one, since a row reading `live: false`
-        # is a dead session the endpoint is answering about rather than a rollout gap (see that
-        # function's docstring). Anything else — an unreadable registry, or a registry-live
-        # session the endpoint has never heard of — is UNKNOWN, never an empty list presented
-        # as complete.
-        #
-        # ⚠️ **This is stricter than the earlier "decide empty before the registry" ordering**,
-        # which returned exit 0 whenever the registry could not be read. That direction reads an
-        # unmeasurable fleet as an empty one, and empty is the resume-authorising shape, so it is
-        # wrong even though it kept a genuinely idle fleet from looking like a failed probe — and
-        # a genuinely idle fleet still measures LIVE here (endpoint empty AND registry empty), so
-        # it keeps its empty list.
-        verdict, line = safe_unstamped(args.endpoint, args.dir)
-        if verdict != LIVE:
-            print(
-                "UNKNOWN — no live row at the session-heartbeat endpoint, but it has no row at "
-                "all for some registry-live session (%s), so an empty list cannot be presented "
-                "as a complete fleet" % line,
-                file=sys.stderr,
-            )
-            return UNKNOWN
-        if args.json:
-            json.dump([], sys.stdout, indent=2)
-            sys.stdout.write("\n")
-            return LIVE
-        print("no live sessions on the session-heartbeat endpoint")
-        return LIVE
-
-    # ⚠️ **A NON-EMPTY list is a positive claim about the whole fleet too, so it pays the same
-    # coverage precondition the empty one pays — and it is the MORE dangerous of the two to
-    # skip.** The rows below are the endpoint's `live: true` rows joined to identity; during a
-    # partial rollout the endpoint holds a row only for already-stamped sessions, so every
-    # live-but-unstamped session is dropped while the command still exits 0. A caller reads
-    # that as the whole live fleet. `commands/open.md` Step 2C matches `<topic> Manager`
-    # against `name`/`formerNames` from exactly this output and spawns a manager on no match,
-    # so the omission is a duplicate manager onto a live topic — the 2026-09-18 failure the
-    # names rule above exists to prevent, reached by a different route. The base version could
-    # not produce this answer: its registry half contributed rows regardless of heartbeat
-    # state. Reading the registry is not enough to license the list — a readable registry is
-    # precisely what makes the omission silent, since it proves the omitted sessions EXIST.
+    # ⚠️ **An empty list is a POSITIVE claim about the whole fleet, so it still pays the coverage
+    # precondition — but the precondition DEGRADES, it no longer REFUSES.** "No live rows" reads
+    # as "no session is live anywhere", which is the ABSENT shape: during a partial rollout the
+    # endpoint holds no live row while the identity registry still lists live sessions, and
+    # `commands/open.md` Step 2C reads THIS call to decide whether to open a session — so a
+    # confident empty fleet there spawns a second session onto a live topic (the 2026-09-18
+    # failure the names rule below guards against).
     #
-    # ⚠️ **The measurement is `unstamped()`, not `coverage()`** — see that function's docstring.
-    # `coverage()`'s `missing` also counts a registered session whose row reads `live: false`,
-    # which is a dead or hung session the endpoint is answering about rather than a rollout
-    # gap, and refusing on it broke `test_list_shows_only_live_sessions`.
+    # ⚠️ **Until 2026-10-18 both `--list` paths refused the WHOLE list on `ABSENT`, and that is
+    # the defect this change removes.** Measured live: `--list --json` exited 2 with
+    # `unstamped=12 ledger_workers=23 registry_live=43`, so a fleet carrying twelve
+    # stale-plugin sessions could not be listed AT ALL — and `plugin-version-census.py`, whose
+    # entire job is naming those stale sessions, was blocked by the same exit 2 and could not
+    # name them. The twelve are interactive sessions running a supervisor older than v0.171.1;
+    # they recur at EVERY plugin release, so a guard that fails the whole list on them is not a
+    # precondition but an outage. The finding now rides ON the row (`degraded: true`), so a
+    # caller sees which rows it cannot trust instead of losing every row it could.
+    #
+    # ⚠️ **UNKNOWN still refuses.** "Could not measure" is neither "measured complete" nor
+    # "degraded": a store that could not be reached must never read as a listed fleet.
     verdict, line = safe_unstamped(args.endpoint, args.dir)
-    if verdict != LIVE:
+    if verdict == UNKNOWN:
         print(
-            "UNKNOWN — the session-heartbeat endpoint holds live rows, but it has no row at "
-            "all for some registry-live session (%s), so this list would omit live sessions "
-            "that have not been stamped yet and cannot be presented as the whole live fleet"
-            % line,
+            "UNKNOWN — the stamp-coverage measurement could not be taken (%s), so this list "
+            "cannot be presented as the whole live fleet" % line,
             file=sys.stderr,
         )
         return UNKNOWN
@@ -883,25 +1041,19 @@ def main(argv=None):
         print("UNKNOWN — cannot read the identity registry (%s)" % (args.dir or "default path"), file=sys.stderr)
         return UNKNOWN
 
-    payload = []
-    for row in live_rows:
-        sid = row.get("session_id")
-        ident = identity.get(sid) or {}
-        payload.append(
-            {
-                "sessionId": sid,
-                "pid": ident.get("pid"),
-                "status": ident.get("status", ""),
-                "name": ident.get("name", ""),
-                "formerNames": ident.get("formerNames", []),
-                "cwd": ident.get("cwd", ""),
-                "nameSource": ident.get("nameSource", ""),
-                "alive": True,
-                "source": row.get("source") or "heartbeat",
-                "state": row.get("state") or "live",
-                "age_seconds": row.get("age_seconds"),
-            }
-        )
+    payload, registry_live, degraded = _list_payload(identity, live_rows)
+    print(
+        "rows=%d registry_live=%d degraded=%d" % (len(payload), registry_live, degraded),
+        file=sys.stderr,
+    )
+
+    if not payload:
+        if args.json:
+            json.dump([], sys.stdout, indent=2)
+            sys.stdout.write("\n")
+            return LIVE
+        print("no live sessions on the session-heartbeat endpoint")
+        return LIVE
 
     if args.json:
         json.dump(payload, sys.stdout, indent=2)
@@ -911,7 +1063,9 @@ def main(argv=None):
     for rec in sorted(payload, key=lambda r: r["sessionId"]):
         pid = rec["pid"]
         where = "pid %s" % pid if pid is not None else "age %ss" % rec["age_seconds"]
-        print("%s  %s  %s  [%s]" % (rec["sessionId"], where, rec["name"] or "(no name)", rec["source"]))
+        mark = "  DEGRADED (no live heartbeat row)" if rec["degraded"] else ""
+        print("%s  %s  %s  [%s]%s" % (
+            rec["sessionId"], where, rec["name"] or "(no name)", rec["source"], mark))
     return LIVE
 
 

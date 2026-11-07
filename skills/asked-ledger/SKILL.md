@@ -1,6 +1,6 @@
 ---
 name: asked-ledger
-description: Claim, resolve and render the shared asked-ledger — which blocked session, or which session-less row, has already been batched to the operator, and by which layer. Use before batching blocked sessions into an AskUserQuestion in /supervisor:fleet-loop or /supervisor:manager-loop, and before the under-target card in /supervisor:manager-loop, so a subject both layers hold is asked exactly once and every open claim renders as one consolidated list. Subcommands claim | resolve | list | prune.
+description: Claim, resolve and render the shared asked-ledger — which blocked session, or which session-less row, has already been batched to the operator, and by which layer. Use before batching blocked sessions into an AskUserQuestion in /supervisor:fleet-loop or /supervisor:goal-loop, and before the under-target card in /supervisor:goal-loop, so a subject both layers hold is asked exactly once and every open claim renders as one consolidated list. Subcommands claim | resolve | list | prune.
 argument-hint: "<claim|resolve|list|prune> [flags]"
 allowed-tools: Bash(python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/asked-ledger.py *)
 ---
@@ -9,7 +9,7 @@ The single home of the asked-ledger rules. Commands and agents point here instea
 
 ## What it is for
 
-`fleet-loop` drops a blocked entry whose owning manager is live, and `manager-loop` batches its own topic's set. Each is correct alone — but the fleet and a live manager can both hold the **same** blocked session and neither sees the other's batch, so the operator receives one question **twice**. Measured twice on 2026-09-20; `scripts/notify-gate.py` records the same two duplicates from the gate side.
+`fleet-loop` drops a blocked entry whose owning manager is live, and `goal-loop` batches its own topic's set. Each is correct alone — but the fleet and a live manager can both hold the **same** blocked session and neither sees the other's batch, so the operator receives one question **twice**. Measured twice on 2026-09-20; `scripts/notify-gate.py` records the same two duplicates from the gate side.
 
 The ledger is the mark they were missing. Claim a subject before batching it; a second layer's claim is refused and it drops the subject from its own batch, while the subject stays visible in the consolidated list.
 
@@ -44,7 +44,7 @@ The `:-` fallback is load-bearing, not style: `CLAUDE_PLUGIN_ROOT` is unset in a
 | **Manager** (goal/topic manager) | `worker` |
 | **Worker** | — never claims: a worker does not batch, so it never calls this ledger |
 
-`--layer` is `required` and accepts exactly those two tokens (`LAYERS` in `scripts/asked-ledger.py`). **`--layer manager` is a usage error**, not a third option — argparse exits **2** with `invalid choice: 'manager'`, at the exact moment you are trying to avoid a duplicate ask. The goal/topic manager's value is `worker`: the same token `commands/manager-loop.md` passes to `scripts/notify-gate.py --layer` for that manager's own gate publishing, where `--layer worker` means *every* topic manager in the fleet rather than one manager.
+`--layer` is `required` and accepts exactly those two tokens (`LAYERS` in `scripts/asked-ledger.py`). **`--layer manager` is a usage error**, not a third option — argparse exits **2** with `invalid choice: 'manager'`, at the exact moment you are trying to avoid a duplicate ask. The goal/topic manager's value is `worker`: the same token `commands/goal-loop.md` passes to `scripts/notify-gate.py --layer` for that manager's own gate publishing, where `--layer worker` means *every* topic manager in the fleet rather than one manager.
 
 ## The claim contract — the one thing callers must act on
 
@@ -61,7 +61,7 @@ The `:-` fallback is load-bearing, not style: `CLAUDE_PLUGIN_ROOT` is unset in a
 
 The subject is the only join both layers can agree on: both see it, and neither sees the other's batch. An asker-keyed ledger would let each layer hold its own copy and the duplicate would survive.
 
-**Two subjects, one slot.** `--session` names the blocked session — the join for the blocked-set batch, which every layer can see. `--row` names the **row** — the join for `manager-loop`'s `under-target` card, whose candidates are `phase: todo` rows that carry **no blocked session at all**, so `--session` has nothing it could be given. Exactly one of the two is required; they are the same slot, and a row key is stored in the entry's `session` field.
+**Two subjects, one slot.** `--session` names the blocked session — the join for the blocked-set batch, which every layer can see. `--row` names the **row** — the join for `goal-loop`'s `under-target` card, whose candidates are `phase: todo` rows that carry **no blocked session at all**, so `--session` has nothing it could be given. Exactly one of the two is required; they are the same slot, and a row key is stored in the entry's `session` field.
 
 Naming the row is what makes the under-target disjointness check performable. Before this, that branch mandated a `--session` claim for rows that have no session, so a manager following it literally could not comply and silently substituted a hand-read of `list` — a substitute, not the check. With `--row`, two managers whose tracked sets overlap claim the **same row key**: the second is refused with exit 3 and drops the row from its card, so the duplicate is caught before either card is posted.
 

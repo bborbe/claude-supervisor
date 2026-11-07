@@ -93,11 +93,83 @@ SITE_LIST = {
     # It returns `None` for a failed query, never an empty argv, and an unreadable argv can
     # only fall back to the load-path check, never turn a refusal into an accept.
     ("restart-worker.py", "worker_argv"),
+    # added 2026-10-20 — `close-worker.py`'s pane teardown (`wezterm cli kill-pane`).
+    # ⚠️ It is an ACTION, not a read, exactly like `reload_pane` above: it returns an exit
+    # code and reports every failure rather than collapsing one into an empty result, so
+    # it is enumerated so the mechanism and this list agree, and is deliberately not
+    # driven into the three states below. The pane JOIN it depends on is `jump.py`'s
+    # `pane_sessions`, which is already enumerated and driven.
+    ("close-worker.py", "main"),
     ("who-needs-me.py", "main"), ("who-needs-me.py", "wezterm_panes"),
+    # added 2026-10-14 — `who-needs-my-help.py`'s pane-viewport read: the
+    # `wezterm cli get-text` the two-channel gate detector needs, and the only
+    # transport read in this repo that takes a pane's VISIBLE SCREEN rather than
+    # its metadata. It returns `None` for a failed read, never `[]` — an unreadable
+    # viewport cannot prove a pane holds no modal, so no caller may read it as "not
+    # gated", which is why it is driven into the three states below rather than
+    # merely listed.
+    ("who-needs-my-help.py", "pane_lines"),
+    # added 2026-10-16 — `manager-menu-footer.py`'s two reads: the pane map
+    # (`wezterm_panes`, which joins a manager session's registry name to its pane) and the
+    # pane viewport (`pane_lines`, the same `wezterm cli get-text` read the sibling takes,
+    # kept as its own function because this file must not import a whole report). ⚠️ Both
+    # return `None` for a failed read, never `{}` / `[]`: this instrument's entire output
+    # is a COUNT of manager panes carrying a modal footer, so a collapsed read would print
+    # `0 footers` from a mux socket that never answered — precisely the false green it
+    # exists to prevent. Both are driven into the three states below rather than listed.
+    ("manager-menu-footer.py", "wezterm_panes"), ("manager-menu-footer.py", "pane_lines"),
+    # added 2026-11-06 — `session-exit-record.py`'s process-tree read, behind the observer's
+    # session-id stamp. One `ps -Ao pid=,ppid=,comm=` snapshot per heartbeat, walked to the
+    # pane's own `claude`. It returns `None` for a failed query, never `{}`: a `ps` that did
+    # not answer cannot prove the pane holds no `claude`, and the caller then keeps the id it
+    # already carries rather than reading the tree as empty. Driven into the three states
+    # below.
+    ("session-exit-record.py", "_process_table"),
     # in-repo callers that hold no transport call of their own
     ("who-needs-me.py", "panes"),          # present pre-audit only; deleted by this change
     ("who-needs-me.py", "pane_for"), ("who-needs-me.py", "live_pane_ids"),
     ("fleet-board.py", "collect_signals"),
+    # added 2026-10-20 — `send-delivery-drill.py`, the reproduction harness for the
+    # swallowed-submit defect. Its `wezterm` helper is the only transport call. The READS
+    # built on it (`pane_text`, `composer`) return `None` for a failed read, never `''`:
+    # an unreadable pane must never read as a clean composer, because a clean composer is
+    # exactly the state the defect misreads as delivery. Enumerated so the mechanism and
+    # this list agree.
+    ("send-delivery-drill.py", "wezterm"),
+    # added 2026-10-22 — `drive-unverifiable.py`'s pane viewport read: the
+    # `wezterm cli get-text` behind the 2-consecutive-unverifiable rule. It returns `None`
+    # for a failed read, never `''` -- an unreadable pane and a pane rendering no closer
+    # are different states, and folding them together would let a broken read render as a
+    # session with nothing to say, which is the exact silence the rule exists to end.
+    # Enumerated so the mechanism and this list agree.
+    ("drive-unverifiable.py", "pane_text"),
+    # added 2026-10-22 — `spawn-goal.py`, the arm sequence the `goal_loop` spawn path
+    # runs. `pane_text` is the `wezterm cli get-text` read behind the bounded
+    # `Goal set:` wait, and it returns `None` for a failed read, never `''`: a dead mux
+    # socket and a pane that has not printed yet are different states, and the whole
+    # point of the wait is that absence of evidence is not evidence of arming. `send`
+    # is an ACTION — it types into the pane and reports its own failure rather than
+    # collapsing one into an empty result — so it is enumerated for the mechanism/list
+    # agreement and, like `close-worker.py`'s `main`, deliberately not driven.
+    ("spawn-goal.py", "pane_text"), ("spawn-goal.py", "send"),
+    # added 2026-10-22 — `manager-attention-watch.py`'s pane-title read, the join that
+    # gives a re-registered park card its jump target. It returns `None` for a failed
+    # query, never `""`: a `wezterm cli list` that never answered cannot prove a pane is
+    # absent, and the card must degrade to "no jump target" rather than claim there is
+    # nowhere to go. Enumerated so the mechanism and this list agree; it is a READ, but
+    # deliberately not driven into the three states below — the card is posted either
+    # way, so the read's failure is a degraded affordance and not a gate of its own.
+    ("manager-attention-watch.py", "pane_for_session_name"),
+    # added 2026-10-31 — `fleet-keeper.py`'s `wezterm` helper, behind the re-arm the fleet
+    # keeper sends into the pane its own resume just spawned (`get-text` for the bounded
+    # readiness wait, `send-text` for the command and its separate submit). It keeps the
+    # three states apart by returning `(rc, stdout)`: a failed or hung query is `rc != 0`,
+    # a reachable pane with nothing on it is `(0, "")`, and `rearm()` acts only on `rc == 0`
+    # — so an unreadable pane can never satisfy the readiness wait and get typed into, which
+    # is the same reason `spawn-goal.py`'s wait refuses to read absence as arming. Enumerated
+    # so the mechanism and this list agree; like `spawn-goal.py`'s `send` it is also an
+    # ACTION, so it is deliberately not driven into the three states below.
+    ("fleet-keeper.py", "wezterm"),
 }
 
 
@@ -161,6 +233,10 @@ POPULATED = {
     ("ng", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
     ("rw", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
     ("oc", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
+    ("mmf", "wezterm_panes"): '[{"pane_id": "204", "title": "t"}]',
+    ("mmf", "pane_lines"): "context\nEnter to select",
+    ("sg", "pane_text"): "  ⎿  Goal set: Task \"t\" is finished.",
+    ("ser", "_process_table"): "101 1 claude",
 }
 
 
@@ -237,6 +313,10 @@ def main():
             ("ng", "notify-gate.py"),
             ("rw", "restart-worker.py"),
             ("oc", "orphan-candidates.py"),
+            ("wnmh", "who-needs-my-help.py"),
+            ("mmf", "manager-menu-footer.py"),
+            ("sg", "spawn-goal.py"),
+            ("ser", "session-exit-record.py"),
         )
     }
 
@@ -265,6 +345,21 @@ def main():
         ("sh", "panes", ()),
         ("mp", "panes", ()), ("ng", "panes", ()),
         ("rw", "panes", ()), ("oc", "panes", ()),
+        # The viewport read takes a pane id; any id reaches the subprocess, and the
+        # three states are what matter — broken must be `None`, and a reachable
+        # transport answering with nothing must not become a failure.
+        ("wnmh", "pane_lines", (1,)),
+        # added 2026-10-16 — the two reads SITE_LIST promises to drive. ⚠️ They were
+        # listed and NOT driven, so this check reported 41/41 while never exercising
+        # the sites the change added: an enumeration entry nothing reaches is a false
+        # green for exactly the read it claims to protect. Found by review.
+        ("mmf", "wezterm_panes", ()), ("mmf", "pane_lines", (1,)),
+        # added 2026-10-22 — the `goal_loop` arm sequence's viewport read. Driven for the
+        # same reason as the pair above: an entry this loop never reaches is a false green
+        # for exactly the read it claims to protect.
+        ("sg", "pane_text", (1,)),
+        # added 2026-11-06 — the observer's process-tree read, driven like `pvc._pid_ttys`.
+        ("ser", "_process_table", ()),
     ]
     if args.capture:
         print(f"== three-state captures — {os.path.abspath(args.tree)}")
@@ -400,6 +495,16 @@ def main():
             not outside,
             f"derived {outside!r} — the mechanism and the enumeration disagree",
         )
+
+        # ⚠️ One-directional BY DESIGN, and the gap it leaves is real: the assertion
+        # above reads `derived ⊆ SITE_LIST`, never `SITE_LIST ⊆ driven`. An entry
+        # listed here but absent from `accessors` is never exercised and this check
+        # stays green — which is exactly how `manager-menu-footer.py`'s two reads
+        # passed 41/41 while being driven by nothing (found by review 2026-10-16,
+        # driven now). Closing it needs an explicit not-driven set carrying a reason
+        # per entry, because most of SITE_LIST is deliberately not driven: transport
+        # ACTIONS (`reload_pane`), callers holding no read of their own, and wrappers
+        # this audit deleted.
 
         # And the caller shape specifically: a consumer holding no transport call of
         # its own, which a call-site-only search cannot reach at any depth.

@@ -16,11 +16,17 @@ import {
   a2aControlRequestFor,
   a2aControlResponseFor,
   a2aDataPart,
+  a2aFrameFor,
   a2aFrames,
   a2aOutcome,
+  a2aPushConfigCallFor,
+  a2aPushConfigListCallFor,
+  a2aPushRefusal,
   a2aSendRequestFor,
   a2aStreamRequestFor,
   a2aWorkerList,
+  createSseFrameReader,
+  declaredCreateArguments,
   resolveA2AEndpoint,
 } from './a2a-client.mjs'
 
@@ -153,6 +159,30 @@ test('the outcome carries the state, the contextId and the reply text', () => {
   })
 })
 
+test('the SDK\'s NESTED event shape yields the completed state and the reply', () => {
+  // a2a-go v2.6.0: `statusUpdate.status.state` and `artifactUpdate.artifact.parts`. Measured
+  // against a real worker — the flat reading filed a completed turn as SUBMITTED with no reply.
+  const body = sse(
+    { task: { id: 't-1', contextId: 'ctx-1', status: { state: 'TASK_STATE_SUBMITTED' } } },
+    { artifactUpdate: { taskId: 't-1', contextId: 'ctx-1', artifact: { artifactId: 'a-1', parts: [{ text: 'ACK 4242' }] } } },
+    { statusUpdate: { taskId: 't-1', contextId: 'ctx-1', status: { state: 'TASK_STATE_COMPLETED' } } },
+  )
+  const { frames } = a2aFrames(body)
+  assert.deepEqual(a2aOutcome(frames, { sentContextId: 'ctx-1' }), {
+    state: 'TASK_STATE_COMPLETED',
+    contextId: 'ctx-1',
+    reply: 'ACK 4242',
+  })
+})
+
+test('a control reply over the stream reads its FAILED state from the nested status', () => {
+  const body = sse(
+    { task: { id: 't-1', contextId: 'ctx-1', status: { state: 'TASK_STATE_SUBMITTED' } } },
+    { statusUpdate: { taskId: 't-1', contextId: 'ctx-1', status: { state: 'TASK_STATE_FAILED' } } },
+  )
+  assert.match(a2aControlResponseFor(body, { sentOperation: 'create' }).error, /FAILED/)
+})
+
 test('a contextId mismatch is the error, because it is the only client-side observable', () => {
   // ⚠️ A turn that ran under the server's default session returns a contextId just as happily as
   // one that ran where it was asked to, so nothing else on this side reads as wrong.
@@ -195,6 +225,90 @@ test('each operation builds its own ControlRequest, and exactly one field', () =
     assert.equal(a2aControlRequestFor(args).error !== undefined, true, JSON.stringify(args))
   }
   assert.deepEqual(A2A_CONTROL_OPERATIONS, ['create', 'list', 'stop'])
+})
+
+test('the push registration carries FLAT params, never the v0 wrapper', () => {
+  const call = a2aPushConfigCallFor({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    taskId: 'task-1',
+    push: { url: 'http://host.docker.internal:41234/a2a/push', token: 'tok-alpha' },
+    token: 'worker-token',
+  })
+  assert.equal(call.body.method, 'CreateTaskPushNotificationConfig')
+  assert.deepEqual(call.body.params, {
+    taskId: 'task-1',
+    url: 'http://host.docker.internal:41234/a2a/push',
+    token: 'tok-alpha',
+  })
+  // ⚠️ The wrapper is the v0 compat transport's shape. A body carrying it is well-formed JSON that
+  // the handler refuses as an unmarshal error, so it must be asserted ABSENT rather than merely
+  // "not required" — this is the assertion that would have caught it.
+  assert.equal(Object.hasOwn(call.body.params, 'pushNotificationConfig'), false)
+  assert.equal(Object.hasOwn(call.body.params, 'config'), false)
+
+  // ⚠️ The bearer is the WORKER's credential; `params.token` is the RECEIVER's. Both are on one
+  // call, and swapping them still returns a 200 — so the distinction is asserted, not assumed.
+  assert.equal(call.headers.authorization, 'Bearer worker-token')
+  assert.equal(call.body.params.token, 'tok-alpha')
+  assert.notEqual(call.headers.authorization, `Bearer ${call.body.params.token}`)
+})
+
+test('the push registration refuses a missing field or an unusable descriptor', () => {
+  const base = {
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    taskId: 'task-1',
+    push: { url: 'http://host.docker.internal:41234/a2a/push', token: 'tok-alpha' },
+    token: 'worker-token',
+  }
+  for (const over of [{ endpoint: '' }, { taskId: '' }, { token: '' }, { push: undefined }, { push: { url: 'http://h/p' } }]) {
+    assert.equal(a2aPushConfigCallFor({ ...base, ...over }).error !== undefined, true, JSON.stringify(over))
+  }
+  // Positive control in the same run: the complete call builds, so the refusals above are refusals
+  // and not a builder that rejects everything.
+  assert.equal(a2aPushConfigCallFor(base).error, undefined)
+})
+
+test('the push-config read-back LISTS the task, and never re-sends the config', () => {
+  const call = a2aPushConfigListCallFor({
+    endpoint: 'http://127.0.0.1:8080/a2a',
+    taskId: 'task-1',
+    token: 'worker-token',
+  })
+  // ⚠️ LIST, NOT GET — a measured correction, not a preference. The SDK's get is
+  // `pushConfigStore.Get(ctx, taskID, req.ID)` and the set path never sends a config `id`, so a get
+  // looks up an empty id and reports "push config not found" against a worker whose pushes arrive.
+  assert.equal(call.body.method, 'ListTaskPushNotificationConfigs')
+  // ⚠️ THE READ IS ADDRESSED BY TASK AND NOTHING ELSE. Sending `url`/`token` back would make it a
+  // second registration wearing a read's name, and a worker that merged the params would overwrite
+  // the config this call exists to observe.
+  assert.deepEqual(call.body.params, { taskId: 'task-1' })
+  assert.equal(call.headers.authorization, 'Bearer worker-token')
+
+  for (const over of [{ endpoint: '' }, { taskId: '' }, { token: '' }]) {
+    const base = { endpoint: 'http://127.0.0.1:8080/a2a', taskId: 'task-1', token: 'worker-token' }
+    assert.equal(a2aPushConfigListCallFor({ ...base, ...over }).error !== undefined, true, JSON.stringify(over))
+  }
+})
+
+test('a push descriptor is refused when either half is missing or unusable', () => {
+  for (const push of [
+    null,
+    'http://host/p',
+    [],
+    {},
+    { url: 'http://host/p' },
+    { token: 'tok' },
+    { url: '', token: 'tok' },
+    { url: 'not a url', token: 'tok' },
+    { url: 'ftp://host/p', token: 'tok' },
+    { url: 'http://host/p', token: '' },
+    { url: 'http://host/p', token: 7 },
+  ]) {
+    assert.equal(a2aPushRefusal({ push }) !== null, true, JSON.stringify(push))
+  }
+  // Positive control in the same run: a complete descriptor passes, so the refusals above are
+  // refusals and not a validator that rejects everything.
+  assert.equal(a2aPushRefusal({ push: { url: 'https://host.example/a2a/push', token: 'tok' } }), null)
 })
 
 // --- the controller-facing half: the data part -----------------------------------------------
@@ -256,6 +370,35 @@ test('every field the controller validates is required, and a missing one refuse
     assert.match(error, new RegExp(`\`${field}\` is required`), `${field} should be required`)
   }
   assert.match(a2aSendRequestFor({ ...CALL, request: null }).error, /non-null object/)
+})
+
+// ⚠️ The controller moved to a2a-go v2.7.0 at v0.17.0, where an ABSENT version header defaults to
+// "0.3" and is refused — every control call, `create` included, answered `-32009 … requested
+// "0.3", served "1.0"` (measured 2026-10-22). So the version the controller advertises has to
+// reach the wire on THIS plane too, not only on the turn plane.
+test('the control call carries the version the controller advertises', () => {
+  const { headers } = a2aSendRequestFor({
+    endpoint: 'http://localhost:8080/a2a',
+    contextId: 'ctx-1',
+    request: { operation: 'create', task: 't' },
+    token: 'not-a-real-token',
+    messageId: 'msg-1',
+    protocolVersion: '1.0',
+  })
+  assert.equal(headers['a2a-version'], '1.0')
+})
+
+test('the control call sends no version header when the card named none', () => {
+  // The pre-negotiation behaviour, and what a controller with no version check at all still
+  // accepts — so a failed or versionless card read degrades rather than breaks.
+  const { headers } = a2aSendRequestFor({
+    endpoint: 'http://localhost:8080/a2a',
+    contextId: 'ctx-1',
+    request: { operation: 'list' },
+    token: 'not-a-real-token',
+    messageId: 'msg-1',
+  })
+  assert.equal(headers['a2a-version'], undefined)
 })
 
 // --- the controller-facing half: the reply ---------------------------------------------------
@@ -398,4 +541,234 @@ test('a list result that is not a list refuses rather than being read as empty',
   assert.match(a2aWorkerList({ operation: 'list', list: { workers: 'w-1' } }).error, /must be an array or null/)
   assert.match(a2aWorkerList('raw body').error, /`ControlResponse` object/)
   assert.match(a2aWorkerList(undefined).error, /`ControlResponse` object/)
+})
+
+// --- the incremental frame reader ------------------------------------------------------------
+//
+// ⚠️ These tests exist because the reader is the difference between a status channel that arms in
+// time and one that arms after the turn it was meant to observe. The whole-body parser is the
+// reference implementation; the reader is what the live turn uses, and the two must not drift.
+
+test('the reader yields a frame before the stream has ended', () => {
+  const reader = createSseFrameReader()
+  // The FIRST frame only. This is the entire point of the reader: the task id is available here,
+  // seconds before the turn ends, which is what makes registering the callback in time possible.
+  reader.push(sse({ task: { id: 'task-1' } }).slice(0, -1))
+  assert.equal(reader.frames.length, 1)
+  assert.equal(reader.frames[0].task.id, 'task-1')
+  assert.equal(reader.error, null)
+})
+
+test('a frame split across a chunk boundary is not corrupted', () => {
+  const reader = createSseFrameReader()
+  const body = sse({ task: { id: 'task-1' } })
+  // ⚠️ The split is placed INSIDE the JSON, which is where a per-chunk parse fails. Where the
+  // network breaks a chunk is arbitrary, so this is the ordinary case rather than an edge case.
+  reader.push(body.slice(0, 20))
+  reader.push(body.slice(20))
+  reader.end()
+  assert.equal(reader.frames.length, 1)
+  assert.equal(reader.frames[0].task.id, 'task-1')
+})
+
+test('the reader and the whole-body parser agree at EVERY split point', () => {
+  const body = sse({ task: { id: 't-1' } }, { statusUpdate: { taskId: 't-1', status: { state: 'working' } } }, { statusUpdate: { taskId: 't-1', status: { state: 'completed' } } })
+  const whole = a2aFrames(body)
+  assert.equal(whole.frames.length, 3)
+
+  // Every cut, not a sampled few: a boundary bug is invisible at most split points, and the one
+  // that matters is exactly the one a sample would miss.
+  for (let cut = 1; cut < body.length; cut++) {
+    const reader = createSseFrameReader()
+    reader.push(body.slice(0, cut))
+    reader.push(body.slice(cut))
+    reader.end()
+    assert.equal(reader.error, null, `cut ${cut}`)
+    assert.deepEqual(reader.frames, whole.frames, `cut ${cut}`)
+  }
+})
+
+test('end() flushes a trailing frame that never received a newline', () => {
+  const reader = createSseFrameReader()
+  // The terminal completion often arrives exactly so — no trailing newline — so dropping it would
+  // lose the one event the completion criterion asserts on.
+  reader.push(sse({ statusUpdate: { taskId: 't-1', status: { state: 'completed' } } }).trimEnd())
+  assert.equal(reader.frames.length, 0, 'still incomplete until the flush')
+  reader.end()
+  assert.equal(reader.frames.length, 1)
+  assert.equal(reader.frames[0].statusUpdate.status.state, 'completed')
+})
+
+test('an error frame stops the reader and is reported, never yielded as data', () => {
+  const reader = createSseFrameReader()
+  reader.push(sse({ task: { id: 't-1' } }))
+  reader.push(`data: ${JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32602, message: 'invalid params' } })}\n\n`)
+  assert.notEqual(reader.error, null)
+  assert.match(reader.error, /refused the turn/)
+  // The frames before the refusal are kept — the caller may still want the task id — but nothing
+  // after it is appended to a run already known to have failed.
+  assert.equal(reader.frames.length, 1)
+  reader.push(sse({ statusUpdate: { taskId: 't-1', status: { state: 'completed' } } }))
+  assert.equal(reader.frames.length, 1)
+})
+
+// ── declared mounts / secrets ───────────────────────────────────────────────
+//
+// These are the ONLY route by which a caller puts something into a worker's environment on this
+// path, so the refusals matter as much as the pass-throughs: `env` stays refused precisely because
+// a mount is checked by the controller and a secret is a KEY rather than a value. The tests below
+// pin that asymmetry — that a value is not expressible, and that a volume is refused by name.
+
+test('a create with no declaration carries neither key, so the wire shape is unchanged', () => {
+  // The regression this pins: an empty array or an empty object emitted unconditionally would
+  // change every existing create's body, and the controller would receive fields it never had.
+  assert.deepEqual(a2aControlRequestFor({ operation: 'create', task: 'T' }), {
+    request: { operation: 'create', create: { task: 'T' } },
+  })
+  assert.deepEqual(a2aControlRequestFor({ operation: 'create', task: 'T', mounts: [], secrets: [] }), {
+    request: { operation: 'create', create: { task: 'T' } },
+  })
+})
+
+test('declared mounts reach the create body, with read_only only when it was given', () => {
+  const call = a2aControlRequestFor({
+    operation: 'create',
+    task: 'T',
+    mounts: [
+      { host_path: '/srv/vault', container_path: '/vault' },
+      { host_path: '/srv/ro', container_path: '/ro', read_only: true },
+    ],
+  })
+  assert.deepEqual(call.request.create.mounts, [
+    { host_path: '/srv/vault', container_path: '/vault' },
+    { host_path: '/srv/ro', container_path: '/ro', read_only: true },
+  ])
+})
+
+test('a declared volume is refused BY NAME, because the allowlist cannot govern it', () => {
+  // The controller refuses this too, with its own `mount_not_allowed: volume <name>`. Refusing here
+  // as well is what turns a refusal at the far end into one the caller can act on, and the message
+  // names the field rather than saying "mount not allowed" about an entry whose problem is one key.
+  const call = a2aControlRequestFor({
+    operation: 'create',
+    task: 'T',
+    mounts: [{ volume: 'other-workload-data', container_path: '/data' }],
+  })
+  assert.match(call.error, /`mounts\[0\]` declares `volume`, which is refused/)
+  assert.match(call.error, /Use `host_path`/)
+})
+
+test('a secret carries a TeamVault KEY, and a value is not expressible', () => {
+  const call = a2aControlRequestFor({
+    operation: 'create',
+    task: 'T',
+    secrets: [{ name: 'GATEWAY_SECRET', teamvault_key: '9L6eMO' }],
+  })
+  assert.deepEqual(call.request.create.secrets, [{ name: 'GATEWAY_SECRET', teamvault_key: '9L6eMO' }])
+  // The key is what travels. There is no field through which a caller could send the value, and
+  // this asserts the shape rather than trusting that nobody would try.
+  assert.equal(call.request.create.secrets[0].value, undefined)
+})
+
+test('a malformed declaration refuses rather than reaching the controller', () => {
+  const cases = [
+    [{ mounts: 'nope' }, /`mounts` must be an array/],
+    [{ mounts: [{ container_path: '/x' }] }, /`mounts\[0\]\.host_path` must be a non-empty string/],
+    [{ mounts: [{ host_path: '/x' }] }, /`mounts\[0\]\.container_path` must be a non-empty string/],
+    [{ mounts: [{ host_path: '/x', container_path: '/y', read_only: 'yes' }] }, /read_only` must be a boolean/],
+    [{ secrets: 'nope' }, /`secrets` must be an array/],
+    [{ secrets: [{ teamvault_key: 'k' }] }, /`secrets\[0\]\.name` must be a non-empty string/],
+    [{ secrets: [{ name: 'N' }] }, /`secrets\[0\]\.teamvault_key` must be a non-empty TeamVault KEY/],
+  ]
+  for (const [args, pattern] of cases) {
+    assert.match(a2aControlRequestFor({ operation: 'create', task: 'T', ...args }).error, pattern)
+  }
+})
+
+test('list and stop refuse a declaration rather than dropping it', () => {
+  // A value silently ignored is how a caller concludes a worker was given access it never received.
+  // `list` and `stop` have no mount or secret surface at all, so passing one is a misunderstanding
+  // of the call and is refused as such.
+  assert.match(
+    a2aControlRequestFor({ operation: 'list', mounts: [{ host_path: '/x', container_path: '/y' }] }).error,
+    /`mounts` and `secrets` are `create` arguments — `list` takes neither/,
+  )
+  assert.match(
+    a2aControlRequestFor({ operation: 'stop', workerId: 'w-1', secrets: [{ name: 'N', teamvault_key: 'k' }] }).error,
+    /`mounts` and `secrets` are `create` arguments — `stop` takes neither/,
+  )
+})
+
+test('declaredCreateArguments returns an empty declaration rather than undefined keys', () => {
+  assert.deepEqual(declaredCreateArguments({}), { declared: {} })
+  assert.deepEqual(declaredCreateArguments({ mounts: [], secrets: [] }), { declared: {} })
+})
+
+// --- the negotiated protocol version ---------------------------------------------------------
+//
+// ⚠️ AN ABSENT `A2A-Version` HEADER IS NOT "NO VERSION" — IT IS `0.3`. Measured 2026-10-22
+// against a2a-go v2.7.0 (`a2asrv/intercepted_handler.go` `checkProtocolVersion`): a request
+// carrying none has its client version defaulted to `"0.3"` and is refused with
+// `-32009 … requested "0.3", served "1.0"` by any service serving 1.0 — inside a well-formed
+// HTTP 200 envelope, so every transport check passes while nothing ran.
+//
+// These cases pin BOTH directions, because only the pair rules out the two ways to get it wrong:
+// a hardcoded `"1.0"` (which breaks the first peer serving anything else) and a hardcoded
+// `"0.3"` (which is today's defect, written down deliberately).
+
+test("the endpoint carries the card's protocolVersion beside its url", () => {
+  const card = {
+    supportedInterfaces: [{ url: 'http://localhost:9091/a2a', protocolVersion: '1.0' }],
+  }
+  assert.deepEqual(resolveA2AEndpoint(card), {
+    url: 'http://localhost:9091/a2a',
+    protocolVersion: '1.0',
+  })
+})
+
+test('a card naming no protocolVersion yields no version — never a default', () => {
+  const card = { supportedInterfaces: [{ url: 'http://localhost:9091/a2a' }] }
+  const resolved = resolveA2AEndpoint(card)
+  assert.equal(resolved.url, 'http://localhost:9091/a2a')
+  assert.equal('protocolVersion' in resolved, false, 'an absent version must stay absent, not default to 0.3')
+})
+
+test('the turn sends the negotiated version, not a constant', () => {
+  const call = a2aStreamRequestFor({ ...REQUEST, protocolVersion: '0.3' })
+  assert.equal(call.headers['a2a-version'], '0.3')
+})
+
+test('the turn sends no A2A-Version header when the card named none', () => {
+  const call = a2aStreamRequestFor({ ...REQUEST })
+  assert.equal('a2a-version' in call.headers, false)
+})
+
+test('both push-config calls carry the same negotiated version as the turn', () => {
+  // ⚠️ These reach the worker's own JSONRPC handler and run the same version gate, so omitting
+  // the header here refuses the registration with the identical -32009 while the turn succeeds.
+  // The symptom is silent rather than loud: the status channel never carries anything.
+  const push = { url: 'https://receiver.example/hook', token: 'push-token' }
+  const created = a2aPushConfigCallFor({
+    endpoint: REQUEST.endpoint,
+    taskId: 'task-1',
+    push,
+    token: REQUEST.token,
+    protocolVersion: '0.3',
+  })
+  const listed = a2aPushConfigListCallFor({
+    endpoint: REQUEST.endpoint,
+    taskId: 'task-1',
+    token: REQUEST.token,
+    protocolVersion: '0.3',
+  })
+  assert.equal(created.headers['a2a-version'], '0.3')
+  assert.equal(listed.headers['a2a-version'], '0.3')
+})
+
+test('both push-config calls send no A2A-Version header when none was negotiated', () => {
+  const push = { url: 'https://receiver.example/hook', token: 'push-token' }
+  const created = a2aPushConfigCallFor({ endpoint: REQUEST.endpoint, taskId: 'task-1', push, token: REQUEST.token })
+  const listed = a2aPushConfigListCallFor({ endpoint: REQUEST.endpoint, taskId: 'task-1', token: REQUEST.token })
+  assert.equal('a2a-version' in created.headers, false)
+  assert.equal('a2a-version' in listed.headers, false)
 })

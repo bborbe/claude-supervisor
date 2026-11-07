@@ -1,11 +1,18 @@
 # restart-worker.py
 
-Restart ONE stale idle worker session under a narrow allow rule.
+Restart ONE stale idle session — worker **or manager** — under a narrow allow rule.
 
 A manager's standing mandate (`65 Runbooks/Manager Session.md` § Gate triage class A)
-covers killing and restarting a live WORKER whose loaded code is stale. This script is
+covers killing and restarting a live session whose loaded code is stale. This script is
 the narrow, allowlistable way to exercise it: one session id in, one registry pid killed,
 the same session resumed in a new tab — never a broad `kill` rule.
+
+⚠️ **The target set is workers AND managers.** Until 2026-10-18 a manager was refused with
+`manager-target`. That refusal is gone: the class-A judgement applies to a manager whose
+loaded code is stale exactly as it does to a worker's, and a manager was never exempt — it
+was merely not covered. Role is still derived (see § *How role is decided*), but it now
+selects the **resume colour** and the **re-arm note** rather than a refusal, and
+`role-undetermined` is the only role-based stop left.
 
 ## Usage
 
@@ -27,6 +34,7 @@ path is read from `SUPERVISOR_LOAD_PATH`, else
 | `0` | Success — the pid was signalled and the session resumed (or, under `--dry-run`, would have been). |
 | `1` | Refusal. The first line of stdout is the reason token below; the second is the sentence. **Or** an operational failure, printed with an `❌ error:` prefix instead of a token — see below. |
 | `2` | Usage error (argparse) — a missing or empty session id, an unknown flag. |
+| `3` | Environment fault — **not** a refusal. The first line is `environment-fault`; `vault-cli` could be found neither on `PATH` nor at `$GOPATH/bin` or a known install location, so no launcher can be resolved for any session. Checked before every refusal, so a broken caller environment never reads as a guard declining. |
 
 A refusal is a printed reason, never a traceback.
 
@@ -41,7 +49,7 @@ anything is signalled, so no code path reaches `os.kill` on a target it has not 
 | `ambiguous-pid` | More than one registry pid claims that session id, or the entry carries no integer pid. | The pid must be unique. Killing one of two claimants is a coin flip on someone else's work. |
 | `busy-target` | `status` is not `idle`. | A mid-turn kill loses the in-flight work. |
 | `headless-target` | `kind` is not `interactive`. | A headless worker has no reliable resume guard, so its liveness stays undetermined — see `a separate task`. |
-| `manager-target` | The target resolves as a manager. | A manager is NEVER restarted. The mandate is class A for workers only. |
+| `held-session` | The session carries an operator hold (`~/.claude/state/session-holds.json`, written by `/supervisor:hold`). | A hold says the session is not yours to touch at all, which outranks `busy-target`'s "the moment is wrong". Restarting is exactly the act the hold prevents, and only the operator releases it. |
 | `role-undetermined` | No role signal could be read. | Fail closed. An unreadable index proves nothing about a role; never assume worker. |
 | `stale-load-path` | None of the three inputs — newest load-path copy, the worker's MCP config file(s), the launcher script — is newer than the session's own start, or the session carries no parseable start time. | Nothing would load differently — the restart buys nothing. |
 
@@ -108,6 +116,38 @@ the last `agent-color` record in the session **transcript** — *not* from
 `~/.cache/wezterm-role-map.json`, which is read at spawn time by `server/config.mjs` and is
 what *sets* a manager's colour in the first place.
 
+## The MCP launch-source report
+
+A restart refreshes a session's supervisor MCP server only if the tree that server
+**launches from** is current. `~/.claude/mcp-<vault>.json` may point the `supervisor`
+server at a workspace checkout rather than the plugin cache, and a checkout lags the
+release until someone pulls it — so a restart onto a stale checkout brings the session
+back with the same old server code and reads as a success. Measured 2026-10-17:
+`spawn_agent` still lacked `mounts`/`secrets` after a fresh process, because the launched
+checkout was behind.
+
+The report names the tree and **both versions, read live** — the checkout's
+`.claude-plugin/plugin.json` against the newest installed copy under the load path. A
+plain file read, deliberately not `git -C` / `git describe`: the question is what the tree
+on disk says it is, and a checkout mid-pull has no useful git answer.
+
+```
+   MCP source: /Users/…/workspaces/claude-supervisor (0.171.1) · installed 0.171.1
+```
+
+When both versions are known and differ, a second line warns:
+
+```
+   ⚠️ MCP source version 0.170.0 ≠ installed 0.171.1 — a restart reloads /Users/…/workspaces/claude-supervisor; pull it or the server code stays stale
+```
+
+**The warning is keyed on the two versions being known AND unequal**, so a hardcoded
+warning cannot pass: equal versions print the source line alone, and that is the control
+case. A source whose version cannot be read is reported `unreadable` and never as current
+— the failure this report exists to catch is a restart that reloads stale code while
+reading as a success, so an unreadable version must not be silent. `unknown` is printed
+when the session's `--mcp-config` carries no supervisor entry.
+
 ## The allow rule to add
 
 Scope the rule to this script's path only. Never allow bare `kill` / `killall` / `pkill` —
@@ -133,15 +173,52 @@ jq -r '.permissions.allow[]' ~/.claude/settings.json | grep -E 'Bash\([^)]*p?kil
 
 ## What this script does NOT do
 
-- **It never restarts a manager.** Class A is a closed list, and adding to it is an
-  operator decision, not a manager one.
+- **It never restarts a held session.** Class A covers a stale session; it does not
+  override an operator hold, and adding a hold to that list is an operator decision.
 - **It does not fix the headless resume guard.** Headless workers are refused, not handled.
-- **It is not the orchestrator.** `commands/worker-restart.md` collapses kill → resume →
+- **It is not the orchestrator.** `commands/restart.md` collapses kill → resume →
   re-orient into one verb and calls THIS script for the kill+resume leg rather than
   reimplementing it, so exactly one kill+resume mechanism exists. Its read-only pre-kill
   probe is the sibling `scripts/restart-precheck.py`, which owns the worktree check and the
   cause-of-death classification; the two scripts share the registry read but not the
   refusal vocabulary — the seven tokens above stay exactly seven.
+
+## `--absent`: resuming a session whose process is gone
+
+The normal path cannot bring back a dead session: it refuses `unknown-session-id` when no
+registry entry carries the id, and a dead session's `~/.claude/sessions/<pid>.json` is deleted
+with it. `--absent` is a separate entry that inverts that precondition and **holds no kill
+path at all** — it never reaches `os.kill`, so it cannot signal a live process. ⚠️ That is not
+the same as being harmless: it CAN start a second copy of a live conversation, which is the real
+hazard. So it also refuses while any registry entry is unparseable, while a pane record names
+the session within the last 10 min with no end after it (a resume through another path
+heartbeats before it registers), and while another `--absent` of the same session holds its
+lock. Its only caller is `scripts/fleet-keeper.py`, and only behind the operator's `resume it`
+answer on a dead-Fleet-Manager card.
+
+`wezterm` is resolved by absolute path (`SUPERVISOR_WEZTERM`, then `PATH`, then known install
+locations), never looked up on `PATH` alone: the keeper runs under launchd with a system-only
+`PATH`, where a bare `wezterm` is not found.
+
+It sources what the registry used to carry from the manager registration
+(`~/.claude/state/worker-manager/<sid>.json`, written by `fleet-register.py`), which outlives
+death: the vault gives the `cwd`, and the launcher is resolved with an explicit
+`(branch, subject)` manager subject, so a fleet manager takes the vault's `manager_launcher`.
+⚠️ Not `manager_subject()`: it knows only topic and goal, so a fleet manager resolved through
+it falls to the **worker** launcher rule — still the case on the normal path, recorded as a
+known gap.
+
+Its refusals — first-line token, exit 1, all before the spawn — are its own vocabulary and
+leave the seven above unchanged:
+
+| Token | Fires when |
+|---|---|
+| `not-absent` | a registry entry carries the id, or the registry cannot be read — the process may be alive |
+| `held-session` | an operator hold, exactly as on the normal path |
+| `unknown-session-id` | no manager registration, so no vault to resume into |
+
+An unresolvable vault or launcher is an `❌ error:` operational failure, never a refusal, and
+fires before anything is spawned.
 
 ## Which launcher the resume runs
 
@@ -155,14 +232,21 @@ manager with no `CLAUDE_SCRIPT` restarted a worker, the `changed:` line named ba
 
 Precedence is the spawn path's (`server/spawn-cwd.mjs` `resolveTaskLauncher`): the task bound
 to the session — matched on its whole id set, `claude_session_id` plus every
-`metrics_sessions[].session_id` — names a `launcher:`; else its goals agree on one; else
-the `claude_script` of the vault whose path holds the session's `cwd` (from
-`vault-cli config list`). A bare name resolves beside the vault launcher. A value that is not
-a plain path, goals that disagree, two task pages claiming the session, a `cwd` under no vault, or a launcher file that does not
-exist all leave it **unresolved** — and an unresolved launcher refuses **before the kill**
-with an `❌ error:` line, the same operational class as a missing `cwd`. It is not a target
-refusal, so the seven tokens stay seven. The output's `launcher:` line names the file and its
-source (`task` / `goal` / `vault`).
+`metrics_sessions[].session_id` — names a `launcher:`; else the vault's configured
+`worker_launcher`; else the `claude_script` of the vault whose path holds the session's `cwd`
+(from `vault-cli config list`). A bare name resolves beside the vault launcher. A value that
+is not a plain path, two task pages claiming the session, a `cwd` under no vault, or a
+launcher file that does not exist all leave it **unresolved** — and an unresolved launcher
+refuses **before the kill** with an `❌ error:` line, the same operational class as a missing
+`cwd`. It is not a target refusal, so the seven tokens stay seven. The output's `launcher:`
+line names the file and its source (`task` / `worker-default` / `vault`).
+
+⚠️ **A goal's `launcher:` is not consulted**, on this path or the spawn path. It states how
+the goal's MANAGER runs; inheriting it resumed every worker under such a goal on its manager's
+Opus launcher (measured 2026-10-22, 12 private-personal goals). A manager resumed through this
+script takes the manager rule instead — the subject page's `manager_launcher:`, then the vault's
+configured `manager_launcher` (`manager-default`), then the `-claude` sibling (`claude-sibling`)
+for a vault-cli too old to emit the key.
 
 ## The one deliberate copy
 

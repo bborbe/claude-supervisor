@@ -183,23 +183,33 @@ class BoundVerdictTest(unittest.TestCase):
         rec = {} if size is None else {"context_window_size": size}
         return cu.bound_verdict({"pct": pct, "rec": rec}, threshold, tokens)
 
-    def test_over_by_percentage(self):
-        self.assertIs(self.v(80.0, 1000000, 200000), True)
+    def test_over_by_tokens(self):
+        # 80% of a 1M window is 800k, over a 500k bound.
+        self.assertIs(self.v(80.0, 1000000, 500000), True)
 
     def test_over_by_tokens_while_under_the_percentage(self):
         # 50% of a 1M window is 500k — the percentage gate would never fire here,
         # which is the whole reason the absolute bound exists on this fleet.
-        self.assertIs(self.v(50.0, 1000000, 200000), True)
+        self.assertIs(self.v(50.0, 1000000, 500000), True)
 
     def test_under_both(self):
-        self.assertIs(self.v(15.0, 1000000, 200000), False)
+        self.assertIs(self.v(15.0, 1000000, 500000), False)
 
-    def test_percentage_is_still_the_floor_on_a_small_window(self):
-        # 75% of 128k is 96k, under a 200k token bound — the percentage must still fire.
-        self.assertIs(self.v(75.0, 128000, 200000), True)
+    def test_a_small_window_below_the_floor_is_not_over(self):
+        # 75% of 128k is 96k, far below the 500k floor. The percentage used to
+        # fire here on its own, because the two bounds were ORed. The rule is
+        # that nothing below the floor is offered on any path, so how full the
+        # window is cannot matter — this is the case the change exists for.
+        self.assertIs(self.v(75.0, 128000, 500000), False)
+
+    def test_a_small_window_is_judged_by_tokens_not_by_its_shape(self):
+        # The floor is about tokens, never about the window: the same 128k
+        # window is over once its token count reaches the bound, even though no
+        # percentage of 128k could ever reach 500k.
+        self.assertIs(self.v(99.0, 128000, 100000), True)
 
     def test_unknown_window_is_unknown_not_under(self):
-        self.assertIsNone(self.v(15.0, None, 200000))
+        self.assertIsNone(self.v(15.0, None, 500000))
 
     def test_unknown_window_without_a_token_bound_is_plainly_under(self):
         # No token bound in force means nothing needs the window size.
@@ -214,8 +224,10 @@ class BoundLabelTest(unittest.TestCase):
     def test_percentage_only(self):
         self.assertEqual(cu.bound_label(70.0, None), "70%")
 
-    def test_both_bounds_named(self):
-        self.assertEqual(cu.bound_label(70.0, 200000), "70% or 200k tokens")
+    def test_only_the_bound_that_can_fire_is_named(self):
+        # Naming the percentage beside a token bound would describe a gate this
+        # code does not have: below the token bound the percentage cannot fire.
+        self.assertEqual(cu.bound_label(70.0, 500000), "500k tokens")
 
 
 class TokenBoundRenderTest(_RenderHarness, unittest.TestCase):
@@ -223,18 +235,28 @@ class TokenBoundRenderTest(_RenderHarness, unittest.TestCase):
 
     def test_the_output_names_the_bound_in_force(self):
         out = self.run_main({"s1.json": ctx_row()}, {}, {"1039"},
-                            argv=["--threshold-tokens", "200000"])
-        self.assertIn("Bound in force: 70% or 200k tokens", out)
+                            argv=["--threshold-tokens", "500000"])
+        self.assertIn("Bound in force: 500k tokens", out)
 
     def test_the_token_bound_fires_where_the_percentage_never_would(self):
+        # 50% of the 1M window is exactly 500k — at the bound, and the
+        # percentage gate alone would never have offered it.
         out = self.run_main({"s1.json": ctx_row(used_percentage=50)}, {}, {"1039"},
-                            argv=["--threshold-tokens", "200000"])
-        self.assertIn("Over 70% or 200k tokens: 1", out)
+                            argv=["--threshold-tokens", "500000"])
+        self.assertIn("Over 500k tokens: 1", out)
+
+    def test_a_small_window_below_the_floor_is_not_offered(self):
+        # The regression this change exists for: 75% of a 128k window is 96k,
+        # which the ORed percentage bound used to offer on its own.
+        out = self.run_main(
+            {"s1.json": ctx_row(used_percentage=75, context_window_size=128000)},
+            {}, {"1039"}, argv=["--threshold-tokens", "500000"])
+        self.assertNotIn("Over 500k tokens", out)
 
     def test_unknown_window_is_reported_and_never_read_as_zero_tokens(self):
         out = self.run_main(
             {"s1.json": ctx_row(used_percentage=15, context_window_size=None)},
-            {}, {"1039"}, argv=["--threshold-tokens", "200000"])
+            {}, {"1039"}, argv=["--threshold-tokens", "500000"])
         self.assertIn("Window UNKNOWN", out)
         self.assertIn("window unknown", out)
         self.assertNotIn("0k/0k", out)
@@ -242,7 +264,7 @@ class TokenBoundRenderTest(_RenderHarness, unittest.TestCase):
     def test_unknown_window_is_never_offered_for_compaction(self):
         out = self.run_main(
             {"s1.json": ctx_row(used_percentage=15, context_window_size=None)},
-            {}, {"1039"}, argv=["--threshold-tokens", "200000", "--compactable"])
+            {}, {"1039"}, argv=["--threshold-tokens", "500000", "--compactable"])
         self.assertNotIn("Compaction candidates", out)
 
 

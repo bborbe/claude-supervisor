@@ -102,7 +102,7 @@ const COST_FIGURES_MEANINGFUL =
 // spawn-mode.mjs, where it can be unit-tested without touching a filesystem.
 const CONFIG_FILE = ENV.SUPERVISOR_CONFIG || join(CONFIG_DIR, 'config.json')
 
-const readConfigFile = (path) => {
+export const readConfigFile = (path) => {
   let raw
   try {
     raw = readFileSync(path, 'utf8')
@@ -117,6 +117,90 @@ const readConfigFile = (path) => {
 }
 
 const CONFIG_FILE_READ = readConfigFile(CONFIG_FILE)
+
+// Every `<PREFIX><NAME>` environment variable, as `{ <name>: value }` — the A2A per-target maps.
+//
+// ⚠️ The name is lowercased with `_` → `-`, because the operator's cluster names are
+// lowercase-hyphen (`octopus-dev`) and an environment variable cannot carry a hyphen. That makes
+// the mapping lossy — `OCTOPUS_DEV` and `OCTOPUS-DEV` are the same key — which is why the config
+// FILE is documented as the preferred source and this route is documented as the normalized one.
+//
+// Empty and whitespace-only values are dropped rather than kept: an unset target must read as
+// "not configured" so the resolver refuses, and a blank string would otherwise pass `set`'s
+// `!== ''` test only to fail the URL check with a message about a value the operator never meant
+// to set.
+function collectPrefixed(env, prefix) {
+  const out = {}
+  for (const [name, value] of Object.entries(env)) {
+    if (!name.startsWith(prefix)) continue
+    if (typeof value !== 'string' || value.trim() === '') continue
+    const suffix = name.slice(prefix.length)
+    if (suffix === '') continue
+    out[suffix.toLowerCase().replace(/_/g, '-')] = value
+  }
+  return out
+}
+
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
+
+// A dotted-quad in 127/8. WHATWG normalisation collapses the decimal and hex spellings
+// (`2130706433`, `0x7f000001`, `127.1`) onto `127.0.0.1` before `url.hostname` is read, so
+// this only ever sees dotted-decimal.
+//
+// ⚠️ The octet range check is DEFENCE IN DEPTH, not the live guard: Node's URL parser rejects
+// an out-of-range octet outright (`new URL('http://127.0.0.256:1')` throws ERR_INVALID_URL),
+// so such an input is refused by the `catch` above and never reaches this function. The check
+// stays because a parser that instead fell back to domain parsing would hand `127.0.0.256`
+// here as an opaque host, and then only this line would stop it. Exported so the check is
+// exercised directly rather than only through a path that cannot reach it.
+export function isLoopbackV4(host) {
+  const m = /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
+  return m !== null && [m[1], m[2], m[3]].every((o) => Number(o) <= 255)
+}
+
+// Resolve the wrapper origin, refusing anything that is not loopback.
+//
+// The wrapper's API is unauthenticated by design — it is a local control plane — and a spawn
+// sends it the whole inherited environment, credentials included. So the one thing that must
+// not be configurable is pointing it off this machine.
+//
+// ⚠️ A bad value is RETURNED as a refusal, not thrown. This module's contract is that
+// refusals are surfaced so the whole surface stays enumerable and testable, with
+// `supervisor.mjs` acting on them at boot — the same shape `claudeHomeRefusal` uses. Throwing
+// here would make `config.mjs` unimportable, so one mistyped environment variable would take
+// down tab workers, the attention surface and everything else at load, in a deployment that
+// may never spawn a wrapper-backed worker at all.
+export function resolveWrapperUrl(raw) {
+  const fallback = 'http://localhost:18090'
+  const value = typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : fallback
+  let url
+  try {
+    url = new URL(value)
+  } catch {
+    // ⚠️ Never echo the raw value: a malformed URL can carry userinfo, and this string reaches
+    // the spawn reply and the log.
+    return { url: fallback, refusal: 'SUPERVISOR_WRAPPER_URL is not a URL' }
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return { url: fallback, refusal: `SUPERVISOR_WRAPPER_URL must be http(s), got ${url.protocol}` }
+  }
+  if (!LOOPBACK.has(url.hostname) && !isLoopbackV4(url.hostname)) {
+    return {
+      url: fallback,
+      refusal:
+        `SUPERVISOR_WRAPPER_URL must point at loopback: the wrapper API is unauthenticated ` +
+        `and a spawn sends the inherited environment to it. Got host ${url.hostname}`,
+    }
+  }
+  // ⚠️ The ORIGIN, not the trimmed string. A value carrying a path, query or fragment
+  // (`http://localhost:18090/base`) passed the host check and was then returned verbatim, so
+  // `baseOf()` concatenated `/base/api/1.0/...` and every wrapper call silently 404'd. The
+  // origin is the only thing the comment above claims to enforce, and `url.origin` also drops
+  // any userinfo, which is what kept a credential out of the reply and the log.
+  return { url: url.origin, refusal: null }
+}
+
+const wrapperResolution = resolveWrapperUrl(ENV.SUPERVISOR_WRAPPER_URL)
 
 export const config = Object.freeze({
   // stderr is the transport-safe log channel — stdout carries MCP frames — so a file
@@ -145,6 +229,24 @@ export const config = Object.freeze({
   configFile: CONFIG_FILE,
   configFileContents: CONFIG_FILE_READ.file,
   configFileError: CONFIG_FILE_READ.error,
+
+  // The A2A status callback a CLUSTER worker is told to POST to. A pod reaches neither this
+  // machine's Docker gateway name (CoreDNS has no such name) nor its LAN address (the worker's
+  // generated egress policy permits only in-cluster namespaces), so the only route out is a
+  // relay the operator deploys inside `agent` — already permitted — and names here. Both are
+  // raw and unvalidated like the fields below: `null` means "no relay exists", which leaves a
+  // cluster spawn on the Docker-gateway default rather than inventing an address.
+  a2aPushPort: ENV.SUPERVISOR_A2A_PUSH_PORT || null,
+  // ⚠️ LOOPBACK BY DEFAULT, AND WIDENING IT IS A DELIBERATE ACT. The receiver is
+  // token-authenticated, but a loopback bind is still the narrowest surface that works — the
+  // docker path needs nothing wider. A relay on another host cannot reach loopback, so the
+  // operator sets this to the address that host can dial; that is the only reason to.
+  a2aPushHost: ENV.SUPERVISOR_A2A_PUSH_HOST || null,
+  // The push router that owns the stable address a cluster relay forwards to. Set, this
+  // session keeps its receiver on loopback and registers its token there; unset, it binds
+  // whatever `a2aPushHost` / `a2aPushPort` say, which a fixed port admits for one process only.
+  a2aPushRouterUrl: ENV.SUPERVISOR_A2A_PUSH_ROUTER_URL || null,
+  a2aK8sCallbackUrl: ENV.SUPERVISOR_A2A_K8S_CALLBACK_URL || null,
 
   // Raw and deliberately unvalidated, exactly like permissionMode below: the legal
   // values and the message naming a bad one belong to the module that owns the meaning.
@@ -192,8 +294,8 @@ export const config = Object.freeze({
   // message belong to cluster-spawn.mjs, which can be tested without an environment.
   clusterAuthToken: ENV.INTERACTIVE_AUTH_TOKEN || null,
 
-  // The A2A worker-controller's base URL and the token this server presents to it — the `docker`
-  // and `k8s` spawn targets.
+  // The A2A worker-controller's base URL and the token this server presents to it — one entry
+  // per TARGET, where a target is `docker` or `k8s:<cluster>` (2026-10-20).
   //
   // ⚠️ TWO names of OUR OWN, unlike the cluster pair above, and the asymmetry is deliberate. The
   // cluster token reuses `INTERACTIVE_AUTH_TOKEN` because that is the name the SERVICE reads at
@@ -201,14 +303,35 @@ export const config = Object.freeze({
   // each turn and its own control token is a separate secret with no counterparty name to borrow,
   // so these are the supervisor's own keys and appear under `a2a` in the config file.
   //
-  // Unset means "the A2A targets are not configured here", and such a spawn REFUSES rather than
+  // ⚠️ PER TARGET, and there is deliberately no target-agnostic variable. The controller runs on
+  // this Mac for `docker` and once per cluster for `k8s` — separate deployments, separate control
+  // secrets, and no address or token that is right for more than one. A single `SUPERVISOR_A2A_URL`
+  // is not a default; it is a value that is wrong for every target but one (measured 2026-10-14: a
+  // `target: "docker"` spawn against the one configured URL created a k8s pod).
+  //
+  // The file carries the same split, as a target-keyed map under `a2a.url`; the environment wins.
+  //
+  // ⚠️ THE ENVIRONMENT IS SCANNED, not enumerated, because the cluster set is the operator's and
+  // grows without a code change. `SUPERVISOR_A2A_URL_<SUFFIX>` becomes the key `suffix.toLowerCase()
+  // with '_' → '-'`, so `…_OCTOPUS_DEV` is the cluster `octopus-dev`. That mapping is lossy
+  // (`octopus_dev` and `octopus-dev` collide) and it is the ONLY lossy one on this path: the file
+  // map is keyed by the cluster name as written, which is why the file is the preferred source.
+  // `docker` and `k8s` are reserved: a target KIND and the legacy default-cluster alias, never a
+  // cluster name.
+  //
+  // Unset means "that target is not configured here", and such a spawn REFUSES rather than
   // reaching for a default — see `resolveA2AControllerTarget`, which owns both the shape rules
   // and the refusals so they can be tested without an environment.
   //
-  // ⚠️ The token is never logged, echoed or written. Nothing in this module prints it, and the
-  // record that holds it is an allowlisted projection away from every read surface.
-  a2aUrl: ENV.SUPERVISOR_A2A_URL || null,
-  a2aToken: ENV.SUPERVISOR_A2A_TOKEN || null,
+  // ⚠️ Neither token is ever logged, echoed or written. Nothing in this module prints them, and
+  // the record that holds one is an allowlisted projection away from every read surface.
+  a2aUrls: collectPrefixed(ENV, 'SUPERVISOR_A2A_URL_'),
+  a2aTokens: collectPrefixed(ENV, 'SUPERVISOR_A2A_TOKEN_'),
+  // The cluster a bare `k8s` target resolves to. Unset means the built-in default (`nukedev`,
+  // what the single `k8s` target meant before clusters existed), so a live row keeps working
+  // with no config edit. The FILE's `a2a.defaultCluster` is read by the resolver, which owns
+  // that precedence; this is only the environment's contribution.
+  a2aDefaultCluster: ENV.SUPERVISOR_A2A_DEFAULT_CLUSTER || null,
 
   // Whether a reported cost figure describes the traffic that actually ran. See the
   // note above the resolution — this is a property of the deployment, not of a turn.
@@ -232,12 +355,18 @@ export const config = Object.freeze({
   // life of the server — the exact staleness the map exists to avoid.
   roleMap: ENV.SUPERVISOR_ROLE_MAP || join(homedir(), '.cache', 'wezterm-role-map.json'),
 
-  // The durable spawn ledger: one uuid-keyed record per worker this server spawns,
-  // outliving the session it describes. Deliberately NOT reusing
-  // SUPERVISOR_SESSIONS_DIR — that name already means the live registry above, a
-  // different store with a different lifetime, and one variable meaning two things is
-  // how a reader ends up pointing the ledger at Claude Code's directory.
-  ledgerDir: ENV.SUPERVISOR_LEDGER_DIR || join(STATE_DIR, 'sessions'),
+  // ⚠️ There is deliberately NO ledger-directory field here any more, and its absence is the
+  // change rather than an omission. The durable spawn ledger is attention-controller's
+  // session-ledger store, reached over HTTP at `attentionStoreUrl` — every reader moved onto it,
+  // and the file write that used to sit beside this config went with the last of them. The
+  // variable that named that directory is retired rather than repurposed: one that still named a
+  // path no code reads is how an operator points a store at the wrong place and reads the silence
+  // as an empty fleet.
+  //
+  // ⚠️ Neither the retired path nor the retired variable is spelled here, and that is deliberate:
+  // SC2 of the task that retired the store asserts each accessor with a pinned per-file probe
+  // matching those two literals, so naming them in a comment would fail the probe on a file whose
+  // code is already clean. Both are named in `docs/fleet-surface.md`, where an operator looks.
 
   // The headless-worker heartbeat store: one transient file per live worker, whose mtime is
   // refreshed by the server that owns it and read by any process that must decide whether
@@ -267,6 +396,22 @@ export const config = Object.freeze({
   // The caller treats `null` as "no self-stamp", which is the honest answer.
   sessionId: ENV.CLAUDE_CODE_SESSION_ID || null,
 
+  // The mode the SERVER THAT SPAWNED THIS SESSION declared for it — `headless`, `interactive`,
+  // or absent when no server spawned it (the operator's own session, a session opened by hand,
+  // a path-B resume that goes through no server).
+  //
+  // ⚠️ Read here rather than in `heartbeat.mjs`, which owns the stamp and must not consult
+  // ambient process state: this module owns the server's whole environment surface, so a second
+  // reader of `process.env` is what `config.test.mjs` fails the build on.
+  //
+  // ⚠️ The value is the spawn's OWN handover (`workerEnvFor` in `spawn-mode.mjs` sets
+  // `SUPERVISOR_WORKER_MODE` on both the SDK and the tab path), inherited by this server because
+  // the worker's session starts it. So a server running inside a headless worker knows that fact
+  // locally — no ledger, no registry and no store read, none of which may sit on the liveness
+  // path. `heartbeat.mjs` uses it to decide whether this server stamps the session at all; see
+  // `selfStampRefusal` there for the defect that makes it stand down.
+  workerMode: ENV.SUPERVISOR_WORKER_MODE || null,
+
   // Raw and deliberately unvalidated here: the allowed-mode list and the warning that
   // names a bad value both belong to the server's own logger, not to this module.
   permissionMode: ENV.SUPERVISOR_PERMISSION_MODE || null,
@@ -289,6 +434,22 @@ export const config = Object.freeze({
 
   claudeCmd: ENV.SUPERVISOR_CLAUDE_CMD || null,
   mcpConfig: ENV.SUPERVISOR_MCP_CONFIG || null,
+
+  // Where claude-wrapper listens. The headless spawn path starts its children THERE rather
+  // than in this process, because a permission park belongs to whoever holds the child's
+  // stdin — and a park held here is answerable only by this server, then dies with it.
+  // Same default as the wrapper's own `--listen`, so an unconfigured machine works.
+  //
+  // ⚠️ LOOPBACK ONLY, and the check is not decoration. A spawn sends the whole inherited
+  // environment — `baseEnv` below, including `ANTHROPIC_BASE_URL` and any credential riding
+  // in it — to this URL in cleartext, on every spawn; and no wrapper call sends an auth
+  // header. A non-loopback value therefore turns the spawn/message/answer control plane into
+  // an unauthenticated endpoint that receives the fleet's credentials.
+  wrapperUrl: wrapperResolution.url,
+  // Non-null when SUPERVISOR_WRAPPER_URL was refused. `wrapperUrl` then holds the loopback
+  // default, so nothing silently points elsewhere; `supervisor.mjs` refuses the spawn and
+  // says why. Same shape as `claudeHomeRefusal`.
+  wrapperUrlRefusal: wrapperResolution.refusal,
 
   // The process environment, handed wholesale to a spawned worker so it inherits the
   // launcher's env — PATH, HOME and ANTHROPIC_BASE_URL among it. Here rather than read at

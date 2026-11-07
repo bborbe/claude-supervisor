@@ -9,48 +9,114 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { query, resolveSettings } from '@anthropic-ai/claude-agent-sdk'
-import { appendFileSync, mkdirSync, readFileSync } from 'fs'
+import { resolveSettings } from '@anthropic-ai/claude-agent-sdk'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { isAbsolute, join } from 'path'
 import { realpathSync } from 'fs'
 import { spawnSync } from 'child_process'
 import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
-import { HEARTBEAT_INTERVAL_MS, clearStamp, heartbeatDir, stampRecord, startSelfStamp } from './heartbeat.mjs'
+import { answerWrappedSession, listWrappedSessions, pendingQuestionOf, readWrappedSession, sendWrappedSession, spawnWrappedSession, stopWrappedSession, streamWrappedSession } from './wrapper-stream.mjs'
+import { HEARTBEAT_INTERVAL_MS, a2aStamp, clearStamp, heartbeatDir, selfStampRefusal, stampRecord, startSelfStamp } from './heartbeat.mjs'
 import { workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
-import { startAttentionPoll, storeDecisionRecord } from './attention-poll.mjs'
+import { startAttentionPoll, storeDecisionRecord, timeoutDecisionRecord } from './attention-poll.mjs'
 import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
+import { WRAPPER_POLICY_INTERVAL_MS, createWrapperPolicyPoller } from './wrapper-policy.mjs'
+import { confinedCandidate, loadManagerAllowlist, matchManagerEntry } from './manager-allowlist.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
-import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellEnvExports, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
+import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
-import { A2A_SPAWN_TARGETS, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, collectWorkerTurn, createWorkerOnController, fetchWorkerCard, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pollA2A, resolveA2AControllerTarget } from './a2a-spawn.mjs'
+import { fileURLToPath } from 'node:url'
+import { A2A_DEFAULT_CLUSTER, a2aTargetsForClusters, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, clusterAllowlistRefusal, clusterOfTarget, collectWorkerTurn, configuredA2AClusters, createWorkerOnController, fetchWorkerCard, isA2ATarget, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pendingPushRegistration, pollA2A, pushDiagnosticPatch, readPushCallbackFromWorker, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
+import { createA2APushRegistry } from './a2a-push-registry.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
-import { parseLauncherModel, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
+import { applyHumanLauncherRule, parseLauncherModel, resolveManagerLauncher, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { readTaskLaunchers } from './task-launcher.mjs'
 import { CLUSTER_ANSWER_MAX, classifyClusterAnswer, newSessionId, resolveClusterTarget, startClusterSession } from './cluster-spawn.mjs'
 import { resolveMessageChannel } from './message-channel.mjs'
 import { bindSessionToTask } from './task-binding.mjs'
 import { windowIdArgument } from './window-id.mjs'
-import { resolveRole } from './role-map.mjs'
+import { tabSpawnInner } from './tab-spawn.mjs'
+import { resolveRole, chipForRole } from './role-map.mjs'
 import { managerSessions } from './manager-sessions.mjs'
+import { mtimeReloadedConfig } from './config-reload.mjs'
+import { mtimeReloadedAllowlist } from './cluster-allowlist.mjs'
 import { policySupportError, resumeSupportError, sendToPane } from './tab.mjs'
-import { buildRecord, listRecords, parentSessionId, readRecord, UNOBSERVED_STATUS, unobservedPatch, updateRecord, writeRecord } from './ledger.mjs'
+import { buildRecord, ledgerWriteRoute, mergeRecord, parentSessionId, stoppedPatch, UNOBSERVED_STATUS, unobservedPatch } from './ledger.mjs'
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
-import { findLiveHolder } from './resume-guard.mjs'
-import { fetchOpenCards } from './open-cards.mjs'
+import { resumeRefusal } from './resume-guard.mjs'
+import { resumeAdmission } from './context-guard.mjs'
+import { shouldEndIdleWorker } from './idle-worker.mjs'
+import { fetchAttentionItems, fetchOpenCards, openCardsOf } from './open-cards.mjs'
+import { foreignParkRefusal } from './park-refusal.mjs'
+import { answerPathRefusal } from './answer-path.mjs'
 import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
 import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
 import { buildCarriedDecision, mayApplyAllow, settleFromCarried } from './decision-settle.mjs'
-import { SHIPPING_PERMISSION_MODE, shippingSettings, shippingSupportError } from './shipping-settings.mjs'
-import { liveSessionIds, rehydratableAgents } from './registry-rehydrate.mjs'
+import { SHIPPING_PERMISSION_MODE, launcherHonoursModeEnv, shippingSupportError, shippingTabEnv } from './shipping-settings.mjs'
+import { liveSessionIds, rehydratableAgents, unionRoster } from './registry-rehydrate.mjs'
+import { patchSessionLedgerRow, postSessionLedger, readSessionLedger, readSessionLedgerRow, recordToWire } from './session-ledger.mjs'
 
 const PERMISSION_TIMEOUT_MS = 15 * 60 * 1000
 
 const agents = new Map() // id -> agent record
+
+// The worker→spawner status channel: one loopback receiver per server, started at boot, and the
+// per-worker tokens it accepts.
+//
+// ⚠️ ONE PER SERVER, AND THAT IS THE DESIGN RATHER THAN AN IMPLEMENTATION DETAIL. The callback
+// URL travels per `create`, so the pushes for a worker land in the records of the session that
+// SPAWNED it — which is the session whose `agent_status` / `list_agents` must show them. A shared
+// receiver would need a worker→session routing table that does not exist today.
+//
+// ⚠️ THE BIND IS LAZY AND ITS FAILURE IS NON-FATAL. A receiver that cannot take a port must not
+// make every A2A spawn fail: the channel is additive, and a spawn without it produces exactly the
+// pre-change worker. `ensureListening()` is called at boot so the port is ready before the first
+// spawn, and again by `beginCreate` — which is what keeps a boot-time failure from being the only
+// attempt, without ever retrying per spawn.
+const a2aPushRegistry = createA2APushRegistry({
+  // A cluster worker reaches this receiver through an in-cluster relay, and a relay's upstream
+  // port is deployed configuration — so a k8s deployment pins the port here and the relay is
+  // told the same number. `0` (ephemeral) stays the default: the docker path has no relay.
+  // ⚠️ A ROUTER SUPERSEDES THE HOST/PORT PAIR, IT DOES NOT JOIN IT. With a router, this
+  // session's receiver MUST stay on loopback at an ephemeral port: the router forwards to
+  // `127.0.0.1:<that port>`, so a receiver bound to the LAN address would refuse every forward
+  // (502), and a receiver pinned to the fixed port would hit EADDRINUSE on the second session —
+  // reintroducing exactly the contention the router exists to remove. The two are one decision,
+  // so the router wins and the pair is ignored rather than merged.
+  ...(config.a2aPushRouterUrl
+    ? { routerUrl: config.a2aPushRouterUrl }
+    : {
+        receiverPort: Number(config.a2aPushPort) || 0,
+        // Loopback unless the operator widens it — the pre-router shape, kept for a
+        // deployment that has not adopted the router yet.
+        ...(config.a2aPushHost ? { receiverHost: config.a2aPushHost } : {}),
+      }),
+})
+
+/**
+ * The callback URL a `k8s` worker must be told to POST to — `undefined` when this process was
+ * not configured with a relay, which leaves the caller on the default Docker-gateway URL.
+ *
+ * ⚠️ A CLUSTER WORKER CANNOT USE THE DEFAULT, AND THIS IS MEASURED RATHER THAN INFERRED.
+ * `host.docker.internal` does not resolve inside a pod (CoreDNS: `no such host`), and a pod
+ * cannot reach this machine's LAN address either: the worker's generated egress NetworkPolicy
+ * permits only `kube-system`, its own `agent` namespace, `monitoring`, and two named `dev`
+ * pods — nothing on the LAN. The egress proxy is a third wall behind those two. So the only
+ * route out of the pod that exists today is a service INSIDE `agent`, which the policy already
+ * permits: `SUPERVISOR_A2A_K8S_CALLBACK_URL` names that relay, and it is the operator's job to
+ * deploy it. Unset means "no relay exists", and a cluster spawn then registers the Docker
+ * gateway exactly as it did before — visibly broken, rather than silently pretending.
+ */
+function a2aCallbackUrlForTarget(target) {
+  if (!String(target ?? '').startsWith('k8s')) return undefined
+  const relay = config.a2aK8sCallbackUrl
+  return typeof relay === 'string' && relay.trim() !== '' ? relay.trim() : undefined
+}
 
 // A headless worker's liveness, published where a process that did NOT spawn it can read it.
 //
@@ -100,7 +166,18 @@ const heartbeat = {
   // deliberately omitted, and the activity starts at `idle`.
   startSelf(sessionId) {
     this.stopSelf()
+    // ⚠️ Standing down is LOGGED rather than silent, because "this session has no self-stamp" is
+    // otherwise indistinguishable from a stamp that failed to write — and only one of those is
+    // intended. `config.workerMode` is the spawn's own handover, so a server running inside a
+    // headless worker knows the stamp belongs to the server that spawned that worker; see
+    // `selfStampRefusal` for the measured defect this removes.
+    const refusal = selfStampRefusal({ workerMode: config.workerMode })
+    if (refusal) {
+      log(`no self-stamp for ${sessionId ?? 'this server'}: ${refusal}`)
+      return false
+    }
     this.self = startSelfStamp(sessionId, {
+      workerMode: config.workerMode,
       // Same reasoning as `stamp` above: the session still runs, and a manager's verdict
       // degrades to "could not tell" rather than the server failing to start.
       onError: (error) => log(`WARNING: cannot stamp own heartbeat for ${sessionId}: ${error.message}`),
@@ -160,11 +237,21 @@ if (config.claudeHomeRefusal) {
 // Best-effort by design: a store that cannot be read leaves the roster as it was before this
 // fix — empty — rather than taking the server down. The warning is the observable.
 {
-  const rehydrated = rehydratableAgents({ log })
+  const rehydrated = await rehydratableAgents({ log })
   if (rehydrated === null) {
     log('WARNING: a store could not be read — the roster starts empty and will not show workers spawned before this process')
   } else {
     for (const agent of rehydrated) agents.set(agent.id, agent)
+    // ⚠️ **An EMPTY store is the loud case, not the quiet one.** `[]` and `null` are
+    // different answers and only one of them is benign: `null` is a store that could not be
+    // read, while `[]` is a store that answered and holds nothing. On a fresh install that
+    // is correct; on a deploy that has not yet run the one-time import it means every
+    // worker spawned before this process is MISSING from the roster — which is worse than
+    // the file ledger this replaced, and used to be indistinguishable from a healthy empty
+    // fleet because the line below reads the same either way.
+    if (rehydrated.length === 0) {
+      log('WARNING: the ledger endpoint answered with NO rows — a fresh install looks like this, but so does a deploy whose one-time import has not run yet, in which case every worker spawned before this process is invisible to the roster')
+    }
     log(`rehydrated ${rehydrated.length} agent(s) from the ledger`)
   }
 }
@@ -187,6 +274,50 @@ function pruneRehydratedAgents() {
   for (const agent of adopted) {
     if (!live.has(agent.sessionId)) agents.delete(agent.id)
   }
+}
+
+// The roster AS OF NOW: this process's own workers, union'd with every live worker the ledger
+// endpoint knows that this process did not spawn.
+//
+// ⚠️ **This is the fix, and the adoption block above is not a substitute for it.** Adoption
+// runs ONCE, at import, and `pruneRehydratedAgents` can only remove — so a session that was not
+// live at that instant stays invisible to this process for its whole life, however live it
+// becomes. Measured 2026-10-13: 4 of 35 live-and-ledgered sessions were absent from a live
+// roster, this server's own session id among them, because its heartbeat is written by the very
+// server that performs the adoption and so cannot exist at import. A read here happens at
+// REQUEST time and cannot freeze, which is the property the adoption block cannot have.
+//
+// ⚠️ **This process's own row WINS on a `session_id` collision**, and the direction is
+// deliberate rather than incidental: an in-process agent carries the live transcript, the park
+// queue and the permission rules, while an endpoint row carries identity alone. Letting the
+// fresh row win would replace a working worker's record with a hollow one.
+//
+// ⚠️ **A store that cannot be read returns the in-process roster rather than an empty one.**
+// The endpoint is a second source, not a replacement for what this process already knows;
+// dropping its own workers on a store outage would be the same failure this change exists to
+// remove, one direction over.
+async function currentRoster() {
+  // Still pruned: an adopted row carries a BOOT-TIME liveness reading, and a worker that died
+  // since would otherwise sit in the roster under a status that reads as fine.
+  pruneRehydratedAgents()
+  const fresh = await rehydratableAgents({ log })
+  if (fresh === null) {
+    // ⚠️ **Logged, because the degraded answer is otherwise indistinguishable from the
+    // correct one.** A store outage silently reverts this call to in-process-only — the
+    // exact failure this whole change exists to remove — and the manager reading
+    // `list_agents` has no way to tell. The boot path above already logs its `null`; this
+    // one did not, which threw away the `null`-vs-`[]` distinction `readSessionLedger`
+    // deliberately preserves.
+    log('WARNING: the ledger endpoint could not be read — this roster is this process\'s own workers ONLY, so a worker spawned elsewhere is missing from it until the store answers again')
+    return new Map(agents)
+  }
+  // ⚠️ **The union lives in `registry-rehydrate.mjs` so it can be TESTED.** `supervisor.mjs`
+  // cannot be imported — it starts an MCP server at module load — which left the heart of
+  // this change pinned only by regexes over the source text, and a regex cannot catch a
+  // behavioural regression. One did get through: the foreign row's id was derived from a set
+  // seeded by THIS process's Map, so a spawn landing between a manager's `list_agents` and its
+  // `send_agent_message` flipped that row's id and handed the message to the wrong worker.
+  return unionRoster(agents, fresh)
 }
 
 // ── attention-store delivery ────────────────────────────────────────────────
@@ -251,6 +382,16 @@ const STATE_DIR = config.stateDir
 const USER_POLICY = config.userPolicy
 const BUNDLED_POLICY = new URL('./policy.json', import.meta.url).pathname
 const PERMISSION_LOG = config.permissionLog
+// The session end record's writer, handed to the spawned pane as `SESSION_EXIT_RECORD`.
+// Resolved from this module so the tab spawn and the rest of the fleet write the same
+// store; a missing or non-executable script is fail-open (every call is `|| true`), so a
+// partial deploy costs a record, never a spawn.
+// `fileURLToPath`, not `.pathname`: a `.pathname` is percent-encoded, so a plugin installed
+// under a path with a space or a non-ASCII character yields `%20`/`%C3%BC` and the variable
+// names a file that does not exist — every write then fails open behind `|| true` and the
+// pane silently records nothing, which reads exactly like a session that is still alive.
+// Same idiom as `server/answer-path.mjs:36`. Raised by the PR review.
+const RECORD_SCRIPT = fileURLToPath(new URL('../scripts/session-exit-record.py', import.meta.url))
 
 const PERMISSION_MODES = ['default', 'acceptEdits', 'bypassPermissions', 'plan', 'dontAsk', 'auto']
 
@@ -453,8 +594,67 @@ const publicPerm = (p) => ({
   reason: p.decisionReason ?? null,
   blocked_path: p.blockedPath ?? null,
   input: p.input,
+  // The manager-allowlist entry covering this prompt, so the answering manager can see WHY it
+  // is allowed to answer before it does — rather than re-deriving a match from the command text.
+  allowlist_entry: p.allowlistEntry?.prefix ?? null,
   requested_at: p.requestedAt,
 })
+
+// The files a test-run entry's confinement reads. A `clean-runner-config` entry means "run this
+// repository's committed test suite", so none of these may carry an uncommitted change — the
+// worker can already write in its cwd, and an edited Makefile turns `make test` into whatever
+// the edit says.
+// ⚠️ Every filename the runners will read, not just the canonical one. `make` prefers
+// `GNUmakefile`, then `makefile`, then `Makefile`; `bun` reads `bunfig.toml` for preloads and
+// test configuration. Checking only `Makefile` left a worker free to write `GNUmakefile` (which
+// `make test` reads INSTEAD) and pass a clean-tree check.
+const RUNNER_CONFIG_FILES = [
+  'GNUmakefile',
+  'makefile',
+  'Makefile',
+  'package.json',
+  'bunfig.toml',
+  'bun.lock',
+  'bun.lockb',
+  'package-lock.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+]
+
+// True only when git succeeds AND reports no change to those files. Every failure — no git, not
+// a repository, a timeout, a non-string result — reads as NOT clean. The entry this gates grants
+// arbitrary execution, so a check that could not run must not grant it.
+function runnerConfigClean(cwd) {
+  if (!cwd) return false
+  try {
+    const out = spawnSync('git', ['status', '--porcelain', '--', ...RUNNER_CONFIG_FILES], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 5000,
+    })
+    if (out.status !== 0 || typeof out.stdout !== 'string') return false
+    return out.stdout.trim() === ''
+  } catch {
+    return false
+  }
+}
+
+// The manager-allowlist entry that authorises this prompt, or null when none does.
+//
+// Read per call: the file is tiny, and the operator must be able to edit it without a restart —
+// the same live-read expectation the policy overlay has. A missing or malformed file yields no
+// entries and therefore no match, which sends every prompt to the operator: the safe direction.
+//
+// The confinement input is computed ONLY when a confined entry's prefix matches, so the common
+// prompt never pays for a `git status`.
+function managerAllowlistEntry(toolName, key, cwd) {
+  const { entries } = loadManagerAllowlist()
+  if (!entries) return null
+  const direct = matchManagerEntry(entries, toolName, key, {})
+  if (direct) return direct
+  if (!confinedCandidate(entries, toolName, key)) return null
+  return matchManagerEntry(entries, toolName, key, { runnerConfigClean: runnerConfigClean(cwd) })
+}
 
 function makeCanUseTool(agent) {
   return (toolName, input, opts = {}) =>
@@ -481,11 +681,22 @@ function makeCanUseTool(agent) {
         decisionReason: opts.decisionReason,
         blockedPath: opts.blockedPath,
         requestedAt: new Date().toISOString(),
+        // Which manager-allowlist entry covers this prompt, or null. Computed HERE, at park
+        // time, so the answer record can carry a server-produced `matched_entry` rather than
+        // one the manager asserts about itself — a manager reporting its own match would make
+        // the audit read the answerer's claim as evidence.
+        allowlistEntry: managerAllowlistEntry(toolName, inputKey(input), agent.cwd),
         settle,
       }
       // Fail safe: an unanswered prompt must not park a worker forever.
+      // ⚠️ The timeout writes a record BEFORE it settles, and that ordering is the point:
+      // this path used to settle with no `permissions.jsonl` row at all, so a timeout and a
+      // clean exit were indistinguishable in the log and the 7-day criterion had no
+      // observable (SC5(a)). The builder lives in `attention-poll.mjs` because this file
+      // cannot be imported by a test; only the call site is pinned here, by source text.
       const timer = setTimeout(() => {
         log(`permission ${requestId} timed out -> deny`)
+        logPermission(timeoutDecisionRecord({ requestId, agentId: agent.id, park: record }))
         settle({ behavior: 'deny', message: 'Supervisor did not answer within 15 minutes.' })
       }, PERMISSION_TIMEOUT_MS)
 
@@ -540,6 +751,70 @@ function makeCanUseTool(agent) {
     })
 }
 
+// Answer a park the WRAPPER holds, for a wrapper-backed worker.
+//
+// ⚠️ The id is authoritative and the record is read LIVE, never from a cache. A worker can
+// unpark and re-park between a status read and this call, so answering by agent would answer
+// a question the caller never saw; naming the request id means a stale call gets the
+// wrapper's own 409 and changes nothing. That asymmetry is the whole reason this shape was
+// chosen over an `agent_id` argument.
+//
+// ⚠️ FOUR outcomes, and the caller must keep them apart. Folding `unreadable` into `not_found`
+// is what made a wrapper that was down indistinguishable from a request id that never
+// existed — the conflation the refusal text used to claim it had already fixed:
+//   {answered, behavior, agent_id, via} — released
+//   {error}                             — a wrapper-backed worker held the id and the answer was refused
+//   {unreadable: true, error}           — a wrapper-backed worker exists but the wrapper could
+//                                         not be read, so "no park" is NOT a fact here
+//   {not_found: true}                   — the wrapper was read and nothing is parked on this id
+async function answerWrapperPark(requestId, behavior) {
+  const wanted = behavior === 'allow' ? 'allow' : 'deny'
+  const backed = [...agents.values()].filter((a) => a.wrapperSessionId)
+  if (backed.length === 0) return { consulted: false }
+  let sessions
+  try {
+    // ONE read for every wrapper-backed worker. The per-agent loop this replaces cost N
+    // sequential round-trips on the miss path, which is the common path.
+    sessions = await listWrappedSessions({ baseUrl: config.wrapperUrl })
+    if (!Array.isArray(sessions)) throw new Error('wrapper session list was not an array')
+  } catch (error) {
+    return { unreadable: true, error: `wrapper session list unreadable: ${error.message}` }
+  }
+  for (const agent of backed) {
+    const session = sessions.find((s) => s?.id === agent.wrapperSessionId)
+    if (session?.question?.request_id !== requestId) continue
+    try {
+      await answerWrappedSession({
+        baseUrl: config.wrapperUrl,
+        sessionId: agent.wrapperSessionId,
+        requestId,
+        behavior: wanted,
+      })
+    } catch (error) {
+      return { error: `wrapper answer for ${agent.id} failed: ${error.message}` }
+    }
+    if (agent.status === 'blocked-on-permission') agent.status = 'running'
+    log(`permission ${requestId} ${wanted.toUpperCase()} by manager (wrapper-backed worker ${agent.id})`)
+    return { answered: requestId, behavior: wanted, agent_id: agent.id, via: 'wrapper' }
+  }
+  return { not_found: true }
+}
+
+// One wrapper read for the whole roster, or null when it cannot be read or was not needed.
+//
+// `needed` is not an optimisation detail: without it every manager sweep in a fleet holding no
+// wrapper-backed worker would still pay a round-trip (and, wrapper down, its timeout) for a
+// field that cannot apply to any row.
+async function readWrapperQuestions(needed) {
+  if (!needed) return null
+  try {
+    const sessions = await listWrappedSessions({ baseUrl: config.wrapperUrl })
+    return Array.isArray(sessions) ? sessions : null
+  } catch {
+    return null
+  }
+}
+
 function waitForPermission(timeoutMs) {
   const first = pending.values().next().value
   if (first) return Promise.resolve(publicPerm(first))
@@ -578,12 +853,77 @@ function transcriptDirFor(cwd) {
 // worker that was never spawned. A worker whose session id never resolved gets no
 // record at all rather than one filed under a key that would never be looked up.
 function writeLedger(agent, patch) {
-  if (!agent.sessionId) {
+  // ⚠️ **THE SINGLE-WRITER GUARANTEE, and the DECISION lives in `ledgerWriteRoute` rather than
+  // here.** It is a pure function in `ledger.mjs` so the one thing that must be right — an
+  // adopted row takes a MERGE and never a REPLACE — is unit-tested, rather than pinned by
+  // matching this file's source text from a test (which is what it took while the decision was
+  // inline: `supervisor.mjs` cannot be imported, because it starts an MCP server). What stays
+  // here is the execution and the logging.
+  //
+  // The rule: a rehydrated row was adopted from the endpoint, so its ledger record belongs to
+  // the server that SPAWNED that worker — which may still be running and driving it. The
+  // endpoint's `Post` REPLACES a whole row rather than merging a patch, so a CREATE from a
+  // second server would not merely lose one field: it would rebuild the record from a row that
+  // carries identity alone and blank everything the owner had written. A `PATCH` is the one
+  // write that is safe from a second server, because the store merges the fields the caller
+  // names and leaves every other field exactly as the owner wrote it.
+  //
+  // ⚠️ **Refusing both was the shape this had while the endpoint had no merge, and it cost
+  // precisely the case the stop path exists for** — the worker a manager stops is usually the
+  // one it did NOT spawn. The stop then went unrecorded on the durable half, and the sweep read
+  // a deliberately stopped worker exactly as it reads a dead one: an orphan candidate, which the
+  // drive leg would stop+recreate.
+  //
+  // ⚠️ **This is reachable, not hypothetical.** `send_agent_message` looks an agent up in
+  // `currentRoster()` — which is the point, because the worker a manager messages is the one it
+  // did not spawn — and the cluster arm of that handler writes `{ result }` onto it. Before the
+  // guard, a manager messaging another server's cluster worker erased that worker's row.
+  //
+  // The refusal is logged rather than silent: the turn's `result` genuinely goes unrecorded for
+  // a cluster worker this process does not own, and that loss must be readable rather than
+  // discovered. `stampUnobservedWorkers` already skips these rows for the same reason; the
+  // guard is what makes that one site's discipline a property of the writer.
+  const route = ledgerWriteRoute(agent, patch)
+  if (route === 'no-session-id') {
     log(`WARNING: no ledger record for ${agent.id} — its session id never resolved, so there is no key to file it under`)
     return null
   }
+  if (route === 'refuse') {
+    log(`WARNING: refusing to write the ledger row for ${agent.id} — it was adopted from the endpoint, so its record belongs to the server that spawned it`)
+    return null
+  }
+  if (route === 'patch') {
+    // ⚠️ **`agent.ledgerRecord` is deliberately NOT set here, and the patch is returned rather
+    // than a merged row.** This process holds no copy of an adopted row — that is what "adopted"
+    // means — so a local record built from the patch alone would be a PARTIAL row, and the next
+    // wholesale publish of it would blank the owner's fields: the exact damage this branch
+    // exists to avoid, deferred by one write rather than prevented. The merge lives in the
+    // store, and a caller that needs the merged row reads it back.
+    publishLedgerPatch(agent.sessionId, patch)
+    return patch
+  }
   try {
-    if (patch) return updateRecord(config.ledgerDir, agent.sessionId, patch)
+    // ⚠️ **The merge source is this process's OWN in-memory record, not a read-back.** The patch
+    // arm used to merge into the file record, which meant a patch could land only while a file
+    // was still there to merge into — and it made the endpoint row a copy of a copy, so a
+    // vanished file froze that row silently. The record the create arm built is held on the agent
+    // instead: one source for this process's own row, no round trip, and no read-modify-write
+    // window for two in-flight patches to race in.
+    //
+    // ⚠️ The create arm always runs FIRST, for every mode — headless on the SDK's `init` message
+    // (`agent-loop.mjs:58`), and cluster / a2a / interactive inside their own spawn paths — so a
+    // patch that finds no record is a session id that resolved with no spawn behind it, which is
+    // the same "no key to file it under" case the guard above reports.
+    if (patch) {
+      const merged = mergeRecord(agent.ledgerRecord, patch)
+      if (!merged) {
+        log(`WARNING: no ledger record for ${agent.id} (${agent.sessionId}) — the patch was not applied`)
+        return null
+      }
+      agent.ledgerRecord = merged
+      publishLedgerRow(merged)
+      return merged
+    }
     const record = buildRecord({
       sessionId: agent.sessionId,
       agentId: agent.id,
@@ -608,6 +948,10 @@ function writeLedger(agent, patch) {
       resumedFrom: agent.resumedFrom ?? null,
       policy: agent.policyPath ?? null,
       shipping: agent.shipping === true,
+      // Persisted, unlike `shipping`: the wrapper is the only holder of this worker's parked
+      // prompt, so a server that lost the id on restart could neither report the park nor
+      // answer it.
+      wrapperSessionId: agent.wrapperSessionId ?? null,
       parentSession: agent.parentSession ?? null,
       // The role this spawn declared. Carried into the record because the spawn edge
       // cannot otherwise distinguish a manager from a worker: `gate-owner-filter.py`
@@ -626,12 +970,74 @@ function writeLedger(agent, patch) {
       target: ledgerModeForStatus(agent.status) ? agent.status : null,
       spawnedAt: agent.createdAt,
     })
-    writeRecord(config.ledgerDir, record)
+    agent.ledgerRecord = record
+    publishLedgerRow(record)
     return record
   } catch (error) {
     log(`WARNING: could not write the ledger record for ${agent.id}: ${error.message}`)
     return null
   }
+}
+
+// Publish a record to the session-ledger endpoint.
+//
+// ⚠️ **This is the ONLY durable write now, and that is a change in kind rather than in address.**
+// The endpoint was a second copy beside the file while the readers moved; the file write is gone,
+// so a row that is not published here exists nowhere that outlives the process. A missed POST
+// therefore costs a RECORD, not merely visibility — which is why the shutdown path below waits for
+// the ones already in flight.
+//
+// ⚠️ **Still not awaited on the ordinary paths, on purpose.** A store outage must not turn a spawn
+// that already produced a working worker into a failed spawn, and no ordinary caller has anything
+// to do with a rejection. The spawn has already succeeded by the time this runs, and a refusal
+// here cannot un-succeed it.
+//
+// ⚠️ **But "not awaited" must not mean "abandoned", and on the shutdown path it did.** Every
+// publish is tracked so the signal handler can wait for the ones already in flight — see
+// `SHUTDOWN_PUBLISH_TIMEOUT_MS` below for why that is the one caller where losing the POST is
+// not merely lost visibility.
+const inFlightPublishes = new Set()
+
+// How long the shutdown path waits for in-flight endpoint writes before exiting anyway.
+// Bounded because a wedged store must not hold the process open, and short because the only
+// thing being waited on is a localhost round trip.
+const SHUTDOWN_PUBLISH_TIMEOUT_MS = 2000
+
+function publishLedgerRow(record) {
+  const wire = recordToWire(record)
+  if (!wire) return
+  const pending = postSessionLedger(wire)
+    .then((ok) => {
+      if (!ok) log(`WARNING: the session-ledger endpoint did not take the row for ${wire.session_id}`)
+    })
+    .catch(() => {})
+    .finally(() => inFlightPublishes.delete(pending))
+  inFlightPublishes.add(pending)
+  return pending
+}
+
+// Merge a patch into ONE endpoint row, from a server that did not spawn it.
+//
+// ⚠️ **Separate from `publishLedgerRow` because it writes a different SHAPE to a different
+// ROUTE.** That one sends a whole record to the collection route; this one sends only the named
+// fields to the per-id route and lets the store merge. Routing an adopted agent's patch through
+// `recordToWire` would send a partial record to the REPLACING route — the destructive write the
+// guard in `writeLedger` exists to prevent — so the two must not share a function however alike
+// their plumbing looks.
+//
+// ⚠️ **The in-flight tracking is shared deliberately.** `inFlightPublishes` is what the shutdown
+// path waits on, and a stop issued moments before the process exits is exactly the write whose
+// loss matters: it is the difference between the sweep reading a worker as deliberately stopped
+// and reading it as dead.
+function publishLedgerPatch(sessionId, patch) {
+  const pending = patchSessionLedgerRow(sessionId, patch)
+    .then((ok) => {
+      if (!ok) log(`WARNING: the session-ledger endpoint did not take the patch for ${sessionId}`)
+    })
+    .catch(() => {})
+    .finally(() => inFlightPublishes.delete(pending))
+  inFlightPublishes.add(pending)
+  return pending
 }
 
 // The shutdown path: what this server owes the ledger when it goes away.
@@ -678,8 +1084,20 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
     // OWN session is the same claim and belongs on the same path. `stopSelf` is idempotent, so
     // a server that never had a session id simply clears nothing.
     heartbeat.stopSelf()
-    log(`received ${signal} — stamped ${stamped} unobserved worker(s) as ${UNOBSERVED_STATUS}, then exited`)
-    process.exit(0)
+    // ⚠️ **The exit WAITS for the endpoint writes already in flight.** `writeLedger` publishes
+    // fire-and-forget by design, and `process.exit(0)` in the same tick killed every one of
+    // them — `fetch` cannot complete a round trip synchronously, so this was deterministic
+    // rather than racy. It matters here and nowhere else: the shutdown stamp is the one write
+    // whose whole purpose is to stop a record asserting `running` forever, and the endpoint is
+    // now the roster's source, so losing it left the two stores disagreeing on the one path
+    // where they are guaranteed to diverge. Bounded, so a wedged store still exits.
+    const pending = [...inFlightPublishes]
+    const exit = () => process.exit(0)
+    setTimeout(exit, SHUTDOWN_PUBLISH_TIMEOUT_MS).unref()
+    Promise.allSettled(pending).finally(() => {
+      log(`received ${signal} — stamped ${stamped} unobserved worker(s) as ${UNOBSERVED_STATUS}, after ${pending.length} endpoint write(s) settled`)
+      exit()
+    })
   })
 }
 
@@ -722,10 +1140,72 @@ function launcherModelFor(scriptPath) {
   }
 }
 
+// Whether the launcher PRESERVES an exported `PERMISSION_MODE` rather than overwriting
+// it — the precondition a shipping tab worker rests on.
+//
+// `false` when the launcher cannot be read, deliberately: a launcher we cannot inspect
+// is one we cannot promise will keep the value, and `shippingSupportError` turns that
+// into a refusal at spawn time. Defaulting to `true` here would recreate the silent
+// overwrite this check exists to catch.
+function launcherPreservesModeEnv(scriptPath) {
+  if (!scriptPath) return false
+  try {
+    return launcherHonoursModeEnv(readFileSync(scriptPath, 'utf8'))
+  } catch {
+    return false
+  }
+}
+
 // Read the servers the launcher passes via `--mcp-config <file>`. These arrive as a
 // CLI flag, not as settings, so settingSources cannot reach them: an SDK worker with
 // settings loaded still saw 7 fewer servers than its tab twin. Handing the same file
 // to query()'s mcpServers is what makes the two modes functionally identical.
+// The launcher's own `--mcp-config <file>` path, for the wrapper-backed path.
+//
+// resolveMcpServers parses that file and returns the SERVERS, which is what the SDK's
+// `mcpServers` option takes. The wrapper takes a FILE, so the same regex is used here to
+// return the path itself — one source of truth for "where the launcher keeps its config",
+// two shapes because the two spawn mechanisms disagree about what they want.
+function launcherMcpConfigFile(claudeCmd) {
+  if (config.mcpConfig) return config.mcpConfig
+  if (!claudeCmd) return null
+  try {
+    const match = readFileSync(claudeCmd, 'utf8').match(/--mcp-config\s+["']?(~?[^"'\s\\]+)/)
+    if (!match) return null
+    return match[1].replace(/^~/, homedir())
+  } catch {
+    return null
+  }
+}
+
+// What a wrapper-backed worker does NOT get, named field by field.
+//
+// ⚠️ A summary ("policy unavailable") is not enough: a reader has to know WHICH parts went
+// quiet, because they differ in consequence. The 15-minute deny changes behaviour most — a
+// prompt that used to die now parks indefinitely. Named individually so an operator
+// reading a spawn response can decide what to depend on.
+//
+// `decide()` is no longer on the list: `wrapper-policy.mjs` polls the wrapper's parks and
+// answers what the policy allows or denies, so a policy-allowed prompt no longer waits for a
+// human. Its decisions carry `via: 'wrapper'` in `permissions.jsonl`, which is what keeps an
+// answered park attributable — `decided_by: 'policy'` was the policy, anything else was not.
+function wrapperPolicyGap({ shipping }) {
+  return {
+    // Why: the wrapper spends the child's single --permission-prompt-tool on its own MCP
+    // tool, and the supervisor sees the child only as an event stream.
+    reason: 'wrapper owns the permission hook',
+    not_run: ['manager allowlist', 'carried decision', '15-minute deny'],
+    // How the policy tier reaches the wrapper path instead of the hook it cannot register.
+    policy_via: `wrapper poll every ${WRAPPER_POLICY_INTERVAL_MS} ms`,
+    // The shipping tier is a SEPARATE loss, not a restatement: permission_mode survives,
+    // the flag-tier `settings` object does not, so a wrapper-backed shipping worker hits
+    // the permission channel for the edits and git verbs its flag tier was meant to skip.
+    shipping_settings: shipping === true ? 'not applied — no wrapper counterpart for the settings tier' : 'n/a',
+    // What IS still true, so the field is not read as "nothing works".
+    answerable_via: 'POST /api/1.0/sessions/{id}/answer',
+  }
+}
+
 function resolveMcpServers(claudeCmd) {
   let path = config.mcpConfig
   if (!path) {
@@ -781,7 +1261,12 @@ async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowI
   // the parameter, and the half a headless-only implementation leaves unexercised. It goes
   // before the `cd` so it survives the login shell's profile files; see `shellEnvExports`
   // for why it must be an `export` rather than a `VAR=value` prefix on the `cd`.
-  const inner = `${shellEnvExports(env)}cd ${shellQuote(cwd)} && exec ${claudeCmd} -n ${shellQuote(tabName)} ${shellQuote(prompt)}`
+  // The shape — the `EXIT` trap, the start marker, the observer, and the absence of `exec` —
+  // lives in `tab-spawn.mjs`, where it can be asserted on. This is the SIXTH call site of that
+  // shape (the other five are `commands/open.md` ×3, `docs/fleet-surface.md` and
+  // `scripts/restart-worker.py`), and the only one that a review found rather than a test: the
+  // string was built here, so nothing could check it without starting an MCP server.
+  const inner = tabSpawnInner({ cwd, launcher: claudeCmd, tabName, prompt, env })
   // `--window-id` is what puts the tab in a ROLE's window. Omitted, the tab inherits
   // WEZTERM_PANE from the calling session and lands in whatever window the caller is
   // in — which is how a human-only task came up in the Agents window (2026-09-20).
@@ -791,7 +1276,10 @@ async function spawnInteractiveAgent({ id, prompt, cwd, launcher, label, windowI
   if (windowId !== undefined && windowId !== null && String(windowId).trim() !== '') {
     spawnArgs.push('--window-id', String(windowId))
   }
-  spawnArgs.push('--', 'bash', '-lc', inner)
+  // The writer path rides as an `env` assignment rather than a `VAR=value` prefix, because a
+  // spawned pane inherits wezterm's MUX-SERVER environment, not this process's — the same
+  // reason `scripts/restart-worker.py` passes it this way.
+  spawnArgs.push('--', 'env', `SESSION_EXIT_RECORD=${RECORD_SCRIPT}`, 'bash', '-lc', inner)
   const res = spawnSync('wezterm', spawnArgs, { encoding: 'utf8' })
 
   if (res.error || res.status !== 0) {
@@ -898,12 +1386,23 @@ async function concurrentLimitError({ operatorNamed = false } = {}) {
   })
   // Skipped when the pair is off or unresolvable: `concurrentLimitRefusal` answers both of
   // those before it ever looks at the count, and the endpoint read is the expensive half.
-  const live = limits.error || limits.limit === null ? null : await workerSessions()
+  const counted =
+    limits.error || limits.limit === null
+      ? { workers: null, error: null }
+      : await workerSessions()
   return concurrentLimitRefusal({
     limits,
     // `null` is "a store could not be read", which is NOT "no worker is live" — the refusal
     // turns that distinction into an error rather than a zero.
-    liveCount: live === null ? null : live.length,
+    liveCount: counted.workers === null ? null : counted.workers.length,
+    // The cause travels with the count, exactly as it does for the manager cap below. Without it
+    // the refusal can only say "the count could not be taken", which is what made 2026-10-19's
+    // lost spawns undiagnosable.
+    countError: counted.error,
+    // A fresh-enough stale count is a count the refusal may decide on, labelled as stale. `null`
+    // when the cache held nothing fresh enough, which keeps the refusal.
+    staleCount: counted.stale?.count ?? null,
+    staleAgeMs: counted.stale?.ageMs ?? null,
     operatorNamed,
     configFile: config.configFile,
   })
@@ -913,12 +1412,27 @@ async function concurrentLimitError({ operatorNamed = false } = {}) {
 // cap above and in the same split: resolve and count HERE, decide in `managerLimitRefusal`.
 // The count is `managerSessions()` — the fleet board's own manager classification, which sees
 // hand-started managers the spawn ledger never records. See `manager-sessions.mjs`.
+// ⚠️ The limits come from `liveConfig`, NOT `config.configFileContents`. The boot snapshot is
+// frozen for the process's life, so a spawn decided against it ignores every edit until the
+// operator reconnects — observed 2026-10-14, `spawn.maxManagers` raised to 10 and still refused
+// as 5. `liveConfig` re-reads the file when its mtime moves; see `config-reload.mjs`.
+const liveConfig = mtimeReloadedConfig({ path: config.configFile })
+
+// The per-vault cluster allowlist, read live for the same reason `liveConfig` is: the operator
+// edits it precisely because they want the NEXT spawn to differ from the last, and a spawn
+// decided against permissions read at boot is a decision against a file that may no longer exist.
+// Its fail-closed semantics differ from `liveConfig`'s on purpose — see `cluster-allowlist.mjs`.
+const liveAllowlist = mtimeReloadedAllowlist()
+
 async function managerLimitError({ operatorNamed = false } = {}) {
-  const limits = resolveMaxManagers({ file: config.configFileContents, path: config.configFile })
-  const live = limits.error || limits.limit === null ? null : await managerSessions()
+  const limits = resolveMaxManagers({ file: liveConfig.current().file, path: config.configFile })
+  const counted = limits.error || limits.limit === null ? { ids: null, error: null } : await managerSessions()
   return managerLimitRefusal({
     limits,
-    liveCount: live === null ? null : live.length,
+    liveCount: counted.ids === null ? null : counted.ids.length,
+    // The cause travels with the count. Without it the refusal can only say "unknown" beside a
+    // limit, which is what sent the operator to the one value that was already correct.
+    countError: counted.error,
     operatorNamed,
     configFile: config.configFile,
   })
@@ -1189,7 +1703,127 @@ async function spawnClusterWorker({ id, prompt, label, task, vault, resume, poli
 // that cannot be refused first is the worker itself: a `create` whose reply fails AFTER the
 // executor started a container reports FAILED, which is why `createWorkerOnController` returns
 // the controller's own text rather than a "nothing happened" claim.
-async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPath, interactive, windowId, role, operatorNamed, shipping, env, target }) {
+// The per-call inputs `resolveA2AControllerTarget` needs: the env maps, the config file, the
+// default cluster and the configured cluster set.
+//
+// ⚠️ ONE HELPER, because four sites resolve a controller — spawn, stop-by-row, stop-by-bare-id
+// and the liveness fan-out — and a default or a cluster set computed at only one of them would
+// make them disagree about what "configured" means. `config` is resolved once at load, so a
+// config edit reaches all four on the next server start (a reconnect), never mid-run.
+//
+// ⚠️ The FILE's `a2a.defaultCluster` wins over the environment's, matching every other file/env
+// pair on this path in spirit — but note the direction: the file is the source a running server
+// re-reads on restart, while an MCP `env` block is cached at session start. The built-in
+// `A2A_DEFAULT_CLUSTER` is the last resort so a bare `k8s` keeps resolving with no config at all.
+function a2aResolverInputs() {
+  const file = config.configFileContents
+  const fileDefault = file?.a2a?.defaultCluster
+  const defaultCluster =
+    typeof fileDefault === 'string' && fileDefault !== '' ? fileDefault : config.a2aDefaultCluster ?? A2A_DEFAULT_CLUSTER
+  const clusters = configuredA2AClusters({
+    envUrls: config.a2aUrls,
+    fileUrls: file?.a2a?.url,
+    defaultCluster,
+  })
+  return {
+    envUrls: config.a2aUrls,
+    envTokens: config.a2aTokens,
+    file,
+    path: config.configFile,
+    defaultCluster,
+    clusters,
+  }
+}
+
+// Stop a controller worker named by its bare id — for a worker this server has no ledger row for.
+//
+// ⚠️ THE TOKEN NEVER LEAVES THIS PROCESS, WHICH IS THE WHOLE REASON THIS EXISTS. A worker whose
+// spawn failed after `create` has no row, so `stop_agent` answered "unknown agent" and the only
+// remaining route was to run the controller's stop by hand — which means extracting the controller
+// token into a shell. The server already holds that token, so the caller supplies an id and nothing
+// else. Measured 2026-10-20: two workers filled the `a2a-worker` quota and no session on the machine
+// could free them.
+//
+// ⚠️ EVERY CONFIGURED TARGET IS TRIED, BECAUSE A BARE ID CARRIES NO TARGET. A controller that does
+// not own the id REFUSES it rather than removing something, so a wrong target costs a refusal and
+// never a wrong removal; the first target that answers wins. `target` narrows the attempt when the
+// caller knows which backend it means.
+async function stopWorkerByIdOnController({ workerId, target }) {
+  if (typeof workerId !== 'string' || workerId === '') {
+    return { error: 'stop_agent needs a non-empty agent_id or worker id' }
+  }
+  const targets = target ? [target] : a2aTargetsForClusters(a2aResolverInputs().clusters)
+  const refusals = []
+  for (const name of targets) {
+    const controller = resolveA2AControllerTarget({
+      target: name,
+      ...a2aResolverInputs(),
+    })
+    if (controller.error) {
+      refusals.push(`${name}: ${controller.error}`)
+      continue
+    }
+    const stopped = await stopWorkerOnController({
+      endpoint: controller.url,
+      workerId,
+      token: controller.token,
+      messageId: randomUUID(),
+      mint: () => randomUUID(),
+    })
+    if (!stopped.error) {
+      return { workerId, target: name, state: stopped.state, response: stopped.response }
+    }
+    refusals.push(`${name}: ${stopped.error}`)
+  }
+  // ⚠️ The `unknown agent` wording is kept so an existing caller's expectation does not change, but
+  // the attempts are named — "unknown" alone is what made this undiagnosable in the first place.
+  return {
+    error: `unknown agent ${workerId} — no ledger row, and no controller would stop it (${refusals.join('; ')})`,
+  }
+}
+
+// Record a worker the controller minted but this spawn could not reach, then return its error.
+//
+// ⚠️ ONE HELPER BECAUSE THE DEFECT IS ONE CLASS, NOT ONE PATH. Two returns after a successful
+// `create` can fail while the worker already EXISTS — an unreadable Agent Card, a failed session
+// binding — and each used to return its error with the worker id while writing no row, so
+// `stop_agent` answered "unknown agent" for a worker that was running. Measured twice on
+// 2026-10-20: a pod refused by ResourceQuota (503 card), then a bind failure on a task name with no
+// vault file. Fixing only the card path leaves the second one live, which is why this is a helper
+// the two paths share rather than two patches. (A third return — an unbuildable record — cannot use
+// it: `a2aWorkerRecord` refuses only on a non-A2A target, so rebuilding from the same target would
+// fail identically and write nothing. That branch reports instead; see its own guard.)
+//
+// ⚠️ `sessionId: null` IS DELIBERATE, NOT AN OMISSION. No session serves this worker — the minted
+// id was never bound to the task and never started — so naming it would let `a2aLiveSessions`
+// stamp a phantom session live on the strength of a worker that has no session behind it. That
+// function skips a record with no session id, which is exactly what this row needs.
+//
+// ⚠️ THE ERROR IS FILED ON THE RECORD, so a roster read says why the worker has no turn instead of
+// showing a healthy worker that silently never ran.
+function recordUnreachableWorker({ error, created, id, label, prompt, task, target }) {
+  const built = a2aWorkerRecord({
+    id,
+    label,
+    prompt,
+    task,
+    target,
+    sessionId: null,
+    workerId: created.worker.worker_id,
+    a2aUrl: created.worker.a2a_url,
+    workerToken: created.token,
+    parentSession: parentSessionId({ dir: config.sessionsDir }),
+    createdAt: new Date().toISOString(),
+  })
+  if (!built.error) {
+    built.record.error = error
+    agents.set(id, built.record)
+    writeLedger(built.record)
+  }
+  return { error, worker_id: created.worker.worker_id }
+}
+
+async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPath, interactive, windowId, role, operatorNamed, shipping, env, mounts, secrets, target }) {
   const refusal = a2aSpawnArgumentRefusal({
     target,
     resume,
@@ -1209,27 +1843,185 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
   const minted = newSessionId()
   if (minted.error) return { error: minted.error }
 
+  // ⚠️ THE BOUNDARY IS CHECKED AT TWO POINTS, AND BOTH ARE LOAD-BEARING — because a cluster is
+  // decidable at two different moments, and either one alone leaves a hole.
+  //
+  // (a) BEFORE the controller resolves, for an EXPLICIT `k8s:<cluster>`. The cluster is already in
+  // the caller's string, so the boundary can be judged with no controller configured. This
+  // ordering is not tidiness: the resolver REFUSES an unconfigured cluster, so a forbidden pairing
+  // aimed at one — `private-personal` → `k8s:octopus-dev`, where no octopus URL or token exists on
+  // this supervisor — would stop at the resolver with ITS message and the allowlist would never be
+  // consulted. The data boundary would then have no evidence at all, on exactly the pairings the
+  // rule exists to forbid. A forbidden pairing must be refused whether or not its cluster happens
+  // to be configured.
+  //
+  // (b) AFTER the controller resolves, on `controller.target`, for a BARE `k8s`. That target names
+  // no cluster until `resolveA2AControllerTarget` turns it into `k8s:<default>`, so checking the
+  // caller's string would refuse a legitimate default-cluster spawn while the cluster it will
+  // actually run on went unchecked — the guard inverted, loudest where it is wrong. On the
+  // canonical target the rule is origin-agnostic: a default-sourced pairing is judged by the
+  // cluster the worker really runs on.
+  //
+  // A read error is returned as itself rather than folded into the refusal, so the message names
+  // the file the operator has to fix instead of saying only "the allowlist could not be read".
+  const allowlistRead = liveAllowlist.current()
+  if (allowlistRead.error) return { error: allowlistRead.error }
+
+  const explicit = clusterOfTarget(target)
+  if (explicit.named && explicit.cluster !== null) {
+    const refusal = clusterAllowlistRefusal({ vault, target, allowlist: allowlistRead.allowlist })
+    if (refusal) return { error: refusal }
+  }
+
   const controller = resolveA2AControllerTarget({
-    envUrl: config.a2aUrl,
-    envToken: config.a2aToken,
-    file: config.configFileContents,
-    path: config.configFile,
+    target,
+    ...a2aResolverInputs(),
   })
   if (controller.error) return { error: controller.error }
+
+  // (b) — the bare-`k8s` path, judged on the cluster it resolved to. It also re-checks an explicit
+  // target, which is deliberate: if the resolver ever canonicalises a target to a different
+  // cluster than the one the caller named, the cluster actually used is still the one judged.
+  const resolvedRefusal = clusterAllowlistRefusal({
+    vault,
+    target: controller.target,
+    allowlist: allowlistRead.allowlist,
+  })
+  if (resolvedRefusal) return { error: resolvedRefusal }
+
+  // ⚠️ THE CANONICAL TARGET, not the caller's string. A bare `k8s` resolves to the configured
+  // default cluster, and everything recorded downstream — the roster status, the capture file
+  // name, the ledger row — must name that cluster rather than echoing `k8s`: the status is also
+  // what `stop_agent` resolves a controller from, so a bare `k8s` there would have to guess the
+  // cluster again. A manager reading two clusters' rows could not tell them apart either.
+  const canonicalTarget = controller.target
 
   // Paced after every refusal above, so a call that never reaches the controller does not spend
   // a rate slot — the same ordering `spawnClusterWorker` uses and for the same reason.
   const rateError = await reserveStart()
   if (rateError.error) return { error: rateError.error }
 
-  const created = await createWorkerOnController({
-    endpoint: controller.url,
-    task,
-    token: controller.token,
-    messageId: randomUUID(),
-    mint: () => randomUUID(),
+  // SC2's evidence: the exact `create` body, written at the send site when the operator sets
+  // `a2a.captureDir` in the supervisor config. Off by default — nothing is written otherwise. The
+  // body carries no credential (the token rides in a header the hook is never given).
+  const captureDir = config.configFileContents?.a2a?.captureDir
+  const capture = captureDir
+    ? ({ url, body }) => {
+        mkdirSync(captureDir, { recursive: true })
+        const at = new Date().toISOString()
+        writeFileSync(
+          join(captureDir, `${at.replace(/[:.]/g, '-')}-${canonicalTarget.replace(/:/g, '-')}-create.json`),
+          `${JSON.stringify({ at, target: canonicalTarget, task, url, body }, null, 2)}\n`,
+        )
+      }
+    : undefined
+
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  // THIS WORKER'S STATUS CHANNEL, minted ONCE per spawn — deliberately outside `createOnce`
+  // below. The retry there re-creates the SAME task's worker, so a token minted per attempt would
+  // leave the earlier one unbound and the worker reporting under a credential nothing listens for.
+  //
+  // ⚠️ NOT SENT TO THE CONTROLLER, which is the correction this design turned on. The controller
+  // creates the worker but never sees a task — this server's own first turn creates it, on the
+  // WORKER's A2A server — so the registration goes there, once the turn has named the task. See
+  // the `onTaskId` callback below.
+  //
+  // ⚠️ A RECEIVER THAT CANNOT BIND DOES NOT FAIL THE SPAWN. The channel is additive: a spawn
+  // without it produces exactly the pre-change worker, and failing here would lose a live worker
+  // to an optional transport. The degradation is visible where it matters — `status_messages`
+  // stays empty, and the surfacing criterion is written so an empty array satisfies nothing.
+  const pushBegun = await a2aPushRegistry.beginCreate({
+    callbackUrl: a2aCallbackUrlForTarget(canonicalTarget),
   })
-  if (created.error) return { error: created.error }
+  const push = pushBegun.error ? undefined : pushBegun.push
+
+  // A fresh `messageId` and `contextId` per attempt: a retry is a NEW turn on the controller's
+  // conversation, and reusing the first attempt's ids would make it read as a duplicate of the
+  // call that just failed.
+  const createOnce = () =>
+    createWorkerOnController({
+      endpoint: controller.url,
+      task,
+      token: controller.token,
+      messageId: randomUUID(),
+      mint: () => randomUUID(),
+      // Forwarded verbatim: this path's job for them is to carry the caller's declaration to the
+      // controller, which is the only party that can allow a path or resolve a key. A retry re-sends
+      // them because a retry is a fresh `create` — dropping them would silently create a worker
+      // WITHOUT the access the caller asked for, which is the failure this whole path refuses to make.
+      mounts,
+      secrets,
+      capture,
+    })
+
+  let created = await createOnce()
+
+  // ⚠️ A FAILED CREATE MAY HAVE A WORKER BEHIND IT, AND THE ERROR DOES NOT SAY SO. The controller
+  // refuses a repeat create for a task that already has a worker, but a backend failure reaches
+  // here as a bare `TASK_STATE_FAILED` with no detail attached — so the refusal cannot be told from
+  // a transport failure by its text, and the worker id it names never arrives. `list` is what tells
+  // the two apart: it is the only client-side read that answers whether this task already has a
+  // worker, and when it does, that worker is what the create was refused over.
+  //
+  // ⚠️ THE RETRY IS BOUNDED TO ONE. A second create for a task whose worker was just stopped either
+  // succeeds or fails for a reason a third attempt cannot fix, and an unbounded loop here would
+  // mint and reap workers forever against a controller that keeps refusing.
+  //
+  // ⚠️ AND THE ORIGINAL ERROR IS WHAT IS REPORTED WHEN NOTHING MATCHED. A create that failed for
+  // its own reasons — an unreachable controller, a rejected token — has no worker to reap, and
+  // reporting a reaping failure there would hide the real one.
+  // ⚠️ ONLY A CALL THE CONTROLLER ANSWERED AND REFUSED IS RECOVERED. A create that failed before
+  // reaching it — an argument refusal here, a transport failure — carries no `controllerFailed`,
+  // and running the reap for one would stop a healthy worker for a task whose create failed for
+  // an unrelated reason. The refusal is the only failure the reap can actually resolve, so it is
+  // the only one it is allowed to act on.
+  if (created.error && created.controllerFailed) {
+    const refusal = created.error
+    const reaped = await reapExistingWorkerForTask({
+      endpoint: controller.url,
+      task,
+      token: controller.token,
+      messageId: randomUUID(),
+      mint: () => randomUUID(),
+    })
+    if (reaped.error) {
+      // ⚠️ THE ORIGINAL ERROR STAYS PRIMARY. A failed `list` does not establish that a worker
+      // existed — the create may have failed for its own reasons — so reporting the reaping
+      // failure alone would replace a real diagnosis with an invented one. It is carried as
+      // context instead, because it is what stopped the recovery from being attempted.
+      return { error: `${refusal} ⚠️ The recovery could not run: ${reaped.error}` }
+    }
+    if (reaped.none) return { error: refusal }
+
+    created = await createOnce()
+    if (created.error) {
+      return {
+        error:
+          `worker ${reaped.stoppedWorkerId} already served task ${JSON.stringify(task)} and was ` +
+          `stopped, but the create that followed it also failed: ${created.error}`,
+      }
+    }
+  }
+
+  // ⚠️ A FAILURE THAT NEVER REACHED THE CONTROLLER HAS NO RECOVERY TO ATTEMPT. Returning here
+  // rather than falling through is load-bearing: the card read below dereferences
+  // `created.worker`, so a create error carried past this point would throw instead of reporting.
+  if (created.error) {
+    // No worker exists, so nothing will ever push under this token — releasing it keeps a failed
+    // spawn from leaving a dead credential in the registry for the life of the process.
+    a2aPushRegistry.release({ token: pushBegun.token })
+    return { error: created.error }
+  }
+
+  // The worker exists from here on, so its token is bound to the id the controller minted for it.
+  // Binding is what re-keys anything the receiver accepted under the token — the only identity
+  // this side held before the create answered — onto the key `agent_status` reads.
+  //
+  // ⚠️ A BIND FAILURE IS NOT FATAL AND NOT FOLDED INTO THE SPAWN'S ERROR. It can only fire on an
+  // internal invariant break (the token was minted above; the controller always names a worker id,
+  // which the error paths below already dereference), and failing a spawn over a bookkeeping slip
+  // would lose a running container to it.
+  if (push) a2aPushRegistry.bind({ token: pushBegun.token, workerId: created.worker.worker_id })
 
   // ⚠️ THE CARD IS READ BEFORE ANYTHING IS RECORDED. It is what proves the URL the controller
   // returned actually answers, and it is where the turn's endpoint comes from — rather than
@@ -1238,18 +2030,28 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
   // fact from a create that never ran, and the two must not read alike.
   const card = await fetchWorkerCard({ a2aUrl: created.worker.a2a_url })
   if (card.error) {
-    return {
+    return recordUnreachableWorker({
       error: `worker ${created.worker.worker_id} was created but its Agent Card could not be read, so no turn could reach it: ${card.error}`,
-      worker_id: created.worker.worker_id,
-    }
+      created,
+      id,
+      label,
+      prompt,
+      task,
+      target: canonicalTarget,
+    })
   }
 
   const bound = bindSessionToTask({ task, vault, sessionId: minted.sessionId })
   if (bound.error) {
-    return {
+    return recordUnreachableWorker({
       error: `worker ${created.worker.worker_id} was created but binding session ${minted.sessionId} to task "${task}" failed: ${bound.error}`,
-      worker_id: created.worker.worker_id,
-    }
+      created,
+      id,
+      label,
+      prompt,
+      task,
+      target: canonicalTarget,
+    })
   }
 
   const built = a2aWorkerRecord({
@@ -1257,15 +2059,40 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
     label,
     prompt,
     task,
-    target,
+    target: canonicalTarget,
     sessionId: minted.sessionId,
     workerId: created.worker.worker_id,
     a2aUrl: card.endpoint,
     workerToken: created.token,
+    protocolVersion: card.protocolVersion,
     parentSession: parentSessionId({ dir: config.sessionsDir }),
     createdAt: new Date().toISOString(),
   })
-  if (built.error) return { error: built.error }
+  // ⚠️ A GUARD, NOT A THIRD RECORDING PATH — and the distinction is load-bearing. `a2aWorkerRecord`
+  // refuses in exactly one case: `a2aWorkerStatus({ target })` is null, which happens iff `target` is
+  // not an A2A target. That is a pure function of the value this path already holds, and the
+  // dispatch that reaches here has restricted target to docker or k8s, so it cannot fire today.
+  // ⚠️ Routing it through `recordUnreachableWorker` would be a NO-OP IF IT EVER DID: that helper
+  // rebuilds the record from the same `target` and fails identically, writing nothing while
+  // returning a shape that reads as though a row had landed. Reporting is the honest outcome for an
+  // invariant break — a row whose status the roster cannot interpret would be worse than none.
+  if (built.error) {
+    return {
+      error: `worker ${created.worker.worker_id} was created but its record could not be built: ${built.error}`,
+      worker_id: created.worker.worker_id,
+    }
+  }
+
+  // ⚠️ A RECEIVER THAT NEVER BOUND IS THE FIRST THING THIS FIELD MUST SAY. Without it the spawn
+  // proceeds, `push` is undefined, `onTaskId` returns at its first line, and the channel is silent
+  // for a reason nothing records — the shape that cost a whole e2e run and could not be diagnosed
+  // from `status_messages` afterwards.
+  if (!push) {
+    built.record.pushRegistration = {
+      state: 'not-attempted',
+      reason: `the status receiver is unavailable: ${pushBegun.error}`,
+    }
+  }
 
   agents.set(id, built.record)
   writeLedger(built.record)
@@ -1288,7 +2115,12 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
     text: prompt,
     token: created.token,
     messageId: randomUUID(),
+    protocolVersion: card.protocolVersion,
   })
+
+  // The conversation the first turn opened — what `send_agent_message` continues. Held in memory
+  // only, beside the token: a follow-up is possible only from the process holding both.
+  if (!sent.error) built.record.contextId = sent.contextId
 
   if (sent.error) {
     const patch = { result: null, error: `the first turn could not be sent: ${sent.error}` }
@@ -1298,7 +2130,101 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
     // ⚠️ `void`, AND THAT ONE KEYWORD IS THE CRITERION. The record is patched in memory as well as
     // on disk, so `agent_status` and `list_agents` read the same answer the ledger holds rather
     // than the one from spawn time.
-    void collectWorkerTurn({ res: sent.res ?? sent.pending, sentContextId: sent.contextId })
+    void collectWorkerTurn({
+      res: sent.res ?? sent.pending,
+      sentContextId: sent.contextId,
+      // ───────────────────────────────────────────────────────────────────────────────────────
+      // THE REGISTRATION, fired the instant the turn names its task.
+      //
+      // ⚠️ WHY IT CANNOT WAIT FOR THE COLLECTION TO FINISH. The SDK refuses a registration naming
+      // a task its store does not hold, so this can only run after the turn has created the task —
+      // and the mid-turn status it exists to catch fires a fixed ~10 s in. Registering when
+      // `collectWorkerTurn` RESOLVES would arm the channel minutes after the event it was meant to
+      // observe, and every symptom of that is silent: the turn completes, the outcome is filed,
+      // and the only visible effect is a status channel that never carries anything.
+      //
+      // ⚠️ AND WHY A FAILURE IS SWALLOWED RATHER THAN SURFACED. The channel is reporting-only. A
+      // refused registration must not be filed against the record as though the TURN had failed,
+      // or a roster read would report a healthy worker as broken. `collectWorkerTurn` swallows a
+      // throw from here for the same reason, so the two agree rather than relying on each other.
+      //
+      // ⚠️ THIS IS NOT THE ONLY TURN THAT REGISTERS — corrected 2026-10-18. It read "a follow-up
+      // continues an existing task, so its config is already held and re-registering would add a
+      // duplicate callback per message", and the premise is false: `openWorkerTurn` sends a
+      // follow-up with a `contextId` and **no `taskId`**, so the worker's SDK creates a NEW task,
+      // and the previous task's config does not apply to it. The `send_agent_message` call site
+      // registers its own turn's task for exactly that reason — no duplicate is created, because
+      // each config belongs to a distinct task.
+      onTaskId: async (taskId) => {
+        // ⚠️ A MISSING PUSH CONFIG IS RECORDED, NOT SWALLOWED — and this line used to swallow it.
+        // `if (!push) return` left the SEED reason standing, which reads "the turn has not yet
+        // named a task" — the opposite of what happened: the turn named one, which is the only way
+        // this callback runs at all. Measured 2026-10-18 on a fresh docker spawn: the record showed
+        // exactly that seed while the task id had been found, so the field named the wrong cause
+        // for the third time in this task. `pushBegun.error` is the bind failure `beginCreate`
+        // returned (it is the only way `push` is undefined); carrying it here turns the next run
+        // into a diagnosis instead of another guess about which branch was taken.
+        if (!push) {
+          built.record.pushRegistration = {
+            state: 'not-attempted',
+            reason: pushBegun.error
+              ? `no push config was minted for this spawn: ${pushBegun.error}`
+              : 'no push config was minted for this spawn',
+            at: new Date().toISOString(),
+          }
+          writeLedger(built.record)
+          return
+        }
+        // ⚠️ RECORDED BEFORE THE AWAIT, SO THE FIELD NEVER READS AS "NOT STARTED" WHILE IN FLIGHT.
+        // The seed says "the turn has not yet named a task" — the exact opposite of the truth once
+        // this callback is running, and the timeout alone does not remove that: a bounded call
+        // still leaves a window in which the field is wrong. `onDiagnostic`'s guard
+        // (`state !== 'not-attempted'`) already refuses to overwrite a non-seed state, which is
+        // what keeps the two writers from disagreeing mid-flight.
+        built.record.pushRegistration = { state: 'attempting', taskId, at: new Date().toISOString() }
+        writeLedger(built.record)
+        const registration = await registerPushCallbackOnWorker({
+          endpoint: card.endpoint,
+          taskId,
+          push,
+          token: created.token,
+          protocolVersion: card.protocolVersion,
+        })
+        // ⚠️ RECORDED, NOT DISCARDED — and that is the whole fix. `registerPushCallbackOnWorker`
+        // returns its refusal precisely so the caller can record it, and this call used to drop
+        // the value on the floor. The result was that a REFUSED registration and one that NEVER
+        // HAPPENED left identical evidence: an empty channel and no explanation. Recording it
+        // here keeps the turn's own outcome untouched — the refusal is filed as a property of the
+        // CHANNEL, never as a turn failure, which is what the comment above requires.
+        built.record.pushRegistration = registration.error
+          ? { state: 'attempted-error', taskId, error: registration.error, at: new Date().toISOString() }
+          : { state: 'attempted-ok', taskId, at: new Date().toISOString() }
+        writeLedger(built.record)
+      },
+      // ⚠️ WHICH PATH THE COLLECTION TOOK — the field that separates the two ways `onTaskId` can
+      // fail to run. `not-attempted` alone cannot: a whole-body collection structurally never
+      // calls it, while an incremental one calls it unless no frame named a task. Recording the
+      // path and the frame count turns the seed reason into a diagnosis.
+      //
+      // ⚠️ IT NEVER OVERWRITES A TERMINAL STATE. `onTaskId` owns `attempted-ok` / `attempted-error`,
+      // and a diagnostic arriving afterwards must not undo it — hence the early return.
+      onDiagnostic: (d) => {
+        // ⚠️ TERMINAL STATES ARE FINAL; `not-attempted` AND `attempting` ARE NOT. The guard used to
+        // return on anything that was not the seed, which would have discarded the throw report
+        // once the pre-await `attempting` write had landed — the exact silence this task spent four
+        // probes on.
+        const state = built.record.pushRegistration?.state
+        if (state === 'attempted-ok' || state === 'attempted-error') return
+        // ⚠️ THE BRANCH LIVES IN `pushDiagnosticPatch`, AND THAT IS THE FIX. Deciding it here on
+        // `d.taskIdFound === false` mislabelled every incremental run that found no task id as
+        // "whole-body" — the announcement carries no `taskIdFound` key at all. A pure function is
+        // where that can be tested; inline, it looked right and was wrong.
+        const patch = pushDiagnosticPatch(d)
+        if (!patch) return
+        built.record.pushRegistration = patch
+        writeLedger(built.record)
+      },
+    })
       .then((collected) => {
         const patch = a2aTurnPatch(collected, { at: new Date().toISOString() })
         built.record.result = patch.result
@@ -1348,7 +2274,7 @@ async function spawnA2AWorker({ id, prompt, label, task, vault, resume, policyPa
 // session in `metrics_sessions`) is the kind of thing that needs a test beside it. See that
 // module's header for why displacing an existing owner is the defect it exists to prevent.
 
-async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, policy: policyPath, windowId, role, target, task, vault, operatorNamed, shipping, env }) {
+async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, policy: policyPath, windowId, role, target, task, vault, operatorNamed, shipping, env, mounts, secrets }) {
   // ⚠️ `seq` is per-process and restarts at 0 on every reconnect, while `agents` may already
   // hold rows adopted from the ledger whose ids a PREVIOUS process minted from this same
   // counter. Minting straight to `agent_${++seq}` would then land on an adopted id, and the
@@ -1418,7 +2344,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // arguments that name a LOCAL process, a local window or a local policy — see
   // `a2aSpawnArgumentRefusal`, which owns that rule and is unit-tested because this file cannot
   // be imported by a test at all.
-  if (A2A_SPAWN_TARGETS.includes(spawnTarget.target)) {
+  if (isA2ATarget(spawnTarget.target)) {
     return spawnA2AWorker({
       id,
       prompt,
@@ -1433,6 +2359,14 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       operatorNamed,
       shipping,
       env: envOverrides,
+      // ⚠️ NOT filtered through `resolveEnvOverrides`, and not the same kind of value. `env` is a
+      // raw map this server would have to transmit; these are a host path the CONTROLLER checks
+      // against its own allowlist and a TeamVault KEY the CONTROLLER resolves — so nothing here is
+      // a credential and the value of a secret never reaches this server at all. They are handed
+      // through unchanged; the shape is validated in `declaredCreateArguments`, which is what puts
+      // bytes on the wire.
+      mounts,
+      secrets,
       target: spawnTarget.target,
     })
   }
@@ -1489,6 +2423,32 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     if (managerError) return { error: managerError }
   }
 
+  // ⚠️ THE ANSWER-PATH GUARD, and it sits HERE rather than first because it is the only guard
+  // that costs a subprocess. `docs/fleet-surface.md` § Spawn a worker item 6, constraint (a):
+  // a headless worker's permission gate parks with the session that SPAWNED it, so a spawner
+  // with no answer path strands it (measured 2026-09-20: two workers, four gates expired in
+  // ~90 minutes). Nothing asked at the spawn site until now.
+  //
+  // REFUSED rather than warned: a warning cannot block a spawn, and the caller reads the
+  // returned text as the reply. The probe is `scripts/answer-path-check.py` — this server
+  // owns no second observable (see `answer-path.mjs`'s header for why).
+  //
+  // ⚠️ **Placement is a cost decision, and it is a real one.** `parentSessionId` walks the
+  // process tree with up to ten `spawnSync('ps')` calls and `runProbe` shells out to python,
+  // and both are SYNCHRONOUS — this one process also answers every worker's `canUseTool`, so a
+  // hung probe would stall unrelated workers' permission handling for up to its timeout. Every
+  // refusal above costs no subprocess, so they go first: a bad role, a full fleet, an
+  // unsupported resume or policy is answered before the probe is paid for. The remaining
+  // window is the one a spawn would have paid anyway.
+  //
+  // The asking session is resolved the way every ledger row's `parent_session` is: by
+  // walking the process tree, because an MCP server carries no argument naming it.
+  const answerPathError = answerPathRefusal({
+    opensInteractive,
+    sessionId: parentSessionId({ dir: config.sessionsDir }),
+  })
+  if (answerPathError) return { error: answerPathError }
+
   // An explicit window id WINS — the caller may need a window the map does not describe.
   // Otherwise the role decides, in-process, and no window id crosses the tool boundary.
   const targetWindowId = windowId ?? roleResolution.windowId
@@ -1503,9 +2463,6 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // refused, not accepted and quietly ignored.
   const unsupportedPolicy = policySupportError({ policy: policyPath, interactive: opensInteractive })
   if (unsupportedPolicy) return { error: unsupportedPolicy }
-  // Same class again: shipping settings a tab worker would never load are refused.
-  const unsupportedShipping = shippingSupportError({ shipping, interactive: opensInteractive })
-  if (unsupportedShipping) return { error: unsupportedShipping }
 
   // Resolved before anything is spawned, so a bad path costs no worker, no ledger
   // record, and no half-started session running under rules nobody chose.
@@ -1519,21 +2476,88 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   const workerTarget = resolveWorkerTarget({ cwd, vault, vaults: loadVaults(), serverCwd: process.cwd() })
   if (workerTarget.error) return { error: workerTarget.error }
   const workerCwd = workerTarget.cwd
+
+  // A HUMAN session's chip follows the vault FAMILY rather than the role alone — green for a
+  // `seibert-*` vault, cyan for a `private-*` one — because colour is the operator's only
+  // at-a-glance cue for which employer a tab belongs to. Resolved HERE, after `workerTarget`,
+  // because the family comes from the RESOLVED vault: the raw `vault` argument is absent on
+  // every cwd-only spawn. This is a refinement of the chip, not a second role lookup, so
+  // `resolveRole` keeps its place above the answer-path probe — a bad role is still refused
+  // before that probe's ten `spawnSync('ps')` calls.
+  const resolvedChip = chipForRole({ resolution: roleResolution, vault: workerTarget.vault })
   // `SUPERVISOR_CLAUDE_CMD` stays the top override: an explicit operator setting rather
   // than a fallback, and the documented way to force a launcher for a one-off spawn.
   //
-  // Below it, a task's own `launcher:` frontmatter, then its goal's, then the vault's
-  // `claude_script` — see `resolveTaskLauncher`.
-  let taskLauncher = { launcher: workerTarget.launcher, source: 'vault' }
-  if (!config.claudeCmd && typeof task === 'string' && task) {
+  // Below it, a task's own `launcher:` frontmatter, then the vault's configured WORKER default
+  // (`worker_launcher`) — see `resolveTaskLauncher`. A goal's `launcher:` is not in that chain:
+  // it is a manager statement, and letting it reach a worker gave every task under a goal its
+  // manager's Opus launcher (measured 2026-10-22, 12 private-personal goals).
+  //
+  // ⚠️ The default is the WORKER rule with no task, not the bare vault launcher. A spawn with
+  // no `task` is still a worker, and `scripts/restart-worker.py` applies `worker_launcher` to a
+  // taskless session — so defaulting to `claude_script` here made a taskless worker spawn on one
+  // launcher and restart on another, silently changing model whenever the two differ.
+  let taskLauncher = resolveTaskLauncher({
+    vaultLauncher: workerTarget.launcher,
+    workerLauncher: workerTarget.workerLauncher,
+  })
+  if (!config.claudeCmd && roleResolution.role === 'manager') {
+    // A manager takes the manager rule, not the worker rule: the vault's configured manager
+    // default, then the `-claude` sibling — see `resolveManagerLauncher`. No subject page is
+    // read here; a topic's `manager_launcher:` is resolved by `/supervisor:open` Step 2C.
+    taskLauncher = resolveManagerLauncher({
+      vaultLauncher: workerTarget.launcher,
+      managerDefault: workerTarget.managerLauncher,
+      exists: existsSync,
+    })
+  } else if (!config.claudeCmd && typeof task === 'string' && task) {
     const read = readTaskLaunchers({ task, vault: workerTarget.vault })
     if (read.error) return { error: read.error }
-    taskLauncher = resolveTaskLauncher({ vaultLauncher: workerTarget.launcher, ...read })
-    for (const w of read.warnings ?? []) log(`spawn ${task}: ${w}`)
-    if (taskLauncher.error) return { error: taskLauncher.error }
+    taskLauncher = resolveTaskLauncher({
+      vaultLauncher: workerTarget.launcher,
+      workerLauncher: workerTarget.workerLauncher,
+      ...read,
+    })
   }
+  if (!config.claudeCmd) {
+    // A `role: human` row is the operator's own session, not a delegate (operator ruling
+    // 2026-11-06, card 25c99a35): it opens on the vault's Claude launcher, never the
+    // `-deepseek` worker default. Only the task's own `launcher:` still wins over that.
+    // ⚠️ `roleResolution` comes from the caller's `role` argument only — the task file's `role:`
+    // is not read here, so `/supervisor:open` must pass it (commands/open.md § 3.0).
+    taskLauncher = applyHumanLauncherRule({
+      role: roleResolution.role,
+      resolved: taskLauncher,
+      vaultLauncher: workerTarget.launcher,
+      managerDefault: workerTarget.managerLauncher,
+      exists: existsSync,
+    })
+  }
+  // ONE check, after every branch. The manager branch could not fail before `managerDefault`
+  // existed, so it carried no check; it can now (an unsafe configured `manager_launcher`), and
+  // an unchecked `{ error }` here makes `workerLauncher` `undefined` — the tab path then execs
+  // `undefined` and the headless path loses its MCP servers, both silently.
+  if (taskLauncher.error) return { error: taskLauncher.error }
   const workerLauncher = config.claudeCmd || taskLauncher.launcher
   const workerModel = launcherModelFor(workerLauncher)
+
+  // Shipping is checked HERE rather than with the support guards above because it needs
+  // the LAUNCHER: the tab path delivers the mode through an env var the launcher reads,
+  // and a launcher that overwrites that var would leave the worker parked on the very
+  // gate `shipping` exists to remove. Still before every side effect — no tab, no slot,
+  // no ledger record — so the refusal costs a rejected call and nothing else.
+  const unsupportedShipping = shippingSupportError({
+    shipping,
+    interactive: opensInteractive,
+    launcherHonoursModeEnv: launcherPreservesModeEnv(workerLauncher),
+  })
+  if (unsupportedShipping) return { error: unsupportedShipping }
+
+  // The tab path's carrier. Merged AFTER the caller's env so the SERVER's value wins —
+  // a caller setting PERMISSION_MODE on a shipping worker must not be able to choose a
+  // wider mode than `acceptEdits`. Null for every non-shipping and every headless
+  // spawn, which is the negative control: those tabs keep the launcher's own default.
+  const tabShippingEnv = shippingTabEnv(shipping === true && opensInteractive)
   let workerRules = null
   let resolvedPolicyPath = null
   if (policyPath) {
@@ -1610,16 +2634,18 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // deleted filter existed to prevent, now bounded and self-healing on retry rather than
     // immediate. And when `liveSessionIds()` answers `null`, every row is kept — the fail-closed
     // direction, but a weaker property than "live by construction".
+    //
+    // ⚠️ The 60s bound does NOT cover a TAB row, and that asymmetry is the defect this path was
+    // fixed for. `pruneRehydratedAgents` only touches `rehydrated` rows, and an `interactive` row
+    // never settles anyway, so a tab's row is permanent — the age proxy never expires it. That is
+    // why the release lives in `resumeRefusal` (which sees `live`) and not in the prune.
     pruneRehydratedAgents()
-    const holder = findLiveHolder(agents.values(), resume)
-    if (holder) {
-      return {
-        // ⚠️ A rehydrated row's worker lives in the supervisor process that SPAWNED it, not
-        // in this one (`registry-rehydrate.mjs` — adoption crosses processes), so naming
-        // "this server" sends the operator to close the wrong thing.
-        error: `session ${resume} is still running (worker ${holder.id} is mid-turn ${holder.rehydrated ? 'in the supervisor process that spawned it' : 'in this server'}) — close it before resuming, or you will have two writers on one conversation`,
-      }
-    }
+    // The refusal is built in resume-guard.mjs rather than here, and `live` is passed in
+    // because it is the one fact that separates a dead tab from a live headless worker —
+    // see that module's header. It is also the seam a test can reach: this file starts an
+    // MCP server at module load and cannot be imported.
+    const refusal = resumeRefusal({ agentRecords: agents.values(), sessionId: resume, live })
+    if (refusal) return { error: refusal }
     // Neither probe could be read. Fail CLOSED: "could not tell" and "confirmed
     // closed" are different answers, and only one of them is safe to act on. A
     // refused resume costs one retry; an unguarded one corrupts a conversation.
@@ -1631,6 +2657,38 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     }
     log(`resume of ${resume} allowed: ${reason} [probes: ${probes.join(', ') || 'none'}]`)
 
+    // ⚠️ Liveness is not the only thing that can make a resume useless. A resume restores the
+    // whole prior conversation, so a long-lived worker comes back carrying the payload its last
+    // turn already ran at; if that payload sits close to the point where the harness compacts,
+    // the resumed session compacts on its first turn or dies with "Prompt is too long". Measured
+    // 2026-10-27 on five workers, one of them dead after a SINGLE turn — see context-guard.mjs
+    // for the numbers and the bound. This is the second guard on this path and answers a
+    // different question from `resume-guard.mjs` (which asks whether a live worker blocks the
+    // resume); the two must stay separate.
+    //
+    // The transcript is resolved by SESSION ID, never from a cwd: a `cc-*` launcher `cd`s into
+    // its own vault, so the spawn's recorded cwd is not where the transcript was written
+    // (CLAUDE.md § "transcript_dir on a tab worker is unreliable").
+    // ⚠️ ONE CALL, AND THE REFUSAL RETURNS BEFORE ANY SPAWN WORK — the `return` on the very next
+    // line is the whole "no worker is created" guarantee, and `context-guard.test.mjs` drives
+    // this same function with fixture transcripts so the gate is exercised end to end rather
+    // than only its arithmetic. Do not inline these three steps again: a test can reach a named
+    // function, and it cannot reach a block.
+    const admission = resumeAdmission({ transcriptPath: transcriptPathFor(resume), readFile: readFileSync })
+    if (!admission.admit) {
+      log(`refusing to resume ${resume}: ${admission.error}`)
+      return { error: admission.error }
+    }
+    const contextStats = admission.stats
+    // Reported even when it allows, because "the guard looked and found nothing" and "the guard
+    // could not look" are different facts about this resume, and only one of them is reassuring.
+    log(
+      contextStats
+        ? `resume of ${resume} context: ${contextStats.restored ?? 'no usage'} restored against a ` +
+            `${contextStats.ceiling ?? 'no'} ceiling${contextStats.model ? ` [${contextStats.model}]` : ''}`
+        : `resume of ${resume} context: not measured (no transcript) — guard allowed it`,
+    )
+
     // A decision can only ride a resume, and only one that names the park on record.
     //
     // The record is this server's own evidence that a park happened: written at park
@@ -1638,7 +2696,12 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // would clear it lives in the spawner that died. That is what makes it the durable
     // half of the answer, and why this check reads it rather than the attention store.
     if (decision) {
-      const record = readRecord(config.ledgerDir, resume)
+      // ⚠️ Read from the endpoint, which is where every reader looks now — and `null` means
+      // exactly what `readRecord`'s `null` did: no park to tie this decision to, so the verdict
+      // refuses. ⚠️ `PARK_FIELD` is `parked_permission`, spelled IDENTICALLY on the wire and in
+      // the file record, so the field access below is unchanged rather than renamed — the one
+      // field this path depends on is the one field the two vocabularies agree on.
+      const record = await readSessionLedgerRow(resume)
       const verdict = validateDecision({ decision, parkRecord: record?.[PARK_FIELD] ?? null, sessionId: resume })
       if (!verdict.ok) {
         log(`refusing a decision on resume ${resume}: ${verdict.error}`)
@@ -1677,6 +2740,10 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // recoverable is a separate change (persist it, then read it back in `toAgentRecord`).
     shipping: shipping === true,
     sessionId: null,
+    // The WRAPPER's handle for this child, set on the wrapper-backed headless path only.
+    // Every wrapper route keys off it, and it is the only thing that can reach a park the
+    // wrapper holds. Null for a tab or cluster worker, which have no wrapper session.
+    wrapperSessionId: null,
     // Which conversation this one continues, when it is an adoption rather than a
     // fresh start. `sessionId` alone cannot say: on resume the SDK reports the SAME
     // id, so the two fields together are what tell the operator which conversation
@@ -1741,7 +2808,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
 
   if (opensInteractive) {
     agent.status = 'interactive'
-    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, launcher: agent.launcher, label: agent.label, windowId: targetWindowId, chip: roleResolution.chip, env: envOverrides })
+    const res = await spawnInteractiveAgent({ id, prompt, cwd: agent.cwd, launcher: agent.launcher, label: agent.label, windowId: targetWindowId, chip: resolvedChip, env: tabShippingEnv ? { ...envOverrides, ...tabShippingEnv } : envOverrides })
     if (res.error) {
       agents.delete(id)
       return { error: res.error }
@@ -1851,51 +2918,157 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // the headless path each resolved the launcher separately and could disagree about the
   // same spawn.
 
-  const q = query({
-    prompt,
+  // ⚠️ **The headless child is started by claude-wrapper, not by this process.** A
+  // permission park belongs to whoever holds the child's stdin: `canUseTool` parked into
+  // THIS process's `pending` Map, so a prompt raised here was answerable only by this
+  // server and died with it after 15 minutes. With the wrapper holding stdin,
+  // `POST /api/1.0/sessions/{id}/answer` releases the park from any manager.
+  //
+  // ⚠️ **What the seam costs, named rather than implied.** The wrapper spends the child's
+  // single `--permission-prompt-tool` on its own MCP tool, so this server's hook never sees a
+  // prompt. `decide()` reaches these workers anyway, by polling the wrapper's parks
+  // (`wrapper-policy.mjs`); the rest of the policy machinery does not. `wrapperPolicyGap`
+  // carries what is still missing on the agent record AND the spawn response, because a
+  // reader who has to infer which parts went quiet will infer wrong in the direction that
+  // matters — the 15-minute deny changes behaviour most. A policy-answered park is the one
+  // with a `decided_by: 'policy'`, `via: 'wrapper'` row in `permissions.jsonl`; any other
+  // answered park was answered by a manager, and is no evidence that the policy tier works.
+  // ⚠️ A refused SUPERVISOR_WRAPPER_URL is refused HERE, not at import. `config.mjs` returns
+  // the refusal rather than throwing so one mistyped variable cannot make the module
+  // unimportable and take the whole server down at load; the cost is that the refusal has to
+  // be acted on at the one place that would use the value.
+  if (config.wrapperUrlRefusal) {
+    agents.delete(id)
+    return { error: config.wrapperUrlRefusal }
+  }
+  // ⚠️ Every throw from here to the stream start must undo `agents.set(id, …)` above. Without
+  // this, a failed wrapper spawn leaves a phantom `running` row that `list_agents` reports for
+  // the life of the process — the tab path's `agents.delete(id)` rollback, which this branch
+  // otherwise omits.
+  let wrapperSession
+  try {
+    wrapperSession = await spawnWrappedSession({
+    baseUrl: config.wrapperUrl,
     options: {
       cwd: agent.cwd,
-      // Hand the worker the mode this server already resolved, so it never has to infer
-      // its own from a config file that describes the fleet rather than this worker. The
-      // SDK's `env` REPLACES the subprocess environment instead of merging with it, which
-      // is why workerEnvFor spreads the inherited env — without that spread the worker
-      // loses PATH, HOME and ANTHROPIC_BASE_URL, and the last of those silently stops it
-      // routing through the router. That base env comes from config.mjs rather than being
-      // read here, because this module owns no environment reads at all.
-      // `overrides` is the caller's per-call `env`. It sits above the inherited environment
-      // and below the mode handover — see workerEnvFor for why that order is the only
-      // correct one.
+      // The mode and environment this server already resolved, handed to the child
+      // directly. The wrapper MERGES `env` over its own environment, which is why the whole
+      // inherited environment rides along: a hand-picked subset would drop PATH, HOME and
+      // ANTHROPIC_BASE_URL, and losing the last silently stops the worker routing through
+      // the router while looking like nothing at all.
       env: workerEnvFor({ mode: spawnMode.mode, source: spawnMode.source, env: config.baseEnv, overrides: envOverrides }),
-      // Load the same settings an interactive session gets. Without this the SDK
-      // starts from nothing — no plugin skills, no settings.json permissions, no
-      // user MCP servers — and a worker missing its normal tooling is not a cheaper
-      // worker, it is one that fails in unfamiliar ways.
-      settingSources: SETTING_SOURCES,
-      // Same reason as settingSources: parity with a tab worker. Spawning is rare, so
-      // the per-spawn launcher lookup is not a hot path.
-      mcpServers: resolveMcpServers(agent.launcher),
-      // Continuing an existing conversation. Because THIS call creates the session,
-      // canUseTool applies to it — which is the whole point: a session you did not
-      // create cannot be supervised, but one you resume you do create.
+      // A shipping worker runs under `acceptEdits`, so its edits and its three git verbs
+      // never depend on the permission channel. ⚠️ Only the MODE survives the wrapper: the
+      // flag-tier `settings` object has no wrapper counterpart, which `wrapperPolicyGap`
+      // records separately — a wrapper-backed shipping worker is not faithfully wrapped.
+      permission_mode: shipping === true ? SHIPPING_PERMISSION_MODE : PERMISSION_MODE,
+      // The launcher's own config FILE. It arrives as a CLI flag, so no setting source can
+      // reach it, and without it this worker's server list is measurably shorter than a tab
+      // worker's — the gap `resolveMcpServers` was written to close on the SDK path.
+      ...(launcherMcpConfigFile(agent.launcher) ? { mcp_configs: [launcherMcpConfigFile(agent.launcher)] } : {}),
+      // Continuing a conversation: the wrapper emits `--resume` INSTEAD of minting an id,
+      // so the child's claude id is the resumed one and arrives on `system`/`init` exactly
+      // as it did through `query()`.
       ...(resume ? { resume } : {}),
-      // Resolved and validated once at module load — never read env in the hot path.
-      // A shipping worker runs under `acceptEdits` instead, so its edits and its three git
-      // verbs never depend on the permission channel; see shipping-settings.mjs for why
-      // that mode and not a wider one. The option and the flag-tier `settings` say the
-      // same thing on purpose: either alone leaves a reader to wonder which one won.
-      permissionMode: shipping === true ? SHIPPING_PERMISSION_MODE : PERMISSION_MODE,
-      ...(shipping === true ? { settings: shippingSettings(true) } : {}),
-      canUseTool: makeCanUseTool(agent),
-      hooks: { PermissionRequest: [{ hooks: [makePermissionHook(agent)] }] },
     },
   })
+  } catch (error) {
+    agents.delete(id)
+    throw error
+  }
+  if (!wrapperSession || !wrapperSession.id) {
+    agents.delete(id)
+    throw new Error(`wrapper spawn for ${id} returned no session id — nothing can answer its prompts`)
+  }
+  // The WRAPPER's handle, never the child's claude id: every wrapper route keys off it, and
+  // it is the only thing `answer_permission` can use to reach a park.
+  agent.wrapperSessionId = wrapperSession.id
+
+  // ⚠️ The opening turn is a SEPARATE call. `query({ prompt })` delivered it while creating
+  // the session; the wrapper takes turns as messages, so a spawn that only streams leaves a
+  // child that initialises and sits idle — indistinguishable from one that is thinking.
+  if (prompt) {
+    // ⚠️ A refused opening turn is not a no-op: the child exists, holds stdin and streams
+    // nothing, so it looks exactly like one that is thinking. Reap it here rather than
+    // returning an agent id for a worker that will never produce a turn — and reap it on
+    // ANY throw, because the wrapper session is already live by this line.
+    try {
+      await sendWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id, text: prompt })
+    } catch (error) {
+      await stopWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id }).catch((reapError) => {
+        log(`WARNING: could not reap wrapper session ${wrapperSession.id} after a refused opening turn: ${reapError.message}`)
+      })
+      agents.delete(id)
+      throw error
+    }
+  }
+
+  const q = streamWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id })
   agent.query = q
 
   // Fire-and-forget on purpose: a spawn must return its agent id without waiting for
   // the worker's first turn. The loop itself lives in agent-loop.mjs so a test can
   // drive it with a synthetic stream and await its completion — this module cannot be
   // imported by a test at all, since it connects a stdio server at load.
-  void runAgentLoop({ q, agent, writeLedger, log, heartbeat })
+  // ⚠️ **A headless worker's child never exits on its own.** It is spawned with
+  // `--input-format stream-json` and holds its stdin pipe, so after a turn it waits for the next
+  // message forever — measured 2026-11-01: 21 of 59 wrapper sessions idle, the oldest 22 hours.
+  // Nothing ended one, so the only thing that ever did was undici's five-minute body timeout,
+  // which ended it wrongly. This is the deliberate end-of-life that timeout was standing in for.
+  //
+  // ⚠️ It runs on EVERY `result`, and a `result` can arrive MID-turn, so it re-reads the wrapper
+  // instead of assuming. `pending_turns` is the signal that separates the two — it counts the
+  // turns the child has not yet closed (`claude-wrapper` `pkg/supervisor.go:562`), so 0 means the
+  // turn is genuinely over and a non-zero value means it is not.
+  //
+  // ⚠️ **Every keep-alive condition fails CLOSED.** An unreadable wrapper or attention store
+  // keeps the worker rather than ending one that could not be inspected. A worker parked on a
+  // `question` is waiting on a manager; a worker with an open attention card is waiting on a
+  // person. Neither is finished, and stopping either would orphan exactly the card this whole
+  // task exists to protect.
+  const endWorkerIfIdle = async (current) => {
+    let session
+    try {
+      session = await readWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id })
+    } catch (error) {
+      log(`WARNING: could not read ${current.id} to decide whether its turn ended; leaving it running: ${error.message}`)
+      return
+    }
+    // Decide everything except the card check first, so an incomplete wrapper record is reported
+    // before we spend an attention-store round trip on it — and is reported at all, because a
+    // silent keep would let the idle-worker leak survive the fix that exists to remove it.
+    const pre = shouldEndIdleWorker({ session, cards: [] })
+    if (pre.reason === 'wrapper-record-incomplete') {
+      log(`WARNING: the wrapper's record for ${current.id} carries no state/pending_turns — the idle-worker end-of-life is a no-op for it until it does`)
+      return
+    }
+    if (!pre.end) return
+    // ⚠️ **A deliberately-absent store is NOT an unreadable one.** With
+    // `SUPERVISOR_ATTENTION_STORE=off`, `config.attentionStoreUrl` is null and `fetchOpenCards`
+    // returns null without issuing a request — which the predicate would read as
+    // `unreadable-cards` and keep the worker forever. In a deployment with no attention stack
+    // there can be no card to orphan, so the honest answer is "no cards": passing `[]` lets the
+    // end-of-life fire there, while a store that is configured but FAILING still returns null
+    // and still fails closed.
+    const cards = config.attentionStoreUrl
+      ? await fetchOpenCards({ storeUrl: config.attentionStoreUrl, sessionId: current.sessionId })
+      : []
+    const verdict = shouldEndIdleWorker({ session, cards })
+    if (!verdict.end) {
+      // The two keeps that explain a worker which is never reaped are logged; `not-idle` and
+      // `turn-in-flight` are the ordinary mid-turn path and would log on every result.
+      if (verdict.reason === 'unreadable-cards' || verdict.reason === 'open-card') {
+        log(`agent ${current.id}: keeping worker — ${verdict.reason}`)
+      }
+      return
+    }
+    log(`agent ${current.id}: turn closed with nothing pending — stopping the session`)
+    await stopWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id }).catch((error) => {
+      log(`WARNING: could not stop ${current.id} after its turn closed: ${error.message}`)
+    })
+  }
+
+  void runAgentLoop({ q, agent, writeLedger, log, heartbeat, onTurnComplete: endWorkerIfIdle })
 
   return {
     agent_id: id,
@@ -1922,6 +3095,11 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // inferring it from the absence of an error.
     policy: agent.policyPath,
     shipping: agent.shipping === true,
+    // ⚠️ Reported, never omitted. A caller that needs the manager allowlist or the 15-minute deny must
+    // be able to refuse to depend on them HERE, rather than discover their absence when a
+    // prompt parks forever. Named field by field — see wrapperPolicyGap.
+    policy_gap: wrapperPolicyGap({ shipping: agent.shipping }),
+    wrapper_session_id: agent.wrapperSessionId,
     // Same field as the tab path, and here too it is not redundant: this is the half a
     // headless-only implementation would leave unexercised, so a caller reading it back is
     // how "both paths carry it" stops being a claim about the diff. Keys only — see envReport.
@@ -1972,6 +3150,10 @@ const agentView = (a) => {
     // indistinguishable from "no gate outstanding" — the exact reading that cost a manager a
     // misdirected worker in the v0.110.4 incident. See registry-rehydrate.mjs.
     rehydrated: a.rehydrated === true,
+    // The wrapper session this worker's child runs under, or null when the worker is not
+    // wrapper-backed. Ships beside `pending_question` because it is the field that tells a
+    // caller which of that field's nulls it is holding.
+    wrapper_session_id: a.wrapperSessionId ?? null,
     // Which source decided interactive-vs-headless: argument, env, config or default. A
     // worker that opened the wrong way is otherwise diagnosed by guessing which of four
     // places was consulted.
@@ -1998,6 +3180,25 @@ const agentView = (a) => {
     awaiting_input: awaitingInput(sessionStatus),
     result: a.result ?? null,
     error: a.error,
+    // ── the pushed status channel ────────────────────────────────────────────────────────────
+    // ⚠️ BOTH FIELDS ARE ALWAYS PRESENT, AND THAT IS THE POINT. `status_messages` is `[]` and
+    // `last_status` is `null` for every worker that is not an A2A one — the same shape a live A2A
+    // worker has before its first push lands. Neither is ever `undefined`, so a caller can tell
+    // "the channel exists and is quiet" from "this field was never wired", and only the second is
+    // a defect. That is also why the surfacing criterion is written to reject an empty array: the
+    // shape alone cannot distinguish a working channel from an unwired one.
+    //
+    // ⚠️ THE VALUES ORIGINATE AT THE WORKER. `ts` is the receive instant the receiver stamped, and
+    // `state` / `text` come from the pushed event — nothing here is synthesised from the reply the
+    // spawner already collected, which is what makes the field evidence of a push rather than of a
+    // projection. See `a2a-receive.mjs` for why the receive instant and not a body-supplied one.
+    status_messages: a2aPushRegistry.statusMessagesFor(a.workerId),
+    last_status: a2aPushRegistry.lastStatusFor(a.workerId),
+    // ⚠️ THE CHANNEL'S OWN OUTCOME, so an empty `status_messages` stops being ambiguous. It says
+    // whether a registration was attempted and, when refused, why — the distinction the two
+    // fields above cannot draw on their own. Always present, `null` only for a record written
+    // before this field existed. Holds no credential: `taskId` is the task's own id.
+    push_registration: a.pushRegistration ?? null,
   }
 }
 
@@ -2019,7 +3220,7 @@ const TOOLS = [
           type: 'string',
           enum: ['manager', 'agent', 'human'],
           description:
-            'The role this session plays, which resolves BOTH its colour and its window from the role map the WezTerm config publishes (~/.cache/wezterm-role-map.json) — manager → orange/Managers, agent → pink/Agents, human → cyan/Direct. Omit for agent, which is the correct default for every task that has not declared a role. PREFER THIS OVER window_id: a role is a word, so it cannot be mistyped or dropped in transit, and the id is looked up in-process at the moment of spawn instead of being carried across the tool boundary — which is where `window_id: 0` was lost intermittently (measured 2026-09-20: 4 of 6 spawns routed, and the two failures were a run\'s first spawn). Passing a role alone is the reliable path.',
+            'The role this session plays, which resolves BOTH its colour and its window from the role map the WezTerm config publishes (~/.cache/wezterm-role-map.json) — manager → orange/Managers, agent → pink/Agents, human → Direct, whose CHIP follows the vault family rather than the map: green for a `seibert-*` vault, cyan for a `private-*` one, and the map\'s own chip for any other family. Omit for agent, which is the correct default for every task that has not declared a role. PREFER THIS OVER window_id: a role is a word, so it cannot be mistyped or dropped in transit, and the id is looked up in-process at the moment of spawn instead of being carried across the tool boundary — which is where `window_id: 0` was lost intermittently (measured 2026-09-20: 4 of 6 spawns routed, and the two failures were a run\'s first spawn). Passing a role alone is the reliable path.',
         },
         window_id: {
           type: 'string',
@@ -2033,19 +3234,28 @@ const TOOLS = [
         },
         target: {
           type: 'string',
-          enum: ['local', 'cluster', 'docker', 'k8s'],
+          // ⚠️ A PATTERN RATHER THAN AN ENUM, since 2026-10-20. The cluster names are the
+          // OPERATOR'S configuration (`a2a.url` / `SUPERVISOR_A2A_URL_<CLUSTER>`), so an enum would
+          // either freeze a list the server does not own or publish names it cannot guarantee are
+          // configured. The pattern bounds the SHAPE a caller may send — the same grammar
+          // `resolveSpawnTarget` and `parseA2ATarget` enforce — and the server still refuses an
+          // unknown or unconfigured cluster, which no schema can know.
+          // `cluster` was removed here in the same change that removed it from `SPAWN_TARGETS`
+          // (2026-10-15), because leaving it would keep the published tool OFFERING a target the
+          // server refuses.
+          pattern: '^(local|docker|k8s(:[a-z0-9][a-z0-9-]*)?)$',
           description:
-            'WHERE the worker is created. Omit for `local` — every worker this server opened before this argument existed: a wezterm tab, or with `interactive:false` an in-process SDK query. `cluster` starts a session in the `claude-interactive` service in nuke dev instead, which requires `task` and a configured SUPERVISOR_CLUSTER_URL. It is PER-CALL ONLY and deliberately NOT selectable from SUPERVISOR_SPAWN_MODE or `spawn.mode` in the config file, because the cluster is a second option rather than the fleet default — a config value able to default the whole fleet into the cluster is exactly what that split forecloses. A value that is neither `local` nor `cluster` REFUSES the spawn rather than falling back, since a worker created somewhere the caller did not ask for is otherwise discovered only by noticing it. ⚠️ With `target: "cluster"` the local-only arguments `interactive`, `resume` and `policy` are REFUSED rather than ignored: the cluster path can honour none of them, and a dropped `resume` would look like a resume while opening a fresh session. Omit all three on a cluster call. ⚠️ `docker` and `k8s` are the A2A worker-controller targets: `docker` asks the controller for one container per task on this Mac, `k8s` for one pod per task in nuke dev, and both then talk to the worker DIRECTLY over A2A. They are currently ACCEPTED BY THIS SCHEMA BUT REFUSED BY THE SPAWN — the A2A client has not shipped, and the spawn refuses rather than falling through to the local path, because a `docker` call that quietly opened a local worker would look exactly like a working call. Both are PER-CALL ONLY for the same reason `cluster` is. They are distinct from `cluster`, which is the shared long-lived `claude-interactive` pod and is untouched by them.',
+            'WHERE the worker is created. Omit for `local` — every worker this server opened before this argument existed: a wezterm tab, or with `interactive:false` an in-process SDK query. It is PER-CALL ONLY and deliberately NOT selectable from SUPERVISOR_SPAWN_MODE or `spawn.mode` in the config file, because the target is a second option rather than the fleet default — a config value able to default the whole fleet somewhere is exactly what that split forecloses. A value that is not a known target REFUSES the spawn rather than falling back, since a worker created somewhere the caller did not ask for is otherwise discovered only by noticing it. `docker` and `k8s` are the A2A worker-controller targets: `docker` asks the controller for one container per task on this Mac; `k8s` for one pod per task on the DEFAULT cluster (nuke dev unless `a2a.defaultCluster` says otherwise); `k8s:<cluster>` (e.g. `k8s:nukedev`, `k8s:octopus-dev`) names the cluster explicitly, and there is one controller per cluster with its own URL and token. An unknown or unconfigured cluster REFUSES rather than defaulting, and the refusal names the configured clusters. All of them talk to the worker DIRECTLY over A2A. ⚠️ With any of them, the local-only arguments `interactive`, `resume`, `policy` and `env` are REFUSED rather than ignored: the controller creates the worker, so there is no local process or window here to set one on, and a dropped `resume` would look like a resume while opening a fresh session. Omit all four on a docker or k8s call. ⚠️ A worker created this way is stopped with `stop_agent`, never with `send_agent_message` — the two are different planes (see that tool). ⚠️ `cluster` was RETIRED on 2026-10-15 (the shared long-lived `claude-interactive` pod in nuke dev); `k8s` is the route to a worker in that cluster now, and `cluster` is refused like any other unknown target.',
         },
         task: {
           type: 'string',
           description:
-            'The vault task this worker is opened for. On every LOCAL path it also chooses the launcher: the task\'s `launcher:` frontmatter, else its goal\'s, else the vault\'s `claude_script` (rule: docs/fleet-surface.md § Spawn a worker item 8) — so a task that cannot be read REFUSES the spawn. Honoured on the TAB and CLUSTER paths, and there it is what binds the worker to the vault: the session id is written to this task\'s `claude_session_id` (through the ownership rule in `task-binding.mjs` — stamped only when the field is EMPTY, otherwise appended to `metrics_sessions`) and reported back as `bind`. REQUIRED with `target: "cluster"`. ⚠️ The local HEADLESS path (`target: "local"` with `interactive: false`) does NOT bind and reports no `bind` key at all, so a headless spawn carrying `task` leaves the field unwritten. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
+            'The vault task this worker is opened for. On every LOCAL path it also chooses the launcher: the task\'s own `launcher:` frontmatter, else the vault\'s `worker_launcher`, else the vault\'s `claude_script` (rule: docs/fleet-surface.md § Spawn a worker item 8) — so a task that cannot be read REFUSES the spawn. ⚠️ A GOAL\'s `launcher:` is NOT read: it describes how that goal\'s manager runs, and inheriting it gave every worker under such a goal its manager\'s launcher. Honoured on the TAB and CLUSTER paths, and there it is what binds the worker to the vault: the session id is written to this task\'s `claude_session_id` (through the ownership rule in `task-binding.mjs` — stamped only when the field is EMPTY, otherwise appended to `metrics_sessions`) and reported back as `bind`. REQUIRED with any A2A target — `docker`, `k8s`, or `k8s:<cluster>` — and with the retired `cluster` target. ⚠️ The local HEADLESS path (`target: "local"` with `interactive: false`) does NOT bind and reports no `bind` key at all, so a headless spawn carrying `task` leaves the field unwritten. Pass `vault` alongside it when the task name is not unique across the configured vaults.',
         },
         vault: {
           type: 'string',
           description:
-            'The vault this worker belongs to. Resolves BOTH the working directory and the default launcher (that vault\'s `claude_script`, which a `task`\'s `launcher:` frontmatter can override) from one value, so the two cannot disagree — the reliable form of the required `cwd`/`vault` pair, and the one to prefer. An unknown vault, or a vault with no `claude_script`, is refused rather than falling back to another vault\'s launcher or to the bare `claude` binary. With `target: "cluster"` it instead names the vault the `task` lives in, because task names collide across boards.',
+            'The vault this worker belongs to. Resolves BOTH the working directory and the default launcher from one value, so the two cannot disagree: the launcher is that vault\'s `worker_launcher` (a `manager` spawn takes `manager_launcher`), falling back to `claude_script`, and a `task`\'s own `launcher:` frontmatter can override it — the reliable form of the required `cwd`/`vault` pair, and the one to prefer. An unknown vault, or a vault with no `claude_script`, is refused rather than falling back to another vault\'s launcher or to the bare `claude` binary. With `target: "cluster"` it instead names the vault the `task` lives in, because task names collide across boards.',
         },
         resume: {
           type: 'string',
@@ -2066,7 +3276,7 @@ const TOOLS = [
         shipping: {
           type: 'boolean',
           description:
-            'Mark this worker as SHIPPING: it runs under `acceptEdits` with `git add` / `git commit` / `git push` pre-allowed, so its edits and commits never depend on the supervisor permission channel — a headless worker whose channel dies ("Stream closed") can otherwise neither edit nor commit. Every other tool still prompts, so the approval policy stays in force. Headless and local only: combining it with interactive:true or target:"cluster" is refused. Omit for an ordinary worker.',
+            'Mark this worker as SHIPPING: it runs under `acceptEdits`, so its edits and commits never depend on the supervisor permission channel — a headless worker whose channel dies ("Stream closed") can otherwise neither edit nor commit, and a tab worker otherwise parks on an operator-only Shift+Tab. ⚠️ The two paths carry it DIFFERENTLY: a HEADLESS worker gets `git add` / `git commit` / `git push` pre-allowed; a TAB worker gets the MODE ONLY, so its unattended command set is the ambient `permissions.allow`. Every other tool still prompts, so the approval policy stays in force. Local only — target:"cluster" is refused, and so is a tab spawn whose launcher does not preserve an exported PERMISSION_MODE. Omit for an ordinary worker.',
         },
         policy: {
           type: 'string',
@@ -2077,6 +3287,16 @@ const TOOLS = [
           type: 'object',
           description:
             'Environment variables for THIS worker only — a per-call override of the ambient environment, so one session can be launched against a non-production backend without redirecting every session in a vault. Keys are shell variable names; values are strings (a number or boolean is stringified). They are layered ON TOP of the environment this server already passes through, so a key given here WINS over the inherited one and every key NOT given here is inherited unchanged — PATH, HOME and ANTHROPIC_BASE_URL among them. Honoured on BOTH local paths: a tab worker gets them exported into the tab\'s own command line, a headless worker gets them set on the SDK process. ⚠️ **On the TAB path the VALUES are visible in the host process table** (`ps`, `/proc/<pid>/cmdline`) for the life of the pane — exporting into a command line is the only mechanism a tab worker has, so a credential passed here is exposed to every local user on the machine; the headless path has no such exposure, because the SDK sets the child environment directly. Pass a credential only if you accept that. The spawn response echoes the NAMES back as `env: {keys: [...]}` — never the values, since a caller may pass a credential and this response gets quoted into ledger records and PR bodies — so a caller can tell the parameter was received rather than accepted-and-dropped. ⚠️ REFUSED with target:"cluster": that path creates no local process, so there is no environment here to set. An illegal variable name, or a value that is not a string/number/boolean, REFUSES the spawn rather than silently dropping the key.',
+        },
+        mounts: {
+          type: 'array',
+          description:
+            'Host paths to make visible inside a `docker` or `k8s` worker, passed through to the controller\'s `create` unchanged. Each entry is `{host_path, container_path, read_only?}`. ⚠️ THE CONTROLLER DECIDES, NOT THIS SERVER: it checks `host_path` against its own allowlist (`MOUNT_ALLOW` on the local docker controller) and REFUSES anything outside it with `mount_not_allowed: <path>`, creating no worker — so declaring a mount is a request, never a grant. A declared mount is WRITABLE unless you set `read_only: true`. ⚠️ A named `volume` is refused rather than accepted: the allowlist governs host paths only, so a volume would be an ungoverned surface. ⚠️ This is the sanctioned route to what the raw `env` argument cannot give you — `env` stays refused on these targets, and a mount carries a FILE rather than a value, so no credential travels from here. Ignored on the local paths, which have no controller.',
+        },
+        secrets: {
+          type: 'array',
+          description:
+            'Secrets to deliver to a `docker` or `k8s` worker, passed through to the controller\'s `create` unchanged. Each entry is `{name, teamvault_key}` — ⚠️ A TEAMVAULT KEY, NEVER A VALUE: the controller resolves the key against TeamVault itself, so the secret\'s value never travels from this server, never appears in a tool result, and is never written to a ledger record. Delivery differs by backend and the value is protected in both: docker writes it to a 0600 host file bind-mounted READ-ONLY at `/run/secrets/<name>` (never an env var, so it is absent from `docker inspect` Config.Env), and k8s adds the key to the worker\'s own Secret object, which the pod already consumes via `envFrom`. The controller refuses a key it cannot resolve, creating no worker. ⚠️ This is the sanctioned route to what the raw `env` argument cannot give you — `env` stays refused on these targets precisely because a value passed that way would be ungoverned. Ignored on the local paths, which have no controller.',
         },
         operator_named: {
           type: 'boolean',
@@ -2096,7 +3316,7 @@ const TOOLS = [
   {
     name: 'send_agent_message',
     description:
-      'Send a follow-up message to a running worker — the send_to_agent this server has never had. TWO transports, chosen from the worker\'s own record. A TAB worker: activates its tab, waits for the input prompt, and types the message, so it STEALS FOCUS; returns an error rather than a false success when the pane is gone, the tab cannot be activated, or the prompt never appears. A CLUSTER worker: posts one more turn on its EXISTING session id through the claude-interactive service — the bearer token is resolved inside the server, so the caller passes no credential — and BLOCKS until the pod answers, so expect a long call on a long turn. ⚠️ A 2xx proves a turn ran, not that the SAME conversation ran: the pod\'s own log (`turn start id=<id>` / `turn end id=<id>`) is the only proof of that, so never read the returned `answer` as a delivery receipt. A headless worker has neither a pane nor a cluster session and is refused; answer its parked prompts with `answer_permission` instead.',
+      'Send a follow-up message to a running worker — the send_to_agent this server has never had. TWO transports, chosen from the worker\'s own record. A TAB worker: activates its tab, waits for the input prompt, and types the message, so it STEALS FOCUS; returns an error rather than a false success when the pane is gone, the tab cannot be activated, or the prompt never appears. A CLUSTER worker: posts one more turn on its EXISTING session id through the claude-interactive service — the bearer token is resolved inside the server, so the caller passes no credential — and BLOCKS until the pod answers, so expect a long call on a long turn. ⚠️ A 2xx proves a turn ran, not that the SAME conversation ran: the pod\'s own log (`turn start id=<id>` / `turn end id=<id>`) is the only proof of that, so never read the returned `answer` as a delivery receipt. An A2A worker (`docker` / `k8s`): sends one more turn to the WORKER\'s own endpoint on the conversation its first turn opened — the controller is not in the path — and returns once the worker acknowledges, with `send_ms`; the result is collected in the background and read with `agent_status`. A row re-adopted after a reconnect holds no token and is refused. A headless worker has neither a pane nor a cluster session and is refused; answer its parked prompts with `answer_permission` instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2107,13 +3327,49 @@ const TOOLS = [
     },
   },
   {
+    name: 'stop_agent',
+    description:
+      'Stop an A2A worker (`docker` / `k8s`) — the one manager-facing way to remove a worker this fleet spawned, and the third of the controller\'s `create` / `list` / `stop` operations to be reachable from here. It calls the A2A worker controller\'s `stop` on the worker id `create` recorded, so the container (docker) or the pod and its `Config` CR (k8s) are removed. ⚠️ KEYED ON THE WORKER ID, NEVER A TASK NAME: one task can be spawned again after its first worker died, and a task-keyed stop would remove the successor. The id is read from the worker\'s own ledger record — pass `agent_id`, and the id is resolved for you. ⚠️ THIS IS A CONTROL-PLANE CALL TO THE CONTROLLER, authenticated with the controller token this server already holds — it is NOT a turn to the worker, so it needs no worker token. That is what makes it work on a row this process never spawned, including one re-adopted after a reconnect: those can be seen but not messaged, and they CAN be stopped. ⚠️ It applies to A2A workers only. A tab worker has no controller worker to stop (close its tab), and a cluster worker is the shared long-lived pod — out of scope here. ⚠️ A `TASK_STATE_FAILED` reply does NOT mean the worker is still running: the controller reports a store-side failure the same way, so reconcile against `list_agents` / the controller\'s own `list` rather than assuming the stop did not happen.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agent_id: {
+          type: 'string',
+          description:
+            'The A2A worker to stop — the id `spawn_agent` returned, or one from `list_agents`. ⚠️ A bare controller WORKER ID is also accepted, for a worker that has no ledger row (a spawn that failed after `create`): it is sent to the controller\'s stop with the token this server already holds, so no credential reaches the caller.',
+        },
+        target: {
+          type: 'string',
+          description:
+            'Optional `docker` / `k8s`, to narrow which controller a bare worker id is tried against. Ignored when `agent_id` names a ledger row, whose target the row already carries.',
+        },
+      },
+      required: ['agent_id'],
+    },
+  },
+  {
+    name: 'read_push_config',
+    description:
+      'Read a worker\'s registered A2A push config back FROM THE WORKER — `{ configs }` (a list, empty when the worker holds none) or `{ error }`. It lists rather than gets: the SDK\'s get is keyed by task id AND a config id the registration never sends, so a get can never match. This is the read half of the push round trip: `push_registration.state === "attempted-ok"` proves only that the worker ACCEPTED a registration, not that it holds one, and this call is the only thing that separates those two. ⚠️ It requires an accepted registration to exist for that agent and refuses otherwise, rather than reading an unregistered task. ⚠️ It returns the CONFIG — the url and notification token the worker stores — never the worker\'s bearer token, which authenticates the call and is never projected. ⚠️ Read-only: nothing on the worker changes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        agent_id: {
+          type: 'string',
+          description: 'The A2A worker whose push config to read — the id `spawn_agent` returned, or one from `list_agents`.',
+        },
+      },
+      required: ['agent_id'],
+    },
+  },
+  {
     name: 'list_agents',
-    description: 'All spawned sessions with status and how many permissions are pending. Each row also carries `current_tool_call` (the call in flight and how long it has been held) and `last_message`, so one sweep says what every worker is doing without a pane.',
+    description: 'All spawned sessions with status and how many permissions are pending. Each row also carries `current_tool_call` (the call in flight and how long it has been held) and `last_message`, so one sweep says what every worker is doing without a pane. Each row also carries `open_cards` — the session\'s open attention-store cards (`{item_id, answer_mechanism, payload, created_at}`), which is where a worker parked on a permission prompt shows up whoever spawned it, since `pending_permissions` covers only the parks this server holds. The tool name is the card\'s `payload` prefix. Answer one with `attention-answer.py answer <item_id> --decision allow|deny`. `open_cards` is null (not []) on every row when the store is unreachable or switched off. Each row also carries `last_status` — the newest pushed A2A status for that worker as `{worker_id, state, text, ts, age_s}`, or null when nothing has arrived — which is what lets one sweep show a docker worker\'s own mid-turn progress without opening its pane or waiting for its turn to end.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'agent_status',
-    description: 'One session: status, last assistant message, the current tool call, result, pending permission ids. `current_tool_call` is `{name, input_summary, started_at, held_seconds}` — the call the worker is inside right now and how long it has been held — or null when nothing is in flight; it is read from the worker\'s transcript and is what tells a long tool call apart from a worker parked on a gate. For a tab worker the last message is read from its transcript on disk. `session_status` and `awaiting_input` come from the session registry; `awaiting_input` is null (not false) when the session is not listed, and means "blocked on input" rather than specifically "a permission gate is open". `open_cards` lists the session\'s open attention-store cards (`{item_id, answer_mechanism, payload, created_at}`) — for a tab worker this is where a live permission prompt shows, since `pending_permissions` covers headless parks only; answer a `permission` card with `attention-answer.py answer <item_id> --decision allow|deny`. `open_cards` is null (not []) when the store is unreachable or switched off.',
+    description: 'One session: status, last assistant message, the current tool call, result, pending permission ids. `current_tool_call` is `{name, input_summary, started_at, held_seconds}` — the call the worker is inside right now and how long it has been held — or null when nothing is in flight; it is read from the worker\'s transcript and is what tells a long tool call apart from a worker parked on a gate. For a tab worker the last message is read from its transcript on disk. `session_status` and `awaiting_input` come from the session registry; `awaiting_input` is null (not false) when the session is not listed, and means "blocked on input" rather than specifically "a permission gate is open". `open_cards` lists the session\'s open attention-store cards (`{item_id, answer_mechanism, payload, created_at}`) — for a tab worker this is where a live permission prompt shows, since `pending_permissions` covers headless parks only; answer a `permission` card with `attention-answer.py answer <item_id> --decision allow|deny`. `open_cards` is null (not []) when the store is unreachable or switched off. `status_messages` is the worker\'s pushed A2A status channel — `{worker_id, state, text, ts}` entries, oldest first, and empty for every worker that is not an A2A one; `last_status` is the newest of those with an added `age_s`, or null when nothing has arrived. Both fields are ALWAYS present, so an empty `status_messages` means the channel is quiet rather than unwired — a worker that has just spawned looks the same as one that is not an A2A worker at all.',
     inputSchema: { type: 'object', properties: { agent_id: { type: 'string' } }, required: ['agent_id'] },
   },
   {
@@ -2131,7 +3387,7 @@ const TOOLS = [
   },
   {
     name: 'answer_permission',
-    description: 'Answer a parked permission prompt: allow or deny. This is what unblocks the worker.',
+    description: 'Answer a parked permission prompt: allow or deny. This is what unblocks the worker. ⚠️ Only for a park THIS server holds — a request parked by another manager\'s server is refused, and the refusal names the worker and its spawning session plus the `attention-answer.py answer <item_id> --decision allow|deny` route by which that manager\'s server settles it. A cross-session `answer_permission` cannot release another server\'s park.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2223,6 +3479,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // and the refusal message — the same split as the mode, the target and the role
           // above. A value that is not an object of string-ish values refuses there.
           env: args.env,
+          // ⚠️ UNLIKE `env` ABOVE, THESE ARE NOT REFUSED ON THE A2A TARGETS — they are the
+          // sanctioned route to what `env` cannot provide. Passed through raw; the shape is
+          // validated in `declaredCreateArguments` (a2a-client.mjs), which is what puts bytes on
+          // the wire, so a malformed entry is refused at the builder rather than reaching the
+          // controller. A caller cannot pass a secret's VALUE through `secrets`: the entry names a
+          // TeamVault key, and the controller resolves it.
+          mounts: args.mounts,
+          secrets: args.secrets,
           // Passed through raw and validated in role-map.mjs, which owns the legal values
           // and the refusal message — the same split as the spawn mode below.
           role: args.role,
@@ -2239,7 +3503,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       )
 
     case 'send_agent_message': {
-      const agent = agents.get(args.agent_id)
+      // ⚠️ The request-time roster, for the same reason `list_agents` reads it: the worker a
+      // manager is being asked to message is the one it did NOT spawn — that is the whole
+      // point of the endpoint — so a Map-only lookup refuses exactly the call this change
+      // exists to make work. The transport still comes from the row (`pane_id`, `worker_id`),
+      // which `toAgentRecord` carries. ⚠️ The `agent.messages` append below is a no-op for a
+      // row built fresh from the endpoint: that array is this process's own in-memory log and
+      // was never persisted for any worker, so nothing regresses — it is named so the missing
+      // entry is not read as a delivery failure.
+      const agent = (await currentRoster()).get(args.agent_id)
       if (!agent) return reply({ error: `unknown agent ${args.agent_id}` })
       if (typeof args.message !== 'string' || !args.message.trim()) {
         return reply({ error: 'message is required' })
@@ -2289,27 +3561,294 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         })
       }
 
+      if (channel.channel === 'a2a') {
+        // A follow-up turn goes to the WORKER's own endpoint on the conversation its first turn
+        // opened — the controller is not in this path (SC3). Sent the same way as the first turn:
+        // the send is awaited, the collection is not (SC5), and `send_ms` is measured here so the
+        // latency is this server's, not a caller's round trip.
+        const t0 = Date.now()
+        const sent = await openWorkerTurn({
+          endpoint: channel.endpoint,
+          contextId: channel.contextId,
+          text: args.message,
+          token: channel.token,
+          messageId: randomUUID(),
+          protocolVersion: channel.protocolVersion,
+        })
+        const sendMs = Date.now() - t0
+        if (sent.error) return reply({ error: `the turn could not be sent: ${sent.error}`, send_ms: sendMs })
+        // ⚠️ THE FOLLOW-UP REGISTERS TOO, AND THE SEED IS RESET FIRST. A follow-up is sent with a
+        // `contextId` and no `taskId`, so the worker creates a NEW task; the push config held for
+        // the first turn's task does not apply to it. Without this the channel is silent for every
+        // turn after the first, and `pushRegistration` keeps the FIRST turn's outcome — so the row
+        // reports a registration that has nothing to do with the turn just sent.
+        //
+        // ⚠️ WHY THE SEED IS REWRITTEN RATHER THAN THE GUARD DROPPED. `onDiagnostic` refuses to
+        // overwrite a terminal state, which is what stops it undoing `onTaskId` within a turn.
+        // Resetting to the seed gives that guard the meaning it has at spawn, while keeping the
+        // field per-turn — `result` is overwritten by each follow-up for exactly this reason.
+        agent.pushRegistration = pendingPushRegistration()
+        void collectWorkerTurn({
+          res: sent.res ?? sent.pending,
+          sentContextId: sent.contextId,
+          onTaskId: async (taskId) => {
+            const push = await a2aPushRegistry.pushFor(agent.id)
+            if (!push) {
+              // ⚠️ RECORDED, NOT SKIPPED. A worker whose token this registry no longer holds — a
+              // row re-adopted after a reconnect, or a create that never bound — cannot register,
+              // and saying so is the difference between that and a channel that is merely quiet.
+              agent.pushRegistration = {
+                state: 'not-attempted',
+                reason: 'this process holds no push token for the worker, so no registration could be sent',
+                at: new Date().toISOString(),
+              }
+              writeLedger(agent)
+              return
+            }
+            // ⚠️ SAME PRE-AWAIT WRITE AS THE SPAWN SITE, and it matters more here: a follow-up is
+            // the turn a reader is most likely to catch mid-flight, because it is issued against a
+            // worker that already exists. Without this the field would say "not yet named a task"
+            // for a task the stream named seconds ago.
+            agent.pushRegistration = { state: 'attempting', taskId, at: new Date().toISOString() }
+            writeLedger(agent)
+            const registration = await registerPushCallbackOnWorker({
+              endpoint: channel.endpoint,
+              taskId,
+              push,
+              token: push.token,
+              protocolVersion: channel.protocolVersion,
+            })
+            agent.pushRegistration = registration.error
+              ? { state: 'attempted-error', taskId, error: registration.error, at: new Date().toISOString() }
+              : { state: 'attempted-ok', taskId, at: new Date().toISOString() }
+            writeLedger(agent)
+          },
+          onDiagnostic: (d) => {
+            // ⚠️ TERMINAL STATES ARE FINAL; `attempting` IS NOT — same rule as the spawn site, and
+            // for the same reason: the pre-await write must not be able to hide a thrown call.
+            const state = agent.pushRegistration?.state
+            if (state === 'attempted-ok' || state === 'attempted-error') return
+            const patch = pushDiagnosticPatch(d)
+            if (!patch) return
+            agent.pushRegistration = patch
+            writeLedger(agent)
+          },
+        })
+          .then((collected) => {
+            const patch = a2aTurnPatch(collected, { at: new Date().toISOString() })
+            agent.result = patch.result
+            agent.error = patch.error
+            writeLedger(agent, patch)
+          })
+          .catch((cause) => {
+            const patch = { result: null, error: `collecting the turn failed: ${cause?.message ?? cause}` }
+            agent.error = patch.error
+            writeLedger(agent, patch)
+          })
+        return reply({
+          agent_id: agent.id,
+          channel: 'a2a',
+          send_ms: sendMs,
+          turn: sent.res
+            ? 'sent — the worker acknowledged; its result is collected in the background'
+            : 'sent, not yet acknowledged — the request is outstanding and its result is collected in the background',
+        })
+      }
+
       const res = await sendToPane(channel.paneId, args.message)
       if (res.error) return reply({ error: res.error })
       agent.messages = [...(agent.messages ?? []), { at: new Date().toISOString(), text: args.message }]
-      log(`sent a follow-up message to ${agent.id} (pane ${channel.paneId}, tab ${res.tabId})`)
-      return reply({ agent_id: agent.id, sent: true, tab_id: res.tabId, pane_id: res.paneId })
+      log(`sent a follow-up message to ${agent.id} (pane ${channel.paneId}, tab ${res.tabId}) — delivered: ${res.delivered}`)
+      // ⚠️ `sent` IS KEPT AS AN ALIAS, and it means only "keystrokes reached the pty" —
+      // true whether or not anything submitted. `delivered` is the verdict the caller must
+      // read: true (watched the text leave the composer), false (still there after the
+      // retries), or 'unverified' (could not tell). Reporting a bare `sent: true` as if it
+      // were delivery is the defect this shape exists to remove.
+      return reply({
+        agent_id: agent.id,
+        sent: true,
+        delivered: res.delivered,
+        ...(res.via ? { via: res.via } : {}),
+        ...(res.reason ? { reason: res.reason } : {}),
+        tab_id: res.tabId,
+        pane_id: res.paneId,
+      })
     }
 
-    case 'list_agents':
-      pruneRehydratedAgents()
-      return reply([...agents.values()].map(agentView))
+    case 'stop_agent': {
+      // The request-time roster, for the same reason `send_agent_message` reads it: the worker a
+      // manager stops is often the one it did NOT spawn. ⚠️ Unlike a message, a stop needs no
+      // worker-side handle — the controller token authenticates it and the worker id comes off the
+      // row — so a re-adopted row this process cannot MESSAGE is still stoppable, and the refusal
+      // below is scoped to what stop actually requires rather than to what a turn would.
+      const agent = (await currentRoster()).get(args.agent_id)
+      // ⚠️ A BARE WORKER ID IS STOPPABLE, AND THAT IS THE POINT OF THIS BRANCH. A spawn that fails
+      // after the controller minted a worker has no row here (see `recordUnreachableWorker`), and
+      // before this the only way to remove that worker was to run the controller's own stop by
+      // hand — which means extracting the controller token into a shell. This server already holds
+      // that token, so a caller who knows the worker id stops the worker and never sees a
+      // credential. Measured 2026-10-20: two quota-filler workers were unstoppable from every
+      // session on the machine for exactly this reason.
+      if (!agent) {
+        const bare = await stopWorkerByIdOnController({
+          workerId: args.agent_id,
+          target: args.target,
+        })
+        if (bare.error) return reply({ error: bare.error })
+        return reply({
+          worker_id: bare.workerId,
+          target: bare.target,
+          state: bare.state,
+          response: bare.response,
+        })
+      }
+
+      // Only an A2A worker has a controller worker behind it. Refused with the reason per kind
+      // rather than a bare "not supported", so a caller told no is told what to do instead.
+      if (!isA2ATarget(agent.status)) {
+        return reply({
+          error:
+            `agent ${agent.id} is not an A2A worker (status "${agent.status}"), so there is no controller worker ` +
+            'to stop. A tab worker is closed in its own tab; a cluster worker is the shared long-lived pod and is ' +
+            'out of this tool\'s scope. Only the A2A targets (`docker`, `k8s`, `k8s:<cluster>`) are stopped here.',
+        })
+      }
+      // ⚠️ THE WORKER ID COMES OFF THE RECORD, NEVER FROM A TASK. It is the id `create` recorded
+      // (`ledger.mjs` `worker_id`), restored on rehydrate by `toAgentRecord` — so a row that was
+      // re-adopted still carries it. A row without one is refused rather than stopped by a
+      // re-derived handle: one task can be spawned again, and a task-keyed stop removes the successor.
+      if (typeof agent.workerId !== 'string' || agent.workerId === '') {
+        return reply({
+          error:
+            `agent ${agent.id} is an A2A worker with no worker id on its record, so there is no worker to name in a ` +
+            'stop. The id is written at spawn; a row missing it cannot be stopped by task name, because one task ' +
+            'can be spawned again and the stop would remove the successor.',
+        })
+      }
+
+      // Resolved per call, never cached on the agent record — the config file is the only source
+      // that reaches an already-running server, and a value cached at spawn would keep presenting
+      // a token the operator has since rotated.
+      // ⚠️ `agent.status` IS the target for an A2A row — the roster stores the spawn target there,
+      // which is why the guard above reads it as one. So a stop resolves the same controller the
+      // spawn did, from the record rather than from the caller's memory. A row written before
+      // clusters existed carries a bare `k8s`, which resolves through the default-cluster clause.
+      const controller = resolveA2AControllerTarget({
+        target: agent.status,
+        ...a2aResolverInputs(),
+      })
+      if (controller.error) return reply({ error: controller.error })
+
+      const stopped = await stopWorkerOnController({
+        endpoint: controller.url,
+        workerId: agent.workerId,
+        token: controller.token,
+        messageId: randomUUID(),
+        mint: () => randomUUID(),
+      })
+      if (stopped.error) return reply({ error: stopped.error, agent_id: agent.id, worker_id: agent.workerId })
+
+      // ⚠️ **The stop is RECORDED, not merely echoed — and the reply alone is not a record.**
+      // The controller reports `stopped` only in the reply to the stop that removed it; `list`
+      // never returns it. So a supervisor that returns the reply and files nothing leaves the
+      // durable record silent, and the manager sweep then reads a deliberately stopped worker
+      // exactly as it reads a dead one — an orphan candidate, which the drive leg would
+      // stop+recreate, resurrecting work someone ended on purpose.
+      //
+      // ⚠️ **ONE record now, and it is the ledger row.** There used to be two: `writeLedger`
+      // refused an adopted row outright, so a stop on a worker this server did NOT spawn reached
+      // no durable store at all, and a machine-wide stop file carried exactly that case. It now
+      // routes such a stop through the endpoint's PATCH, which MERGES where `Post` would blank
+      // the owner's fields (see its guard), so the row is written for every stop and the file —
+      // with the `worker_id` join that existed only to read it — is gone. Applied on the success
+      // path only: a stop the controller refused is not a stop.
+      writeLedger(agent, stoppedPatch())
+
+      // ⚠️ The response is echoed as a whole rather than projected: it names the operation and the
+      // worker's resulting state, which is what a caller checks — and it carries no credential
+      // (the controller token rides in a header, never in the reply body).
+      return reply({
+        agent_id: agent.id,
+        worker_id: agent.workerId,
+        target: agent.status,
+        state: stopped.state,
+        response: stopped.response,
+      })
+    }
+
+    case 'list_agents': {
+      // ⚠️ The request-time roster, not the in-process Map: a worker another manager spawned —
+      // or one resumed from a WezTerm pane — is not in this process's Map at all, and reading
+      // only the Map is the defect this task exists to close. See `currentRoster`.
+      const roster = [...(await currentRoster()).values()]
+      // ⚠️ One store read for the whole roster, fanned out through the pure `openCardsOf` —
+      // never one `fetchOpenCards` per worker. That would be N round-trips, and with the store
+      // down N × the 3 s timeout, in front of every manager sweep.
+      //
+      // `null` (the store could not be read) stays distinct from `[]` (read, nothing open for
+      // this session) on every row: collapsing them reports a parked worker as unblocked, which
+      // is the false negative this field exists to remove.
+      const items = await fetchAttentionItems({ storeUrl: config.attentionStoreUrl })
+      // ⚠️ Same shape, same reason: ONE wrapper read for the whole roster, and skipped
+      // entirely when no row is wrapper-backed. A per-row `readWrappedSession` would be N
+      // round-trips with the wrapper down being N × the timeout in front of every sweep.
+      const questions = await readWrapperQuestions(roster.some((a) => a.wrapperSessionId))
+      return reply(
+        roster.map((agent) => ({
+          ...agentView(agent),
+          open_cards: items === null ? null : openCardsOf(items, agent.sessionId),
+          pending_question: pendingQuestionOf(questions, agent.wrapperSessionId),
+        })),
+      )
+    }
 
     case 'agent_status': {
-      pruneRehydratedAgents()
-      const agent = agents.get(args.agent_id)
+      const agent = (await currentRoster()).get(args.agent_id)
       if (!agent) return reply({ error: `unknown agent ${args.agent_id}` })
       // A tab worker's permission prompt never enters the park queue, so
       // `pending_permissions` is empty for it by construction. Its attention-store cards
       // are the gate a manager can see — and, via the plugin's PermissionRequest hook,
       // answer with `attention-answer.py answer <item_id>`. Null = store unreadable/off.
       const open_cards = await fetchOpenCards({ storeUrl: config.attentionStoreUrl, sessionId: agent.sessionId })
-      return reply({ ...agentView(agent), open_cards })
+      // Read the wrapper's LIVE record, never a cache: a worker can unpark and re-park, and a
+      // request id read from anything stale names a question the caller can no longer answer.
+      const questions = await readWrapperQuestions(Boolean(agent.wrapperSessionId))
+      return reply({
+        ...agentView(agent),
+        open_cards,
+        pending_question: pendingQuestionOf(questions, agent.wrapperSessionId),
+      })
+    }
+
+    case 'read_push_config': {
+      // ⚠️ THE READ HALF OF THE ROUND TRIP. `attempted-ok` says the worker ACCEPTED a registration;
+      // only a read says it HOLDS one. Gated on an accepted registration existing, because reading
+      // a task the worker never accepted would report "no config" and read as a channel fault.
+      const agent = (await currentRoster()).get(args.agent_id)
+      if (!agent) return reply({ error: `unknown agent ${args.agent_id}` })
+      const reg = agent.pushRegistration
+      if (!reg || reg.state !== 'attempted-ok' || typeof reg.taskId !== 'string') {
+        return reply({
+          error:
+            `agent ${args.agent_id} has no accepted push registration to read back (state: ${reg?.state ?? 'none'}). ` +
+            `A read of a task the worker never accepted would report a missing config as a channel fault.`,
+        })
+      }
+      if (!agent.a2aUrl || !agent.workerToken) {
+        return reply({
+          error:
+            `agent ${args.agent_id} is an A2A worker whose endpoint or bearer token this process does not hold — ` +
+            `a row re-adopted after a reconnect can be watched but not read back.`,
+        })
+      }
+      const out = await readPushCallbackFromWorker({
+        endpoint: agent.a2aUrl,
+        taskId: reg.taskId,
+        token: agent.workerToken,
+        protocolVersion: agent.protocolVersion,
+      })
+      if (out.error) return reply({ error: out.error, task_id: reg.taskId })
+      return reply({ agent_id: agent.id, task_id: reg.taskId, configs: out.configs })
     }
 
     case 'pending_permissions':
@@ -2324,7 +3863,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case 'answer_permission': {
       const record = pending.get(args.request_id)
       if (!record) {
-        return reply({ error: `no pending permission ${args.request_id} (already answered, or expired)` })
+        const viaWrapper = await answerWrapperPark(args.request_id, args.behavior)
+        // Computed, never constant — see `answerWrapperPark`'s four outcomes.
+        const consulted = viaWrapper.consulted === false ? ['pending'] : ['pending', 'wrapper']
+        // ⚠️ `unreadable` FIRST. It carries an `error` too, so testing `.error` before it made
+        // this arm unreachable and the outage sentence dead — the branch order is the fix.
+        if (viaWrapper.unreadable) {
+          return reply({
+            error: `${viaWrapper.error} — a wrapper-backed worker may still be parked on ${args.request_id}; this is an outage, not a foreign park`,
+            sources_consulted: consulted,
+          })
+        }
+        if (viaWrapper.answered || viaWrapper.error) return reply({ ...viaWrapper, sources_consulted: consulted })
+        // Both sources were read and neither holds the id.
+        return reply({
+          error: await foreignParkRefusal({ requestId: args.request_id, readLedger: readSessionLedger }),
+          sources_consulted: consulted,
+        })
       }
       // Record the manager's verdict too: a key the manager allows over and over
       // is the raw material for the next policy rule.
@@ -2335,6 +3890,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           tool: record.toolName,
           key: inputKey(record.input),
           matched_rule: null,
+          // The manager allowlist entry the server matched at park time, or null when the
+          // prompt was outside the list. Server-produced on purpose: an audit that read the
+          // manager's own claim about which entry covered it would be reading the answerer as
+          // its own witness.
+          matched_entry: record.allowlistEntry?.prefix ?? null,
           decision: behavior,
           decided_by: 'manager',
           request_id: args.request_id,
@@ -2360,6 +3920,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 await server.connect(new StdioServerTransport())
 log('supervisor ready')
+
+// Bind the A2A status receiver now, so its port is known before the first spawn rather than on
+// that spawn's critical path.
+//
+// ⚠️ NOT AWAITED, NOT FATAL, AND REPORTED ONCE. The server is already connected and serving, and a
+// port this process cannot take must not stop it — the channel is additive. Reporting once is
+// enough because the registry CACHES the bind result: a later spawn reads the same cached failure
+// rather than re-attempting the bind, so this line and the spawn's silent degradation cannot
+// disagree, and neither turns into a per-spawn error.
+void a2aPushRegistry.ensureListening().then((ready) => {
+  if (ready.error) log(`a2a status receiver unavailable — workers spawn without a status channel: ${ready.error}`)
+})
 
 // Stamp the session this server runs inside, on the same interval as its workers. A server
 // started outside a session has no id, so `startSelf` is a no-op there rather than a stamp
@@ -2412,45 +3984,100 @@ const clusterTimer = setInterval(async () => {
 }, HEARTBEAT_INTERVAL_MS)
 clusterTimer.unref?.()
 
+// The policy tier for wrapper-backed headless workers — see wrapper-policy.mjs for why it is a
+// supervisor-side poll rather than a hook. One roster read per tick for the whole fleet, and
+// none at all while this server holds no wrapper-backed worker.
+const wrapperPolicy = createWrapperPolicyPoller({
+  agents: () => agents.values(),
+  listSessions: () => listWrappedSessions({ baseUrl: config.wrapperUrl }),
+  answer: ({ sessionId, requestId, behavior }) =>
+    answerWrappedSession({ baseUrl: config.wrapperUrl, sessionId, requestId, behavior }),
+  decide,
+  logPermission,
+  log,
+})
+const wrapperPolicyTimer = setInterval(() => {
+  wrapperPolicy.run()
+}, WRAPPER_POLICY_INTERVAL_MS)
+wrapperPolicyTimer.unref?.()
+
 // The A2A equivalent of the cluster mirror: list the controller's workers and stamp every ledger
 // session it still runs, so an A2A worker reads live while it runs and dead within one sweep of
 // being killed (SC7). See `pollA2A` in a2a-spawn.mjs for why there is no reachability marker.
 //
 // ⚠️ SILENT WHEN NO CONTROLLER IS CONFIGURED, and that is the common case rather than a fault: most
-// servers never spawn an A2A worker, and logging a missing `SUPERVISOR_A2A_URL` every 30 s would
-// bury the signal. The ledger is read from disk each tick, never from the in-memory map, so a
-// reconnected server keeps stamping workers a previous process spawned.
+// servers never spawn an A2A worker, and logging a missing `SUPERVISOR_A2A_URL_<TARGET>` every
+// 30 s would bury the signal. The ledger is read from disk each tick, never from the in-memory
+// map, so a reconnected server keeps stamping workers a previous process spawned.
 const a2aPollState = { ok: null, inFlight: false }
 const a2aTimer = setInterval(async () => {
   if (a2aPollState.inFlight) return
-  const controller = resolveA2AControllerTarget({
-    envUrl: config.a2aUrl,
-    envToken: config.a2aToken,
-    file: config.configFileContents,
-    path: config.configFile,
-  })
-  if (controller.error) return
-  const records = listRecords(config.ledgerDir).filter((r) => r?.mode === 'a2a' && r.worker_id && !r.ended_at)
+  // ⚠️ ONE POLL PER CONFIGURED TARGET, NOT ONE POLL. The docker controller runs on this Mac and
+  // each k8s cluster has its own, behind separate URLs, so a single list call can only ever see
+  // part of the fleet. That matters here and nowhere else on this path: `pollA2A` STAMPS what it
+  // lists and never un-stamps what it does not, so a poll that skipped a target would leave that
+  // target's workers unstamped — reading as dead while they run. A `k8s:<cluster>` roster status
+  // is exactly why the fan-out is built from the CONFIGURED CLUSTERS rather than the closed kind
+  // list: the kind list knows `k8s`, not which clusters exist.
+  //
+  // Fanning out is safe for exactly that reason: an unlisted session is left alone, never marked
+  // stopped. A target whose controller is unreachable contributes `ok: false` rather than a false
+  // "no workers", so the caller's existing warning still fires.
+  const controllers = a2aTargetsForClusters(a2aResolverInputs().clusters)
+    .map((t) =>
+      resolveA2AControllerTarget({
+        target: t,
+        ...a2aResolverInputs(),
+      }),
+    )
+    .filter((c) => !c.error)
+  // Silent when NO target is configured, and that is the common case rather than a fault: most
+  // servers never spawn an A2A worker, and logging a missing `SUPERVISOR_A2A_URL_*` every 30 s
+  // would bury the signal.
+  if (controllers.length === 0) return
+  // ⚠️ Read from the endpoint, which is where every reader looks now — and the filter
+  // transfers UNCHANGED, because `readSessionLedger` returns the store's wire rows verbatim
+  // and `mode`, `worker_id` and `ended_at` are spelled identically on both sides. The only
+  // difference is where the array came from.
+  // ⚠️ `null` (could not read it) becomes `[]` here, which is exactly what `listRecords` did
+  // for a directory it could not read: the tick is skipped and the next one retries. That is
+  // safe because the poll is idempotent — a skipped tick costs a cycle, never a stamp — and
+  // the alternative, refusing the tick loudly, would log every 30 s through a store outage.
+  const records = ((await readSessionLedger()) ?? []).filter(
+    (r) => r?.mode === 'a2a' && r.worker_id && !r.ended_at,
+  )
   if (records.length === 0) return
   a2aPollState.inFlight = true
   try {
-    const result = await pollA2A({
-      records,
-      list: () =>
-        listWorkersOnController({
-          endpoint: controller.url,
-          token: controller.token,
-          messageId: randomUUID(),
-          mint: () => randomUUID(),
+    const results = []
+    for (const controller of controllers) {
+      results.push(
+        await pollA2A({
+          records,
+          list: () =>
+            listWorkersOnController({
+              endpoint: controller.url,
+              token: controller.token,
+              messageId: randomUUID(),
+              mint: () => randomUUID(),
+            }),
+          stamp: a2aStamp({ dir: heartbeatDir }),
         }),
-      stamp: (sessionId) => stampRecord(heartbeatDir, { sessionId, pid: null, mode: 'a2a', source: 'a2a' }),
-    })
-    if (!result.ok && a2aPollState.ok !== false) {
-      log(`a2a heartbeat: ${result.reason} — A2A stamps will go stale until it clears`)
-    } else if (result.ok && a2aPollState.ok === false) {
-      log(`a2a heartbeat: controller reachable again (${result.stamped.length} stamped)`)
+      )
     }
-    a2aPollState.ok = result.ok
+    // ⚠️ `every`, not the last result: a target that went unreachable must still warn even when
+    // the other answered. The warning names stamps going stale, and half the fleet going stale is
+    // exactly that condition — reading only the final result would silence it whenever the k8s
+    // controller happened to be the one that answered last.
+    const ok = results.every((r) => r.ok)
+    const stamped = results.flatMap((r) => r.stamped)
+    const failed = results.find((r) => !r.ok)
+    if (!ok && a2aPollState.ok !== false) {
+      log(`a2a heartbeat: ${failed.reason} — A2A stamps will go stale until it clears`)
+    } else if (ok && a2aPollState.ok === false) {
+      log(`a2a heartbeat: controller reachable again (${stamped.length} stamped)`)
+    }
+    a2aPollState.ok = ok
   } catch (error) {
     if (a2aPollState.ok !== false) log(`a2a heartbeat: poll failed: ${error?.message ?? error}`)
     a2aPollState.ok = false

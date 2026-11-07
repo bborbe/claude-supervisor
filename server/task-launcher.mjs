@@ -1,7 +1,14 @@
-// Read the `launcher:` frontmatter of a task and of each of its goals.
+// Read the `launcher:` frontmatter of a task.
 //
 // Split out of supervisor.mjs so it can be tested: that module connects a stdio server at
 // load and cannot be imported by a test. `run` is injectable, mirroring task-binding.mjs.
+//
+// ⚠️ A goal's `launcher:` is deliberately NOT read here. It is a MANAGER statement — managers
+// resolve through the subject's `manager_launcher:` and never through this field (operator
+// decision 2026-10-19) — so letting it reach a worker handed every task under a goal its
+// manager's Opus launcher. Measured 2026-10-22: 12 goals in private-personal carried
+// `launcher: cc-private-claude`, and every worker beneath them ran Opus. The worker default now
+// comes from the vault's config (`worker_launcher`); see `resolveTaskLauncher` in spawn-cwd.mjs.
 //
 // Precedence lives in `resolveTaskLauncher` (spawn-cwd.mjs); this only reads. A read that
 // FAILS is an error rather than "no field": reading it as absent would open a task that
@@ -11,8 +18,8 @@
 // ⚠️ The exit code is NOT the whole error signal. Measured against the real CLI (see
 // task-binding.mjs `currentOwner`): a task that does not exist answers
 // `{"error": "...file not found", "success": false}` with **exit 0**. So every answer is
-// checked for its expected shape — `value` a string, `goals` an array — and anything else
-// is an error. A `?? ''` here turned a missing task into "field unset".
+// checked for its expected shape — `value` a string — and anything else is an error. A `?? ''`
+// here turned a missing task into "field unset".
 
 import { runVaultCli } from './task-binding.mjs'
 
@@ -35,34 +42,11 @@ export function readTaskLaunchers({ task, vault, run = runVaultCli }) {
 
   try {
     const taskLauncher = field(call(['task', 'get', task, 'launcher']), `task ${JSON.stringify(task)}`)
-    // A task naming its own launcher wins outright, so its goals are never read — a broken
-    // goal must not refuse a spawn the precedence says should open.
-    if (taskLauncher) return { taskLauncher, goalLaunchers: [], warnings: [] }
-
-    const shown = call(['task', 'show', task])
-    if (shown?.error || shown?.success === false) throw new Error(`task ${JSON.stringify(task)}: ${shown.error ?? 'show failed'}`)
-    // `goals` is OMITTED when the task has none — that, and only that, reads as no goals.
-    // Present but not an array is an unexpected answer, so it is an error, not "no field".
-    if (shown?.goals === undefined) return { taskLauncher: '', goalLaunchers: [], warnings: [] }
-    if (!Array.isArray(shown.goals)) throw new Error(`task ${JSON.stringify(task)}: \`goals\` is not a list`)
-    const goals = shown.goals.map((g) => String(g).trim().replace(/^\[\[|\]\]$/g, '').trim()).filter(Boolean)
-    // A goal link that does not resolve is SKIPPED with a warning, never an error: stale goal
-    // links are a normal vault state, and refusing on one would stop every task carrying it
-    // from opening at all. Same rule as vault-cli's `ops.ResolveTaskLauncher`.
-    const goalLaunchers = []
-    const warnings = []
-    for (const g of goals) {
-      try {
-        goalLaunchers.push(field(call(['goal', 'get', g, 'launcher']), `goal ${JSON.stringify(g)}`))
-      } catch (error) {
-        warnings.push(`goal ${JSON.stringify(g)} skipped for launcher resolution: ${error.message}`)
-      }
-    }
-    return { taskLauncher: '', goalLaunchers, warnings }
+    return { taskLauncher }
   } catch (error) {
     return {
       error:
-        `could not read the \`launcher:\` field of task ${JSON.stringify(task)} or its goals in vault ` +
+        `could not read the \`launcher:\` field of task ${JSON.stringify(task)} in vault ` +
         `${JSON.stringify(vault)} — refusing rather than opening it on the vault default: ${error.message}`,
     }
   }

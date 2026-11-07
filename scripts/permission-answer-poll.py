@@ -125,6 +125,46 @@ def get_json(conn, url: str):
         return False, f"{type(e).__name__}: {e}"
 
 
+def post_json(conn, url: str, body: dict):
+    """(ok, data_or_reason) for a POST on the held connection. Never raises."""
+    parts = urlsplit(url)
+    try:
+        conn.request(
+            "POST", parts.path, body=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+        )
+        r = conn.getresponse()
+        payload = r.read().decode("utf-8", errors="replace")
+        if r.status not in (200, 201):
+            return False, f"store returned HTTP {r.status} for {url}"
+        return True, json.loads(payload) if payload else {}
+    except (OSError, http.client.HTTPException) as e:
+        conn.close()
+        return False, f"{type(e).__name__}: {e}"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+CARRIER = "supervisor:permission-answer-poll"
+
+
+def record_attempt(conn, store: str, item_id: str) -> None:
+    """Record that this hook delivered the verdict to its own gate.
+
+    ⚠️ Called AFTER `emit`, never before: an attempt is a fact about a delivery
+    that happened. This hook is the tab worker's carrier, the way
+    `server/attention-poll.mjs` is the headless worker's, and
+    `attention-answer.py` claims `ANSWERED` only when the store reads
+    `delivered` — so without this write every delivered tab-worker answer would
+    read `never_attempted` and the arm would report it UNCONFIRMED. A failure
+    here is logged, never raised: the decision is already on stdout.
+    """
+    ok, res = post_json(conn, f"{store}/api/1.0/attention/{item_id}/attempt",
+                        {"carrier": CARRIER, "outcome": "delivered"})
+    if not ok:
+        print(f"[poll] delivery attempt record failed for {item_id}: {res}", file=sys.stderr)
+
+
 def verdict(item):
     """(ok, decision, reason) — the three conditions, in the order the versioned half checks them."""
     if not isinstance(item, dict):
@@ -261,6 +301,8 @@ def poll_until_settled(conn, store, args, item_id, expect, hook_started) -> int:
                     print(f"[poll] WOULD EMIT behavior={decision!r} ({reason})", file=sys.stderr)
                     return 0
                 emit(decision)
+                sys.stdout.flush()
+                record_attempt(conn, store, item_id)
                 return 0
         else:
             last_reason = data

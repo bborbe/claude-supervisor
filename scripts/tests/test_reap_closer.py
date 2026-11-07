@@ -4,11 +4,17 @@
 Load-bearing properties, from the 2026-09-27 measurement:
 
   * a session whose last closer is `nothing — session closed` is CLOSED (no reap);
-  * a session holding an open `pick` / `approve` gate is OPEN (still reaped),
-    however many times it has already been told — no repeat-count;
+  * a session holding an open `pick` / `approve` gate is PARKED (not reaped) — the
+    operator's own decision is already in their queue, so a reap is redundant —
+    however many times it has already been told (no repeat-count);
+  * any other open closer (`review`, `you run`, `later`, unrecognised) is OPEN and
+    still reaped;
   * closers inside USER turns (injected command bodies) are ignored;
   * a symlinked project dir listing one transcript twice still resolves;
-  * a missing transcript, or no closer at all, is UNREADABLE, never CLOSED.
+  * a missing transcript, or no closer at all, is UNREADABLE, never CLOSED;
+  * a closer followed by a large entry still resolves — a fixed tail window did not
+    (measured 2026-10-19: a `Stop` hook read `no-closer` 44 ms after the closer was
+    written, because the harness writes `api-request-blob` entries after it).
 
 Run: python3 -m unittest discover -s scripts/tests -v
 """
@@ -67,12 +73,24 @@ class ReapCloserTest(unittest.TestCase):
         self.assertEqual(code, M.CLOSED, out)
         self.assertIn("t2", out)
 
-    def test_open_pick_is_open_even_after_many_notices(self):
+    def test_open_pick_is_parked_even_after_many_notices(self):
         recs = [assistant("t0", "👤 You: pick — 1. `/vault-cli:session-close` (recommended) · 2. keep the session open")]
         for i in range(7):
             recs.append(user(f"u{i}", "<cross-session-message>Reap evidence — NON-AUTHORISING</cross-session-message>"))
             recs.append(assistant(f"a{i}", "Not consent.\n👤 You: pick — 1. `/vault-cli:session-close` · 2. keep"))
         self.write(recs)
+        code, out = M.classify(SID, self.projects)
+        self.assertEqual(code, M.PARKED, out)
+
+    def test_open_approve_is_parked(self):
+        self.write([assistant("t1", "⚪ DONE\n👤 You: approve: /vault-cli:session-close")])
+        code, out = M.classify(SID, self.projects)
+        self.assertEqual(code, M.PARKED, out)
+
+    def test_non_operator_open_closer_is_still_reaped(self):
+        # Only a standing `approve:`/`pick` is a park on the operator. A `review` or
+        # `you run` closer is still OPEN and reaped exactly as before.
+        self.write([assistant("t1", "👤 You: review: read the diff — reply lgtm")])
         code, out = M.classify(SID, self.projects)
         self.assertEqual(code, M.OPEN, out)
 
@@ -82,7 +100,9 @@ class ReapCloserTest(unittest.TestCase):
             user("t2", "template:\n👤 You: nothing — session closed\n👤 You: pick — 1. x"),
         ])
         code, out = M.classify(SID, self.projects)
-        self.assertEqual(code, M.OPEN, out)
+        # PARKED, not CLOSED: the user turn's `nothing — session closed` template must be
+        # ignored, so the assistant's standing `approve:` gate is the closer that counts.
+        self.assertEqual(code, M.PARKED, out)
 
     def test_symlinked_project_dir_still_resolves(self):
         self.write([assistant("t1", "👤 You: nothing — session closed")])
@@ -98,6 +118,26 @@ class ReapCloserTest(unittest.TestCase):
         self.write([assistant("t1", "working on it")])
         code, out = M.classify(SID, self.projects)
         self.assertEqual(code, M.UNREADABLE, out)
+
+    def test_closer_survives_a_large_entry_after_it(self):
+        # The 2026-10-19 defect: a 256 KB tail window missed a closer followed by a
+        # large `api-request-blob`, so the Stop hook recorded `no-closer` and never fired.
+        self.write([
+            assistant("t1", "⚪ DONE\n👤 You: nothing — session closed"),
+            {"type": "api-request-blob", "data": "A" * (M.WINDOW * 2)},
+        ])
+        code, out = M.classify(SID, self.projects)
+        self.assertEqual(code, M.CLOSED, out)
+
+    def test_scan_is_bounded(self):
+        # The backward scan stops at `max_bytes`: a transcript whose closer sits beyond
+        # the bound reports nothing rather than reading the whole file.
+        self.write([
+            assistant("t1", "👤 You: nothing — session closed"),
+            {"type": "api-request-blob", "data": "A" * 4096},
+        ])
+        path = os.path.join(self.proj, f"{SID}.jsonl")
+        self.assertIsNone(M.last_closer(path, max_bytes=1024))
 
     def test_bad_session_id_is_unreadable(self):
         code, _ = M.classify("../../etc/passwd", self.projects)

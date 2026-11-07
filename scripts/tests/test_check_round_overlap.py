@@ -4,7 +4,7 @@ The guard's headline claim is that the rule's home is *dispatched every round*. 
 version read that reach from the step file's own `When:` line — a restatement, not the
 normative trigger — so deleting the row naming the file from every router left it green.
 The second version read the router tables but accepted **any** router, and the loop had
-two: `commands/manager-loop.md` is the arm, invoked once to start the loop and never
+two: `commands/goal-loop.md` is the arm, invoked once to start the loop and never
 re-invoked, and it carried the same step table as the router a wakeup named. So deleting
 the row from that router alone still exited 0 while the success message read *"named by a
 router row that fires every tick"* — an instrument reporting success on a weaker condition
@@ -12,7 +12,7 @@ than the one it names, which is the defect class the guard exists to catch, repr
 inside the guard.
 
 ⚠️ **The fixture follows the tree, and the tree changed on 2026-10-11.** The wakeup now
-names `commands/manager-drive.md` — the round — and `commands/manager-loop-tick.md` was
+names `commands/goal-drive.md` — the round — and `commands/manager-loop-tick.md` was
 retired, and the arm no longer carries a step table at all. The *property* the guard asserts
 is unchanged, so the fixture now models the real shape: an arm with no table, a round router
 that names the step, and a `*-tick.md` file kept as the fleet loop's still-valid shape.
@@ -30,10 +30,10 @@ import tempfile
 import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-round-overlap.py"
-ARM = "commands/manager-loop.md"
-DRIVE = "commands/manager-drive.md"
+ARM = "commands/goal-loop.md"
+DRIVE = "commands/goal-drive.md"
 TICK = "commands/manager-loop-tick.md"
-STEP = "commands/steps/manager-readings.md"
+STEP = "commands/steps/round-readings.md"
 
 MARKER = "is ABSORBED, never run"
 WHEN = "every tick, **before** the sweep dispatch"
@@ -71,7 +71,7 @@ class Base(unittest.TestCase):
         (root / "commands" / "steps").mkdir(parents=True)
         shutil.copy(SCRIPT, root / "scripts" / "check-round-overlap.py")
         # The real shape since 2026-10-11: the arm carries no step table, and the router a
-        # wakeup names is the round (`commands/manager-drive.md`).
+        # wakeup names is the round (`commands/goal-drive.md`).
         self.write(ARM, router([]))
         self.write(DRIVE, router([ROW]))
         self.write(STEP, STEP_BODY)

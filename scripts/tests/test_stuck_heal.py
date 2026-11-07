@@ -7,9 +7,10 @@ table plus a fake-effects run, and the ledger join against synthetic records.
 import importlib.util
 import json
 import os
-import shutil
-import tempfile
 import unittest
+
+import endpoint_fixture  # noqa: E402
+from endpoint_fixture import FixtureEndpoint, dead_url, ledger_row  # noqa: E402
 
 SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SID = "e4fd1919-b082-4bb4-aebb-d7185cd61502"
@@ -133,70 +134,78 @@ class HealTest(unittest.TestCase):
 
 
 class DeathsFromLedgerTest(unittest.TestCase):
+    """⚠️ The rows come from a fixture ENDPOINT now, not a directory of files.
+
+    A case that still wrote `<sid>.json` would count against a ledger this reader never
+    opens, and every count below would read **0** — which is the value `decide()` maps to
+    "resume headless", so the whole class would pass while the ladder never left its first
+    rung. That is why the fixture is not decoration here.
+    """
+
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="heal-ledger-")
-        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
 
     def write(self, name, **rec):
-        with open(os.path.join(self.dir, name + ".json"), "w") as fh:
-            json.dump(rec, fh)
+        """Plant one ledger row, so the file-era call sites below read unchanged."""
+        self.endpoint.add_ledger_row(
+            ledger_row(rec.get("session_id") or name, resumed_from=rec.get("resumed_from") or "")
+        )
 
-    def test_a_missing_ledger_is_zero_not_an_exception(self):
-        self.assertEqual(
-            heal.deaths_from_ledger(SID, os.path.join(self.dir, "nope")), 0)
+    def test_an_unreadable_store_is_zero_not_an_exception(self):
+        self.assertEqual(heal.deaths_from_ledger(SID, dead_url()), 0)
 
     def test_resumes_of_this_session_are_counted_by_resumed_from(self):
         # A resume keeps the SAME session id, so counting distinct ids would
         # always read 1 and the ladder would never leave the first rung.
-        # Real shape: one `<session_id>.json` per session, overwritten in place
-        # on a resume (server/ledger.mjs recordPath).
+        # Real shape: one row per session, replaced in place on a resume.
         self.write(SID, session_id=SID, resumed_from=SID)
         self.write("other", session_id="other", resumed_from="other")
-        self.assertEqual(heal.deaths_from_ledger(SID, self.dir), 1)
+        self.assertEqual(heal.deaths_from_ledger(SID, self.endpoint.url), 1)
 
     def test_a_fresh_record_is_zero(self):
         self.write(SID, session_id=SID, resumed_from=None)
-        self.assertEqual(heal.deaths_from_ledger(SID, self.dir), 0)
+        self.assertEqual(heal.deaths_from_ledger(SID, self.endpoint.url), 0)
 
-    def test_non_object_json_is_skipped_not_a_crash(self):
-        for i, body in enumerate(("[1,2,3]", '"str"', "7", "null")):
-            with open(os.path.join(self.dir, f"odd{i}.json"), "w") as fh:
-                fh.write(body)
-        self.assertEqual(heal.deaths_from_ledger(SID, self.dir), 0)
+    def test_a_non_object_row_is_skipped_not_a_crash(self):
+        for body in ([1, 2, 3], "str", 7, None):
+            self.endpoint.add_ledger_row(body)
+        self.assertEqual(heal.deaths_from_ledger(SID, self.endpoint.url), 0)
 
     def test_an_eight_char_prefix_resolves(self):
         # The form a manager actually holds: the watcher prints 8 chars, and an
         # exact-match lookup would read 0 and re-resume an already-resumed session.
         self.write("a", session_id=SID, resumed_from=SID)
-        self.assertEqual(heal.deaths_from_ledger(SID[:8], self.dir), 1)
+        self.assertEqual(heal.deaths_from_ledger(SID[:8], self.endpoint.url), 1)
 
-    def test_an_unreadable_record_is_skipped_not_fatal(self):
+    def test_a_non_object_row_does_not_hide_the_others(self):
         self.write("a", session_id=SID, resumed_from=SID)
-        with open(os.path.join(self.dir, "broken.json"), "w") as fh:
-            fh.write("{not json")
-        self.assertEqual(heal.deaths_from_ledger(SID, self.dir), 1)
-
+        self.endpoint.add_ledger_row(None)
+        self.assertEqual(heal.deaths_from_ledger(SID, self.endpoint.url), 1)
 
     def test_a_different_session_sharing_only_a_longer_prefix_is_not_counted(self):
         # Full-id lookup: a record from another session that shares the first 8
         # chars must not count against this one.
         other = SID[:8] + "-0000-0000-0000-000000000000"
         self.write("r1", resumed_from=other)
-        self.assertEqual(heal.deaths_from_ledger(SID, self.dir), 0)
+        self.assertEqual(heal.deaths_from_ledger(SID, self.endpoint.url), 0)
 
 
 class MainTest(unittest.TestCase):
     """The printed line is the whole contract with the manager."""
 
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="heal-main-")
-        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        # ⚠️ An EMPTY fixture store, not the real one: the ladder's first rung is decided by
+        # `resumes=0`, so a case reading the MACHINE's ledger could find a resume of its own
+        # synthetic id and report the second rung instead.
+        self.endpoint = FixtureEndpoint()
+        self.addCleanup(self.endpoint.__exit__, None, None, None)
 
     def run_main(self, *argv):
         import contextlib, io
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            rc = heal.main(list(argv) + ["--ledger-dir", self.dir])
+            rc = heal.main(list(argv) + ["--endpoint", self.endpoint.url])
         return rc, out.getvalue().strip()
 
     def test_line_shape_for_a_first_stream_closed_death(self):
@@ -209,8 +218,7 @@ class MainTest(unittest.TestCase):
         self.assertTrue(line.endswith("-> report-only"), line)
 
     def test_line_shape_after_one_resume_reopens(self):
-        with open(os.path.join(self.dir, SID + ".json"), "w") as fh:
-            json.dump({"session_id": SID, "resumed_from": SID}, fh)
+        self.endpoint.add_ledger_row(ledger_row(SID, resumed_from=SID))
         _, line = self.run_main("--session", SID8, "--task", TASK, "--kind", "stream-closed")
         self.assertEqual(line, f"HEAL {SID8} [stream-closed] task={TASK!r} resumes=1 -> reopen-interactive")
 
@@ -226,8 +234,7 @@ class MainTest(unittest.TestCase):
                 heal.main(["--session", SID8, "--task", TASK, "--kind", bad])
 
     def test_a_padded_session_is_stripped_before_the_ledger_join(self):
-        with open(os.path.join(self.dir, SID + ".json"), "w") as fh:
-            json.dump({"session_id": SID, "resumed_from": SID}, fh)
+        self.endpoint.add_ledger_row(ledger_row(SID, resumed_from=SID))
         _, line = self.run_main("--session", f"  {SID8} ", "--task", TASK, "--kind", "stream-closed")
         self.assertTrue(line.endswith("resumes=1 -> reopen-interactive"), line)
 

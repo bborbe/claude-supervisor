@@ -49,6 +49,7 @@ The hard invariants and gates live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/rule
 ## Arm procedure
 
 1. **Arm `ScheduleWakeup` FIRST — before the read half, not after it.** It is one-shot per call, so a long round (a drive leg, an escalation, a gate relay) that re-arms at its end is exactly the round that never reaches the re-arm and stops silently. Arm at the **clamped** interval with the prompt `/supervisor:fleet-drive --interval <N>m` — **name the ROUND, never the arm** — and `noop: false` (the round has not run yet, so `noop` cannot be honest at the head). A second `ScheduleWakeup` supersedes the first rather than stacking.
+   ⚠️ **The fleet registration and its liveness record are written by the round's re-arm step** — `${CLAUDE_PLUGIN_ROOT}/commands/steps/re-arm.md`, which runs immediately after this arm. This arm does not duplicate them: one home for the pair, and a round that skips its re-arm step also stops refreshing its answer path, which is a defect that should be visible in one place.
 2. **Then run the round** — read `${CLAUDE_PLUGIN_ROOT}/commands/fleet-drive.md` and follow its router table. Every step file it names is under `${CLAUDE_PLUGIN_ROOT}/commands/steps/`.
 
 ## Router

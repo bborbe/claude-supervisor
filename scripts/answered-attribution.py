@@ -71,7 +71,10 @@ Load it the way the tree loads its siblings (`fleet-board.py:77`):
 # The store's own state vocabulary. `closed` is **not** an act — see
 # `was_acted_on`: a close records that a card was cleared, not that anything was
 # answered. The state stays in the vocabulary because a sweep must still be able
-# to name what it saw.
+# to name what it saw. ⚠️ `OPEN` is the only state no branch in this module
+# compares against, and that is deliberate: it is the one live value, and
+# `classify` must never *default* to it — an absent state is `unreadable`, not
+# open, so a caller gating on `state == "open"` and this reason line agree.
 OPEN = "open"
 ANSWERED = "answered"
 CLOSED = "closed"
@@ -81,6 +84,21 @@ ATTRIBUTED = "attributed"
 UNATTRIBUTED = "unattributed"
 AUTOMATED = "automated"
 NOTHING = "nothing"
+
+# What the answer's KIND says, which outranks what its client says.
+#
+# ⚠️ These are verdicts, not the poll terminals that render them, and they are
+# checked BEFORE the client evidence. The reason is that a kind is a fact about
+# what the operator did, while the client is evidence about who sent it: a
+# decline is a decline whether a person or a script clicked it, and asking "was
+# this positively flagged as automated?" first would answer ATTRIBUTED for a
+# card the operator explicitly dismissed.
+#
+# ⚠️ The operator's ruling fixes the vocabulary at four — *"the rest api is able
+# to tell the session what the state is — accepted, declined, skipped/hidden or
+# not answered — one of these 4"* — and these two are the middle pair.
+DECLINED = "declined"
+HIDDEN = "hidden"
 
 
 def answered_client(item):
@@ -103,10 +121,15 @@ def was_acted_on(item):
 
     What changed is downstream, in `classify`: a close is an act but **not a
     release**, because the asking session is still frozen — treating the clear as
-    an answer opens a gate nobody opened. Splitting the two is what keeps a reap
-    distinguishable from an acknowledgement in the poll's terminal: a reap
-    carries no actor at all and reads as OPEN, while an acknowledgement carries
-    one and reads as NOT_OPERATOR_ANSWERED.
+    an answer opens a gate nobody opened. Splitting the two keeps a reap
+    distinguishable from an acknowledgement, but **not by the poll's terminal
+    word** — since 2026-10-28 both reach `NOT_OPERATOR_ANSWERED:`, and they are
+    separated by the `ANSWERED_BY:` line, which an acknowledgement carries and a
+    reap cannot. ⚠️ **This docstring said the opposite until then** — that a reap
+    "reads as OPEN" — and `attention-ask.py`'s `cmd_poll` keyed its OPEN branch
+    on it, so a reaped close printed the same word as a live gate. That is why
+    the branch is now keyed on `state == "open"`: OPEN is the one terminal that
+    means "still unanswered", and no close of any kind can support it.
 
     ⚠️ The reap reading this function was written for is unchanged. The dominant
     closed shape in the live store is a reap — `closed` with no `answered_at`,
@@ -119,6 +142,29 @@ def was_acted_on(item):
     return bool(item.get("answered_by")) and item.get("state") in (ANSWERED, CLOSED)
 
 
+def answer_kind(item):
+    """The kind the operator's answer took, or "" when the item carries none.
+
+    Two fields carry it and they are mutually exclusive by construction: `answer`
+    holds a single-question item's content and `answers` holds a multi-question
+    item's, one entry per tab. A multi-question item is read as `hidden` or
+    `skip` only when EVERY unit carries that kind — a card with one tab answered
+    and one hidden is not a whole-card close, and reporting it as one would
+    swallow the tab the operator actually answered.
+    """
+    item = item or {}
+    units = item.get("answers")
+    if isinstance(units, list) and units:
+        kinds = {u.get("kind") for u in units if isinstance(u, dict)}
+        if len(kinds) == 1:
+            return kinds.pop() or ""
+        return ""
+    answer = item.get("answer")
+    if isinstance(answer, dict):
+        return answer.get("kind") or ""
+    return ""
+
+
 def classify(item):
     """Return (verdict, reason) for one item — the single rule every caller uses.
 
@@ -129,7 +175,13 @@ def classify(item):
     """
     item = item or {}
     if not was_acted_on(item):
-        state = item.get("state") or OPEN
+        # ⚠️ **Never default this to `OPEN`.** `attention-ask.py`'s poll gates its
+        # `OPEN` terminal on `state == "open"`, so a record with no readable
+        # state is deliberately NOT claimed as open there. A fallback of `OPEN`
+        # here made the reason line contradict that gate on the same record —
+        # `NOT_OPERATOR_ANSWERED: … (state None) -- no answer recorded (state
+        # open)` — naming the one state the caller had just rejected.
+        state = item.get("state") or "unreadable"
         return NOTHING, f"no answer recorded (state {state})"
 
     # ⚠️ **A close is a clear, not an answer — 2026-09-27.** `was_acted_on` still
@@ -147,6 +199,27 @@ def classify(item):
             "the item was closed without an answer — a close is a clear, not an "
             "answer, so the asking session is still frozen and the gate is not "
             "released",
+        )
+
+    # ⚠️ The answer's KIND is read before the client evidence, and that ordering
+    # IS the 2026-10-20 change. A decline or a hidden close is a fact about what
+    # the operator did; asking "was this client positively flagged as automated?"
+    # first answers ATTRIBUTED for a card the operator explicitly dismissed —
+    # which is what shipped until this date, and what let a bottom-Dismiss
+    # release a gate.
+    kind = answer_kind(item)
+    if kind == "skip":
+        return (
+            DECLINED,
+            "the operator dismissed the card — a decline, not an acceptance, so "
+            "the gate is not released",
+        )
+    if kind == "hidden":
+        return (
+            HIDDEN,
+            "the card was closed as handled elsewhere — the operator answered in "
+            "the asking session's own pane, so there is no answer here to release "
+            "a gate with",
         )
 
     # The client evidence is read next, so an item that is positively flagged as

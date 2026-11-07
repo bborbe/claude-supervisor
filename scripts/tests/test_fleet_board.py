@@ -32,8 +32,12 @@ which records a real run against the real registry.
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
+import io
+import json
 import os
+import sys
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -342,15 +346,20 @@ class TestGroupingRules(unittest.TestCase):
         self.assertEqual(g.role_of(_sid(6)), "manager")
         self.assertIsNone(g.subject_of(_sid(6)), "orange proves a manager, not its scope")
 
-    def test_rule_2_the_goal_chain_nests_a_worker_under_its_manager(self):
-        """goal -> topic listing that goal -> the live manager for that topic."""
+    def test_a_worker_whose_goal_has_no_manager_falls_to_the_root_not_its_topic(self):
+        """A topic manager never manages a worker.
+
+        `_sid(2)` is the live topic manager for "Manager Layer", which lists
+        "Sample Goal A"; `_sid(3)`'s task names that goal, and no goal manager is
+        live. The worker must fall to the fleet manager, not to the topic manager.
+        """
         g = _grouping()
         self.assertEqual(g.role_of(_sid(3)), "worker")
-        self.assertEqual(g.parent_of(_sid(3)), _sid(2))
+        self.assertEqual(g.parent_of(_sid(3)), _sid(9))
 
-    def test_rule_2_a_manager_whose_subject_is_the_goal_beats_the_topic(self):
-        """Both a goal-subject manager and its topic's manager exist; the goal is
-        the more specific parent and must win."""
+    def test_rule_2_a_goal_manager_wins_over_its_topic(self):
+        """Both a goal-subject manager and its topic's manager exist; the worker is
+        parented to the goal manager, because the topic is not a rung for a worker."""
         g = _grouping()
         self.assertEqual(g.parent_of(_sid(8)), _sid(7))
 
@@ -420,6 +429,59 @@ class TestGroupingRules(unittest.TestCase):
         g = fb.build_grouping(registry, index, {}, set(), {_sid(3): ["Some Task"]})
         self.assertEqual(g.parent_of(_sid(3)), _sid(10))
 
+    def test_managed_by_naming_a_topic_still_parents_to_that_topic(self):
+        """Tier 1 is the operator's own declaration: a `managed_by` naming a topic
+        keeps that topic manager as the worker's parent."""
+        index = fb.VaultIndex(
+            topics=["Manager Layer"],
+            task_titles=["Some Task"],
+            task_managed_by={"some task": "Manager Layer"},
+        )
+        registry = {
+            _sid(9): {"status": "idle", "name": "Fleet Manager", "cwd": CWD},
+            _sid(2): {"status": "idle", "name": "Manager Layer", "cwd": CWD},
+            _sid(3): {"status": "busy", "name": "Some Task", "cwd": CWD},
+        }
+        g = fb.build_grouping(registry, index, {}, set(), {_sid(3): ["Some Task"]})
+        self.assertEqual(g.parent_of(_sid(3)), _sid(2))
+
+    def test_a_task_listed_directly_under_a_topic_resolves_to_that_topic(self):
+        """F4 — the design's nearest-ancestor case.
+
+        A task named as an entry in a topic's `## Goals` carries no `goals:` and no
+        `managed_by`, so before `task_topics` existed the goal chain was empty and
+        the task fell straight to the root — the fleet manager claimed work the
+        topic manager owns.
+        """
+        index = fb.VaultIndex(
+            topics=["Manager Layer"],
+            goals=[],
+            task_titles=["Some Task"],
+            task_topics={"some task": ["Manager Layer"]},
+        )
+        registry = {
+            _sid(9): {"status": "idle", "name": "Fleet Manager", "cwd": CWD},
+            _sid(10): {"status": "idle", "name": "Manager Layer", "cwd": CWD},
+            _sid(3): {"status": "busy", "name": "Some Task", "cwd": CWD},
+        }
+        g = fb.build_grouping(registry, index, {}, set(), {_sid(3): ["Some Task"]})
+        self.assertEqual(g.parent_of(_sid(3)), _sid(10))
+
+    def test_a_task_under_no_topic_still_falls_to_the_root(self):
+        """The control that keeps the new rung from claiming every task."""
+        index = fb.VaultIndex(
+            topics=["Manager Layer"],
+            goals=[],
+            task_titles=["Some Task"],
+        )
+        registry = {
+            _sid(9): {"status": "idle", "name": "Fleet Manager", "cwd": CWD},
+            _sid(10): {"status": "idle", "name": "Manager Layer", "cwd": CWD},
+            _sid(3): {"status": "busy", "name": "Some Task", "cwd": CWD},
+        }
+        g = fb.build_grouping(registry, index, {}, set(), {_sid(3): ["Some Task"]})
+        self.assertEqual(g.parent_of(_sid(3)), _sid(9))
+
     def test_rule_4_no_task_file_is_unmanaged(self):
         g = _grouping()
         self.assertEqual(g.role_of(_sid(5)), "unmanaged")
@@ -439,7 +501,7 @@ class TestManagerSubject(unittest.TestCase):
     def test_source_one_resolves_through_the_loop_record(self):
         """A name that matches no page still resolves when the loop's slug does."""
         self.assertEqual(
-            fb.manager_subject("Manager-Layer", _group_index(), {"manager-layer"}),
+            fb.manager_subject("Manager-Layer", _group_index(), {"topic--manager-layer"}),
             ("topic", "Manager Layer"),
         )
 
@@ -487,7 +549,7 @@ class TestTree(unittest.TestCase):
         self.assertTrue(self.tree[1][0].startswith("├ "), self.tree[1][0])
 
     def test_a_grandchild_carries_its_parents_continuation_bar(self):
-        cell = self.cell(_sid(3))
+        cell = self.cell(_sid(8))
         self.assertTrue(cell.startswith("│   └ "), cell)
 
     def test_the_last_child_uses_the_closing_glyph(self):
@@ -931,6 +993,321 @@ class TestNameTitleMismatch(unittest.TestCase):
                              _sid(1): [self.DRIFTED_TITLE, self.DRIFTED_TITLE]})
         self.assertEqual([row[0] for row in got], [_sid(1), _sid(2)])
         self.assertEqual(got[0][2], [self.DRIFTED_TITLE])
+
+
+class TestDeclaredWait(unittest.TestCase):
+    """`⏰ Ends:` suppresses `nudge` — and nothing else.
+
+    The `nudge` value is the live half of the false-stall defect: a worker whose turn
+    ended inside a `run_in_background` watcher is inactive *by design*, and transcript
+    age cannot tell it apart from one that has genuinely stalled. The declaration can,
+    so the value is suppressed. The three controls below pin that the suppression is
+    narrow — an unrelated session, a finished task and an operator keystroke all keep
+    their own value, so a build that suppressed `nudge` for everyone would fail here.
+    """
+
+    IDLE = fb.NUDGE_SECONDS + 60
+    META = {"status": "in_progress", "phase": "execution", "open_boxes": 2}
+
+    def unblocks(self, declared=frozenset(), panels=frozenset(), meta=None):
+        return fb.unblocks_for(_sid(1), self.IDLE, self.META if meta is None else meta,
+                               panels, declared_wait=declared)
+
+    def test_a_stale_execution_row_is_nudged(self):
+        self.assertEqual(self.unblocks(), fb.UNBLOCKS_NUDGE)
+
+    def test_a_declared_wait_is_not_nudged(self):
+        self.assertEqual(self.unblocks(declared={_sid(1)}), fb.UNBLOCKS_WORKING)
+
+    def test_a_declaration_on_another_session_suppresses_nothing(self):
+        self.assertEqual(self.unblocks(declared={_sid(2)}), fb.UNBLOCKS_NUDGE)
+
+    def test_a_finished_task_is_still_reaped(self):
+        meta = dict(self.META, status="completed")
+        self.assertEqual(self.unblocks(declared={_sid(1)}, meta=meta), fb.UNBLOCKS_REAP)
+
+    def test_an_operator_keystroke_still_surfaces(self):
+        self.assertEqual(self.unblocks(declared={_sid(1)}, panels={_sid(1)}),
+                         fb.UNBLOCKS_OPERATOR)
+
+    def test_the_default_is_empty_so_callers_are_not_broken(self):
+        self.assertEqual(fb.unblocks_for(_sid(1), self.IDLE, self.META, frozenset()),
+                         fb.UNBLOCKS_NUDGE)
+
+class TestSessionTaskTitle(unittest.TestCase):
+    """A `sessions` entry names the task its row resolved to, or says why it has none.
+
+    `build_rows` renders the resolved title into `cells[2]`, but the `sessions`
+    projection used to drop it. A consumer reading the documented structure then
+    got a registry label and nothing to match it against, so a row whose label
+    differs from its task title read as an unresolvable session — which is what
+    happened to `77f7ff67` on 2026-10-20. The fixtures make both halves
+    observable: a resolved title must reach the entry, and each distinct absence
+    must carry its own wording rather than one shared sentence.
+    """
+
+    def _by_sid(self):
+        return {s["session_id"]: s for s in fb.build_sessions(_group_rows()[1])}
+
+    def test_a_worker_row_carries_its_resolved_task_title(self):
+        entry = self._by_sid()[_sid(3)]
+        self.assertEqual(entry["task_title"], "Some Task")
+        self.assertIsNone(entry["task_title_reason"], "a resolved row needs no reason")
+
+    def test_a_manager_row_carries_its_own_reason(self):
+        entry = self._by_sid()[_sid(9)]
+        self.assertIsNone(entry["task_title"], "a manager manages a page, not a task")
+        self.assertEqual(entry["task_title_reason"], fb.TASK_TITLE_NO_MANAGER)
+
+    def test_an_unmanaged_row_carries_a_different_reason(self):
+        entry = self._by_sid()[_sid(5)]
+        self.assertIsNone(entry["task_title"])
+        self.assertEqual(entry["task_title_reason"], fb.TASK_TITLE_NO_TASK_FILE)
+
+    def test_every_absence_has_its_own_wording(self):
+        reasons = {fb.TASK_TITLE_NO_MANAGER, fb.TASK_TITLE_NO_TASK_FILE,
+                   fb.TASK_TITLE_NO_BINDING}
+        self.assertEqual(len(reasons), 3, "one wording per distinct absence, never shared")
+
+
+class _EmptyIndex:
+    """A `VaultIndex` with no pages — enough for `build_grouping` to run offline.
+
+    `build_grouping` and `manager_subject` reach for `.topics`, `.goals`,
+    `.subject()`, `.has_task_file()`, `.goals_of()` and `.managed_by_of()`; every
+    one of them answers empty here, so the grouping classifies the fixture rows and
+    touches no vault.
+    """
+
+    topics = {}
+    goals = {}
+
+    def subject(self, name):
+        return None
+
+    def has_task_file(self, name):
+        return False
+
+    def goals_of(self, title):
+        return ()
+
+    def managed_by_of(self, title):
+        return None
+
+
+class TestExitRecordRelay(unittest.TestCase):
+    """The board↔coverage wiring — the three things a refactor breaks silently.
+
+    `fleet-board.py` relays `exit-record-coverage`'s answer in three places: the
+    `--json` document, the default `{header, rows, widths}` render (where it must
+    NOT appear), and stderr. Until this class nothing drove `main()` at all, so
+    dropping the doc key, widening the render whitelist, or deleting the stderr
+    relay left every other test green. Each test below pins one of them by name.
+
+    `erc.live_coverage` and the registry are stubbed; the remaining live reads are
+    stubbed too, because `main()` reads them before it ever reaches the coverage
+    call and a test that left them live would be neither hermetic nor fast.
+    """
+
+    SID = _sid(1)
+    #: The pane map `collect_signals()` now RETURNS — the object the coverage call must
+    #: reuse rather than re-reading `wezterm cli list` for.
+    PANE_MAP = {"7": {"title": "✳ Fleet Manager"}}
+    LINE = ("⚠️ UNRECORDED: Fleet Manager — pane 7, session aaaabbbb runs without the "
+            "exit recorder (no live `kind=spawn` line); its death would leave no record")
+    UNKNOWN = "⚠️ UNRECORDED unknown: 1 manager pane(s) unresolvable from `wezterm cli list` — X Manager"
+
+    def _result(self):
+        return {
+            "unrecorded": [{"session_id": self.SID, "name": "Fleet Manager",
+                            "pane": "7", "line": self.LINE}],
+            "unknown": [{"session_id": _sid(2), "name": "X Manager"}],
+        }
+
+    def _run(self, argv, result):
+        """Drive `main()` with every live read stubbed. Returns (rc, stdout, stderr)."""
+        registry = {self.SID: {"status": "idle", "name": "Fleet Manager", "cwd": CWD}}
+        heartbeat = type("_LW", (), {
+            "read_live": staticmethod(lambda directory: []),
+            "heartbeat_dir": staticmethod(lambda: "/nonexistent/heartbeat"),
+        })
+        saved = {
+            "registry_records": fb.registry_records,
+            "collect_signals": fb.collect_signals,
+            "transcript_fresh_ids": fb.transcript_fresh_ids,
+            "vault_index": fb.vault_index,
+            "colour_census": fb.colour_census,
+            "loop_slugs": fb.loop_slugs,
+            "_load": fb._load,
+        }
+        saved_age = fb.wnm.session_transcript_age
+        saved_panes = fb.wnm.wezterm_panes
+        saved_bti = fb.fs.build_task_index
+        saved_live = fb.erc.live_coverage
+        saved_argv = sys.argv
+        try:
+            fb.registry_records = lambda sessions_dir=None: registry
+            fb.collect_signals = lambda stuck_min: (set(), set(), {}, self.PANE_MAP, set(), set())
+            fb.transcript_fresh_ids = lambda window=None: set()
+            fb.vault_index = lambda: _EmptyIndex()
+            fb.colour_census = lambda: {}
+            fb.loop_slugs = lambda state_dir=None: set()
+            fb._load = lambda name, filename: heartbeat
+            fb.wnm.session_transcript_age = lambda sid: 60
+            # `main()` evaluates `wnm.wezterm_panes()` as an ARGUMENT at the coverage
+            # call, so patching `live_coverage` alone would still spawn `wezterm`.
+            # Counting the call is what the reuse assertion below observes.
+            self.wezterm_calls = 0
+            self.received_pane_map = None
+
+            def _panes(timeout=None):
+                self.wezterm_calls += 1
+                return {}
+
+            def _coverage(managers, pane_map):
+                self.received_pane_map = pane_map
+                return result
+
+            fb.wnm.wezterm_panes = _panes
+            fb.fs.build_task_index = lambda: ({}, {})
+            fb.erc.live_coverage = _coverage
+            sys.argv = ["fleet-board.py"] + argv
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = fb.main()
+        finally:
+            for name, value in saved.items():
+                setattr(fb, name, value)
+            fb.wnm.session_transcript_age = saved_age
+            fb.wnm.wezterm_panes = saved_panes
+            fb.fs.build_task_index = saved_bti
+            fb.erc.live_coverage = saved_live
+            sys.argv = saved_argv
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_exit_record_rides_the_json_document(self):
+        """`--json` carries `exit_record`. Dropping the doc key fails this test and nothing else."""
+        rc, out, _ = self._run(["--json"], self._result())
+        self.assertEqual(rc, 0)
+        doc = json.loads(out)
+        self.assertIn("exit_record", doc)
+        self.assertEqual([r["pane"] for r in doc["exit_record"]["unrecorded"]], ["7"])
+
+    def test_exit_record_is_absent_from_the_default_render(self):
+        """The default render is a whitelist, so `exit_record` must not leak into it.
+
+        Widening the whitelist, or switching the board to dumping `doc` whole, fails
+        this test and nothing else.
+        """
+        rc, out, _ = self._run([], self._result())
+        self.assertEqual(rc, 0)
+        doc = json.loads(out)
+        self.assertNotIn("exit_record", doc)
+        self.assertEqual(sorted(doc), ["header", "rows", "widths"])
+
+    def test_the_coverage_call_reuses_the_pane_map_collect_signals_read(self):
+        """One `wezterm cli list` per render, and the coverage check gets THAT map.
+
+        `collect_signals()` reads the pane map already; re-reading it at the coverage
+        call costs a second subprocess (up to its 5 s timeout) per render. Two
+        assertions, because either half can regress alone: zero calls means no second
+        read, and identity means the reused object is the one already read rather
+        than a fresh `{}`.
+        """
+        self._run(["--json"], self._result())
+        self.assertEqual(self.wezterm_calls, 0,
+                         "a second `wezterm cli list` per render is the cost this reuse removes")
+        self.assertIs(self.received_pane_map, self.PANE_MAP,
+                      "the coverage check must receive the map collect_signals() already read")
+
+    def test_exit_record_lines_reach_stderr(self):
+        """The UNRECORDED and unknown lines are relayed to stderr.
+
+        Deleting the relay fails this test and nothing else: the doc would still
+        carry the key, so only this assertion notices that the operator's warning
+        never printed.
+        """
+        _, out, err = self._run([], self._result())
+        self.assertIn(self.LINE, err)
+        self.assertIn(self.UNKNOWN, err)
+        self.assertNotIn(self.LINE, out, "the operator's warning belongs on stderr, not the doc")
+
+
+class TestBelowBoxActionLineOrder(unittest.TestCase):
+    """The below-box action lines keep their position relative to the DRAWN rows.
+
+    Three orderings are easy to confuse here, and only one is the drawn one:
+
+    1. `list(details)` — insertion order, filled inside `build_rows()`'s
+       `for sid, rec in registry.items()` loop. Says nothing about drawing.
+    2. `build_rows()`'s flat `rows` — the bucket/label sort. **Not** what the board
+       draws; a test pinned here passes while the drawn order changes.
+    3. `build_tree()`'s `ordered` — the emission order, which re-sorts each sibling
+       group by `(role != manager, _age_key, label)` and so diverges from the flat
+       sort whenever ages differ.
+
+    This asserts (3). The fixture's ages are set to 300 s and 5 s precisely so the
+    flat and drawn orders disagree — with equal ages the test would pass against the
+    wrong ordering and prove nothing. The golden carries a `None` for every row with
+    no action line, so the *absence* of a line for the four ungated rows is pinned
+    too, not silently filtered away.
+    """
+
+    GOLDEN = ["pane 1039 — open permission gate", "pane 1040 — open question gate",
+              None, None, None, None]
+
+    def test_action_lines_follow_the_drawn_row_order(self):
+        attribution = {_sid(3): "pane 1039 — open permission gate",
+                       _sid(6): "pane 1040 — open question gate"}
+        ages = dict(AGES)
+        ages[_sid(3)] = 300
+        ages[_sid(6)] = 5
+        rows, details = fb.build_rows(REGISTRY, GATES, STUCK, TITLES, ages,
+                                      gate_attribution=attribution)
+        _, ordered, _ = fb.build_tree(rows, fb.Grouping(None, {}, {}, {}))
+        self.assertEqual([details.get(sid) for sid in ordered], self.GOLDEN)
+
+
+class TestCollectSignalsPaneMap(unittest.TestCase):
+    """`collect_signals()`'s fourth value is the pane MAP, never a bool.
+
+    `TestExitRecordRelay` stubs `collect_signals`, so it cannot see this contract at
+    all: reverting the return to `pmap is not None` leaves every relay test green,
+    while `main()` hands a bool to `live_coverage`, whose `pane_map.items()` raises,
+    is swallowed by the try/except, and silently degrades the check to all-unknown —
+    a false "every manager is unresolvable" on every render. These two drive the real
+    function over stubbed stores and pin the value and its `None` sentinel.
+    """
+
+    PANE_MAP = {"7": {"title": "✳ Fleet Manager"}}
+
+    def _signals(self, pane_map):
+        names = ("read_registry", "load", "quiet_session_ids", "wezterm_panes",
+                 "reclassify_idle", "is_live", "is_open_gate", "rendered_panels")
+        saved = {name: getattr(fb.wnm, name) for name in names}
+        saved_wait = fb.dw.declared_wait_ids
+        try:
+            fb.wnm.read_registry = lambda sessions_dir=None: {}
+            fb.wnm.load = lambda kind: []
+            fb.wnm.quiet_session_ids = lambda records, live_ids: set()
+            fb.wnm.wezterm_panes = lambda timeout=None: pane_map
+            fb.wnm.reclassify_idle = lambda record: record
+            fb.wnm.is_live = lambda record, pmap, quiet: True
+            fb.wnm.is_open_gate = lambda record, **kwargs: False
+            fb.wnm.rendered_panels = lambda needs, **kwargs: []
+            fb.dw.declared_wait_ids = lambda state_dir=None: set()
+            return fb.collect_signals(20)
+        finally:
+            for name, value in saved.items():
+                setattr(fb.wnm, name, value)
+            fb.dw.declared_wait_ids = saved_wait
+
+    def test_the_fourth_value_is_the_pane_map_itself(self):
+        self.assertIs(self._signals(self.PANE_MAP)[3], self.PANE_MAP,
+                      "a bool here degrades the coverage check to all-unknown on every render")
+
+    def test_an_unreadable_pane_map_is_none(self):
+        self.assertIsNone(self._signals(None)[3])
 
 
 if __name__ == "__main__":

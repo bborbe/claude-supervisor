@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "note": "The commands a MANAGER may answer on its own when a prompt reaches it. Anything absent here goes to the operator. This file is the machine source; docs/permission-allowlist.md is its human-readable rendering with the rationale, and `make check-manager-allowlist` asserts the two agree. Matching is a whole-token prefix, using the same tokenizer as server/policy.mjs — so `ls` matches `ls -la /tmp` and not `lsblk`. An entry with \"exact\": true matches only when the command has NO further tokens, which is what stops an argument from selecting different code.",
+  "entries": [
+    { "tool": "Bash", "prefix": "ls" },
+    { "tool": "Bash", "prefix": "cat" },
+    { "tool": "Bash", "prefix": "head" },
+    { "tool": "Bash", "prefix": "tail" },
+    { "tool": "Bash", "prefix": "wc" },
+    { "tool": "Bash", "prefix": "uniq" },
+    { "tool": "Bash", "prefix": "diff" },
+    { "tool": "Bash", "prefix": "grep" },
+    { "tool": "Bash", "prefix": "shasum" },
+    { "tool": "Bash", "prefix": "md5" },
+    { "tool": "Bash", "prefix": "jq" },
+    { "tool": "Bash", "prefix": "make test", "exact": true, "confine": "clean-runner-config" },
+    { "tool": "Bash", "prefix": "bun test", "exact": true, "confine": "clean-runner-config" }
+  ]
+}

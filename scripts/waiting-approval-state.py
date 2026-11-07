@@ -3,7 +3,7 @@
 
 Why this exists
 ---------------
-`commands/manager-loop.md` § Act's `waiting-approval` bullet and `agents/manager-drive.md`
+`commands/goal-loop.md` § Act's `waiting-approval` bullet and `agents/goal-drive.md`
 clause (7)'s `Card (1)` block both name a `--dedup-key` for the round's waiting-approval
 row set, and **neither owned its derivation**. The leg rendered the template's own example
 as the value to hand over — `post-batch --dedup-key "<the round's waiting-approval row set>"`
@@ -80,7 +80,7 @@ STATE_DIR = os.path.expanduser("~/.claude/state/manager-waiting-approval")
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 # The literal the drive leg handed over at ticks 90 and 91 (2026-10-03, topic
-# `manager-layer`) — the value `agents/manager-drive.md`'s `Card (1)` block rendered until
+# `manager-layer`) — the value `agents/goal-drive.md`'s `Card (1)` block rendered until
 # this fix replaced it with `<key>`, so it no longer appears in any document in the repo.
 # Kept because `verify` must recognise it: a caller reproducing the old template from
 # memory is precisely the case the refusal exists for. It is a frozen historical input,

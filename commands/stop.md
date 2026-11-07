@@ -42,7 +42,7 @@ Stand the manager loop **this session** is running down. This is the operator's 
    python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py --stop --topic "<subject>"
    ```
 
-   It writes `<slug>.stopped` into the liveness state dir, so a deliberate stand-down is not reported as a lapse. The next `/supervisor:manager-loop` re-arm clears it. Report it as a `✓ stop marker — <path>` line under `Disarmed`.
+   It writes `<slug>.stopped` into the liveness state dir, so a deliberate stand-down is not reported as a lapse. The next `/supervisor:goal-loop` re-arm clears it. Report it as a `✓ stop marker — <path>` line under `Disarmed`.
 
    ⚠️ **When the probe prints `subject  (none recorded)`, fall back to the subject *this session* is managing — never skip the marker.** The probe resolves a subject only from `~/.claude/state/worker-manager/<session-id>.json`, and that registration is written by the manager command's own recording step; when it is missing while the loop is genuinely armed, following the old *"skip and say so; there is no slug to mark"* line left those arms to go stale and be reported as a lapsed manager. Measured 2026-09-30: the probe printed `(none recorded)` while `~/.claude/state/sweep-gate/<slug>.arms` and `.cadence` were both on disk, written by the two `--arm` calls. **The session knows what it armed** — its own subject is in its context, not an inference from a file that may never have been written — so that is the source. Run the marker with it, and name which source it came from:
 
@@ -62,7 +62,7 @@ Stand the manager loop **this session** is running down. This is the operator's 
        ● gate ledger <path>  <last line>  (<age>s ago)
      Session alive
        ● ledger <path> — <n> open of <m>, unchanged by this command
-     Restart: /supervisor:manager-loop "<subject>"
+     Restart: /supervisor:goal-loop "<subject>"
    ```
 
    Print only the forms that occurred. A `●` line whose read came back absent takes its own form from `<error_handling>` instead of a fabricated value — the tick file and the gate loop each have one, and a dropped line reads as "checked and clean" when the truth may be "never looked".

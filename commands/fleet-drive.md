@@ -30,19 +30,26 @@ allowed-tools:
   - Read
   - Write
   - Edit
-argument-hint: "[--interval <N>m] (interval defaults to 15m; the round repeats by default)"
+argument-hint: "[--interval <N>m] (default 15m; repeats by default)"
 ---
-Fleet-drive — **the round**: one round, once, over the whole fleet, runnable by hand. The fleet's show is `/supervisor:fleet-status`.
+Fleet-drive — **the round**: one round, once, over the whole fleet, runnable by hand. The show is `/supervisor:fleet-status`.
 
-⚠️ **This is the round, not the arm.** The wakeup names THIS command; the arm (`/supervisor:fleet-loop`) is invoked **once** to arm the loop and is **never** re-invoked from a wakeup — a wakeup re-invokes THIS command (`/supervisor:fleet-drive --interval <N>m`). This file is the **round** (read on every wakeup); `commands/fleet-loop.md` is the **arm** (read once).
+⚠️ **This is the round, not the arm.** A wakeup names THIS command (`/supervisor:fleet-drive --interval <N>m`) — this file is the **round**, read every wakeup; `commands/fleet-loop.md` is the **arm**, invoked **once** and never re-invoked.
 
-⚠️ **A fleet-tier verb — never run it from a worker session.** Running a fleet-wide sweep inside a worker collapses the two roles silently: the session keeps its task anchor while its turns sweep the whole fleet (`${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles). A worker routes a sweep to its manager with `SendMessage`. A change to this command is exercised in a manager session's runtime, never from the session that authored it.
+⚠️ **A fleet-tier verb — never run it from a worker session.** Running a fleet-wide sweep in a worker collapses both roles silently: it keeps its task anchor while its turns sweep the whole fleet (`${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles). A worker routes a sweep to its manager with `SendMessage`. A change to this command is exercised in a manager session's runtime, never from the session that authored it.
 
-The hard invariants and gates live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/rules.md`; the INLINE section mirrors them so no rule is ever absent from the round.
+Hard invariants and gates: `${CLAUDE_PLUGIN_ROOT}/commands/steps/rules.md`; INLINE mirrors them so no rule is ever absent from the round.
 
 `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts` — every script below is `python3 $P/<script>`.
 
-Rationale and history: runbook § Fleet-Manager Command — Rationale and Measured History.
+Rationale: runbook § Fleet-Manager Command — Rationale and Measured History.
+
+⚠️ **Delegate; keep this session for the round.** `Task` is available — anything not the sweep
+goes to a sub-agent, or the round stalls (2026-10-30: 2h30m, 100 rows unmanaged).
+
+⚠️ **Carve-out: 5b and 5c are acting legs.** They run here, or in a sub-agent granted
+write tools (`Bash`, `Edit`, `Write`, `mcp__supervisor__*`); a read-only delegate is not a run of
+them — it prints the count it was told to, not the one it measured.
 
 ## Router
 
@@ -56,6 +63,9 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 3 | Confirm the digest's candidates | the hand-back reports `orphan`, `collision` or `unmanaged` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/confirm-candidates.md` |
 | 4 | Adopt | `adopt-orphans.py` printed rows or exited non-zero — run: `python3 $P/adopt-orphans.py --self "$CLAUDE_CODE_SESSION_ID"` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/adopt.md` |
 | 5 | Drive leg | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/drive.md` |
+| 5b | Keep alive | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/keepalive.md` |
+| 5c | Flagged open | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/flagged-open.md` |
+| 5d | Own parks | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/own-parks.md` |
 | 6 | Reap contract | the drive leg runs | `${CLAUDE_PLUGIN_ROOT}/commands/steps/reap.md` |
 | 7 | Answer a parked or exited worker | a worker is parked on a question or has exited | `${CLAUDE_PLUGIN_ROOT}/commands/steps/worker-channels.md` |
 | 8 | Act on the open-items ledger | the ledger holds ≥1 open entry | `${CLAUDE_PLUGIN_ROOT}/commands/steps/act.md` · `${CLAUDE_PLUGIN_ROOT}/commands/steps/open-items.md` |
@@ -63,15 +73,16 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 10 | Escalate | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/escalate.md` |
 | 11 | Needs-input batch + relay | the hand-back reports `blocked` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/needs-input.md` |
 | 12 | Covered-subject invariant | a covered subject's manager is live | `${CLAUDE_PLUGIN_ROOT}/commands/steps/covered-subject-invariant.md` |
-| 13 | Attention watchers | every tick — arm ONE `Monitor` over the attention feed, and re-arm it whenever it expires or is found dead: `python3 $P/gate-owner-filter.py --feed --self "<this-session-id>" --interval 60` and `python3 $P/answered-watch.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/attention-watcher.md` |
+| 13 | Attention watchers | every tick — arm ONE `Monitor` over the feed, re-arm on expiry/death: `python3 $P/gate-owner-filter.py --feed --self "<this-session-id>" --interval 60` and `python3 $P/answered-watch.py`, never append `2>&1` (stderr = heartbeat) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/attention-watcher.md` |
 | 14 | Auto-compaction | the hand-back reports `context70` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/auto-compaction.md` |
-| 15 | Voice + notification | every tick — run the `{"gates": []}` prune on every round, and publish only the gates the operator must decide (§ Gate triage classes C, D, E) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/voice-notify.md` |
-| 16 | Persist | the snapshot path is missing or the write failed — run: `python3 $P/fleet-snapshot.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
-| 17 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
-| 18 | Readings | every tick — print both readings with the marker line, run: `python3 $P/fleet-board.py --json` · `python3 $P/approved-not-started.py --tasks-dir "<vault>/<tasks-dir>"` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |
-| 19 | Propose a manager | `propose-managers.py` printed a card — run: `python3 $P/propose-managers.py --post` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/propose-manager.md` |
+| 15 | Readings | every tick — take all five readings (commands in the step) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |
+| 16 | Open leg | every tick — after Readings | `${CLAUDE_PLUGIN_ROOT}/commands/steps/open.md` |
+| 17 | Voice + notification | every tick — run the `{"gates": []}` prune on every round, and publish only the gates the operator must decide (§ Gate triage classes C, D, E) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/voice-notify.md` |
+| 18 | Persist | the snapshot path is missing or the write failed — run: `python3 $P/fleet-snapshot.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
+| 19 | Round tail | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/fleet-round-tail.md` |
+| 20 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
 
-⚠️ **The table is evaluated more than once per round, and the later reads are the ones that get skipped.** At the head only the rows decidable then can be honoured (`every tick` and the cold `rules` row); **every other row gates on data the round does not hold yet** — including `reap`, whose `When` is the drive leg — so **re-read this table the moment the sweep hand-back exists**, and again before the output shape renders, reading each row whose `When` has newly become decidable **and that has not already run this round**. Never re-run a leg: **every `every tick` row is once-per-round**, and a second sweep or drive leg would duplicate sends to peers. Measured 2026-10-12 on a cold `v0.130.0` round: rows 3 (`orphan=46`, `collision=1`), 8 (`ledger=16`) and 11 (`blocked=3`) each held, none was read, and the mandatory `📋 Open with the operator` render was omitted.
+⚠️ **The table is read more than once per round, and the later reads are the ones that get skipped.** Re-read it once the sweep hand-back exists, and again before the output shape renders, honouring every row whose `When` has newly become decidable **and that has not run this round**. Never re-run a leg — **each `every tick` row is once-per-round**, and a second sweep or drive leg duplicates sends. Full rule and measured case: `steps/rules.md` § Re-read the router.
 
 ## INLINE — the hard rules
 
@@ -97,7 +108,7 @@ One imperative per rule; full text and the `⚠️` clauses live in `steps/rules
 - **The feed answers "was a gate raised", never "is a gate open"** — confirm via `gate-relay-read`.
 - **`mcp__supervisor__spawn_agent` is held for `resume=` alone** — never open a worker with it (fleet-surface § Spawn a worker item 6).
 - **Prefix by who answered** — `Operator answer, via supervisor:` only when the operator answered here; `Manager answer, via supervisor:` for your own.
-- **A manager cannot close a worker's session.**
+- **Close via `/supervisor:close` only.**
 - **Read-only context sends freely** — course corrections only on an explicit operator yes.
 - **Cause must be verified live, never read off the task file** (`gh pr list --state all`, `git log`).
 - **An operator ask lives on disk from the moment it is said** — `/supervisor:open-items add` it before replying.

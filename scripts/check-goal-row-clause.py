@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The goal-row rule must stay single-valued, and its retracted readings must not come back.
 
-`agents/manager-sweep-reader.md` states the goal-row rule in four places — input 8's
+`agents/goal-sweep-reader.md` states the goal-row rule in four places — input 8's
 contract, step 7's frame paragraph, the optional-split paragraph and a `<success_criteria>`
 bullet — because each is read on its own and a pointer alone is what this repo already
 records as the liability (`scripts/check-bucket-clause.py`'s own docstring, same reason).
@@ -61,7 +61,7 @@ CLAUSE_RE = re.compile(
     r"renders as its own row even with \*{0,2}0\*{0,2} tracked tasks",
     re.IGNORECASE,
 )
-CARRIER = "agents/manager-sweep-reader.md"
+CARRIER = "agents/goal-sweep-reader.md"
 CARRIER_MIN = 4
 
 # Readings that were deliberately withdrawn. Each one had a defensible reading on the

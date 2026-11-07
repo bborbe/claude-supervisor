@@ -47,8 +47,11 @@ class CheckBudgetTest(unittest.TestCase):
         self.write("agents/small.md", 1000)
         # The suffix-less wakeup targets must exist in the fixture, or the guard's own
         # "named as a wakeup target but the file is gone" failure fires on every case.
-        # One per `WAKEUP_TARGETS` entry: the manager loop's round, and the fleet loop's.
-        self.write("commands/manager-drive.md", 1000)
+        # One per `WAKEUP_TARGETS` entry: the two manager rounds (topic and goal) and the
+        # fleet loop's round. A target missing from the fixture fails every case with the
+        # guard's own "named as a wakeup target but the file is gone".
+        self.write("commands/topic-drive.md", 1000)
+        self.write("commands/goal-drive.md", 1000)
         self.write("commands/fleet-drive.md", 1000)
         self.baseline({"commands/big.md": BODY_MAX + 1024, "agents/small.md": 1000})
 
@@ -114,23 +117,23 @@ class CheckBudgetTest(unittest.TestCase):
     # --- the strict cap follows the WAKEUP TARGET, not the filename -------------------
 
     def test_oversized_suffixless_wakeup_target_fails(self):
-        # The manager loop's wakeup names `commands/manager-drive.md`, which carries no
+        # The manager loop's wakeup names `commands/goal-drive.md`, which carries no
         # `-tick` suffix — so the glob cannot find it and the explicit list is the only
         # thing holding the cap on that side.
-        self.write("commands/manager-drive.md", TICK_MAX + 1)
+        self.write("commands/goal-drive.md", TICK_MAX + 1)
         result = self.run_guard()
         self.assertEqual(1, result.returncode)
-        self.assertIn("commands/manager-drive.md", result.stderr)
+        self.assertIn("commands/goal-drive.md", result.stderr)
 
     def test_suffixless_wakeup_target_at_the_cap_passes(self):
-        self.write("commands/manager-drive.md", TICK_MAX)
+        self.write("commands/goal-drive.md", TICK_MAX)
         result = self.run_guard()
         self.assertEqual(0, result.returncode, result.stderr)
 
     def test_missing_wakeup_target_fails(self):
         # A cap pointed at a file that is gone reports green against nothing, so its
         # absence is a failure rather than a skip.
-        (self.root / "commands" / "manager-drive.md").unlink()
+        (self.root / "commands" / "goal-drive.md").unlink()
         result = self.run_guard()
         self.assertEqual(1, result.returncode)
         self.assertIn("wakeup target", result.stderr)

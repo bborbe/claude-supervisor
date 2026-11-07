@@ -1,0 +1,6 @@
+[  269]  3m  ⚙ SC7 Has No Scorer and No Owner — awaiting-operator
+[  260]  3m  ⚙ BRO-22423 legacy lib-* builds — awaiting-operator
+[  272]  3m  ⚙ Vault UI topic card column contradiction — awaiting-operator
+[  278]  3m  ⚙ Fix board-drain and strategy-rep templates — awaiting-operator
+[  279]  3m  ⚙ Port weekly-strategy-rep W42 fixes — awaiting-operator
+[  410]  3m  ⚙ own worker control — awaiting-operator

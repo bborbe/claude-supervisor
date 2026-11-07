@@ -154,9 +154,18 @@ export async function pollCluster({
   const stamped = []
   for (const stamp of stamps) {
     if (!stamp || typeof stamp.session_id !== 'string' || !stamp.session_id) continue
+    // `location: 'pod'` — every entry in the cluster store was published by a pod on another
+    // machine, so the location is a property of this path rather than of the record. Without it
+    // the row is served as `local` and the board offers a Resume for a worker that is running.
     stampRecord(
       dir,
-      { sessionId: stamp.session_id, pid: stamp.pid ?? null, mode: 'cluster', source: 'cluster' },
+      {
+        sessionId: stamp.session_id,
+        pid: stamp.pid ?? null,
+        mode: 'cluster',
+        source: 'cluster',
+        location: 'pod',
+      },
       { fs },
     )
     stamped.push(stamp.session_id)

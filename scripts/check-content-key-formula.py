@@ -2,7 +2,7 @@
 """The drive leg's `content_key` derivation must stay stated, and must keep excluding
 the fields the audit does not read.
 
-`agents/manager-drive.md` clause (1) is the single home of the key's derivation. Until
+`agents/goal-drive.md` clause (1) is the single home of the key's derivation. Until
 2026-10-06 that home named **no algorithm** — it said only *"keyed to the row file's
 content"* — so each leg finished the sentence itself, and the caches on disk carried
 **three** truncation lengths (2 at 12 hex, 7 at 16, 3 at 64; measured 2026-10-06T11:35,
@@ -52,7 +52,7 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-HOME = "agents/manager-drive.md"
+HOME = "agents/goal-drive.md"
 
 #: The clause's own opening words. Anchored on text rather than a line number: this file's
 #: clauses have moved by tens of lines inside a week, and a line-anchored check fails for

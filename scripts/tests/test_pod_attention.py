@@ -16,10 +16,16 @@ failure mode that reads as success if it regresses:
     would release a gate nobody approved.
   * the producer gate -- an item with no producer can never be polled back, so it
     is refused rather than posted into a void.
+  * the liveness default and its bound -- `owner:` rather than `session:`, because the
+    store resolves `session:` against its OWN host's registry and a pod is in a container
+    with no entry there, so the card is pruned on its first read; AND an `expires_at`,
+    because `owner:` is exempt from that prune and would otherwise never be removed.
+    Each half fails alone, so both are pinned.
 
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+from datetime import datetime, timedelta, timezone
 import importlib.util
 import io
 import json
@@ -58,6 +64,7 @@ def gate_args(**overrides):
         payload="Run the production deploy?",
         producer_id="pod-a",
         liveness_ref="",
+        expires_at="",
         timeout=10.0,
         interval=1.0,
     )
@@ -74,6 +81,7 @@ def ask_args(**overrides):
         producer_id="pod-a",
         interrupt_class="pick",
         liveness_ref="",
+        expires_at="",
     )
     defaults.update(overrides)
     return mock.Mock(**defaults)
@@ -200,10 +208,64 @@ class RenderPollTest(unittest.TestCase):
         pod.render_poll(item(state="answered", decision="allow"), out)
         self.assertTrue(out.getvalue().startswith("NOT_OPERATOR_ANSWERED:"))
 
-    def test_a_message_item_with_no_answer_reads_as_open(self):
+    def test_a_live_message_item_with_no_answer_reads_as_open(self):
+        # The positive control for the `state == "open"` guard: a non-permission
+        # card that is still waiting must keep printing OPEN. ⚠️ A `permission`
+        # gate is NOT a control for this branch — it is answered by the branch
+        # above, so it prints OPEN on a broken arm too.
         out = io.StringIO()
-        pod.render_poll(item(answer_mechanism="message"), out)
+        pod.render_poll(item(answer_mechanism="message", state="open"), out)
         self.assertEqual(out.getvalue().strip(), "OPEN")
+
+    def test_a_reaped_message_close_does_not_read_as_open(self):
+        # ⚠️ The dominant closed shape in the live store: `closed` with no
+        # `answered_at` and no `answered_by`. It classifies as NOTHING and renders
+        # no content, so the un-keyed branch printed OPEN for it — making a reaped
+        # message card read exactly like a live gate. Measured 2026-11-02 on the
+        # deployed 0.227.3 arm. NOT_OPERATOR_ANSWERED is the terminal it reaches
+        # now. ⚠️ It is NOT distinguished from an acknowledgement here — see
+        # test_an_acknowledgement_close_is_indistinguishable_from_a_reap.
+        out = io.StringIO()
+        pod.render_poll(item(answer_mechanism="message", state="closed"), out)
+        self.assertEqual(
+            out.getvalue().strip(),
+            "NOT_OPERATOR_ANSWERED: (no answer content recorded; item is closed)",
+        )
+
+    def test_an_acknowledgement_close_is_indistinguishable_from_a_reap(self):
+        # ⚠️ Pins a LIMITATION, so the comment above cannot drift back into
+        # claiming a distinction this arm does not provide. An acknowledgement is
+        # `closed` + `answered_by` with no `answered_at`; `answered-attribution`
+        # classifies it UNATTRIBUTED (a close is a clear, not an answer), and
+        # `render_poll` prints no `ANSWERED_BY:` line, so it renders byte-identical
+        # to an actor-less reap. `attention-ask.py`'s `cmd_poll` keeps the two
+        # apart with `ANSWERED_BY:`; this arm does not. Asserting equality is the
+        # point — if someone later adds that line, this test is what tells them
+        # the comment needs updating too.
+        reap, ack = io.StringIO(), io.StringIO()
+        pod.render_poll(item(answer_mechanism="message", state="closed"), reap)
+        pod.render_poll(
+            item(answer_mechanism="message", state="closed", answered_by="someone"), ack
+        )
+        self.assertEqual(reap.getvalue(), ack.getvalue())
+        self.assertTrue(ack.getvalue().startswith("NOT_OPERATOR_ANSWERED:"))
+        self.assertNotIn("ANSWERED_BY:", ack.getvalue())
+
+    def test_a_reaped_ack_close_does_not_read_as_open(self):
+        # The second non-permission class that reaches the branch — `ack` cards
+        # reap the same way, so the guard has to cover it too.
+        out = io.StringIO()
+        pod.render_poll(item(answer_mechanism="ack", state="closed"), out)
+        self.assertTrue(out.getvalue().startswith("NOT_OPERATOR_ANSWERED:"))
+        self.assertNotIn("OPEN", out.getvalue())
+
+    def test_a_message_item_with_no_readable_state_does_not_read_as_open(self):
+        # Failing closed: a record whose `state` is unreadable is not claimed as
+        # open either, because OPEN asserts the gate is still waiting.
+        out = io.StringIO()
+        pod.render_poll(item(answer_mechanism="message", state=None), out)
+        self.assertTrue(out.getvalue().startswith("NOT_OPERATOR_ANSWERED:"))
+        self.assertNotIn("OPEN", out.getvalue())
 
 
 class AskTest(unittest.TestCase):
@@ -241,6 +303,97 @@ class AskTest(unittest.TestCase):
             rc = pod.cmd_ask(ask_args(), out=out)
         self.assertEqual(rc, 2)
         self.assertIn("not loopback", out.getvalue())
+
+
+class LivenessDefaultTest(unittest.TestCase):
+    """The `owner:` default and its bound — ONE change, and each half fails alone.
+
+    A `session:` ref has the store prune the card on its first list read: the store
+    resolves `session:<id>` against its OWN host's `~/.claude/sessions`, and a pod runs in
+    a container with no entry there, so `IsLive` answers false and the card is removed as a
+    dead asker's. `owner:` fixes that, but it is exempt from that same prune by design, so
+    without an `expires_at` the card would never be removed at all. These tests pin both
+    halves, plus the explicit-override paths.
+    """
+
+    def _post_ask(self, **overrides):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": "q1"})
+
+        out = io.StringIO()
+        with mock.patch.object(pod.urllib.request, "urlopen", fake_urlopen):
+            rc = pod.cmd_ask(ask_args(**overrides), out=out)
+        return rc, out.getvalue(), captured.get("body")
+
+    def test_ask_defaults_to_owner_liveness_not_session(self):
+        rc, _, body = self._post_ask()
+        self.assertEqual(rc, 0)
+        self.assertEqual(body["liveness_ref"], "owner:pod-a")
+
+    def test_ask_card_carries_a_bound(self):
+        """`owner:` is exempt from the liveness prune, so the bound is the only remover."""
+        _, _, body = self._post_ask()
+        self.assertGreater(datetime.fromisoformat(body["expires_at"]), datetime.now(timezone.utc))
+
+    def test_an_explicit_expires_at_is_honoured(self):
+        when = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        _, _, body = self._post_ask(expires_at=when)
+        self.assertEqual(body["expires_at"], when)
+
+    def test_a_past_expires_at_is_refused_before_any_request(self):
+        """A past deadline is removed on the first read — this change's own defect."""
+        when = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        rc, out, body = self._post_ask(expires_at=when)
+        self.assertEqual(rc, 2)
+        self.assertIn("REFUSED", out)
+        self.assertIsNone(body)
+
+    def test_an_explicit_liveness_ref_still_wins(self):
+        _, _, body = self._post_ask(liveness_ref="session:pod-a")
+        self.assertEqual(body["liveness_ref"], "session:pod-a")
+
+    def test_gate_defaults_to_owner_and_bounds_by_its_own_timeout(self):
+        """The gate bounds its card by the window it actually waits on, not a TTL."""
+        posted = {}
+
+        def fake_urlopen(req, timeout=None):
+            if req.get_method() == "POST":
+                posted["body"] = json.loads(req.data.decode())
+                return FakeResponse({"item_id": "g1"})
+            return FakeResponse(
+                {
+                    "item_id": "g1",
+                    "state": "answered",
+                    "decision": "allow",
+                    "resolved_by": "arm-a",
+                }
+            )
+
+        clock = FakeClock()
+        out = io.StringIO()
+        with mock.patch.object(pod.urllib.request, "urlopen", fake_urlopen):
+            rc = pod.cmd_gate(gate_args(), out=out, sleep=clock.sleep, clock=clock)
+
+        self.assertEqual(rc, 0)
+        body = posted["body"]
+        self.assertEqual(body["liveness_ref"], "owner:pod-a")
+        remaining = (
+            datetime.fromisoformat(body["expires_at"]) - datetime.now(timezone.utc)
+        ).total_seconds()
+        self.assertGreater(remaining, 0)
+        self.assertLessEqual(remaining, gate_args().timeout)
+
+    def test_the_default_ttl_is_positive_and_finite(self):
+        """A non-positive TTL yields an `expires_at` of now, which the store sweeps."""
+        with mock.patch.dict(os.environ, {"POD_ATTENTION_ASK_TTL_HOURS": "0"}):
+            with self.assertRaises(ValueError):
+                pod._ask_ttl_seconds()
+        with mock.patch.dict(os.environ, {"POD_ATTENTION_ASK_TTL_HOURS": "inf"}):
+            with self.assertRaises(ValueError):
+                pod._ask_ttl_seconds()
 
 
 class GateTest(unittest.TestCase):
@@ -330,7 +483,7 @@ class WireContractTest(unittest.TestCase):
     # is quotable. Verified against the source on 2026-10-06:
     # `OwnerLivenessModel LivenessModel = "owner"` (`pkg/liveness-ref.go:39`),
     # carried by `AvailableLivenessModels` (`:46-49`).
-    STORE_PRODUCER_KINDS = ("session", "agent", "cron", "dark-factory")
+    STORE_PRODUCER_KINDS = ("session", "manager", "agent", "cron", "dark-factory")
     STORE_LIVENESS_MODELS = ("session", "heartbeat", "owner")
 
     def _posted(self, command="ask"):

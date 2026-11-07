@@ -1,0 +1,76 @@
+---
+# Read by the router, never invoked — without this key Claude Code
+# registers this file as /<plugin>:steps:<name>.
+user-invocable: false
+---
+
+# Flagged open
+
+When: every tick
+
+⚠️ **This leg acts, and a read-only execution is not a run of it.** It opens each admitted row; a
+run that only reports `unactioned: <n> operator-flagged` without invoking the command has measured
+nothing — `opened=0` because the leg was told to print it is a failure, not a quiet round. It is one
+of the round's two acting legs, so the round's delegate rule carves it out — a sub-agent may run it
+only with write tools (`commands/fleet-drive.md`, the delegate rule's carve-out).
+
+⚠️ **Gate this leg on the round's debt — chain it, do not merely read it:**
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --debt --subject "Fleet Manager" --branch fleet \
+  && <run this leg>
+```
+
+Exit **12** = a step is still owed: print the `debt:` lines, skip this leg, and **carry on with the round — the tail still runs**, because the tail's `--check` is what reports the round's verdict to the operator. Exit **0** = no debt, run it. ⚠️ **Exit 2 = the gate could not read or write the debt file** — it prints nothing to stdout, only a reason to stderr; skip the leg and print that reason, never read 2 as "no debt". ⚠️ **`--debt` judges the round in progress**, re-reading the receipt, so a round that already swept is not blocked by a debt it has paid. ⚠️ **The exit code is the gate, never the printed line** — a leg that reads only the text is satisfied by an empty read. ⚠️ **An operator's flag is not a licence to run ahead of the sweep** — the 13:27 round on 2026-10-31 opened three flagged rows and never swept, and nothing in its render said so. Opening the row is one round's delay; sweeping is what makes the next round's opening decision correct.
+
+## Step 5c — Open what the operator already marked
+
+`/supervisor:open --flagged` has been specified since before the `flag_set_by` field existed and
+had **no caller**: `commands/open.md` defines the batch, `commands/steps/goal-spawn.md`
+excluded the very rows it selects, and three rule files said the loop must never invoke it.
+This leg is the caller. The operator's mark is their decision; opening it executes that
+decision and decides nothing new (`docs/session-tiers.md` § The four tiers, rule 2).
+
+**Invoke the command. Do not re-implement its selector** — `commands/open.md` § the
+`--flagged` batch owns the vault scan, the due-date rule, the `OPENING_ACTORS` gate and the
+`REFUSED` line, and a second copy here would drift from it:
+
+```
+/supervisor:open --flagged
+```
+
+**Act on what it prints, and nothing else.** It opens each admitted row and prints the rest as
+`REFUSED | <vault> | <name> | flag_set_by=<who> | not the operator — not opened, not approved`.
+**Print every `REFUSED` line verbatim and open nothing it names.**
+
+⚠️ **`flag_set_by` is the safety rule, not a detail.** Only `operator` and `legacy` are
+admitted; an agent-set value is refused, and so is an **absent** one — after the disposition no
+row should carry one, so an absent value means a writer that did not declare itself, which is
+the bypass. Never widen the admitted set to make a row openable, and never "fix" a refusal by
+writing `flag_set_by` on the row.
+
+⚠️ **This leg removes the human from the loop, and that is a real change in blast radius.**
+Before it, the batch ran only when the operator typed the command; now it runs every tick
+unattended. `legacy` is a plain frontmatter value with no enforcement behind it, so under the
+fleet's cooperative-agent trust model an agent that writes `flag: true` +
+`flag_set_by: legacy` can get its own task opened without the operator. The same assumption
+underlies `keepalive.md` resuming a page-supplied `claude_session_id`. **That is the accepted
+model, not a defect — but it is named here so nobody reads the `flag_set_by` check as an
+authentication control.** If the model ever changes, this leg and the keep-alive are the two
+places that must change with it.
+
+⚠️ **This leg opens work, never a manager — and not because rule 4 forbids it.** Rule 4
+explicitly permits a manager opened *because it was flagged*; what stops this leg is that
+`/supervisor:open --flagged` selects **tasks** only (`commands/open.md` § the batch). A flagged
+manager is rule 2's subject and opens through `/supervisor:open --goal` or `--topic`. ⚠️ **No
+fleet-tier leg opens a flagged goal manager today** — `fleet-drive.md` removed the
+manager-proposal row on 2026-10-29, so the tier table's *"a goal manager only when that goal is
+flagged"* has no fleet executor; the operator opens one, or the topic tier's ranking does on
+their instruction (`commands/topic-drive.md` § Start). Say that plainly rather than implying
+this leg covers it.
+
+**Record the count — in the digest, not only in chat.** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg operator-flagged --count <n>`, with `<n>` the rows this leg left unopened — the `# Regression metric` reads it. The line's format and its not-run form have their **single home in `commands/steps/output-shape.md` item 14** — read it there and never restate it here.
+
+⚠️ **A leg that does not execute records WHY.** When the debt gate skips this leg (exit 12 = a step is still owed, exit 2 = the gate could not read the debt file), write `fleet-legs.py --leg flagged-open --not-run "<reason>"` rather than leaving the sweep's seeded `not run — no reading recorded this round` standing — `--check` reads that seed as "nobody has spoken for this key". ⚠️ **Never render `unactioned: 0` for a leg that did not run** — a suppressed leg and a leg that opened nothing must never print the same, which is the whole reason the count is written to the digest instead of spoken into chat.
+
+⚠️ **A failed write is reported, never swallowed.** If `fleet-legs.py` exits 2 the digest could not be read or written (the sweep may not have written it yet); render `legs: UNKNOWN — <reason>` for this round and retry the record once the digest exists. A reading that never landed must not read as a leg that never ran.

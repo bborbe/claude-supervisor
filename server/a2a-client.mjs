@@ -52,11 +52,33 @@ export const A2A_STREAM_METHOD = 'SendStreamingMessage'
 // The role every part of this client's messages carries. ⚠️ The enum string, not `"user"`.
 const A2A_USER_ROLE = 'ROLE_USER'
 
+// The `A2A-Version` header, or nothing at all — `{}` spread into a request's headers.
+//
+// ⚠️ AN ABSENT HEADER IS NOT "NO VERSION", IT IS `0.3`. Measured 2026-10-22 against a2a-go v2.7.0
+// (`a2asrv/intercepted_handler.go` `checkProtocolVersion`): a request carrying no `A2A-Version`
+// has its client version defaulted to `"0.3"` and is then refused with
+// `-32009 … requested "0.3", served "1.0"` by any service serving 1.0. The refusal arrives inside
+// a well-formed HTTP 200 envelope, so every transport check passes while nothing ran.
+//
+// ⚠️ SO THE VALUE IS READ FROM THE CARD AND NEVER GUESSED. `a2a.Version` is a constant on the
+// SERVER side, and a client that hardcodes it breaks against the first peer serving a different
+// one — which is exactly the defect this header repairs, mirrored. An absent `protocolVersion`
+// therefore sends NO header rather than a default: that keeps a server which advertises none
+// behaving exactly as it did before this existed.
+export function a2aVersionHeader(protocolVersion) {
+  if (typeof protocolVersion !== 'string' || protocolVersion === '') return {}
+  return { 'a2a-version': protocolVersion }
+}
+
 // The A2A endpoint a worker's Agent Card advertises — or `{ error }` when it advertises none.
 //
 // ⚠️ REFUSES RATHER THAN FALLING BACK, and the refusal names the nested field, because the
 // wrong read is invisible: a top-level `url` is a plausible-looking key that a correct card
 // simply does not carry, so a fallback would quietly send every turn to whatever it named.
+//
+// `protocolVersion` rides beside `url` because they come from the same object and a caller that
+// read one without the other would send a turn to the right place speaking the wrong protocol —
+// see `a2aVersionHeader`. It is `undefined` when the card names none, which is a supported state.
 export function resolveA2AEndpoint(card) {
   const interfaces = card?.supportedInterfaces
   if (!Array.isArray(interfaces) || interfaces.length === 0) {
@@ -75,7 +97,11 @@ export function resolveA2AEndpoint(card) {
         'nothing, and a fallback would send every turn somewhere the card never named.',
     }
   }
-  return { url }
+  const protocolVersion = interfaces[0]?.protocolVersion
+  return {
+    url,
+    ...(typeof protocolVersion === 'string' && protocolVersion !== '' ? { protocolVersion } : {}),
+  }
 }
 
 // The `contextId` to send, given the one this conversation already used.
@@ -106,7 +132,7 @@ export function a2aContextIdFor({ previous, mint } = {}) {
 // and a flattened `parts` array. `contextId` is REQUIRED here even though the vault client makes
 // it optional, because that client can send to a worker's default conversation by design while
 // this one must not — the supervisor always knows which conversation it is continuing.
-export function a2aStreamRequestFor({ endpoint, contextId, text, token, messageId } = {}) {
+export function a2aStreamRequestFor({ endpoint, contextId, text, token, messageId, protocolVersion } = {}) {
   const missing = (name, value) =>
     value === undefined || value === null || value === ''
       ? `\`${name}\` is required to send a turn over A2A.`
@@ -125,6 +151,7 @@ export function a2aStreamRequestFor({ endpoint, contextId, text, token, messageI
       // response from a streaming route, which reads as a turn that produced no frames.
       accept: 'text/event-stream',
       authorization: `Bearer ${token}`,
+      ...a2aVersionHeader(protocolVersion),
     },
     body: {
       jsonrpc: '2.0',
@@ -142,6 +169,32 @@ export function a2aStreamRequestFor({ endpoint, contextId, text, token, messageI
   }
 }
 
+// One SSE line — `{ frame }`, `{ skip: true }` for a line carrying no frame, or `{ error }`.
+//
+// ⚠️ EXTRACTED FROM `a2aFrames` SO THERE IS EXACTLY ONE PARSER. The incremental reader below has
+// to reach the same verdicts on the same bytes as the whole-body path does, and two copies of an
+// error-frame rule is precisely how one of them drifts into treating a refusal as data.
+export function a2aFrameFor(line) {
+  if (!line.startsWith('data:')) return { skip: true }
+  const raw = line.slice('data:'.length).trim()
+  if (raw === '' || raw === '[DONE]') return { skip: true }
+  let payload
+  try {
+    payload = JSON.parse(raw)
+  } catch (err) {
+    return { error: `an SSE frame is not JSON: ${raw.slice(0, 200)}` }
+  }
+  if (payload?.error) {
+    return {
+      error:
+        `the service refused the turn: ${JSON.stringify(payload.error)}. ⚠️ This arrives inside a ` +
+        'well-formed HTTP 200 SSE envelope, so the transport status proves nothing — a `content` ' +
+        'part and a slash-form method name both fail exactly here.',
+    }
+  }
+  return { frame: payload?.result ?? payload }
+}
+
 // The frames carried by an SSE body — `{ frames }`, or `{ error }` when one of them is an error.
 //
 // ⚠️ AN ERROR FRAME IS FATAL HERE, AND THAT IS THE POINT. The measured defect this guards is a
@@ -152,26 +205,88 @@ export function a2aFrames(sseBody) {
   if (typeof sseBody !== 'string') return { error: 'the SSE body must be a string.' }
   const frames = []
   for (const line of sseBody.split('\n')) {
-    if (!line.startsWith('data:')) continue
-    const raw = line.slice('data:'.length).trim()
-    if (raw === '' || raw === '[DONE]') continue
-    let payload
-    try {
-      payload = JSON.parse(raw)
-    } catch (err) {
-      return { error: `an SSE frame is not JSON: ${raw.slice(0, 200)}` }
-    }
-    if (payload?.error) {
-      return {
-        error:
-          `the service refused the turn: ${JSON.stringify(payload.error)}. ⚠️ This arrives inside a ` +
-          'well-formed HTTP 200 SSE envelope, so the transport status proves nothing — a `content` ' +
-          'part and a slash-form method name both fail exactly here.',
-      }
-    }
-    frames.push(payload?.result ?? payload)
+    const parsed = a2aFrameFor(line)
+    if (parsed.error) return { error: parsed.error }
+    if (parsed.skip) continue
+    frames.push(parsed.frame)
   }
   return { frames }
+}
+
+// The task id a turn's frames carry, or `null` — the value a push registration needs.
+//
+// ⚠️ IT ACCEPTS EVERY SHAPE THE ID ARRIVES IN, because the FIRST frame is the one that matters and
+// which shape it takes is not fixed: the opening `task` frame carries `{task: {id}}` while a later
+// `statusUpdate` carries `{statusUpdate: {taskId}}`. `a2aOutcome` resolves the same ambiguity for
+// the terminal read (`.task ?? f` then `.id`); this mirrors it rather than inventing a second rule,
+// and it scans in ORDER so the earliest id wins — which is what makes it usable mid-stream, where
+// only a prefix of the frames exists yet.
+export function a2aTaskIdOf(frames) {
+  if (!Array.isArray(frames)) return null
+  for (const frame of frames) {
+    const id = frame?.task?.id ?? frame?.id ?? frame?.statusUpdate?.taskId ?? frame?.artifactUpdate?.taskId
+    if (typeof id === 'string' && id !== '') return id
+  }
+  return null
+}
+
+// A frame reader fed a turn's stream CHUNK BY CHUNK — `{ push, end, frames, error }`.
+//
+// ⚠️ WHY THIS EXISTS AT ALL, AND IT IS NOT AN OPTIMISATION. The push callback must be registered
+// against the worker's task *after* that task exists and *before* the worker emits its mid-turn
+// status, which fires a fixed ~10 s into the turn. The task id is in the turn's FIRST frame, so a
+// reader that only yields at the end of the stream — which is what `.text()` does — learns it
+// minutes too late and arms the channel for a turn that has already reported. Every failure in
+// that direction is silent: the turn still completes, the outcome is still filed, and the only
+// symptom is a status channel that never carries anything.
+//
+// ⚠️ THE BUFFER IS THE WHOLE CORRECTNESS PROBLEM. A chunk boundary falls wherever the network
+// puts it, so a `data:` line routinely arrives split across two reads. Only text up to the LAST
+// newline is parsed; the remainder is held and prefixed to the next chunk. Parsing eagerly would
+// fail on a truncated JSON line and report a malformed stream for a perfectly good one.
+export function createSseFrameReader() {
+  let buffer = ''
+  let error = null
+  const frames = []
+
+  const consume = (text) => {
+    buffer += text
+    const lastBreak = buffer.lastIndexOf('\n')
+    if (lastBreak === -1) return
+    const complete = buffer.slice(0, lastBreak)
+    buffer = buffer.slice(lastBreak + 1)
+    for (const line of complete.split('\n')) {
+      const parsed = a2aFrameFor(line)
+      // The first error is kept and the reader stops yielding: an error frame is fatal in
+      // `a2aFrames` too, so returning frames collected before it would let a caller read a refused
+      // turn as a partial success.
+      if (parsed.error) {
+        if (error === null) error = parsed.error
+        return
+      }
+      if (!parsed.skip) frames.push(parsed.frame)
+    }
+  }
+
+  return {
+    frames,
+    get error() {
+      return error
+    },
+    push: (chunk) => {
+      if (error !== null) return
+      consume(chunk)
+    },
+    // Flush whatever is left. ⚠️ A trailing line with NO newline is still a frame: the last
+    // `data:` line of a stream often arrives exactly so, and dropping it would lose the terminal
+    // completion event — the one SC2 asserts on.
+    end: () => {
+      if (error !== null) return
+      const rest = buffer
+      buffer = ''
+      if (rest !== '') consume(`${rest}\n`)
+    },
+  }
 }
 
 // What a turn produced — `{ state, contextId, reply }`, or `{ error }`.
@@ -181,6 +296,15 @@ export function a2aFrames(sseBody) {
 // session returns a `contextId` just as happily as one that ran where it was asked to, so a
 // mismatch is the ONLY client-side observable that the conversation is not the one intended —
 // and it surfaces here rather than as unexplained memory loss two turns later.
+// The state a `statusUpdate` frame carries. ⚠️ It is NESTED — `{ status: { state } }`, a2a-go
+// v2.6.0 `TaskStatusUpdateEvent` — and the parts of an `artifactUpdate` sit one level down too, at
+// `artifact.parts`. Measured 2026-10-13 against a real worker: reading both one level too shallow
+// found no status update and no reply, so a turn that ran to completion was filed as SUBMITTED
+// with an empty reply. The flat `{ state }` shape is still accepted.
+export function a2aEventState(update) {
+  return update?.status?.state ?? update?.state ?? null
+}
+
 export function a2aOutcome(frames, { sentContextId } = {}) {
   if (!Array.isArray(frames) || frames.length === 0) {
     return { error: 'the turn produced no frames — nothing executed.' }
@@ -199,7 +323,7 @@ export function a2aOutcome(frames, { sentContextId } = {}) {
     }
   }
   const reply = frames
-    .map((f) => f?.artifactUpdate ?? f?.artifact ?? f)
+    .map((f) => f?.artifactUpdate?.artifact ?? f?.artifactUpdate ?? f?.artifact ?? f)
     .flatMap((f) => f?.parts ?? [])
     .map((p) => p?.text ?? '')
     .filter((t) => t !== '')
@@ -208,8 +332,8 @@ export function a2aOutcome(frames, { sentContextId } = {}) {
   // `task(SUBMITTED)` → `artifactUpdate` → `statusUpdate(COMPLETED)`, so the `task` frame is the
   // FIRST one and it carries a status too — reading `task.status.state` therefore reports
   // SUBMITTED on a turn that completed. Measured by this module's own test before it shipped.
-  const statusUpdates = frames.map((f) => f?.statusUpdate).filter((s) => s?.state)
-  const state = statusUpdates.at(-1)?.state ?? task.status?.state
+  const statusUpdates = frames.map((f) => a2aEventState(f?.statusUpdate)).filter(Boolean)
+  const state = statusUpdates.at(-1) ?? task.status?.state
   return { state, contextId, reply }
 }
 
@@ -264,18 +388,136 @@ export const A2A_CONTROL_OPERATIONS = ['create', 'list', 'stop']
 // two copies of a wire constant is how they drift.
 export const A2A_STATE_FAILED = 'TASK_STATE_FAILED'
 
+// Why a `push` descriptor cannot be sent, or `null` when it can.
+//
+// Exported so the supervisor's own wiring refuses a half-configured receiver at the place the
+// wire shape is decided, rather than discovering it as a controller-side 4xx at spawn time.
+//
+// ⚠️ BOTH HALVES ARE REQUIRED AND NEITHER IS A DEFAULT. A URL with no token would register a
+// callback any sender could POST to; a token with no URL would register nothing and read as a
+// configured channel. The two travel together or not at all.
+export function a2aPushRefusal({ push } = {}) {
+  if (push === null || typeof push !== 'object' || Array.isArray(push)) {
+    return `\`push\` must be an object carrying \`url\` and \`token\` — got ${JSON.stringify(push) ?? 'undefined'}.`
+  }
+  if (typeof push.url !== 'string' || push.url === '') {
+    return '`push.url` must be a non-empty string — the controller has nothing to POST to otherwise.'
+  }
+  let parsed
+  try {
+    parsed = new URL(push.url)
+  } catch {
+    return `\`push.url\` is not a parseable URL: ${JSON.stringify(push.url)}.`
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return `\`push.url\` must be http or https — got ${JSON.stringify(parsed.protocol)}.`
+  }
+  if (typeof push.token !== 'string' || push.token === '') {
+    return '`push.token` must be a non-empty string — it is the only credential the receiver checks.'
+  }
+  return null
+}
+
 // The `ControlRequest` for one operation — `{ request }`, or `{ error }`.
 //
 // ⚠️ EXACTLY ONE OPERATION-SPECIFIC FIELD, and that is the controller's own rule rather than
 // this module's preference: it refuses a request that sets none or more than one instead of
 // guessing at the intent. A builder that silently dropped a stray field would turn a caller's
 // mistake into a different operation than the one it asked for.
-export function a2aControlRequestFor({ operation, task, workerId } = {}) {
+// The declared `mounts` / `secrets` a `create` carries, validated — `{ declared }`, or `{ error }`.
+//
+// ⚠️ THESE ARE THE ONLY ROUTE BY WHICH A CALLER PUTS SOMETHING INTO A WORKER'S ENVIRONMENT, and
+// that is deliberate: the raw `env` argument stays REFUSED on this path (`a2aSpawnArgumentRefusal`),
+// because a bare map is an ungoverned surface. A mount is a host path the controller checks against
+// its own allowlist, and a secret is a TeamVault KEY the controller resolves itself — so the caller
+// names what it wants and the controller decides whether it may have it. Passing a secret VALUE is
+// not expressible here, which is the point rather than a limitation.
+//
+// ⚠️ VALIDATED HERE, NOT ONLY AT THE TOOL BOUNDARY. The tool schema is what a caller reads, but
+// this builder is what puts bytes on the wire, and a test drives it directly — so a shape that
+// only the schema rejected would be one the request builder would happily send.
+export function declaredCreateArguments({ mounts, secrets } = {}) {
+  const declared = {}
+
+  if (mounts !== undefined) {
+    if (!Array.isArray(mounts)) return { error: '`mounts` must be an array.' }
+    const checked = []
+    for (const [index, mount] of mounts.entries()) {
+      if (mount === null || typeof mount !== 'object' || Array.isArray(mount)) {
+        return { error: `\`mounts[${index}]\` must be an object.` }
+      }
+      const { host_path: hostPath, volume, container_path: containerPath, read_only: readOnly } = mount
+      // ⚠️ EXACTLY ONE SOURCE, and `volume` is named in the refusal rather than ignored. The
+      // controller refuses a named volume with its own `mount_not_allowed: volume <name>`; a
+      // caller told only "not supported" here would have no idea which of its fields was the
+      // problem, and the two refusals must agree about what a volume is.
+      if (volume !== undefined) {
+        return {
+          error:
+            `\`mounts[${index}]\` declares \`volume\`, which is refused: the mount allowlist governs ` +
+            'host paths only, so a named volume would be an ungoverned mount surface. Use `host_path`.',
+        }
+      }
+      if (typeof hostPath !== 'string' || hostPath === '') {
+        return { error: `\`mounts[${index}].host_path\` must be a non-empty string.` }
+      }
+      if (typeof containerPath !== 'string' || containerPath === '') {
+        return { error: `\`mounts[${index}].container_path\` must be a non-empty string.` }
+      }
+      if (readOnly !== undefined && typeof readOnly !== 'boolean') {
+        return { error: `\`mounts[${index}].read_only\` must be a boolean when given.` }
+      }
+      checked.push({ host_path: hostPath, container_path: containerPath, ...(readOnly === undefined ? {} : { read_only: readOnly }) })
+    }
+    if (checked.length > 0) declared.mounts = checked
+  }
+
+  if (secrets !== undefined) {
+    if (!Array.isArray(secrets)) return { error: '`secrets` must be an array.' }
+    const checked = []
+    for (const [index, secret] of secrets.entries()) {
+      if (secret === null || typeof secret !== 'object' || Array.isArray(secret)) {
+        return { error: `\`secrets[${index}]\` must be an object.` }
+      }
+      const { name, teamvault_key: teamVaultKey } = secret
+      if (typeof name !== 'string' || name === '') {
+        return { error: `\`secrets[${index}].name\` must be a non-empty string.` }
+      }
+      // ⚠️ THE KEY, NEVER THE VALUE. A caller cannot pass a secret's value through this field even
+      // by accident: the controller resolves the key against TeamVault itself, so the value never
+      // travels from here at all.
+      if (typeof teamVaultKey !== 'string' || teamVaultKey === '') {
+        return {
+          error:
+            `\`secrets[${index}].teamvault_key\` must be a non-empty TeamVault KEY. The value is never ` +
+            'passed by the caller — the controller resolves the key itself.',
+        }
+      }
+      checked.push({ name, teamvault_key: teamVaultKey })
+    }
+    if (checked.length > 0) declared.secrets = checked
+  }
+
+  return { declared }
+}
+
+export function a2aControlRequestFor({ operation, task, workerId, mounts, secrets } = {}) {
   if (!A2A_CONTROL_OPERATIONS.includes(operation)) {
     return {
       error:
         `\`operation\` must be one of ${A2A_CONTROL_OPERATIONS.map((o) => JSON.stringify(o)).join(', ')} ` +
         `— got ${JSON.stringify(operation) ?? 'undefined'}.`,
+    }
+  }
+  // ⚠️ REFUSED, NOT DROPPED, and checked BEFORE the per-operation branches — which is the whole
+  // point of its position. `list` and `stop` have no mount or secret surface at all, so a caller
+  // that passed one has misunderstood the call; a value silently ignored is how a caller concludes
+  // a worker was given access it never received. ⚠️ Placed after the `list` branch it would be
+  // UNREACHABLE for `list`, because that branch returns first — a guard that can never fire reads
+  // exactly like one that passed.
+  if (mounts !== undefined || secrets !== undefined) {
+    if (operation !== 'create') {
+      return { error: `\`mounts\` and \`secrets\` are \`create\` arguments — \`${operation}\` takes neither.` }
     }
   }
   if (operation === 'list') {
@@ -291,7 +533,14 @@ export function a2aControlRequestFor({ operation, task, workerId } = {}) {
     if (workerId !== undefined) {
       return { error: '`create` takes no `workerId` — the controller mints the worker id.' }
     }
-    return { request: { operation, create: { task } } }
+    // ⚠️ NO PUSH DESCRIPTOR RIDES HERE, and that is a correction rather than an omission. The
+    // controller never sees a task: it creates the worker and the SPAWNER sends the first turn,
+    // which is what creates the task on the worker's own A2A server. The push config is registered
+    // against that task, on that server, by the spawner — see `a2aPushConfigCallFor`. A callback
+    // URL sent to the controller would be a field nothing could act on.
+    const declared = declaredCreateArguments({ mounts, secrets })
+    if (declared.error) return { error: declared.error }
+    return { request: { operation, create: { task, ...declared.declared } } }
   }
   if (typeof workerId !== 'string' || workerId === '') {
     return { error: '`stop` requires a non-empty `workerId`.' }
@@ -321,13 +570,115 @@ export function a2aDataPart(value) {
   return { part: { data: value } }
 }
 
+// The JSON-RPC method that registers a push callback against a task.
+//
+// ⚠️ NOT the `tasks/pushNotificationConfig/set` spelling. That name belongs to a DIFFERENT
+// transport — the v0 compat binding, `a2acompat/a2av0/jsonrpc.go:24` — where the params wrap the
+// config in a `pushNotificationConfig` object. This binding's params are the flat `a2a.PushConfig`;
+// see the builder below for why that distinction is worth a paragraph.
+export const A2A_PUSH_CONFIG_METHOD = 'CreateTaskPushNotificationConfig'
+
+// The registration call that arms the worker→spawner status channel — `{ url, headers, body }`,
+// or `{ error }`.
+//
+// ⚠️ THE PARAMS ARE FLAT, AND CLOSING THAT TRAP IS THIS BUILDER'S WHOLE REASON TO EXIST. The
+// obvious A2A spelling is `{ taskId, pushNotificationConfig: { url, token } }` — and it is WRONG
+// here. The handler unmarshals its params as `a2a.PushConfig` **directly**
+// (`a2asrv/jsonrpc.go:334-340`), and that struct carries `taskId`, `url` and `token` as its OWN
+// fields (`a2a/push.go:71,82,85`). So the task id is a SIBLING of the url, never a wrapper around
+// it. A wrapped body is perfectly well-formed JSON that the handler refuses as an unmarshal
+// error, which reads downstream as "malformed request" rather than as "wrong protocol version" —
+// the misdiagnosis this comment is here to prevent.
+//
+// ⚠️ TWO DIFFERENT CREDENTIALS RIDE ON THIS ONE CALL, and conflating them is the other silent
+// failure. The bearer in the headers authenticates to the WORKER; `params.token` is the credential
+// the RECEIVER verifies, which the SDK later echoes back as the `A2A-Notification-Token` header.
+// Swapping them would either hand the receiver's token to the worker or register the worker's
+// token as the push credential — and either one still returns a 200.
+export function a2aPushConfigCallFor({ endpoint, taskId, push, token, requestId = 1, protocolVersion } = {}) {
+  for (const [name, value] of Object.entries({ endpoint, taskId, token })) {
+    if (typeof value !== 'string' || value === '') {
+      return { error: `\`${name}\` is required to register a push callback over A2A.` }
+    }
+  }
+  const refusal = a2aPushRefusal({ push })
+  if (refusal) return { error: refusal }
+
+  return {
+    url: endpoint,
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${token}`,
+      // ⚠️ THE SAME HEADER AS THE TURN, AND FOR THE SAME REASON. This call reaches the worker's
+      // own JSONRPC handler, which runs the same version gate — so omitting it here refuses the
+      // registration with the identical -32009 while the turn itself succeeds. The symptom is not
+      // an error but a silent one: the status channel never carries anything.
+      ...a2aVersionHeader(protocolVersion),
+    },
+    body: {
+      jsonrpc: '2.0',
+      id: requestId,
+      method: A2A_PUSH_CONFIG_METHOD,
+      params: { taskId, url: push.url, token: push.token },
+    },
+  }
+}
+
+export const A2A_PUSH_CONFIG_LIST_METHOD = 'ListTaskPushNotificationConfigs'
+
+// The read-back half of the round trip — `{ url, headers, body }`, or `{ error }`.
+//
+// ⚠️ LIST, NOT GET, AND THAT IS A MEASURED CORRECTION RATHER THAN A PREFERENCE. The first version
+// of this read-back used `GetTaskPushNotificationConfig` with `params: {taskId}` and every call
+// returned "push config not found" against a worker whose pushes were demonstrably arriving. The
+// cause is in the SDK: the handler reads `h.pushConfigStore.Get(ctx, req.TaskID, req.ID)`
+// (`a2asrv/handler.go:419`) — the store is keyed by task id **and config id** — and the set path
+// never sends a config `id`, so a get looks up an empty one and can never match. `List` is keyed by
+// `taskId` alone and returns `{configs: […]}`.
+//
+// ⚠️ `CreateTaskPushNotificationConfig` IS ONLY EVIDENCE THAT THE WORKER ACCEPTED A REGISTRATION.
+// It says nothing about what the worker then stored, and an accepted-then-dropped config is
+// indistinguishable from a working one until something reads it back. This builder is that read.
+export function a2aPushConfigListCallFor({ endpoint, taskId, token, requestId = 1, protocolVersion } = {}) {
+  for (const [name, value] of Object.entries({ endpoint, taskId, token })) {
+    if (typeof value !== 'string' || value === '') {
+      return { error: `\`${name}\` is required to read a push callback back over A2A.` }
+    }
+  }
+  return {
+    url: endpoint,
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${token}`,
+      // Same gate as the turn and the registration — see `a2aPushConfigCallFor`.
+      ...a2aVersionHeader(protocolVersion),
+    },
+    body: {
+      jsonrpc: '2.0',
+      id: requestId,
+      method: A2A_PUSH_CONFIG_LIST_METHOD,
+      params: { taskId },
+    },
+  }
+}
+
 // The JSON-RPC request for one control call — `{ url, headers, body }`, or `{ error }`.
 //
 // ⚠️ ONE-SHOT, NOT STREAMING — see trap 6. No `accept: text/event-stream`: a one-shot route
 // answers a single object, and asking it for a stream reads as a call that produced no frames.
 // `contextId` is sent for the same reason the worker half sends it — a control call is a turn on
 // the controller's conversation, and a follow-up must land on the one it started.
-export function a2aSendRequestFor({ endpoint, contextId, request, token, messageId } = {}) {
+//
+// ⚠️ THE `A2A-Version` HEADER IS SENT WHEN — AND ONLY WHEN — THE CONTROLLER'S CARD NAMES ONE, and
+// that is what the note this comment replaces asked for. It used to send nothing, deliberately:
+// the controller pinned a2a-go v2.6.0, which has no `checkProtocolVersion` at all, so a version
+// here would have asserted a contract it never advertised. The controller has since moved to
+// v2.7.0, where the handler defaults an ABSENT header to `"0.3"` and refuses it — measured
+// 2026-10-22 against controller `v0.17.0`, whose every control call, `create` included, was
+// refused `-32009 … requested "0.3", served "1.0"`. So the caller reads the card on this plane
+// and passes what it advertises; `undefined` still sends no header, which is exactly the old
+// behaviour and keeps an older controller working. See `a2aVersionHeader`.
+export function a2aSendRequestFor({ endpoint, contextId, request, token, messageId, protocolVersion } = {}) {
   for (const [name, value] of Object.entries({ endpoint, contextId, token, messageId })) {
     if (value === undefined || value === null || value === '') {
       return { error: `\`${name}\` is required to send a control call over A2A.` }
@@ -341,6 +692,7 @@ export function a2aSendRequestFor({ endpoint, contextId, request, token, message
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${token}`,
+      ...a2aVersionHeader(protocolVersion),
     },
     body: {
       jsonrpc: '2.0',
@@ -408,11 +760,16 @@ export function a2aControlResponseFor(body, { sentOperation } = {}) {
   // ⚠️ THE STATUS IS READ BEFORE THE PAYLOAD, and the order is load-bearing: a backend failure
   // yields `TASK_STATE_FAILED` with NO artifact, so a client that hunted for the data part first
   // would find none and have to invent a reason, while the status states the real one.
-  const statusUpdates = frames.map((f) => f?.statusUpdate).filter((s) => s?.state)
-  const state = statusUpdates.at(-1)?.state ?? task?.status?.state
+  const statusUpdates = frames.map((f) => a2aEventState(f?.statusUpdate)).filter(Boolean)
+  const state = statusUpdates.at(-1) ?? task?.status?.state
 
   if (state === A2A_STATE_FAILED) {
     return {
+      // ⚠️ THE FLAG IS WHAT LETS A CALLER BRANCH ON THIS WITHOUT PARSING THE MESSAGE. A call that
+      // reached the controller and was refused is a different fact from one that never arrived,
+      // and the supervisor's recovery keys on exactly that difference — matching on the error
+      // text instead would break the first time this sentence is reworded.
+      controllerFailed: true,
       error:
         'the controller reported the control call FAILED. It returns no detail on this path — the ' +
         'error is logged controller-side and never sent — so this status is all the caller gets. ' +

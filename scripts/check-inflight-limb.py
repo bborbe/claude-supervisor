@@ -32,9 +32,9 @@ is consulted, and `LIMB` then guards the other direction — that the clause sti
 the labels a reader has to write. Both must hold on the same line.
 
 Anchored on the clause's own words, never on a line number: this file's neighbours cite
-`agents/manager-drive.md` by line number, and **four in-repo sites had drifted to `:132`
+`agents/goal-drive.md` by line number, and **four in-repo sites had drifted to `:132`
 for a sentence that sits at `:134`** — `scripts/manager-attention-watch.py` plus
-`agents/manager-sweep-reader.md`, `commands/manager-loop.md` and `commands/manager-status.md`.
+`agents/goal-sweep-reader.md`, `commands/goal-loop.md` and `commands/goal-status.md`.
 All four are corrected in the change that added this guard, so the drift is now historical
 rather than live — which is the point: it was found only by a reader checking a citation
 against its target, and nothing in the repo would have caught it. A prose anchor cannot
@@ -51,7 +51,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-DRIVE = REPO / "agents/manager-drive.md"
+DRIVE = REPO / "agents/goal-drive.md"
 
 # The rule's own opening words. Present exactly once, in the drop-line bullet.
 RULE_ANCHOR = "An `in flight:` drop names the LIMB that answered"

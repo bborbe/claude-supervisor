@@ -52,13 +52,14 @@ Manager Session runbook § Sweep output):
   4. no task file at all -> `Unmanaged`.
 
 A manager's SUBJECT is resolved from two sources in order: the loop record its
-manager wrote under `~/.claude/state/sweep-gate/<subject-slug>.*`, then its
+manager wrote under `~/.claude/state/sweep-gate/<branch>--<base>.*`, then its
 registry name matching a topic or goal title (case-insensitively; a `<X> Manager`
 suffix allowed). ⚠️ Never from the session's `claude_session_id` stamp — measured
 2026-09-24, `Sample Agent`'s stamp points at an unrelated task. ⚠️ The two
 sources are not independent: `manager-liveness.py`'s slug is
-`re.sub(r"[^a-z0-9]+", "-", topic.lower()).strip("-")`, a lossy transform that
-carries no session id, so source 1 narrows the SUBJECT and the session still comes
+`f"{branch}--" + re.sub(r"[^a-z0-9]+", "-", subject.lower()).strip("-")`, a lossy
+transform that carries no session id, so source 1 narrows the SUBJECT and the
+session still comes
 from the registry — the same name the fallback reads. A manager that resolves
 neither way is still a manager (colour is the signal); it just has no subject, so
 nothing nests under it.
@@ -89,6 +90,8 @@ def _load(name, filename):
 wnm = _load("who_needs_me", "who-needs-me.py")
 fs = _load("fleet_sessions", "fleet-sessions.py")
 fc = _load("fleet_colours", "fleet-colours.py")
+dw = _load("declared_wait", "declared-wait.py")
+erc = _load("exit_record_coverage", "exit-record-coverage.py")
 
 # --- the tree's inputs -------------------------------------------------------
 
@@ -120,14 +123,33 @@ MANAGER_COLOUR = "orange"
 ROLE_MANAGER, ROLE_WORKER, ROLE_UNMANAGED = "manager", "worker", "unmanaged"
 UNMANAGED = "unmanaged"  # the `parent` value for a session no manager covers
 
+# Why a `sessions` entry carries no `task_title`. One wording per distinct
+# absence: a manager never has one by design, an unmanaged session has no task
+# file at all, and a worker can be a worker without binding to anything. A single
+# shared sentence would make three different states read as one.
+TASK_TITLE_NO_MANAGER = "manager — manages a subject page, not a task"
+TASK_TITLE_NO_TASK_FILE = "unmanaged — no stamped title and no task file of that name"
+TASK_TITLE_NO_BINDING = "worker — bound by neither a stamped title nor a task file"
+
 _WIKILINK = re.compile(r"\[\[([^\]|#]+)")
 _LIST_ITEM = re.compile(r"^\s*-\s")
 _MANAGER_SUFFIX = re.compile(r"\s+manager$", re.IGNORECASE)
 
 
 def slug(text):
-    """`manager-liveness.py`'s slug, verbatim — one definition, two readers."""
+    """The BASE slug — `manager-liveness.py`'s own transform, one definition, two readers."""
     return re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+
+
+def subject_slug(text, branch):
+    """`manager-liveness.py`'s state slug, verbatim: `goal--<base>` / `topic--<base>`.
+
+    ⚠️ The branch prefix is what keeps a topic and a goal that share a name from
+    colliding in one flat state directory. Reading the unprefixed form here would
+    find neither record — every manager would silently lose its subject and the tree
+    would collapse to the root.
+    """
+    return f"{branch}--{slug(text)}"
 
 
 def frontmatter(text):
@@ -206,6 +228,19 @@ def _matches_one_title(key, titles):
     return sum(1 for t in titles if t.startswith(key)) == 1
 
 
+def _prefix_title(key, titles):
+    """The single title `key` unambiguously prefixes, or `None`.
+
+    The same two guards `_matches_one_title` applies — a length floor and "exactly
+    one" — but returning the title rather than a boolean, because a manager's
+    subject has to be named, not merely confirmed.
+    """
+    if not key or len(key) < _TRUNCATION_MIN_PREFIX:
+        return None
+    hits = [t for k, t in titles.items() if k.startswith(key)]
+    return hits[0] if len(hits) == 1 else None
+
+
 class VaultIndex:
     """Topic and goal titles, and the links between them — read once per run.
 
@@ -216,13 +251,20 @@ class VaultIndex:
     """
 
     def __init__(self, topics=(), goals=(), task_titles=(), task_goals=None, goal_topics=None,
-                 task_managed_by=None):
+                 task_managed_by=None, task_topics=None):
         self.topics = {t.lower(): t for t in topics}
         self.goals = {g.lower(): g for g in goals}
         self.task_titles = {t.lower(): t for t in task_titles}
         self.task_goals = task_goals or {}
         self.goal_topics = goal_topics or {}
         self.task_managed_by = task_managed_by or {}
+        # A topic's `## Goals` section admits tasks as well as goals — the design's
+        # "a task whose task has no goal is managed by its topic's manager when it
+        # sits directly under a topic". Kept separate from `goal_topics` because the
+        # two name different populations: a goal entry resolves a goal page, a task
+        # entry resolves a task file, and collapsing them would let a task title
+        # masquerade as a goal in every goal-chain read.
+        self.task_topics = task_topics or {}
         self._norm_titles = None
 
     def subject(self, title):
@@ -251,6 +293,17 @@ class VaultIndex:
     def topics_of(self, goal_title):
         """The topics whose `## Goals` lists this goal, in order."""
         return self.goal_topics.get((goal_title or "").lower(), [])
+
+    def topics_of_task(self, task_title):
+        """The topics whose `## Goals` lists this TASK directly, in order.
+
+        The design's "a task whose task has no goal is managed by the nearest
+        existing ancestor — its topic's manager if the task sits directly under a
+        topic". Without this the branch was unreachable: `goal_topics` keeps only
+        entries that resolve to a goal page, so a task entry was dropped and the
+        task fell through to the fleet manager.
+        """
+        return self.task_topics.get((task_title or "").lower(), [])
 
     def _normalized_titles(self):
         """`{normalized title: title}`, built once — the index is read-only.
@@ -418,7 +471,7 @@ def vault_index():
             if owner:
                 task_managed_by[title.lower()] = owner[0].strip()
 
-    goal_topics = {}
+    goal_topics, task_topics = {}, {}
     for path in topic_pages:
         topic = os.path.basename(path)[:-3]
         for link in _goals_section_links(_read(path)):
@@ -427,9 +480,18 @@ def vault_index():
                 goal_topics.setdefault(key, [])
                 if topic not in goal_topics[key]:
                     goal_topics[key].append(topic)
+            elif key in task_titles:
+                # A task named directly in a topic's `## Goals` is a member of that
+                # topic — the nearest-ancestor case the tier design states. It is
+                # matched against task titles only, never goals, so an entry that
+                # resolves to neither page (F2's prose artifact) is still dropped.
+                task_topics.setdefault(key, [])
+                if topic not in task_topics[key]:
+                    task_topics[key].append(topic)
 
     return VaultIndex(topics.values(), goals.values(),
-                      task_titles.values(), task_goals, goal_topics, task_managed_by)
+                      task_titles.values(), task_goals, goal_topics, task_managed_by,
+                      task_topics)
 
 
 def loop_slugs(state_dir=None):
@@ -458,15 +520,32 @@ def manager_subject(name, index, slugs):
     through to source 2 rather than answering `None` — the loop proves a manager
     exists, not what it covers.
     """
-    if slug(name) in slugs:
-        for key, title in list(index.topics.items()) + list(index.goals.items()):
-            if slug(title) == slug(name):
-                return index.subject(title)
+    if any(subject_slug(name, b) in slugs for b in ("topic", "goal")):
+        for branch, table in (("topic", index.topics), ("goal", index.goals)):
+            for title in table:
+                if subject_slug(title, branch) in slugs and slug(title) == slug(name):
+                    return index.subject(title)
     for candidate in (name, _MANAGER_SUFFIX.sub("", name or "")):
         found = index.subject(candidate)
         if found:
             return found
-    return None
+    # Source 3 — a TRUNCATED registry name, the same normal shape `has_task_file`
+    # documents for tasks. Without this a goal manager whose name the registry
+    # clipped resolved to no subject at all: measured 2026-10-20, the live goal
+    # manager `985c00e8` held the name `Topics and Goals Run on the Same Phase
+    # Lifecycle a` against the goal `… and Manager Tree as Tasks`, so the topic
+    # tier's N-slot count read zero and the round would start a second manager.
+    # ⚠️ Exactly ONE hit across BOTH tables, so an ambiguous prefix stays `None`
+    # rather than becoming a confident guess.
+    keys = {_norm_session_name(name), _norm_session_name(_MANAGER_SUFFIX.sub("", name or ""))}
+    hits = []
+    for kind, table in (("goal", index.goals), ("topic", index.topics)):
+        normalized = {_norm_session_name(title): title for title in table.values()}
+        for key in keys:
+            hit = _prefix_title(key, normalized)
+            if hit and (kind, hit) not in hits:
+                hits.append((kind, hit))
+    return hits[0] if len(hits) == 1 else None
 
 # Session 26 · Bucket 16 · Vault task 34 · Unblocks 18 · Inactive 9 -> sum 103,
 # and `box-table.py` renders `sum(widths) + 3n + 1` = 119 of the operator's 119
@@ -522,7 +601,7 @@ UNBLOCKS_VALUES = (UNBLOCKS_OPERATOR, UNBLOCKS_NUDGE, UNBLOCKS_REAP, UNBLOCKS_WO
 NUDGE_SECONDS = 30 * 60
 
 
-def unblocks_for(sid, age, meta, panel_ids):
+def unblocks_for(sid, age, meta, panel_ids, declared_wait=frozenset()):
     """Which of the four `Unblocks` values this session carries.
 
     Order is the whole rule — first match wins, and the classes are disjoint by
@@ -538,6 +617,13 @@ def unblocks_for(sid, age, meta, panel_ids):
        so the session wants closing.
     3. `nudge` — inactive past the threshold, in `execution`, holding an open
        box: the one shape where "go on" is both allowed and useful.
+       ⚠️ **A session that DECLARED a wait is never `nudge`.** `declared_wait`
+       carries the ids from `scripts/declared-wait.py` — the `⏰ Ends:` slot — and a
+       declared wait is the one case where a session is inactive *by design*: its
+       turn ended and a machine will wake it. Nudging it is the false positive this
+       parameter exists to remove. `reap/close` and `operator-keystroke` still
+       outrank it, because a finished task wants closing whatever the session
+       declared, and a keystroke row is the operator's to press.
     4. `working` — everything else, including a session with no stamped task
        (`meta` is None). ⚠️ `working` is the DEFAULT, not a finding: a session
        with no task cannot be shown to be idle, and inventing a nudge for it
@@ -552,7 +638,8 @@ def unblocks_for(sid, age, meta, panel_ids):
     if meta:
         if meta.get("status") == "completed":
             return UNBLOCKS_REAP
-        if (age is not None and age >= NUDGE_SECONDS
+        if (sid not in declared_wait
+                and age is not None and age >= NUDGE_SECONDS
                 and meta.get("phase") == "execution"
                 and meta.get("open_boxes", 0) >= 1):
             return UNBLOCKS_NUDGE
@@ -680,16 +767,25 @@ def collect_signals(stuck_min):
     and the stuck predicate are the same ones the operator's `Needs you` section
     is built from — one definition, two renderings.
 
-    The fourth return value is whether the pane read succeeded. A failed read is
-    `None`, which `is_live()` keeps every row on — the board degrades to the
-    registry's own verdict rather than rendering a false empty — but it must say
-    so, or a board whose pane filter never ran looks identical to one that ran.
+    The fourth return value is the pane map itself — `{pane_id: record}`, or `None`
+    when the read failed. A failed read is `None`, which `is_live()` keeps every row
+    on — the board degrades to the registry's own verdict rather than rendering a
+    false empty — but it must say so, or a board whose pane filter never ran looks
+    identical to one that ran. It is the MAP and not a bool so the exit-record check
+    downstream can reuse this one read instead of spawning a second `wezterm cli
+    list` (up to its 5 s timeout) on every render.
 
     The fifth is the Rendered-panels session-id set — the `operator-keystroke`
     input. It is composed here rather than in `build_rows()` because it needs
     the same `needs`/`open_panes` pair the gate predicate above was built from,
     and re-deriving those in the row builder is exactly the second definition
     this function exists to prevent.
+
+    The sixth is the declared-wait session-id set — the ids whose newest `Stop`
+    record carries a non-empty `⏰ Ends:`, read whole-store through the shared
+    `scripts/declared-wait.py`. It is what suppresses the `Unblocks: nudge`
+    value in `unblocks_for`, and it is returned rather than re-read per row for
+    the same reason the fifth is: one read, one definition.
     """
     registry = wnm.read_registry()
     live_ids = None if registry is None else set(registry)
@@ -715,6 +811,18 @@ def collect_signals(stuck_min):
     gate_ids = {r["session_id"] for r in gates}
     cutoff = time.time() - stuck_min * 60
     stuck_ids = {r["session_id"] for r in wnm.load("tool") if live(r) and r["ts"] < cutoff}
+    # ⚠️ **A declared wait is not stuck, and must not be nudged.** Read once, from the
+    # shared reader (`scripts/declared-wait.py`) — the same `⏰ Ends:` slot the manager
+    # tier's input 13 reads and the fleet sweep's `parked-on-watcher` class keys on.
+    # ⚠️ **The `stuck_ids` subtraction below is forward-compat, not the live fix:**
+    # `stuck_ids` is built from `*.tool.json`, and `agents/manager-drive.md:130` records
+    # that marker as *"effectively dead today — nothing writes the marker any more"*, so
+    # that bucket is inert until the writer returns. **The live route is the `nudge`
+    # value**, which reads transcript age — see `unblocks_for`.
+    # ⚠️ **Untested by design:** no test asserts this subtraction, because the writer is
+    # dead and the bucket is inert. Read the absence of a test as that, not as coverage.
+    wait_ids = dw.declared_wait_ids(state_dir=wnm.STATE)
+    stuck_ids = {sid for sid in stuck_ids if sid not in wait_ids}
     # The Rendered-panels set, read from who-needs-me's own composition so the
     # board's `operator-keystroke` rows and the operator's `Needs you` section
     # cannot drift apart. The `busy`/`resumed` sets are left at their empty
@@ -726,8 +834,8 @@ def collect_signals(stuck_min):
         for r in wnm.rendered_panels(needs, open_panes=open_panes,
                                      task_status=wnm.task_status_from_closer)
     }
-    return (gate_ids, stuck_ids, gate_attribution(gates, gate_ids), pmap is not None,
-            panel_ids)
+    return (gate_ids, stuck_ids, gate_attribution(gates, gate_ids), pmap,
+            panel_ids, wait_ids)
 
 
 def transcript_fresh_ids(window=None):
@@ -840,8 +948,18 @@ class Grouping:
     def subject_of(self, sid):
         return self.subjects.get(sid)
 
+    def subject_title_of(self, sid):
+        """The managed page's title, or `None` — the tuple's second element.
 
-def manager_on_chain(goal_titles, index, roles, subjects, managed_by=None):
+        `subject_of` answers `('goal'|'topic'|'root', title)`; readers that only
+        need the name (the topic tier's N-slot count) should not have to unpack a
+        tuple that may also be `None`.
+        """
+        found = self.subjects.get(sid)
+        return found[1] if found else None
+
+
+def manager_on_chain(goal_titles, index, roles, subjects, managed_by=None, task_title=None):
     """The live manager covering a task, or `None`.
 
     The order is the one `docs/fleet-surface.md` § *Which manager owns a subject* states,
@@ -849,17 +967,33 @@ def manager_on_chain(goal_titles, index, roles, subjects, managed_by=None):
     `goals:`. The field is hand-authored — nothing writes it automatically — so an absent
     or unresolvable value is not an error; it falls through to `goals:`.
 
-    A goal reaches a manager two ways: a manager whose subject IS the goal, or a
-    manager whose subject is a topic listing that goal. The goal is tried before
-    its topics, so the more specific parent wins when both exist.
+    A worker is parented only to a manager whose subject IS one of its declared
+    subjects (`managed_by`, then each goal). ⚠️ **The goal's topic is not a rung
+    for a worker.** `docs/fleet-surface.md` tier 4 makes the topic manager the
+    owner of an unmanaged GOAL so it can start that goal's manager; it does not
+    parent the worker to the topic manager, which a topic manager never manages
+    (`commands/topic-loop.md`). With no live goal manager the worker falls to the
+    root (the fleet manager) as a holding row.
+
+    ⚠️ **The goal chain is not the whole order — the task's OWN topic is the last
+    rung.** The design says a task with no goal is managed by the nearest existing
+    ancestor, "its topic's manager if the task sits directly under a topic". Before
+    `task_title` was threaded here that branch was unreachable: a task named directly
+    in a topic's `## Goals` carries no `goals:` and no `managed_by`, so it fell
+    straight to the root and the fleet manager claimed it.
     """
-    for goal in ([managed_by] if managed_by else []) + list(goal_titles):
-        for subject in [goal] + index.topics_of(goal):
-            for sid, found in subjects.items():
-                if roles.get(sid) != ROLE_MANAGER or not found:
-                    continue
-                if found[1].lower() == subject.lower():
-                    return sid
+    for subject in ([managed_by] if managed_by else []) + list(goal_titles):
+        for sid, found in subjects.items():
+            if roles.get(sid) != ROLE_MANAGER or not found:
+                continue
+            if found[1].lower() == subject.lower():
+                return sid
+    for subject in index.topics_of_task(task_title):
+        for sid, found in subjects.items():
+            if roles.get(sid) != ROLE_MANAGER or not found:
+                continue
+            if found[1].lower() == subject.lower():
+                return sid
     return None
 
 
@@ -899,15 +1033,33 @@ def build_grouping(registry, index, colours, slugs, task_titles):
         roles[sid], parents[sid] = ROLE_WORKER, root
         for title in titles:
             manager = manager_on_chain(index.goals_of(title), index, roles, subjects,
-                                       index.managed_by_of(title))
+                                       index.managed_by_of(title), task_title=title)
             if manager:
                 parents[sid] = manager
                 break
     return Grouping(root, roles, parents, subjects)
 
 
+def _task_title_reason(role, titles):
+    """Why a row has no resolved task title — `None` when it has one.
+
+    The reason is a named value, never a sentence the reader has to interpret:
+    a consumer filtering rows it cannot attribute reads the constant, and each
+    distinct absence carries its own, so a manager and an unmanaged session are
+    never collapsed into one unexplained `null`.
+    """
+    if titles:
+        return None
+    if role == ROLE_MANAGER:
+        return TASK_TITLE_NO_MANAGER
+    if role == ROLE_UNMANAGED:
+        return TASK_TITLE_NO_TASK_FILE
+    return TASK_TITLE_NO_BINDING
+
+
 def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, grouping=None,
-               gate_attribution=None, task_meta=None, panel_ids=frozenset()):
+               gate_attribution=None, task_meta=None, panel_ids=frozenset(),
+               declared_wait=frozenset()):
     """One row per registry entry, sorted by bucket precedence then name.
 
     Pure: every input is passed in, so the bucket fixtures in
@@ -930,19 +1082,33 @@ def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, gr
         age = ages.get(sid)
         last = "—" if age is None or not math.isfinite(age) else fs.human_age(age)
         meta = task_meta.get(sid)
-        unblocks = unblocks_for(sid, age, meta, panel_ids)
+        unblocks = unblocks_for(sid, age, meta, panel_ids, declared_wait=declared_wait)
         titles = task_titles.get(sid) or []
         # Glyph-stripped, matching `who-needs-me.py`'s display: the registry's
         # `name` may carry a leading `⚙` the operator did not type, and a name
         # rendered two ways across two readers of the same field is a defect
         # waiting to be mistaken for a rename.
         label = wnm.strip_status_glyph(rec.get("name") or "") or "—"
+        role = grouping.role_of(sid) if grouping else ROLE_WORKER
         rows.append(
             {
                 "session_id": sid,
                 "bucket": bucket,
                 "label": label,
-                "role": grouping.role_of(sid) if grouping else ROLE_WORKER,
+                "role": role,
+                # The task this row resolved to, from the same `task_titles` the
+                # parent chain is built from. Kept beside `cells[2]` so the
+                # `sessions` projection can publish it: a registry label that
+                # differs from the task title otherwise leaves a consumer with no
+                # way to match the two, and the row reads as an unresolvable
+                # session rather than a resolved one under a stale name.
+                "task_title": titles[0] if titles else None,
+                "task_title_reason": _task_title_reason(role, titles),
+                # The page this session manages, when it manages one. Emitted so the
+                # topic tier's N-slot count can see a live goal manager the goal page
+                # never recorded — the page id is a write the resolve step may miss,
+                # and a manager the registry knows about must still count.
+                "subject": grouping.subject_title_of(sid) if grouping else None,
                 "parent": grouping.parent_of(sid) if grouping else None,
                 # Raw seconds, kept beside the rendered cell: the sibling-group
                 # ordering reads this, never the width-9 string — "20h ago" and
@@ -980,6 +1146,40 @@ def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, gr
             )
     rows.sort(key=lambda r: (BUCKET_ORDER.index(r["bucket"]), r["label"].lower()))
     return rows, details
+
+
+def build_sessions(rows):
+    """The `sessions` projection of the drawn rows — the documented consumer view.
+
+    Pure, so the projection is testable without a live fleet. `task_title` is the
+    task the row resolved to, the same value `build_rows` renders into `cells[2]`;
+    `task_title_reason` names why it is absent. Publishing both is what lets a
+    consumer tell a row whose registry label drifted from its task title apart
+    from a row that genuinely has no task — reading `label` alone, the two look
+    identical and the resolved one reads as unresolvable.
+    """
+    return [
+        {
+            "session_id": r["session_id"],
+            "label": r["label"],
+            "role": r["role"],
+            "subject": r["subject"],
+            "task_title": r["task_title"],
+            "task_title_reason": r["task_title_reason"],
+            "parent": r["parent"],
+            "bucket": r["bucket"],
+            "unblocks": r["unblocks"],
+            # The raw seconds the `Inactive` cell was rendered from, so the
+            # sibling-group ordering is checkable against the value that
+            # decided it rather than against the 9-char string it printed.
+            # `inf` (no transcript) is emitted as `null`: it is not a
+            # duration, and a literal `Infinity` is not valid JSON — `jq`
+            # and every strict parser reject it.
+            "age": (None if r["age"] is None or not math.isfinite(r["age"])
+                    else round(r["age"], 3)),
+        }
+        for r in rows
+    ]
 
 
 TREE_BRANCH, TREE_LAST, TREE_PIPE, TREE_BLANK = "├ ", "└ ", "│   ", "    "
@@ -1076,6 +1276,26 @@ def build_tree(rows, grouping):
     return out, ordered, sids
 
 
+def managers_of(registry, grouping):
+    """`{session id: name}` for every registry session the grouping calls a manager.
+
+    The registry only: a heartbeat-only row is headless or a cluster pod, and owns no pane
+    to carry an exit recorder.
+    """
+    return {sid: (rec.get("name") or "") for sid, rec in registry.items()
+            if grouping.role_of(sid) == ROLE_MANAGER}
+
+
+def manager_sessions():
+    """`managers_of()` over the live registry and vault, or `None` if the registry is unreadable."""
+    registry = registry_records()
+    if registry is None:
+        return None
+    task_titles, _ = fs.build_task_index()
+    grouping = build_grouping(registry, vault_index(), colour_census(), loop_slugs(), task_titles)
+    return managers_of(registry, grouping)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--stuck-min", type=int, default=20)
@@ -1089,8 +1309,8 @@ def main():
         print("fleet-board: session registry unreadable — refusing to render a table", file=sys.stderr)
         return 1
 
-    gate_ids, stuck_ids, attribution, panes_read, panel_ids = collect_signals(a.stuck_min)
-    if not panes_read:
+    gate_ids, stuck_ids, attribution, pane_map, panel_ids, wait_ids = collect_signals(a.stuck_min)
+    if pane_map is None:
         print(
             "fleet-board: ⚠️ `wezterm cli list` unreadable — pane data withheld. Every row is kept "
             "on the session registry's verdict alone: a pane that cannot be checked is UNKNOWN, "
@@ -1147,7 +1367,7 @@ def main():
     grouping = build_grouping(merged, vault_index(), colour_census(), loop_slugs(), task_titles)
     rows, details = build_rows(merged, gate_ids, stuck_ids, task_titles, ages, grouping=grouping,
                                gate_attribution=attribution, task_meta=task_meta,
-                               panel_ids=panel_ids)
+                               panel_ids=panel_ids, declared_wait=wait_ids)
     tree, ordered, sids = build_tree(rows, grouping)
 
     fresh = transcript_fresh_ids()
@@ -1157,6 +1377,18 @@ def main():
     # drop one step later, and only this one can see it.
     errors = coverage_errors([r["session_id"] for r in rows], set(registry), fresh, beat_ids)
     errors += tree_errors(ordered, [r["session_id"] for r in rows])
+    # Manager panes running without the exit recorder. Not a column — the box is at its
+    # 119-character budget — so it rides the doc and the below-box action lines (stderr,
+    # beside the coverage and pane-read warnings). The line text is the coverage script's
+    # own; this board only relays it, so it cannot special-case one pane.
+    # A side check must never take the board down with it: on any failure every manager
+    # reads `unknown`, which is honest, rather than the table not rendering at all.
+    managers = managers_of(registry, grouping)
+    try:
+        exit_record = erc.live_coverage(managers, pane_map)
+    except Exception as exc:  # noqa: BLE001 — degrade to unknown, never crash the board
+        print(f"fleet-board: exit-record check failed: {exc}", file=sys.stderr)
+        exit_record = erc.all_unknown(managers)
     counts = {b: sum(1 for r in rows if r["bucket"] == b) for b in BUCKET_ORDER}
     # Every value in the fixed set, always present — a class with no rows reads
     # `0`, never an absent key, so a consumer cannot mistake "none this round"
@@ -1179,25 +1411,7 @@ def main():
         "tree_rows": len(tree),
         "residual": sorted(fresh - set(registry)),
         "details": details,
-        "sessions": [
-            {
-                "session_id": r["session_id"],
-                "label": r["label"],
-                "role": r["role"],
-                "parent": r["parent"],
-                "bucket": r["bucket"],
-                "unblocks": r["unblocks"],
-                # The raw seconds the `Inactive` cell was rendered from, so the
-                # sibling-group ordering is checkable against the value that
-                # decided it rather than against the 9-char string it printed.
-                # `inf` (no transcript) is emitted as `null`: it is not a
-                # duration, and a literal `Infinity` is not valid JSON — `jq`
-                # and every strict parser reject it.
-                "age": (None if r["age"] is None or not math.isfinite(r["age"])
-                        else round(r["age"], 3)),
-            }
-            for r in rows
-        ],
+        "sessions": build_sessions(rows),
         "coverage_ok": not errors,
         "coverage_errors": errors,
         # The drawn tree's session ids in emission order — a row's position in
@@ -1205,8 +1419,14 @@ def main():
         # claim is otherwise only checkable by parsing the glyphs, and a probe
         # that reads the rendered cell is testing the formatter, not the sort.
         "order": ordered,
+        "exit_record": exit_record,
     }
     print(json.dumps(doc if a.json else {k: doc[k] for k in ("header", "rows", "widths")}))
+    for row in exit_record["unrecorded"]:
+        print(row["line"], file=sys.stderr)
+    unknown = erc.unknown_line(exit_record)
+    if unknown:
+        print(unknown, file=sys.stderr)
 
     if errors:
         # Loud, never silent: a table that renders correctly and omits sessions is

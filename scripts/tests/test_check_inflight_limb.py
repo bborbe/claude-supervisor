@@ -23,7 +23,7 @@ import tempfile
 import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-inflight-limb.py"
-DRIVE = "agents/manager-drive.md"
+DRIVE = "agents/goal-drive.md"
 
 RULE = (
     "⚠️ **An `in flight:` drop names the LIMB that answered, not only the value it read** — "

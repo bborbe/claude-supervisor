@@ -34,13 +34,27 @@ reads a task as parked on the strength of a sentence *about* parking.
 
 import argparse
 import glob
+import importlib.util
 import json
 import os
 import re
 import subprocess
 import sys
 import time
-from datetime import date
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load(name, filename):
+    """Import a sibling script by path — the filenames carry hyphens."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: `defer_date` is an instant, not a date — see `defer-date.py`.
+defer_date = _load("defer_date", "defer-date.py")
 
 FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 
@@ -60,9 +74,24 @@ def field(block, key):
 
 
 def is_parked(block, today):
-    """True when the task is scheduled rather than abandoned."""
-    defer_date = field(block, "defer_date")
-    if defer_date and defer_date >= today:
+    """True when the task is scheduled rather than abandoned.
+
+    A `defer_date` naming TODAY is due, not parked: the vault's rule is that the
+    field keeps a task `in_progress` and makes it available ON that date, so only
+    an instant still in the future parks it. A date-only value reads as the start of
+    that local day, so a same-day row is due (`<= now`) and only a later one parks it.
+
+    ⚠️ **Every stored shape is parsed, never string-compared.** vault-cli writes an
+    unquoted `defer_date` as RFC3339 (`2026-09-18T00:00:00Z`) and a full timestamp
+    keeps its time of day, so a string comparison both mis-orders the shapes and
+    truncates a defer to 02:00 back to midnight. `defer-date.py` is the one parser.
+    """
+    state, reason = defer_date.defer_state(field(block, "defer_date"), today)
+    if state == "invalid":
+        # Unreadable is not "parked" and not "abandoned": the row is withheld from the
+        # candidate list either way, and the reason is said rather than swallowed.
+        print("orphan-candidates: %s — treating as parked" % reason, file=sys.stderr)
+    if state in ("deferred", "invalid"):
         return "defer_date"
     if field(block, "created_by") == "recurring-task-creator":
         return "created_by"
@@ -375,7 +404,9 @@ def main():
         print(f"   liveness probe unavailable: {script or 'fleet-sessions.py not found'}")
         return 2
 
-    today = date.today().isoformat()
+    # The CURRENT INSTANT, not today's date: a date reads as local midnight, which would
+    # park a defer that already came due today for another full day.
+    today = defer_date.as_now()
     found = list(candidates(args.tasks_dir, today, args.max_age_days, live))
 
     if args.json:

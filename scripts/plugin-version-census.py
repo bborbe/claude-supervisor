@@ -205,6 +205,14 @@ def live_sessions(liveness=LIVENESS):
 
     Returns (records, error). An unreadable probe is an error, never an empty list: the
     census would then report `live: 0 · stale: 0`, which reads as a healthy fleet.
+
+    ⚠️ **A DEGRADED probe is not an unreadable one, and this is the caller the 2026-10-18
+    per-row degrade unblocked.** `--list` used to exit 2 whenever any ledger worker lacked
+    a heartbeat row, so this census — the one tool that names the stale sessions — was
+    blocked by the very condition it exists to report, and printed `exited 2: UNKNOWN`
+    instead of a census. It now exits 0 carrying those sessions with `degraded: true`, and
+    they are exactly the stale-plugin population this reads for, so they belong in the
+    records. The non-zero branch below still means "could not measure" and is unchanged.
     """
     if not os.path.exists(liveness):
         return None, f"session-liveness.py not found at {liveness}"

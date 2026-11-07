@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The widened necessity contract must stay pinned in the two agents that carry it.
 
-`agents/manager-sweep-reader.md` § step 8 defines the necessity verdicts and their row
-shapes; `agents/manager-verify.md` § step 1 consumes them. The 2026-10-07 widening — each
+`agents/goal-sweep-reader.md` § step 8 defines the necessity verdicts and their row
+shapes; `agents/goal-verify.md` § step 1 consumes them. The 2026-10-07 widening — each
 verdict then named *which* of three sources a task serves (goal sentence / `SC<n>` / `DoD<n>`)
 — moved the `needed:` row shape, and deliberately left the `product:` row and the summary
 line byte-identical so that a before/after comparison of this read stays valid.
@@ -48,8 +48,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-READER = "agents/manager-sweep-reader.md"
-VERIFY = "agents/manager-verify.md"
+READER = "agents/goal-sweep-reader.md"
+VERIFY = "agents/goal-verify.md"
 
 SERVES = "needed: <task> — serves"
 FOUNDATION = "needed: <task> — foundation for"

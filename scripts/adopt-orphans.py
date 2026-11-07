@@ -159,7 +159,13 @@ def stranded_workers(ledger, live):
     for session_id, record in ledger.items():
         if session_id not in live:
             continue
-        parent = record.get("parent_session")
+        # ⚠️ **Two spellings, one field.** The file record called the spawn edge
+        # `parent_session`; the endpoint's row calls it `spawner_session_id`. Both are read,
+        # matching `gate-owner-filter.py`'s `evaluate` and `server/registry-rehydrate.mjs`'s
+        # `toAgentRecord`. ⚠️ A wrong name here is not an error — it is `None`, which this
+        # function reads as "this worker has no spawner" and skips, so the whole adoption
+        # round would silently find nothing.
+        parent = record.get("spawner_session_id") or record.get("parent_session")
         if not parent or parent in live:
             continue
         if not gf.is_manager(parent, ledger):
@@ -238,12 +244,22 @@ def main(argv=None):
     )
     parser.add_argument("--dry-run", action="store_true", help="report, claim nothing")
     parser.add_argument("--json", action="store_true", help="emit JSON instead of lines")
-    parser.add_argument("--ledger-dir", default=None)
+    parser.add_argument("--endpoint", default=None, help="override the attention store base URL")
+    parser.add_argument("--ledger-dir", default=None, help="ACCEPTED AND IGNORED — the ledger comes from the endpoint")
     parser.add_argument("--registry-dir", default=None)
     parser.add_argument("--heartbeat-dir", default=None)
     parser.add_argument("--subjects-dir", default=SUBJECTS)
     parser.add_argument("--claims-file", default=None)
     args = parser.parse_args(argv)
+
+    # ⚠️ Kept and IGNORED rather than removed, the same call `worker-sessions.py` made: the
+    # callers and tests pass it, so removing it breaks them, while accepting it in silence
+    # would let a caller believe it had redirected a read that still went to the endpoint.
+    if args.ledger_dir:
+        sys.stderr.write(
+            "warning: --ledger-dir is accepted and IGNORED — the ledger is read from the "
+            "session-ledger endpoint; use --endpoint to point at the store\n"
+        )
 
     self_id = (
         args.self_id
@@ -257,20 +273,22 @@ def main(argv=None):
         )
         return 1
 
-    ledger_dir = args.ledger_dir or gf.LEDGER
-    if not os.path.isdir(ledger_dir):
-        # `load_ledger` returns {} for an unreadable directory AND for a genuinely empty
-        # one, and the filter's own docstring requires the caller to treat {} as UNKNOWN
-        # rather than as "no spawns". The two are told apart here, on the directory, so an
-        # absent ledger exits 1 like an unreadable registry instead of reporting a clean
-        # round it never measured. A ledger that exists and is empty still exits 0 -- that
-        # one is a real answer.
+    # ⚠️ **`load_ledger_checked`, never `load_ledger`.** The filter's `load_ledger` returns
+    # `{}` for an unreadable store AND for a genuinely empty one, and its own docstring
+    # requires the caller to treat `{}` as UNKNOWN rather than as "no spawns". This file must
+    # not collapse the two: an unreadable ledger means the spawn edges were never read, so a
+    # round that adopted on it would move ownership on no evidence. The checked variant keeps
+    # `None` distinct, so an unreadable store exits 1 like an unreadable registry instead of
+    # reporting a clean round it never measured — while a store that IS readable and empty
+    # still exits 0, because that one is a real answer.
+    # ⚠️ This reaches the store TRANSITIVELY, through `gate-owner-filter.py`, and deliberately
+    # has no endpoint client of its own — the same one-reader rule `session-liveness.py` keeps.
+    ledger = gf.load_ledger_checked(args.endpoint)
+    if ledger is None:
         sys.stderr.write(
-            "adopt-orphans: spawn ledger directory unreadable at %s -- adopting nothing.\n"
-            % ledger_dir
+            "adopt-orphans: spawn ledger endpoint unreadable -- adopting nothing.\n"
         )
         return 1
-    ledger = gf.load_ledger(ledger_dir)
 
     live = live_session_ids(args.registry_dir, args.heartbeat_dir)
     if live is None:

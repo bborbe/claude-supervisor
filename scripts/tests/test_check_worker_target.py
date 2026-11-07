@@ -2,7 +2,7 @@
 agrees with the code.
 
 The defect this guards against is the repo's own measured history: the spawn cap was
-restated in `commands/manager-loop.md`, `commands/manager-verify.md` and the manager
+restated in `commands/goal-loop.md`, `commands/goal-verify.md` and the manager
 runbook's Guardrail 2 until 2026-09-24 — four homes for one number, which is how a
 single cap becomes four counters the day one home is edited and the others are not,
 with no error and no diff to catch it.
@@ -71,7 +71,7 @@ class CheckWorkerTargetTest(unittest.TestCase):
         self.write("docs/fleet-surface.md", HOME)
         self.write("server/spawn-mode.mjs", CODE)
         self.write("commands/fleet-loop.md", SITE)
-        self.write("agents/manager-drive.md", "No mention of the limit here.\n")
+        self.write("agents/goal-drive.md", "No mention of the limit here.\n")
 
     def write(self, relpath, text):
         path = pathlib.Path(self.dir) / relpath

@@ -10,7 +10,7 @@ That matters because `config` is byte-identical whether a site was wired and the
 bypassed, or never wired in the first place — so no measurement can tell the two
 apart. Measured 2026-09-25: `agent_163` and `agent_164`, spawned from `Manager
 Layer`, both reported `mode_source=config` — a direct open by
-`agents/manager-drive.md` that skipped the classification entirely, on a plugin
+`agents/goal-drive.md` that skipped the classification entirely, on a plugin
 that already carried the prose fix.
 
 **Why this reads the ledger rather than a file.** `scripts/check-spawn-mode.py`
@@ -18,10 +18,11 @@ reads what a file *says*; the defect above was defined by what the file's grant
 *permitted*, and a text scan cannot see a runtime call. This is the other half:
 the record the spawn actually produced.
 
-**Why it is not a precommit gate.** It reads the live ledger at
-`~/.local/state/claude-supervisor/sessions/`, which exists only after spawns have
-happened. `make precommit` runs against a tree, not against a machine's spawn
-history, so this cannot live there — run it by hand, or from a sweep.
+**Why it is not a precommit gate.** It reads the live ledger from
+attention-controller's `GET /api/1.0/session-ledger`, which answers only for a
+machine that has spawned. `make precommit` runs against a tree, not against a
+machine's spawn history, so this cannot live there — run it by hand, or from a
+sweep.
 
 **Why there is a time window, and why it is not optional.** The wiring landed
 incrementally, so the ledger's *history* is mostly `config` rows: run over the
@@ -41,13 +42,28 @@ naming each offending record.
 """
 import argparse
 import datetime
-import glob
-import json
+import importlib.util
 import os
 import sys
 
-#: Where `server/ledger.mjs` writes, mirroring `scripts/ledger-drill.py`.
-DEFAULT_LEDGER = "~/.local/state/claude-supervisor/sessions"
+_SPAWN_LEDGER = None
+
+
+def _spawn_ledger():
+    """Import `spawn-ledger.py` (hyphenated filename -> importlib) — the ONE ledger reader.
+
+    ⚠️ **The ledger moved to the attention store's endpoint on 2026-10-14.** This checker used
+    to walk a directory and carried that path as its own default; it delegates now, so the
+    store's address is resolved in exactly one place for every reader.
+    """
+    global _SPAWN_LEDGER
+    if _SPAWN_LEDGER is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "spawn-ledger.py")
+        spec = importlib.util.spec_from_file_location("spawn_ledger", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _SPAWN_LEDGER = mod
+    return _SPAWN_LEDGER
 
 #: The only source that proves the site decided. Everything else is a fallback.
 DECIDED = "argument"
@@ -79,16 +95,20 @@ def spawned_at(record):
     return parsed
 
 
-def records(dir):
-    """Every parseable record. An unreadable or half-written file is skipped rather
-    than raised on: the writer renames into place, and a reader that crashed on a
-    transient would report a clean ledger as a broken one."""
-    for path in sorted(glob.glob(os.path.join(dir, "*.json"))):
-        try:
-            with open(path, encoding="utf-8") as handle:
-                yield path, json.load(handle)
-        except (OSError, ValueError):
-            continue
+def records(endpoint=None):
+    """Every row the ledger endpoint serves, as `(session_id, record)`.
+
+    ⚠️ **The key is the ROW'S OWN `session_id` — never `agent_id`.** That field is a
+    per-process counter that restarts at 0 on every reconnect (215 of the 1891 ledger rows
+    claim `agent_1`), so a reader keyed on it would judge one row and silently drop the rest.
+    ⚠️ An unreadable store yields nothing rather than raising, which the caller reports as
+    "nothing to check" — the same answer a machine that has never spawned gives.
+    """
+    ledger = _spawn_ledger().read_ledger(endpoint) or {}
+    for session_id in sorted(ledger):
+        record = ledger[session_id]
+        if isinstance(record, dict):
+            yield session_id, record
 
 
 def offenders(recs, since):
@@ -112,9 +132,9 @@ def offenders(recs, since):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument(
-        "--ledger",
-        default=DEFAULT_LEDGER,
-        help=f"ledger directory (default: {DEFAULT_LEDGER})",
+        "--endpoint",
+        default=None,
+        help="override the attention store base URL (default $ATTENTION_STORE_URL)",
     )
     parser.add_argument(
         "--since-hours",
@@ -129,11 +149,9 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    dir = os.path.expanduser(args.ledger)
-    if not os.path.isdir(dir):
-        print(f"no ledger at {dir} — nothing to check")
-        return 0
-
+    # ⚠️ No path to resolve and no directory to stat: the store either answers or it does
+    # not, and an unreadable one yields no rows — reported below as "nothing to check",
+    # exactly as a machine that has never spawned does.
     now = (
         datetime.datetime.fromisoformat(args.now.replace("Z", "+00:00"))
         if args.now
@@ -143,7 +161,7 @@ def main(argv=None):
         now = now.replace(tzinfo=datetime.timezone.utc)
     since = now - datetime.timedelta(hours=args.since_hours)
 
-    recs = list(records(dir))
+    recs = list(records(args.endpoint))
     in_window = [
         (p, r)
         for p, r in recs
@@ -166,9 +184,9 @@ def main(argv=None):
         f"FAIL: {len(bad)} new-worker spawn(s) in the last {args.since_hours:g}h "
         "with no mode decision"
     )
-    for path, record in bad:
+    for session_id, record in bad:
         print(
-            f"  {os.path.basename(path)}: mode={record.get('mode')} "
+            f"  {session_id}: mode={record.get('mode')} "
             f"mode_source={record.get('mode_source')} label={record.get('label')!r}"
         )
     print(

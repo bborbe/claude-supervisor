@@ -47,7 +47,7 @@ is worth keeping because it cuts both ways:
   `sweep-gate-classify.py` keeps its own `liveness -> parked` trigger (a different gate
   with a different job). ⚠️ **Recorded HERE and not only in `docs/fleet-surface.md`,
   because this block is the digest contract's declared single home** —
-  `commands/manager-status.md` step 1 reads it rather than restating it, so a stale
+  `commands/goal-status.md` step 1 reads it rather than restating it, so a stale
   agreement here is what a reader would take as current.
 
   IT LACKS the rendered table, and it has no member list. The no-change branch must
@@ -155,7 +155,7 @@ graded on. A worker dying changes session liveness; a digest over `status`/`phas
 alone would see the dead worker's task as unchanged and replay the stored table straight
 over the death. Liveness is therefore computed HERE, in the gate — never inside the
 dispatched `manager-sweep-reader` agent, which is forbidden to probe liveness
-(`agents/manager-sweep-reader.md`) and could not see it anyway.
+(`agents/goal-sweep-reader.md`) and could not see it anyway.
 
 ⚠️ **But only its DEATH half belongs in the digest, and the two must not be conflated.**
 "Liveness is in the digest" is true of the death transition and false of the churn: a
@@ -218,7 +218,9 @@ STATE_DIR = os.path.expanduser(
     os.environ.get("MANAGER_PREDISPATCH_STATE_DIR", "~/.claude/state/manager-predispatch")
 )
 REGISTRY_DIR = os.path.expanduser("~/.claude/sessions")
-FEED_DIR = os.path.expanduser("~/.claude/state/attention")
+FEED_DIR = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser(
+    "~/.claude/state/attention"
+)
 
 # The headless-worker heartbeat store, written by this plugin's `server/heartbeat.mjs`.
 HEARTBEAT_DIR = os.environ.get("SUPERVISOR_HEARTBEAT_DIR") or os.path.join(
@@ -656,7 +658,10 @@ def read_task(path: str) -> dict | None:
         "phase": fm_scalar(fm, "phase"),
         "session": fm_scalar(fm, "claude_session_id").strip("'\""),
         "sessions": session_id_set(fm),
-        "goals": fm_wikilinks(fm, "goals"),
+        # ⚠️ The shared normaliser, never `fm_wikilinks`: that one returns only `[[...]]`
+        # matches, so a bare `- Name` block item reads as "declares no goal" and the task
+        # silently leaves the tracked set. See `_goals_declaration` for the measurement.
+        "goals": _goals_declaration().goal_names(fm),
         "progress_hash": progress_hash(text),
         "met": checkbox_count(text),
         "mtime": mtime,
@@ -838,6 +843,81 @@ def _session_identity():
     return _IDENTITY
 
 
+_DECLARED_WAIT = None
+
+
+def _declared_wait():
+    """Import declared-wait.py — the shared `⏰ Ends:` reader.
+
+    ⚠️ **Shared, not re-derived.** `agents/manager-drive.md:134` forbids *"a fourth
+    definition of 'idle'"*, and `scripts/fleet-board.py` reads the same slot through this
+    same module. A private copy here would be exactly the drift that rule names.
+    """
+    global _DECLARED_WAIT
+    if _DECLARED_WAIT is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "declared-wait.py")
+        spec = importlib.util.spec_from_file_location("declared_wait", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _DECLARED_WAIT = mod
+    return _DECLARED_WAIT
+
+
+_GOALS_DECLARATION = None
+
+
+def _goals_declaration():
+    """Import goals-declaration.py — the shared `goals:` reader.
+
+    ⚠️ **Shared, not re-derived, and the reason is a measured silent drop.** `read_task`
+    used to read `goals:` through `fm_wikilinks`, which returns only `[[...]]` matches — so
+    a task declaring its goal as a bare list item (`goals:` then `    - Name`, no brackets)
+    contributed nothing to `resolve_tracked`, vanished from the tracked set, and never
+    received a liveness probe. `reset.py` read the same declaration with a normaliser that
+    DID handle that shape, so the two disagreed while both looked self-consistent. Measured
+    2026-11-02 on the live `private-personal` vault: caller scan 61 names, gate snapshot 60,
+    differing by exactly the one task in the bare-list shape.
+
+    ⚠️ `blocked_by` deliberately stays on `fm_wikilinks`. Its contract is different —
+    `blocked_by_verdict` has to tell "declares no blocker" from "declares a blocker that
+    did not parse as a name", and widening the accepted shapes there changes which rows
+    read as blocked. That is not this fix.
+    """
+    global _GOALS_DECLARATION
+    if _GOALS_DECLARATION is None:
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "goals-declaration.py"
+        )
+        spec = importlib.util.spec_from_file_location("goals_declaration", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _GOALS_DECLARATION = mod
+    return _GOALS_DECLARATION
+
+
+_DECLARED_WAIT_IDS = None
+
+
+def declared_wait_ids():
+    """The whole-store `⏰ Ends:` set, read once per process.
+
+    ⚠️ **Memoised, and that is not a micro-optimisation.** Three call sites ask this per
+    row — `liveness_of_sid`, `roster_owner` and `idle_stuck`'s feed — so a per-sid read
+    would open and parse every session's log once per tracked session. `scripts/fleet-board.py`
+    reads the same set through the same shared reader, whole store and once, and this
+    matches that shape rather than inventing a second one.
+
+    ⚠️ **`state_dir=FEED_DIR`, explicitly.** `declared-wait.py`'s module-level `STATE`
+    honours `ATTENTION_STATE_DIR`, but this file's store is `FEED_DIR`; passing it keeps
+    the two readers over one store pointed at the same place, which is what makes an
+    isolated render actually isolated.
+    """
+    global _DECLARED_WAIT_IDS
+    if _DECLARED_WAIT_IDS is None:
+        _DECLARED_WAIT_IDS = _declared_wait().declared_wait_ids(state_dir=FEED_DIR)
+    return _DECLARED_WAIT_IDS
+
+
 def read_registry() -> dict[str, dict]:
     """`~/.claude/sessions/<pid>.json` -> {sessionId: {pid, status, name, alive}}.
 
@@ -909,8 +989,21 @@ def liveness_of_sid(
         beat = heartbeat_live(sid) if heartbeat is _HEARTBEAT_UNREAD else heartbeat
         if beat is not True:
             return LIVENESS_NONE
-        return LIVENESS_PARKED if is_open_gate(feed.get(sid)) else LIVENESS_LIVE
-    if is_open_gate(feed.get(sid)) or rec["status"] == "waiting":
+        return (LIVENESS_PARKED
+                if (is_open_gate(feed.get(sid)) or sid in declared_wait_ids())
+                else LIVENESS_LIVE)
+    # ⚠️ **A declared wait parks a LIVE row, and only a live one.** `⏰ Ends:` names a
+    # machine the worker is waiting on — a dependency, which is what this file's park
+    # rule exists to cover — read through the shared reader so this file cannot drift
+    # from `scripts/fleet-board.py`'s own reading.
+    # ⚠️ **The read is taken HERE, below the death gate, never above it.** A session that
+    # is dead and once declared a wait is still dead, and parking it would resurrect it;
+    # hoisting the read to the top would leave that invariant resting on the position of
+    # two `or` clauses rather than on the order of the code — the kind a later edit near
+    # the top silently breaks.
+    if (is_open_gate(feed.get(sid))
+            or sid in declared_wait_ids()
+            or rec["status"] == "waiting"):
         return LIVENESS_PARKED
     return LIVENESS_LIVE
 
@@ -1005,7 +1098,15 @@ def roster_owner(name: str, registry: dict, feed: dict) -> str:
             continue
         if not _names_the_same_session(wanted, rec.get("name", "")):
             continue
-        return LIVENESS_PARKED if is_open_gate(feed.get(sid)) else LIVENESS_LIVE
+        # ⚠️ **The park test is `liveness_of`'s, and it carries BOTH carriers.** A
+        # roster-name match names the same session an id match does, so a reader that
+        # parked only on the gate would leave a declared-waiting worker reading LIVE
+        # here — and the LIVE half is what feeds `idle_stuck`'s `!= LIVENESS_PARKED`
+        # branch, so the task would still be offered for re-dispatch. That is the same
+        # false positive this change removes, reached by the name-fallback path.
+        return (LIVENESS_PARKED
+                if (is_open_gate(feed.get(sid)) or sid in declared_wait_ids())
+                else LIVENESS_LIVE)
     return LIVENESS_NONE
 
 
@@ -1078,6 +1179,11 @@ def idle_stuck(t: dict, now_ts: float) -> bool:
     file-unchanged proxy cannot tell the two apart. The parked carrier is already
     computed in this file (`liveness_of` -> `LIVENESS_PARKED`), so a branch (b) that
     ignored it would flag exactly the workers the rule exists to leave alone.
+    ⚠️ **`LIVENESS_PARKED` carries two shapes now, not one:** an open gate, and a
+    session whose newest `Stop` record declares `⏰ Ends:` (read through the shared
+    `scripts/declared-wait.py`). The second is the one that regressed in practice — a
+    worker whose turn ended inside a `run_in_background` watcher is inactive *by
+    design*, and the file-unchanged proxy read that as stuck.
     """
     if t.get("liveness") == LIVENESS_PARKED:
         return False
@@ -1364,10 +1470,18 @@ def liveness_change_term(t: dict) -> int:
 
 
 def parked_names(tracked: list[dict]) -> list[str]:
-    """The rows whose rendered Status cell reads `⌛ waiting-on-human`, sorted.
+    """The rows whose rendered Status cell reads `⌛ waiting-on-human` or `⌛ waiting-external`, sorted.
+
+    ⚠️ **TWO carriers, two cell names, since the declared-wait change.** This function
+    keys on `LIVENESS_PARKED`, and that verdict now covers both an open gate *and* a
+    session whose newest `Stop` record declares `⏰ Ends:` — which
+    `agents/manager-sweep-reader.md:138` renders as the **`waiting-external`** cell, not
+    `waiting-on-human`. Both are parked, both move the Status cell, and both belong in
+    this set; naming only the first would state a contract that is half false, which is
+    the drift the `roster_owner` comment above warns against.
 
     ⚠️ **This is the Status cell, not the Session cell, and the difference is the whole
-    reason this function exists.** `agents/manager-sweep-reader.md:136` makes a *parked*
+    reason this function exists.** `agents/goal-sweep-reader.md:136` makes a *parked*
     row render `⌛ waiting-on-human` whatever its bucket, while a live one keeps its
     ordinary bucket — so a `live` <-> `parked` flip moves the Status cell. The Session
     cell does NOT move with it: step 7 is explicit that `parked` is ALIVE and therefore
@@ -1378,7 +1492,7 @@ def parked_names(tracked: list[dict]) -> list[str]:
 
     ⚠️ **This reads THIS script's `liveness_of`, while the cell it protects is rendered by
     the caller's sweep reader from a different input** — `session-liveness.py --check` over
-    the row's id set (`agents/manager-sweep-reader.md` input 10). The repo's two-renderer
+    the row's id set (`agents/goal-sweep-reader.md` input 10). The repo's two-renderer
     rule keeps those two verdicts independent on purpose, and this clause does not close
     that gap: a row the reader renders `⌛ waiting-on-human` while the gate reads `live`
     moves the cell with the parked set unchanged, and the replay is still served. Named
@@ -1436,11 +1550,11 @@ def digest_of(tracked: list[dict]) -> str:
     ⚠️ **That split NARROWS THIS DOCSTRING'S OWN CONTRACT, and the narrowing is named
     here rather than left to be rediscovered.** "What the sweep would render" no longer
     holds for one cell: `parked` is what makes a row render `⌛ waiting-on-human`
-    (`agents/manager-sweep-reader.md:136`), so a worker newly opening a gate no longer
+    (`agents/goal-sweep-reader.md:136`), so a worker newly opening a gate no longer
     moves the digest.
 
     ⚠️ **The narrowing is REAL and is covered ONE LEVEL UP, not here.** The exit-0 replay
-    path (`commands/manager-status.md` step 1, `commands/manager-drive.md` step 2) would
+    path (`commands/goal-status.md` step 1, `commands/goal-drive.md` step 2) would
     otherwise reproduce the stored table with whatever cell the row last had, so
     `evaluate` carries a separate `parked_set_moved` clause that refuses the replay on
     exactly that transition. ⚠️ **It is deliberately NOT a term in this function**:
@@ -1451,7 +1565,7 @@ def digest_of(tracked: list[dict]) -> str:
     set.
 
     ⚠️ **The cell that goes stale is the STATUS cell, never the Session cell** — named
-    because the two were conflated in the caveats that clause replaced. `agents/manager-sweep-reader.md`
+    because the two were conflated in the caveats that clause replaced. `agents/goal-sweep-reader.md`
     step 7 makes a parked session take the LIVE-shaped `[<sid8>]` delimiter, and
     `session-liveness.py` never reads the registry's `status` field, so a `live` <-> `parked`
     flip renders the SAME Session cell on both sides. The Session cell's own stale routes
@@ -1460,7 +1574,7 @@ def digest_of(tracked: list[dict]) -> str:
 
     ⚠️ **`/manager-loop` is NOT one of the replaying surfaces and is NOT a mitigation:**
     it never calls `--print` or `--check`, so it never consults this digest at all, and
-    its attention-feed read is step 4's first bullet (`commands/manager-loop.md:186`),
+    its attention-feed read is step 4's first bullet (`commands/goal-loop.md:186`),
     which runs before any verdict. The independent surfacing that does hold is step 7's
     `manager-attention-watch.py` / feed-Monitor arms, which fire `NEW GATE` off the
     registry and the feed rather than off this digest.
@@ -1483,6 +1597,15 @@ def digest_of(tracked: list[dict]) -> str:
     string and `digest_moved` fires with nothing about the tree moved. Bounded and
     fail-open -- a CHANGE authorises a sweep, it never suppresses one -- and self-healing:
     the loop's own `--save` rewrites the digest in the new format on its first tick.
+
+    ⚠️ **A SECOND one-shot refusal comes from the same change, and it is a different
+    input.** `parked_replay_reason` compares `parked_names`' set against the stored
+    `"parked"` field, and that set now also carries declared-wait rows — so a record
+    written before the change refuses its replay **once per subject holding such a row**,
+    and the refusal reads as a CHANGE. Same bounds, same direction and the same
+    self-healing as the shape change above: it authorises a sweep rather than suppressing
+    one, and the first `--save` clears it. Named here rather than left to be discovered,
+    which is the discipline the rest of this file applies.
 
     ⚠️ **The hold is a digest input, and deliberately NOT a suppression here.** This gate
     decides whether the sweep runs at all, so suppressing it for a held session would
@@ -1647,7 +1770,7 @@ def content_key(row_path: str) -> str:
     """The verdicts cache's key for one row file — **the single implementation.**
 
     ⚠️ **This function exists because the derivation used to live only as PROSE**, in
-    `agents/manager-drive.md` clause (1). The drive leg is an agent, so every leg
+    `agents/goal-drive.md` clause (1). The drive leg is an agent, so every leg
     re-implemented the formula and they disagreed. A leg's own `Audit` block on
     **2026-10-12T15:49:30Z** reported it verbatim: *"CACHE-KEY DRIFT (report, do not fix):
     the 8 stored entries reproduce under a `mode:`-only exclusion, NOT the clause's
@@ -2916,7 +3039,7 @@ def main(argv: list[str]) -> int:
         # own frontmatter read, which is nondeterministic — measured 2026-10-02, four
         # misreads across eleven relevant ticks, and reproduced again 2026-10-03 18:44 on
         # two rows whose first entry had shipped and whose later entries had not. The
-        # warning against exactly that read has sat in `agents/manager-sweep-reader.md`
+        # warning against exactly that read has sat in `agents/goal-sweep-reader.md`
         # since v0.96.4 and did not prevent it, so the decision moves to code and the
         # agent renders the bucket from the answer.
         #
