@@ -151,8 +151,23 @@ class Liveness(unittest.TestCase):
         self.assertIn("goal--manager-layer", self.m.read_notified())
         self.assertNotIn("goal--manager-layer", self.m.read_pending())
 
-    def test_the_ack_records_the_crossing_not_the_ack_time(self):
-        # The report says when the lapse CROSSED, and that is what dedup compares
+    def test_a_failed_attempt_records_its_producer(self):
+        # The durable record must be showable as written by a real failed send: a
+        # hand-written file reproduces every other field byte for byte.
+        self.arm("Manager Layer", 300, age=5000)
+        self.assertEqual(self.check()[0], 10)
+        with redirect_stdout(io.StringIO()):
+            self.m.failed("goal--manager-layer", "prod unreachable", pid="4242", row_ts="2026-11-07T03:26:09Z")
+        entry = self.m.read_pending()["goal--manager-layer"]
+        self.assertEqual(entry["pid"], "4242")
+        self.assertEqual(entry["row_ts"], "2026-11-07T03:26:09Z")
+        # ... and a later poll's rewrite must not drop them.
+        self.assertEqual(self.check()[0], 10)
+        entry = self.m.read_pending()["goal--manager-layer"]
+        self.assertEqual(entry["pid"], "4242")
+        self.assertEqual(entry["row_ts"], "2026-11-07T03:26:09Z")
+
+    def test_the_ack_records_the_crossing_not_the_ack_time(self):        # The report says when the lapse CROSSED, and that is what dedup compares
         # against `last_arm`. Storing the ack time would make a manager that re-armed
         # while the report was owed look already-reported on its next lapse.
         t0 = time.time()
