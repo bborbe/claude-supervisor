@@ -33,13 +33,28 @@ reads a task as parked on the strength of a sentence *about* parking.
 """
 
 import argparse
+import glob
+import importlib.util
 import json
 import os
 import re
 import subprocess
 import sys
 import time
-from datetime import date
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load(name, filename):
+    """Import a sibling script by path — the filenames carry hyphens."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: `defer_date` is an instant, not a date — see `defer-date.py`.
+defer_date = _load("defer_date", "defer-date.py")
 
 FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 
@@ -59,9 +74,24 @@ def field(block, key):
 
 
 def is_parked(block, today):
-    """True when the task is scheduled rather than abandoned."""
-    defer_date = field(block, "defer_date")
-    if defer_date and defer_date >= today:
+    """True when the task is scheduled rather than abandoned.
+
+    A `defer_date` naming TODAY is due, not parked: the vault's rule is that the
+    field keeps a task `in_progress` and makes it available ON that date, so only
+    an instant still in the future parks it. A date-only value reads as the start of
+    that local day, so a same-day row is due (`<= now`) and only a later one parks it.
+
+    ⚠️ **Every stored shape is parsed, never string-compared.** vault-cli writes an
+    unquoted `defer_date` as RFC3339 (`2026-09-18T00:00:00Z`) and a full timestamp
+    keeps its time of day, so a string comparison both mis-orders the shapes and
+    truncates a defer to 02:00 back to midnight. `defer-date.py` is the one parser.
+    """
+    state, reason = defer_date.defer_state(field(block, "defer_date"), today)
+    if state == "invalid":
+        # Unreadable is not "parked" and not "abandoned": the row is withheld from the
+        # candidate list either way, and the reason is said rather than swallowed.
+        print("orphan-candidates: %s — treating as parked" % reason, file=sys.stderr)
+    if state in ("deferred", "invalid"):
         return "defer_date"
     if field(block, "created_by") == "recurring-task-creator":
         return "created_by"
@@ -125,6 +155,12 @@ HOLDS_PATH = os.path.expanduser(
     os.environ.get("SUPERVISOR_SESSION_HOLDS", "~/.claude/state/session-holds.json")
 )
 
+# The session registry, read only by the Hold-window pane join. Same dir and env
+# var as the other consumers, so a test can point it at a fixture tree.
+REGISTRY_DIR = os.path.expanduser(
+    os.environ.get("SUPERVISOR_SESSIONS_DIR") or "~/.claude/sessions"
+)
+
 
 def read_holds() -> dict:
     """The operator's session holds, keyed on session id. `{}` on any read failure.
@@ -147,11 +183,162 @@ def read_holds() -> dict:
     return holds if isinstance(holds, dict) else {}
 
 
+# --------------------------------------------------------------------------- #
+# the Hold window -- the second source of heldness
+# --------------------------------------------------------------------------- #
+#
+# A pane parked in the WezTerm role map's Hold window is held with no store entry
+# at all: the operator's statement is the pane's POSITION, not a `hold` call. It is
+# resolved at read time from the map's `Hold.window_id` plus `wezterm cli list`, and
+# never persisted -- a stored entry would outlive the pane leaving the window.
+# Inlined, like `read_holds` above: the plugin's scripts do not import each other.
+
+# The WezTerm role map. Same variable the server reads (`server/config.mjs`) and
+# `session-holds.py` reads.
+ROLE_MAP = os.environ.get("SUPERVISOR_ROLE_MAP") or os.path.expanduser(
+    "~/.cache/wezterm-role-map.json"
+)
+
+
+def panes():
+    """Every WezTerm pane, or `None` when the query FAILED.
+
+    ⚠️ `None`, never `[]`: a failed `wezterm cli list` cannot prove a pane is gone
+    any more than it can prove one is live. `[]` is reserved for a transport that
+    answered with zero panes, and for a machine with no `wezterm` BINARY -- an
+    absent transport has no panes, and the Hold window is a WezTerm concept. Only
+    `FileNotFoundError` reads that way; any other `OSError` is a genuine failure and
+    stays `None`. See `docs/pane-reads.md`.
+    """
+    try:
+        result = subprocess.run(
+            ["wezterm", "cli", "list", "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return []
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        listing = json.loads(result.stdout)
+    except ValueError:
+        return None
+    return listing if isinstance(listing, list) else None
+
+
+# The activity glyph WezTerm puts in front of a pane title (`✳` active, `◑`/`◐`
+# otherwise). Decoration on the title, never part of the name.
+_GLYPH = re.compile(r"^[^\w\s]{1,2}\s+")
+
+
+def registry_names():
+    """name -> session id, for the pane join. Later entries win on a clash."""
+    names = {}
+    for path in glob.glob(os.path.join(REGISTRY_DIR, "*.json")):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        sid = data.get("sessionId") or data.get("session_id")
+        name = data.get("name")
+        if sid and name:
+            names[name] = sid
+    return names
+
+
+def session_pane(session_id, listing):
+    """The pane currently showing this session, or None when the listing has none.
+
+    The registry carries no pane id, so a session id joins to its pane through the
+    registry `name`, which is what the tab TITLE carries.
+    """
+    names = registry_names()
+    for pane in listing:
+        title = pane.get("title") or ""
+        name = title if title in names else _GLYPH.sub("", title)
+        if names.get(name) == session_id:
+            return pane.get("pane_id")
+    return None
+
+
+def pane_window(pane_id, listing):
+    """The WezTerm window id owning this pane, or None when the listing has none.
+
+    Read straight off the pane record, with no name join, so it answers for a
+    Hold-window pane whose title the registry does not know.
+    """
+    for pane in listing:
+        if str(pane.get("pane_id")) == str(pane_id):
+            window = pane.get("window_id")
+            if isinstance(window, bool) or not isinstance(window, int):
+                return None
+            return window
+    return None
+
+
+def hold_window_id():
+    """The role map's Hold window id, or None when it cannot be read.
+
+    Read directly from the map's `Hold.window_id`, never through the server's role
+    map: its `ROLES` deliberately excludes Hold, because the Hold window is a
+    parking lot rather than a role and is never spawned into.
+    """
+    try:
+        with open(ROLE_MAP, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    entry = data.get("Hold") if isinstance(data, dict) else None
+    window = entry.get("window_id") if isinstance(entry, dict) else None
+    if isinstance(window, bool) or not isinstance(window, int):
+        return None
+    return window
+
+
+def in_hold_window(target):
+    """Whether session `target` sits in the role map's Hold window.
+
+    Three states, per `docs/pane-reads.md`: `True` in the window, `False` not in
+    it, `None` when the pane listing could NOT be read, so the question is
+    unanswered. A missing role map, an unreadable one, or one carrying no `Hold`
+    key is NOT that third state -- it is the documented fallback to explicit holds
+    only, and it answers `False`.
+    """
+    window = hold_window_id()
+    if window is None:
+        return False
+    listing = panes()
+    if listing is None:
+        return None
+    pane = target if str(target).isdigit() else session_pane(target, listing)
+    if pane is None:
+        return False
+    return pane_window(pane, listing) == window
+
+
 def is_held(session_id: str) -> bool:
-    """True when this session carries a hold. Never raises."""
+    """True when this session carries a hold -- store or Hold window. Never raises.
+
+    The second source is the WezTerm Hold window: a pane parked there is held with
+    no store entry, resolved at read time.
+
+    ⚠️ A failed pane read answers *not held* here, and that direction is chosen for
+    THIS caller exactly as it is for the store read above: this predicate DROPS a
+    candidate, so inventing a hold would silently drop a real orphan -- the false
+    clean this script exists to prevent -- while reading a broken transport as
+    "nothing held" merely fails to honour a Hold-window hold and leaves the row in
+    the candidate list, where a later sweep re-checks it.
+    """
     if not session_id:
         return False
-    return isinstance(read_holds().get(session_id), dict)
+    if isinstance(read_holds().get(session_id), dict):
+        return True
+    return in_hold_window(session_id) is True
 
 
 def candidates(tasks_dir, today, max_age_days, live):
@@ -217,7 +404,9 @@ def main():
         print(f"   liveness probe unavailable: {script or 'fleet-sessions.py not found'}")
         return 2
 
-    today = date.today().isoformat()
+    # The CURRENT INSTANT, not today's date: a date reads as local midnight, which would
+    # park a defer that already came due today for another full day.
+    today = defer_date.as_now()
     found = list(candidates(args.tasks_dir, today, args.max_age_days, live))
 
     if args.json:

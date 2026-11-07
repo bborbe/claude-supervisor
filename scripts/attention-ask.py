@@ -104,6 +104,7 @@ import importlib.util
 import json
 import math
 import os
+import ssl
 import sys
 import time
 import urllib.error
@@ -124,6 +125,110 @@ def _load(name, filename):
 attribution = _load("answered_attribution", "answered-attribution.py")
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
+
+# Where a platform keeps its CA bundle when the interpreter knows of none.
+# macOS, Debian/Ubuntu, and RHEL respectively.
+CA_BUNDLE_PATHS = (
+    "/etc/ssl/cert.pem",
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+)
+
+
+def _ssl_context():
+    """An SSL context that can verify a certificate, or None to keep the default.
+
+    A python.org build ships no CA bundle, so `ssl.get_default_verify_paths()`
+    returns None for both `cafile` and `capath` and `urllib` rejects every
+    certificate before the request is sent:
+
+        [SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate
+
+    That reads as a bad server certificate and is not one — the chain validates
+    under `curl` and `openssl s_client`, and the store answers normally once a
+    bundle is supplied. This went unnoticed because every store this script had
+    used was `http://localhost`, where no TLS is involved, so the first HTTPS
+    store was also the first to fail.
+
+    Resolution order, first hit wins: `$SSL_CERT_FILE` (the caller's explicit
+    choice), then `certifi` when installed, then the platform bundle. A fix
+    inside the script rather than a caller-side env var, because the next
+    caller will not know to set one.
+
+    Returns None when the interpreter's own default context actually loads
+    roots, so `urlopen` keeps its default and a machine that was working is
+    unchanged. Also None when no bundle is found anywhere: there is nothing to
+    trust, and failing loudly beats silently trusting nothing.
+
+    ⚠️ **"Loaded roots" is the test, never "a path is configured."** A bundle
+    that exists but parses to zero certificates builds a context with no trust
+    anchors; the original `CERTIFICATE_VERIFY_FAILED` then persists and the fix
+    is a silent no-op, indistinguishable from the bug it was meant to cure. The
+    same trap sits on the interpreter's own default: `get_default_verify_paths()`
+    reports the **compiled-in** OpenSSL paths, not paths that were checked — a
+    python.org macOS build names a `cert.pem` under its framework that does not
+    exist until `Install Certificates.command` has run. So the default is probed
+    by building it and counting its roots, and only a default that really trusts
+    something is accepted. Each fallback candidate is validated the same way and
+    a dud falls through to the next rather than being returned.
+    """
+    if _default_context_loads_roots():
+        return None
+    for cafile in _ca_bundle_candidates():
+        if not os.path.exists(cafile):
+            continue
+        try:
+            context = ssl.create_default_context(cafile=cafile)
+        except OSError:
+            continue
+        if context.get_ca_certs():
+            return context
+    return None
+
+
+def _default_context_loads_roots():
+    """Whether the interpreter's own default context trusts any certificate.
+
+    Probed rather than inferred from `get_default_verify_paths()`: that reports
+    what OpenSSL was *compiled* to use, and a reported path may not exist.
+    """
+    try:
+        context = ssl.create_default_context()
+    except OSError:
+        return False
+    return bool(context.get_ca_certs())
+
+
+def _ca_bundle_candidates():
+    """The bundle paths to try, in the caller's order of intent."""
+    env = os.environ.get("SSL_CERT_FILE") or ""
+    if env:
+        yield env
+    try:
+        import certifi
+
+        yield certifi.where()
+    except ImportError:
+        pass
+    yield from CA_BUNDLE_PATHS
+
+
+# Bearer token for a store that requires authentication.
+#
+# Empty by default, so a local unauthenticated store behaves exactly as before.
+# An in-cluster store answers 401 without it — and 401 reads to this script as
+# "nothing was posted", which is the confusing failure this exists to remove.
+# The token belongs to whoever runs the command: it is read from the
+# environment and never written, logged or echoed.
+TOKEN = os.environ.get("ATTENTION_STORE_TOKEN", "").strip()
+
+
+def _headers(extra=None):
+    """Request headers, carrying the bearer token when one is configured."""
+    headers = dict(extra or {})
+    if TOKEN:
+        headers["Authorization"] = "Bearer " + TOKEN
+    return headers
 
 
 # The largest TTL this script will accept.
@@ -329,7 +434,7 @@ POSTABLE_MECHANISMS = (MECHANISM, "ack")
 # is — the failure reads as a store fault rather than a bad argument. Pinning the
 # enum here lets argparse reject it before the request is sent, and list the
 # accepted values in `--help`.
-PRODUCER_KINDS = ("session", "agent", "cron", "dark-factory")
+PRODUCER_KINDS = ("session", "manager", "agent", "cron", "dark-factory")
 # The three levels the store's schema declares for `risk`. It is a producer
 # declaration, stored unchanged; the board may render HIGHER than it and never
 # lower, so a poster that under-declares still cannot make a destructive card
@@ -585,15 +690,22 @@ def post_question(
     req = urllib.request.Request(
         f"{STORE}/api/1.0/attention",
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=_headers({"Content-Type": "application/json"}),
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=STORE_TIMEOUT) as resp:
+    with urllib.request.urlopen(
+        req, timeout=STORE_TIMEOUT, context=_ssl_context()
+    ) as resp:
         return json.load(resp)
 
 
 def fetch_item(item_id):
-    with urllib.request.urlopen(f"{STORE}/api/1.0/attention/{item_id}", timeout=STORE_TIMEOUT) as resp:
+    req = urllib.request.Request(
+        f"{STORE}/api/1.0/attention/{item_id}", headers=_headers()
+    )
+    with urllib.request.urlopen(
+        req, timeout=STORE_TIMEOUT, context=_ssl_context()
+    ) as resp:
         return json.load(resp)
 
 
@@ -955,7 +1067,7 @@ def cmd_post_batch(args, out=sys.stdout):
     return _post_and_report(args, *producer, payload, [], out)
 
 
-def cmd_poll(item_id, out=sys.stdout):
+def cmd_poll(item_id, out=sys.stdout, answered_at=False):
     if not is_store_item_id(item_id):
         # ⚠️ Refused here rather than at the store's 404, and that placement is
         # the whole point: a short id and an unknown full id both printed
@@ -1000,19 +1112,45 @@ def cmd_poll(item_id, out=sys.stdout):
     verdict, reason = attribution.classify(item)
     described = describe_answer(item)
     # `OPEN` is the one terminal that means "still unanswered", and it is
-    # reached only when the record carries neither an answer nor an act. An
-    # item that moved but whose mover cannot be attributed falls through to
-    # NOT_OPERATOR_ANSWERED rather than being read as open — failing closed in
-    # that direction is what keeps a re-ask from looking like a lost gate.
+    # reached only when the record is still open AND carries neither an answer
+    # nor an act. An item that moved but whose mover cannot be attributed falls
+    # through to NOT_OPERATOR_ANSWERED rather than being read as open — failing
+    # closed in that direction is what keeps a re-ask from looking like a lost
+    # gate.
     #
-    # ⚠️ **This branch is deliberately NOT keyed on `state`, and 2026-09-27 is
-    # why it was checked.** A `closed` item that carries an actor still classifies
-    # as an act and falls through to NOT_OPERATOR_ANSWERED — the item moved, and
-    # saying "open" would invite a manager to keep waiting on a card that is
-    # gone. Only a record with no actor at all — the reaped close — reaches OPEN
-    # here, which is what makes a reap and an acknowledgement distinguishable in
-    # the terminal rather than collapsed into one word.
-    if verdict == attribution.NOTHING and described is None:
+    # ⚠️ **This branch IS keyed on `state`, and the 2026-09-27 note it replaces
+    # is why.** That note argued the opposite: a record with no actor at all —
+    # the reaped close — should reach OPEN, so a reap and an acknowledgement
+    # stay distinguishable in the terminal. The reasoning holds; the terminal it
+    # picked does not. A reap is not the only record with no actor. Every one of
+    # these posts an empty body and lands here with no `answered_by`:
+    # `sweep_dead_sessions` (attention-watcher.py:668), the compact-crossing
+    # clear (:1327), a forwarded `SessionEnd` (:2991), and
+    # `close_session_approval` (:1213) — and the last is not a producer exit at
+    # all. So "no actor" cannot stand in for "open", and printing OPEN for it
+    # made a reaped close read exactly like a live gate: measured 2026-10-27,
+    # `poll` and `answer` disagreed about one card seconds apart because of it.
+    #
+    # The separation the old note protected survives, but on a different field,
+    # and saying so plainly is the point of this paragraph. A reaped close now
+    # falls through to NOT_OPERATOR_ANSWERED — and so does an acknowledgement,
+    # the actor-carrying close (`state: closed` + `answered_by`, no
+    # `answered_at`), which `answered-attribution.py` deliberately does not
+    # treat as a release (pinned by
+    # `test_ack_close_with_no_client_is_not_operator_answered`). The two stay
+    # distinguishable by `ANSWERED_BY:` — an acknowledgement carries an actor
+    # and a reap carries none — not by the terminal word. What the old branch
+    # actually bought was a word that also meant "a live gate is waiting", and
+    # that overload is what this change gives up. `state` is the only field that
+    # can carry the open/not-open distinction: the store refuses an arm-caused
+    # close of an open `permission` gate (attention-store-impl.go:1498-1506),
+    # so the reaped record has no `answered_by` to read. A record whose `state`
+    # is unreadable is not claimed as open either; failing closed is the point.
+    if (
+        verdict == attribution.NOTHING
+        and described is None
+        and item.get("state") == "open"
+    ):
         print("OPEN", file=out)
         return 0
     answered_by = item.get("answered_by") or ""
@@ -1024,6 +1162,12 @@ def cmd_poll(item_id, out=sys.stdout):
         print(f"ANSWERED: {content}", file=out)
         if answered_by:
             print(f"ANSWERED_BY: {answered_by}", file=out)
+        # Opt-in, so every existing consumer's output is byte-identical. The fleet keeper
+        # bounds how long an answered resume may wait from when the OPERATOR answered, not
+        # from when the keeper first noticed — a keeper asleep for hours must not hand an
+        # hours-old answer a fresh window.
+        if answered_at and item.get("answered_at"):
+            print(f"ANSWERED_AT: {item.get('answered_at')}", file=out)
         return 0
     # ⚠️ Two terminals of their own, from 2026-10-20. Both are answers the
     # operator GAVE, so neither is `NOT_OPERATOR_ANSWERED`, and neither is
@@ -1141,6 +1285,9 @@ def main(argv=None):
 
     poll = sub.add_parser("poll")
     poll.add_argument("item_id")
+    poll.add_argument("--answered-at", action="store_true",
+                      help="also print `ANSWERED_AT: <rfc3339>` for an answered item (opt-in; "
+                           "the default output is unchanged)")
 
     args = parser.parse_args(argv)
     try:
@@ -1148,7 +1295,7 @@ def main(argv=None):
             return cmd_post(args)
         if args.cmd == "post-batch":
             return cmd_post_batch(args)
-        return cmd_poll(args.item_id)
+        return cmd_poll(args.item_id, answered_at=args.answered_at)
     except urllib.error.HTTPError as err:
         # Each command handles its own HTTP errors, so reaching here means the
         # failure predates the item lookup — which is why no item is named: this

@@ -1,0 +1,50 @@
+[
+  {
+    "session_id": "695c311f-ba48-4d3d-9aee-48ffd343246c",
+    "spawner_session_id": "b9a2ea68-a8f3-49fe-b52b-cf960b909057",
+    "role": "agent",
+    "label": "SC7 Has No Scorer",
+    "mode": "interactive",
+    "status": "running"
+  },
+  {
+    "session_id": "0eacc5e4-7e73-4929-9db0-b19163c0b042",
+    "spawner_session_id": "ac24db61-1dad-4c89-b1fe-18b454067584",
+    "role": "agent",
+    "label": "BRO-22423 legacy lib-* builds",
+    "mode": "interactive",
+    "status": "running"
+  },
+  {
+    "session_id": "2767ba96-f0bd-439f-aed0-c46bb8fa5392",
+    "spawner_session_id": "ac24db61-1dad-4c89-b1fe-18b454067584",
+    "role": "agent",
+    "label": "Vault UI topic card column contradiction",
+    "mode": "interactive",
+    "status": "running"
+  },
+  {
+    "session_id": "0b7d28a7-0d44-4462-8ee1-c237097fa3da",
+    "spawner_session_id": "ac24db61-1dad-4c89-b1fe-18b454067584",
+    "role": "agent",
+    "label": "Fix board-drain and strategy-rep templates",
+    "mode": "interactive",
+    "status": "running"
+  },
+  {
+    "session_id": "51e78933-5751-471b-9fec-63bd9b59b872",
+    "spawner_session_id": "ac24db61-1dad-4c89-b1fe-18b454067584",
+    "role": "agent",
+    "label": "Port weekly-strategy-rep W42 fixes",
+    "mode": "interactive",
+    "status": "running"
+  },
+  {
+    "session_id": "aaaaaaaa-1111-4111-8111-111111111111",
+    "spawner_session_id": "49b471f1-a8a6-48b0-b2b2-14b9cb2437e3",
+    "role": "agent",
+    "label": "own worker control",
+    "mode": "interactive",
+    "status": "running"
+  }
+]

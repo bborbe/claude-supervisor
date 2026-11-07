@@ -457,7 +457,7 @@ class Receipt(unittest.TestCase):
         p = self.m.path(self.m.slug(self.topic))
         with open(p) as fh:
             d = json.load(fh)
-        d["round_started_at"] = now - 700  # < 2*1020+60
+        d["round_started_at"] = now - 700  # < 1020 + 180
         with open(p, "w") as fh:
             fh.write(json.dumps(d))
         # The artifacts were written "now", so re-age them into the round window.
@@ -469,6 +469,777 @@ class Receipt(unittest.TestCase):
             fh.write(json.dumps(d))
         rc, out = self.check()
         self.assertEqual(rc, 0, out)
+
+    # --- the aligned window: one rule, and the boundary is the limit -------------
+
+    def _history(self, name, now, gaps, cadence=None):
+        """Write `<name>.arms` whose arm-to-arm gaps are exactly `gaps`, ending at `now`."""
+        vals = [now]
+        for g in reversed(gaps):
+            vals.insert(0, vals[0] - g)
+        with open(os.path.join(self.live.name, name + ".arms"), "w", encoding="utf-8") as fh:
+            fh.write("".join(f"{v:.0f}\n" for v in vals))
+        if cadence is not None:
+            with open(os.path.join(self.live.name, name + ".cadence"), "w", encoding="utf-8") as fh:
+                fh.write(f"{cadence}\n")
+        return vals
+
+    def _set_started(self, started):
+        p = self.m.path(self.m.slug(self.topic))
+        with open(p, encoding="utf-8") as fh:
+            d = json.load(fh)
+        d["round_started_at"] = started
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(d))
+        return d
+
+    def _check_at(self, now):
+        """`check()` at an explicit `now`, with its stdout captured.
+
+        `cli()` cannot do this: it goes through `main()`, which reads the clock.
+        """
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = self.m.check(self.topic, now=now)
+        return rc, buf.getvalue()
+
+    def test_window_boundary_is_inclusive_at_the_limit(self):
+        """`now - started == limit` is still inside the round; `limit + 1` is not.
+
+        Pinned because the direction is invisible in a passing run: flipping `>` to
+        `>=` would report a lapsed receipt for a round that arrived exactly on time,
+        and every other test in this file would still pass.
+        """
+        now = 1_700_000_000.0
+        gap = 900
+        self._history("recurring-operator-gates", now, [gap, gap, gap], cadence=300)
+        self.start()
+        limit = gap + 180  # p90 == median == the only gap, so 1x + 180
+        s = self.m.slug(self.topic)
+
+        self._set_started(now - limit)
+        self.assertEqual(self.m.window(s, now)[1], limit)
+        _, out = self._check_at(now)
+        self.assertNotIn("skipped: receipt", out, "a round landing exactly on its limit is judged")
+        self._set_started(now - limit - 1)
+        rc, out = self._check_at(now)
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn(f"limit {limit}s period={gap}s(observed,1x+180)", out)
+
+    def test_period_is_read_from_the_branch_prefixed_record(self):
+        """The liveness record has carried a `goal--` / `topic--` prefix since the
+        goal/topic split; this file's slug never did.
+
+        Measured 2026-10-21: **4 of the 9** live receipts named a subject whose only
+        liveness record was prefixed, so the bare-base read found no history, the
+        period came back unknown, and the limit silently fell back to the reported
+        interval — a different number from the one `manager-liveness.py` used for the
+        same subject. Pinned because the fallback is silent: the receipt still prints
+        a plausible limit.
+        """
+        now = 1_700_000_000.0
+        gap = 1200
+        # ONLY the prefixed record exists; the bare base has nothing.
+        self._history("goal--recurring-operator-gates", now, [gap, gap, gap], cadence=300)
+        self.start()
+        self._set_started(now - 10)
+
+        s = self.m.slug(self.topic)
+        self.assertEqual(self.m.liveness_slug(s), "goal--recurring-operator-gates")
+        _, limit, basis = self.m.window(s, now)
+        self.assertEqual(limit, gap + 180)
+        self.assertEqual(basis, f"period={gap}s(observed,1x+180)")
+        self.assertNotIn("reported", basis)
+
+        # The claim this task repairs, asserted rather than written in prose: the
+        # receipt's limit IS the liveness limit for the same subject.
+        ml = self.m.liveness()
+        self.assertEqual(limit, ml.observed_period("goal--recurring-operator-gates") + ml.SLACK)
+
+    def test_an_already_prefixed_slug_is_not_prefixed_again(self):
+        """A fleet round puts its own branch on the receipt slug, so the period must come
+        from `fleet--<base>` — the record the arm step actually wrote.
+
+        Covers the fleet tier's observed basis end to end; no other test reaches it.
+        The early return in `liveness_slug()` that skips re-probing an already-prefixed
+        slug is clarity, not a fix: without it the bad probes find nothing and the
+        fallback returns the same name, so this test does not discriminate on it.
+        """
+        now = 1_700_000_000.0
+        gap = 1200
+        self._history("fleet--fleet-manager", now, [gap, gap, gap], cadence=300)
+
+        fleet_slug = self.m.slug("Fleet Manager", "fleet")
+        self.assertEqual(fleet_slug, "fleet--fleet-manager")
+        self.assertEqual(self.m.liveness_slug(fleet_slug), "fleet--fleet-manager")
+
+        with open(self.m.path(fleet_slug), "w", encoding="utf-8") as fh:
+            json.dump({"topic": "Fleet Manager", "round_started_at": now - 10, "fields": {}}, fh)
+        _, limit, basis = self.m.window(fleet_slug, now)
+        self.assertEqual(limit, gap + 180)
+        self.assertEqual(basis, f"period={gap}s(observed,1x+180)")
+
+    def test_printed_limit_never_understates_a_fractional_boundary(self):
+        """`observed_period()` interpolates a p90, so the limit is not always an integer.
+
+        Truncating it on the way out lets a refused round print a limit below the
+        enforced boundary, so the two printed numbers read as *not* lapsed. The invariant
+        pinned here is one-directional: the printed limit is never below the enforced
+        one, so rounding up (which can overstate by <1 s) is correct and truncating is
+        not.
+        """
+        now = 1_700_000_000.0
+        # p90 of (1000, 1101, 1200) interpolates to 1180.2, so the limit is 1360.2.
+        self._history("recurring-operator-gates", now, [1000, 1101, 1200], cadence=300)
+        self.start()
+        self._set_started(now - 1400)
+
+        _, limit, _ = self.m.window(self.m.slug(self.topic), now)
+        self.assertNotEqual(limit, int(limit), "fixture must produce a fractional limit")
+
+        rc, out = self._check_at(now)
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        printed = int(out.split("limit ")[1].split("s")[0])
+        self.assertGreaterEqual(printed, limit)
+
+    def test_reported_fallback_is_the_interval_plus_the_same_slack(self):
+        """With no `.arms` history the limit is `interval + SLACK`, not a multiple of it.
+
+        This is the branch every subject spends its first three arms in, and nothing else
+        pins it: every other test supplies history, so reverting the fallback to a `2 x`
+        multiple — or reading the wrong file for the declared cadence — would pass the
+        whole suite. It also pins `liveness_slug()`'s bare-base return, the other half of
+        the same fallback.
+        """
+        now = 1_700_000_000.0
+        self.start()
+        self._set_started(now - 10)
+        # No `.arms` at all; only the declared cadence exists.
+        with open(os.path.join(self.live.name, "recurring-operator-gates.cadence"), "w") as fh:
+            fh.write("900\n")
+
+        s = self.m.slug(self.topic)
+        self.assertEqual(self.m.liveness_slug(s), s, "no prefixed record -> the bare base")
+        _, limit, basis = self.m.window(s, now)
+        self.assertEqual(limit, 900 + 180)
+        self.assertEqual(basis, "period=900s(reported,1x+180)")
+
+
+
+FLEET_SUBJECT = "Fleet Manager"
+FLEET_SLUG = "fleet--fleet-manager"
+
+
+class FleetTier(unittest.TestCase):
+    """SC2a — the fleet round's own two steps, and the slug that makes them readable.
+
+    The fleet round writes its liveness under `fleet--fleet-manager` (the slug
+    `manager-liveness.py:101` builds from `--branch fleet`), so a receipt keyed on the
+    bare `fleet-manager` reads a file the arm step never wrote and reports
+    `skipped: re-arm` on a round that armed perfectly. Both halves are pinned here.
+
+    Measured 2026-10-30: the fleet round ran its arm step twelve times across a window
+    in which no digest was written at all, and nothing on that round's own tail said so.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.live = tempfile.TemporaryDirectory()
+        self.arts = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name, self.live.name)
+
+    def tearDown(self):
+        for t in (self.tmp, self.live, self.arts):
+            t.cleanup()
+        os.environ.pop("MANAGER_RECEIPT_STATE_DIR", None)
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    # --- helpers ---------------------------------------------------------------
+
+    def artifact(self, name, text, age=0.0):
+        p = os.path.join(self.arts.name, name)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        if age:
+            t = time.time() - age
+            os.utime(p, (t, t))
+        return p
+
+    def cli(self, *argv):
+        out, err, old = io.StringIO(), io.StringIO(), sys.argv
+        sys.argv = ["manager-receipt.py", *argv]
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        return rc, out.getvalue()
+
+    def start(self):
+        return self.cli("--start", "--subject", FLEET_SUBJECT, "--branch", "fleet")
+
+    def record(self, step, path):
+        return self.cli("--record", "--subject", FLEET_SUBJECT, "--branch", "fleet",
+                        "--step", step, "--path", path)
+
+    def check(self):
+        return self.cli("--check", "--subject", FLEET_SUBJECT, "--branch", "fleet")
+
+    def arms(self, epochs):
+        """An `.arms` ring in `manager-liveness.py`'s own format: one epoch per line."""
+        return self.artifact("fleet--fleet-manager.arms",
+                             "".join("%.0f\n" % e for e in epochs))
+
+    def digest(self, text=None, name="20261030T232317.digest"):
+        """A digest in the sweep reader's rendered shape — its real first line."""
+        return self.artifact(
+            name,
+            text if text is not None else
+            "DIGEST 20261030T232317 · 39 sessions · snapshot written: "
+            "2026-10-30T23:26:50Z\n",
+        )
+
+    def full_round(self):
+        self.start()
+        self.record("re-arm", self.arms([time.time()]))
+        self.record("digest", self.digest())
+
+    # --- the slug --------------------------------------------------------------
+
+    def test_fleet_slug_carries_the_branch(self):
+        self.assertEqual(self.m.slug(FLEET_SUBJECT, "fleet"), FLEET_SLUG)
+        # The unprefixed slug is what every goal/topic receipt already uses, unchanged.
+        self.assertEqual(self.m.slug("Recurring Operator Gates"), "recurring-operator-gates")
+
+    def test_fleet_receipt_lands_under_the_branch_slug(self):
+        self.start()
+        self.assertTrue(os.path.exists(os.path.join(self.tmp.name, FLEET_SLUG + ".json")))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "fleet-manager.json")))
+
+    # --- green -----------------------------------------------------------------
+
+    def test_full_fleet_round_is_green(self):
+        self.full_round()
+        rc, out = self.check()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out, "")
+
+    # --- the two steps this tier owes ------------------------------------------
+
+    def test_missing_arm_is_red(self):
+        self.start()
+        self.record("digest", self.digest())
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: re-arm", out)
+
+    def test_missing_digest_is_red(self):
+        self.start()
+        self.record("re-arm", self.arms([time.time()]))
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: digest", out)
+
+    def test_arm_ring_with_no_epoch_inside_the_window_is_red(self):
+        # The ring survived from an earlier round. Its existence proves nothing; only
+        # an epoch inside THIS round does.
+        self.start()
+        self.record("re-arm", self.arms([time.time() - 7200, time.time() - 5400]))
+        self.record("digest", self.digest())
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: re-arm", out)
+
+    def test_wiped_arm_ring_is_red(self):
+        # `manager-liveness.py:345` empties `prior` at the first arm after a stand-down,
+        # so an empty ring is the real shape of "the arm step did not run this round".
+        self.start()
+        self.record("re-arm", self.arms([]))
+        self.record("digest", self.digest())
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: re-arm", out)
+
+    def test_stub_digest_is_red(self):
+        self.start()
+        self.record("re-arm", self.arms([time.time()]))
+        self.record("digest", self.digest("ok\n"))
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: digest", out)
+
+    def test_digest_outside_the_round_window_is_red(self):
+        self.start()
+        self.record("re-arm", self.arms([time.time()]))
+        p = self.digest()
+        t = time.time() - 7200
+        os.utime(p, (t, t))
+        self.record("digest", p)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: digest", out)
+
+    # --- the regression guard --------------------------------------------------
+
+    def test_goal_tier_still_owes_only_its_own_steps(self):
+        # Adding the fleet steps to the goal/topic tuple would make every such round
+        # report a permanent `skipped: digest` — a false red on a healthy round.
+        self.assertNotIn("re-arm", self.m.STEPS)
+        self.assertNotIn("digest", self.m.STEPS)
+        self.assertEqual(self.m.steps_for(""), self.m.STEPS)
+        self.assertEqual(self.m.steps_for("fleet"), ("re-arm", "digest"))
+
+    def test_topic_and_branch_together_select_the_fleet_tier(self):
+        # `--topic` is the older spelling of `--subject`; combined with `--branch` it
+        # must resolve the fleet slug, not silently fall back to the unprefixed one.
+        self.cli("--start", "--topic", FLEET_SUBJECT, "--branch", "fleet")
+        self.assertTrue(os.path.exists(os.path.join(self.tmp.name, FLEET_SLUG + ".json")))
+
+    def test_an_unknown_branch_is_refused(self):
+        # manager-liveness.py validates its branch before building the slug; this module
+        # claims parity, and an unvalidated branch interpolates into the state path.
+        with self.assertRaises(ValueError):
+            self.m.slug(FLEET_SUBJECT, "fleet/../../etc")
+
+    def test_an_unknown_branch_is_a_usage_error_not_a_traceback(self):
+        # The library guard alone would surface as an uncaught ValueError (exit 1 with a
+        # traceback); the CLI owes an argparse usage error.
+        with self.assertRaises(SystemExit) as caught:
+            self.cli("--check", "--subject", FLEET_SUBJECT, "--branch", "fleet/../../etc")
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_a_fleet_step_cannot_be_recorded_on_a_goal_receipt(self):
+        # `steps_for("")` never looks for `digest`, so recording one there would be a
+        # dead field the tail silently ignores.
+        self.cli("--start", "--topic", "Recurring Operator Gates")
+        with self.assertRaises(SystemExit) as caught:
+            self.cli("--record", "--topic", "Recurring Operator Gates",
+                     "--step", "digest", "--path", "/tmp/whatever")
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_topic_check_never_reports_fleet_steps(self):
+        self.cli("--start", "--topic", "Recurring Operator Gates")
+        rc, out = self.cli("--check", "--topic", "Recurring Operator Gates")
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertNotIn("skipped: re-arm", out)
+        self.assertNotIn("skipped: digest", out)
+
+
+class FleetDebt(unittest.TestCase):
+    """The fleet tier's incomplete-round sentinel, and the debt it carries.
+
+    On `origin/master` the tail prints `skipped: <step> — <why>` and nothing else, and
+    the skip dies with the receipt: `--start` clears `fields`, so one round later the
+    evidence is gone and a round that skipped is indistinguishable from one that did
+    not. These pin the three properties that close that gap — a positive sentinel, a
+    debt that outlives the receipt, and exactly one documented way to pay it.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.live = tempfile.TemporaryDirectory()
+        self.arts = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name, self.live.name)
+
+    def tearDown(self):
+        for t in (self.tmp, self.live, self.arts):
+            t.cleanup()
+        os.environ.pop("MANAGER_RECEIPT_STATE_DIR", None)
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    # --- helpers ---------------------------------------------------------------
+
+    def artifact(self, name, text):
+        p = os.path.join(self.arts.name, name)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return p
+
+    def cli(self, *argv):
+        out, err, old = io.StringIO(), io.StringIO(), sys.argv
+        sys.argv = ["manager-receipt.py", *argv]
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        return rc, out.getvalue()
+
+    def start(self):
+        return self.cli("--start", "--subject", FLEET_SUBJECT, "--branch", "fleet")
+
+    def record(self, step, path):
+        return self.cli("--record", "--subject", FLEET_SUBJECT, "--branch", "fleet",
+                        "--step", step, "--path", path)
+
+    def check(self):
+        return self.cli("--check", "--subject", FLEET_SUBJECT, "--branch", "fleet")
+
+    def debt(self):
+        return self.cli("--debt", "--subject", FLEET_SUBJECT, "--branch", "fleet")
+
+    def abandon(self, step):
+        return self.cli("--abandon", "--subject", FLEET_SUBJECT, "--branch", "fleet",
+                        "--step", step)
+
+    def arms(self, epochs):
+        return self.artifact("fleet--fleet-manager.arms",
+                             "".join("%.0f\n" % e for e in epochs))
+
+    def digest(self):
+        return self.artifact(
+            "20261030T232317.digest",
+            "DIGEST 20261030T232317 · 39 sessions · snapshot written: "
+            "2026-10-30T23:26:50Z\n",
+        )
+
+    def skipped_round(self):
+        """The measured defect: the arm ran, the digest never did."""
+        self.start()
+        self.record("re-arm", self.arms([time.time()]))
+
+    def clean_round(self):
+        self.start()
+        self.record("re-arm", self.arms([time.time()]))
+        self.record("digest", self.digest())
+
+    def digest_only_round(self):
+        """The mirror of `skipped_round`: the digest ran, the arm did not."""
+        self.start()
+        self.record("digest", self.digest())
+
+    # --- the sentinel ----------------------------------------------------------
+
+    def test_a_round_that_armed_and_never_digested_prints_the_sentinel(self):
+        # A POSITIVE line, not an absence: the pre-change rounds already omitted
+        # `Snapshot written` (measured 2026-10-31), so an absence discriminates nothing.
+        self.skipped_round()
+        rc, out = self.check()
+        self.assertEqual(rc, 11, out)
+        self.assertIn("INCOMPLETE ROUND — skipped: digest", out)
+
+    def test_the_sentinel_names_digest_as_the_only_skipped_step(self):
+        self.skipped_round()
+        rc, out = self.check()
+        self.assertEqual(rc, 11, out)
+        self.assertEqual(out.count("skipped:"), 1, out)
+
+    def test_a_clean_round_prints_no_sentinel(self):
+        # The control: without it the sentinel could be a constant and every other
+        # test in this class would still pass.
+        self.clean_round()
+        rc, out = self.check()
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("INCOMPLETE ROUND", out)
+        self.assertEqual(out, "")
+
+    # --- the debt outlives the receipt -----------------------------------------
+
+    def test_the_debt_outlives_the_next_round_start(self):
+        # `--start` clears `fields`, which is why the debt lives in its own file. A
+        # debt stored in the receipt is wiped by the very round that must pay it.
+        self.skipped_round()
+        self.check()
+        rc, out = self.debt()
+        self.assertEqual(rc, 12, out)
+        self.assertIn("digest", out)
+
+        self.start()  # the next round opens; the receipt is cleared
+        rc, out = self.debt()
+        self.assertEqual(rc, 12, out)
+        self.assertIn("digest", out)
+
+    def test_a_clean_round_opens_no_debt(self):
+        # The other half of read-vs-constant: a clear debt prints nothing and exits 0.
+        self.clean_round()
+        self.check()
+        rc, out = self.debt()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.strip(), "")
+
+    # --- the one recovery verb --------------------------------------------------
+
+    def test_abandon_pays_the_debt_and_leaves_the_next_check_green(self):
+        self.skipped_round()
+        self.check()
+        rc, out = self.abandon("digest")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("abandoned", out)
+
+        rc, out = self.debt()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.strip(), "")
+
+        rc, out = self.check()
+        self.assertEqual(rc, 0, out)
+
+    def test_abandon_records_the_step_it_paid(self):
+        self.skipped_round()
+        self.check()
+        self.abandon("digest")
+        p = os.path.join(self.tmp.name, FLEET_SLUG + ".abandoned")
+        self.assertTrue(os.path.exists(p))
+        with open(p, encoding="utf-8") as fh:
+            self.assertIn("digest", fh.read())
+
+    def test_abandon_refuses_a_step_the_receipt_did_not_skip(self):
+        # The recovery verb is scoped to a step THIS round skipped. Here `re-arm` is
+        # owed and `digest` is not, so paying `digest` must be refused even though a
+        # debt is open — otherwise the verb is a way to write anything into the ledger.
+        # (The earlier shape of this test ran a clean round, so it only proved the
+        # empty-debt refusal and never exercised the scoping it names.)
+        self.digest_only_round()
+        rc, out = self.check()
+        self.assertEqual(rc, 11, out)
+        self.assertIn("skipped: re-arm", out)
+
+        rc, _ = self.abandon("digest")
+        self.assertEqual(rc, 2)
+        rc, out = self.debt()
+        self.assertEqual(rc, 12, out)
+        self.assertIn("re-arm", out)
+
+    # --- pay by passing ---------------------------------------------------------
+
+    def test_a_clean_round_pays_the_previous_rounds_debt_by_passing(self):
+        # The mechanism that actually pays a debt in normal operation: `write_debt`
+        # rewrites on every check, so doing the work clears it with no abandon at
+        # all. `--abandon` is the exception path, not the everyday one.
+        self.skipped_round()
+        self.check()
+        self.assertEqual(self.debt()[0], 12)
+
+        self.clean_round()
+        rc, out = self.check()
+        self.assertEqual(rc, 0, out)
+        rc, out = self.debt()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.strip(), "")
+
+    def test_a_second_skipping_check_keeps_the_debt_open(self):
+        # The control for pay-by-passing. If `write_debt` appended instead of
+        # rewriting, a clean round could never clear the debt; if a repeat skip
+        # wrote nothing, the debt would silently vanish after one round.
+        self.skipped_round()
+        self.check()
+        self.skipped_round()
+        rc, out = self.check()
+        self.assertEqual(rc, 11, out)
+        rc, out = self.debt()
+        self.assertEqual(rc, 12, out)
+        self.assertIn("digest", out)
+
+    # --- the payment is scoped to its round -------------------------------------
+
+    def test_a_round_that_skips_is_gated_by_its_own_receipt(self):
+        # The prevention the gate exists for: the sweep is row 2 and the gate is row
+        # 5, so a round that skipped its digest must be blocked on ITS OWN receipt —
+        # not on whatever the previous round left behind.
+        self.skipped_round()
+        rc, out = self.debt()
+        self.assertEqual(rc, 12, out)
+        self.assertIn("digest", out)
+        self.assertNotIn("re-arm", out)
+
+    def test_the_gate_judges_the_round_in_progress_not_the_last_one(self):
+        # The mirror: a round that HAS swept must not be blocked by a debt it has
+        # already paid. A file-only `--debt` fails this, because the file is only
+        # rewritten at the tail (row 19) — after the legs (rows 5/5b/5c) have run.
+        self.skipped_round()
+        self.check()
+        self.assertEqual(self.debt()[0], 12)
+
+        self.clean_round()
+        rc, out = self.debt()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.strip(), "")
+
+    # --- a leg gates on the steps it consumes (--only) ---------------------------
+
+    def debt_only(self, *steps):
+        argv = ["--debt", "--subject", FLEET_SUBJECT, "--branch", "fleet"]
+        for step in steps:
+            argv += ["--only", step]
+        return self.cli(*argv)
+
+    def test_a_leg_scoped_to_re_arm_runs_while_the_digest_is_still_owed(self):
+        # The measured defect, 2026-11-05: row 5b reached the gate with the arm paid
+        # and the sweep reader still running, so the whole-round gate read
+        # `debt: digest` and skipped the keepalive leg (2 of 25 gate calls). The
+        # keepalive procedures never read the digest, so scoped to `re-arm` it runs.
+        self.skipped_round()
+        rc, out = self.debt()
+        self.assertEqual(rc, 12, out)  # the control: unscoped, the leg is stopped
+        rc, out = self.debt_only("re-arm")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out.strip(), "")
+
+    def test_a_scoped_gate_still_fires_on_the_step_it_consumes(self):
+        # The mirror. Without it `--only` could be a constant 0 and the test above
+        # would still pass: a round that never armed must still stop a re-arm leg.
+        self.digest_only_round()
+        rc, out = self.debt_only("re-arm")
+        self.assertEqual(rc, 12, out)
+        self.assertIn("debt: re-arm", out)
+        self.assertNotIn("digest", out)
+
+    def test_a_scoped_gate_scopes_the_exit_never_the_record(self):
+        # `--only` narrows what can stop THIS leg. The debt file is what `--check` and
+        # the unscoped legs read, so a scoped call that rewrote it to the subset would
+        # silently pay the digest for every other gated leg.
+        self.skipped_round()
+        self.assertEqual(self.debt_only("re-arm")[0], 0)
+        with open(os.path.join(self.tmp.name, FLEET_SLUG + ".debt"), encoding="utf-8") as fh:
+            self.assertIn("digest", fh.read())
+        rc, out = self.debt()
+        self.assertEqual(rc, 12, out)
+        self.assertIn("digest", out)
+
+    def test_a_scoped_gate_reads_the_carried_file_when_the_round_is_unjudgeable(self):
+        # The other branch of `debt()`: with no receipt the carried file is the only
+        # evidence, and the scope must apply there too — in both directions.
+        self.skipped_round()
+        self.check()
+        os.unlink(os.path.join(self.tmp.name, FLEET_SLUG + ".json"))
+        self.assertEqual(self.debt_only("re-arm")[0], 0)
+        rc, out = self.debt_only("digest")
+        self.assertEqual(rc, 12, out)
+        self.assertIn("debt: digest", out)
+
+    def test_only_is_a_usage_error_outside_debt(self):
+        with self.assertRaises(SystemExit) as caught:
+            self.cli("--check", "--subject", FLEET_SUBJECT, "--branch", "fleet",
+                     "--only", "re-arm")
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_only_refuses_a_step_the_fleet_round_does_not_owe(self):
+        # `sweep` is a goal/topic step. Accepting it would scope the gate to a step the
+        # fleet debt never contains — a gate that always passes.
+        with self.assertRaises(SystemExit) as caught:
+            self.debt_only("sweep")
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_a_non_finite_abandonment_is_ignored(self):
+        # `float()` accepts `inf`, and the honouring test has no upper bound: one
+        # tampered line would excuse the step on every later round.
+        self.skipped_round()
+        self.check()
+        p = os.path.join(self.tmp.name, FLEET_SLUG + ".abandoned")
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write("inf digest\n")
+        rc, out = self.check()
+        self.assertEqual(rc, 11, out)
+        self.assertIn("skipped: digest", out)
+
+    def test_an_abandonment_stamped_in_the_same_instant_is_honoured(self):
+        # The two ends of the window carry the same one-second tolerance. Without
+        # the upper slack a payment stamped a fraction before a read — `abandon()`
+        # writes "%.3f", and the read follows in microseconds — lands past that
+        # read's `now` and the recovery silently fails. This reddened in CI on the
+        # first cut of the upper bound, which used a bare `now`.
+        self.skipped_round()
+        self.check()
+        p = os.path.join(self.tmp.name, FLEET_SLUG + ".abandoned")
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write("%.3f digest\n" % (time.time() + 0.5))
+        rc, out = self.debt()
+        self.assertEqual(rc, 0, out)
+
+    def test_an_abandonment_past_the_tolerance_is_rejected(self):
+        # The other side of the edge. Without this pair the previous test passes for
+        # any tolerance at all, including an unbounded one — it would only prove the
+        # happy side.
+        #
+        # +60, not a value just past the slack: the rejection holds only while `now`
+        # is still below the record's stamp minus the slack, so a record dated a
+        # couple of seconds ahead tolerates just one second between the write and the
+        # read — a stall on a loaded runner would advance `now` past it and flip the
+        # test green for the wrong reason. Sixty seconds keeps the boundary check and
+        # removes the window; the +0.5 case brackets the other side.
+        self.skipped_round()
+        self.check()
+        p = os.path.join(self.tmp.name, FLEET_SLUG + ".abandoned")
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write("%.3f digest\n" % (time.time() + 60))
+        rc, out = self.debt()
+        self.assertEqual(rc, 12, out)
+        self.assertIn("digest", out)
+
+    def test_a_future_dated_abandonment_is_ignored(self):
+        # The other unbounded direction: a finite timestamp in the future — a
+        # forward clock jump when `abandon()` stamped it, or a hand-edited line —
+        # would otherwise excuse the step on every round until wall-clock caught up.
+        self.skipped_round()
+        self.check()
+        p = os.path.join(self.tmp.name, FLEET_SLUG + ".abandoned")
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write("%.3f digest\n" % (time.time() + 86400))
+        rc, out = self.check()
+        self.assertEqual(rc, 11, out)
+        self.assertIn("skipped: digest", out)
+
+    def test_an_abandonment_from_an_earlier_round_is_not_honoured(self):
+        # `check()` honours a payment only from the round it was paid in. Without
+        # that filter one abandon would excuse the step for the rest of the task's
+        # life — the permanent-green failure this whole file exists to prevent.
+        self.skipped_round()
+        self.check()
+        p = os.path.join(self.tmp.name, FLEET_SLUG + ".abandoned")
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write("%.3f digest\n" % (time.time() - 3600))
+        rc, out = self.check()
+        self.assertEqual(rc, 11, out)
+        self.assertIn("skipped: digest", out)
+
+    # --- the debt is fleet-only -------------------------------------------------
+
+    def test_the_debt_survives_a_round_with_no_receipt(self):
+        # The early returns run BEFORE `write_debt`, deliberately: a round that never
+        # wrote a receipt has judged nothing, so it must not clear a debt an earlier
+        # round left. Moving the write above them would silently pay every debt.
+        self.skipped_round()
+        self.check()
+        os.unlink(os.path.join(self.tmp.name, FLEET_SLUG + ".json"))
+
+        rc, out = self.check()
+        self.assertEqual(rc, 11, out)
+        self.assertIn("skipped: receipt", out)
+        rc, out = self.debt()
+        self.assertEqual(rc, 12, out)
+        self.assertIn("digest", out)
+
+    def test_an_unreadable_debt_file_is_not_a_clear_debt(self):
+        # A fail-open read here runs the leg while a debt is owed — the exact failure
+        # the gate exists to stop. Only "the file does not exist" means "no debt".
+        # A directory at the debt path raises `IsADirectoryError`, which is an
+        # `OSError` but not a `FileNotFoundError` — portable and deterministic.
+        os.makedirs(os.path.join(self.tmp.name, FLEET_SLUG + ".debt"))
+        rc, out = self.debt()
+        self.assertEqual(rc, 2, out)
+
+    def test_debt_refuses_a_non_fleet_branch(self):
+        # The goal/topic tier writes no debt, so an empty read there is not "clear" —
+        # it is a gate that always passes. Refuse rather than report a false green.
+        with self.assertRaises(SystemExit) as caught:
+            self.cli("--debt", "--topic", "Some Goal")
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_abandon_without_a_step_is_a_usage_error(self):
+        self.skipped_round()
+        self.check()
+        with self.assertRaises(SystemExit) as caught:
+            self.cli("--abandon", "--subject", FLEET_SUBJECT, "--branch", "fleet")
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_the_goal_tier_writes_no_debt(self):
+        # `--check` is shared with the goal/topic tier, but only the three fleet
+        # legs chain `--debt`. Writing the file there would leave state no command
+        # reads, which is worse than no state at all.
+        self.cli("--start", "--topic", "Some Goal")
+        rc, out = self.cli("--check", "--topic", "Some Goal")
+        self.assertEqual(rc, 11, out)
+        self.assertIn("INCOMPLETE ROUND", out)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "some-goal.debt")))
 
 
 if __name__ == "__main__":

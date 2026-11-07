@@ -97,6 +97,109 @@ def tail_lines(path, max_bytes=MAX_SCAN):
             end = start
 
 
+_TYPE_TEXT = re.compile(r'\{\s*"type"\s*:\s*"text"')
+_TEXT_KEY = re.compile(r'"text"\s*:\s*"')
+_ASSISTANT = re.compile(r'"(?:role|type)"\s*:\s*"assistant"')
+
+
+def _json_string_at(text, start):
+    """`(body, terminated)` for a JSON string whose opening quote ends at `start`.
+
+    Stops at the closing quote or at truncation, and **never** mistakes an escaped
+    `\\"` for the terminator. Cutting at the first `"` instead — as this did — dropped
+    everything after a quoted `--subject`, including a trailing `--admin`, so the
+    admin-merge deny check never fired.
+
+    `terminated` is load-bearing: an unterminated body means the harness cut the line,
+    so its tail may be half a command.
+    """
+    i = start
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == '"':
+            return text[start:i], True
+        i += 1
+    return text[start:], False
+
+
+def _text_values(text):
+    """`(body, terminated)` for each `text` content block of a partial assistant line.
+
+    Mirrors the parsed path, which joins only `type == "text"` blocks — a closer quoted
+    in a `tool_use` input or a `thinking` block is not the operator's gate. The `{`
+    anchor narrows the match to a block start; ⚠️ it does not eliminate the residual
+    where a structured `tool_use` input is itself shaped `{"type": "text", "text": …}`.
+    """
+    values, pos = [], 0
+    while True:
+        kind = _TYPE_TEXT.search(text, pos)
+        if not kind:
+            return values
+        # Bounded to this block: an unbounded search could pair a truncated block's
+        # marker with the NEXT block's text key and salvage the wrong string.
+        key = _TEXT_KEY.search(text, kind.end(), kind.end() + 200)
+        if not key:
+            return values
+        values.append(_json_string_at(text, key.end()))
+        pos = key.end()
+
+
+def _first_line(body):
+    """`(line, ended_at_newline)` for a raw JSON string body.
+
+    Walks backslash-aware: a real newline is the two characters `\\` + `n`, but a literal
+    backslash in the text is `\\\\`, so `--subject C:\\new` contains the same `\\n` pair.
+    A plain `split("\\n")` cut there and dropped a trailing `--admin`, so the deny never
+    fired — the same bypass fixture 22 exists to prevent.
+    """
+    i = 0
+    while i < len(body):
+        if body[i] == "\\":
+            if i + 1 < len(body) and body[i + 1] == "n":
+                return body[:i], True
+            i += 2
+            continue
+        i += 1
+    return body, False
+
+
+def _partial_closer(text):
+    """`(timestamp, line)` recovered from a partially-written assistant line, or `None`.
+
+    The harness streams a message to disk, so a `Stop` hook can read a line whose JSON is
+    not closed yet. `json.loads` rejects it, and the pre-fix scan then SKIPPED it and
+    returned an EARLIER message's closer — measured 2026-10-31, session `95e9b174`: a real
+    `gh pr merge` gate was recorded as `not-a-gate` 266 ms after the message was written.
+
+    The text is already on disk, so recover it rather than fall back to a stale message.
+    ⚠️ **The assistant test must accept `message.role`.** A real record serializes
+    `message` at key index 2 and the top-level `type` at index 9, so a line cut inside
+    `message.content` — the very shape this salvages — carries `"role": "assistant"` but
+    no `"type": "assistant"` at all. Keying on `type` alone left the whole path inert.
+    """
+    if not _ASSISTANT.search(text):
+        return None
+    for body, terminated in reversed(_text_values(text)):
+        idx = body.rfind("👤 You:")
+        if idx < 0:
+            continue
+        tail = body[idx:]
+        line, ended = _first_line(tail)
+        if not ended and not terminated:
+            # ⚠️ The closer runs into an UNTERMINATED tail, so the harness may have cut
+            # it mid-command — `--admi` must never be read as a whole closer, or the
+            # `--admin` deny misses and the lint releases a branch-protection bypass.
+            return None
+        line = line.strip()
+        if not line:
+            return None
+        ts = re.search(r'"timestamp":\s*"([^"]+)"', text)
+        return (ts.group(1) if ts else "?"), line
+    return None
+
+
 def last_closer(path, max_bytes=MAX_SCAN):
     """`(timestamp, line)` for the transcript's last `👤 You:` line, or `None`.
 
@@ -107,6 +210,16 @@ def last_closer(path, max_bytes=MAX_SCAN):
         try:
             d = json.loads(raw)
         except ValueError:
+            # ⚠️ A partial final line is the turn's own message, not a line to skip past.
+            # Falling back to an older message here is the stale-closer defect: the hook
+            # then decides on a closer the operator never saw.
+            text = raw.decode("utf-8", "replace")
+            salvaged = _partial_closer(text)
+            if salvaged is not None:
+                return salvaged
+            if _ASSISTANT.search(text):
+                # An assistant message we cannot read is not a licence to use an older one.
+                return None
             continue
         if d.get("type") != "assistant":
             continue

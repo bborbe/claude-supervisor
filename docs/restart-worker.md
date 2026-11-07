@@ -34,6 +34,7 @@ path is read from `SUPERVISOR_LOAD_PATH`, else
 | `0` | Success — the pid was signalled and the session resumed (or, under `--dry-run`, would have been). |
 | `1` | Refusal. The first line of stdout is the reason token below; the second is the sentence. **Or** an operational failure, printed with an `❌ error:` prefix instead of a token — see below. |
 | `2` | Usage error (argparse) — a missing or empty session id, an unknown flag. |
+| `3` | Environment fault — **not** a refusal. The first line is `environment-fault`; `vault-cli` could be found neither on `PATH` nor at `$GOPATH/bin` or a known install location, so no launcher can be resolved for any session. Checked before every refusal, so a broken caller environment never reads as a guard declining. |
 
 A refusal is a printed reason, never a traceback.
 
@@ -181,6 +182,43 @@ jq -r '.permissions.allow[]' ~/.claude/settings.json | grep -E 'Bash\([^)]*p?kil
   probe is the sibling `scripts/restart-precheck.py`, which owns the worktree check and the
   cause-of-death classification; the two scripts share the registry read but not the
   refusal vocabulary — the seven tokens above stay exactly seven.
+
+## `--absent`: resuming a session whose process is gone
+
+The normal path cannot bring back a dead session: it refuses `unknown-session-id` when no
+registry entry carries the id, and a dead session's `~/.claude/sessions/<pid>.json` is deleted
+with it. `--absent` is a separate entry that inverts that precondition and **holds no kill
+path at all** — it never reaches `os.kill`, so it cannot signal a live process. ⚠️ That is not
+the same as being harmless: it CAN start a second copy of a live conversation, which is the real
+hazard. So it also refuses while any registry entry is unparseable, while a pane record names
+the session within the last 10 min with no end after it (a resume through another path
+heartbeats before it registers), and while another `--absent` of the same session holds its
+lock. Its only caller is `scripts/fleet-keeper.py`, and only behind the operator's `resume it`
+answer on a dead-Fleet-Manager card.
+
+`wezterm` is resolved by absolute path (`SUPERVISOR_WEZTERM`, then `PATH`, then known install
+locations), never looked up on `PATH` alone: the keeper runs under launchd with a system-only
+`PATH`, where a bare `wezterm` is not found.
+
+It sources what the registry used to carry from the manager registration
+(`~/.claude/state/worker-manager/<sid>.json`, written by `fleet-register.py`), which outlives
+death: the vault gives the `cwd`, and the launcher is resolved with an explicit
+`(branch, subject)` manager subject, so a fleet manager takes the vault's `manager_launcher`.
+⚠️ Not `manager_subject()`: it knows only topic and goal, so a fleet manager resolved through
+it falls to the **worker** launcher rule — still the case on the normal path, recorded as a
+known gap.
+
+Its refusals — first-line token, exit 1, all before the spawn — are its own vocabulary and
+leave the seven above unchanged:
+
+| Token | Fires when |
+|---|---|
+| `not-absent` | a registry entry carries the id, or the registry cannot be read — the process may be alive |
+| `held-session` | an operator hold, exactly as on the normal path |
+| `unknown-session-id` | no manager registration, so no vault to resume into |
+
+An unresolvable vault or launcher is an `❌ error:` operational failure, never a refusal, and
+fires before anything is spawned.
 
 ## Which launcher the resume runs
 

@@ -105,6 +105,19 @@ def assistant(text=None, tool=None, thinking=None):
     return {"type": "assistant", "message": {"content": content}}
 
 
+def user_result(content, is_error):
+    """One `user` record carrying a single `tool_result` block."""
+    return {"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "t1", "is_error": is_error,
+         "content": content}]}}
+
+
+STREAM_CLOSED_ERROR = "Tool permission request failed: AbortError: Stream closed"
+BLOCKED_HEAD = "🔴 BLOCKED · nothing running · needs intervention"
+BLOCKED_ASK = BLOCKED_HEAD + "\n👤 You: approve: merge it"
+BLOCKED_NOTHING = BLOCKED_HEAD + "\n👤 You: nothing"
+
+
 class Fixture:
     """A temp vault + transcript tree + registry, one tracked task."""
 
@@ -490,6 +503,30 @@ class StateScopeTest(unittest.TestCase):
         self.assertEqual([k for k, *_ in watch.transitions(["aaaa1111"], [], state)],
                          ["HELD"])
 
+    def test_held_causes_are_distinguishable_for_the_emit_loop(self):
+        # The emit loop ANNOUNCES one of the two HELD causes and only records the
+        # other, so the split has to be decidable from the record alone. It keys
+        # on `UNTRACKED_DETAIL`, the exact string the lost-sight branch emits —
+        # so that string must match, and the announced cause must not collide
+        # with it. A prefix test would be the fragile form; this pins equality.
+        lost = watch.transitions(["aaaa1111"], [], {})[0]
+        unregistered = watch.transitions(
+            ["aaaa1111"], [], {"aaaa1111": ("A", "x", "unregistered", None)})[0]
+        self.assertEqual(lost[3], watch.UNTRACKED_DETAIL,
+                         "the lost-sight cause must match the constant exactly")
+        self.assertNotEqual(unregistered[3], watch.UNTRACKED_DETAIL,
+                            "the announced cause must not collide with it")
+        self.assertIn("unregistered", unregistered[3])
+
+    def test_unregistered_held_record_carries_a_label(self):
+        # The announcement prints `label[:46]`; an empty label would announce a
+        # dead gate with no task name attached, which is the half of the message
+        # the manager needs to act on. The lost-sight cause carries no label and
+        # is never printed, so only this one has to have one.
+        got = watch.transitions(
+            ["aaaa1111"], [], {"aaaa1111": ("My Task", "x", "unregistered", None)})
+        self.assertEqual(got[0][2], "My Task")
+
     def test_genuine_answer_still_clears(self):
         # The verdict a genuine answer now produces is the settle at `idle` with
         # no ask — NOT `registry:busy`, which is HELD. See `is_gated`.
@@ -683,8 +720,8 @@ class CommitLoopTest(unittest.TestCase):
     """The commit loop, driven for real — `--once` returns before it.
 
     Everything this watcher guarantees about `CLEARED` honesty is decided inside
-    this loop: the stability gate, the HELD-logged-not-printed branch, and the
-    atomic state write. `--once` returns at the top of the loop, so before this
+    this loop: the stability gate, the two `HELD` causes (one announced, one
+    log-only), and the atomic state write. `--once` returns at the top of the loop, so before this
     test the tested units were the honest parts and the untested one was where
     dishonesty is decided. Found in review 2026-10-04.
     """
@@ -735,12 +772,59 @@ class CommitLoopTest(unittest.TestCase):
         self.assertEqual(out.count("NEW GATE"), 1, out)
         self.assertEqual(out.count("CLEARED"), 1, out)
 
-    def test_an_unregistered_session_is_held_and_never_printed(self):
+    def test_an_unregistered_session_is_held_and_announced(self):
+        # ⚠️ INVERTED 2026-11-03. This used to assert the HELD record was never
+        # printed — which was the defect: a manager that is not told its worker's
+        # gate died keeps waiting on a card that no longer exists. The line is now
+        # ANNOUNCED, so the "never cleared" half has to be read per line: the
+        # detail text itself carries the word `CLEARED` ("no CLEARED emitted").
         held = {"aaaa1111": ("A", "unregistered", "unregistered", None)}
-        out = self._drive([{}, self.GATED, self.GATED, held, held])
+        out = self._drive([{}, self.GATED, self.GATED, held, held, held])
         self.assertEqual(out.count("NEW GATE"), 1, out)
-        self.assertNotIn("CLEARED", out,
-                         "an unregistered session is HELD, never cleared")
+        # ⚠️ EXACTLY ONCE, not merely present — and the poll COUNT is load-bearing.
+        # `assertIn` alone would still pass if the `prev.pop(sid8, None)` in the
+        # emit loop were dropped, and the line would then re-fire on every poll: a
+        # `Monitor` notification storm, which is the risk this change's own
+        # rationale names.
+        #
+        # ⚠️ A FIVE-poll sequence cannot see that. The stability gate admits the
+        # departure only on the second poll that shows it, so with
+        # `[{}, GATED, GATED, held, held]` the HELD lands on the FIFTH — the last —
+        # and the count is 1 whether or not the pop runs. A sixth poll is what makes
+        # the pop observable: without it, poll six re-announces and the count is 2.
+        self.assertEqual(out.count("HELD"), 1, out)
+        self.assertIn("HELD  aaaa1111  A  ::  unregistered; no CLEARED emitted",
+                      out, "a dead worker's gate must reach the manager")
+        self.assertFalse(
+            [ln for ln in out.splitlines() if ln.startswith("CLEARED  ")],
+            "an unregistered session is HELD, never cleared: " + out)
+
+    def test_two_dead_workers_each_get_their_own_line(self):
+        # The announcement is per WORKER, and so is the pop. A single-session
+        # fixture cannot tell a per-sid8 pop from a blanket one that drops the
+        # whole set — both leave one line behind.
+        gated = {"aaaa1111": ("A", "pick", "idle+closer", True),
+                 "bbbb2222": ("B", "pick", "idle+closer", True)}
+        held = {"aaaa1111": ("A", "unregistered", "unregistered", None),
+                "bbbb2222": ("B", "unregistered", "unregistered", None)}
+        out = self._drive([{}, gated, gated, held, held, held])
+        self.assertEqual(out.count("HELD"), 2, out)
+        self.assertIn("HELD  aaaa1111  A  ::", out)
+        self.assertIn("HELD  bbbb2222  B  ::", out)
+
+    def test_a_lost_sight_session_is_recorded_not_announced(self):
+        """The control that tells the narrow fix from a widened branch.
+
+        Both `HELD` causes arrive at the emit loop as one `kind`, so a fix that
+        widens that branch prints both and still passes every other test in this
+        class. A session the watcher stopped tracking is bookkeeping, not a dead
+        gate, and must stay out of the announcement.
+        """
+        out = self._drive([{}, self.GATED, self.GATED, {}, {}])
+        self.assertEqual(out.count("NEW GATE"), 1, out)
+        self.assertNotIn("HELD", out,
+                         "a session that stopped being tracked is not a dead "
+                         "gate: " + out)
 
     def test_a_closer_unknown_read_does_not_drop_the_gate(self):
         """THE DEFECT, at the commit loop — where the lost `CLEARED` is decided.
@@ -1084,6 +1168,60 @@ class AgedEmissionTest(unittest.TestCase):
                       "two spaces after the kind, matching NEW GATE — " + out)
 
 
+class IdleCloserAgedTest(unittest.TestCase):
+    """An `idle` session parked on its own closer `approve:` line escalates.
+
+    ⚠️ This is the shape the old exclusion suppressed. Measured 2026-10-31: a
+    worker parked on `approve: write one flow_probe_test …` at 02:22, the arm fired
+    `NEW GATE … :: idle+closer :: …`, and no `AGED` line followed at 15 minutes
+    or at 60 — the park ran 69 minutes unescalated. Drives `main()` end to end,
+    so the assertion covers the predicate, the age clock and the log writer.
+    """
+
+    PARKED = {"aaaa1111": ("A", "approve: write one flow_probe_test sample",
+                           "idle+closer", True)}
+
+    def _drive(self, polls, clock):
+        seq, ticks = [self.PARKED] * polls, list(clock)
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as d:
+            state = os.path.join(d, "state")
+            with mock.patch.object(watch, "probe",
+                                   lambda *a, **kw: seq.pop(0) if seq else {}), \
+                 mock.patch.object(watch, "repost_empty_parks",
+                                   lambda *a, **kw: []), \
+                 mock.patch.object(watch.time, "sleep", lambda *_: None), \
+                 mock.patch.object(watch.time, "time", lambda: ticks.pop(0)), \
+                 redirect_stdout(out), redirect_stderr(io.StringIO()):
+                watch.main(["--tracked", os.path.join(d, "t.txt"),
+                            "--tasks-dir", d,
+                            "--state", state,
+                            "--max-polls", str(polls)])
+            records = []
+            log = os.path.join(state, "events.jsonl")
+            if os.path.exists(log):
+                with open(log, encoding="utf-8") as f:
+                    records = [json.loads(line) for line in f if line.strip()]
+        return out.getvalue(), records
+
+    def test_aged_fires_at_fifteen_and_at_sixty_minutes(self):
+        t0 = 1_700_000_000.0
+        out, records = self._drive(4, [t0, t0, t0 + 16 * 60, t0 + 61 * 60])
+        self.assertIn("AGED  aaaa1111  15m", out, out)
+        self.assertIn("AGED  aaaa1111  60m", out, out)
+        self.assertEqual(out.count("AGED"), 2, out)
+        aged = [r["detail"] for r in records if r.get("kind") == "AGED"]
+        self.assertEqual(aged, ["15m parked [idle+closer]",
+                                "60m parked [idle+closer]"],
+                         "the production record renders `<n>m parked [<reason>]`, "
+                         "never the bare reason")
+
+    def test_no_aged_before_fifteen_minutes(self):
+        t0 = 1_700_000_000.0
+        out, _ = self._drive(3, [t0, t0, t0 + 14 * 60])
+        self.assertNotIn("AGED", out, out)
+
+
 class RepostTest(unittest.TestCase):
     """The re-post — a parked session the store no longer holds gets a card back.
 
@@ -1280,10 +1418,14 @@ class RepostTest(unittest.TestCase):
         state = {"aaaa1111": ("A", "pick — 1. alpha", "busy+parked-modal", True)}
         self.assertEqual(watch.parked_keys(state), ["aaaa1111"])
 
-    def test_a_settled_idle_park_is_not_parked(self):
-        """The deliberate exclusion, pinned so a later widening is a decision."""
-        state = {"aaaa1111": ("A", "pick — 1. alpha", "idle+closer", True)}
-        self.assertEqual(watch.parked_keys(state), [])
+    def test_a_settled_idle_closer_park_is_parked(self):
+        """⚠️ Formerly pinned as a deliberate EXCLUSION, on the premise that the
+        ownership-filtered feed already carries this shape. It does not: a closer
+        panel is a `Stop` record and `is_open_gate` drops it from `needs-you`
+        (`who-needs-me.py:1247`), so the exclusion left the shape with no
+        escalation at all — 242 production parks of ≥ 15 min, zero `AGED`."""
+        state = {"aaaa1111": ("A", "approve: write one sample", "idle+closer", True)}
+        self.assertEqual(watch.parked_keys(state), ["aaaa1111"])
 
 
 class ParkAgeDurabilityTest(unittest.TestCase):
@@ -1507,6 +1649,27 @@ class AnsweredParkKeysTest(unittest.TestCase):
             None, "error", self._row("closed", "2026-10-10T18:12:32Z")]))
         self.assertEqual(list(out), [self.SID8],
                          "the good row still resolves; the bad ones are skipped")
+
+    def test_history_read_is_narrowed_to_park_keys(self):
+        # The loop only reads `park:` keys, so the read asks the store for only
+        # those — eight watchers reading the whole history every 60 s was 41 %
+        # of the store's allocation (measured 2026-11-03).
+        seen = []
+        resp = mock.MagicMock()
+        resp.read.return_value = b"[]"
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda *a: False
+
+        def urlopen(url, **kw):
+            seen.append(url)
+            return resp
+
+        with mock.patch("urllib.request.urlopen", urlopen):
+            watch.answered_park_keys([self.SID8])
+        self.assertEqual(seen, [
+            f"{watch.STORE}/api/1.0/attention/history"
+            f"?limit={watch.card_lookup.HISTORY_LIMIT}&dedup_key_prefix=park%3A"
+        ])
 
     def test_no_sids_does_not_touch_the_store(self):
         with mock.patch("urllib.request.urlopen",
@@ -1777,6 +1940,13 @@ class IncidentKindTest(unittest.TestCase):
         self.assertEqual(watch.incident_kind("stuck:stream-closed"), "stall")
         self.assertEqual(watch.incident_kind("stuck-tab:no-writes"), "stall")
 
+    def test_blocked_closer_is_a_stall_only_for_the_verbless_closer(self):
+        # The cause still maps to `stall` — `stuck_reason` decides WHO reaches it,
+        # and it now hands over only a `👤 You: nothing` tail. A verb-carrying
+        # closer arrives as `registry:waiting` / `idle+closer` and never gets here,
+        # which is what takes a settled park off the answer-less stall path.
+        self.assertEqual(watch.incident_kind("stuck-tab:blocked-closer"), "stall")
+
     def test_held_reasons_record_nothing(self):
         for reason in ("unregistered", "held:busy", "held:shell", "headless:no-ask",
                        "idle:no-ask"):
@@ -1787,6 +1957,95 @@ class IncidentKindTest(unittest.TestCase):
         # would be a gate the ledger never hears about.
         for reason in watch.PARKED_REASONS:
             self.assertIsNotNone(watch.incident_kind(reason), reason)
+
+
+class BlockedCloserGateTest(unittest.TestCase):
+    """A `🔴 BLOCKED` closer carrying an answerable verb is a PARK, end to end.
+
+    `test_stuck.py` pins the predicate; this pins the CONSEQUENCE through a real
+    transcript fixture and the commit loop, which is where the incident is actually
+    written. `--once` returns before that write, so this drives `--max-polls` — the
+    same reason `CommitLoopTest` exists.
+
+    The two controls are the point, not decoration: the discriminator is *someone
+    was told*. A `👤 You: nothing` panel mints no card, so that worker is still
+    stuck and must still escalate; a dead permission channel is stuck whoever wrote
+    the last panel.
+    """
+
+    def _run(self, records, status):
+        fx = Fixture(records, status)
+        self.addCleanup(fx.cleanup)
+        opened, out = [], io.StringIO()
+        with mock.patch.object(watch, "open_incident",
+                               lambda sid, reason: opened.append((sid, reason))), \
+             mock.patch.object(watch, "open_store_items", lambda *a, **kw: None), \
+             mock.patch.object(watch, "resume_observer", lambda *a, **kw: None), \
+             mock.patch.object(watch.time, "sleep", lambda *_: None), \
+             redirect_stdout(out), redirect_stderr(io.StringIO()):
+            rc = watch.main(["--tracked", fx.tracked, "--tasks-dir", fx.tasks,
+                             "--projects-root", fx.projects,
+                             "--sessions-dir", fx.sessions,
+                             "--state", os.path.join(fx.dir, "state"),
+                             "--max-polls", "3"])
+        self.assertEqual(rc, 0)
+        return opened, out.getvalue()
+
+    def test_a_verb_carrying_closer_opens_no_stuck_incident(self):
+        opened, text = self._run([assistant(text=BLOCKED_ASK)], "waiting")
+        self.assertIn("registry:waiting", text)
+        self.assertTrue(opened, "the gate must still be raised: " + text)
+        self.assertEqual([r for _, r in opened if r.startswith("stuck")], [],
+                         "a parked closer must open no stuck incident: %r"
+                         % (opened,))
+        self.assertEqual(watch.incident_kind(opened[0][1]), "permission")
+
+    def test_a_verbless_closer_still_opens_a_stall_incident(self):
+        opened, text = self._run([assistant(text=BLOCKED_NOTHING)], "waiting")
+        self.assertIn("stuck-tab:blocked-closer", text)
+        self.assertEqual([r for _, r in opened], ["stuck-tab:blocked-closer"])
+        self.assertEqual(watch.incident_kind(opened[0][1]), "stall")
+
+    def test_a_stream_closed_worker_still_opens_a_stall_incident(self):
+        opened, text = self._run(
+            [assistant(text="retrying"),
+             user_result(STREAM_CLOSED_ERROR, True),
+             user_result(STREAM_CLOSED_ERROR, True),
+             user_result(STREAM_CLOSED_ERROR, True)], "waiting")
+        self.assertIn("stuck-tab:stream-closed", text)
+        self.assertEqual([r for _, r in opened], ["stuck-tab:stream-closed"])
+
+    def test_the_parked_worker_produces_one_card_not_two(self):
+        # The `Stop` hook already minted the closer's card, produced by the worker's
+        # own session id — the join `repost_empty_parks` reads. So the watcher's gate
+        # must add nothing: one block, one card.
+        fx = Fixture([assistant(text=BLOCKED_ASK)], "waiting")
+        self.addCleanup(fx.cleanup)
+        state = fx.probe()
+        # The fixture reading, straight through `probe()`: a `waiting` worker whose
+        # tail ends on a verb-carrying `🔴 BLOCKED` closer is gated with a reason that
+        # is neither `stuck:` nor `stuck-tab:`, and that reason is not a stall kind.
+        self.assertEqual(state[SID8][2], "registry:waiting")
+        self.assertNotEqual(watch.incident_kind(state[SID8][2]), "stall")
+        parked = watch.parked_keys(state)
+        self.assertEqual(parked, [SID8], "a verb-carrying closer is a PARK")
+        posted = []
+        with mock.patch.object(watch, "open_store_items",
+                               lambda *a, **kw: ({SID}, set())):
+            watch.repost_empty_parks(
+                parked, {SID8: (TASK, SID)},
+                os.path.join(fx.dir, "events.jsonl"),
+                post=lambda *a, **kw: posted.append(a) or True,
+                park_since={SID8: 0.0})
+        self.assertEqual(posted, [], "the closer's own card is already open")
+
+    def test_a_stall_is_not_a_park_so_it_still_escalates(self):
+        # The contrast that makes the one-card assertion meaningful: the genuinely
+        # stuck class keeps the escalate leg, whose card is the only one it gets —
+        # no closer was ever written for it, so no hook card exists to duplicate.
+        state = {SID8: (TASK, "retrying", "stuck-tab:stream-closed", True)}
+        self.assertEqual(watch.parked_keys(state), [])
+        self.assertEqual(watch.incident_kind("stuck-tab:stream-closed"), "stall")
 
 
 class OpenIncidentTest(unittest.TestCase):
@@ -1885,6 +2144,15 @@ class ParkCardShapeTest(unittest.TestCase):
                          "field — the answer path for a parked closer line")
         payload = cmd[cmd.index("--payload") + 1]
         self.assertIn("parked on the operator", payload)
+
+    def test_an_idle_closer_park_also_keeps_its_message_card(self):
+        """`idle+closer` joined `PARKED_REASONS`, so it now reaches the re-post —
+        and it must reach it as a question, not an `ack`: the park is a closer
+        line the board CAN answer, and `INCIDENT_KIND_BY_REASON` maps it to no
+        `permission` kind."""
+        ok, cmd = self._run("idle+closer")
+        self.assertTrue(ok)
+        self.assertNotIn("--mechanism", cmd)
 
     def test_a_resolved_pane_puts_a_jump_target_on_the_card(self):
         _, cmd = self._run("busy+parked-modal", pane="1907")

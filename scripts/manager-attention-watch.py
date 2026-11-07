@@ -129,9 +129,31 @@ a dead or never-spawned worker — never "no gate". Such a session is HELD rathe
 than cleared: no `CLEARED` is emitted, because nothing was answered.
 
   So a session that dies while gated emits **no** `CLEARED`; the transition is
-  recorded to the event log as `HELD` instead. Nothing was answered, so nothing
-  is announced — a dead worker is neither progress nor a gate, and reporting it
-  as either is the silent direction this file exists to close.
+  recorded to the event log as `HELD` instead, **and announced on this arm's
+  stdout** as `HELD  <sid8>  <label>  ::  <reason>; no CLEARED emitted`.
+
+  A dead worker is neither progress nor a gate, so it is never printed as a
+  `CLEARED` and never re-raised as a `NEW GATE` — those two false readings are
+  the silent direction this file exists to close. But silence is a third false
+  reading: a manager that is not told its worker's gate is gone keeps waiting on
+  a card that no longer exists, and learns of it only by finding the card absent.
+  The announcement is the fact that is missing, not a verdict about the worker.
+
+  ⚠️ **Only the UNREGISTERED cause is announced.** The other `HELD` cause — a
+  session the watcher lost sight of, because it stopped being tracked — is
+  ordinary bookkeeping, fires on every gated session that leaves the tracked set,
+  and stays log-only. `UNTRACKED_DETAIL` is the exact string the emit loop
+  matches to keep the two apart.
+
+  ⚠️ **The announcement is not proof.** `unregistered` is three-valued: a dead or
+  never-spawned worker, an unreadable registry directory, or a registry file
+  caught mid-rewrite all produce it, and a host whose heartbeat store cannot see
+  a headless worker reads the same way. So the line can name a worker that is
+  still parked. It is announced anyway, because the alternative — silence — leaves
+  a manager waiting on a card that is genuinely gone with no signal at all, and
+  the condition self-heals on the next readable poll. The operator-facing rule
+  (confirm the card; several `HELD` lines in one poll mean an outage, not N dead
+  gates) lives in `commands/steps/round-tail.md`.
 
   ⚠️ **The transcript-only predecessor got this wrong in the opposite way, and it
   is worth stating because it is the mirror of the defect above.** Keyed on the
@@ -152,6 +174,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -242,13 +265,31 @@ LIVE_WINDOW = 5 * 60
 # park, at the first poll whose age has crossed it.
 PARK_AGE_THRESHOLDS = (15, 60)
 
-# ⚠️ The three `is_gated` reasons that mean *parked on the operator* — and
-# deliberately not a fourth. `idle+closer` is a park too, but it is the shape the
-# ownership-filtered FEED already carries (`who-needs-me.py --section needs-you`),
-# so it is not the class this arm exists to rescue: this watcher reads the
-# registry and the transcript for the parks the store cannot carry.
+# ⚠️ The four `is_gated` reasons that mean *parked on the operator*. This
+# watcher reads the registry and the transcript for the parks the store cannot
+# carry, and every one of the four is such a park.
 #
-# ⚠️ **`headless+closer` IS included, and it is the one of the three the registry
+# ⚠️ **`idle+closer` IS included, and it used to be excluded on a false premise.**
+# The exclusion read *"it is the shape the ownership-filtered FEED already
+# carries (`who-needs-me.py --section needs-you`)"*. It does not: a closer panel
+# is written by the `Stop` hook with `event: "Stop"`, and `is_open_gate` drops
+# exactly that record unless the caller asks for panels —
+# `if is_rendered_panel(rec) and not include_panels: return False`
+# (`who-needs-me.py:1247`, `is_rendered_panel` = `rec.get("event") == "Stop"`).
+# The `kind` check at `:1239` does not separate them: a closer panel carries
+# `kind: "question"` and passes it. So the feed files every closer panel under
+# *"Rendered panels — a closer line, not a parked gate"* and carries none of
+# them in `needs-you`, and the exclusion removed the only escalation the shape
+# had. Measured 2026-11-01 over 78 production `events.jsonl` files: 587
+# `idle+closer` parks across 313 sessions, 242 of them ≥ 15 minutes, and **zero**
+# `AGED` records for the reason (all 272 `AGED` records were `registry:waiting`).
+# Membership here also feeds `repost_empty_parks`, so an `idle+closer` park whose
+# `Stop`-minted card the store has lost is now re-posted — as a question-shaped
+# `message` card, since `INCIDENT_KIND_BY_REASON` maps it to no `permission`
+# kind — which is the same guarantee `headless+closer` already gets. While the
+# closer's own card is open the re-post stays suppressed (`producer_id` match).
+#
+# ⚠️ **`headless+closer` is the one of the four the registry
 # cannot reach at all.** A headless worker is an in-process SDK `query()` with no
 # pid, so `registry_status` returns `None` and `is_gated` decides on the
 # `headless_live` branch — which is precisely why it needs this arm rather than a
@@ -259,7 +300,14 @@ PARK_AGE_THRESHOLDS = (15, 60)
 # because it was filed from a registry-`waiting` incident; its stated guarantee —
 # *even when the store is lossy, a tracked worker's park must not go unescalated*
 # — is not limited to the reasons that incident happened to show.
-PARKED_REASONS = ("registry:waiting", "busy+parked-modal", "headless+closer")
+#
+# ⚠️ **`registry:waiting` is also how a verb-carrying `🔴 BLOCKED` closer arrives**
+# since `stuck_reason` stopped reading that panel as a stall: such a worker is
+# parked on its own closer, so the gate falls through to the registry branch and
+# this set picks it up — which is what makes the closer's own card the only one it
+# gets (the re-post is suppressed while that card is open).
+PARKED_REASONS = ("registry:waiting", "busy+parked-modal", "headless+closer",
+                  "idle+closer")
 
 # Which incident kind a raised gate records. EVERY reason that can reach `NEW GATE`
 # appears here or in `STALL_REASON_PREFIXES`; an unmapped one records nothing rather
@@ -277,11 +325,24 @@ INCIDENT_KIND_BY_REASON = {
     "registry:waiting": "permission",
     "busy+parked-modal": "permission",
     "headless+closer": "question",
+    # A closer line on a registered `idle` session — same shape as
+    # `headless+closer`, read from the same closer, so the same kind. Before this
+    # entry existed the reason reached `NEW GATE` unmapped and opened no incident,
+    # in breach of this map's own rule above.
+    "idle+closer": "question",
     "closer-unknown": "question",
 }
 
 #: `stuck:` is a headless worker, `stuck-tab:` a registered one — both are a stall:
 #: the worker is not moving, which is a duration rather than a gate someone can answer.
+#:
+#: ⚠️ **A `blocked-closer` cause reaches here only when the closer was VERBLESS**
+#: (`stuck_reason`). A `🔴 BLOCKED` panel carrying an answerable `👤 You:` verb is a
+#: park, so it arrives as `registry:waiting` (records `permission`) or `idle+closer`
+#: (records `question`) instead of a `stall`. That matters because a stall has no
+#: answer path and therefore no close path — filing a settled park as one made the
+#: record escalate-only. `stream-closed` and `permission-failures` are untouched: a
+#: dead channel is a stall whoever wrote the last panel.
 STALL_REASON_PREFIXES = ("stuck:", "stuck-tab:")
 
 
@@ -785,12 +846,28 @@ def stuck_reason(text, tail):
     `blocked-closer` matches the state line as a line PREFIX: the phrase also occurs
     mid-line in a worker's prose about it, and a substring match would fire on a
     worker that is merely discussing a block.
+
+    ⚠️ **`blocked-closer` is the VERBLESS closer, and that is the discriminator.**
+    A `🔴 BLOCKED` line accompanied by an answerable `👤 You:` verb is a worker
+    that reached its own closer and told the operator where to answer — parked,
+    not stuck — so it deliberately does NOT match here, and the gate falls through
+    to the registry branch (`registry:waiting` / `idle+closer`), a park reason
+    that already exists and already routes to the operator. Only a closer whose
+    panel reads `nothing` (or carries no `👤 You:` line at all) means nobody was
+    told, and only that one keeps this cause and keeps escalating.
+
+    ⚠️ **`stream-closed` and `permission-failures` are unaffected**, and their
+    positions on either side of this limb are what says so: a dead channel and an
+    exhausted retry run are stuck whoever wrote the last panel, so a verb-carrying
+    closer sitting on a three-failure run still reads `permission-failures`.
     """
     outcomes = permission_outcomes(tail)
     run = trailing_failures(outcomes)
     if run and any(sc for _, sc in outcomes[len(outcomes) - run:]):
         return "stream-closed"
-    if text and any(l.strip().startswith(BLOCKED_PREFIX) for l in text.splitlines()):
+    if (text
+            and any(l.strip().startswith(BLOCKED_PREFIX) for l in text.splitlines())
+            and not is_ask(closer_body(text))):
         return "blocked-closer"
     if run >= STUCK_PERM_FAILURES:
         return "permission-failures"
@@ -857,10 +934,15 @@ def is_gated(status, body, headless_live=False, stuck=None, pending=None,
     # ⚠️ The one narrowing this accepts, stated rather than left to be discovered:
     # on a host whose heartbeat store is absent or unreadable, `headless_live` is
     # False for every session, so a stuck headless worker there reads
-    # `unregistered` (HELD) instead of `stuck:` (gated). That is the safe
-    # direction — such a host already cannot see a headless worker well enough to
-    # gate `headless+closer` either — and it is the same narrowing `heartbeat_live`
-    # already documents for the registry half.
+    # `unregistered` (HELD) instead of `stuck:` (gated). That was the safe
+    # direction while HELD was silent — such a host already cannot see a headless
+    # worker well enough to gate `headless+closer` either — and it is the same
+    # narrowing `heartbeat_live` already documents for the registry half.
+    # ⚠️ It is no longer free: the emit loop now ANNOUNCES the `unregistered` cause,
+    # so on such a host a stuck headless worker reaches the manager as a `HELD`
+    # line rather than as a carded `stuck:`. Still the safe direction — a gate the
+    # manager is told is gone beats a gate nobody mentions — but it is a false
+    # negative in what the line claims, and `round-tail.md` says so.
     if status is None and not headless_live:
         return None, "unregistered"
     # Deliberately ahead of the registry half: a dead permission channel is the
@@ -1093,6 +1175,17 @@ def gate_transition(prev, sid8, reason, detail):
             content)
 
 
+#: The `detail` of the `HELD` record for a session the watcher lost sight of.
+#:
+#: Exact-matched by the emit loop to keep THIS cause out of the announcement.
+#: A session that stopped being tracked — its task completed, or its
+#: `claude_session_id` changed — is not a dead worker whose gate died, and
+#: announcing it would fire on every gated session that leaves the tracked set.
+#: The `UNREGISTERED` cause is the one that is announced; see `transitions()`.
+UNTRACKED_DETAIL = ("no longer resolved (no transcript, or no longer "
+                    "tracked); no CLEARED emitted")
+
+
 def transitions(prev, key, state):
     """The transitions one poll emits — `(kind, sid8, label, detail)` records.
 
@@ -1140,9 +1233,7 @@ def transitions(prev, key, state):
             # `claude_session_id` changed. Neither is an answer, so neither is a
             # clear — this was the last path emitting a `CLEARED` the code cannot
             # justify.
-            out.append(("HELD", sid8, "",
-                        "no longer resolved (no transcript, or no longer "
-                        "tracked); no CLEARED emitted"))
+            out.append(("HELD", sid8, "", UNTRACKED_DETAIL))
             continue
         if state[sid8][3] is None:
             # Two causes, and they need OPPOSITE handling.
@@ -1163,7 +1254,8 @@ def transitions(prev, key, state):
                 continue
             # UNREGISTERED: a dead or never-spawned worker. Nothing was answered
             # here either, but there is nothing left to hold, so the membership is
-            # dropped and the transition is recorded rather than announced.
+            # dropped and the transition is recorded AND announced — the emit loop
+            # prints this cause and not the lost-sight one (see UNTRACKED_DETAIL).
             out.append(("HELD", sid8, state[sid8][0],
                         f"{reason}; no CLEARED emitted"))
             continue
@@ -1287,8 +1379,9 @@ def answered_park_keys(sids, store=STORE, timeout=None):
     acts on it by re-posting, so an unreachable store would re-post for every
     parked worker on every poll.
 
-    ⚠️ **One read for the whole poll, never one per session.** The page is tens of
-    thousands of items; the caller passes every candidate at once for that reason,
+    ⚠️ **One read for the whole poll, never one per session.** On a store older
+    than attention-controller v0.67.0 the page is tens of thousands of items (a
+    current store narrows it to `park:` keys); the caller passes every candidate at once for that reason,
     and this returns early when there are none — an idle arm must not depend on
     the store being up.
     """
@@ -1301,7 +1394,15 @@ def answered_park_keys(sids, store=STORE, timeout=None):
     try:
         with urllib.request.urlopen(
                 f"{store}/api/1.0/attention/history"
-                f"?limit={card_lookup.HISTORY_LIMIT}",
+                f"?limit={card_lookup.HISTORY_LIMIT}"
+                # ⚠️ Narrowed server-side to `park:` keys — the only ones the
+                # loop below reads. Measured 2026-11-03: eight of these
+                # watchers read the WHOLE history every 60 s and the endpoint
+                # was 41 % of the store's allocation. A store that predates
+                # the parameter (< attention-controller v0.67.0) ignores it;
+                # the `startswith("park:")` check below still filters, so
+                # either deploy order is safe.
+                + "&dedup_key_prefix=" + urllib.parse.quote("park:", safe=""),
                 timeout=timeout) as resp:
             payload = json.loads(resp.read().decode("utf-8") or "[]")
         # ⚠️ Strict, unlike `card_lookup.items_of`, which tolerates a wrapper by
@@ -1749,8 +1850,9 @@ def repost_empty_parks(parked, entries, log_path, post=None, park_since=None,
             # ⚠️ An ANSWERED park is an answered QUESTION, not a store fault. The
             # suppression is open-scoped, so the operator's answer leaves no open
             # item and that absence used to read as a lost record. Recorded rather
-            # than announced, like `HELD` and `LIVENESS`: a suppression the
-            # operator already acted on needs no manager turn.
+            # than announced, like `LIVENESS` (and like the lost-sight `HELD`
+            # cause): a suppression the operator already acted on needs no
+            # manager turn.
             log_event(log_path, "ANSWERED", sid8, name,
                       f"store holds no open item for {sid8}, but its latest "
                       f"park:{sid8} record is ANSWERED "
@@ -1929,9 +2031,31 @@ def main(argv=None):
                 for kind, sid8, label, detail in transitions(prev, key, state):
                     if sid8 not in stable:
                         continue
-                    # A HELD transition is recorded, never announced: a dead
-                    # worker is neither progress nor a gate, and reporting it as
-                    # either is the silent direction this file exists to close.
+                    # A HELD transition is neither progress nor a gate, so it is
+                    # never printed as a `CLEARED` or re-raised as a `NEW GATE`.
+                    # The UNREGISTERED cause IS announced: the worker's gate is
+                    # gone, and a manager that is not told keeps waiting on a card
+                    # that no longer exists. The lost-sight cause stays log-only —
+                    # it fires on every gated session that leaves the tracked set,
+                    # which is ordinary bookkeeping rather than a dead gate. See
+                    # UNTRACKED_DETAIL for the discriminator.
+                    #
+                    # ⚠️ `unregistered` is a THREE-valued verdict, not proof the
+                    # worker is dead: `registry_status()` also yields `None` for an
+                    # unreadable registry dir and for a session whose registry file
+                    # is mid-rewrite. A registry outage spanning two polls therefore
+                    # announces this line for gated workers that are still alive.
+                    # Accepted rather than gated on positive evidence, because
+                    # silence was the larger error — a manager waiting on a card
+                    # that is genuinely gone has no other signal — and because the
+                    # condition self-heals on the next readable poll, so a line that
+                    # does not repeat is its own false-positive signature.
+                    # ⚠️ Do NOT lean on the stderr warning to identify it: the
+                    # `warned` set lives for the whole process, so only the FIRST
+                    # outage in an arm prints "registry unreadable"; a second one is
+                    # silent. `commands/steps/round-tail.md` carries the operator-
+                    # facing rule — confirm the card, and read several `HELD` lines
+                    # in one poll as an outage rather than as N dead gates.
                     if kind == "NEW GATE":
                         print(f"NEW GATE  {sid8}  {label[:46]}  ::  {detail}",
                               flush=True)
@@ -1944,6 +2068,15 @@ def main(argv=None):
                         open_incident(entries.get(sid8, (None, ""))[1] or sid8,
                                       state[sid8][2])
                     elif kind == "HELD":
+                        # `transitions()` gives both HELD causes the same kind,
+                        # because both mean "no CLEARED is earned". They differ in
+                        # whether the manager should hear about it, so the split
+                        # is by `detail`, exact-matched against the one string the
+                        # lost-sight branch emits — a prefix test would also match
+                        # an UNREGISTERED detail that happened to start the same.
+                        if detail != UNTRACKED_DETAIL:
+                            print(f"HELD  {sid8}  {label[:46]}  ::  {detail}",
+                                  flush=True)
                         prev.pop(sid8, None)
                     else:
                         print(f"CLEARED  {sid8}", flush=True)
@@ -1992,9 +2125,11 @@ def main(argv=None):
             # would cost 30 turns per 30-minute arm. The event log is the surface
             # the manager is already told to read (`commands/goal-loop.md`
             # step 7), and nothing consumes it programmatically, so a fourth `kind`
-            # is additive rather than a schema change. `HELD` is recorded but never
-            # announced for the same reason; this is its counterpart on the
-            # liveness axis.
+            # is additive rather than a schema change. `HELD` is announced on
+            # stdout for the UNREGISTERED cause only — that one is a dead gate a
+            # manager must stop waiting on — and recorded-but-not-announced for
+            # the lost-sight cause, for this same reason. `LIVENESS` is the
+            # counterpart on the liveness axis.
             #
             # Read it as the runbook reads the loop's own marker (§ Sweep output):
             # the line's PRESENCE answers *alive or stuck?* and its AGE is what

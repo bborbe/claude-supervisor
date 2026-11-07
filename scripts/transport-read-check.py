@@ -44,7 +44,24 @@ SITE_LIST = {
     ("jump.py", "activate_pane_by_id"), ("jump.py", "activate_tab"),
     ("jump.py", "current_window"), ("jump.py", "main"),
     ("jump.py", "pane_sessions"), ("jump.py", "wezterm_panes"),
-    ("session-holds.py", "pane_title"),
+    # ⚠️ As of 2026-10-12 `pane_title` is a CALLER here, not the transport call: the
+    # `wezterm cli list` read moved into `panes()`, which the walk derives as the seed.
+    # It keeps the three-state contract — `None` on a failed query, `[]` only for a
+    # reachable WezTerm holding nothing — because the Hold-window predicate joins
+    # through it, and a failed read collapsed into "no panes" would silently un-hold
+    # every pane in the Hold window. `pane_title` stays listed for the closure, the
+    # same way every other caller is.
+    ("session-holds.py", "panes"), ("session-holds.py", "pane_title"),
+    # added 2026-10-12 — the SAME Hold-window predicate inlined into the four
+    # consumers that decide whether a session is held: `manager-predispatch.py`
+    # (digest input), `notify-gate.py` (escalation suppression), `restart-worker.py`
+    # (restart refusal) and `orphan-candidates.py` (candidate drop). Each carries its
+    # own `panes()` with the identical three-state contract — `None` on a failed
+    # `wezterm cli list`, `[]` only for a reachable WezTerm holding nothing (or an
+    # absent `wezterm` binary). A failed read collapsed into "no panes" would silently
+    # un-hold every pane in the Hold window at that consumer.
+    ("manager-predispatch.py", "panes"), ("notify-gate.py", "panes"),
+    ("restart-worker.py", "panes"), ("orphan-candidates.py", "panes"),
     # added 2026-10-05 — `open-items.py`'s pane-existence probe, the read half of the new
     # origin record. `classify` asks whether an entry's recorded raising pane still exists;
     # `live_panes` is that query, and it must keep the same three-state contract as every
@@ -101,6 +118,13 @@ SITE_LIST = {
     # `0 footers` from a mux socket that never answered — precisely the false green it
     # exists to prevent. Both are driven into the three states below rather than listed.
     ("manager-menu-footer.py", "wezterm_panes"), ("manager-menu-footer.py", "pane_lines"),
+    # added 2026-11-06 — `session-exit-record.py`'s process-tree read, behind the observer's
+    # session-id stamp. One `ps -Ao pid=,ppid=,comm=` snapshot per heartbeat, walked to the
+    # pane's own `claude`. It returns `None` for a failed query, never `{}`: a `ps` that did
+    # not answer cannot prove the pane holds no `claude`, and the caller then keeps the id it
+    # already carries rather than reading the tree as empty. Driven into the three states
+    # below.
+    ("session-exit-record.py", "_process_table"),
     # in-repo callers that hold no transport call of their own
     ("who-needs-me.py", "panes"),          # present pre-audit only; deleted by this change
     ("who-needs-me.py", "pane_for"), ("who-needs-me.py", "live_pane_ids"),
@@ -136,6 +160,16 @@ SITE_LIST = {
     # deliberately not driven into the three states below — the card is posted either
     # way, so the read's failure is a degraded affordance and not a gate of its own.
     ("manager-attention-watch.py", "pane_for_session_name"),
+    # added 2026-10-31 — `fleet-keeper.py`'s `wezterm` helper, behind the re-arm the fleet
+    # keeper sends into the pane its own resume just spawned (`get-text` for the bounded
+    # readiness wait, `send-text` for the command and its separate submit). It keeps the
+    # three states apart by returning `(rc, stdout)`: a failed or hung query is `rc != 0`,
+    # a reachable pane with nothing on it is `(0, "")`, and `rearm()` acts only on `rc == 0`
+    # — so an unreadable pane can never satisfy the readiness wait and get typed into, which
+    # is the same reason `spawn-goal.py`'s wait refuses to read absence as arming. Enumerated
+    # so the mechanism and this list agree; like `spawn-goal.py`'s `send` it is also an
+    # ACTION, so it is deliberately not driven into the three states below.
+    ("fleet-keeper.py", "wezterm"),
 }
 
 
@@ -194,9 +228,15 @@ POPULATED = {
     ("oi", "live_panes"): '[{"pane_id": "204", "title": "t"}]',
     ("pvc", "wezterm_panes"): '[{"pane_id": "204", "tty_name": "/dev/ttys001"}]',
     ("pvc", "_pid_ttys"): "101 ttys001",
+    ("sh", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
+    ("mp", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
+    ("ng", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
+    ("rw", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
+    ("oc", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
     ("mmf", "wezterm_panes"): '[{"pane_id": "204", "title": "t"}]',
     ("mmf", "pane_lines"): "context\nEnter to select",
     ("sg", "pane_text"): "  ⎿  Goal set: Task \"t\" is finished.",
+    ("ser", "_process_table"): "101 1 claude",
 }
 
 
@@ -268,9 +308,15 @@ def main():
             ("sp", "stop-probe.py"),
             ("oi", "open-items.py"),
             ("pvc", "plugin-version-census.py"),
+            ("sh", "session-holds.py"),
+            ("mp", "manager-predispatch.py"),
+            ("ng", "notify-gate.py"),
+            ("rw", "restart-worker.py"),
+            ("oc", "orphan-candidates.py"),
             ("wnmh", "who-needs-my-help.py"),
             ("mmf", "manager-menu-footer.py"),
             ("sg", "spawn-goal.py"),
+            ("ser", "session-exit-record.py"),
         )
     }
 
@@ -296,6 +342,9 @@ def main():
         ("fs", "live_processes", ()), ("sp", "gate_processes", ()),
         ("oi", "live_panes", ()),
         ("pvc", "wezterm_panes", ()), ("pvc", "_pid_ttys", ([1],)),
+        ("sh", "panes", ()),
+        ("mp", "panes", ()), ("ng", "panes", ()),
+        ("rw", "panes", ()), ("oc", "panes", ()),
         # The viewport read takes a pane id; any id reaches the subprocess, and the
         # three states are what matter — broken must be `None`, and a reachable
         # transport answering with nothing must not become a failure.
@@ -309,6 +358,8 @@ def main():
         # same reason as the pair above: an entry this loop never reaches is a false green
         # for exactly the read it claims to protect.
         ("sg", "pane_text", (1,)),
+        # added 2026-11-06 — the observer's process-tree read, driven like `pvc._pid_ttys`.
+        ("ser", "_process_table", ()),
     ]
     if args.capture:
         print(f"== three-state captures — {os.path.abspath(args.tree)}")

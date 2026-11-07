@@ -32,7 +32,14 @@ Seven refusals, each exit 1 with a stable reason token as the first line of outp
                       file and no launcher script is newer than the session's own
                       start, so restarting it buys nothing.
 
-Exit codes: 0 success, 1 refusal, 2 usage error.
+Exit codes: 0 success, 1 refusal, 2 usage error, 3 environment fault.
+
+An environment fault is NOT a refusal. `environment-fault` (exit 3) means this script's
+own environment is broken — today, `vault-cli` cannot be found, so no launcher can be
+resolved for ANY session. A refusal is a decision about one target; an environment fault
+is a defect in the caller, and it must never print as a refusal. Measured 2026-11-01: a
+launchd agent whose `PATH` lacked `vault-cli` printed a launcher refusal on ~1000 ticks,
+so an agent that had never worked read as a guard correctly declining.
 
 ⚠️ **A manager IS restarted — there is no `manager-target` refusal.** The role predicate
 still runs, but it now selects the resume colour and the re-arm note rather than a
@@ -65,10 +72,18 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# The exit-record writer, which sits beside this script. Passed to the spawned pane as an
+# absolute path through `env`, because the pane inherits wezterm's mux-server environment
+# and cannot resolve `$CLAUDE_PLUGIN_ROOT` for a script this file already knows the
+# location of.
+RECORD_SCRIPT = os.path.join(HERE, "session-exit-record.py")
 
 # The registry. `SUPERVISOR_SESSIONS_DIR` first so a drill can point at a fixture tree;
 # never a hardcoded home path in committed content.
@@ -341,6 +356,44 @@ def mcp_config_paths(argv):
 SAFE_LAUNCHER = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 
+# Where `vault-cli` is installed when the caller's `PATH` does not carry it. launchd gives a
+# job no login shell, so a bare-name lookup is only as good as the plist's `PATH`; resolve
+# the lookup here instead of depending on it (`go install` → GOPATH/bin, Homebrew).
+VAULT_CLI_LOCATIONS = (
+    "~/Documents/workspaces/go/bin/vault-cli",
+    "~/go/bin/vault-cli",
+    "/opt/homebrew/bin/vault-cli",
+    "/usr/local/bin/vault-cli",
+)
+
+ENV_FAULT = "environment-fault"
+
+
+def find_vault_cli():
+    """Absolute path of an executable `vault-cli`, or `None` when none exists.
+
+    `SUPERVISOR_VAULT_CLI` overrides the search (tests, drills). Otherwise `PATH`, then
+    `$GOPATH/bin`, then `VAULT_CLI_LOCATIONS`.
+    """
+    override = os.environ.get("SUPERVISOR_VAULT_CLI")
+    if override is not None:
+        path = os.path.expanduser(override)
+        return path if os.path.isfile(path) and os.access(path, os.X_OK) else None
+    found = shutil.which("vault-cli")
+    if found:
+        return os.path.abspath(found)
+    candidates = []
+    gopath = os.environ.get("GOPATH")
+    if gopath:
+        candidates.append(os.path.join(gopath, "bin", "vault-cli"))
+    candidates.extend(VAULT_CLI_LOCATIONS)
+    for cand in candidates:
+        path = os.path.expanduser(cand)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
 def vault_configs():
     """`[{name, path, claude_script}]` from vault-cli config, or `None` when unreadable.
 
@@ -353,8 +406,11 @@ def vault_configs():
             with open(os.path.expanduser(override), encoding="utf-8") as fh:
                 data = json.load(fh)
         else:
+            vault_cli = find_vault_cli()
+            if vault_cli is None:
+                return None
             out = subprocess.run(
-                ["vault-cli", "config", "list", "--output", "json"],
+                [vault_cli, "config", "list", "--output", "json"],
                 capture_output=True, text=True, timeout=15,
             )
             if out.returncode != 0:
@@ -413,6 +469,13 @@ def resolve_launcher(sid, cwd, fb, subject=None):
     override = os.environ.get("SUPERVISOR_LAUNCHER")
     if override:
         return override, "override"
+    # A missing `vault-cli` is the caller's environment, not this session's state: report
+    # it under its own token so `main` exits 3, never as a launcher refusal.
+    if not os.environ.get("SUPERVISOR_VAULT_CONFIG") and find_vault_cli() is None:
+        return None, (
+            f"{ENV_FAULT}: vault-cli not found on PATH ({os.environ.get('PATH', '')}) "
+            f"nor at {', '.join(VAULT_CLI_LOCATIONS)}"
+        )
     configs = vault_configs()
     if configs is None:
         return None, "vault-cli config could not be read"
@@ -526,7 +589,13 @@ def changed_inputs(load_path, load_mtime, argv, launcher, started):
 
 
 def describe_changed(changed):
-    """`plugin version (0.1.0); MCP config (/p)` — one line naming every changed input."""
+    """`plugin version (0.1.0); MCP config (/p)` — one line naming every changed input.
+
+    Empty means a `--reason lapse` restart: the loop stopped, no input changed. Said out loud
+    rather than left blank, so the caller cannot read an empty string as a missing report.
+    """
+    if not changed:
+        return "nothing — the loop stopped, no input changed (`--reason lapse`)"
     return "; ".join(f"{label} ({what})" for label, what in changed)
 
 
@@ -582,15 +651,39 @@ def resume_command(sid, title, chip, cwd, launcher):
     manager relaunched as a worker on 2026-09-18. The quotes are dropped here, deliberately.
     """
     script = launcher
+    # ⚠️ NO `exec`, and the trap is why. `exec` replaces the pane's shell with the launcher,
+    # so no process is left to `waitpid` and the session's exit status stops existing — a
+    # SIGKILLed worker then leaves no record anywhere, which is the whole gap
+    # `session-exit-record.py` closes. Measured 2026-10-27 on this shape: as a child with
+    # `trap _sx EXIT`, a `kill -9` records `rc=137`; behind `exec`, the trap cannot fire.
+    # The writer path travels as an `env` assignment because a spawned pane inherits
+    # wezterm's mux-server environment, not this process's.
+    #
+    # The observer is started BEFORE the trap and BEFORE the launcher, and it detaches into
+    # its own session, so it outlives a kill of this whole process group. It watches `$$`
+    # — this shell — because the shell outlives the launcher and dies exactly when the group
+    # is killed, which is the case the trap cannot record. Its own `append` call writes the
+    # spawn marker first so a record that begins at `kind=spawn` proves the writer was wired.
+    trap = (
+        '_sx() { rc=$?; "$SESSION_EXIT_RECORD" append --session "'
+        + sid
+        + '" --pid $$ --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn '
+        '--session "'
+        + sid
+        + '" --pid $$ || true; "$SESSION_EXIT_RECORD" observe --pid $$ --session "'
+        + sid
+        + '" || true; trap _sx EXIT; '
+    )
     inner = (
         "unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN "
         "CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; "
-        f'exec "{script}" --resume {sid} -n "{title}" "/color {chip}"'
+        + trap
+        + f'"{script}" --resume {sid} -n "{title}" "/color {chip}"'
     )
     argv = ["wezterm", "cli", "spawn"]
     if cwd:
         argv += ["--cwd", cwd]
-    return argv + ["--", "bash", "-lc", inner]
+    return argv + ["--", "env", f"SESSION_EXIT_RECORD={RECORD_SCRIPT}", "bash", "-lc", inner]
 
 
 HOLDS_PATH = os.path.expanduser(
@@ -629,18 +722,451 @@ def held_reason(session_id):
     return entry.get("reason") or "held"
 
 
+# --------------------------------------------------------------------------- #
+# the Hold window -- the second source of heldness
+# --------------------------------------------------------------------------- #
+#
+# A pane parked in the WezTerm role map's Hold window is held with no store entry
+# at all: the operator's statement is the pane's POSITION, not a `hold` call. It is
+# resolved at read time from the map's `Hold.window_id` plus `wezterm cli list`, and
+# never persisted -- a stored entry would outlive the pane leaving the window.
+# Inlined, like `read_holds` above: the plugin's scripts do not import each other.
+
+# The WezTerm role map. Same variable the server reads (`server/config.mjs`) and
+# `session-holds.py` reads.
+ROLE_MAP = os.environ.get("SUPERVISOR_ROLE_MAP") or os.path.expanduser(
+    "~/.cache/wezterm-role-map.json"
+)
+
+
+def panes():
+    """Every WezTerm pane, or `None` when the query FAILED.
+
+    ⚠️ `None`, never `[]`: a failed `wezterm cli list` cannot prove a pane is gone
+    any more than it can prove one is live. `[]` is reserved for a transport that
+    answered with zero panes, and for a machine with no `wezterm` BINARY -- an
+    absent transport has no panes, and the Hold window is a WezTerm concept. Only
+    `FileNotFoundError` reads that way; any other `OSError` is a genuine failure and
+    stays `None`. See `docs/pane-reads.md`.
+    """
+    try:
+        result = subprocess.run(
+            ["wezterm", "cli", "list", "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return []
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        listing = json.loads(result.stdout)
+    except ValueError:
+        return None
+    return listing if isinstance(listing, list) else None
+
+
+# The activity glyph WezTerm puts in front of a pane title (`✳` active, `◑`/`◐`
+# otherwise). Decoration on the title, never part of the name.
+_GLYPH = re.compile(r"^[^\w\s]{1,2}\s+")
+
+
+def registry_names():
+    """name -> session id, for the pane join. Later entries win on a clash."""
+    names = {}
+    for path in glob.glob(os.path.join(SESSIONS_DIR, "*.json")):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        sid = data.get("sessionId") or data.get("session_id")
+        name = data.get("name")
+        if sid and name:
+            names[name] = sid
+    return names
+
+
+def session_pane(session_id, listing):
+    """The pane currently showing this session, or None when the listing has none.
+
+    The registry carries no pane id, so a session id joins to its pane through the
+    registry `name`, which is what the tab TITLE carries.
+    """
+    names = registry_names()
+    for pane in listing:
+        title = pane.get("title") or ""
+        name = title if title in names else _GLYPH.sub("", title)
+        if names.get(name) == session_id:
+            return pane.get("pane_id")
+    return None
+
+
+def pane_window(pane_id, listing):
+    """The WezTerm window id owning this pane, or None when the listing has none.
+
+    Read straight off the pane record, with no name join, so it answers for a
+    Hold-window pane whose title the registry does not know.
+    """
+    for pane in listing:
+        if str(pane.get("pane_id")) == str(pane_id):
+            window = pane.get("window_id")
+            if isinstance(window, bool) or not isinstance(window, int):
+                return None
+            return window
+    return None
+
+
+def hold_window_id():
+    """The role map's Hold window id, or None when it cannot be read.
+
+    Read directly from the map's `Hold.window_id`, never through the server's role
+    map: its `ROLES` deliberately excludes Hold, because the Hold window is a
+    parking lot rather than a role and is never spawned into.
+    """
+    try:
+        with open(ROLE_MAP, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    entry = data.get("Hold") if isinstance(data, dict) else None
+    window = entry.get("window_id") if isinstance(entry, dict) else None
+    if isinstance(window, bool) or not isinstance(window, int):
+        return None
+    return window
+
+
+def in_hold_window(target):
+    """Whether session `target` sits in the role map's Hold window.
+
+    Three states, per `docs/pane-reads.md`: `True` in the window, `False` not in
+    it, `None` when the pane listing could NOT be read, so the question is
+    unanswered. A missing role map, an unreadable one, or one carrying no `Hold`
+    key is NOT that third state -- it is the documented fallback to explicit holds
+    only, and it answers `False`.
+    """
+    window = hold_window_id()
+    if window is None:
+        return False
+    listing = panes()
+    if listing is None:
+        return None
+    pane = target if str(target).isdigit() else session_pane(target, listing)
+    if pane is None:
+        return False
+    return pane_window(pane, listing) == window
+
+
+def hold_refusal(session_id):
+    """The refusal a hold warrants for `session_id`, or `(None, None)` when free.
+
+    Returns `(token, detail)`. A hold -- store entry OR a pane in the WezTerm Hold
+    window -- returns `held-session`. ⚠️ A FAILED pane read returns a distinct
+    `hold-unreadable` refusal rather than `(None, None)`, and that is the decision
+    for THIS caller: a restart KILLS a process, so a broken transport must never be
+    read as "not held" -- that is the direction that restarts a session the operator
+    parked. `docs/pane-reads.md` prescribes *refuse non-zero, naming the transport*
+    for a caller that already exits non-zero, which this one does on every refusal.
+    """
+    reason = held_reason(session_id)
+    if reason is not None:
+        return "held-session", (
+            f"session {session_id} carries an operator hold ({reason}); only the "
+            "operator releases it -- see the /supervisor:hold skill"
+        )
+    verdict = in_hold_window(session_id)
+    if verdict is None:
+        return "hold-unreadable", (
+            f"the WezTerm pane list could not be read, so whether session "
+            f"{session_id} sits in the operator's Hold window is unknown; refusing "
+            "rather than restarting a session the operator may have parked"
+        )
+    if verdict:
+        return "held-session", (
+            f"session {session_id} sits in the operator's WezTerm Hold window; only "
+            "the operator releases it -- see the /supervisor:hold skill"
+        )
+    return None, None
+#: The manager registration `fleet-register.py` writes — `{subject, branch, vault}` keyed on
+#: the session id. It is the one record that outlives the process: the registry entry
+#: (`~/.claude/sessions/<pid>.json`) is deleted on death, this is not. Same override chain
+#: `fleet-keeper.py` reads it through.
+WORKER_MANAGER_DIR = os.path.expanduser(
+    os.environ.get("SUPERVISOR_WORKER_MANAGER_DIR")
+    or os.environ.get("WORKER_MANAGER_STATE_DIR")
+    or "~/.claude/state/worker-manager"
+)
+
+
+#: Where `wezterm` lives when no `PATH` reaches it. ⚠️ The fleet keeper is a launchd job whose
+#: PATH is `/usr/bin:/bin:/usr/sbin:/sbin` by design (user-writable dirs would shadow system
+#: tools), so a bare `wezterm` is FileNotFoundError there — the failure that left the
+#: 2026-11-01 keeper unable to resume a manager it had killed. Resolved by absolute path, the
+#: same way `find_vault_cli` resolves `vault-cli`, rather than by widening that PATH.
+WEZTERM_LOCATIONS = (
+    "/Applications/WezTerm.app/Contents/MacOS/wezterm",
+    "~/Applications/WezTerm.app/Contents/MacOS/wezterm",
+    "/opt/homebrew/bin/wezterm",
+    "/usr/local/bin/wezterm",
+)
+
+#: The exit-record store. Since v0.243.0 every heartbeat carries the session id, so a pane
+#: already running — or just spawned for — a session is visible here before the session
+#: registers itself in `~/.claude/sessions/`.
+SESSION_EXIT_DIR = os.path.expanduser(
+    os.environ.get("SUPERVISOR_SESSION_EXIT_DIR") or "~/.claude/state/session-exit"
+)
+
+#: How recent a pane line naming the session must be to count as "that session is running
+#: or starting somewhere". Comfortably above the observer's 30 s heartbeat interval.
+IN_FLIGHT_WINDOW = 600
+
+
+def find_wezterm():
+    """Absolute path of an executable `wezterm`, or `None`. `SUPERVISOR_WEZTERM` overrides."""
+    override = os.environ.get("SUPERVISOR_WEZTERM")
+    if override is not None:
+        path = os.path.expanduser(override)
+        return path if os.path.isfile(path) and os.access(path, os.X_OK) else None
+    found = shutil.which("wezterm")
+    if found:
+        return os.path.abspath(found)
+    for cand in WEZTERM_LOCATIONS:
+        path = os.path.expanduser(cand)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def unparseable_registry_entries(directory):
+    """Names of `*.json` registry files that cannot be parsed, or `None` when unreadable.
+
+    On the normal path a skipped file fails safe. On `--absent`, absence IS the licence, so a
+    half-written file — possibly the very session, mid-rewrite — must never count as absence.
+    """
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return None
+    bad = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as fh:
+                rec = json.load(fh)
+        except (OSError, ValueError, RecursionError):
+            bad.append(name)
+            continue
+        if not isinstance(rec, dict):
+            bad.append(name)
+    return bad
+
+
+def recent_pane_for(sid, now=None, window=IN_FLIGHT_WINDOW):
+    """`(pane file, line)` of a recent pane record naming `sid` with no end after it, or `None`.
+
+    A resume through any OTHER path (`/supervisor:open`, `/supervisor:restart`, by hand) writes
+    a `spawn` line before `claude` boots and registers itself, so for that window the registry
+    check alone would pass and two copies would run. This closes it.
+    """
+    now = time.time() if now is None else now
+    try:
+        names = [n for n in os.listdir(SESSION_EXIT_DIR) if n.startswith("pane-") and n.endswith(".log")]
+    except OSError:
+        return None
+    for name in names:
+        last = None
+        try:
+            with open(os.path.join(SESSION_EXIT_DIR, name), encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if f"\tsession={sid}\t" in line:
+                        last = line
+        except OSError:
+            continue
+        if last is None:
+            continue
+        kind = next((f[5:] for f in last.split("\t") if f.startswith("kind=")), "")
+        if kind not in ("spawn", "heartbeat"):
+            continue
+        try:
+            stamp = datetime.datetime.strptime(last.split("\t", 1)[0], "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            continue
+        age = now - stamp.replace(tzinfo=datetime.timezone.utc).timestamp()
+        if age <= window:
+            return name, last.rstrip("\n")
+    return None
+
+
+def read_registration(sid):
+    """The manager registration for `sid`, or `None` when absent or unreadable."""
+    if not sid or any(ch in sid for ch in ("/", "\\", "\x00")) or sid in (".", ".."):
+        return None
+    try:
+        with open(os.path.join(WORKER_MANAGER_DIR, f"{sid}.json"), encoding="utf-8") as fh:
+            rec = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def resume_absent(sid, sessions_dir, dry_run):
+    """Resume a session whose process is GONE. Signals nothing; exits 0 only on a resume.
+
+    The normal path cannot do this: it refuses `unknown-session-id` when no registry entry
+    carries the id, and a dead session's entry is deleted with it — so a Fleet Manager that
+    died could never be brought back (measured 2026-11-06: three deaths in one day). This
+    entry inverts the precondition and holds no kill path at all.
+
+    Refusals, each first-line token + exit 1, every one before the spawn:
+      `not-absent`         a registry entry carries the id, or the registry is unreadable —
+                           the process may be alive, and resuming it would run two copies
+      `held-session`       an operator hold; outranks everything, exactly as on the normal path
+      `unknown-session-id` no manager registration, so no vault to resume into
+    """
+    # FIRST, before anything reads a record's fields: a file that is half-written, or valid
+    # JSON that is not an object, must refuse with its token rather than crash `find_target`.
+    bad = unparseable_registry_entries(sessions_dir or SESSIONS_DIR)
+    if bad is None or bad:
+        return refuse("not-absent", f"registry entries could not be parsed ({', '.join(bad or ['the directory'])}); "
+                                    f"a half-written record may be {sid} itself, so its absence is unproven")
+    entries = registry_entries(sessions_dir)
+    if entries is None:
+        return refuse("not-absent", f"the registry at {sessions_dir or SESSIONS_DIR} could not "
+                                    f"be read, so it cannot be proved that {sid} is gone")
+    path, _rec = find_target(entries, sid)
+    if path is not None:
+        return refuse("not-absent", f"a registry entry still carries session {sid}; the process "
+                                    "may be alive — use the normal restart, never --absent")
+    in_flight = recent_pane_for(sid)
+    if in_flight is not None:
+        return refuse("not-absent", f"{in_flight[0]} names session {sid} within the last "
+                                    f"{IN_FLIGHT_WINDOW}s with no end — it is running or being "
+                                    "resumed elsewhere; a second copy would split the conversation")
+
+    held = held_reason(sid)
+    if held is not None:
+        return refuse("held-session", f"session {sid} carries an operator hold ({held}); only the "
+                                      "operator releases it -- see the /supervisor:hold skill")
+
+    reg = read_registration(sid)
+    if reg is None:
+        return refuse("unknown-session-id", f"no manager registration for {sid} under "
+                                            f"{WORKER_MANAGER_DIR}, so there is no vault to resume into")
+
+    vault_name = str(reg.get("vault") or "").strip()
+    configs = vault_configs()
+    vault = next((v for v in (configs or []) if isinstance(v, dict) and v.get("name") == vault_name), None)
+    cwd = os.path.expanduser(str(vault.get("path") or "").strip()) if vault else ""
+    if not cwd or not os.path.isdir(cwd):
+        print(f"❌ error: the registration names vault {vault_name!r}, which resolves to no "
+              f"existing directory — resuming without a cwd strands the session on a "
+              f"workspace-trust dialog")
+        return 1
+
+    fb = load_sibling("fleet-board.py")
+    subject = str(reg.get("subject") or "").strip() or sid[:8]
+    branch = str(reg.get("branch") or "").strip() or "fleet"
+    # An explicit manager subject: `fleet-board.py`'s `manager_subject` knows only topic and
+    # goal, so a fleet manager resolved through it would fall to the WORKER launcher rule.
+    launcher, launcher_source = resolve_launcher(sid, cwd, fb, subject=(branch, subject))
+    if launcher is None:
+        if launcher_source.startswith(ENV_FAULT):
+            print(ENV_FAULT)
+            print(f"🛑 environment fault (not a refusal): {launcher_source[len(ENV_FAULT) + 2:]}")
+            return 3
+        print(f"❌ error: no launcher could be resolved for {sid} ({launcher_source})")
+        return 1
+
+    wezterm = find_wezterm()
+    if wezterm is None:
+        print("❌ error: no wezterm found on PATH or at a known install location "
+              f"({', '.join(WEZTERM_LOCATIONS)}) — nothing was spawned")
+        return 1
+
+    chip = fb.MANAGER_COLOUR
+    header = (f"🔄 restart-worker --absent · session {sid[:8]} · {subject!r}"
+              f"{' · dry-run' if dry_run else ''}")
+    if dry_run:
+        print(header)
+        print(f"   launcher: {launcher} ({launcher_source})")
+        print(f"   wezterm: {wezterm}")
+        print(f"   ✅ would resume session {sid} — nothing to kill, the process is gone")
+        print(f"   ↪ would resume into {cwd}")
+        return 0
+
+    # One resume per session per window, across every --absent caller: an O_EXCL lock that
+    # outlives this process for `IN_FLIGHT_WINDOW`, so a second call during the new pane's
+    # boot (before it registers or heartbeats) is refused instead of starting a second copy.
+    # Taken BEFORE any output, so a refusal's token stays the first line a caller reads.
+    lock = os.path.join(SESSION_EXIT_DIR, f"absent-resume-{sid}.lock")
+    try:
+        os.makedirs(SESSION_EXIT_DIR, exist_ok=True)
+        if os.path.exists(lock) and time.time() - os.path.getmtime(lock) > IN_FLIGHT_WINDOW:
+            os.remove(lock)
+        os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    except FileExistsError:
+        return refuse("not-absent", f"another --absent resume of {sid} started within the last "
+                                    f"{IN_FLIGHT_WINDOW}s ({lock})")
+    except OSError as exc:
+        print(f"❌ error: cannot take the resume lock {lock}: {exc} — nothing was spawned")
+        return 1
+    print(header)
+    print(f"   launcher: {launcher} ({launcher_source})")
+    print(f"   wezterm: {wezterm}")
+
+    argv = resume_command(sid, subject, chip, cwd, launcher)
+    argv[0] = wezterm
+    try:
+        spawned = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        # The spawn may well have happened — a second, hand-started copy is the hazard.
+        print(f"❌ error: resume outcome UNKNOWN — wezterm did not answer within 30 s; check for "
+              f"a pane running {sid} before starting it again")
+        return 1
+    except Exception as error:
+        print(f"❌ error: resume failed before spawning: {error}")
+        return 1
+    if spawned.returncode != 0:
+        print(f"❌ error: resume failed (exit {spawned.returncode}): {(spawned.stderr or '').strip()}")
+        return 1
+    pane = (spawned.stdout or "").strip().splitlines()
+    print(f"   ✅ resumed session {sid} in a new tab (pane {pane[-1] if pane else '?'}); "
+          "nothing was signalled")
+    print("   ↪ manager: the resumed session must RE-ARM its loop (`/supervisor:fleet-loop`) — "
+          "a dead session's scheduled jobs died with it")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Restart one stale idle session — worker or manager — registry-guarded.",
     )
     ap.add_argument("session_id", help="the session id to restart")
     ap.add_argument("--dry-run", action="store_true", help="check everything, kill nothing")
+    ap.add_argument("--reason", choices=("code", "lapse"), default="code",
+                    help="why this restart is justified. `code` (default) requires something "
+                         "newer than the session's start to load, which is precondition 4. "
+                         "`lapse` is for a session whose LOOP stopped — a lapsed fleet round "
+                         "writes no file, so no input changed — and skips precondition 4 and "
+                         "nothing else: a held, busy or headless target is still refused")
     ap.add_argument("--sessions-dir", help=f"registry dir (default: {SESSIONS_DIR})")
+    ap.add_argument("--absent", action="store_true",
+                    help="resume a session whose process is GONE: refuses unless no registry "
+                         "entry carries the id, signals nothing, and takes cwd and launcher from "
+                         "the manager registration")
     args = ap.parse_args()
 
     sid = args.session_id.strip()
     if not sid:
         ap.error("session id must not be empty")  # exits 2
+
+    if args.absent:
+        return resume_absent(sid, args.sessions_dir, args.dry_run)
 
     fb = load_sibling("fleet-board.py")
 
@@ -666,14 +1192,12 @@ def main():
     # ⚠️ A held session is never restarted. Checked BEFORE the status and kind gates
     # because a hold is the stronger statement: `busy` says the moment is wrong, a hold says the session
     # is not yours to touch at all, and it outranks every other consideration here.
-    # Restarting is exactly the act the operator held the session to prevent.
-    held = held_reason(sid)
-    if held is not None:
-        return refuse(
-            "held-session",
-            f"session {sid} carries an operator hold ({held}); only the operator "
-            "releases it -- see the /supervisor:hold skill",
-        )
+    # Restarting is exactly the act the operator held the session to prevent. A hold is
+    # either a store entry or a pane parked in the WezTerm Hold window; an UNREADABLE
+    # pane list refuses too (`hold-unreadable`) rather than reading as "not held".
+    token, detail = hold_refusal(sid)
+    if token is not None:
+        return refuse(token, detail)
 
     pid = rec.get("pid")
     if not isinstance(pid, int):
@@ -724,30 +1248,44 @@ def main():
     # here, before the kill, because afterwards there is no process left to read.
     load_path, load_mtime = newest_load_path()
     started = parse_started(rec)
-    if started is None:
-        return refuse(
-            "stale-load-path",
-            f"session {sid} carries no parseable start time, so it cannot be shown that "
-            "anything would load differently",
-        )
     argv = worker_argv(pid)
     subject = fb.manager_subject(name, index, slugs) if role == "manager" and index is not None else None
     launcher, launcher_source = resolve_launcher(sid, (rec.get("cwd") or "").strip(), fb, subject)
-    changed = changed_inputs(load_path, load_mtime, argv, launcher, started)
-    if not changed:
-        checked = [
-            f"load path {os.path.basename(load_path)}" if load_path
-            else f"no load path under {LOAD_PATH_ROOT}",
-            "MCP config (unreadable argv)" if argv is None
-            else ", ".join(mcp_config_paths(argv)) or "no --mcp-config",
-            launcher or f"launcher unresolved: {launcher_source}",
-        ]
-        return refuse(
-            "stale-load-path",
-            f"none of plugin version, MCP config or launcher is newer than session "
-            f"{sid}'s start ({'; '.join(checked)}); restarting would reload identical "
-            "code and config",
-        )
+    if launcher is None and launcher_source.startswith(ENV_FAULT):
+        # Checked before every refusal below: a broken environment must never be masked
+        # by, or printed as, a decision about the target.
+        print(ENV_FAULT)
+        print(f"🛑 environment fault (not a refusal): {launcher_source[len(ENV_FAULT) + 2:]}")
+        return 3
+
+    # ⚠️ Precondition 4 applies to a CODE-staleness restart only. `--reason lapse` restarts a
+    # session whose LOOP stopped, not one whose code changed: a lapsed fleet round writes no
+    # file, so requiring a newer input would refuse every legitimate lapse restart and the
+    # keeper that calls this could never act. Everything above and below still applies — a
+    # held, busy, headless or unresumable target is refused exactly as before.
+    changed = []
+    if args.reason == "code":
+        if started is None:
+            return refuse(
+                "stale-load-path",
+                f"session {sid} carries no parseable start time, so it cannot be shown that "
+                "anything would load differently",
+            )
+        changed = changed_inputs(load_path, load_mtime, argv, launcher, started)
+        if not changed:
+            checked = [
+                f"load path {os.path.basename(load_path)}" if load_path
+                else f"no load path under {LOAD_PATH_ROOT}",
+                "MCP config (unreadable argv)" if argv is None
+                else ", ".join(mcp_config_paths(argv)) or "no --mcp-config",
+                launcher or f"launcher unresolved: {launcher_source}",
+            ]
+            return refuse(
+                "stale-load-path",
+                f"none of plugin version, MCP config or launcher is newer than session "
+                f"{sid}'s start ({'; '.join(checked)}); restarting would reload identical "
+                "code and config",
+            )
 
     print(
         f"🔄 restart-worker · session {sid[:8]} · pid {pid} · {name!r}"
@@ -792,6 +1330,10 @@ def main():
         )
         return 1
 
+    # A machine token, printed BEFORE the signal: a caller that must know whether a failure
+    # came before or after the kill reads this line rather than matching the prose of
+    # whichever refusal follows. `scripts/fleet-keeper.py` arms its cap on it.
+    print(f"   killing-pid {pid}")
     try:
         os.kill(pid, 15)
     except ProcessLookupError:

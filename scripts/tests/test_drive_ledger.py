@@ -52,6 +52,8 @@ SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "drive-ledger.py"
 #: how many CONSECUTIVE rounds a session has been classified unverifiable and the round
 #: tag that count was last advanced at; `unverifiable_action` records what the 2-round
 #: rule did about it, and is what makes the action fire once rather than every round.
+#: `unverifiable_observation` is the third outcome -- a row whose pane did not resolve,
+#: recorded apart from `unverifiable_action` so it never counts as an action taken.
 FIELDS = {
     "session_id",
     "name",
@@ -66,6 +68,7 @@ FIELDS = {
     "unverifiable_streak",
     "unverifiable_round",
     "unverifiable_action",
+    "unverifiable_observation",
 }
 
 FLAT_ONLY = tuple("flat%05d" % i for i in range(13))

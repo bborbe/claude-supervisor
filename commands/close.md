@@ -1,5 +1,5 @@
 ---
-description: Close ONE finished session's pane — a worker whose task is terminal or deferred, idle, and holding no gate. Refuses in seven named cases and reuses the restart scripts' guards rather than adding a second kill mechanism. Takes a session id (or a pid).
+description: Close ONE finished session — a worker whose task is terminal or deferred, or a goal/topic manager whose page is handed over, ended or parked — idle, and holding no gate. Closes a tab by killing its pane and a headless worker by SIGTERM on its registry pid, running the same guards for both. Refuses in eight named cases and reuses the restart scripts' guards rather than adding a second kill mechanism. Takes a session id (or a pid).
 argument-hint: "<session-id | pid>"
 allowed-tools:
   - Read
@@ -8,10 +8,11 @@ allowed-tools:
   - Bash(python3:*)
 ---
 
-Close a pane whose work is finished. The fleet manager could open and restart a session
+Close a session whose work is finished. The fleet manager could open and restart a session
 but not close one, so every finished tab waited for the operator — nine of them on
-2026-10-19. This verb is the third arm of the same family, and it is deliberately the
-smallest: it tears down a pane and resumes nothing.
+2026-10-19, and eleven headless workers hand-killed on 2026-11-02. This verb is the third
+arm of the same family, and it is deliberately the smallest: it tears down a surface and
+resumes nothing.
 
 **This command is the orchestrator. It is not a second kill mechanism.** The registry
 read, the hold store and the refusal contract belong to `scripts/restart-worker.py`; the
@@ -56,20 +57,31 @@ shaped `Bash(<script path>:*)`, which matches a command whose first token is tha
 `--dry-run` runs every guard and closes nothing — use it when the operator wants the
 verdict without the act.
 
+⚠️ **A pane is where the close is delivered, never what authorises it.** A tab session
+(`entrypoint: cli`) is closed by killing its pane; a headless one (`entrypoint: sdk-cli`)
+has no pane and is closed by **SIGTERM on its registry pid**. Both run every guard below.
+There is no `headless-target` token any more: "no pane" is a delivery detail, not a reason
+to refuse, and refusing it left the operator as the only actor who could close a finished
+headless worker.
+
+⚠️ **A headless worker that ended its turn is parked, not finished.** `task-not-terminal`
+still refuses one whose task is live — an exited headless worker is waiting for a
+continuation, and closing it discards that. See `docs/fleet-surface.md` § *A headless
+worker exits at turn end*.
+
 **The refusal token is the first line of stdout** — branch on it, never on the prose
-below it. Seven tokens, each terminal for this run:
+below it. Eight tokens, each terminal for this run:
 
 | Token | Then |
 |---|---|
 | `unknown-session-id` | **Stop.** No entry carries it, or the registry could not be read. |
 | `ambiguous-pid` | **Stop.** More than one pid claims that id; closing one is a coin flip. |
 | `held-session` | **Stop.** The operator holds it. Only they release it (`/supervisor:hold`). |
-| `busy-target` | **Stop.** The session is mid-turn. A close loses the work with no resume behind it. |
-| `headless-target` | **Stop.** Not `interactive`; there is no pane. |
+| `busy-target` | **Stop.** The session is mid-turn. For a tab session that is `status` not `idle`. For a pane-less one (`sdk-cli`) it also covers an open tool marker in `~/.claude/state/attention/<sid>.tool.json` younger than 20 minutes — such a session parked on the permission channel keeps `status: idle` and writes no transcript closer. A close loses the work with no resume behind it. ⚠️ The marker is not reliably cleared at tool end, so it reads as "used a tool recently": it delays a pane-less close by up to 20 minutes, it does not block one. Retry on a later sweep. |
 | `dirty-worktree` | **Stop.** The target is the only live session in that worktree and it carries tracked changes. Hand the operator the choice: commit, stash, or another target. |
-| `gate-held` | **Stop.** Its transcript tail carries an unanswered `👤 You:` gate. Closing discards a question the operator never answered — hand them the jump link instead. |
-| `task-unresolved` | **Stop.** No task file carries this session id as `claude_session_id`. Fail closed: absent evidence is not evidence of a finished task. |
-| `task-not-terminal` | **Stop.** The task is neither terminal nor deferred to a future `defer_date`. |
+| `gate-held` | **Stop.** Its transcript tail carries an unanswered `👤 You:` gate. Closing discards a question the operator never answered — hand them the jump link instead. A pane-less (`sdk-cli`) session refuses here only while a channel can still answer it: an open card it produced, or a full-id card the closer names that is open or answered-and-delivered. Otherwise it classifies `gate-unanswerable` and the close proceeds — nobody can ever release that gate. |
+| `task-unresolved` | **Stop.** No task, goal or topic file carries this session id as `claude_session_id` or in its `metrics_sessions`, or a goal/topic lookup failed. Fail closed: absent evidence is not evidence of a finished task. |
+| `task-not-terminal` | **Stop.** The task is neither terminal nor deferred to a future `defer_date` — or, for a goal/topic anchor (a goal or topic manager with no held task), the session still holds a page that is neither `completed`/`aborted` nor parked on a future `defer_date`. `hold` refuses there: a held goal is parked, not finished. A handed-over page (the id only in `metrics_sessions`) does not refuse. |
 
 ⚠️ **A refusal is terminal — never fall back to another teardown route.** `wezterm cli
 kill-pane` by hand, or closing the tab, is the same act with none of the guards. Falling
@@ -82,12 +94,16 @@ neither is the other's remedy.
 ## Step 2 — Report
 
 The script prints its own report on success: the session, its pid, the task it closed
-against, the worktree verdict, the classification and the pane. Repeat it — do not
+against (or, for a goal/topic anchor, a `goal: <path>` / `topic: <path>` line per page),
+the worktree verdict, the classification and the target — `pane <N>` for a tab
+session, `pid <pid> (entrypoint sdk-cli, no pane)` for a headless one. The success line names
+the target separately, so a headless close reads `closed headless session (sdk-cli)`. Repeat it — do not
 paraphrase the task status, which is the evidence the close was permitted.
 
-`✅ closed pane <N> · pid <pid> dead · registry entry removed` is the success line. A
-`⚠️` line means the pane went but the pid or its registry entry survived; report it as
-written and do not retry.
+`✅ closed pane <N> · pid <pid> dead · registry entry removed` is the success line; for a
+headless target it reads `✅ closed headless session (sdk-cli) · pid <pid> dead · registry
+entry removed`. A `⚠️` line means the surface went but the pid or its registry
+entry survived; report it as written and do not retry.
 
 **No jump link on success** — the pane is gone, and a link to a closed pane is a dead
 coordinate. On a `gate-held` refusal, hand over the jump link instead:
@@ -104,6 +120,7 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
   called.
 - **A close is not a `session-close`.** `/vault-cli:sync-progress` and
   `/vault-cli:session-close` read the worker's own conversation and remain the worker's
-  act; this verb only removes a pane whose task is already terminal or deferred.
+  act; this verb only removes a pane whose task is already terminal or deferred (or whose
+  goal/topic anchor passes the page rule in `scripts/close-worker.py` § Goal/topic anchor).
 - **Never close a pane holding a gate.** That is what `gate-held` is for; the operator's
   answer is the only way past it.

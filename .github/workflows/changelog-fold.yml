@@ -10,10 +10,15 @@ name: Changelog Fold Guard
 #
 # WHY `push` ON MASTER, AND WHY THE TRIGGER LIVES HERE:
 # the fold happens in GitHub's merge resolution, after the branch is already
-# final. A pull-request check runs against that branch and is structurally blind
-# to it, so this cannot be a `pull_request` job — and it cannot be a rule in
-# bborbe/coding's rule base either, because the pr-review bot evaluates rules on
-# the PR. `push` on master is the only event that sees the folded state.
+# final. A check that reads the branch's HEADING is structurally blind to it, and
+# it cannot be a rule in bborbe/coding's rule base either, because the pr-review
+# bot evaluates rules on the PR. `push` on master is the only event that sees the
+# fold as a fact rather than a prediction.
+#
+# The prediction lives in `changelog-unreleased-fold.yml`: it checks out the PR
+# head and computes the merge with `git merge-tree`, so the fold is caught before
+# it lands instead of after. This job stays as the backstop — it is the one that
+# reads the real merged tree, so a prediction that misses still cannot hide.
 #
 # `@master` rather than a pinned tag is deliberate: the guard is one tool with one
 # source of truth, and a stale pin would silently keep an older check running.

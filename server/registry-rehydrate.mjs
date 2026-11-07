@@ -125,6 +125,11 @@ export function toAgentRecord(record, id = record.agent_id) {
     // worker TOKEN is not on the ledger and so cannot be restored: a re-adopted A2A row can be
     // seen live, but cannot be sent another turn by this process.
     workerId: record.worker_id ?? null,
+    // The wrapper session this worker's child runs under. Null for a pre-field record AND for
+    // a worker that is genuinely not wrapper-backed — the two are the same absence on the
+    // ledger, which is why `rehydrated` already marks the row: a caller must not read a null
+    // here on an adopted row as proof the worker has no wrapper park.
+    wrapperSessionId: record.wrapper_session_id ?? null,
     error: null,
     // Observable rather than inferred, and load-bearing at two call sites in
     // `supervisor.mjs`: a rehydrated row must not be stamped on shutdown

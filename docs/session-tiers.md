@@ -25,11 +25,68 @@ Load this page, with the rest of `docs/`, via `/supervisor:read-guides`.
 
 ## The four tiers
 
-The tiers form a **tree**, and the operator's hierarchy (2026-10-23) names what each level may
-open: **the fleet manager is top of everything** — it opens topic managers, goal managers and
-workers, each when no lower-tier manager owns the subject; **a topic manager opens goal
-managers and workers**; **a goal manager opens workers**; **a worker opens nothing**. A tier
-opens a lower one through `/supervisor:open`, never by a bare spawn.
+The tiers form a **tree**, and the operator's hierarchy (2026-10-23, amended 2026-10-30) names
+what each level may open: **the fleet manager is top of everything** — it opens topic managers,
+and a **worker** only when no lower-tier manager owns that subject, and a goal manager **only
+when that goal is flagged**; **a topic manager opens workers, and a goal manager only when that
+goal is flagged**; **a goal manager opens workers**; **a worker opens nothing**. A tier opens a
+lower one through `/supervisor:open`, never by a bare spawn.
+
+⚠️ **The ownership condition survived the 2026-10-30 amendment, and it is not the same rule as
+the one it sat beside.** The clause that was removed read *"each when no lower-tier manager owns
+the subject"* and governed **goal managers** — a manager is never opened fresh at all now, so
+that half is gone. The **worker** half is unchanged and still binds: a worker is opened directly
+by the fleet manager only when no topic or goal manager owns its subject, which is the same
+fallback `docs/fleet-surface.md` § Which manager owns a subject states. Do not read the removal
+as licensing the fleet tier to open a worker under a live goal manager.
+
+⚠️ **Restart is not open, and that distinction is what makes the tree coherent** (operator
+ruling 2026-10-30). A restart resumes a session that already has a subject and a recorded id;
+an open creates supervision where none existed. Restarting a broken manager therefore decides
+nothing new, while opening one decides who supervises. Four rules follow:
+
+1. **A crashed or lapsed manager or worker is restarted automatically** — it already owns its
+   subject, so the restart decides nothing new. ⚠️ **The fleet tier is the one exception: its
+   lapse is REPORTED, never restarted** (operator decision 2026-11-01). `scripts/fleet-keepalive.py`
+   detects a lapsed fleet round, and `scripts/fleet-keeper.py` posts one attention card once it
+   has read `stale` continuously for 40 minutes. The keeper holds no kill path and starts nothing
+   on its own judgement. **The one exception is answer-gated** (operator decision 2026-11-06): the
+   card for a *dead* fleet manager offers `resume it`, and only that answer — after the death is
+   corroborated — runs `restart-worker.py --absent` once; a lapsed (live) manager is never offered
+   it. See `scripts/fleet-keeper.py`'s docstring. **Why the exception:** a restart-on-stale keeper killed a healthy Fleet Manager,
+   because the trigger cannot tell a dead loop from a slow round. Measured healthy arm→digest
+   ran median 18 min, p90 38 min and max 51 min, against an 18-minute `stale` threshold, so about
+   half of healthy rounds cross it. No settle window fixes that: one under ~40 min kills healthy
+   managers, and one above it leaves any restart cap unreachable. Restarting the Fleet Manager
+   stays a human decision, prompted by the card.
+2. **A flagged page is opened automatically by the tier above it** — `flag: true` means
+   *"open me"*, and **provenance is not read**. Operator ruling 2026-10-30: *"in the end it
+   should not matter how set the flag … if flag, should be open if claude session limit allow
+   it"* — so `flag_set_by` is a note, not a gate, and the only bound after the flag is
+   capacity. ⚠️ **The consequence is deliberate:** an agent may flag its own page and get
+   something opened for it, limited only by the cap. ⚠️ **The boundary is the WRITE, not the
+   tier:** `/supervisor:open --flagged` alone keeps a provenance gate, because it writes
+   `approved_by: operator`. **Which legs read the flag alone and which read `flag_set_by` has
+   one home — `docs/fleet-surface.md` § Approval provenance; read the split there.** A flag on
+   a page no leg reads is inert, which is the defect `--topic-open` was added to remove.
+3. **An approved worker is opened automatically**, up to `spawn.maxConcurrent`.
+4. **A manager is never opened fresh on the operator's behalf** — not by a loop, not by a
+   round, not to fill a gap. Only restarted, or opened because it was flagged.
+
+⚠️ **Rule 4 binds every tier.** The fleet tier removed its manager-proposal row on 2026-10-29
+(`commands/fleet-drive.md`: *"No manager-proposal row — the round does not propose managers for
+unmanaged goals"*). No other tier restores that behaviour under another name.
+
+⚠️ **The fleet keeper obeys rule 4 trivially: it opens nothing and resumes nothing.** There is
+exactly one fleet manager, and a second would be a double writer over every subject. The
+report-only keeper cannot create one: its source holds no `restart-worker.py` call, no
+`wezterm` spawn and no `os.kill`. `scripts/tests/test_fleet_keeper.py` pins that absence with
+a grep, plus a positive control that fires on `restart-worker.py` itself. It reads the
+`Fleet Manager` registration only to name the session a card is about.
+
+⚠️ **`flag` carries one meaning tree-wide.** It marks a page the operator wants opened. A leg
+that reads it as *"parked / waiting-on-human"* and excludes it inverts the operator's mark; the
+parked class needs its own marker, never this field.
 
 ⚠️ **The `-spawn` verbs are narrower than their tier, and that is not a contradiction.** A
 `-spawn` verb starts the level directly below it and nothing else — `topic-spawn` starts a
@@ -41,8 +98,8 @@ open — and no `worker-spawn` at all.
 
 | Tier | Manages | May start | Done condition |
 |---|---|---|---|
-| **Fleet manager** | every topic manager, and every goal with no topic | a topic manager (on the operator's initiative), and — when no lower-tier manager owns the subject — a goal manager or a worker directly | the fleet has no unmanaged subject and no gate it owns is outstanding |
-| **Topic manager** | ONE topic's declared goal set, the goal managers running on it, and the workers it opens | a **goal manager**, at most N at once per topic and never past the fleet manager ceiling; and a **worker** | every goal in its declared set is either managed, terminal, or ranked out of the N slots with the reason stated |
+| **Fleet manager** | every topic manager, and every goal with no topic | a topic manager (on the operator's initiative), a **worker** directly when no lower-tier manager owns it, and a goal manager **only when that goal is flagged** | the fleet has no unmanaged subject and no gate it owns is outstanding |
+| **Topic manager** | ONE topic's declared goal set, the goal managers running on it, and the workers it opens | a **worker**; and a **goal manager only when that goal is flagged**, at most N at once per topic and never past the fleet manager ceiling | every goal in its declared set is either managed, terminal, or ranked out of the N slots with the reason stated |
 | **Goal manager** | ONE goal's declared task set, and the workers running on it | a **worker**, under the spawn cap | every task in its declared set is terminal, waiting on a named party, or held with a stated reason |
 | **Worker** | ONE anchored task | nothing — a worker never opens a session | its anchored task is terminal, or it reports the gate that stops it |
 
@@ -81,6 +138,7 @@ other side.
 | `/supervisor:fleet-drive` | fleet manager | worker; topic manager (use `topic-drive`); goal manager (use `goal-drive`) |
 | `/supervisor:fleet-workers` | fleet manager | worker |
 | `/supervisor:fleet-verify` | fleet manager | worker; topic manager (use `topic-verify`); goal manager (use `goal-verify`) |
+| `/supervisor:fleet-triage` | fleet manager — one pass over every live session: classify, close, drive, card; ends green only on all five of zero stuck, zero uncarded, zero finished-but-open, zero no-loop, and every live session accounted for | worker; topic manager (use `topic-drive` — it serves one subject); goal manager (use `goal-drive` — same) |
 | `/supervisor:topic-loop` | topic manager | worker; goal manager — arming it collapses the two roles silently |
 | `/supervisor:topic-status` | topic manager | worker; goal manager |
 | `/supervisor:topic-drive` | topic manager | worker; goal manager |
@@ -186,7 +244,17 @@ output — the fleet table.
   § Session roles attaches to the worker-side prohibition, so do not go hunting for an
   enforcement that does not exist.
 - **A topic manager starts a goal manager with `/supervisor:open --goal "<goal>"`**, and only
-  for a goal its own `## Goals` list declares. `commands/topic-spawn.md` owns the three
-  refusals (`goal-not-in-scope`, `goal-not-startable`, `manager-cap`), the ranking that picks
-  which goals get one of the N slots, and the keep-alive contract. It holds no `spawn_agent`
-  tool.
+  for a goal its own `## Goals` list declares **and that carries the flag** (whoever set it). `commands/topic-spawn.md`
+  owns the five refusals (`goal-not-in-scope`, `goal-not-startable`, `goal-terminal`,
+  `goal-unflagged`, `manager-cap`), the ranking that picks which goals get one of the N slots, and
+  the keep-alive contract. It holds no `spawn_agent` tool.
+  ⚠️ **The flag gates the OPEN, never the RESTART.** A goal with **no recorded
+  `claude_session_id`** is an open: an unflagged one is reported (`open-unflagged`) and
+  held, however free the slots are — that is rule 4, and `topic-spawn.py`'s `goal-unflagged`
+  refusal is its executable gate. A goal that **already carries a recorded id** and whose
+  session is `ABSENT`, or whose loop is `STALE`, is a **restart**: rule 1 restarts it
+  automatically and **the flag is not consulted**, because `/supervisor:open --goal` resumes
+  the same session and decides nothing about who supervises.
+  ⚠️ **Reading this bullet as "an unflagged goal is held", without that split, is what makes
+  rule 1 inert on the topic tier** — the round then reports dead managers as *"resume held …
+  unflagged"* and restarts none of them, which is the state measured on 2026-10-30.

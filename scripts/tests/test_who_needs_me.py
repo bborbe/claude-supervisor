@@ -1185,6 +1185,66 @@ class UnroutableHandover(unittest.TestCase):
         self.assertEqual("STOREID", rec["store_item_id"])
 
 
+class HeadlessRowIsAnswerableNotUnroutable(unittest.TestCase):
+    """A pane-less, answerable row is a headless gate — it is never `unroutable`.
+
+    A headless worker owns no pane by construction (`owned_pane()` refuses an
+    unprovable pane, so the hook records `pane: ""`), so every such row took the
+    "no pane recorded" branch and was labelled unroutable **while carrying a working
+    answer command**. Measured 2026-10-24: four operator-bound gates surfaced in one
+    sweep, all four rendered that way, and the operator acted on none of them — the
+    row read as a session that had exited rather than a question waiting.
+
+    Both halves are asserted, because the operator named both: the jump line's
+    wording, and the `?` in the pane column.
+    """
+
+    HEADLESS = {"session_id": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa", "pane": "",
+                "ts": 0, "cwd": "/tmp/x", "kind": "permission", "detail": "d",
+                "store_item_id": "0f701f0b4b654e3338dcc97d9be8b314"}
+
+    def test_a_headless_gate_is_not_called_unroutable(self):
+        rendered = wnm.row(self.HEADLESS, {}, "d")
+        self.assertNotIn("unroutable", rendered)
+        self.assertIn("headless", rendered)
+
+    def test_a_headless_gate_still_hands_over_its_answer_command(self):
+        """The handover is what makes the row actionable — losing it would be worse."""
+        rendered = wnm.row(self.HEADLESS, {}, "d")
+        self.assertIn("attention-answer.py answer 0f701f0b4b654e3338dcc97d9be8b314", rendered)
+        self.assertIn("--decision allow|deny", rendered)
+
+    def test_a_headless_gate_marks_its_pane_column(self):
+        """`?` in the pane column is the other half of the exited-session reading."""
+        self.assertIn("[ hst]", wnm.row(self.HEADLESS, {}, "d"))
+
+    def test_a_pane_less_row_with_nothing_to_answer_stays_unroutable(self):
+        """The negative control: the relabel is scoped to rows that ARE answerable.
+
+        Without a store id there is no handover and no route, so the row is
+        genuinely unroutable and must keep saying so — otherwise this change would
+        dress up a dead end as actionable, which is the failure the original
+        `unroutable` wording existed to prevent.
+        """
+        rec = dict(self.HEADLESS)
+        del rec["store_item_id"]
+        rendered = wnm.row(rec, {}, "d")
+        self.assertIn("unroutable — no pane recorded for this item", rendered)
+        self.assertNotIn("attention-answer.py", rendered)
+        # The pane column is scoped with the jump line, not applied to every
+        # pane-less row: with no handover there is no route, and `hst` would claim
+        # a live headless worker where the row may be an exited session.
+        self.assertIn("[   ?]", rendered)
+        self.assertNotIn("hst", rendered)
+
+    def test_a_pane_backed_unroutable_row_is_unchanged(self):
+        """The other negative control: a stale pane is still unroutable, not headless."""
+        rec = dict(self.HEADLESS, pane="999")
+        rendered = wnm.row(rec, {"1": {}}, "d")
+        self.assertIn("unroutable — pane 999 does not resolve to this session", rendered)
+        self.assertNotIn("headless", rendered)
+
+
 class ProvenanceRendering(unittest.TestCase):
     """The row carries its provenance, and an absent value renders as absent.
 
@@ -2442,6 +2502,135 @@ class LastAssistantTextBeyondTheTail(unittest.TestCase):
     def test_a_transcript_with_no_assistant_text_reads_empty(self):
         path = self.write([{"type": "attachment", "attachment": {"content": "x" * 300_000}}])
         self.assertEqual("", wnm._read_last_assistant_text({"transcript": path, "session_id": "s"}))
+
+
+class CloserClass(unittest.TestCase):
+    """`closer_class()` — the digest's class token, which is not the feed's question.
+
+    The feed asks "is the operator being asked something" and answers by keeping a
+    routine closer OUT. The digest asks "what did the turn end on" and needs the
+    routine closer IN, classed, because `agents/fleet-drive.md` step 4a fail-closes a
+    candidate with no `CLOSERS` row to `unverifiable` — measured 2026-10-29, 7 parked
+    rows against 4 `CLOSERS` rows, the gap spanning all three non-ask classes.
+    """
+
+    def classify(self, closer_line):
+        # Restore after each test: a bare assignment leaks the stub into every class
+        # that sorts after this one, and one of them reads the closer too.
+        original = wnm.last_assistant_text
+        self.addCleanup(setattr, wnm, "last_assistant_text", original)
+        wnm.last_assistant_text = lambda _rec, _t=closer_line: _t
+        return wnm.closer_class({"session_id": "unit", "pane": "1", "cwd": "/tmp",
+                                 "kind": "idle", "detail": "OK", "ts": 0,
+                                 "state": "open"})
+
+    def test_a_real_ask_is_ask(self):
+        self.assertEqual("ask", self.classify("👤 You: pick — 1. hold prod"))
+
+    def test_a_routine_turn_end_is_routine(self):
+        # The case the task exists for: a session that ended its turn needing
+        # nothing must not read the same as one whose closer was never captured.
+        self.assertEqual("routine", self.classify("👤 You: nothing — I continue on step 1"))
+
+    def test_a_nbsp_padded_nothing_is_routine(self):
+        # Same parser trap `reclassify_idle` guards: `&nbsp;` is not whitespace.
+        self.assertEqual("routine", self.classify("👤 You: &nbsp;&nbsp;nothing"))
+
+    def test_a_capitalised_nothing_falls_through_to_ask(self):
+        """Fail-closed, and pinned so a later "fix" cannot flip it to routine.
+
+        The prefix test is lower-case by design — a closer that only *looks* like a
+        routine turn end reaches the drive leg as blocked, never as revivable.
+        """
+        self.assertEqual("ask", self.classify("👤 You: Nothing — I continue"))
+
+    def test_a_nothing_closer_naming_a_destructive_verb_is_not_routine(self):
+        """The one hole a `nothing …` prefix would otherwise open.
+
+        A `nothing …` closer is never promoted to a `BLOCKED` row, so step 4a test 4
+        can never fire on one and the routine-continue table's destructive-verb
+        blacklist (test 3) would be skipped — this closer would reach `revive`.
+        """
+        self.assertEqual("ask", self.classify("👤 You: nothing — approve: deploy prod"))
+
+    def test_the_destructive_matcher_over_matches_on_purpose(self):
+        """`produce` trips `prod` and `staged` trips `tag`; both are deliberate.
+
+        Over-matching costs a routine row one blocked verdict; under-matching would
+        revive a closer that names a destructive verb.
+        """
+        for line in ("👤 You: nothing — produce the report",
+                     "👤 You: nothing — staged the change"):
+            self.assertEqual("ask", self.classify(line), line)
+
+    def test_a_parked_wait_is_parked_wait(self):
+        self.assertEqual("parked-wait",
+                         self.classify("👤 You: later (on 2026-11-05T02:00): re-take SC(c)"))
+
+    def test_no_closer_line_is_none(self):
+        self.assertEqual("none", self.classify(""))
+
+    def test_every_class_is_in_the_declared_vocabulary(self):
+        for line in ("", "👤 You: nothing", "👤 You: later (on x): y", "👤 You: approve: x"):
+            self.assertIn(self.classify(line), wnm.CLOSER_CLASSES)
+
+
+class LastClosersSection(unittest.TestCase):
+    """The digest's `CLOSERS` source, end to end through `main()`.
+
+    Opt-in on purpose: the feed's five default sections are what the manager's
+    watchers arm on, and a row here is not a gate. The no-regression bar is the
+    unscoped render, which must stay byte-for-byte what it was.
+    """
+
+    RECORDS = [
+        {"session_id": "lc-routine", "pane": "901", "cwd": "/tmp", "kind": "idle",
+         "detail": "OK", "ts": 1, "state": "open", "event": "Stop"},
+        {"session_id": "lc-ask", "pane": "902", "cwd": "/tmp", "kind": "question",
+         "detail": "OK", "ts": 2, "state": "open", "event": "Stop"},
+        {"session_id": "lc-parked", "pane": "903", "cwd": "/tmp", "kind": "idle",
+         "detail": "OK", "ts": 3, "state": "open", "event": "Stop"},
+        {"session_id": "lc-none", "pane": "904", "cwd": "/tmp", "kind": "idle",
+         "detail": "OK", "ts": 4, "state": "open", "event": "Stop"},
+    ]
+    TEXTS = {
+        "lc-routine": "👤 You: nothing — I continue on step 1",
+        "lc-ask": "👤 You: pick — 1. hold prod",
+        "lc-parked": "👤 You: later (on 2026-11-05T02:00): re-take SC(c)",
+        "lc-none": "",
+    }
+
+    def run_section(self, argv=()):
+        panes = {r["pane"]: {"pane_id": int(r["pane"]), "title": "S"}
+                 for r in self.RECORDS}
+        with mock.patch.object(
+                wnm, "last_assistant_text",
+                lambda rec: self.TEXTS.get(rec.get("session_id"), "")):
+            return run_feed(panes, [dict(r) for r in self.RECORDS], argv=argv)
+
+    def test_the_default_render_does_not_carry_it(self):
+        rc, out, err = self.run_section()
+        self.assertEqual(0, rc, err)
+        self.assertNotIn("Last closers (", out)
+
+    def test_the_section_prints_all_four_classes(self):
+        rc, out, err = self.run_section(["--section", "last-closers"])
+        self.assertEqual(0, rc, err)
+        self.assertIn("Last closers (4)", out)
+        for token in ("routine: nothing", "ask: pick", "parked-wait: later (on",
+                      "none: no closer line"):
+            self.assertIn(token, out)
+
+    def test_one_row_per_session_not_per_open_item(self):
+        # `needs` holds one record per open item, so a session carrying two of them
+        # would otherwise spend two of the digest's 40 payload lines on one closer.
+        records = [dict(self.RECORDS[0]), dict(self.RECORDS[0], ts=9)]
+        panes = {"901": {"pane_id": 901, "title": "S"}}
+        with mock.patch.object(wnm, "last_assistant_text",
+                               lambda rec: self.TEXTS["lc-routine"]):
+            rc, out, err = run_feed(panes, records, argv=["--section", "last-closers"])
+        self.assertEqual(0, rc, err)
+        self.assertIn("Last closers (1)", out)
 
 
 if __name__ == "__main__":

@@ -100,7 +100,7 @@ Measured 2026-09-14: the live registry held 13 entries against 13 live processes
 }
 ```
 
-`role` is the role the spawn declared, as resolved by `spawn_agent` from the role map (`manager` / `agent` / `human`; `agent` is the default). It is recorded because **the spawn edge alone cannot tell a manager from a worker**: `/supervisor:open` starts a topic manager in a plain wezterm tab, which writes no record at all, while `spawn_agent(role="manager")` writes one — and `gate-owner-filter.py`'s `is_manager()` reads a record as proof of "worker". Without this field a manager opened through the worker path was invisible to every peer manager, which then re-escalated gates it had already handled (measured 2026-10-06). `null` means the record was written before the field existed, and it reads as a worker — not because no pre-field manager has a record (the manager this fixes had one), but because the field is absent on pre-field workers and managers alike, so defaulting the other way would flip every worker spawned before the change into a manager and drop the fleet's gates. The residue is a known gap: a pre-change `spawn_agent(role="manager")` manager still reads as a worker until it is re-spawned or its record gains the field.
+`role` is the role the spawn declared, as resolved by `spawn_agent` from the role map (`manager` / `agent` / `human`; `agent` is the default). It is recorded because **the spawn edge alone cannot tell a manager from a worker**: `/supervisor:open` starts a topic manager in a plain wezterm tab, which writes no record at all, while `spawn_agent(role="manager")` writes one — and `gate-owner-filter.py`'s `is_manager()` reads a record as proof of "worker". Without this field a manager opened through the worker path was invisible to every peer manager, which then re-escalated gates it had already handled (measured 2026-10-06). `null` means the record was written before the field existed, and it reads as a worker — not because no pre-field manager has a record (the manager this fixes had one), but because the field is absent on pre-field workers and managers alike, so defaulting the other way would flip every worker spawned before the change into a manager and drop the fleet's gates. The residue is a known gap: a pre-change `spawn_agent(role="manager")` manager still reads as a worker until it is re-spawned or its record gains the field. `human` is the operator's own workspace, opened into the Direct window rather than as a worker (`commands/open.md` § Step 0.6), so `gate-owner-filter.py`'s `is_human()` excludes such a row as `role-human` instead of emitting it — measured 2026-10-27, a human row the Fleet Manager itself had spawned fired its feed three times in one hour. `is_human()` matches only an explicit `human`, the opposite default from `is_manager()`: a pre-field record and a `null` role are never human, because excluding on an absence is the fleet-wide silence every hop there fails open to avoid.
 
 `parent_session` is the **spawn edge** — the manager session that called `spawn_agent`, resolved once by walking up from this server's own pid to the **nearest ancestor the live registry knows**. It is *not* the direct parent pid: `.mcp.json` starts this server through a `bun run` wrapper, so the direct parent is that wrapper and a bare `process.ppid` lookup named nothing — which is why this field was `null` in every record written before the walk existed. When no ancestor is registered — an exited manager, or a chain that never passed through a session — the field stays `null` rather than carrying a guess. Nothing else records it. A worker whose session id never resolved gets no record rather than one filed under a key nothing would look up, and the server logs that rather than staying quiet.
 
@@ -147,8 +147,9 @@ commands/{jump,who-needs-me}.md                  find and reach a session
 commands/attention-next.md + scripts/attention-answer.py  answer an attention item, route it to the asker
 commands/{fleet-loop,fleet-status}.md            fleet surface — many sessions; the loop's arm and its read-only snapshot
 commands/fleet-drive.md                          fleet surface — the loop's round, dispatched on every wakeup and runnable by hand
+commands/fleet-triage.md + commands/steps/fleet-triage-*.md  one pass over every live session — classify, close, drive, card; the deliverable is all five green conditions: zero stuck, zero uncarded, zero finished-but-open, zero no-loop, and every live session accounted for
 commands/{topic-loop,topic-status}.md    one TOPIC — the loop's arm and its read-only goal snapshot
-commands/topic-drive.md                  one TOPIC — the loop's round: keep goal managers alive, start what the ranking admits
+commands/topic-drive.md                  one TOPIC — the loop's round: keep goal managers alive, start only goals the operator flagged
 commands/topic-spawn.md                  one TOPIC — start ONE goal manager; holds no spawn tool, delegates to /supervisor:open --goal
 commands/topic-verify.md                 topic manager — verify one topic, suggest fixes
 commands/{goal-loop,goal-status}.md      one GOAL — the loop's arm and its read-only task snapshot
@@ -160,7 +161,7 @@ commands/worker-drive.md                         one worker session — drive it
 scripts/progress-window.py                       its measured window — verdict, A/B/C observations and the claim result, from disk only (spec: docs/session-progress.md)
 commands/restart.md                              restart ONE named session, worker or manager — kill, resume, re-orient
 commands/worker-restart.md                       DEPRECATED alias for commands/restart.md
-commands/close.md                                close ONE finished session's pane — seven guards, never a resume
+commands/close.md                                close ONE finished session — eight guards, never a resume
 scripts/restart-precheck.py                      its read-only pre-kill probe: worktree, transcript, cause of death
 scripts/restart-worker.py                        the kill+resume leg — seven refusals, never a broad `kill`
 scripts/close-worker.py                          the close leg — reuses restart-worker/restart-precheck/jump, adds the task gate
@@ -169,7 +170,9 @@ commands/ready.md                                ready ONE named task to the bar
 commands/stop.md                                 stand that loop down
 commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
 docs/fleet-surface.md                            spawn shape + fleet table render spec (canonical)
+docs/closer-classes.md                           the CLOSERS class vocabulary, the routine-continue table and the digest join rule (canonical)
 docs/sweep-output.md                             the manager sweep's output frame — columns, widths, icons (canonical)
+docs/fleet-drive-rationale.md                    the evidence behind the drive leg's rules — the agent body states them and points here
 docs/session-tiers.md                            session tiers + command → tier table (canonical)
 docs/subject-resolution.md                      the four-source subject chain the eight manager commands share
 scripts/topic-spawn.py                           the topic tier's spawn gate — goal-not-in-scope / goal-not-startable / manager-cap, the § 1 ranking, and the worker refusal
@@ -181,9 +184,12 @@ scripts/manager-predispatch.py                   the pre-dispatch gate both mana
 scripts/plugin-version-census.py                 the fleet reading of the plugin-install probe — who is stale, and `--reload` the lever that moves them
 scripts/approved-not-started.py                  the approved-but-unstarted reading both loops print (tick = 30 min constant; `unknown`, never `0`, on an unreadable registry)
 scripts/adopt-orphans.py                         adopts an exited manager's live workers into the ownership-claim store (/fleet-loop Step 3a) — successor-by-subject, else the tick session
-scripts/gate-owner-filter.py                     the ownership-scoped attention arm — drops gates a live peer manager owns (state: ~/.claude/state/gate-feed/<self-session-id>.json)
+scripts/gate-owner-filter.py                     the ownership-scoped attention arm — drops gates a live peer manager owns, excludes gates the vault says belong to another goal, and excludes a `role: human` row (the operator's own workspace, never a manager's to route) (state: ~/.claude/state/gate-feed/<self-session-id>.json)
+scripts/session-scope.py                         that arm's durable ownership input — which goal a session belongs to, from the vault's page stamps (not a live store)
 commands/read-guides.md                          load every guide in docs/
 scripts/{jump,who-needs-me}.py                   their helpers
+scripts/service-guard.py                         the fleet round's standing resource guard (fifth reading, router row 15) — `phys_footprint` + CPU per launchd service against `~/.claude/state/service-guard.json`; `--apply` reopens the owning row on a breach, never restarts
+scripts/declared-wait.py                         the shared `⏰ Ends:` reader — one home for the slot `fleet-board.py`, `manager-predispatch.py` and the fleet sweep all key on (the "fourth definition of idle" guard)
 agents/goal-wrangler.md                routine approval loop over headless workers
 agents/topic-sweep-reader.md            the TOPIC sweep's read half — goal rows and their managers (called by topic-loop/topic-status)
 agents/topic-drive.md                   the TOPIC sweep's act leg — keep-alive and the ranked start hand-over
@@ -201,7 +207,9 @@ server/policy.json                       bundled approval rules (see README § T
 
 ## Changelog fold guard
 
-`.github/workflows/changelog-fold.yml` runs `bborbe/coding`'s reusable guard on every push to master. It fails when a bullet sits under a released section whose tag does not contain its merge.
+The fold is guarded twice. `.github/workflows/changelog-unreleased-fold.yml` runs on every pull request and **predicts** it: it computes the merge with `git merge-tree --write-tree` and fails when a pending `## Unreleased` bullet would land under an already-released heading. `.github/workflows/changelog-fold.yml` runs on every push to master and **detects** it in the real merged tree: it fails when a bullet sits under a released section whose tag does not contain its merge.
+
+The precheck is the one that saves the mail. Between 2026-10-30 and 10-31 the post-merge guard was red for 91 consecutive master runs — 91 detections, not 91 prevented, one failure mail each. Run the precheck locally before pushing: `CHANGELOG_ROOT=$PWD CHANGELOG_BASE_REF=origin/master bash <path-to-bborbe-coding>/scripts/check-changelog-unreleased-fold.sh`.
 
 **A red run on master blocks the next merge.** Owner: the maintainer. Trigger: a `changelog-fold` workflow run concluding `failure` on master. Repair it in the next PR, or in a PR of its own, before merging anything else — an always-red guard cannot distinguish a new fold from a standing backlog, which is how three folds in a row (#398, #405, #406) were each found by hand while the guard sat red and unread.
 

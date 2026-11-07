@@ -41,9 +41,9 @@ argument-hint: "[goal|topic] [--interval <N>m] (subject detected when omitted; i
 
 Manager-drive — **the round**. It is the round the manager loop's wakeup runs, and it is runnable by hand: one round, once, against one subject.
 
-⚠️ **This is the round, not the arm.** The wakeup prompt names THIS command; the arm (`/supervisor:goal-loop`) is invoked **once** to arm the loop and is **never** re-invoked from a wakeup. This file is the **round** (read on every wakeup); `commands/goal-loop.md` is the **arm** (read once).
+⚠️ **This is the round, not the arm.** The wakeup prompt names THIS command; the arm (`/supervisor:goal-loop`) is invoked **once** to arm the loop and is **never** re-invoked from a wakeup. This file is the **round** (read on every wakeup); `commands/goal-loop.md` is the **arm** (read once). ⚠️ **The liveness record is the exception — row 0a writes it every round; "not the arm" governs only the `ScheduleWakeup`.**
 
-⚠️ **A manager-tier verb — never run it from a worker session.** A worker carries a *task*; a manager carries a topic or goal and a loop. Driving a subject's tracked set from inside a worker collapses the two roles silently (`docs/fleet-surface.md` § Session roles). A worker that needs a subject driven routes it to its manager with `SendMessage` and says so.
+⚠️ **A manager-tier verb — never run it from a worker session.** A worker carries a *task*; a manager carries a subject and a loop. Driving a subject's tracked set from a worker collapses the two roles silently (`docs/fleet-surface.md` § Session roles). A worker needing a subject driven routes it to its manager with `SendMessage`.
 
 Rationale and incident history: the Manager Session runbook § Command rationale — maintained.
 
@@ -51,11 +51,13 @@ Rationale and incident history: the Manager Session runbook § Command rationale
 
 | # | Step | When | File |
 |---|---|---|---|
+| 0a | Write the liveness record | every round, before the pre-dispatch gate | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-liveness.md` |
 | 0 | Correct the `noop` field and re-arm | end of every tick | *inline — see the tail step* |
 | 1 | Resolve the subject and the tracked set | manager start; the declaration read re-runs every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-resolve.md` |
 | 2 | Take the round's readings | every tick, **before** the sweep dispatch | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-readings.md` |
 | 2b | Quiet check | every tick, after the readings | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-quiet.md` |
 | 3 | Sweep | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-sweep.md` |
+| 4c | Closure | every tick, after the sweep | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` |
 | 4 | Classify the rows | every tick, after the sweep | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-classify.md` |
 | 4b | Coverage | every tick, before the drive leg | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-coverage.md` |
 | 5 | Drive | every tick, after the table renders | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-drive.md` |
@@ -69,22 +71,26 @@ Rationale and incident history: the Manager Session runbook § Command rationale
 | 13 | Self-improvement | before the session ends, or a sweep exposes a gap | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-self-improvement.md` |
 | 14 | Unowned check | before declaring any member task unowned | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-unowned.md` |
 
+⚠️ **Row 4c runs before row 4, whatever its label reads** — the classify decides its `done`
+bucket from `status`, so a page closed after it is classified as active and rows 5–6 act on
+that stale bucket.
+
 ⚠️ **Opening a worker is bound by `docs/fleet-surface.md` § Spawn a worker item 6** — the mode is passed in both directions (`mode: headless` → `interactive=false`, `mode: interactive` → `interactive=true`). This file grants the tool but does not open; the binding and the call live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-spawn.md`.
 
 **Read a step file only when its `When` holds**, and if a step's text is not in context — after a compaction, say — **re-read it** rather than assuming it survived.
 
-⚠️ **The `#` column is a stable label, not a running order — `When` sequences the round.** Rows 6 and 7 are referenced **by number** from other step files, so a new step takes a letter suffix rather than renumbering: `4b` is *between 4 and 5*, which is where it runs.
+⚠️ **The `#` column is a stable label, not a running order — `When` sequences the round.** Rows 6 and 7 are referenced **by number** from other step files, so a new step takes a letter suffix rather than renumbering: `4b` sits between 4 and 5.
 
-⚠️ **The rules do not live here, and that is deliberate.** Every always-hold invariant and gate is **inline in the arm** (`commands/goal-loop.md`), and every per-round rule lives in **exactly one** step file above. Restating a rule in this command would give it two homes, and a rule with two homes drifts — one copy is amended and the other silently keeps the old behaviour. So this command is the **map**: it names the steps and the condition under which each is read, and nothing else. If you find yourself needing a rule that is not in a step file you have read, read the arm or the step file — do not act from memory of a previous round.
+⚠️ **The rules do not live here, deliberately.** Every always-hold invariant and gate is **inline in the arm** (`commands/goal-loop.md`), and every per-round rule lives in **exactly one** step file above — a rule with two homes drifts. This command is the **map**; when a rule is not in a step file you have read, read the arm or the step file, never act from memory of a previous round.
 
-⚠️ **The arm is not in context, and a round never assumes context left over from the previous round.** State lives on disk (the tracked-set file, the snapshot, the verdicts cache); re-read what a step needs rather than carrying it forward.
+⚠️ **A round assumes no context left over from the previous round.** State lives on disk (the tracked-set file, the snapshot, the verdicts cache); re-read what a step needs rather than carrying it forward.
 
 ## Arguments
 
 - **`$1` (optional — resolved from the session when omitted):** the **subject** — a goal name matching a page in `24 Goals/`, or a topic name matching a topic page in `23 Topics/` *(operator's vault; not shipped with this plugin)*. The branch is detected from whichever page resolves (step 1); this command never assumes one.
   - `/goal-drive "Sample Task"` → explicit subject
   - `/goal-drive` (bare) → resolve the subject from § Subject resolution in the arm, which points at `${CLAUDE_PLUGIN_ROOT}/docs/subject-resolution.md` — the same rule `/goal-loop` and `/goal-status` use, so a manager session's bare drive acts on the subject it is already watching.
-- **`--interval <N>m`** is the **arm's**, not this command's: it is the loop's wakeup delay, armed by `/supervisor:goal-loop` § step 3 at the round's head, and nothing in this command reads it. ⚠️ **Do not read that as "a round arms nothing" — it is not inert here.** Step 12 makes one `ScheduleWakeup` call to correct `noop` on a no-change tick, and re-arms the two `Monitor` channels that expire mid-tick; what this command never does is *set* the interval. The flag is accepted solely so the wakeup's prompt parses.
+- **`--interval <N>m`** is the **arm's**, not this command's: it is the loop's wakeup delay, armed by `/supervisor:goal-loop` § step 3 at the round's head. ⚠️ **Do not read that as "a round arms nothing" — it is not inert here.** Step 12 makes one `ScheduleWakeup` call to correct `noop` on a no-change tick, and re-arms the two `Monitor` channels that expire mid-tick; what this command never does is *set* the interval. ⚠️ **Row 0a reads it too** — it passes the clamped seconds to `manager-liveness.py --arm`, which requires `--interval > 0`. The flag is accepted so the wakeup's prompt parses and so the liveness record can reuse its value.
 
 ## Pre-dispatch gate — by-hand rounds only
 
@@ -95,10 +101,10 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 ```
 
 - **exit 0 — nothing changed.** The gate has already printed the stored table under its `NO-CHANGE` marker. Reproduce that output as this round's whole result and **STOP** — dispatch no agent, run no step below. The stored table carries **no jump coordinates**, so say in one line that pane ids must be re-resolved by a fresh run; never present a replayed link as live.
-- **exit 10 — something changed, the gate could not tell, OR the stored classification places a row in an actionable bucket.** Run the round, and persist the fresh snapshot at the sweep step. ⚠️ **That third reason is why a round still runs on a tree nothing has touched** — ready-to-start is a steady state, and the gate's own reason line names them (`N actionable row(s) waiting: …`), so print it and never report a pass-through as "the tree moved".
+- **exit 10 — something changed, the gate could not tell, OR the stored classification places a row in an actionable bucket.** Run the round, persist the fresh snapshot at the sweep. ⚠️ **That third reason is why a round runs on an untouched tree** — ready-to-start is a steady state; print the gate's own reason line (`N actionable row(s) waiting: …`), never "the tree moved".
 - **exit 2 — usage error.** A malformed invocation (missing `--vault`, bad flag), not a verdict. Fix the call; do not read it as "changed".
 
-⚠️ **The rule has one home:** `${CLAUDE_PLUGIN_ROOT}/scripts/manager-predispatch.py` — the digest inputs, why liveness is in them, why mtime is not, and the fail-open cases. Read it there; it is **not** restated here. ⚠️ **Fail-open is the contract** — a missing state file, an unreadable one, a parse error, an unresolvable subject and a failed write all exit 10. Never treat a non-zero exit as an error to route around, and never hand-roll a second classifier here: this gate is the only pre-dispatch decision.
+⚠️ **The rule has one home:** `${CLAUDE_PLUGIN_ROOT}/scripts/manager-predispatch.py` — digest inputs, why liveness is in them and mtime is not, and the fail-open cases. Read it there; **not** restated here. ⚠️ **Fail-open is the contract** — every unreadable or unresolvable input exits 10; never route around a non-zero exit, and never hand-roll a second classifier: this gate is the only pre-dispatch decision.
 
 ## What this command must never do
 

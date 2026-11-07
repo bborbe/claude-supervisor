@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -182,7 +183,55 @@ class ResumeCommand(unittest.TestCase):
     def test_resumes_through_the_given_launcher_not_bare_claude(self):
         """Regression 2026-10-10: a bare-`claude` resume dropped `--mcp-config` and `a2a`."""
         inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc-private-claude")[-1]
-        self.assertIn('exec "/l/cc-private-claude" --resume sid', inner)
+        self.assertIn('"/l/cc-private-claude" --resume sid', inner)
+
+    def test_no_exec_so_the_exit_status_survives(self):
+        """`exec` makes a SIGKILLed worker leave no record anywhere — the whole point.
+
+        Measured 2026-10-27: `bash -lc 'exec bash -c "kill -9 $$"'` reports 137 to its own
+        caller but leaves nothing to run a trap; the same child run *without* `exec`, behind
+        `trap _sx EXIT`, records `rc=137`. A test that only checked the launcher path would
+        pass with `exec` still in place and silently re-open the gap.
+        """
+        argv = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")
+        inner = argv[-1]
+        self.assertNotIn("exec ", inner)
+        self.assertNotIn("exec ", " ".join(argv))
+        self.assertIn("trap _sx EXIT", inner)
+        self.assertIn("rc=$?", inner)
+
+    def test_the_writer_path_rides_as_an_env_assignment(self):
+        """A spawned pane inherits wezterm's mux-server environment, not this process's."""
+        argv = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")
+        self.assertIn("--", argv)
+        assignments = [a for a in argv if a.startswith("SESSION_EXIT_RECORD=")]
+        self.assertEqual(len(assignments), 1)
+        self.assertTrue(assignments[0].endswith("/scripts/session-exit-record.py"))
+
+    def test_a_spawn_marker_is_written_before_the_launcher_runs(self):
+        """Without it an empty record cannot be told from an unwired writer."""
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")[-1]
+        self.assertIn("--kind spawn --session \"sid\"", inner)
+        self.assertLess(inner.index("--kind spawn"), inner.index('--resume sid'))
+
+    def test_the_observer_watches_this_shell(self):
+        """`$$` outlives the launcher and dies exactly when the group is killed.
+
+        That is the death the trap cannot record, so it is the one the out-of-group observer
+        exists for; watching anything else would leave the group kill unattributed.
+        """
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")[-1]
+        self.assertIn('observe --pid $$ --session "sid"', inner)
+
+    def test_the_observer_starts_before_the_launcher(self):
+        """Started after the launcher would be started after the first kill can land."""
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")[-1]
+        self.assertLess(inner.index(" observe "), inner.index('--resume sid'))
+
+    def test_the_trap_and_the_marker_both_carry_the_pid(self):
+        """A record without a pid cannot be joined to the process it describes."""
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")[-1]
+        self.assertEqual(inner.count("--pid $$"), 3)
 
     def test_resume_target_and_unset_list_intact(self):
         """The copied recipe's own invariants must survive the --cwd addition."""
@@ -616,8 +665,13 @@ class Cli(unittest.TestCase):
         os.makedirs(self.reg)
         self.load = os.path.join(self.dir, "loadpath")
         os.makedirs(os.path.join(self.load, "9.9.9"))
+        # No role map: the Hold-window source is off for the store/CLI tests, so they
+        # never shell out to a real WezTerm and stay host-independent. The window is
+        # exercised on its own in HoldWindow below.
+        os.environ["SUPERVISOR_ROLE_MAP"] = os.path.join(self.dir, "no-role-map.json")
 
     def tearDown(self):
+        os.environ.pop("SUPERVISOR_ROLE_MAP", None)
         self.tmp.cleanup()
 
     def write(self, pid, rec):
@@ -762,6 +816,72 @@ class Cli(unittest.TestCase):
         self.assertIn("no launcher could be resolved", out.stdout)
         self.assertNotIn("killed pid", out.stdout)
 
+    def _run_with_vault_cli(self, sid, vault_cli):
+        """Run the CLI with NO config override, so `vault-cli` itself must be resolved."""
+        env = dict(os.environ)
+        for key in ("SUPERVISOR_LAUNCHER", "SUPERVISOR_VAULT_CONFIG"):
+            env.pop(key, None)
+        env["SUPERVISOR_LOAD_PATH"] = self.load
+        env["SUPERVISOR_VAULT_CLI"] = vault_cli
+        env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+        return subprocess.run(
+            [sys.executable, SCRIPT, sid, "--sessions-dir", self.reg],
+            capture_output=True, text=True, env=env,
+        )
+
+    def test_missing_vault_cli_is_an_environment_fault_not_a_refusal(self):
+        """Launcher absent: exit 3 under its own token — never the refusal line."""
+        self.write(1, entry("envfault", name="Some Worker"))
+        out = self._run_with_vault_cli("envfault", os.path.join(self.dir, "no-vault-cli"))
+        lines = out.stdout.splitlines()
+        self.assertEqual(out.returncode, 3, out.stdout)
+        self.assertEqual(lines[0], "environment-fault", out.stdout)
+        self.assertIn("vault-cli not found", out.stdout)
+        self.assertNotIn("no launcher could be resolved", out.stdout)
+        self.assertNotIn("killed pid", out.stdout)
+
+    def test_present_vault_cli_with_ineligible_target_is_a_refusal(self):
+        """Launcher present, cwd under no vault: the genuine refusal, exit 1."""
+        self.write(1, entry("ineligible", name="Some Worker"))
+        fake = os.path.join(self.dir, "vault-cli")
+        payload = json.dumps([{"name": "v", "path": os.path.join(self.dir, "elsewhere"),
+                               "claude_script": "/x/cc"}])
+        with open(fake, "w") as fh:
+            fh.write(f"#!/bin/sh\ncat <<'EOF'\n{payload}\nEOF\n")
+        os.chmod(fake, 0o755)
+        out = self._run_with_vault_cli("ineligible", fake)
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("no launcher could be resolved", out.stdout)
+        self.assertNotIn("environment-fault", out.stdout)
+
+    def test_vault_cli_off_path_is_found_via_gopath(self):
+        """No override, `vault-cli` absent from PATH, present in $GOPATH/bin: resolved, so
+        the outcome is the ordinary refusal (exit 1), never the environment fault."""
+        self.write(1, entry("gopath", name="Some Worker"))
+        gobin = os.path.join(self.dir, "gopath", "bin")
+        os.makedirs(gobin)
+        fake = os.path.join(gobin, "vault-cli")
+        payload = json.dumps([{"name": "v", "path": os.path.join(self.dir, "elsewhere"),
+                               "claude_script": "/x/cc"}])
+        with open(fake, "w") as fh:
+            # The marker proves THIS binary ran — a real vault-cli at a fixed location would
+            # produce the same refusal and hide a broken $GOPATH branch.
+            fh.write(f"#!/bin/sh\ntouch {self.dir}/gopath-ran\ncat <<'EOF'\n{payload}\nEOF\n")
+        os.chmod(fake, 0o755)
+        env = dict(os.environ)
+        for key in ("SUPERVISOR_LAUNCHER", "SUPERVISOR_VAULT_CONFIG", "SUPERVISOR_VAULT_CLI"):
+            env.pop(key, None)
+        env["SUPERVISOR_LOAD_PATH"] = self.load
+        env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+        env["GOPATH"] = os.path.join(self.dir, "gopath")
+        out = subprocess.run(
+            [sys.executable, SCRIPT, "gopath", "--sessions-dir", self.reg],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertNotIn("environment-fault", out.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "gopath-ran")), out.stdout)
+
     def test_happy_path_dry_run_signals_nothing(self):
         """Cleared target: the dry run reports what it WOULD do and exits 0."""
         self.write(1, entry("ok", name="Some Worker"))
@@ -781,6 +901,213 @@ SID_HELD = "aaaaaaaa-1111-2222-3333-444444444444"
 # own test uses (`test_session_holds.py` NEAR_MISS). A prefix match, a substring match
 # or a flag-everything build all trip on it; nothing weaker does.
 SID_NEAR_MISS = "aaaaaaab-1111-2222-3333-444444444444"
+
+
+class AbsentMode(unittest.TestCase):
+    """`--absent`: resume a session whose process is GONE — no registry entry, nothing to kill.
+
+    The normal path refuses `unknown-session-id` when no registry entry carries the id, and a
+    dead session's `~/.claude/sessions/<pid>.json` is deleted on death, so it could never
+    bring back a Fleet Manager that died (measured 2026-11-06: three deaths in one day). The
+    absent mode inverts the precondition — the id must be ABSENT — sources `cwd` and launcher
+    from the manager registration that outlives death, and never signals anything.
+
+    Both directions are asserted: a too-loose build (resumes a live session) and a too-tight
+    one (refuses a genuinely dead one) fail in opposite directions.
+    """
+
+    SID = "eeee0000-0000-0000-0000-000000000005"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+        self.reg = os.path.join(self.dir, "sessions")
+        self.mgr = os.path.join(self.dir, "worker-manager")
+        self.vault = os.path.join(self.dir, "vault")
+        self.bin = os.path.join(self.dir, "bin")
+        for d in (self.reg, self.mgr, self.vault, self.bin):
+            os.makedirs(d)
+        # Three DISTINCT launchers, so the test can tell the manager-default rule from the
+        # `claude_script` fallback as well as from the worker launcher.
+        self.launcher = os.path.join(self.dir, "cc-manager")
+        self.vault_script = os.path.join(self.dir, "cc-vault")
+        for path in (self.launcher, self.vault_script):
+            with open(path, "w") as fh:
+                fh.write("#!/bin/sh\n")
+            os.chmod(path, 0o755)
+        self.cfg = os.path.join(self.dir, "vaults.json")
+        with open(self.cfg, "w") as fh:
+            json.dump([{"name": "v1", "path": self.vault, "claude_script": self.vault_script,
+                        "manager_launcher": self.launcher, "worker_launcher": "/no/worker"}], fh)
+        self.exits = os.path.join(self.dir, "session-exit")
+        os.makedirs(self.exits)
+        self.holds = os.path.join(self.dir, "holds.json")
+        with open(self.holds, "w") as fh:
+            fh.write('{"version": 1, "holds": {}}')
+        # A fake `wezterm` that records its argv and prints a pane id, so a non-dry run is
+        # observable without opening a tab.
+        self.spawned = os.path.join(self.dir, "spawned.txt")
+        fake = os.path.join(self.bin, "wezterm")
+        with open(fake, "w") as fh:
+            fh.write(f'#!/bin/sh\nprintf "%s\\n" "$@" > "{self.spawned}"\necho 999\n')
+        os.chmod(fake, 0o755)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def register(self, **over):
+        rec = {"subject": "Fleet Manager", "branch": "fleet", "vault": "v1",
+               "resolved_at": "2026-11-06T09:00:00+00:00"}
+        rec.update(over)
+        with open(os.path.join(self.mgr, f"{self.SID}.json"), "w") as fh:
+            json.dump(rec, fh)
+
+    def run_absent(self, *extra, dry=True, path=None, wezterm=None):
+        env = dict(os.environ)
+        env.pop("SUPERVISOR_LAUNCHER", None)
+        env.pop("SUPERVISOR_WEZTERM", None)
+        env["SUPERVISOR_VAULT_CONFIG"] = self.cfg
+        env["SUPERVISOR_WORKER_MANAGER_DIR"] = self.mgr
+        env["SUPERVISOR_SESSION_HOLDS"] = self.holds
+        # Never the real store: the in-flight scan reads it and the resume lock writes to it.
+        env["SUPERVISOR_SESSION_EXIT_DIR"] = self.exits
+        env["PATH"] = path if path is not None else self.bin + os.pathsep + env.get("PATH", "")
+        if wezterm is not None:
+            env["SUPERVISOR_WEZTERM"] = wezterm
+        argv = [sys.executable, SCRIPT, self.SID, "--absent", "--sessions-dir", self.reg]
+        if dry:
+            argv.append("--dry-run")
+        out = subprocess.run(argv + list(extra), capture_output=True, text=True, env=env)
+        return out.returncode, out.stdout.strip().splitlines()
+
+    def test_a_dead_registered_manager_resumes_into_its_vault_on_its_manager_launcher(self):
+        self.register()
+        code, lines = self.run_absent()
+        self.assertEqual(code, 0, lines)
+        text = "\n".join(lines)
+        self.assertIn(f"launcher: {self.launcher}", text)
+        self.assertIn(f"would resume into {self.vault}", text)
+        self.assertNotIn("/no/worker", text, "the fleet manager took the worker launcher")
+
+    def test_a_live_session_is_refused_not_absent(self):
+        """The too-loose direction: a registry entry means the process may be alive."""
+        self.register()
+        with open(os.path.join(self.reg, "4242.json"), "w") as fh:
+            json.dump(entry(self.SID), fh)
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "not-absent", lines)
+
+    def test_an_unreadable_registry_cannot_prove_absence(self):
+        self.register()
+        os.rmdir(self.reg)
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "not-absent", lines)
+
+    def test_no_registration_means_no_resume(self):
+        """Without the registration there is no vault, so no cwd and no launcher."""
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "unknown-session-id", lines)
+
+    def test_a_held_session_is_never_resumed(self):
+        self.register()
+        with open(self.holds, "w") as fh:
+            fh.write('{"version": 1, "holds": {"%s": {"reason": "operator"}}}' % self.SID)
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "held-session", lines)
+
+    def test_an_unknown_vault_is_an_error_before_any_spawn(self):
+        self.register(vault="nope")
+        code, lines = self.run_absent(dry=False)
+        self.assertEqual(code, 1, lines)
+        self.assertFalse(os.path.exists(self.spawned), "spawned with no resolvable cwd")
+
+    def test_a_real_resume_spawns_once_and_signals_nothing(self):
+        self.register()
+        code, lines = self.run_absent(dry=False)
+        self.assertEqual(code, 0, lines)
+        with open(self.spawned) as fh:
+            argv = fh.read()
+        self.assertIn("spawn", argv)
+        self.assertIn(self.vault, argv)
+        self.assertIn(f"--resume {self.SID}", argv)
+        self.assertNotIn("killing-pid", "\n".join(lines))
+        self.assertIn("re-arm", "\n".join(lines).lower())
+
+    def test_it_resumes_under_the_launchd_path_where_wezterm_is_not_on_path(self):
+        """M1, the bug the suite missed: the keeper's plist PATH is system dirs only.
+
+        A bare `wezterm` is FileNotFoundError there, so every answered resume would have
+        failed. `wezterm` must be resolved by absolute path, not looked up on PATH.
+        """
+        self.register()
+        code, lines = self.run_absent(dry=False, path="/usr/bin:/bin:/usr/sbin:/sbin",
+                                      wezterm=os.path.join(self.bin, "wezterm"))
+        self.assertEqual(code, 0, lines)
+        self.assertTrue(os.path.exists(self.spawned), "nothing was spawned under the launchd PATH")
+
+    def test_no_wezterm_anywhere_is_an_error_before_any_spawn(self):
+        self.register()
+        code, lines = self.run_absent(dry=False, wezterm="/no/such/wezterm")
+        self.assertEqual(code, 1, lines)
+        self.assertIn("no wezterm", "\n".join(lines))
+        self.assertFalse(os.path.exists(self.spawned))
+
+    def test_a_half_written_registry_entry_is_never_proof_of_absence(self):
+        self.register()
+        with open(os.path.join(self.reg, "777.json"), "w") as fh:
+            fh.write('{"sessionId": "' + self.SID[:10])  # truncated mid-write
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "not-absent", lines)
+
+    def test_a_registry_file_that_is_valid_json_but_not_an_object_refuses_not_crashes(self):
+        self.register()
+        with open(os.path.join(self.reg, "778.json"), "w") as fh:
+            fh.write('["not", "an", "object"]')
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "not-absent", lines)
+
+    def _pane_line(self, kind, age):
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - age))
+        with open(os.path.join(self.exits, "pane-51.log"), "a") as fh:
+            fh.write(f"{stamp}\tkind={kind}\tpane=51\tsession={self.SID}\tpid=9\trc=-\t"
+                     f"signal=-\tsender=-\twriter=observer\n")
+
+    def test_a_pane_already_running_the_session_is_refused(self):
+        """A resume through another path heartbeats before it registers — two copies otherwise."""
+        self.register()
+        self._pane_line("heartbeat", age=20)
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "not-absent", lines)
+
+    def test_an_old_pane_record_does_not_block_a_resume(self):
+        self.register()
+        self._pane_line("heartbeat", age=3600)
+        code, lines = self.run_absent()
+        self.assertEqual(code, 0, lines)
+
+    def test_a_pane_that_ended_does_not_block_a_resume(self):
+        self.register()
+        self._pane_line("heartbeat", age=40)
+        self._pane_line("signalled kill", age=30)
+        code, lines = self.run_absent()
+        self.assertEqual(code, 0, lines)
+
+    def test_a_second_resume_inside_the_window_is_refused(self):
+        self.register()
+        first, lines = self.run_absent(dry=False)
+        self.assertEqual(first, 0, lines)
+        os.remove(self.spawned)
+        second, lines = self.run_absent(dry=False)
+        self.assertEqual(second, 1, lines)
+        self.assertEqual(lines[0], "not-absent", lines)
+        self.assertFalse(os.path.exists(self.spawned), "a second copy was spawned")
 
 
 class HeldSession(Cli):
@@ -852,6 +1179,90 @@ class HeldSession(Cli):
             handle.write("{not json")
         _code, lines = self.run_cli(SID_HELD)
         self.assertNotEqual(lines[0] if lines else "", "held-session", lines)
+
+
+SID_WINDOW = "cccccccc-1111-2222-3333-444444444444"
+
+
+class HoldWindow(Cli):
+    """The Hold WINDOW -- a pane parked in the role map's Hold window is refused.
+
+    The second source of heldness, and the one where a failed read must REFUSE: a
+    restart KILLS a process, so a broken transport read as "not held" is the
+    direction that restarts a session the operator parked. `docs/pane-reads.md`
+    prescribes *refuse non-zero, naming the transport* for a caller that already
+    exits non-zero -- which this one does on every refusal.
+
+    Both directions are asserted by name. The whole path is real -- a fixture role
+    map, a fixture registry and a fake `wezterm` on PATH -- so the test never
+    depends on the host having WezTerm.
+    """
+
+    NAME = "⚙ held worker"
+    PANE = 874
+    HOLD_WINDOW = 11
+    AGENT_WINDOW = 9
+
+    def setUp(self):
+        super().setUp()
+        self.role_map = os.path.join(self.dir, "role-map.json")
+        with open(self.role_map, "w", encoding="utf-8") as handle:
+            json.dump({"Hold": {"window_id": self.HOLD_WINDOW}}, handle)
+        os.environ["SUPERVISOR_ROLE_MAP"] = self.role_map
+        # registry_names() reads SESSIONS_DIR, so point it at the fixture registry and
+        # seed the session's name -- the join the pane title carries.
+        os.environ["SUPERVISOR_SESSIONS_DIR"] = self.reg
+        self.bin = os.path.join(self.dir, "bin")
+        os.makedirs(self.bin)
+        self.write_wezterm(self.HOLD_WINDOW)
+        self.write(4242, entry(SID_WINDOW, name=self.NAME))
+
+    def tearDown(self):
+        os.environ.pop("SUPERVISOR_SESSIONS_DIR", None)
+        super().tearDown()
+
+    def write_wezterm(self, window, fail=False):
+        path = os.path.join(self.bin, "wezterm")
+        with open(path, "w", encoding="utf-8") as handle:
+            if fail:
+                handle.write("#!/bin/sh\nexit 1\n")
+            else:
+                listing = json.dumps(
+                    [{"pane_id": self.PANE, "window_id": window,
+                      "title": "✳ " + self.NAME}]
+                )
+                handle.write("#!/bin/sh\ncat <<'JSON'\n" + listing + "\nJSON\n")
+        os.chmod(path, 0o755)
+
+    def run_hold(self):
+        env = dict(os.environ)
+        env["PATH"] = self.bin + os.pathsep + env.get("PATH", "")
+        env["SUPERVISOR_LOAD_PATH"] = self.load
+        env["SUPERVISOR_LAUNCHER"] = os.path.join(self.dir, "loadpath")
+        out = subprocess.run(
+            [sys.executable, SCRIPT, SID_WINDOW, "--sessions-dir", self.reg, "--dry-run"],
+            capture_output=True, text=True, env=env,
+        )
+        return out.returncode, out.stdout.strip().splitlines()
+
+    def test_a_session_in_the_hold_window_is_refused(self):
+        """Too-tight: a Hold-window pane refuses the restart with no store entry."""
+        code, lines = self.run_hold()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "held-session", lines)
+
+    def test_a_session_outside_the_hold_window_is_not_refused_for_a_hold(self):
+        """Too-loose: the SAME session, pane in another window, is not held."""
+        self.write_wezterm(self.AGENT_WINDOW)
+        code, lines = self.run_hold()
+        self.assertNotEqual(lines[0] if lines else "", "held-session", lines)
+
+    def test_an_unreadable_pane_list_refuses_naming_the_transport(self):
+        """The chosen response for THIS caller: refuse, never read as not held."""
+        self.write_wezterm(self.HOLD_WINDOW, fail=True)
+        code, lines = self.run_hold()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "hold-unreadable", lines)
 
 
 if __name__ == "__main__":

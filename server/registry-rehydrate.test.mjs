@@ -404,8 +404,22 @@ test('supervisor.mjs actually adopts the roster and guards the rehydrated rows',
   // out. Filtering fixed the dead-worker deadlock by breaking the live case: a rehydrated row
   // whose worker still runs must keep blocking a resume, or two writers land on one
   // conversation.
-  assert.match(src, /pruneRehydratedAgents\(\)\n\s+const holder = findLiveHolder\(agents\.values\(\), resume\)/)
+  //
+  // ⚠️ The guard's BODY moved into `resume-guard.mjs` on 2026-10-29 (`resumeRefusal`), so it
+  // could be exercised behaviourally — `supervisor.mjs` starts an MCP server at module load and
+  // cannot be imported. What is pinned HERE is unchanged in intent and narrower in shape: this
+  // path still prunes first, still hands over EVERY row unfiltered, and now also passes `live`
+  // (the one fact that separates a dead tab from a live headless worker). The release itself and
+  // the safety property that must survive it are asserted in `resume-guard.test.mjs`.
+  //
+  // ⚠️ This pins the CALL'S TEXT, which is the price of a seam that cannot be imported: it can
+  // prove a variable named `live` is passed, not that the variable is the one `checkLiveness`
+  // produced. Renaming that binding breaks this test without a behaviour change, and the fix is
+  // to update the regex — not to loosen it, since the whole point is that the argument cannot
+  // silently become a literal or a different binding.
+  assert.match(src, /pruneRehydratedAgents\(\)\n(?:\s*\/\/[^\n]*\n)*\s+const refusal = resumeRefusal\(\{ agentRecords: agents\.values\(\), sessionId: resume, live \}\)/)
   assert.ok(!/findLiveHolder\(\[\.\.\.agents\.values\(\)\]\.filter/.test(src), 'the rehydrated filter must not come back')
+  assert.ok(!/agentRecords: \[\.\.\.agents\.values\(\)\]\.filter/.test(src), 'the rehydrated filter must not come back')
   // Not stamped on shutdown — that record belongs to the server that spawned the worker.
   assert.match(src, /if \(agent\.rehydrated\) continue/)
   // ⚠️ And the WRITER routes every write through the DECISION, so the single-writer guarantee is
@@ -490,4 +504,15 @@ test('the in-process map is not mutated', () => {
   unionRoster(inProcess, [foreign('agent_1', FAR_A1)])
   assert.equal(inProcess.size, 1)
   assert.equal(inProcess.get('agent_1').label, 'mine')
+})
+
+// A silent field loss here is the class this module's own comments warn about: the ledger
+// carries `wrapper_session_id`, and a mapping that does not read it leaves an adopted row
+// unable to see or answer a park the wrapper is holding for it.
+test('an adopted row keeps the wrapper session it was spawned under', () => {
+  const agent = toAgentRecord({ session_id: 's-1', agent_id: 'agent_1', mode: 'headless', wrapper_session_id: 'w-1' })
+  assert.equal(agent.wrapperSessionId, 'w-1')
+  // A pre-field record and a genuinely non-wrapper worker are the same absence on the ledger —
+  // which is why `rehydrated` marks the row rather than this field trying to say which it is.
+  assert.equal(toAgentRecord({ session_id: 's-1', agent_id: 'agent_1', mode: 'headless' }).wrapperSessionId, null)
 })
