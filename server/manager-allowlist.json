@@ -7,8 +7,6 @@
     { "tool": "Bash", "prefix": "head" },
     { "tool": "Bash", "prefix": "tail" },
     { "tool": "Bash", "prefix": "wc" },
-    { "tool": "Bash", "prefix": "uniq" },
-    { "tool": "Bash", "prefix": "diff" },
     { "tool": "Bash", "prefix": "grep" },
     { "tool": "Bash", "prefix": "shasum" },
     { "tool": "Bash", "prefix": "md5" },

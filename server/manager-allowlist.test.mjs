@@ -29,9 +29,9 @@ function entries() {
 
 test('the shipped file parses and carries every documented entry', () => {
   const list = entries()
-  assert.equal(list.length, 13)
+  assert.equal(list.length, 11)
   const prefixes = list.map((e) => e.prefix)
-  for (const expected of ['ls', 'cat', 'head', 'tail', 'wc', 'uniq', 'diff', 'grep', 'shasum', 'md5', 'jq', 'make test', 'bun test']) {
+  for (const expected of ['ls', 'cat', 'head', 'tail', 'wc', 'grep', 'shasum', 'md5', 'jq', 'make test', 'bun test']) {
     assert.ok(prefixes.includes(expected), `missing entry: ${expected}`)
   }
   assert.equal(list.filter((e) => e.confine === 'clean-runner-config').length, 2)
@@ -45,6 +45,21 @@ test('sort and tree are NOT allowlisted — their extensions write files', () =>
   const list = entries()
   for (const command of ['sort x', 'sort -o /tmp/out x', 'sort --compress-program=sh x', 'tree', 'tree -o /tmp/out']) {
     assert.equal(matchManagerEntry(list, 'Bash', command, CLEAN), null, `must not match: ${command}`)
+  }
+})
+
+test('uniq and diff are NOT allowlisted — one writes a file, the other runs a program', () => {
+  // `uniq IN OUT` writes OUT — an arbitrary-path write that bypasses the policy's Write(cwd)
+  // confinement — and `diff -l` / `--paginate` runs pr(1). Both match a bare prefix, and a
+  // prefix rule cannot exclude a positional or a flag, so neither may be listed. Catches
+  // anyone re-adding them from the worker policy's pre-v0.249.0/v0.250.0 set.
+  const list = entries()
+  for (const command of ['uniq /tmp/in /tmp/out', 'uniq -c /dev/null /tmp/out', 'diff -l a b', 'diff --paginate a b', 'diff a b']) {
+    assert.equal(matchManagerEntry(list, 'Bash', command, CLEAN), null, `must not match: ${command}`)
+  }
+  // The removals must not have narrowed the read-only entries they sat beside.
+  for (const command of ['ls -la /tmp', 'cat f', 'grep -rn x .', 'jq -r .x f']) {
+    assert.ok(matchManagerEntry(list, 'Bash', command, CLEAN), `expected a match: ${command}`)
   }
 })
 
