@@ -68,6 +68,14 @@ test('file and diff are NOT allowed — --compile writes and --paginate runs a p
   }
 })
 
+test('uniq is NOT allowed — its second positional is an output file', () => {
+  // `uniq IN OUT` writes OUT — an arbitrary-path write that bypasses Write(cwd). A prefix
+  // rule cannot exclude a positional, so the command is not listed. Catches a re-add.
+  for (const command of ['uniq f', 'uniq -c f', 'uniq /dev/null /etc/authorized_keys', 'uniq -c /dev/null /tmp/out']) {
+    assert.notEqual(verdict(command), 'allow', `must not be allowed: ${command}`)
+  }
+})
+
 test('the operator-decided refusals stay refused', () => {
   // These are the classes the change deliberately left out. Pinned so a later widening
   // has to argue with this test rather than slip through review.
