@@ -392,6 +392,11 @@ def read_pending() -> dict:
             "detail": str(v.get("detail", "")),
             "attempts": attempts,
             "last_error": v.get("last_error"),
+            # Producer identity, carried through every rewrite: a normalising reader
+            # that dropped these would make the record indistinguishable from one
+            # written by hand, which is the property they exist to give it.
+            "pid": v.get("pid"),
+            "row_ts": v.get("row_ts"),
         }
     return out
 
@@ -426,8 +431,14 @@ def delivered(s: str) -> int:
     return 0
 
 
-def failed(s: str, error: str) -> int:
-    """Record ONE failed delivery attempt. The entry STAYS owed — that is the retry."""
+def failed(s: str, error: str, pid: str = None, row_ts: str = None) -> int:
+    """Record ONE failed delivery attempt. The entry STAYS owed — that is the retry.
+
+    ⚠️ `pid` and `row_ts` are the PRODUCER's identity: the sender's own process id and
+    the timestamp of the ledger row it wrote in the same run. They exist so a durable
+    record can be shown to have been written by a real failed send rather than by hand —
+    a hand-written file reproduces every other field exactly.
+    """
     pending = read_pending()
     entry = pending.get(s)
     if entry is None:
@@ -435,6 +446,10 @@ def failed(s: str, error: str) -> int:
         return 0
     entry["attempts"] = int(entry.get("attempts", 0)) + 1
     entry["last_error"] = (error or "")[:500]
+    if pid:
+        entry["pid"] = str(pid)[:40]
+    if row_ts:
+        entry["row_ts"] = str(row_ts)[:40]
     write_pending(pending)
     print(f"failed {s} attempts={entry['attempts']}")
     return 0
@@ -608,6 +623,8 @@ def main() -> int:
         help="record one failed delivery attempt for SLUG (needs --error)",
     )
     ap.add_argument("--error", help="the transport error --failed records")
+    ap.add_argument("--pid", help="--failed: the sender's pid, so the record names its producer")
+    ap.add_argument("--row-ts", dest="row_ts", help="--failed: the ledger row's timestamp")
     ap.add_argument("--subject", help="the goal or topic name")
     ap.add_argument(
         "--topic",
@@ -635,7 +652,7 @@ def main() -> int:
     if a.failed:
         if not a.error:
             ap.error("--failed needs --error (the transport error it records)")
-        return failed(a.failed, a.error)
+        return failed(a.failed, a.error, pid=a.pid, row_ts=a.row_ts)
     if a.state:
         if not a.subject:
             ap.error("--state requires --subject (or the deprecated --topic)")
