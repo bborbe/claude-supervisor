@@ -30,7 +30,7 @@ delegate rule's carve-out).
    - **`status=ok`** → **print the block at `render=` verbatim.** That file's contents are the
      `open leg:` block `commands/steps/output-shape.md` item 3 renders — the head with its
      `workers` reading, the selected rows in rank order, and the `skipped:` tally by reason. Then
-     print `opened=<n>` of `selected=<n>` and every `refused:` line **verbatim**.
+     print the tally `opened: <n> of <m>` and every `refused:` line **verbatim**.
      ⚠️ **Open nothing a refusal names**, and never reorder or retry a row.
    - **`status=unknown`** → print `open leg: unknown` and **open nothing this tick.** The agent has
      already opened nothing; do not retry the leg. ⚠️ **`unknown` is a third answer, never `0`** —
