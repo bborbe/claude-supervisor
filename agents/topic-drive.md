@@ -70,6 +70,14 @@ tier down. The sweep is the product; everything else is delegated.
    opened by the fleet round's open leg regardless. `resume` and `restart` are keep-alive
    arms, never gated on the flag — `docs/session-tiers.md` § Keep-alive.
 
+   ⚠️ **This call carries no `--receipt`, on purpose.** The topic round's own inline keep-alive
+   (`commands/topic-drive.md` router row 5) is the one path that records owed verdicts on the
+   round's receipt; a second recorder here would owe each verdict twice.
+
+   ⚠️ **Never hold a `To resume:` or `To restart:` row for N** — N = 3 gates a start,
+   never a resume (`docs/session-tiers.md` § Keep-alive). Measured 2026-11-08: a round that
+   held three such rows for N left their goal managers down for two ticks.
+
    ⚠️ **`cannot-tell` is never death.** `UNKNOWN`, `AMBIGUOUS` and `MALFORMED` all mean the
    probe could not decide; a second manager started on that reading is the double-writer
    failure. Report it and act on nothing.
