@@ -30,7 +30,9 @@ delegate rule's carve-out).
    - **`status=ok`** → **print the block at `render=` verbatim.** That file's contents are the
      `open leg:` block `commands/steps/output-shape.md` item 3 renders — the head with its
      `workers` reading, the selected rows in rank order, and the `skipped:` tally by reason. Then
-     print the tally `opened: <n> of <m>` and every `refused:` line **verbatim**.
+     print the tally `opened: <n> of <m> · resumed=<n> · jumped=<n>` and every `refused:` line
+     **verbatim**. ⚠️ **All four counts print, every round** — a round that resumed two rows and
+     one that lost two must not render the same, and `opened` alone cannot tell them apart.
      ⚠️ **Open nothing a refusal names**, and never reorder or retry a row. ⚠️ **The gap between
      `opened` and `selected` is the refusals plus the `resumed=` and `jumped=` rows** — `opened`
      counts only the rows that produced a **new worker**; a resumed row re-enters an existing
@@ -76,9 +78,22 @@ delegate rule's carve-out).
    ⚠️ **The selected names come from the payload**, `<digest minus .digest>.open` — written by
    `agents/fleet-open-actor.md` § 2 *before* § 3 acts. Its numbered rows read `  <n>. <name> — <why>`,
    and `<why>` is always one of `flagged` / `priority <n>` / `no priority`, so a name is its line
-   minus that prefix and that suffix. **No payload ⇒ the leg never reached its act step ⇒ nothing
-   was opened ⇒ a re-run is safe.** A ledger row naming a selected task means that task was opened —
-   report `opened=unknown` and open nothing more. Only with no such row may the leg run again.
+   minus that prefix and that suffix.
+   ⚠️ **`read_ledger()` answers three ways, and this guard must branch on all three.** Its own
+   docstring is explicit: `{}` is *read it, nobody is recorded* while `None` is *could not read it*,
+   and collapsing them "turns a failure into a confident empty fleet". A guard that tests only
+   "row found / no row" reads an unreadable ledger as the empty fleet and authorises exactly the
+   re-run this paragraph exists to forbid. So:
+
+   - **No payload ⇒ the leg never reached its act step ⇒ nothing was opened ⇒ a re-run is safe.**
+   - **`None` ⇒ unreadable ⇒ cannot tell ⇒ open nothing and never re-run.** Print
+     `open leg: unknown — opened=unknown (spawn ledger unreadable)`; `commands/steps/output-shape.md`
+     item 3 owns that form. The first invocation may have spawned rows seconds before the hand-back
+     was lost, and a second run would spawn a second worker onto those tasks.
+   - **A row naming a selected task** — a row with `resumed_from` set is a resume, not a create —
+     ⇒ that task was opened ⇒ open nothing more, never re-run, and print
+     `open leg: unknown — opened=unknown (spawn ledger names <name>)`.
+   - **A readable ledger with no such row ⇒ nothing was opened ⇒ the leg may run again.**
 
 ## What the leg does not decide
 

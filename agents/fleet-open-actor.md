@@ -178,7 +178,10 @@ this leg** — a fourth key is an output-shape change, not a side effect of a sp
 - **The payload write fails** → `status=not-run` with the reason; never hand back a `render=` path
   that does not exist. A block the round cannot print is a leg that did not run.
 - **`selected` is empty, or the block is `no free slots` / `target unlimited`** → `status=ok`,
-  `selected=0`, `opened=0`, `resumed=0`, `jumped=0`, and the payload carries the one line that says which. ⚠️ **`target
+  `selected=0`, `opened=0`, `resumed=0`, `jumped=0`, `refused=0`, and the payload carries the one
+  line that says which. ⚠️ **`refused=0` belongs here as much as the other three** — the four act
+  counts are reconciled as `opened + resumed + jumped + refused == selected` on every round, and
+  the one branch with no refusals is the one a dropped key would silently leave unreconciled. ⚠️ **`target
   unlimited` is the `spawn.maxConcurrent: 0` config and the leg opens nothing there on purpose**
   (`docs/fleet-surface.md` § Spawn a worker item 5 owns the constant and its cap) — `0` removes
   the server's cap, and the cap is the only bound this leg ranks against; admitting every eligible
