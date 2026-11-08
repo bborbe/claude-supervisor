@@ -86,7 +86,7 @@ KEEPALIVE = os.path.join(HERE, "fleet-keepalive.py")
 LIVENESS = os.path.join(HERE, "session-liveness.py")
 MANAGER_LIVENESS = os.path.join(HERE, "manager-liveness.py")
 ATTENTION_ASK = os.path.join(HERE, "attention-ask.py")
-MANAGER_STATES = ("OK", "STALE", "STOPPED", "UNARMED", "INVALID")
+MANAGER_STATES = ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID")
 
 STATE_DIR = os.path.expanduser(
     os.environ.get("SUPERVISOR_FLEET_KEEPER_DIR") or "~/.claude/state/fleet-keeper"

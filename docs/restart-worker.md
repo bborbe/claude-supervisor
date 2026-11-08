@@ -248,9 +248,26 @@ script takes the manager rule instead — the subject page's `manager_launcher:`
 configured `manager_launcher` (`manager-default`), then the `-claude` sibling (`claude-sibling`)
 for a vault-cli too old to emit the key.
 
+⚠️ **A `role: human` task takes the Claude launcher**, mirroring `applyHumanLauncherRule` in
+`server/spawn-cwd.mjs` (operator ruling 2026-11-06, matrix Rule 4): the `-claude` sibling
+(`claude-sibling`), then the configured `manager_launcher` (`manager-default`), then the
+vault's `claude_script` (`vault`) — never the worker default. The sibling comes **first on
+purpose** — `private-personal` and `seibert-brogrammers` both point `manager_launcher` at a
+`-deepseek` script, so taking the configured value first would leave a human row on the
+worker model while the rule reported success. A task's own `launcher:` still wins, over both
+rules.
+
 ## The one deliberate copy
 
 The resume recipe (`wezterm cli spawn … --resume <session-id>`, with the four
 `CLAUDE_CODE_*` variables unset) is copied from `commands/open.md` Step 3.1. A markdown
-command is not executable, so the two are kept in lockstep by hand — and that is precisely
-why the orchestrator command must call this script instead of carrying its own copy.
+command is not executable, so the two are kept in lockstep by hand.
+
+⚠️ **The LAUNCHER is no longer part of that copy, and must never become part of it again.**
+`commands/open.md` § 3.1 used to state the precedence in prose — *"apply the rule yourself"* —
+so whichever session ran the resume picked the value and nothing checked the result. Measured
+2026-11-07: two `role: agent` rows with no `launcher:` were resumed as
+`cc-private-claude --resume … /color cyan` because the manager session that resumed them ran on
+Opus. The call site now runs `scripts/resolve-launcher.py`, which prints
+`<launcher>\t<source>\t<role>\t<chip>` from `resolve_launcher` — so the resume and the restart
+share one rule and one answer, and the chip follows the ROLE rather than the caller.
