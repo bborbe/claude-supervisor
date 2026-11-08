@@ -65,11 +65,15 @@ disagree about a row.
     manager-quiet.py --subject "<goal or topic>" --vault <path> --reset
 
 **Output contract** — one line on stdout, `<verdict>` TAB `<n_runnable>` TAB `<n_quiet>`
-TAB `<consecutive_quiet>`, where `<verdict>` is `armed` or `stood-down`. `armed` means
-the caller must leave the loop alone. `stood-down` means `QUIET_TICKS_TO_STAND_DOWN`
-consecutive quiet ticks were reached and the caller may disarm. An unreadable subject
-exits 2 with a reason on stderr and **writes nothing** — a failed read must not advance
-a counter toward a stand-down.
+TAB `<consecutive_quiet>`, where `<verdict>` is `armed`, `sleep-until` or `stood-down`.
+`armed` means the caller must leave the loop alone. `stood-down` means
+`QUIET_TICKS_TO_STAND_DOWN` consecutive quiet ticks were reached and the caller may
+disarm. `sleep-until` means the same threshold was reached but **every** quiet row is
+quiet for a future `defer_date`, so the subject is waiting on a clock rather than
+finished: the caller arms a wakeup at the trigger instead of disarming, and a second line
+on stdout names that instant (`Sleep until <instant>`). An unreadable subject exits 2
+with a reason on stderr and **writes nothing** — a failed read must not advance a counter
+toward a stand-down.
 """
 import argparse
 import importlib.util
@@ -340,6 +344,36 @@ def reopen_trigger(seen: dict) -> str:
     return "no named trigger"
 
 
+def verdict_for(seen: dict, count: int) -> str:
+    """`armed` | `sleep-until` | `stood-down` for one surveyed subject.
+
+    ⚠️ **A date-gated subject SLEEPS; it does not stand down.** When every quiet row is
+    quiet *because* it carries a future `defer_date`, the subject is not finished and not
+    blocked — it is waiting on a date it already knows, and standing it down puts a human
+    in the loop every morning to re-arm it. `sleep-until` is that third verdict; the
+    caller arms a wakeup at `trigger` instead of disarming.
+
+    The test is set equality, not a count: `seen["quiet"]` is every quiet row and
+    `seen["defer"]` the subset quiet for a future defer, so equality means **every** quiet
+    row carries one. A subject with even one row quiet for another reason — `backlog`,
+    `hold`, `phase: todo`, or an unmet `blocked_by` — fails it and still stands down: a
+    blocker reopens on a human's action, not on a clock, and auto-reopening that is out
+    of scope.
+
+    ⚠️ **The runnable guard is not redundant.** A runnable row resets `count` to 0 before
+    this is called, so the two conditions cannot both hold today — but this module's whole
+    invariant is failing toward ARMED, and a future change to the counter must not be able
+    to turn a subject with live work into a sleeping one.
+    """
+    if count < QUIET_TICKS_TO_STAND_DOWN:
+        return "armed"
+    if seen["runnable"]:
+        return "armed"
+    if seen["quiet"] and set(seen["quiet"]) == set(seen["defer"]):
+        return "sleep-until"
+    return "stood-down"
+
+
 def tick(subject: str, vault: str, today_key, state_dir: str | None = None) -> dict:
     """Record one tick and return the verdict. This is the whole rule.
 
@@ -388,7 +422,7 @@ def tick(subject: str, vault: str, today_key, state_dir: str | None = None) -> d
         "quiet": seen["quiet"],
         "terminal": seen["terminal"],
         "consecutive_quiet": count,
-        "verdict": "stood-down" if count >= QUIET_TICKS_TO_STAND_DOWN else "armed",
+        "verdict": verdict_for(seen, count),
         "trigger": reopen_trigger(seen),
     }
 
@@ -423,6 +457,11 @@ def main(argv: list) -> int:
         f"{result['verdict']}\t{len(result['runnable'])}\t"
         f"{len(result['quiet'])}\t{result['consecutive_quiet']}"
     )
+    if result["verdict"] == "sleep-until":
+        # The wake instant comes from the SAME read that produced the verdict — a caller
+        # that recomputed it could arm the wakeup for a different date than the one the
+        # sleep was decided on.
+        print(f"Sleep until {result['trigger']}")
     if result["verdict"] == "stood-down":
         # SC3's line. Emitted HERE rather than by the caller so the trigger and the
         # verdict come from one read of the tree — a step that recomputed the trigger

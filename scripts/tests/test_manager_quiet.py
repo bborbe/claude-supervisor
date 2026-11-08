@@ -138,6 +138,45 @@ class TestBoundary(Base):
         self.assertEqual(self.verdicts(3), ["armed", "stood-down", "stood-down"])
 
 
+class TestSleepUntil(Base):
+    """A date-gated subject sleeps to its earliest `defer_date` — SC1's fixture.
+
+    Two future-dated rows and zero runnable ones: the subject is not finished and not
+    blocked, it is waiting on a date it already knows, so standing it down is the defect
+    (a human re-arms it every morning). The verdict word AND the named instant are both
+    asserted — a build that returned the right word with a wrong or absent instant would
+    arm the wakeup for the wrong moment, which is worse than not sleeping at all.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.task("Later", extra='defer_date: "2026-10-20T11:00:00+02:00"\n')
+        self.task("Sooner", extra='defer_date: "2026-10-18T08:00:00+02:00"\n')
+
+    def test_two_future_dated_rows_sleep_until_the_earliest(self):
+        self.assertEqual(self.tick()["verdict"], "armed")
+        r = self.tick()
+        self.assertEqual(r["verdict"], "sleep-until")
+        self.assertEqual(r["trigger"], "2026-10-18T08:00:00+02:00")
+
+    def test_a_sleeping_subject_never_reads_stood_down(self):
+        self.assertNotIn("stood-down", self.verdicts(4))
+
+    def test_the_boundary_is_the_same_as_the_stand_down(self):
+        """One quiet tick is still ordinary — sleeping does not start a tick early."""
+        self.assertEqual(self.verdicts(1), ["armed"])
+
+    def test_a_runnable_row_defeats_the_sleep(self):
+        """The negative control: live work must never be put to sleep."""
+        self.task("Live")
+        self.assertEqual(self.verdicts(3), ["armed", "armed", "armed"])
+
+    def test_a_blocked_row_defeats_the_sleep(self):
+        """A blocker reopens on a human's action, not on a clock — still stands down."""
+        self.task("Blocked", extra="blocked_by:\n    - '[[Missing]]'\n")
+        self.assertEqual(self.verdicts(2), ["armed", "stood-down"])
+
+
 class TestNegativeControl(Base):
     """Property 2 — one runnable task never stands the subject down."""
 
