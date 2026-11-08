@@ -69,10 +69,10 @@ Two readings, and only the first is routed:
 
 ## Report
 
-One line in the round's output, always, even when skipped. It is built from the wrangler's scoped-mode report, whose allow reasons name the allowlist entry and whose escalations start with their class. Nothing in this repo parses it; it exists to be quoted when counting answered against escalated parks:
+One line in the round's output, always, even when skipped. It is built from the wrangler's scoped-mode report, whose allow reasons name the allowlist entry and whose escalations start with their class. Step 7 reads the `routed` half of it — that count is its trigger (`commands/steps/worker-channels.md`) — and nothing else parses it; it exists to be quoted when counting answered against escalated parks:
 
 ```
-own-parks: answered <n> · routed <c> (class C → step 7) · escalated <m> (D <d> · E <e> · hold <h> · unverified <u>) · refused-not-own <r>
+own-parks: answered <n> · routed <c> (class C → step 7) · escalated <m> (C <co> · D <d> · E <e> · hold <h> · unverified <u>) · refused-not-own <r>
 ```
 
-Every park lands in exactly one bucket, so the four counts plus `refused-not-own` account for everything the step saw. For each answered park, list `<request_id> | <worker label> | <tool> | allow | class B — allowlist_entry <prefix>`. For each routed park, list `<request_id> | <worker label> | AskUserQuestion | route | class C — <the question, one line>`. An answered line that names no allowlist entry is a defect: report it as one rather than counting it.
+Every park lands in exactly one of answered, routed, escalated or refused-not-own, so the line accounts for everything the step saw. ⚠️ **`routed` and the escalated `C <co>` are the two halves of one class, not two classes.** The wrangler escalates every class-C park; the step routes the ones the manager owns and leaves the rest pending, so `c + co` is the class-C population — `routed 3 · escalated 2 (C 1 …)` means three answered by the manager and one still the operator's. For each answered park, list `<request_id> | <worker label> | <tool> | allow | class B — allowlist_entry <prefix>`. For each routed park, list `<request_id> | <worker label> | AskUserQuestion | route | class C — <the question, one line>`. An answered line that names no allowlist entry is a defect: report it as one rather than counting it.
