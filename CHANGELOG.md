@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.251.1
 
 - fix: count live workers in both directions — the fleet counter unions the identity registry in (a headless `claude --print` worker holds a live pid but stamps no heartbeat, so it was dropped: 44 live sessions counted as 10) and drops ghost rows (a `live: true` row with no `state` that the store keeps serving after its session exited: the cap read 51 against 49 real processes)
 
