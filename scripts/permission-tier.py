@@ -338,7 +338,8 @@ _DEV_WRAPPERS = {"kubectlnukedev", "kubectldev", "kubectlsmalldev", "kubectlquan
                  "kubectlsun", "kubectlstaging"}
 _SECRET_PATH = re.compile(
     r"(^|[/~\s=])(\.ssh/|\.netrc\b|\.aws/|\.config/gh\b|\.kube/config\b|\.env(\.[\w-]+)?$|"
-    r"id_(rsa|ed25519|ecdsa)\b|\.npmrc\b|\.git-credentials\b|\.pgpass\b|\.pypirc\b|\.docker/config\.json\b|\.gnupg/|\.vault-token\b)")
+    r"id_(rsa|ed25519|ecdsa)\b|\.npmrc\b|\.git-credentials\b|\.pgpass\b|\.pypirc\b|\.docker/config\.json\b|\.gnupg/|\.vault-token\b|"
+    r"application_default_credentials\.json|\.(bash|zsh|sh)_history\b|^/proc/|/proc/\d+/environ)")
 _PROTECTED_REF = re.compile(r"^(?:[^:]*:)?(refs/heads/)?(master|main)$")
 
 
@@ -475,7 +476,8 @@ def _kubectl(env, argv):
     a = argv[1:]
     values = {i + 1 for i, x in enumerate(a)
               if x in ("-n", "--namespace", "-o", "--output", "-l", "--selector", "-c", "--container")}
-    if any(a[i] == "prod" for i in values if i < len(a) and a[i - 1] in ("-n", "--namespace")):
+    if any(a[i] == "prod" for i in values if i < len(a) and a[i - 1] in ("-n", "--namespace")) \
+            or any(x in ("--namespace=prod", "-n=prod") for x in a):
         return "prod"
     positional = [x for i, x in enumerate(a) if i not in values and not x.startswith("-")]
     if positional and "$" in positional[0] or any(a[i].startswith("$") for i in values if i < len(a)):
@@ -726,6 +728,8 @@ def classify_bash(cmd, depth=0):
             if any(v in ("prod",) for k, v in env.items() if k == "BRANCH"):
                 return "prod"
             continue
+        if any(re.search(r"\{[^}]*,[^}]*\}", a) for a in argv):
+            raise Unverifiable("brace expansion hides the real argument")  # cat ~/{.netrc,x}
         head = argv[0]
         if head in _NOOP_HEADS:  # `for f in ~/.netrc` — the operands still feed the loop body
             form = _prod(env, argv[1:]) or ("secret" if any(_SECRET_PATH.search(a) for a in argv[1:]) else None)
@@ -817,6 +821,11 @@ def classify_tool(tool, tool_input):
             return "live-trade"
         if re.search(r"(send|post|reply|publish|merge|push|delete|transition|addcomment|create(issue|page|comment))", low):
             return "publish"
+        # The tool NAME says what it is for; the INPUT says what it touches. A write tool aimed at
+        # settings, hooks or a credential store is the same operator-only form as a Bash redirect.
+        for v in inp.values():
+            if isinstance(v, str) and (_SETTINGS.search(v) or _SECRET_PATH.search(v)):
+                return "permission-grant" if _SETTINGS.search(v) else "secret"
     return None
 
 
