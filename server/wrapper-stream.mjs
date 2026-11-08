@@ -107,6 +107,21 @@ export class StreamExhaustedError extends StreamGapBaseError {
   }
 }
 
+/**
+ * Raised when the wrapper answers `404`/`410` for a stream.
+ *
+ * ⚠️ **A gap, not a plain failure.** The child is gone or unknown, and the stream ended
+ * without the end sentinel — so nothing here proves the turn completed. A `result` captured
+ * before the session vanished must not settle the worker `done`.
+ */
+export class StreamSessionGoneError extends StreamGapBaseError {
+  constructor(sessionId, status) {
+    super('StreamSessionGoneError', `session ${sessionId} stream ended without the end sentinel: the wrapper reports the session gone (HTTP ${status}) — this turn cannot be settled as done`)
+    this.sessionId = sessionId
+    this.status = status
+  }
+}
+
 /** Raised when the wrapper cannot be reached or refuses the request. */
 export class WrapperError extends Error {
   constructor(message, status) {
@@ -379,7 +394,13 @@ function frameOf(frame, tracker) {
   for (const line of frame.split('\n')) {
     if (line.startsWith('id:')) {
       const id = line.slice(3).trim()
-      if (tracker && id !== '') tracker.lastId = id
+      if (tracker && id !== '') {
+        tracker.lastId = id
+        // Distinguishes "no id on this connection" from "the same id again": only the
+        // former makes the stream unresumable, the latter is a stuck wrapper that must
+        // consume the budget instead.
+        tracker.sawId = true
+      }
     }
     if (line.startsWith('event:') && line.slice(6).trim() === 'end') sawEnd = true
     if (line.startsWith('data:')) data = line.slice(5).trim()
@@ -472,14 +493,14 @@ export async function* streamWrappedSession({
       // A 404/410 is a settled answer about the session, not a transport blip: the child is
       // gone or unknown, and retrying cannot change that.
       if (resp.status === 404 || resp.status === 410) {
-        throw new WrapperError(`wrapper stream failed: HTTP ${resp.status}`, resp.status)
+        throw new StreamSessionGoneError(sessionId, resp.status)
       }
       if (await waitForRetry()) continue
       if (signal?.aborted) return
       throw new StreamExhaustedError(sessionId, `HTTP ${resp.status}`)
     }
 
-    const tracker = { lastId, ended: false }
+    const tracker = { lastId, ended: false, sawId: false }
     // Where this connection started. A connection that delivers an id we did not already
     // have has genuinely resumed the transcript — that is progress, and it earns a fresh
     // budget. One that re-delivers the SAME id has not: a wrapper stuck re-sending one event
@@ -487,10 +508,12 @@ export async function* streamWrappedSession({
     // forever.
     const lastIdAtConnect = lastId
     let sawProgress = false
+    let sawFramesThisConnection = false
     let bodyError = null
     try {
       for await (const message of parseSSE(resp.body, tracker)) {
         sawAnyFrame = true
+        sawFramesThisConnection = true
         if (!sawProgress && tracker.lastId !== null && tracker.lastId !== lastIdAtConnect) {
           sawProgress = true
           attempt = 0
@@ -506,12 +529,14 @@ export async function* streamWrappedSession({
     if (tracker.ended) break
     if (signal?.aborted) return
 
-    // ⚠️ **A stream that carried no `id:` cannot be resumed.** That is an older wrapper or a
-    // deploy skew, and reconnecting blind would either replay the whole transcript (firing
-    // `onTurnComplete` again for every replayed result) or silently skip the gap. Failing
-    // loudly is the only honest option.
-    if (lastId === null && sawAnyFrame) {
-      throw new StreamGapError(sessionId, null)
+    // ⚠️ **A connection that delivered frames but no `id:` cannot be resumed.** That is an
+    // older wrapper or a deploy skew, and reconnecting blind would either replay the whole
+    // transcript (firing `onTurnComplete` again for every replayed result) or silently skip
+    // the gap. Checked per CONNECTION, not once for the stream: a successor that starts
+    // serving frames without ids is exactly as unresumable as a first connection that never
+    // had them.
+    if (sawFramesThisConnection && !tracker.sawId) {
+      throw new StreamGapError(sessionId, lastId)
     }
 
     // The body ended or threw without the sentinel — the connection died under a live child.
@@ -527,7 +552,20 @@ export async function* streamWrappedSession({
 
   // The stream ended on its own terms. Ask why before letting the caller settle a terminal
   // state — a lag is still not a finished turn.
-  const session = await readWrappedSession({ baseUrl, sessionId, fetchImpl })
+  //
+  // ⚠️ The read itself can fail (the daemon restarts between the sentinel and this call), and
+  // an unguarded throw here would be a non-gap error: a captured `result` would then settle
+  // the worker `done` on an end nobody confirmed. Confirming is part of the classification,
+  // so a failed confirmation is a gap too.
+  let session
+  try {
+    session = await readWrappedSession({ baseUrl, sessionId, fetchImpl })
+  } catch (err) {
+    throw new StreamExhaustedError(
+      sessionId,
+      `end-of-stream confirmation failed: ${err?.message ?? err}`,
+    )
+  }
   if (session.state !== 'exited') {
     throw new StreamLaggedError(sessionId, session.state)
   }

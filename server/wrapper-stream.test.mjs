@@ -16,6 +16,7 @@ import {
   StreamExhaustedError,
   StreamGapError,
   StreamLaggedError,
+  StreamSessionGoneError,
   WrapperError,
   answerWrappedSession,
   listWrappedSessions,
@@ -143,15 +144,23 @@ test('streamWrappedSession throws StreamLaggedError when the child is still gene
   assert.equal(seen.length, 1)
 })
 
-test('streamWrappedSession reports a non-200 as a WrapperError', async () => {
-  const fetchImpl = async () => ({ ok: false, status: 404 })
+// ⚠️ The stream path no longer throws a plain `WrapperError`: every terminal answer is a GAP
+// class, because none of them proves the child finished. A non-gap error here would let a
+// captured `result` settle the worker `done` on a stream that never sent its end sentinel.
+test('streamWrappedSession reports a gone session as a gap, not a plain failure', async () => {
+  const fetchImpl = async () => ({ ok: false, status: 410 })
   await assert.rejects(
     (async () => {
       for await (const _ of streamWrappedSession({ baseUrl: 'http://w', sessionId: SESSION, fetchImpl })) {
         // no messages
       }
     })(),
-    (err) => err instanceof WrapperError && err.status === 404,
+    (err) => {
+      assert.ok(err instanceof StreamSessionGoneError, `expected StreamSessionGoneError, got ${err?.name}`)
+      assert.equal(err.gap, true)
+      assert.equal(err.status, 410)
+      return true
+    },
   )
 })
 
@@ -392,6 +401,73 @@ test('does not reconnect blind when the stream carried frames but no ids', async
   assert.equal(n, 1, 'resuming is impossible without an id, so it must not retry')
 })
 
+// ⚠️ A body that closes CLEANLY without the end sentinel is the shape a graceful drain
+// produces, and it must exhaust as a gap — not settle a captured result `done`.
+test('a clean body close without the end sentinel exhausts as a gap', async () => {
+  let n = 0
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/events')) {
+      n += 1
+      return sseResponse(['id: 1\ndata: {"type":"result"}\n\n']) // no event: end
+    }
+    return jsonResponse({ id: SESSION, state: 'generating' })
+  }
+
+  await assert.rejects(
+    (async () => {
+      for await (const _ of streamWrappedSession({
+        baseUrl: 'http://w',
+        sessionId: SESSION,
+        fetchImpl,
+        reconnect: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1, maxElapsedMs: 500 },
+      })) {
+        // drain
+      }
+    })(),
+    (err) => {
+      assert.ok(err instanceof StreamExhaustedError, `expected StreamExhaustedError, got ${err?.name}`)
+      assert.equal(err.gap, true)
+      assert.match(err.reason, /closed without the end sentinel/)
+      return true
+    },
+  )
+  assert.equal(n, 3)
+})
+
+// The budget must reset per OUTAGE. Two separate outages, each preceded by real progress,
+// each get their own budget — otherwise a long session dies on its second restart.
+test('the budget resets after a reconnect that made progress', async () => {
+  let clock = 0
+  let n = 0
+  const fetchImpl = async (url) => {
+    if (!url.endsWith('/events')) return jsonResponse({ id: SESSION, state: 'exited' })
+    n += 1
+    if (n === 1) {
+      clock += 10_000
+      return dyingResponse(['id: 1\ndata: {"type":"assistant"}\n\n'])
+    }
+    if (n === 2) {
+      // Resumed with a NEW id — real progress, so the next outage gets a fresh budget.
+      clock += 100_000
+      return dyingResponse(['id: 2\ndata: {"type":"assistant"}\n\n'])
+    }
+    return sseResponse(['id: 3\ndata: {"type":"result"}\n\nevent: end\ndata: {}\n\n'])
+  }
+
+  const seen = []
+  for await (const message of streamWrappedSession({
+    baseUrl: 'http://w',
+    sessionId: SESSION,
+    fetchImpl,
+    reconnect: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1, maxElapsedMs: 500, now: () => clock },
+  })) {
+    seen.push(message)
+  }
+  // maxAttempts 1 means one retry per outage; two outages each got theirs.
+  assert.deepEqual(seen.map((m) => m.type), ['assistant', 'assistant', 'result'])
+  assert.equal(n, 3)
+})
+
 test('treats a 404 during the restart window as terminal, not a blip', async () => {
   let n = 0
   const fetchImpl = async (url) => {
@@ -413,7 +489,14 @@ test('treats a 404 during the restart window as terminal, not a blip', async () 
         // drain
       }
     })(),
-    (err) => err instanceof WrapperError && err.status === 404,
+    (err) => {
+      // ⚠️ A gap class, not a plain WrapperError: the stream ended without the sentinel,
+      // so a captured result must not settle the worker done.
+      assert.ok(err instanceof StreamSessionGoneError, `expected StreamSessionGoneError, got ${err?.name}`)
+      assert.equal(err.status, 404)
+      assert.equal(err.gap, true)
+      return true
+    },
   )
   assert.equal(n, 1, 'a gone session is not retried')
 })
