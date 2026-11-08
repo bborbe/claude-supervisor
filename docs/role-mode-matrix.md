@@ -31,6 +31,8 @@ Ask of the task **body** (never the title or frontmatter): *does finishing this 
 
 The five watch-need signals are listed exhaustively in [`docs/fleet-surface.md` § Spawn a worker](fleet-surface.md#spawn-a-worker) item 6 — the signal list stays there; this file owns only the mapping and its defaults.
 
+**An `agent` row carrying none of the signals opens `headless` even when its `mode:` on disk reads `interactive`.** Operator ruling, 2026-11-07: an agent row never opens interactive. This **narrows** the both-ways carve-out at item 6, which otherwise honours a declared `mode:` in both directions; that carve-out still governs every other case — `human`, `manager`, and an `agent` row that *does* carry a signal. The normalisation prints `normalised mode interactive -> headless` and rewrites the field, so the correction is visible on disk and the next run reads the corrected value rather than re-deriving it.
+
 ## Rule 3 — `phase`
 
 A missing or empty `phase` is not decided here: it takes the existing entry path (`vault-cli task work-on` advances it; on the `--flagged` batch the operator's flag is the approval).
