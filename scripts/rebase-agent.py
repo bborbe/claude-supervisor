@@ -1,84 +1,57 @@
 #!/usr/bin/env python3
 """Rebase every behind-master open PR in a scratch worktree, gate it, hand the operator a line.
 
+Rationale, repo set, conflict table and the live-queue exercise: `docs/rebase-agent.md`.
+
 Why this exists
 ---------------
 A release cut renames the top `## Unreleased` to `## vX.Y.Z`, and every open branch
 still carries `## Unreleased`. Each merge therefore re-conflicts every other open PR.
 Measured 2026-11-06 in `bborbe/claude-supervisor`: **8 of 12 open PRs DIRTY, 4 of them
-APPROVED**, and four merges that evening re-broke the set four times. The conflict is
-cheap to reconstruct; the cost is that nobody is doing it.
+APPROVED**, and four merges that evening re-broke the set four times.
 
 ⚠️ **The trap is the mechanism, not the conflict.** "Sync the branch with master"
 naturally means `git merge origin/master`, and that writes a merge commit. Measured on
-`#652` the same evening: three merge commits (`4ead1e56`, `da40e840`, `c1e51e25`), head
-APPROVED, PR `MERGEABLE`/`CLEAN` — it would merge cleanly and pass every visible check
-while permanently failing the merge train's linearity probe. **Nothing in the PR's own
-state signalled a problem.** This script therefore never merges; it rebases, and the
-linearity gate below is what proves it.
+`#652`: three merge commits (`4ead1e56`, `da40e840`, `c1e51e25`), head APPROVED, PR
+`MERGEABLE`/`CLEAN` — it would merge cleanly and pass every visible check while
+permanently failing the merge train's linearity probe. This script therefore never
+merges; it rebases, and the linearity gate below is what proves it.
 
 What it does, and what it refuses to do
 ---------------------------------------
 Per candidate it creates a **detached** worktree at a temp path — no branch ref exists
 to damage, and the main worktree is never entered — rebases onto `origin/master`, runs
-the gates, and either emits one push line or a failure report. It **never pushes** and
-**never merges**. A failed gate produces a failure report with no push line: the gates
-block, they do not warn.
+the gates, and emits one push line or a failure report. It **never pushes** and **never
+merges**; a failed gate blocks, it does not warn.
 
 Conflict policy, and the line between mechanical and genuine
 -----------------------------------------------------------
-A conflict in any path other than `CHANGELOG.md` is a genuine content conflict: refuse,
-name the paths, let a worker resolve. A conflict in `CHANGELOG.md` alone is the
-mechanical class this agent exists to clear, and is resolved deterministically from the
-branch's own added bullets — never by guessing at the author's intent. The resolution is
-refused rather than attempted when the branch does more to `CHANGELOG.md` than add
+A conflict outside `CHANGELOG.md` is genuine: refuse, name the paths, let a worker
+resolve. A `CHANGELOG.md`-only conflict is the mechanical class this agent exists to
+clear, resolved deterministically from the branch's own added bullets — never by
+guessing at the author's intent — and refused when the branch does more than add
 bullets, because taking master's side would silently discard that edit.
 
-The seven gates, and why the grep is not the authority
-------------------------------------------------------
-1. `git log --merges origin/master..HEAD` is empty — the branch is linear.
-2. `git diff origin/master -- CHANGELOG.md | grep -E '^[-+]## '` prints only
-   `+## Unreleased`. ⚠️ An **empty** result here is ambiguous between "no heading moved"
-   and "already under Unreleased", so it is never read as a pass on its own.
-3. `git diff origin/master -- CHANGELOG.md | grep -E '^--[^-]'` is empty — no bullet that
-   master carries was dropped by the resolution. ⚠️ The pattern is `^--[^-]`, not `^-[^-]`:
-   a removed bullet renders as `-- <bullet>` (removal marker plus the file's own `- `).
-4. The `awk` placement assertion prints `sits under: ## Unreleased` for every bullet the
-   branch adds — **this is the authority**, and it is what disambiguates (2).
+The seven gates
+---------------
+Each is spelled out, with its trap, in `docs/rebase-agent.md` § The gates. In short:
+(1) branch linear, (2) the fold guard prints only `+## Unreleased` and an **empty**
+result is never a pass, (3) no master bullet dropped — pattern `^--[^-]`, since a
+removed bullet renders as `-- <bullet>`, (4) the `awk` placement assertion is the
+**authority** and disambiguates (2), (5) `grep -c '^## Unreleased$'` prints 1 — a
+duplicate heading reads as one to (2) and (4), (6) the candidate is under the repo's
+park size limit, (7) the rebase leaves a commit ahead of master rather than a no-op.
 
-A fifth guard, added because it is the same failure:
-`grep -c '^## Unreleased$' CHANGELOG.md` must print **1**. Inserting an identical heading
-above master's existing one yields two sections that probes 2 and 4 both accept, since
-one added heading is still one `+## Unreleased` line and both sections read as
-`## Unreleased`. Measured 2026-11-01 on `bborbe/nuke#841`, caught only by reading the
-file head.
-
-Gates 6 and 7 are not CHANGELOG probes. A candidate over the repo's park size limit is
-refused rather than handed out — those thresholds are the reviewer's deployment env, so
-the defaults above are unverified. A rebase that leaves no commit ahead of master is
-refused as a no-op rather than reported as a successful push.
-
-The merge-time twin of probes 2–4 is the coding plugin's
-`check-changelog-unreleased-fold.sh` (`make check-changelog-unreleased-fold`), which
-computes the merge with `merge-tree`. This script deliberately does not call it: that
-guard predicts what a *merge* would fold, and the whole point here is that no merge
-happens. The `awk` form is shared, including its `ENVIRON` trick — `awk -v` processes
-escape sequences in the bullet and turns a literal backslash-n into a newline, which
-then matches no line and reports a false MISSING.
-
-What already detected this, before this script
-----------------------------------------------
-`github-pr-watch/scripts/watch.sh` reads `mergeStateStatus == "BEHIND"` and
-`mergeable == "CONFLICTING" || mergeStateStatus == "DIRTY"` from `gh pr view` — per PR,
-warn-only, and its own remedy line prescribes `git merge origin/<base>`, the exact
-mechanism this goal forbids. Nothing in this repo, `~/.claude/scripts/` or the vault
-sweeps a queue. The GitHub fields are reused as the signal; only the queue-level sweep
-and the rebase are new.
+The park thresholds are the reviewer's deployment env, so the defaults are unverified.
+The merge-time twin of (2)–(4) is the coding plugin's `check-changelog-unreleased-fold.sh`;
+it is deliberately not called — it predicts what a *merge* would fold, and no merge
+happens here. The `awk` form is shared, including its `ENVIRON` trick: `awk -v` turns a
+literal backslash-n into a newline, which matches no line and reports a false MISSING.
 
 Out of scope by contract
 ------------------------
-Merge ordering — the agent rebases, never decides what merges when. Prod-pin PRs — a PR
-changing a prod pin is the operator's approval, so it is refused before any rebase.
+Merge ordering — the agent rebases, never decides what merges when. Prod-pin PRs are the
+operator's approval, refused before any rebase.
 
 Exit codes
 ----------
