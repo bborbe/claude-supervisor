@@ -28,7 +28,7 @@ import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { WRAPPER_POLICY_INTERVAL_MS, createWrapperPolicyPoller } from './wrapper-policy.mjs'
 import { confinedCandidate, loadManagerAllowlist, matchManagerEntry } from './manager-allowlist.mjs'
 import { permissionTier } from './permission-tier.mjs'
-import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
+import { checkLiveness, findRegisteredByName, namesForSessionId, pidIsAlive, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -3331,12 +3331,12 @@ const TOOLS = [
   {
     name: 'send_agent_message',
     description:
-      'Send a follow-up message to a running worker — the send_to_agent this server has never had. TWO transports, chosen from the worker\'s own record. A TAB worker: activates its tab, waits for the input prompt, and types the message, so it STEALS FOCUS; returns an error rather than a false success when the pane is gone, the tab cannot be activated, or the prompt never appears. A CLUSTER worker: posts one more turn on its EXISTING session id through the claude-interactive service — the bearer token is resolved inside the server, so the caller passes no credential — and BLOCKS until the pod answers, so expect a long call on a long turn. ⚠️ A 2xx proves a turn ran, not that the SAME conversation ran: the pod\'s own log (`turn start id=<id>` / `turn end id=<id>`) is the only proof of that, so never read the returned `answer` as a delivery receipt. An A2A worker (`docker` / `k8s`): sends one more turn to the WORKER\'s own endpoint on the conversation its first turn opened — the controller is not in the path — and returns once the worker acknowledges, with `send_ms`; the result is collected in the background and read with `agent_status`. A row re-adopted after a reconnect holds no token and is refused. A headless worker has neither a pane nor a cluster session and is refused; answer its parked prompts with `answer_permission` instead.',
+      'Send a follow-up message to a running worker — the send_to_agent this server has never had. FOUR transports, chosen from the worker\'s own record. A TAB worker: activates its tab, waits for the input prompt, and types the message, so it STEALS FOCUS; returns an error rather than a false success when the pane is gone, the tab cannot be activated, or the prompt never appears. A CLUSTER worker: posts one more turn on its EXISTING session id through the claude-interactive service — the bearer token is resolved inside the server, so the caller passes no credential — and BLOCKS until the pod answers, so expect a long call on a long turn. ⚠️ A 2xx proves a turn ran, not that the SAME conversation ran: the pod\'s own log (`turn start id=<id>` / `turn end id=<id>`) is the only proof of that, so never read the returned `answer` as a delivery receipt. An A2A worker (`docker` / `k8s`): sends one more turn to the WORKER\'s own endpoint on the conversation its first turn opened — the controller is not in the path — and returns once the worker acknowledges, with `send_ms`; the result is collected in the background and read with `agent_status`. A row re-adopted after a reconnect holds no token and is refused. A headless worker has neither a pane nor a cluster session, but it IS addressable — this call returns its session-registry `name` with `sent: false`, and YOU deliver with `SendMessage(to: <name>)`, which this server cannot call itself. ⚠️ Never read `sent: false` as a failure: for the peer channel it means the address is resolved and the send is yours. A headless worker with no registry entry (the session exited, or it runs in-process under the SDK) is refused; answer its parked prompts with `answer_permission`.',
     inputSchema: {
       type: 'object',
       properties: {
-        agent_id: { type: 'string', description: 'The tab worker to message.' },
-        message: { type: 'string', description: 'The message to type into its input box and submit.' },
+        agent_id: { type: 'string', description: 'The worker to message — the id from spawn_agent / list_agents.' },
+        message: { type: 'string', description: 'The message to deliver. For the peer channel the caller sends it with SendMessage; the text is not forwarded by this server.' },
       },
       required: ['agent_id', 'message'],
     },
@@ -3542,8 +3542,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // "has a pane?" wearing a general guard's clothes: true for a headless worker, and
       // accidentally true for every cluster worker, whose record carries `paneId: null` by
       // construction.
-      const channel = resolveMessageChannel(agent)
+      // Both resolvers are PID-CHECKED: a name handed to `SendMessage` must be one a live
+      // session answers to, and a collision guard must not fire on a crashed session's
+      // leftover entry. `namesForSessionId` defaults to `pidIsAlive`; the holders read does
+      // not, because its other caller (`uniqueTabName`) wants presence.
+      const channel = resolveMessageChannel(agent, {
+        peerNamesFor: namesForSessionId,
+        peerHoldersFor: (name) => sessionIdsNamed(name, { isAlive: pidIsAlive }),
+      })
       if (channel.error) return reply({ error: channel.error })
+
+      if (channel.channel === 'peer') {
+        // ⚠️ NOT A SEND, AND THE REPLY MUST NOT SAY OTHERWISE. This server is not a Claude
+        // session, so it cannot call `SendMessage` — that tool lives in the CALLER's harness.
+        // What the server owns is the join the caller cannot perform: it holds the worker's
+        // session id, `SendMessage` takes a registry name, and the registry is the only place
+        // that maps one to the other. So the delivery is handed back, `sent` stays false, and
+        // the name is the whole payload. Claiming `sent: true` here would be the same defect
+        // as the refusal it replaces — a channel reported as working while delivering nothing.
+        log(`resolved headless worker ${agent.id} to registry name ${channel.name} — the caller delivers`)
+        return reply({
+          agent_id: agent.id,
+          sent: false,
+          channel: 'peer',
+          name: channel.name,
+          note:
+            `this server cannot reach a headless worker's conversation itself — send it with ` +
+            `SendMessage(to: "${channel.name}"), which is the registry name this worker answers to`,
+        })
+      }
 
       if (channel.channel === 'cluster') {
         // Resolved per call, never cached on the agent record: the config file is the only
