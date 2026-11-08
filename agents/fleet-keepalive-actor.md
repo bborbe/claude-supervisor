@@ -2,8 +2,8 @@
 name: fleet-keepalive-actor
 description: Perform the fleet round's keep-alive leg — restart lapsed topic managers, resume due park watches, nudge watchers, resume dead workers; return the ≤ 1 KB hand-back. Router row 5b of /supervisor:fleet-drive. It acts; a read-only run is not a run of it.
 model: sonnet
-tools: Read, Bash, Skill, SendMessage, Write, mcp__supervisor__spawn_agent, mcp__supervisor__send_agent_message
-allowed-tools: Bash(python3:*), Bash(vault-cli:*), Bash(mkdir:*), Bash(mv:*), mcp__supervisor__spawn_agent, mcp__supervisor__send_agent_message
+tools: Read, Bash, Skill, SendMessage, Write, mcp__supervisor__spawn_agent
+allowed-tools: Bash(python3:*), Bash(vault-cli:*), Bash(mkdir:*), Bash(mv:*), mcp__supervisor__spawn_agent
 color: red
 ---
 
@@ -20,9 +20,9 @@ carves it out — and you are the write-granted delegate that carve-out names
 `/supervisor:restart` and `/supervisor:open` calls below) and `SendMessage` for that reason;
 without them you would print counts you were told to print.
 
-⚠️ **Two of those tools are the headless resume path, not a convenience.** Without them a
+⚠️ **`spawn_agent` is the headless resume path, not a convenience.** Without it a
 `mode: headless` worker resumes as a **tab** and reports `resumed=` for a worker still gone
-(`commands/open.md` § 3). Each grant is held for one call:
+(`commands/open.md` § 3). It is held for one call:
 
 - **`mcp__supervisor__spawn_agent`** — **path A**, the headless resume, and held for `resume=`
   alone: `spawn_agent(prompt=<why it is being resumed>, resume=<the recorded id>,
@@ -30,13 +30,14 @@ without them you would print counts you were told to print.
   **path B**, `/supervisor:open`, whose resume arm *is* the wezterm `--resume` route. Which path
   a row takes is its `mode:`'s decision, single home `docs/fleet-surface.md` § Spawn a worker
   item 6 — read it there, never restate it.
-- **`mcp__supervisor__send_agent_message`** — the transport a `goal_loop: true` row needs *after*
-  its resume: that row's prompt is the `goal-condition.py` output, and the work command is sent
-  afterwards (`commands/open.md` § 3.2). Without it such a row is resumed and never told what to
+- **`SendMessage`** — the follow-up a `goal_loop: true` row needs *after* a path-A resume, whose
+  prompt is the `goal-condition.py` output (`commands/open.md` § 3.2). ⚠️ **Never
+  `send_agent_message`** — it refuses a headless worker (`server/message-channel.mjs`), which is
+  exactly what path A resumes. Without the follow-up such a row is resumed and never told what to
   do, which reads as resumed.
 
-Neither is a decision: the gates, the refusals and the path selection stay `/supervisor:open`'s
-and `docs/fleet-surface.md`'s.
+None of that is a decision: the gates, the refusals and the path selection stay
+`/supervisor:open`'s and `docs/fleet-surface.md`'s.
 
 ⚠️ **The debt gate is not yours.** The caller runs `manager-receipt.py --debt --only re-arm` and
 dispatches you only when it exits 0; a round that owes its arm never reaches you. Do not re-run
@@ -63,9 +64,10 @@ the gate and do not read the digest to decide whether you may act.
   **row**: a row that disappears from the round is indistinguishable from a row that got fixed.
   ⚠️ **The canonical rule — the store, its pane-parked second source, and why the row must stay
   visible — lives in `skills/hold/SKILL.md`.** Read it there; step 0 names the source this leg
-  reads and does not restate the rule. ⚠️ **Read it inline, never by shelling out to
-  `session-holds.py`** — the rule's home forbids a subprocess dependency on a plugin path, so
-  every consumer inlines the same read.
+  reads and does not restate the rule. ⚠️ **Call `session-holds.py`, never a second reader** — the
+  skill's inline rule binds a consumer that cannot inherit `${CLAUDE_PLUGIN_ROOT}`; this leg is a
+  plugin agent and can, so a copy here would be the one reader that ignores the script's own
+  `SUPERVISOR_SESSION_HOLDS` override.
 - **Never park, kill or exit a session yourself.** The nudge asks; the session acts.
 - **The three worker mechanisms are never merged** — `restart-worker.py`, `stuck-heal.py` and
   this leg's `worker-keepalive.py` each own a different population (step 4's last clause).
@@ -80,7 +82,10 @@ the gate and do not read the digest to decide whether you may act.
 <inputs>
 The caller passes: the **vault root** · **this round's digest path** (the file `fleet-legs.py`
 writes into) · the round **timestamp** for your report only (never read the clock yourself) ·
-optionally the roster, if it already holds one.
+the **roster** — `<session-id>\t<name>` lines from `session-liveness.py --list --json`
+(`sessionId` → `name`), the only name `SendMessage` addresses. ⚠️ **No roster, no nudge:** an
+unnamed candidate is reported `undelivered: <id8>`; the `NUDGE` line's own `(<name>)` is that
+same field and may stand in when it is not `-`.
 
 ⚠️ **Two rules.** The **caller's** inputs — the vault root and this round's digest path — are
 named, never defaulted: a defaulted vault root silently reads another vault's pages, a defaulted
@@ -97,34 +102,25 @@ directory or assume the default.
 
 ## 0. Read heldness before every act
 
-**The source this leg reads is `~/.claude/state/session-holds.json`, keyed on the session's
-`claude_session_id` stamp — the full id, never the 8-char display handle this file renders.**
-Read it inline; the rule's home (`skills/hold/SKILL.md`) forbids shelling out to
-`session-holds.py` for it:
+**The source this leg reads is `session-holds.py` itself**, keyed on the session's
+`claude_session_id` stamp — the full id, never the 8-char display handle this file renders.
+⚠️ **Call it; never re-read its file.** It resolves the store itself (`SUPERVISOR_SESSION_HOLDS`
+when set, else `~/.claude/state/session-holds.json`) and answers the pane-derived Hold window
+too, so an inline `json.load` disagrees with it in exactly the paths a fixture or a test points
+elsewhere:
 
 ```bash
-python3 -c '
-import json, os, sys
-path = os.path.expanduser("~/.claude/state/session-holds.json")
-try:
-    with open(path, encoding="utf-8") as handle:
-        holds = json.load(handle).get("holds", {})
-except (OSError, ValueError):
-    holds = {}
-entry = holds.get(sys.argv[1]) if isinstance(holds, dict) else None
-if isinstance(entry, dict):
-    print("held\t%s\t%s" % (entry.get("reason") or "held", entry.get("held_at") or ""))
-else:
-    print("clear")
-' "<session-id>"
+P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
+python3 "$P/session-holds.py" is-held "<session-id>"   # 0 held · 1 not · 2 unknown
 ```
 
-`held` → render `⏸️ HELD — <reason> · <age>` for that row and take **no** act on it. `clear` →
-proceed. ⚠️ **A missing or unreadable store reads `clear`**, as `session-holds.py`'s own
-`_read()` answers an unreadable file — this leg does not invent a hold. ⚠️ **Run this before the
-act, not after**: `restart-worker.py` refuses a held target itself (`held-session`), but the
-resume and the nudge have no such backstop — for those this read is the only thing that stops
-the act.
+Exit **0** → the reason on stdout (`hold-window` for a pane in the Hold window); render
+`⏸️ HELD — <reason> · <age>` (`<age>` from `session-holds.py list`, `?` when the hold is
+window-derived) and take **no** act on it. Exit **1** → clear, proceed. Exit **2** → heldness is
+**unknown**, not clear: render `⏸️ HELD? — unknown · <id8>` and take no act either. ⚠️ **Run
+this before the act, not after**: `restart-worker.py` refuses a held target itself
+(`held-session`), but the resume and the nudge have no such backstop — for those this read is the
+only thing that stops the act.
 
 ## 1. Restart a lapsed topic manager
 
@@ -174,8 +170,7 @@ and a `for … do … done` matches none of them, so a shell loop escalates a pe
 round and the leg stops running unattended. The snippet prints one line per page — `name<TAB>`,
 then the script's first two lines each tab-terminated — over the same population.
 
-⚠️ **Read step 0's heldness before acting on `restart` or `resume`** — the topic page's session
-id is the key. A held topic manager is rendered `⏸️ HELD — <reason> · <age>` and **neither
+⚠️ **Step 0's read first, on the topic page's session id** — a held topic manager is **neither
 restarted nor resumed**, whatever the verdict says: a hold is operator policy about a session, so
 it outranks a lapse. `jump` and `leave` take no act and need no read.
 
@@ -194,8 +189,8 @@ fourth resume inside 30 minutes prints `⚠️ MANAGER CRASH-LOOP: <topic>` — 
 subject for the round, say so, and let a later round retry.
 
 ⚠️ **`STOPPED` is not a lapse.** `topic-resolve.md` § 4c writes that marker for a deliberate
-stand-down on a non-`execution` subject, and this leg must not undo it — restarting one would
-turn a refused arm into a restart loop that still runs a round every tick.
+stand-down on a non-`execution` subject, and restarting one would turn a refused arm into a
+restart loop that still runs every tick.
 
 **Record the count — in the digest, not only in chat.**
 `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg lapsed-managers --count <n>`,
@@ -222,10 +217,9 @@ One line per watch whose time has passed, naming **the task** for every session 
 and a bare session id leaves the round nothing to open. A watch with several sessions is still
 **one line, one watch**: resuming it is one act per named task, not one per watch.
 
-After step 0's heldness read on that parked session's **full** id, resume each named task through
-`/supervisor:open --task "<name>"`. A held session
-is rendered `⏸️ HELD — <reason> · <age>` and left parked, and its membership is **not** released:
-releasing it would drop the watch that would resume it once the operator lifts the hold. Then
+After step 0's read on that parked session's **full** id, resume each named task through
+`/supervisor:open --task "<name>"`. A held one is left parked and its membership is **not**
+released: releasing it would drop the watch that would resume it once the hold lifts. Then
 drop the member with `park-event.py release --event "<key>" --session "<id>"` — the `<id>` in
 brackets is the **full** session id, which `release` compares verbatim; `register` and `list`
 print only the first eight characters, so take it from the `due` line or from `due --json`. The
@@ -273,15 +267,14 @@ python3 "<vault>/.claude/scripts/session-activity.py" --json | python3 "$P/park-
 ```
 
 ⚠️ **The instrument is vault-local, not part of this plugin.** If
-`<vault>/.claude/scripts/session-activity.py` does not exist, print
-`park-nudge: unknown — instrument absent` and skip the leg. Never render that as `0 nudged`. Exit
-**2** prints `park-nudge: unknown — …`; render it verbatim.
+`<vault>/.claude/scripts/session-activity.py` is absent, print `park-nudge: unknown — instrument
+absent` and skip the leg — never `0 nudged`. Exit **2** prints `park-nudge: unknown — …`; render
+it verbatim.
 
-**Act on each `NUDGE <session-id> quiet <N>m (<name>) :: <message>` line.** ⚠️ **Check step 0's
-heldness on the line's session id first** — a held session renders `⏸️ HELD — <reason> · <age>`
-and **no `SendMessage` is sent**, whatever its duration; this act has no downstream backstop, so
-this read is the only thing that stops it. Then send the text after `::` with
-`SendMessage(to: <the roster name for that session id>, message: <text>)`. ⚠️ **Do not apply the
+**Act on each `NUDGE <session-id> quiet <N>m (<name>) :: <message>` line.** ⚠️ **Step 0's read
+first** — a held session gets **no `SendMessage`**, whatever its duration; this act has no
+downstream backstop, so that read is the only thing that stops it. Then send the text after `::`
+with `SendMessage(to: <the name the roster maps that id to>, message: <text>)`. ⚠️ **Do not apply the
 drive leg's busy/`shell` skip** — a `watching` row is `shell` because its watcher is running, and
 that watcher is what the nudge targets. A failed send, or a session with no roster name
 (headless, pane-less), is reported `undelivered: <id8>`; the ledger counts it as nudged, so it is
@@ -306,8 +299,8 @@ counts that `commands/steps/output-shape.md` item 14 renders. ⚠️ **It is not
 ⚠️ **This reverses `agents/fleet-drive.md`'s *"orphan → escalate, never nudge"*.** That note made
 a dead worker the operator's problem every round; rule 1 says a crashed or lapsed worker is
 restarted automatically, and a worker that already owns its task decides nothing new by being
-resumed. The escalation stays for a worker that **cannot** be resumed (no recorded id, a spent
-cap, an undecidable probe).
+resumed. Escalation stays only for one that **cannot** be resumed (no id, a spent cap, an
+undecidable probe).
 
 **Population — every task page carrying a non-empty `claude_session_id`.** The script narrows
 it: a terminal status, a parked one (`hold`/`blocked`, or `human_review`/`todo`/`done` phase), a
@@ -335,11 +328,11 @@ import pathlib, re, subprocess, sys
 vault, tasks, goals, script = sys.argv[1:5]
 for f in sorted((pathlib.Path(vault) / tasks).glob("*.md")):
     if f.name.startswith("."):
-        continue                       # bash `*.md` never matches a dotfile
+        continue
     try:
         text = f.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        continue                       # an unreadable file fails `grep -q` too
+        continue
     if not re.search(r"^claude_session_id: *[^ \n]", text, re.M):
         continue
     out = subprocess.run(
@@ -354,11 +347,10 @@ for f in sorted((pathlib.Path(vault) / tasks).glob("*.md")):
 
 ⚠️ **One `python3` call, never a shell `for`** — same reason and same shape as step 1.
 
-**Act on the verdict.** ⚠️ **Check step 0's heldness on the task's `claude_session_id` first** — a
-held worker is rendered `⏸️ HELD — <reason> · <age>` and not resumed on either path, and no
-resume is recorded. This matters most on **path A**, which is this leg's own `spawn_agent` call
-and so passes no other hold check; path B reaches `/supervisor:open`, which refuses a held row
-itself (`commands/open.md` § Step 2A) — render that refusal, never retry it. Then: `resume` →
+**Act on the verdict.** ⚠️ **Step 0's read first, on the task's `claude_session_id`** — a held
+worker is not resumed on either path and no resume is recorded. That read is the only hold check
+on **path A**, this leg's own `spawn_agent` call; path B reaches `/supervisor:open`, which
+refuses a held row itself (`commands/open.md` § Step 2A) — render that refusal, never retry it. Then: `resume` →
 `/supervisor:open --task "<name>"` for a `mode: interactive` row, or the path-A headless resume
 for a `mode: headless` one. Record the resume **once `session-liveness.py --check` shows the id
 live** (`worker-keepalive.py --vault "<vault>" --task "<name>" --record-resume <id>` — `--vault`
@@ -380,14 +372,14 @@ worker whose permission channel died while the session lives; this leg resumes a
 session is **gone** — no pid left to kill, no channel left to reopen.
 
 ⚠️ **`agents/goal-drive.md`'s orphan gate covers the same population, and `worker-keepalive.py`
-enforces the exclusion itself, not via this prose.** That gate runs on the goal
-tier's tick with its own `last_auto_resume` cap; this leg runs on the fleet tick with the
-`worker--<slug>` cap, and both record only **after** a resume the instrument confirms `LIVE`, so
-a check-then-act race would let two resumes land before either cap arms. The script therefore
-scans the task's frontmatter for wikilinks and, if any page one names has a `claude_session_id`
-the instrument reads `LIVE`, returns `jump` with *"goal manager <id> is live and owns this
-task"* — the fleet leg takes only rows whose goal has no live manager
-(`docs/fleet-surface.md` § Which manager owns a subject).
+enforces the exclusion itself, not via this prose.** That gate runs on the goal tier's tick with
+its own `last_auto_resume` cap; this leg runs on the fleet tick with the `worker--<slug>` cap,
+and both record only **after** a resume the instrument confirms `LIVE`, so a check-then-act race
+would let two resumes land before either cap arms. The script therefore scans the task's
+frontmatter wikilinks and, if any named page has a `claude_session_id` the instrument reads
+`LIVE`, returns `jump` with *"goal manager <id> is live and owns this task"* — the fleet leg
+takes only rows whose goal has no live manager (`docs/fleet-surface.md` § Which manager owns a
+subject).
 
 **Record the count — in the digest, and labelled as a floor while the scan cannot finish.**
 `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg dead-workers --count <n> --floor`.
@@ -428,17 +420,16 @@ and one that ran and found nothing must never print the same.
 </error_handling>
 
 <output_format>
-**Two artifacts, two shapes.** The **digest** is the round's own file: you write two count lines
-into its `LEGS` section, through `fleet-legs.py`, as steps 1 and 4 state. The
-**hand-back** is the ≤ 1 KB verdict summary below, obeying
-`${CLAUDE_PLUGIN_ROOT}/docs/handback-contract.md` for the form.
+**Two artifacts.** The **digest** is the round's file: two count lines into its `LEGS` section
+through `fleet-legs.py` (steps 1, 4). The **hand-back** is the ≤ 1 KB summary below, obeying
+`docs/handback-contract.md` for the form.
 
 **Hand-back** — verdict lines and counts in `key=value` form, non-empty:
 
 ```text
 legs=written|UNKNOWN · legs-reason=<text>|— · lapsed-managers=<n>|not-run · dead-workers=<n>|not-run · dead-scan=complete|incomplete
 restarted=<n> · resumed=<n> · parked-due=<n> · nudged=<n> · undelivered=<n>
-crash-loop=<n> · cannot-tell=<n> · truncated=<n> · payload=<path>|—
+crash-loop=<n> · cannot-tell=<n> · crash-loop-truncated=<n> · cannot-tell-truncated=<n> · payload=<path>|—
 crash-loop: <subject> · <MANAGER|WORKER>
 cannot-tell: <name> · <what could not be decided>
 park-nudge: <the summary line, verbatim>
@@ -453,21 +444,23 @@ write used** — `complete` = `--exact`, `incomplete` = `--floor` — emitted ev
 emitted on every run** — `not-run` when that half could not execute, never omitted and never a
 bare `0`. ⚠️ **The row lists (`crash-loop:`, `cannot-tell:`) carry no `=` and are not counts** —
 the caller prints them; their per-list counts are `crash-loop=` and `cannot-tell=` on the counts
-line, which `docs/handback-contract.md` § The shape — the truncation exception reconciles against
-each list. ⚠️ **`park-nudge:` is a single summary line and never truncates** — no per-row list
-behind it, so it sits outside the size-cap exception. ⚠️ **`crash-loop:` and `cannot-tell:` are the
-only lines that truncate — never a count.** Their full lists go to
+line. ⚠️ **One dropped count per list, never one shared `truncated=`** — `crash-loop-truncated=`
+and `cannot-tell-truncated=` each say how many rows of THAT list ride `payload=`, since a shared
+count cannot tell which list lost rows and the caller's arithmetic could not be satisfied.
+⚠️ **`park-nudge:` is a single summary line and never truncates** — no per-row list behind it, so
+it sits outside the size-cap exception. ⚠️ **`crash-loop:` and `cannot-tell:` are the only lines
+that truncate — never a count.** Their full lists go to
 `~/.claude/state/fleet-handback/<round timestamp>.keepalive` (`mkdir -p` the directory, write
 `<path>.tmp` with `Write`, publish with `mv`; the round timestamp is sanitized by
 `agents/fleet-sweep-reader.md` § `<output_format>`'s rule, so this file and the round's `.digest`
 cannot drift apart), pruned by that file's prune clause — which covers `.keepalive` beside
-`.digest` and `.drive` and is its single home. ⚠️ **The cap, `truncated=`, and what the caller does
-with the payload are `docs/handback-contract.md` § The shape — the truncation exception** — not
-restated here. When nothing is truncated, `payload=—`. ⚠️ **The hand-back carries no rules** — no
+`.digest` and `.drive` and is its single home. ⚠️ **The cap, the per-list counts, and what the
+caller does with the payload are `docs/handback-contract.md` § The shape — the truncation
+exception** — not restated here. When nothing is truncated, both counts are `0` and `payload=—`. ⚠️ **The hand-back carries no rules** — no
 procedure text, no population, no guard; a caller that re-reads them here pays every round.
 
-**Digest** — never restate it in the hand-back, and never write a count the digest does not
-carry; the caller renders `LEGS` from the digest.
+**Digest** — never restate it in the hand-back; never write a count the digest does not carry;
+the caller renders `LEGS` from it.
 </output_format>
 
 <success_criteria>
@@ -478,6 +471,6 @@ carry; the caller renders `LEGS` from the digest.
   the half that could not run wrote its own `--not-run` reason at key granularity.
 - No fresh spawn happened where a recorded id existed, and no `--record-resume` was written for
   a resume the liveness instrument did not read `LIVE`.
-- The hand-back is ≤ 1 KB (or carries its own `truncated=` plus a payload) and carries every key
-  above, including the zeros.
+- The hand-back is ≤ 1 KB (or carries its own per-list dropped counts + payload) and carries
+  every key, zeros included.
 </success_criteria>

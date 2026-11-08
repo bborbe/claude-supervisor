@@ -102,11 +102,16 @@ LEGS = {
             "legs", "legs-reason", "lapsed-managers", "dead-workers", "dead-scan",
             "restarted", "resumed", "parked-due", "nudged", "undelivered",
             # one count per truncatable row list: the caller's reconciliation is
-            # `rows printed + truncated == this count`, so a list without its count has
-            # no arithmetic to check and a row dropped in transit is invisible
+            # `rows printed + that list's dropped count == this count`, so a list without
+            # its count has no arithmetic to check and a row dropped in transit is invisible
             "crash-loop", "cannot-tell",
-            # the size-cap exception's two keys
-            "truncated", "payload",
+            # ⚠️ ONE DROPPED COUNT PER LIST, never one shared `truncated=`: two truncatable
+            # lists behind a single count cannot say which list lost rows, so the per-list
+            # reconciliation above is unsatisfiable. A one-list leg (flagged-open) keeps
+            # `truncated`.
+            "crash-loop-truncated", "cannot-tell-truncated",
+            # the size-cap exception's payload key
+            "payload",
         ),
     },
     "supervisor:fleet-flagged-open-actor": {
