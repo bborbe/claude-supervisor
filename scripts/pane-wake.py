@@ -46,7 +46,8 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ATTENTION_DIR = os.path.expanduser("~/.claude/state/attention")
+ATTENTION_DIR = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser(
+    "~/.claude/state/attention")
 FLEET_MANAGER_NAME = "Fleet Manager"
 PUSHER_NAME = "Fleet Pusher"
 DEFAULT_MESSAGE = (
