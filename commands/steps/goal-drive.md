@@ -25,4 +25,15 @@ Rationale and incident history: the Manager Session runbook § Command rationale
 
    - **Reap is no longer inlined here — it is the drive leg, dispatched under `- Act:` below.** Its rules (the three disk reads, the deliberately-open Self-Review box, and why a close is only for a task that is already terminal or deferred, through `/supervisor:close`) live in `agents/goal-drive.md`. ⚠️ **The ordering is this command's to preserve: reap runs before drive**, which is why the dispatch sits after this sweep and never before it.
 
+  - **record the drive artifact — the leg's own report, on the round's receipt.** The tail's `--check` cannot see this leg unless it names an artifact produced this round, and until now nothing did: a round could sweep, render a complete-looking table and never dispatch the drive leg while the receipt read green (measured 2026-11-07 on goal `No Session Sits Idle Unnoticed and a Lapsed Manager Is Detected` — five sweep readers after 13:51:15Z, zero drive dispatches, and `--check` exited 0 on a receipt holding `needs-you`/`readings`/`sweep`/`watcher` alone).
+
+    Write the report the leg returned — the one you reproduce under the table, `To open` / `To resume` / `Nudged` / `Not resumed` / `Escalated` and all — to `~/.claude/state/manager-receipts/<slug>.drive`, then record it:
+
+    ```bash
+    python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-receipt.py \
+      --record --topic "<subject>" --step drive --path ~/.claude/state/manager-receipts/<slug>.drive
+    ```
+
+    ⚠️ **The file must carry the leg's own headers, not a summary you wrote.** `drive_shape()` accepts a report that names any of `To open`, `To resume`, `Not resumed`, `Escalated`, `Nudged` or `Reaped`; an arbitrary non-empty string, a `touch`ed file and a round-written stub all fail, exactly as they do for every other step. ⚠️ **A leg that found nothing still reports** — it says so under `To open` / `To resume` with no rows — so the predicate deliberately does not require a non-empty row set. A predicate that did would report `skipped: drive` on a healthy quiet round, which is the permanent false red this whole check exists to avoid. ⚠️ **No usable report → record nothing and let the tail say so.** An unrecorded `drive` is the honest verdict; a stub written to turn the check green is the defect.
+
 ⚠️ **Next: row 5b, before the tail — read `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-parked.md` now, every tick, and render its lever rows through `scripts/parked-lever.py`.** This hand-off is the only thing that reaches it: the router lists 5b, but no step chained to it, so a round that walked drive → tail never opened the file (measured 2026-11-04/05: 6 of 8 context loads skipped it, and 14 consecutive rounds rendered no lever row while two workers sat parked). 5b belongs **between** the drive leg and the tail, never inside the tail — the tail is the step most likely to be truncated, and a parked row needs the drive leg's report as input. The step's own rules — including what to print when nothing is parked — live in that file, not here.
