@@ -64,13 +64,46 @@ const DEFAULT_TIMEOUT_MS = 10_000
 // `dispatcher`, or drop the option.
 const SSE_DISPATCHER = new Agent({ bodyTimeout: 0 })
 
+/**
+ * Marker for "this stream did not end because the child finished".
+ *
+ * ⚠️ **Consumers must test `gap`, never a list of class names.** A name set has to be
+ * updated by hand every time a new gap class is added, and the failure when it is not is
+ * silent and in the dangerous direction: `runAgentLoop` settles `done` on any error it does
+ * not recognise, so a forgotten name reports a holed transcript as a completed turn. Every
+ * class below carries `gap = true`, and the consumer asks that one question.
+ */
+export class StreamGapBaseError extends Error {
+  constructor(name, message) {
+    super(message)
+    this.name = name
+    this.gap = true
+  }
+}
+
 /** Raised when the stream stopped for a reason other than the child exiting. */
-export class StreamLaggedError extends Error {
+export class StreamLaggedError extends StreamGapBaseError {
   constructor(sessionId, state) {
-    super(`session ${sessionId} stream ended while the child was still ${state} — the subscriber fell behind, so this is not a completed turn`)
-    this.name = 'StreamLaggedError'
+    super('StreamLaggedError', `session ${sessionId} stream ended while the child was still ${state} — the subscriber fell behind, so this is not a completed turn`)
     this.sessionId = sessionId
     this.state = state
+  }
+}
+
+/**
+ * Raised when the reconnect budget is spent before the stream reached its end sentinel.
+ *
+ * ⚠️ This is a gap, not a failure to report as `done`: the child never said it finished, and
+ * the events between the last frame this client saw and wherever the successor got to are
+ * simply missing. It covers all three exhaustion shapes — a persistent non-ok response, a
+ * body that kept throwing, and a body that closed cleanly without the sentinel (the shape a
+ * graceful drain produces).
+ */
+export class StreamExhaustedError extends StreamGapBaseError {
+  constructor(sessionId, reason) {
+    super('StreamExhaustedError', `session ${sessionId} reconnect budget exhausted before the end sentinel (${reason}) — the transcript may have a hole and this turn cannot be settled as done`)
+    this.sessionId = sessionId
+    this.reason = reason
   }
 }
 
@@ -93,10 +126,9 @@ export class WrapperError extends Error {
  * `done` on that stream reports a completed turn that never actually completed. Surfacing it
  * is the only honest outcome: the caller must not treat this worker as finished.
  */
-export class StreamGapError extends Error {
+export class StreamGapError extends StreamGapBaseError {
   constructor(sessionId, lastEventId) {
-    super(`session ${sessionId} stream resume point ${lastEventId} is no longer retained — the transcript has a gap and this turn cannot be settled as done`)
-    this.name = 'StreamGapError'
+    super('StreamGapError', `session ${sessionId} stream resume point ${lastEventId} is no longer retained — the transcript has a gap and this turn cannot be settled as done`)
     this.sessionId = sessionId
     this.lastEventId = lastEventId
   }
@@ -401,6 +433,9 @@ export async function* streamWrappedSession({
   // of looping forever.
   let attempt = 0
   let outageStartedAt = 0
+  // Whether ANY frame ever arrived. A stream that carried frames but no ids cannot be
+  // resumed, and reconnecting blind would duplicate or skip the transcript.
+  let sawAnyFrame = false
 
   for (;;) {
     if (signal?.aborted) return
@@ -424,7 +459,7 @@ export async function* streamWrappedSession({
       // briefly not listening. Retry it on the same budget as a dropped body.
       if (await waitForRetry()) continue
       if (signal?.aborted) return
-      throw err
+      throw new StreamExhaustedError(sessionId, `connect failed: ${err?.message ?? err}`)
     }
 
     // ⚠️ 409 is the wrapper saying the resume point fell out of its retained window. Re-opening
@@ -441,7 +476,7 @@ export async function* streamWrappedSession({
       }
       if (await waitForRetry()) continue
       if (signal?.aborted) return
-      throw new WrapperError(`wrapper stream failed: HTTP ${resp.status}`, resp.status)
+      throw new StreamExhaustedError(sessionId, `HTTP ${resp.status}`)
     }
 
     const tracker = { lastId, ended: false }
@@ -455,6 +490,7 @@ export async function* streamWrappedSession({
     let bodyError = null
     try {
       for await (const message of parseSSE(resp.body, tracker)) {
+        sawAnyFrame = true
         if (!sawProgress && tracker.lastId !== null && tracker.lastId !== lastIdAtConnect) {
           sawProgress = true
           attempt = 0
@@ -470,10 +506,23 @@ export async function* streamWrappedSession({
     if (tracker.ended) break
     if (signal?.aborted) return
 
+    // ⚠️ **A stream that carried no `id:` cannot be resumed.** That is an older wrapper or a
+    // deploy skew, and reconnecting blind would either replay the whole transcript (firing
+    // `onTurnComplete` again for every replayed result) or silently skip the gap. Failing
+    // loudly is the only honest option.
+    if (lastId === null && sawAnyFrame) {
+      throw new StreamGapError(sessionId, null)
+    }
+
     // The body ended or threw without the sentinel — the connection died under a live child.
     if (await waitForRetry()) continue
     if (signal?.aborted) return
-    throw bodyError ?? new Error(`session ${sessionId} stream ended without the end sentinel and the reconnect budget is exhausted`)
+    throw new StreamExhaustedError(
+      sessionId,
+      bodyError
+        ? `body failed: ${bodyError?.message ?? bodyError}`
+        : 'body closed without the end sentinel',
+    )
   }
 
   // The stream ended on its own terms. Ask why before letting the caller settle a terminal

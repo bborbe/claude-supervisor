@@ -133,15 +133,15 @@ export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_
     // presence does not prove the turn closed; the absence of this error is what does. Settling it
     // `done` would resurrect the exact "a lag looks like a finished worker" defect the adapter was
     // built to prevent, which is a worse failure than the `error` it replaces.
-    // ⚠️ **Every gap class, not only `StreamLaggedError`.** `StreamGapError` is the `409` case:
-    // the resume point fell out of the wrapper's retained window, so the events between it and
-    // the successor's first frame are simply missing. A `result` captured before that gap does
-    // not prove the turn closed — the transcript has a hole — and settling it `done` reports a
-    // completed turn that never completed. Both are excluded by name so a future gap class
-    // added to `wrapper-stream.mjs` must be added here deliberately.
-    const GAP_ERRORS = new Set(['StreamLaggedError', 'StreamGapError'])
+    // ⚠️ **Ask the error whether it is a gap; never keep a list of names.** A name set has to
+    // be updated by hand for every new gap class, and forgetting one fails silently in the
+    // dangerous direction: a `result` captured before the gap makes `turnClosed` true and the
+    // worker settles `done` on a transcript with a hole. That is exactly what happened when
+    // the reconnect-exhaustion paths were added — they throw classes the old set did not
+    // name. Every gap class in `wrapper-stream.mjs` carries `gap = true`, so this one test
+    // covers all of them, present and future.
     const terminal = { ended_at: new Date().toISOString() }
-    const turnClosed = agent.result && !agent.result.is_error && !GAP_ERRORS.has(error?.name)
+    const turnClosed = agent.result && !agent.result.is_error && error?.gap !== true
     if (turnClosed) {
       agent.status = 'done'
       writeLedger(agent, { ...terminal, status: 'done', result: agent.result })

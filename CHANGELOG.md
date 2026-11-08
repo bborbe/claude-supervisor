@@ -20,10 +20,13 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   budget is **per outage, not per stream** — a parked or long-running worker whose stream has
   been open for hours still reconnects, because the clock starts when a connection fails and
   resets only on real progress (a new event id), so a wrapper stuck re-sending one event cannot
-  loop forever. `StreamGapError` is also excluded from `runAgentLoop`'s `turnClosed`, so a
-  captured mid-turn `result` followed by a 409 settles `error`, never `done`. Previously
-  undici's `TypeError: terminated` reached `runAgentLoop`'s catch and the worker settled `error`
-  while its child was still generating.
+  loop forever. Every gap class — `StreamLaggedError`, `StreamGapError`, and the new
+  `StreamExhaustedError` raised when the retry budget runs out — carries a `gap` marker, and
+  `runAgentLoop` settles `error` on that marker rather than on a list of class names, so a
+  captured mid-turn `result` can never settle a holed transcript `done`. A stream that carried
+  frames but no `id:` fails loudly instead of reconnecting blind and duplicating the
+  transcript. Previously undici's `TypeError: terminated` reached `runAgentLoop`'s catch and the
+  worker settled `error` while its child was still generating.
 
 ## v0.250.7
 

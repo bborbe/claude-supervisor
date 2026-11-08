@@ -13,6 +13,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  StreamExhaustedError,
   StreamGapError,
   StreamLaggedError,
   WrapperError,
@@ -262,7 +263,9 @@ test('streamWrappedSession gives up in bounded time when the wrapper never retur
         // drain
       }
     })(),
-    (err) => err instanceof TypeError,
+    // ⚠️ Exhaustion surfaces as a GAP class, not the raw body error: the child never said it
+    // finished, so the loop must not read this as a completed turn.
+    (err) => err instanceof StreamExhaustedError && err.gap === true,
   )
   // 1 initial + 2 retries, then it stops rather than spinning forever.
   assert.equal(attempts, 3)
@@ -347,9 +350,46 @@ test('gives up after the retry budget when the wrapper keeps returning 5xx', asy
         // drain
       }
     })(),
-    (err) => err instanceof WrapperError && err.status === 503,
+    (err) => {
+      // ⚠️ Exhaustion must be a GAP, not a plain failure: the child never said it finished,
+      // so a captured `result` must not settle the worker `done`.
+      assert.ok(err instanceof StreamExhaustedError, `expected StreamExhaustedError, got ${err?.name}`)
+      assert.equal(err.gap, true, 'exhaustion carries the gap marker the loop tests')
+      return true
+    },
   )
   assert.equal(n, 3, 'one initial attempt plus two retries')
+})
+
+test('does not reconnect blind when the stream carried frames but no ids', async () => {
+  let n = 0
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/events')) {
+      n += 1
+      // An older wrapper: frames with data but no `id:` line, then the body dies.
+      return dyingResponse(['data: {"type":"assistant"}\n\n'])
+    }
+    return jsonResponse({ id: SESSION, state: 'generating' })
+  }
+
+  await assert.rejects(
+    (async () => {
+      for await (const _ of streamWrappedSession({
+        baseUrl: 'http://w',
+        sessionId: SESSION,
+        fetchImpl,
+        reconnect: FAST_RECONNECT,
+      })) {
+        // drain
+      }
+    })(),
+    (err) => {
+      assert.ok(err instanceof StreamGapError, `expected StreamGapError, got ${err?.name}`)
+      assert.equal(err.gap, true)
+      return true
+    },
+  )
+  assert.equal(n, 1, 'resuming is impossible without an id, so it must not retry')
 })
 
 test('treats a 404 during the restart window as terminal, not a blip', async () => {
