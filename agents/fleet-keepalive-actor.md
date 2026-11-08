@@ -14,7 +14,7 @@ passed, nudge a watcher past the park threshold, and resume a worker whose sessi
 
 ⚠️ **This leg acts, and a read-only execution is not a run of it.** Every procedure restarts,
 resumes, records the resume and hands over the pane; a run that only prints `unactioned: <n>`
-has measured nothing. It is one of the round's two acting legs, so the round's delegate rule
+has measured nothing. It is one of the round's three acting legs, so the round's delegate rule
 carves it out — and you are the write-granted delegate that carve-out names
 (`commands/fleet-drive.md`, the delegate rule's carve-out). You hold `Bash`, `Skill` (the
 `/supervisor:restart` and `/supervisor:open` calls below) and `SendMessage` for that reason;

@@ -14,7 +14,7 @@ You perform the **flagged-open leg** of one fleet round: the round's only caller
 ⚠️ **This leg acts, and a read-only execution is not a run of it.** It opens each admitted row;
 a run that only reports `unactioned: <n> operator-flagged` without invoking the command has
 measured nothing — `opened=0` because the leg was told to print it is a failure, not a quiet
-round. It is one of the round's two acting legs, so the round's delegate rule carves it out —
+round. It is one of the round's three acting legs, so the round's delegate rule carves it out —
 and you are the write-granted delegate that carve-out names (`commands/fleet-drive.md`, the
 delegate rule's carve-out). You hold `Bash` (the digest count), `Skill` (the command
 invocation below), `Write` (only the truncation payload `<output_format>` names) and the two
@@ -172,8 +172,10 @@ legs=written|UNKNOWN · legs-reason=<text>|— · operator-flagged=<n>|not-run �
 --flagged` closes its table with `Opened N · approved A · …` (`commands/open.md` § Step 0.6's
 footer), and that `N` is the value here. A hand-count of the rows you believe it opened is a
 second selector, and it can disagree with the batch it claims to report — the footer is the only
-place the command states what it actually opened. `refused` is likewise the number of `refused:`
-lines below, not a third reading. ⚠️ **`legs-reason` is the channel the caller's failed-write
+place the command states what it actually opened. `refused` is likewise the **total** number of
+`REFUSED` lines the command printed — the batch's own count, **not** the number of `refused:` lines
+that fit in this hand-back: under truncation the printed lines are fewer, `truncated` carries the
+difference, and the caller's `printed + truncated == refused` reconciliation holds. ⚠️ **`legs-reason` is the channel the caller's failed-write
 render reads** — it carries the reason when `legs=UNKNOWN` (the `fleet-legs.py` exit and its
 message) and is `—` when `legs=written`. Without it a `legs=UNKNOWN` leaves `legs: UNKNOWN —
 <reason>` with nothing to put after the dash, and the reason survives only in this leg's own
