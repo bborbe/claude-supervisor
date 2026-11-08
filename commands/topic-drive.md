@@ -99,8 +99,7 @@ The **first line is the verdict**:
 | `open-unflagged` | no recorded id, **no flag** | ⚠️ **Report, never open.** Render the row with its rank and say it is held for a flag. Rule 4: a manager is opened only for a flagged page, so a round may not create one |
 | `resume` | a recorded `claude_session_id` whose session is `ABSENT` | run `/supervisor:open --goal "<goal>"`, then `topic-keepalive.py --vault "<vault>" --subject "<goal>" --record-resume <the id>` **once the liveness instrument shows it live** |
 | `restart` | live session, `STALE`/`INVALID` cadence | `/supervisor:restart <session-id>`; its `busy-target` refusal means mid-turn — wait a tick, never kill in-flight work |
-| `leave` | `STOPPED` — a deliberate stand-down | nothing; the operator stood it down |
-| `leave` | `SLEEPING` — a date-gated wait on its own `defer_date` | nothing; the sleep expires by itself and the arm clears the marker |
+| `leave` | `STOPPED` (stood down) or `SLEEPING` (date-gated wait) | nothing; a sleep expires on its own |
 | `cannot-tell` | the probe could not decide | render `UNVERIFIED` and name the input; **never act** |
 | `crash-loop` | 3 resumes in 30 min already spent | print `⚠️ MANAGER CRASH-LOOP: <goal>` and escalate **once** to the operator |
 
