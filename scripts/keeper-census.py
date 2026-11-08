@@ -37,12 +37,14 @@ reported as `not-live` so the count line stays a statement about the live fleet.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import re
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -51,12 +53,14 @@ SESSION_LIVENESS = os.path.join(HERE, "session-liveness.py")
 MANAGER_LIVENESS = os.path.join(HERE, "manager-liveness.py")
 ATTENTION_ASK = os.path.join(HERE, "attention-ask.py")
 
-#: The file whose text decides whether a keeper leg EXISTS. The leg's four procedures moved
-#: out of `commands/steps/keepalive.md` into this agent (`commands/steps/keepalive.md` § 1),
-#: so the agent body is where a leg is added or removed. A leg that is not in this file is
-#: run by no round, whatever the contract says — which is exactly the reading this census
-#: exists to surface for the topic-less goal tier.
-LEG_FILE = os.path.join(REPO, "agents", "fleet-keepalive-actor.md")
+#: The files whose text decides whether a keeper leg EXISTS: the actor that runs three of the
+#: four procedures, and every `commands/steps/keepalive*.md` — the step that dispatches it and
+#: the per-leg steps beside it (`keepalive-topicless-goals.md` carries the goal leg, shipped
+#: 2026-11-08). Globbing rather than naming them is the point: a leg added in a new step file
+#: is picked up without editing this list, and a leg nobody ships is absent from all of them.
+LEG_FILES = sorted(glob.glob(os.path.join(REPO, "commands", "steps", "keepalive*.md"))) + [
+    os.path.join(REPO, "agents", "fleet-keepalive-actor.md"),
+]
 
 #: Matched against `LEG_FILE`. The invocations are Python argument lists, so the branch token
 #: may be bare (`--branch topic`) or quoted and comma-separated (`"--branch", "topic"`).
@@ -240,8 +244,9 @@ def cadence(subject, branch, vault):
 
 
 def legs(leg_file=None):
-    """Which keeper legs exist, read from the leg file's own text."""
-    text = _read(leg_file or LEG_FILE)
+    """Which keeper legs exist, read from the leg files' own text."""
+    paths = [leg_file] if leg_file else LEG_FILES
+    text = "\n".join(_read(path) for path in paths)
     return {name: bool(pattern.search(text)) for name, pattern in LEG_PATTERNS.items()}
 
 
@@ -315,7 +320,18 @@ def owner(kind, name, world):
 
     Returns `{"live", "cadence", "owns", "why"}`. `live is None` means the page is missing —
     a cannot-tell, never a "no owner".
+
+    Cached per `(kind, name)` for the run: the cadence read is a subprocess, and one goal
+    manager is consulted once per worker that names it — measured 2026-11-08, an uncached
+    pass over a 327-page vault took over two minutes and would have blocked the round.
     """
+    cache = world.setdefault("owners", {})
+    if (kind, name) not in cache:
+        cache[(kind, name)] = _owner(kind, name, world)
+    return cache[(kind, name)]
+
+
+def _owner(kind, name, world):
     page = world["by_name"].get((kind, name))
     if page is None:
         return {"live": None, "cadence": "NO-PAGE", "owns": False,
@@ -429,6 +445,35 @@ def _red(keepers):
     return None
 
 
+#: Cadence probes run in parallel. `manager-liveness.py --state` answers one subject per
+#: process and takes ~0.9 s, and a real fleet consults ~60 of them: serial, that was 55 s of
+#: wall clock for a reading the round takes every tick (measured 2026-11-08, 73 live
+#: sessions). The probe itself is unchanged — only its scheduling.
+PROBE_WORKERS = 8
+
+
+def prefetch_owners(world):
+    """Fill the owner cache concurrently, so `census()` is a lookup pass.
+
+    The set is exactly the pairs `census()` will consult: every live topic or goal page, and
+    every goal named by a live worker's task page. A pair outside it is still resolved on
+    demand by `owner()`; this only warms what the rows need.
+    """
+    pairs = set()
+    for sid in world["live"]:
+        page = _page_for(sid, world["by_session"])
+        if page is None:
+            continue
+        if page["kind"] in ("topic", "goal"):
+            pairs.add((page["kind"], page["name"]))
+        elif page["kind"] == "task":
+            pairs.update(("goal", goal) for goal in page["goals"])
+    if not pairs:
+        return
+    with ThreadPoolExecutor(max_workers=PROBE_WORKERS) as pool:
+        list(pool.map(lambda pair: owner(pair[0], pair[1], world), sorted(pairs)))
+
+
 def census(world):
     """Every row the census prints, red ones first, plus the mismatch lines."""
     rows, mismatches, stale = [], [], []
@@ -456,9 +501,10 @@ def census(world):
         if sid in world["live"]:
             continue
         page = _page_for(sid, world["by_session"])
-        keepers, _ = keepers_of(page, world)
+        # No keeper read: the session is gone, so who would have kept it is not a question
+        # the round acts on, and computing it costs one cadence probe per page.
         rows.append({"state": "not-live", "tier": TIER_BY_KIND[page["kind"]],
-                     "name": page["name"], "sid": sid, "keepers": keepers,
+                     "name": page["name"], "sid": sid, "keepers": [],
                      "red": None, "why": "session is not live"})
         stale.append(f"page \"{page['name']}\" records session {sid} — "
                      "the registry does not hold it")
@@ -623,6 +669,7 @@ def main(argv=None):
         "fleet": fleet_session(),
     }
 
+    prefetch_owners(world)
     rows, mismatches = census(world)
     text, unkept, double = render(rows, mismatches, len(live), world["legs"], args.vault)
     print(text)
