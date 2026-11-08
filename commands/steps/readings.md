@@ -28,12 +28,17 @@ Read it from `python3 $P/fleet-board.py --json` → `saturation`, which carries 
 Every tick prints this line with the marker line:
 
     approved, not started: 3 · oldest 7h35m (Build claude-interactive)
+      never started: 1 → open · orphaned: 2 → reopen
 
-Read it from `python3 $P/approved-not-started.py --tasks-dir "<vault>/<tasks-dir>"`. A row counts when its task-file frontmatter carries `approved_at` with a non-terminal `status` and no **live** `claude_session_id`. Rows waiting longer than one tick (**30 min, a script constant** — never a per-call flag, because two rounds disagreeing about the same row is the defect this line exists to remove) are listed beneath it with their owning manager.
+Read it from `python3 $P/approved-not-started.py --tasks-dir "<vault>/<tasks-dir>"`. A row counts when its task-file frontmatter carries `approved_at` with a non-terminal `status` and no **live** `claude_session_id`. Rows waiting longer than one tick (**30 min, a script constant** — never a per-call flag, because two rounds disagreeing about the same row is the defect this line exists to remove) are listed beneath it with their class and their owning manager.
 
-⚠️ **`unknown` is a third answer, not `0`.** If the session registry cannot be read the script prints `approved, not started: unknown` and exits non-zero — *"no approved rows are waiting"* and *"I could not ask"* must not render the same (`docs/pane-reads.md` § The rule). Print it as it comes back; never round `unknown` down to a number.
+**The total is two populations, and the second line splits it.** *Never started* — no `claude_session_id` at all: nobody ever opened the row. *Orphaned* — a `claude_session_id` that names a session the registry does not hold live: the row was started and its worker died. Each is counted on its own predicate, never as the other's remainder, and the two sum to the total; a row whose id is live counts in neither, because it is not in the total. Measured 2026-10-30: 81 of 122 rows were orphans, invisible as a class inside the single number. `--json` carries the same split as `never_started` and `orphaned`, and each row's `class`.
 
-⚠️ **The line reports; the open leg opens.** This reading adds visibility, not authority. The acting is `commands/steps/open.md`'s (router row 16), which ranks these rows and opens them through `/supervisor:open` up to the free slots, and the owning manager's where one is live. A reading that opened anything itself would be the measure acting on its own measurement — and the rank, the guards and the cap are the leg's to apply, never this line's.
+⚠️ **`orphaned` is not `adopt-orphans.py`'s population.** That script adopts the **live** workers an exited manager left behind; an orphaned row here is the inverse — the worker is gone and the task remains.
+
+⚠️ **`unknown` is a third answer, not `0`.** If the session registry cannot be read the script prints `approved, not started: unknown` and `never started: unknown → open · orphaned: unknown → reopen`, and exits non-zero — *"no approved rows are waiting"* and *"I could not ask"* must not render the same (`docs/pane-reads.md` § The rule). Print it as it comes back; never round `unknown` down to a number.
+
+⚠️ **The line reports; the open leg opens, and the reopen rule reopens.** This reading adds visibility, not authority. A *never started* row is the open leg's: `commands/steps/open.md` (router row 16) ranks these rows and opens them through `/supervisor:open` up to the free slots, and the owning manager's where one is live. An *orphaned* row is the reopen rule's: `commands/steps/keepalive.md` § Resume a worker whose session died, through `scripts/worker-keepalive.py`, which owns the resume cap and the crash-loop escalation. A reading that opened or reopened anything itself would be the measure acting on its own measurement — and the rank, the guards and the cap are the legs' to apply, never this line's.
 
 ## The unarmed-goals reading
 
