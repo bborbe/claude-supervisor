@@ -86,12 +86,11 @@ the **roster** — `<session-id>\t<name>` lines from `session-liveness.py --list
 unnamed candidate is reported `undelivered: <id8>`; the `NUDGE` line's own `(<name>)` is that
 same field and may stand in when it is not `-`.
 
-⚠️ **Two rules.** The **caller's** inputs — the vault root and this round's digest path — are
+⚠️ **Two rules.** The **caller's** inputs — the vault root, this round's digest path and the plugin root — are
 named, never defaulted: a defaulted vault root silently reads another vault's pages, a defaulted
-digest path writes a reading into a round nobody reads. The **directory names** (`TOPICS`,
-`TASKS`, `GOALS`) come from the vault's own config, falling back to the documented default
-(`23 Topics`, `25 Tasks`, `24 Goals`) **only when the config carries none** — a vault with no
-configured directory must still work; a configured value always wins.
+digest path writes a reading into a round nobody reads. The **directory names** come from
+`resolve-folders.py --vault`, matched by the vault's PATH, never the first config entry; a vault
+lacking a key a step needs refuses, and that step records `--not-run`.
 
 `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts`
 </inputs>
@@ -196,7 +195,7 @@ dies with the round.
 
 ## 1b. Restart a lapsed goal manager whose goal no topic declares
 
-Read and run `commands/steps/keepalive-topicless-goals.md`.
+Read `<plugin root>/commands/steps/keepalive-topicless-goals.md` (absolute; never search for it) and run it.
 
 ## 2. Resume the park watches whose re-check has passed
 

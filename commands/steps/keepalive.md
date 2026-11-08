@@ -27,7 +27,7 @@ Exit **12** = the arm is still owed: print the `debt:` lines, skip this leg, and
 
 1. **Dispatch the leg — this step no longer carries its procedures.** Dispatch:
 
-   `Task(subagent_type: "supervisor:fleet-keepalive-actor", prompt: <vault root + this round's digest path + round timestamp + the roster: one session-id<TAB>name line per live session, from python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-liveness.py" --list --json>)`
+   `Task(subagent_type: "supervisor:fleet-keepalive-actor", prompt: <vault root + this round's digest path + round timestamp + the plugin root (`${CLAUDE_PLUGIN_ROOT}`, resolved — the actor reads `commands/steps/keepalive-topicless-goals.md` under it) + the roster: one session-id<TAB>name line per live session, from python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-liveness.py" --list --json>)`
 
    The plugin prefix is required — a bare `fleet-keepalive-actor` resolves to a personal `~/.claude/agents/` copy. The agent (Sonnet) runs the five procedures — **restart a lapsed topic manager**, **restart a lapsed goal manager whose goal no topic declares** (`commands/steps/keepalive-topicless-goals.md`), **resume the park watches whose re-check has passed**, **nudge a watcher past the park threshold**, **resume a worker whose session died** — acts on every verdict, and writes the leg's three digest counts itself (`lapsed-managers`, and `dead-workers` with its `--floor` / `--exact` label). It owns every population resolver, every script invocation and every `⚠️` guard; read them in `agents/fleet-keepalive-actor.md` — this step does not restate them.
 
