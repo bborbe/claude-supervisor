@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.254.1
 
 - fix: **the plugin no longer declares the stdio `supervisor` MCP server, so a plugin auto-update stops resurrecting a per-session `supervisor.mjs`.** `.mcp.json` held only `mcpServers.supervisor` (`python3 scripts/mcp-start.py`), so it is deleted rather than left as an empty `mcpServers`. The long-running daemon (`127.0.0.1:18090/supervisor/mcp`) serves the same nine tools over HTTP, and sessions reach it through an `http` entry in their own `--mcp-config`. `scripts/mcp-start.py` stays for a self-registered stdio entry (and `restart-worker.py` still matches on it). `make check` now fails if `.mcp.json` reappears. Change set: `.mcp.json`, `Makefile`, `README.md`, `CLAUDE.md`, `CHANGELOG.md`.
 
