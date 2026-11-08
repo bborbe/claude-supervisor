@@ -91,19 +91,28 @@ nothing.
 
 ```
 keeper-census: <vault>
-  legs: topic=yes goal=NO worker=yes · live=57 rows=324
-  RED unkept      goal-mgr   <goal>     — goal is in no topic and the fleet round has no goal keep-alive leg
+  legs: topic=yes goal=yes worker=yes · live=78 rows=328 · cannot-tell=0
+  RED unkept      none       <session>  — no topic, goal or task page records this session
       live        topic-mgr  <topic>    keeper: fleet round
-      not-live    worker     <task>     keeper: fleet round
+      not-live    worker     <task>     keeper: —
 MISMATCH page "<task>" records session <id> — the registry does not hold it
-keeper-census: unkept=23 double-kept=0 sessions=57
+  card: <item-id>
+keeper-census: unkept=16 double-kept=0 sessions=78
 ```
+
+⚠️ **The count line is the block's last line, always** — the `card:` line sits above it, and
+that line is what the goal's own criterion reads.
 
 ⚠️ **The exit code is three-way, and only one of them is a finding.** `0` clean; `1` at
 least one red row — the reading's own result, **not** a refusal, so the round carries on and
 prints the block; `2` the registry or the vault could not be read, and the census says so on
 stderr rather than reporting a fleet of zero. Render `2` as
 `keeper census: refused — <reason>`; a refusal and a clean fleet must never print the same.
+
+⚠️ **`cannot-tell` is a third row state and is never counted red.** A row whose keeper could
+not be read (an unreadable loop probe, a page naming a manager page that does not exist) is
+printed with that state and counted in the header's `cannot-tell=` — a failed read must not
+be reported as a definite gap, and the count line carries only the definite ones.
 
 ⚠️ **The script posts its own card — the round posts none.** One card per red *episode*,
 under a dedup key carrying the episode's start time and day, so a second consecutive red

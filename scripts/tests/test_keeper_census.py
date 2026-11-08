@@ -15,10 +15,7 @@ reason).
 
 import importlib.util
 import io
-import json
-import os
 import pathlib
-import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -260,7 +257,8 @@ class CensusTest(unittest.TestCase):
         code, _ = self.run_census("--now", "1000120")
         self.assertEqual(0, code)
         self.assertEqual(1, len(self.posts))
-        self.assertEqual({}, json.loads((self.state / "episodes.json").read_text()))
+        self.assertFalse((self.state / "episodes.json").exists(),
+                         "a green census ends the episode and leaves no record")
 
         self.legs.write_text(LEGS_NO_GOAL, encoding="utf-8")
         self.run_census("--now", "1000180")
@@ -276,6 +274,57 @@ class CensusTest(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertRegex(text, r"fleet-mgr\s+Fleet Manager\s+keeper: operator")
         self.assertIn("keeper-census: unkept=0 double-kept=0 sessions=1", text)
+
+    # -- the two parsing defects the review caught --------------------------------------
+
+    def test_a_goals_section_that_ends_the_file_still_declares_its_goals(self):
+        """`## Goals` as the last section must still declare — the section ends at EOF."""
+        self.write("topic", "T", sid="t-sid", body="## Goals\n- [[G]]\n")
+        self.write("goal", "G", sid="g-sid")
+        self.write("task", "W", sid="w-sid", goals=["G"])
+        for sid in ("t-sid", "g-sid", "w-sid"):
+            self.alive(sid)
+        self.states[("topic", "T")] = "OK"
+        self.states[("goal", "G")] = "OK"
+
+        code, text = self.run_census("--no-card")
+        self.assertEqual(0, code, text)
+        self.assertIn("keeper: topic mgr: T", text)
+
+    def test_an_empty_session_id_does_not_swallow_the_next_key(self):
+        """`claude_session_id:` with no value must read as absent, not as the next key."""
+        raw = ("---\npage_type: task\nstatus: in_progress\nclaude_session_id:\n"
+               "phase: execution\n---\n\nbody\n")
+        (self.vault / "25 Tasks" / "Empty.md").write_text(raw, encoding="utf-8")
+
+        code, text = self.run_census("--no-card")
+        self.assertEqual(0, code, text)
+        self.assertNotIn("Empty", text)
+        self.assertIn("sessions=0", text)
+
+    # -- the card's day bucket ------------------------------------------------------------
+
+    def test_a_still_red_census_reposts_on_the_next_day(self):
+        """The card expires after 24 h, so a fleet red a day later must be asked again."""
+        self.write("goal", "Topicless", sid="goal-sid")
+        self.alive("goal-sid")
+        self.states[("goal", "Topicless")] = "OK"
+
+        self.run_census("--now", "1000000")
+        self.assertEqual(1, len(self.posts))
+        self.run_census("--now", str(1000000 + 86400))
+        self.assertEqual(2, len(self.posts), self.posts)
+        self.assertTrue(self.posts[1][0].endswith("-d1"), self.posts[1][0])
+
+    def test_the_count_line_stays_last_even_when_a_card_posts(self):
+        self.write("goal", "Topicless", sid="goal-sid")
+        self.alive("goal-sid")
+        self.states[("goal", "Topicless")] = "OK"
+
+        _, text = self.run_census("--now", "1000000")
+        self.assertEqual("keeper-census: unkept=1 double-kept=0 sessions=1",
+                         text.strip().splitlines()[-1])
+        self.assertIn("  card: item-1", text)
 
     # -- refusals ------------------------------------------------------------------------
 

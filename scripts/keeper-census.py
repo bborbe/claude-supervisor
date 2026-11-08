@@ -84,6 +84,11 @@ TERMINAL = {"completed", "aborted"}
 #: unreadable manager, and none of them runs the round that would keep its subjects alive.
 OWNER_STATES = {"OK", "STALE"}
 
+#: The loop states the contract names as **not** an owner (`docs/session-tiers.md` § Owner).
+#: Any other token — `UNREADABLE`, or a vocabulary this file has not learned — is a
+#: cannot-tell, and the census reports it without counting it against the fleet.
+NOT_OWNER_STATES = {"STOPPED", "SLEEPING", "UNARMED", "INVALID", "ABSENT", "NO-ID", "NO-PAGE"}
+
 STATE_DIR = os.path.expanduser(
     os.environ.get("KEEPER_CENSUS_DIR") or "~/.claude/state/keeper-census"
 )
@@ -118,7 +123,7 @@ def _read(path):
 
 def frontmatter(text):
     """The frontmatter block, or "" — a page with none carries no session id either."""
-    m = re.match(r"---\n(.*?)\n---", text, re.S)
+    m = re.match(r"---\r?\n(.*?)\r?\n---", text, re.S)
     return m.group(1) if m else ""
 
 
@@ -129,7 +134,10 @@ NULLS = {"", "~", "null", "none", "nil"}
 
 
 def scalar(fm, key):
-    m = re.search(rf"^{key}:\s*(.*)$", fm, re.M)
+    # `[ \t]*`, never `\s*`: `\s` matches the newline, so an empty-valued key captured the
+    # NEXT line's key as its value — `claude_session_id:` followed by `goals:` read as the
+    # id `goals:`, which is the same collapse-into-one-row defect the NULLS set prevents.
+    m = re.search(rf"^{key}:[ \t]*(.*)$", fm, re.M)
     if not m:
         return ""
     value = m.group(1).strip().strip('"').strip("'")
@@ -143,8 +151,14 @@ def links(fm, key):
 
 
 def section_links(text, heading):
-    """The wikilinks of a `## <heading>` bullet list — the topic page's declared goals."""
-    m = re.search(rf"^## {re.escape(heading)}$(.*?)^## ", text, re.M | re.S)
+    """The wikilinks of a `## <heading>` bullet list — the topic page's declared goals.
+
+    The section runs to the next `## ` heading **or the end of the file** (`\\Z`). Requiring
+    a following heading made a topic page whose `## Goals` list is its last section declare
+    nothing, so every goal it named read topic-less and went red — a false violation of the
+    very invariant this script asserts.
+    """
+    m = re.search(rf"^## {re.escape(heading)}$(.*?)(?=^## |\Z)", text, re.M | re.S)
     return re.findall(r"^- \[\[([^\]|#]+)", m.group(1), re.M) if m else []
 
 
@@ -182,7 +196,6 @@ def scan(vault):
                     "phase": scalar(fm, "phase"),
                     "goals": links(fm, "goals") if kind == "task" else [],
                     "topics": links(fm, "topics") if kind == "goal" else [],
-                    "text": text,
                 }
                 pages.append(page)
                 by_session.setdefault(sid, []).append(page)
@@ -318,8 +331,12 @@ def owner(kind, name, world):
     body becomes its call and this docstring goes with it. Nothing else in this file decides
     ownership, so the swap is one function.
 
-    Returns `{"live", "cadence", "owns", "why"}`. `live is None` means the page is missing —
-    a cannot-tell, never a "no owner".
+    Returns `{"live", "cadence", "owns", "cannot", "why"}`. **`cannot` is a third answer and
+    it is not `owns: False`** — `scripts/owner.py` returns `CANNOT_TELL` for an unreadable
+    probe, and the rule it inherits is the fleet-wide one: a failed read must never license a
+    definite verdict (`docs/pane-reads.md` § The rule). A row whose keeper could not be read
+    is reported and carded as an ownership gap; it is never counted unkept. `live is None`
+    (no page at all) is a cannot-tell for the same reason.
 
     Cached per `(kind, name)` for the run: the cadence read is a subprocess, and one goal
     manager is consulted once per worker that names it — measured 2026-11-08, an uncached
@@ -334,16 +351,21 @@ def owner(kind, name, world):
 def _owner(kind, name, world):
     page = world["by_name"].get((kind, name))
     if page is None:
-        return {"live": None, "cadence": "NO-PAGE", "owns": False,
+        return {"live": None, "cadence": "NO-PAGE", "owns": False, "cannot": True,
                 "why": f"no {kind} page named {name}"}
     if not page["sid"]:
-        return {"live": False, "cadence": "NO-ID", "owns": False,
+        return {"live": False, "cadence": "NO-ID", "owns": False, "cannot": False,
                 "why": f"{kind} {name} records no claude_session_id"}
     if page["sid"] not in world["live"]:
-        return {"live": False, "cadence": "ABSENT", "owns": False,
+        return {"live": False, "cadence": "ABSENT", "owns": False, "cannot": False,
                 "why": f"{kind} {name} session is not live"}
     state = world["cadence"](name, kind, world["vault"])
-    return {"live": True, "cadence": state, "owns": state in OWNER_STATES,
+    if state not in OWNER_STATES and state not in NOT_OWNER_STATES:
+        # An unreadable probe, or a token this file does not know: cannot tell, never "no
+        # owner". Reading it as `not-owner` would card a failed read as a keeper gap.
+        return {"live": True, "cadence": state, "owns": False, "cannot": True,
+                "why": f"{kind} {name} loop unreadable ({state})"}
+    return {"live": True, "cadence": state, "owns": state in OWNER_STATES, "cannot": False,
             "why": f"{kind} {name} loop {state}"}
 
 
@@ -383,31 +405,31 @@ def _page_for(sid, by_session):
 
 
 def keepers_of(page, world):
-    """`(keepers, why)` — who keeps this page's session alive, and why when nobody does."""
+    """`(keepers, why, cannot)` — who keeps this page's session alive, and whether the answer
+    is a definite one. `cannot` means a keeper read failed: report it, never count it red."""
     kind = page["kind"]
 
     if kind == "topic":
         if world["legs"]["topic"]:
-            return ["fleet round"], ""
-        return [], "the fleet round has no topic keep-alive leg"
+            return ["fleet round"], "", False
+        return [], "the fleet round has no topic keep-alive leg", False
 
     if kind == "goal":
-        claimants = [f"topic mgr: {topic}"
-                     for topic in world["goal_topics"].get(page["name"], [])
-                     if owner("topic", topic, world)["owns"]]
+        verdicts = [(topic, owner("topic", topic, world))
+                    for topic in world["goal_topics"].get(page["name"], [])]
+        claimants = [f"topic mgr: {topic}" for topic, v in verdicts if v["owns"]]
         if claimants:
-            return claimants, ""
+            return claimants, "", False
         # A goal declared by no topic is kept by the fleet manager — a leg the contract
         # records as missing (`docs/session-tiers.md` § Keep-alive, "Goal manager — goal in
         # no topic"). The census reads whether it exists rather than assuming either way.
         if world["legs"]["goal"]:
-            return ["fleet round"], ""
-        declared = world["goal_topics"].get(page["name"], [])
-        if not declared:
-            return [], "goal is in no topic and the fleet round has no goal keep-alive leg"
-        states = ", ".join(
-            f"{t} [{owner('topic', t, world)['cadence']}]" for t in declared)
-        return [], f"declaring topic(s) have no live armed manager: {states}"
+            return ["fleet round"], "", False
+        if not verdicts:
+            return [], "goal is in no topic and the fleet round has no goal keep-alive leg", False
+        states = ", ".join(f"{t} [{v['cadence']}]" for t, v in verdicts)
+        return ([], f"declaring topic(s) have no live armed manager: {states}",
+                any(v["cannot"] for _, v in verdicts))
 
     if kind == "task":
         claimants, deferred = [], []
@@ -421,20 +443,21 @@ def keepers_of(page, world):
                 # `docs/session-tiers.md` § Keep-alive names that as the standing gap.
                 deferred.append(f"{goal} [{verdict['cadence']}]")
         if claimants:
-            return claimants, ""
+            return claimants, "", False
         if deferred:
-            return [], ("goal manager session LIVE but its loop is not running: "
-                        + ", ".join(deferred))
+            return ([], "goal manager session LIVE but its loop is not running: "
+                    + ", ".join(deferred),
+                    any(owner("goal", g, world)["cannot"] for g in page["goals"]))
         if world["legs"]["worker"]:
-            return ["fleet round"], ""
+            return ["fleet round"], "", False
         if not page["goals"]:
-            return [], "task has no goal and the fleet round has no worker keep-alive leg"
+            return [], "task has no goal and the fleet round has no worker keep-alive leg", False
         states = ", ".join(f"{g} [{owner('goal', g, world)['cadence']}]"
                            for g in page["goals"])
-        return [], ("goal manager(s) absent and the fleet round has no worker keep-alive "
-                    f"leg: {states}")
+        return ([], "goal manager(s) absent and the fleet round has no worker keep-alive "
+                f"leg: {states}", False)
 
-    return [], f"unhandled page kind {kind}"
+    return [], f"unhandled page kind {kind}", False
 
 
 def _red(keepers):
@@ -458,6 +481,10 @@ def prefetch_owners(world):
     The set is exactly the pairs `census()` will consult: every live topic or goal page, and
     every goal named by a live worker's task page. A pair outside it is still resolved on
     demand by `owner()`; this only warms what the rows need.
+
+    The workers write into one shared dict without a lock, deliberately: keys are disjoint
+    per pair and a dict assignment is atomic, so the worst case is two threads probing the
+    same subject — a wasted probe, never a wrong verdict.
     """
     pairs = set()
     for sid in world["live"]:
@@ -492,10 +519,11 @@ def census(world):
                          "why": "no topic, goal or task page records this session"})
             mismatches.append(f"live session {sid} ({name}) — no page records it")
             continue
-        keepers, why = keepers_of(page, world)
-        rows.append({"state": "live", "tier": TIER_BY_KIND[page["kind"]],
+        keepers, why, cannot = keepers_of(page, world)
+        rows.append({"state": "cannot-tell" if cannot else "live",
+                     "tier": TIER_BY_KIND[page["kind"]],
                      "name": page["name"], "sid": sid, "keepers": keepers,
-                     "red": _red(keepers), "why": why})
+                     "red": None if cannot else _red(keepers), "why": why})
 
     for sid, pages in world["by_session"].items():
         if sid in world["live"]:
@@ -544,27 +572,33 @@ def _kind_of(tier):
 # reporting
 # --------------------------------------------------------------------------------------
 
-def render(rows, mismatches, live_count, leg_state, vault):
-    """The round's text block. Its LAST line is the count line, byte-stable."""
+def render(rows, mismatches, live_count, leg_state, vault, card=None):
+    """The round's text block. Its LAST line is the count line, byte-stable.
+
+    Everything else — including the `card:` line — is emitted above it, because the count
+    line is what the goal's own criterion reads and what `commands/steps/readings.md`
+    documents as the block's last line.
+    """
     unkept = sum(1 for r in rows if r["red"] == "unkept")
     double = sum(1 for r in rows if r["red"] == "double-kept")
+    cannot = sum(1 for r in rows if r["state"] == "cannot-tell")
     out = [f"keeper-census: {vault}",
            "  legs: " + " ".join(f"{k}={'yes' if v else 'NO'}" for k, v in leg_state.items())
-           + f" · live={live_count} rows={len(rows)}"]
+           + f" · live={live_count} rows={len(rows)} · cannot-tell={cannot}"]
     dead_printed = dead_hidden = 0
     for row in rows:
         if row["red"]:
             out.append(f"  RED {row['red']:<11} {row['tier']:<10} {row['name'][:56]:<56} — "
                        f"{row['why'] or ', '.join(row['keepers'])}")
             continue
-        if row["state"] != "live":
+        if row["state"] == "not-live":
             # Every page that records a dead session is a row, but a real vault carries
             # hundreds and printing them would bury the live fleet. The count is kept.
             dead_printed += 1
             if dead_printed > NOT_LIVE_LIMIT:
                 dead_hidden += 1
                 continue
-        out.append(f"      {'live' if row['state'] == 'live' else 'not-live':<8} "
+        out.append(f"      {row['state']:<8} "
                    f"{row['tier']:<10} {row['name'][:56]:<56} keeper: "
                    f"{', '.join(row['keepers']) or '—'}")
     if dead_hidden:
@@ -572,6 +606,8 @@ def render(rows, mismatches, live_count, leg_state, vault):
                    "(worker-keepalive.py's population — never counted red)")
     for line in mismatches:
         out.append(f"MISMATCH {line}")
+    if card:
+        out.append(f"  card: {card}")
     out.append(f"keeper-census: unkept={unkept} double-kept={double} sessions={live_count}")
     return "\n".join(out), unkept, double
 
@@ -586,6 +622,20 @@ def _load_episodes():
 
 
 def _save_episodes(record):
+    """Persist the episode record — or delete it when there is none.
+
+    An empty record is removed rather than rewritten, the same way
+    `fleet-keeper.py` § `end_episodes` ends an episode: a green fleet then leaves no file to
+    go stale, and the next red run starts a fresh episode by construction.
+    """
+    if not record:
+        try:
+            os.remove(EPISODES)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return False
+        return True
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
         tmp = EPISODES + ".tmp"
@@ -633,7 +683,14 @@ def raise_card(rows, now):
     item = notify(dedup, card_payload(rows), ["acknowledge"],
                   context=f"keeper census · unkept={sum(1 for r in red if r['red'] == 'unkept')}"
                           f" double-kept={sum(1 for r in red if r['red'] == 'double-kept')}")
-    _save_episodes({"red": {"since": since, "item": item, "day": day}})
+    if not _save_episodes({"red": {"since": since, "item": item, "day": day}}):
+        # ⚠️ **An unwritable record means the dedup key cannot be remembered**, so every
+        # tick would mint a new episode and post again — the flooding `fleet-keeper.py`
+        # § `raise_once` exists to prevent. One card says so instead.
+        notify(f"keeper-census-state-unwritable-{int(now) // 86400}",
+               f"The keeper census cannot write {EPISODES}, so it cannot remember which red "
+               "reading it already reported; it may repost that card every round.",
+               ["acknowledge"], context="keeper census")
     return item
 
 
@@ -671,13 +728,12 @@ def main(argv=None):
 
     prefetch_owners(world)
     rows, mismatches = census(world)
-    text, unkept, double = render(rows, mismatches, len(live), world["legs"], args.vault)
+    # The card is posted BEFORE the block is rendered so its line lands above the count
+    # line: the count line is the block's last line, by contract with the goal's criterion.
+    item = None if args.no_card else raise_card(rows, now)
+    text, unkept, double = render(rows, mismatches, len(live), world["legs"], args.vault,
+                                  card=item)
     print(text)
-
-    if not args.no_card:
-        item = raise_card(rows, now)
-        if item and (unkept or double):
-            print(f"  card: {item}")
     return 1 if (unkept or double) else 0
 
 
