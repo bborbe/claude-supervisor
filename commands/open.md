@@ -204,6 +204,8 @@ vault-cli --vault "<vault>" task set "<task>" mode <interactive|headless>
 
 Writing them is the point, not a side effect. The next batch reads the fields instead of re-deciding, so one task cannot be classified one way today and the other way tomorrow. It also makes the call reviewable — a wrong value is visible on disk and the operator corrects it with that same one-line command.
 
+⚠️ **`role: agent` overrides a stored `mode: interactive`.** An agent row carrying none of item 6's five watch-need signals opens `headless` even when the field on disk says `interactive` (operator ruling 2026-11-07; matrix Rule 2 carries the narrowing). Rewrite the field and print `normalised mode interactive -> headless`. Every other case keeps item 6's both-ways carve-out — `human`, `manager`, and an `agent` row that *does* carry a signal all honour what is on disk.
+
 **`shipping:` is read here and passed at Step 3 — never inferred.** Pass `shipping: true` to `spawn_agent` only when the field reads `true`; omit it otherwise. Rule: § Spawn a worker item 9.
 
 **`goal_loop:` is read here and used at Step 3** — on `true` the spawn prompt is the condition alone; the work command follows. Rule: § Spawn a worker item 10.
@@ -250,13 +252,15 @@ approve  a routine task - 2026W39
  10  a routine task - 2026W38-sun                   agent   interactive   (on disk)
      ⛔ HOLD — blocked by two other in-flight tasks
   ...
-  Rows with no `mode:` on disk open per fleet config (`spawn.mode`); only an
-  explicit `headless` overrides it.
+  Rows always carry a `mode:` by the time Step 3 reads them — § Step 0.6 resolves
+  it per matrix Rule 2 and writes it. The fleet config (`spawn.mode`) is never the
+  decider for a row this command opens; it only reaches a spawn that omits the
+  argument, which this file never does.
 
 ⚠️  Ordering is NOT auto-detected. Every ⛔ row is skipped;
     the rest open in the stable order printed above.
 
-Opened N · approved A · filled F fields · direct H (human) · yours Y (manager) · defaulted D fields · held K (blocked) · not ready R (readiness).
+Opened N · approved A · filled F fields · direct H (human) · yours Y (manager) · defaulted D fields · held K (blocked) · not ready R (readiness) · skipped S already opened.
 ```
 
 **Readiness-gate every CREATE-bound row first, concurrently.** ⚠️ **Order differs by path**: on the `--flagged` batch this runs *before* the approval (§ below); on the single-task path the **operator has already approved the row before invoking the command**, so this dispatch normally sees a `planning` row — Gate 1, which runs later in Step 1.5, only verifies that and never writes the approval. For each CREATE-bound row (`role: agent`, no live pane, no `claude_session_id`), dispatch Step 1.5's readiness sub-agent — **all in ONE message**, one `Agent` call per row. Resume/jump-bound, `role: human` (→ DIRECT) and `task_type:` pipeline rows are not gated. `readiness` column: `✅ ready <score>/10`; `⚠️ opened <score>/10` (operator-flagged, below threshold — gap bullets under the row); `⛔ NOT READY` (still below after the improvement pass); `— (resume/jump/direct)`; `— (pipeline contract)` (an ungated `task_type:` row, defined at Gate 2). A not-ready row is **held, never opened** — **except an operator-flagged row below the ladder's open threshold, which opens with its gaps** (§ Step 1.5 Gate 2); held rows go in the footer (`… · not ready R (readiness)`). ⚠️ **Gate 1 does not refuse this batch** (`flag: true` on a `todo` row **is** the approval for `--flagged`). The batch runs **Gate 2 only** — ⚠️ **Gate 3 still runs at the spawn.**
@@ -286,6 +290,21 @@ vault-cli --vault "<vault>" task set "<task>" phase planning
 ⚠️ **Approval is an admission, so the batch runs it last.** `approved_at` is what `approved-not-started.py` counts; approving before readiness admits rows the dispatch then holds, adding K per run to a queue that exists to be drained. This **reverses** the old rule (*"The pass runs before the readiness dispatch, never after"*) on the batch path only.
 
 ⚠️ **Print one `approve <task>` line per approved row and one `not ready <task>` per row readiness left unapproved** — the output is the only record that the ordering held. ⚠️ **Only readiness-held rows get `not ready`**: a `⛔ HOLD` row and an answer-path-refused row are reported by their own skip line, and a JUMP/RESUME-bound row is excluded from this pass entirely, so printing `not ready` for any of them would double-report. (`not ready`, not `held`: the footer's `held K` is for prerequisite-blocked rows.)
+
+**Skip a row this batch already opened inside the hour — read the record, never remember it.** Before delegating, ask the spawn ledger:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/opened-recently.py" --subject "<task>" --minutes 60
+# exit 0 → opened inside the window; the row is on stdout as `<spawned_at>\t<session_id>\t<label>`
+# exit 1 → not opened inside the window; open it
+# exit 2 → the ledger could not be read
+```
+
+⚠️ **Exit 2 is not exit 1.** An unreadable ledger is the *absence of an answer*, not a "no" — opening on it re-creates exactly the duplicate this record exists to prevent. Report `❓ UNVERIFIED — <task> · the spawn ledger could not be read · skipped; the batch continues` and take no branch for that row.
+
+⚠️ **Print the matched `spawned_at` beside the skip.** `skipped N already opened` without it is indistinguishable from a skip for any other reason, and the timestamp is the whole evidence that the *record* — not liveness, not a hold — is what skipped the row. Count them in the footer as `skipped N already opened`.
+
+⚠️ **The ledger answers "was it opened", never "is it running".** A record reads `status: running` whether its worker is alive or four hours dead, so liveness stays with `session-liveness.py`; this probe only suppresses a re-open inside the window.
 
 **Loop the eligible rows in the printed stable order**, delegating each to this command's own single-task path. Per row, invoke `/supervisor:open "<task>"` — with `--first-step "<gap bullets>"` only when the row opened below the readiness ladder's open threshold. Never reimplement jump / resume / spawn here; never pass a mode override to the fleet. ⚠️ **The per-row delegation IS the guard — no shortcut keeps it.** ⚠️ **The batch is paced by delegation, never by a counter of its own** (rule home: `docs/fleet-surface.md` § Spawn a worker item 5).
 
@@ -416,6 +435,16 @@ Print `❓ SESSION UNREADABLE — <task> · vault-cli exited <rc> reading claude
 
 ⚠️ **`--vault` takes a name, not a path** — a path exits non-zero, and under `2>/dev/null` an empty id matches every session.
 
+⚠️ **A prefix is not a resume id — refuse it here, before any branch.** `session-liveness.py --check` accepts an 8-char prefix by design, but `--resume` needs the whole value: a truncated id resumes nothing, which is what the 2026-11-07 batch's `HTTP 400`s were. An empty id means "never worked" and falls through to CREATE; a non-empty one must be a full 36-character uuid.
+
+```bash
+[ -z "$PRIOR_SID" ] || printf '%s' "$PRIOR_SID" \
+  | grep -Eq '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$' \
+  || { echo '❌ TRUNCATED ID'; exit 1; }
+```
+
+Print `❌ TRUNCATED ID — <task> · claude_session_id holds <n> characters, not a full uuid · refused; re-stamp the field with the whole 36-character id, never a prefix.` and STOP: no JUMP, no RESUME, no CREATE.
+
 **Refuse first if that session carries an operator hold — before any branch, JUMP included.** A hold is operator *policy* about a **session**; it is **not** the `hold` *task status*, nor the `HOLD` marker for a `blocked` row — only the first is read here:
 
 ```bash
@@ -435,7 +464,9 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 pgrep -fl "<PRIOR_SID>" || echo "no process holding this session"
 ```
 
-A live pid → **wait for it to exit, then resume** (Step 3). JUMP is unavailable — there is no pane to activate, and the branch logic below would otherwise spawn onto it, putting two writers on one conversation.
+A live pid → **on the single-task path, wait for it to exit, then resume** (Step 3). JUMP is unavailable — there is no pane to activate, and the branch logic below would otherwise spawn onto it, putting two writers on one conversation.
+
+⚠️ **On the `--flagged` batch, waiting is not an option.** One live row would hold every later row behind a session that may never exit. Report `⏭️ LIVE HERE — <task> · <PRIOR_SID> · a local process holds this session · skipped; the batch continues`, take no branch for that row, and move to the next. ⚠️ **This is a different verdict from `🔒 LIVE ELSEWHERE` below**, not a rewording of it: that one means live with **no** local process and is a *refusal*; this one means live **here** and is a *skip*.
 
 **Then refuse if the session is live but reachable from nowhere here — this is the cluster worker.** Probe via the plugin's single reader; **do not open the registry here**:
 
@@ -559,7 +590,7 @@ Effective dir = the vault's `session_project_dir`, else no `cd`.
 
 ⚠️ **Pass `role`, not `window_id`.** `spawn_agent` takes an optional `role` (`manager` / `agent` / `human`, default `agent`) and resolves **both** the colour and the window from the published map **in-process**, so pass § 3.0's resolved role here. The older `window_id` argument still works but is no longer how a role is routed. The response reports the resolved `role` and `window_id` — **check those fields**.
 
-**Create branch — `spawn_agent`, which takes the work prompt as an *argument*.** Call shape: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) — prompt `/vault-cli:work-on-task "<task>"`, `vault <vault>`, **`task <task>`**, label `<task>`, role `<role>` (§ 3.0), `[target <target>]`, `[shipping]` (Step 0.6's read). ⚠️ **`task` binds the worker to the vault; `label` is NOT a substitute.** ⚠️ **Pass `vault`, not `cwd`** — one of the two is **required**; rule and refusals: `§ Spawn a worker` **item 8**. **With `--first-step <text>`, the prompt is `<text>`, a blank line, then `/vault-cli:work-on-task "<task>"`**; otherwise the bare work command. ⚠️ **On a `goal_loop: true` row the prompt is neither** — it is `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/goal-condition.py" --task "<task>" --vault "<vault>"`, whose stdout already carries the `/goal ` prefix, with the work command sent afterwards (§ 3.2); refuse on any non-zero exit.
+**Create branch — `spawn_agent`, which takes the work prompt as an *argument*.** Call shape: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) — prompt `/vault-cli:work-on-task "<task>"`, `vault <vault>`, **`task <task>`**, **`label <task>`** — mandatory, never omitted, role `<role>` (§ 3.0), `[target <target>]`, `[shipping]` (Step 0.6's read). ⚠️ **`task` binds the worker to the vault; `label` is NOT a substitute.** ⚠️ **`label` is mandatory.** `server/supervisor.mjs` stores `label: label || id`, so an omitted label is recorded as the minted agent id and the session appears as `agent_N`. Step 4 refuses that. ⚠️ **Pass `vault`, not `cwd`** — one of the two is **required**; rule and refusals: `§ Spawn a worker` **item 8**. **With `--first-step <text>`, the prompt is `<text>`, a blank line, then `/vault-cli:work-on-task "<task>"`**; otherwise the bare work command. ⚠️ **On a `goal_loop: true` row the prompt is neither** — it is `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/goal-condition.py" --task "<task>" --vault "<vault>"`, whose stdout already carries the `/goal ` prefix, with the work command sent afterwards (§ 3.2); refuse on any non-zero exit.
 
 **Read `target:` and pass `target="<value>"` when the field is present, omitting it when absent** (absent = `local`; `docs/fleet-surface.md` § Spawn a worker item 7 is the single home for the field, its default and the `docker` / `k8s` argument contract). Pass the value **verbatim** — an unknown value reaches the server and is refused there, never defaulted or lower-cased here. ⚠️ **Then check ELIGIBILITY — a separate question from which target, read from the same item.** When the row carries a disqualifier, **print a warning naming it** before spawning (`⚠️ target "<t>" is not eligible for "<task>": needs <disqualifier>`). ⚠️ **Advisory, never a refusal** — print it and leave the decision here; never silently drop the `target`, never rewrite the row's frontmatter, never refuse the spawn on this ground. The disqualifier list has its single home in item 7 — **read it there and never restate it here.** ⚠️ **On a `docker` / `k8s` row the argument contract changes and the `role` above is dropped** — item 7 carries that branch; never hand-build it from this line.
 
@@ -652,6 +683,8 @@ wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- env SE
 
 ⚠️ **Never hand this shape a launcher, and never restate the rule here.** `$LAUNCHER` and `$CHIP` are `resolve-launcher.py`'s fields 1 and 4: the task's own `launcher:`, else the vault `worker_launcher`, with the `role: human` Claude rule and the manager rule already applied inside `resolve_launcher` — and never a goal's `launcher:`, which states how its MANAGER runs. Restating the precedence in prose is what let a caller resume a `role: agent` row on its own Opus launcher (measured 2026-11-07: two rows came back as `cc-private-claude --resume … /color cyan`). Rule home: [`docs/restart-worker.md`](../docs/restart-worker.md) § Which launcher the resume runs.
 
+⚠️ **`<title>` is the row's subject — the same value as `label`.** It is what `claude -n` writes into the session record; empty or omitted leaves the session unnamed, exactly as an omitted `label` does on the server path. Task rows pass the task name, manager rows `<goal> Manager` / `<topic> Manager` (§ 2B / § 2C). Step 4 refuses an unnamed result.
+
 **`--window-id` is what puts the tab in the right window** — without it the new tab inherits `WEZTERM_PANE` from the calling session. `${WINDOW_ID:+...}` keeps the flag off entirely when the map is unavailable.
 
 **`--cwd` is the other half of the same trap, and it is not inherited either.** Without it the tab inherits *wezterm's* working directory. Read the value from the shared reader (`session-liveness.py --list --json`, field `cwd`) and resolve it **before** the spawn; never guess, and refuse rather than spawn into the wrong tree.
@@ -703,7 +736,7 @@ The `cc-*` launchers `cd` into their own vault before starting Claude, so a vaul
     | python3 -c "import json,sys; [print(r['name'], r['nameSource']) for r in json.load(sys.stdin) if r['sessionId'].startswith('<sid-prefix>')]"
   ```
 
-  `nameSource: user` → correct. `nameSource: peer` → the `unset` prefix was missing or ineffective; the session is named after its spawner and the title-match session-connect cannot resolve it (see below).
+  `nameSource: user` → correct. `nameSource: peer` → the `unset` prefix was missing or ineffective; the session is named after its spawner and the title-match session-connect cannot resolve it (see below). **A `name` that is not the row's subject → the spawn carried no usable `label`.** `server/supervisor.mjs` records `label: label || id`, and `''` is falsy in JavaScript, so **an empty label falls through exactly as an absent one does** — to the minted agent id (`agent_N`) or, on the tab path, to the launcher's own default (`claude-00`, measured live 2026-11-08). Compare the name against the subject after `strip_status_glyph` and with the `(2)` uniqueness suffix removed; **anything that is not that subject is a refused spawn** — a `agent_\d+` pattern match is too narrow and passes `claude-00`. Stop, re-issue with `label <task>`, report the row `⚠️ unlabelled`.
 - state the branch taken in one line: `↪️ jumped` / `♻️ resumed <sid-prefix>` / `🆕 created <sid-prefix>` — plus the resolved type **and the resolved vault**, so a mis-resolution is visible immediately
 - **the worker runs where you asked, under that vault's launcher** — read `vault`, `launcher` and `model` back from the spawn response: `launcher` must equal the launcher the task resolves to (its `launcher:` frontmatter, else the vault `worker_launcher` — for `role: human` the Claude launcher, matrix Rule 4 — else the vault `claude_script` — never its goal's; `launcher_source` names which — rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8); the returned `cwd` must **not** be the `claude-supervisor` repo, and `model` must be the one that launcher sets.
 
