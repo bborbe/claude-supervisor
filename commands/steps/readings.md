@@ -6,7 +6,7 @@ user-invocable: false
 
 # Readings
 
-When: every tick — take all five readings (commands in the step)
+When: every tick — take all six readings (commands in the step)
 
 ## The saturation reading — the ratio, not tok/s
 
@@ -80,3 +80,37 @@ Read it from `python3 $P/next-focus.py --vault "<vault>" --tasks-dir "25 Tasks"`
 ## The service-guard reading
 
 Every tick runs `python3 $P/service-guard.py --apply` and prints its lines. Unlike the four readings above, this one acts: a breach on a terminal owning row reopens it. The contract — config, instrument, the three states, and why it reopens but never restarts — lives in `${CLAUDE_PLUGIN_ROOT}/commands/steps/service-guard.md`.
+
+## The keeper-census reading
+
+Every tick runs `python3 $P/keeper-census.py --vault "<vault>"` and prints its block. It is
+the reading that asserts the fleet's invariant — **every live session has exactly one
+keeper** — against the contract in `docs/session-tiers.md` § Keep-alive, which is the single
+home of the rule set. It reads and never acts: it resumes nothing, closes nothing, adopts
+nothing.
+
+```
+keeper-census: <vault>
+  legs: topic=yes goal=NO worker=yes · live=57 rows=324
+  RED unkept      goal-mgr   <goal>     — goal is in no topic and the fleet round has no goal keep-alive leg
+      live        topic-mgr  <topic>    keeper: fleet round
+      not-live    worker     <task>     keeper: fleet round
+MISMATCH page "<task>" records session <id> — the registry does not hold it
+keeper-census: unkept=23 double-kept=0 sessions=57
+```
+
+⚠️ **The exit code is three-way, and only one of them is a finding.** `0` clean; `1` at
+least one red row — the reading's own result, **not** a refusal, so the round carries on and
+prints the block; `2` the registry or the vault could not be read, and the census says so on
+stderr rather than reporting a fleet of zero. Render `2` as
+`keeper census: refused — <reason>`; a refusal and a clean fleet must never print the same.
+
+⚠️ **The script posts its own card — the round posts none.** One card per red *episode*,
+under a dedup key carrying the episode's start time and day, so a second consecutive red
+round asks nothing and a fleet that goes green and red again is asked again. Do not re-post
+it, do not add an option to it, and do not card individual red rows.
+
+⚠️ **A red row is a report, never a work item for this round.** Fixing what the census finds
+belongs to the task that owns the gap (a missing leg, an unrecorded session, a stood-down
+manager), not to the round that read it — the census exists so the gap becomes a board line
+instead of a park.
