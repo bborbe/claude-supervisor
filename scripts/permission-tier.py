@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 """Classify a parked tool call into one of three permission tiers.
 
-    allowlist  — matches an entry in server/manager-allowlist.json; answered without judgment.
-    manager    — everything a worker does that is not operator-only: writes, git reads, cluster
-                 reads. The owning live manager decides it against the rubric in
-                 docs/permission-allowlist.md.
+    allowlist  — matches a server/manager-allowlist.json entry; answered without judgment.
+    manager    — everything else a worker does: writes, git reads, cluster reads.
     operator   — the operator-only class. Always reaches the operator, never a manager.
 
-The operator's ruling (2026-11-06): "read only => allowed · write => send to manager … that is a
-second gate and can allow it · only if manager is unsure or is some prod deploy stuff … it should
-reach me always". This module is the machine half of that ruling: it decides which side of the
-line a call falls on. The manager's judgment is the other half and lives in the doc.
+The operator's ruling (2026-11-06) and the manager's rubric live in docs/permission-allowlist.md;
+this module is the machine half that decides which side of the line a call falls on.
 
 ⚠️ GIT READS ARE NOT READS. `git status` runs `core.fsmonitor`; `core.pager`, `diff.external`,
 textconv drivers and hooks do the same, and the shipped policy lets a worker write `.git/config`
@@ -196,8 +192,9 @@ def lex(cmd):
             i = n if k < 0 else k
             continue
         if cmd.startswith("$((", i):
-            _, i = _read_balanced(cmd, i + 3, "(", ")")
-            buf.append("0")
+            inner, i = _read_balanced(cmd, i + 3, "(", ")")
+            _nested_in_double(inner, 0, len(inner), nested)  # arithmetic can embed $(…)/`…`
+            buf.append("$__SUBST__")
             at_word_start = False
             continue
         if cmd.startswith(("$(", "<(", ">("), i):
@@ -326,6 +323,8 @@ def segment_words(segment):
                 k, _, v = toks[0].partition("=")
                 env[k] = v
             toks = toks[1:]
+        if not toks:
+            toks = ["env"]  # `env -i` with no command: keep the word so `_secret_cmd` sees a dump
     return env, toks, writes
 
 
@@ -339,12 +338,15 @@ _DEV_WRAPPERS = {"kubectlnukedev", "kubectldev", "kubectlsmalldev", "kubectlquan
                  "kubectlsun", "kubectlstaging"}
 _SECRET_PATH = re.compile(
     r"(^|[/~\s=])(\.ssh/|\.netrc\b|\.aws/|\.config/gh\b|\.kube/config\b|\.env(\.[\w-]+)?$|"
-    r"id_(rsa|ed25519|ecdsa)\b|\.npmrc\b|\.git-credentials\b|\.pgpass\b|\.pypirc\b|\.docker/config\.json\b|\.gnupg/)")
+    r"id_(rsa|ed25519|ecdsa)\b|\.npmrc\b|\.git-credentials\b|\.pgpass\b|\.pypirc\b|\.docker/config\.json\b|\.gnupg/|"
+    r"\.vault-token\b)")
 _PROTECTED_REF = re.compile(r"^(?:[^:]*:)?(refs/heads/)?(master|main)$")
 
 
 _SECRET_FILES = ("~/.netrc", "~/.pgpass", "~/.git-credentials", "~/.ssh/id_rsa", "~/.ssh/id_ed25519",
-                 "~/.aws/credentials", "~/.kube/config", "~/.docker/config.json", "~/.npmrc", ".env")
+                 "~/.ssh/id_ecdsa", "~/.aws/credentials", "~/.kube/config", "~/.docker/config.json",
+                 "~/.npmrc", ".env", "~/.vault-token", "~/.config/gh/hosts.yml", "~/.pypirc",
+                 "~/.config/gcloud/application_default_credentials.json")
 
 
 def _glob_hits_secret(arg):
@@ -528,7 +530,9 @@ def _secret_cmd(env, argv):
         return "secret"
     if name == "security" and any(x.startswith(("find-", "dump-", "export")) for x in argv[1:]):
         return "secret"
-    if name == "env" and len(argv) == 1:
+    # `env`/`env -i`/`env -u X` with NO command operand dumps the environment; options are not
+    # a command. A real operand is a wrapper, handled in `words()`.
+    if name == "env" and not [a for a in argv[1:] if not a.startswith("-") and not _ENV.match(a)]:
         return "secret"
     return None
 
@@ -702,10 +706,10 @@ def classify_bash(cmd, depth=0):
             if form:
                 return form
             continue
-        if not quoted:
-            # An unquoted heredoc expands `$(…)` in its body before the program reads it.
-            for m in re.finditer(r"\$\(", body):
-                inner, _ = _read_balanced(body, m.end(), "(", ")")
+        if not quoted:  # unquoted: expands `$(…)` AND backticks before the program reads it
+            expansions = []
+            _nested_in_double(body, 0, len(body), expansions)
+            for inner in expansions:
                 form = classify_bash(inner, depth + 1)
                 if form:
                     return form
