@@ -58,6 +58,51 @@ class EvaluateTest(unittest.TestCase):
         cm.cadence_state = lambda name, branch: state
         cm.session_state = lambda sid: verdict
 
+    def kept_goal(self, name, phase="execution", status="in_progress",
+                  sid="aaaa1111-0000-0000-0000-000000000000"):
+        write(os.path.join(self.goals, f"{name}.md"),
+              f"---\nclaude_session_id: {sid}\npage_type: goal\nstatus: {status}\n"
+              f"phase: {phase}\n---\n\n# Impact\n")
+
+    def test_a_topicless_execution_goal_is_covered_by_the_fleet_leg(self):
+        """The fleet round's keep-alive restarts it, so a card would duplicate the restart."""
+        self.kept_goal("Topicless Goal")
+        self.stub("STALE", "LIVE")
+        row = cm.evaluate(self.vault, "goal", "topicless-goal")
+        self.assertFalse(row["card"], row["reason"])
+        self.assertIn("fleet round", row["reason"])
+
+    def test_a_topicless_goal_outside_execution_still_cards(self):
+        """The other direction: the fleet leg skips a non-execution goal, so nothing covers it."""
+        self.kept_goal("Todo Goal", phase="todo")
+        self.stub("STALE", "LIVE")
+        row = cm.evaluate(self.vault, "goal", "todo-goal")
+        self.assertTrue(row["card"], row["reason"])
+
+    def test_a_backlog_goal_still_cards(self):
+        self.kept_goal("Backlog Goal", status="backlog")
+        self.stub("STALE", "LIVE")
+        self.assertTrue(cm.evaluate(self.vault, "goal", "backlog-goal")["card"])
+
+    def test_a_declared_execution_goal_under_a_dead_topic_manager_still_cards(self):
+        """A topic owns the goal even with its manager down, so the fleet leg does not cover it."""
+        self.kept_goal("Declared Goal")
+        self.topic("Dead Topic", ["Declared Goal"], sid="dead0000-0000-0000-0000-000000000000")
+        cm.cadence_state = lambda name, branch: "STALE"
+        cm.session_state = lambda sid: "ABSENT" if sid.startswith("dead") else "LIVE"
+        row = cm.evaluate(self.vault, "goal", "declared-goal")
+        self.assertTrue(row["card"], row["reason"])
+
+    def test_fleet_keeps_reads_the_four_conditions(self):
+        self.kept_goal("Kept")
+        self.kept_goal("No Id", sid="")
+        self.kept_goal("Declared")
+        self.topic("T", ["Declared"])
+        self.assertTrue(cm.fleet_keeps(self.vault, "Kept"))
+        self.assertFalse(cm.fleet_keeps(self.vault, "No Id"))
+        self.assertFalse(cm.fleet_keeps(self.vault, "Declared"))
+        self.assertFalse(cm.fleet_keeps(self.vault, "Missing Page"))
+
     def test_live_but_lapsed_and_uncovered_cards(self):
         self.goal("Lonely Goal")
         self.stub("STALE", "LIVE")

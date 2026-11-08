@@ -23,7 +23,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --debt --subject "Fle
 
 Exit **12** = the arm is still owed: print the `debt:` lines, skip this leg, and **carry on with the round — the tail still runs**, because the tail's `--check` is what reports the round's verdict to the operator. Exit **0** = no debt this leg consumes, run it. ⚠️ **Exit 2 = the gate could not read or write the debt file** — it prints nothing to stdout, only a reason to stderr; skip the leg and print that reason, never read 2 as "no debt". ⚠️ **`--debt` judges the round in progress**, re-reading the receipt, so a round that already armed is not blocked by a debt it has paid. ⚠️ **The exit code is the gate, never the printed line** — a leg that reads only the text is satisfied by an empty read.
 
-⚠️ **Why `--only re-arm`, and not the whole round's debt.** None of this leg's four procedures reads the digest — they read `topic-keepalive.py`, `park-event.py`, `park-nudge.py` and `worker-keepalive.py`. Gated on the whole round, the leg was stopped by a step it cannot consume whenever the round reached row 5b with the sweep reader (row 2) still running in the background: measured 2026-11-05 on the Fleet Manager, 2 of 25 gate calls printed `debt: digest` and exited 12 (03:13:29, 06:57:39 — the second one's digest recorded at 07:05:35, after the leg). `--only` scopes the exit code, never the record: the debt file still carries the digest, so `--check` at the tail and the unscoped legs (`drive.md`, `flagged-open.md`) are unchanged. This narrows the 2026-10-31 trade — *a topic-manager resume is not urgent enough to outrank the step the round owes* — to the one step this leg needs: a round that has not armed still skips it, and a round whose sweep is merely in flight no longer does.
+⚠️ **Why `--only re-arm`, and not the whole round's debt.** None of this leg's five procedures reads the digest — they read `topic-keepalive.py`, `topicless-goal-keepalive.py`, `park-event.py`, `park-nudge.py` and `worker-keepalive.py`. Gated on the whole round, the leg was stopped by a step it cannot consume whenever the round reached row 5b with the sweep reader (row 2) still running in the background: measured 2026-11-05 on the Fleet Manager, 2 of 25 gate calls printed `debt: digest` and exited 12 (03:13:29, 06:57:39 — the second one's digest recorded at 07:05:35, after the leg). `--only` scopes the exit code, never the record: the debt file still carries the digest, so `--check` at the tail and the unscoped legs (`drive.md`, `flagged-open.md`) are unchanged. This narrows the 2026-10-31 trade — *a topic-manager resume is not urgent enough to outrank the step the round owes* — to the one step this leg needs: a round that has not armed still skips it, and a round whose sweep is merely in flight no longer does.
 
 ## Restart a lapsed topic manager
 
@@ -85,6 +85,75 @@ The fallback wake needs no branch here — once the instant passes the marker st
 suppressing anything, the subject reads `STALE`, and the ordinary restart path resumes it.
 
 **Record the count — in the digest, not only in chat.** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg lapsed-managers --count <n>`, with `<n>` the topic rows this leg found and did not act on — the `# Regression metric` on the task that installed this leg reads it, and a round that prints the number without moving it is the defect it exists to remove. The line's format, its not-run form and the dead-worker floor have their **single home in `commands/steps/output-shape.md` item 14** — read it there and never restate it here. ⚠️ **The reading must land in the digest, which is the file that outlives the round.** A count spoken into chat and nowhere else dies with the round: measured 2026-11-06, a real 69-line digest over 24 sessions carried **zero** `unactioned:` lines while this file instructed the round to print them.
+
+## Restart a lapsed goal manager whose goal no topic declares
+
+`docs/session-tiers.md` assigns the fleet manager *"every topic manager, and every goal with
+no topic"*. The goal-branch keep-alive runs inside a topic manager's round
+(`agents/topic-drive.md`), so before this section a goal manager whose goal no topic
+declares was kept by **nobody**. Measured 2026-11-08 on private-personal: 29 non-terminal
+goals carried a manager id and no topic declared any of them. This is the rung for that
+population, and it is the same restart as above. **Restart is not open.**
+
+**Population: `scripts/topicless-goal-keepalive.py` selects it, and also decides each verdict.**
+It takes every goal page at `status: in_progress` + `phase: execution` that carries a
+`claude_session_id` and that no topic page's `## Goals` list names (`crashed-managers.py`
+`fleet_keeps`, one home). For each one it asks `topic-keepalive.py --branch goal` for the
+verdict. It never acts and never writes the cap.
+- ⚠️ **The phase filter is not optional.** `topic-keepalive.py` reads liveness and cadence
+  only, so on its own it answers `resume` for a backlog goal. Measured 2026-11-08: 5 of the
+  8 `resume` verdicts were outside `execution`.
+- ⚠️ **A goal a topic declares is never selected, even while that topic's manager is down.**
+  The section above restarts the topic manager, and the topic manager restarts its goal
+  managers. Taking the goal here as well makes a second keeper, which is a double writer.
+
+```bash
+P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
+GOALS=$(vault-cli config list --output json | python3 -c "
+import json,sys
+for x in json.load(sys.stdin):
+    if x.get('goals_dir'):
+        print(x['goals_dir']); break")
+GOALS="${GOALS:-24 Goals}"
+TOPICS=$(vault-cli config list --output json | python3 -c "
+import json,sys
+for x in json.load(sys.stdin):
+    if x.get('topics_dir'):
+        print(x['topics_dir']); break")
+TOPICS="${TOPICS:-23 Topics}"
+python3 "$P/topicless-goal-keepalive.py" --vault "<vault>" --goals-dir "$GOALS" --topics-dir "$TOPICS"
+```
+
+Output:
+- `selected: <n>`
+- one `<goal>\t<verdict>\t<command>\t<reason>` row per goal
+- `actionable: <n>`
+
+Exit **2** means REFUSED: an unreadable directory, page or helper. Record it as not run (see
+below). A refusal is never "nothing to resume".
+
+**Act on the verdict exactly as the topic tier does.** Run the row's command column:
+- `restart` → `/supervisor:restart <id>`.
+- `resume` → `/supervisor:open --goal "<name>"`.
+- After either, once `session-liveness.py --check` shows the id live, record the resume with
+  `topic-keepalive.py --vault "<vault>" --subject "<name>" --branch goal --record-resume <id>`.
+  That write is the 3-per-30-minute cap.
+- `crash-loop` → print its `⚠️ MANAGER CRASH-LOOP` line and stop on that goal for the round.
+- `jump` → hand the operator the pane.
+- `leave` → nothing.
+- `cannot-tell` → report it, never act.
+The command column is `-` for every verdict that runs nothing.
+
+⚠️ **Not an open.** A topic-less goal with no recorded id is not in the population. Opening
+it is `commands/steps/flagged-open.md`'s job, and only when the goal is flagged.
+
+**Record the count in the digest.**
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg topicless-goal-managers --count <n>`
+- `<n>` is the rows this section found actionable and did not act on: a `crash-loop`, a
+  `cannot-tell`, or a command that failed.
+- On exit 2, write `--leg topicless-goal-managers --not-run "<reason>"` instead, so the other
+  keep-alive readings stay intact.
+- The line's format has its single home in `commands/steps/output-shape.md` item 14.
 
 ## Resume the park watches whose re-check has passed
 
@@ -264,7 +333,7 @@ Both flags are refused on any other key. Format, not-run form and rationale:
 
 ⚠️ **A leg that does not execute records WHY, in the same file — at the granularity that failed.**
 When the debt gate skips the whole leg (exit 12 or 2), write
-`fleet-legs.py --leg keep-alive --not-run "<reason>"`, which covers both of its keys.
+`fleet-legs.py --leg keep-alive --not-run "<reason>"`, which covers all three of its keys.
 ⚠️ **When only one half failed, name that KEY, never the leg** — a scan whose instrument is
 absent is `fleet-legs.py --leg dead-workers --not-run "scan instrument absent"`, because
 `--leg keep-alive` would wipe the lapsed-manager reading this leg already recorded. Never
