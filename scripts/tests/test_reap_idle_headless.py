@@ -1,0 +1,374 @@
+#!/usr/bin/env python3
+"""Tests for scripts/reap-idle-headless.py.
+
+The script's claim is narrow and load-bearing, so the tests pin exactly it:
+
+  1. **It closes the process and keeps the transcript.** The resume consumer
+     (`--resume <same id>`) needs the transcript and the task anchor; a change that turned
+     this into a session delete must fail here.
+  2. **Every guard refuses without signalling.** A refusal that killed anyway would be
+     worse than no guard — the target is a live worker.
+  3. **The task gate is inverted on purpose.** `task-not-terminal` is this verb's
+     population; a resolved *terminal* task belongs to `close-worker.py` and is refused.
+
+Real child processes stand in for workers, never fixture pids: the close path signals
+whatever the registry names, and a fixture pid could name something else on the machine.
+
+Run: python3 -m unittest discover -s scripts/tests -v
+"""
+
+import http.server
+import importlib.util
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SCRIPTS = os.path.dirname(_HERE)
+_spec = importlib.util.spec_from_file_location(
+    "reap_idle_headless", os.path.join(_SCRIPTS, "reap-idle-headless.py")
+)
+reap = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(reap)
+
+SCRIPT = os.path.join(_SCRIPTS, "reap-idle-headless.py")
+SID = "eeeeeeee-5555-4555-8555-555555555555"
+VAULT = "private-personal"
+
+
+class TestIdleSeconds(unittest.TestCase):
+    def test_status_updated_at_wins(self):
+        now = 1_000_000.0
+        rec = {"statusUpdatedAt": int((now - 900) * 1000), "updatedAt": 0}
+        self.assertAlmostEqual(reap.idle_seconds(rec, now), 900, places=1)
+
+    def test_updated_at_is_the_fallback(self):
+        now = 1_000_000.0
+        rec = {"updatedAt": int((now - 60) * 1000)}
+        self.assertAlmostEqual(reap.idle_seconds(rec, now), 60, places=1)
+
+    def test_no_stamp_is_unknown(self):
+        self.assertIsNone(reap.idle_seconds({}, 1_000_000.0))
+
+
+class TestHelperFilter(unittest.TestCase):
+    def test_mcp_and_stdio_helpers_are_helpers(self):
+        for args in (
+            "/Users/x/.local/bin/claude-wrapper --mcp-stdio -",
+            "/Users/x/.local/bin/uv tool uvx mcp-obsidian",
+            "npm exec @playwright/mcp@latest",
+            "/Users/x/.bun/bin/bun run --cwd /w/claude-supervisor/server",
+        ):
+            self.assertTrue(reap.is_helper(args), args)
+
+    def test_a_backgrounded_command_is_not_a_helper(self):
+        for args in ("sleep 600", "/bin/sh -c 'tail -f x.log'", "python3 watch.py"):
+            self.assertFalse(reap.is_helper(args), args)
+
+
+class TestGuard(unittest.TestCase):
+    """The predicate, driven with injected readings — no live worker needed."""
+
+    def rec(self, **over):
+        base = {
+            "sessionId": SID,
+            "pid": os.getpid(),
+            "status": "idle",
+            "entrypoint": "sdk-cli",
+            "statusUpdatedAt": int((time.time() - 1200) * 1000),
+        }
+        base.update(over)
+        return base
+
+    def ok(self, **over):
+        return reap.guard(
+            self.rec(**over),
+            wrapper={"state": "idle", "pending_turns": 0, "question": None},
+            cards=[],
+            cards_readable=True,
+            children=[],
+        )
+
+    def test_all_guards_pass(self):
+        self.assertIsNone(self.ok())
+
+    def test_busy_target(self):
+        self.assertEqual(self.ok(status="busy")[0], "busy-target")
+
+    def test_not_idle_long_enough(self):
+        fresh = {"statusUpdatedAt": int(time.time() * 1000)}
+        self.assertEqual(self.ok(**fresh)[0], "not-idle-long-enough")
+
+    def test_pending_turns_refuses(self):
+        verdict = reap.guard(
+            self.rec(),
+            wrapper={"state": "idle", "pending_turns": 1, "question": None},
+            cards=[],
+            cards_readable=True,
+            children=[],
+        )
+        self.assertEqual(verdict[0], "wrapper-busy")
+
+    def test_parked_question_refuses(self):
+        verdict = reap.guard(
+            self.rec(),
+            wrapper={"state": "idle", "pending_turns": 0, "question": "yes?"},
+            cards=[],
+            cards_readable=True,
+            children=[],
+        )
+        self.assertEqual(verdict[0], "wrapper-busy")
+
+    def test_unreadable_wrapper_fails_closed(self):
+        verdict = reap.guard(
+            self.rec(), wrapper=None, cards=[], cards_readable=True, children=[]
+        )
+        self.assertEqual(verdict[0], "wrapper-busy")
+
+    def test_open_card_refuses(self):
+        verdict = reap.guard(
+            self.rec(),
+            wrapper={"state": "idle", "pending_turns": 0, "question": None},
+            cards=[{"item_id": "a" * 32}],
+            cards_readable=True,
+            children=[],
+        )
+        self.assertEqual(verdict[0], "gate-held")
+
+    def test_unreadable_store_fails_closed(self):
+        verdict = reap.guard(
+            self.rec(),
+            wrapper={"state": "idle", "pending_turns": 0, "question": None},
+            cards=None,
+            cards_readable=False,
+            children=[],
+        )
+        self.assertEqual(verdict[0], "gate-held")
+
+    def test_watcher_refuses(self):
+        verdict = reap.guard(
+            self.rec(),
+            wrapper={"state": "idle", "pending_turns": 0, "question": None},
+            cards=[],
+            cards_readable=True,
+            children=["1234"],
+        )
+        self.assertEqual(verdict[0], "watcher-alive")
+
+
+class _Store(http.server.BaseHTTPRequestHandler):
+    """A stub wrapper + attention store; the test sets the payloads."""
+
+    wrapper = {}
+    items = []
+
+    def do_GET(self):
+        if self.path.startswith("/api/1.0/sessions/"):
+            body = json.dumps(_Store.wrapper).encode()
+        elif self.path == "/api/1.0/attention":
+            body = json.dumps(_Store.items).encode()
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+class TestScript(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="reap-idle-")
+        self.sessions = os.path.join(self.tmp, "sessions")
+        self.vaults = os.path.join(self.tmp, "vaults")
+        self.tasks = os.path.join(self.vaults, VAULT, "25 Tasks")
+        self.projects = os.path.join(self.tmp, "projects")
+        os.makedirs(self.sessions)
+        os.makedirs(self.tasks)
+        os.makedirs(self.projects)
+
+        _Store.wrapper = {"id": SID, "state": "idle", "pending_turns": 0, "question": None}
+        _Store.items = []
+        self.httpd = http.server.HTTPServer(("127.0.0.1", 0), _Store)
+        self.port = self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.children = []
+
+    def tearDown(self):
+        for child in self.children:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=10)
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # --- fixtures ---------------------------------------------------------------------
+
+    def _spawn(self, argv=None):
+        child = subprocess.Popen(argv or ["sleep", "60"])
+        self.children.append(child)
+        # Reap the child the moment it dies. In production the worker's parent is the
+        # wrapper, which reaps it; here the parent is this test process, and an unreaped
+        # SIGTERMed child stays a zombie whose pid still answers `kill -0` — which would
+        # read as "STILL ALIVE" for a close that worked.
+        threading.Thread(target=child.wait, daemon=True).start()
+        return child
+
+    def _registry(self, pid, **over):
+        rec = {
+            "sessionId": SID,
+            "pid": pid,
+            "status": "idle",
+            "entrypoint": "sdk-cli",
+            "name": "fixture",
+            "cwd": os.path.join(self.vaults, VAULT),
+            "statusUpdatedAt": int((time.time() - 20 * 60) * 1000),
+        }
+        rec.update(over)
+        with open(os.path.join(self.sessions, f"{pid}.json"), "w", encoding="utf-8") as handle:
+            json.dump(rec, handle)
+        return os.path.join(self.sessions, f"{pid}.json")
+
+    def _task(self, status="in_progress", session_id=SID):
+        lines = ["---", f"claude_session_id: {session_id}", f"status: {status}", "---", ""]
+        path = os.path.join(self.tasks, "t.md")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines))
+        return path
+
+    def _transcript(self):
+        escaped = os.path.join(self.vaults, VAULT).replace("/", "-")
+        directory = os.path.join(self.projects, escaped)
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, f"{SID}.jsonl")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write('{"type":"assistant"}\n')
+        return path
+
+    def _run(self, *extra, sessions_dir=None):
+        env = dict(os.environ)
+        env["SUPERVISOR_SESSIONS_DIR"] = self.sessions
+        env["SUPERVISOR_VAULTS_ROOT"] = self.vaults
+        env["SUPERVISOR_PROJECTS_DIR"] = self.projects
+        env["SUPERVISOR_WRAPPER_URL"] = f"http://127.0.0.1:{self.port}"
+        env["SUPERVISOR_ATTENTION_URL"] = f"http://127.0.0.1:{self.port}"
+        return subprocess.run(
+            [sys.executable, SCRIPT, SID, *extra],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+
+    # --- refusals ---------------------------------------------------------------------
+
+    def test_unknown_session_id(self):
+        done = self._run()
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(done.stdout.splitlines()[0], "unknown-session-id")
+
+    def test_already_gone(self):
+        child = self._spawn(["true"])
+        child.wait(timeout=10)
+        self._registry(child.pid)
+        self._task()
+        self.assertEqual(self._run().stdout.splitlines()[0], "already-gone")
+
+    def test_busy_target_sends_no_signal(self):
+        child = self._spawn()
+        self._registry(child.pid, status="busy")
+        self._task()
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "busy-target")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_not_idle_long_enough_sends_no_signal(self):
+        child = self._spawn()
+        self._registry(child.pid, statusUpdatedAt=int(time.time() * 1000))
+        self._task()
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "not-idle-long-enough")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_pending_turn_refuses(self):
+        child = self._spawn()
+        self._registry(child.pid)
+        self._task()
+        _Store.wrapper = {"id": SID, "state": "idle", "pending_turns": 1, "question": None}
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "wrapper-busy")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_open_card_refuses(self):
+        child = self._spawn()
+        self._registry(child.pid)
+        self._task()
+        card = "a" * 32
+        _Store.items = [{"item_id": card, "producer_id": SID, "state": "open"}]
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "gate-held")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_live_watcher_refuses(self):
+        child = self._spawn(["/bin/sh", "-c", "sleep 60 & wait"])
+        self._registry(child.pid)
+        self._task()
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "watcher-alive")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_terminal_task_is_refused(self):
+        """A finished task belongs to close-worker.py, not here."""
+        child = self._spawn()
+        self._registry(child.pid)
+        self._task(status="completed")
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "task-terminal")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_unresolved_task_is_refused(self):
+        child = self._spawn()
+        self._registry(child.pid)
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "task-unresolved")
+
+    # --- the close --------------------------------------------------------------------
+
+    def test_dry_run_signals_nothing(self):
+        child = self._spawn()
+        self._registry(child.pid)
+        self._task()
+        self._transcript()
+        done = self._run("--dry-run")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("would close", done.stdout)
+        self.assertIsNone(child.poll(), "a dry run must send no signal")
+
+    def test_reaps_the_process_and_keeps_the_transcript(self):
+        child = self._spawn()
+        entry = self._registry(child.pid)
+        self._task()
+        transcript = self._transcript()
+        done = self._run()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(child.wait(timeout=10), -signal.SIGTERM)
+        self.assertFalse(os.path.exists(entry), "the registry entry must be gone")
+        self.assertTrue(os.path.exists(transcript), "the transcript must survive")
+        self.assertIn("transcript kept", done.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()

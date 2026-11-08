@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **`scripts/reap-idle-headless.py` closes the process of an idle headless worker and keeps its transcript.** The fleet's end-of-life for a parked worker is reap-and-resume: a worker idle ≥ 15 minutes is closed — process only — and the manager resumes the same session id when the recorded wait clears. `close-worker.py` cannot serve that population (its `task-not-terminal` refusal is deliberate), so this verb names its own gate instead of weakening that one: it refuses `unknown-session-id`, `ambiguous-pid`, `already-gone`, `busy-target`, `not-idle-long-enough`, `wrapper-busy`, `gate-held`, `watcher-alive` and `task-terminal`, and the success path asserts the transcript at `~/.claude/projects/<escaped-cwd>/<sid>.jsonl` still exists before reporting. The `watcher-alive` guard reads surviving children of the worker and filters the session's own MCP/stdio helpers — measured 2026-11-07, all 24 idle workers have children and every one was a helper, so "has a child" is not a signal; a watcher detached with `setsid`/`nohup` escapes the read, and that hole is stated in the module docstring. 25 tests.
+
 ## v0.250.0
 
 - fix: **the bundled Bash allow list no longer carries `uniq`.** `uniq IN OUT` writes `OUT`, an arbitrary-path write that bypasses the `Write(cwd)` restriction, and a prefix rule cannot exclude a positional. `uniq /dev/null /etc/authorized_keys` read `allow` before this change. `server/policy-bundled.test.mjs` pins it alongside the other refusals.
