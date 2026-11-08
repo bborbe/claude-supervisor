@@ -899,6 +899,12 @@ def main() -> int:
     # `steps_for()` would never look for it.
     if a.branch not in BRANCHES:
         ap.error(f"--branch must be one of {BRANCHES}, got {a.branch!r}")
+    # `--tier` selects the goal/topic step tuple and nothing else, so pairing it with the
+    # fleet branch is a silent no-op — the fleet round is the only tier that owes neither
+    # tuple. Refuse rather than accept a flag that changes nothing: a caller that passes
+    # it believes it selected something.
+    if a.tier != "goal" and a.branch == "fleet":
+        ap.error("--tier selects the goal/topic tuple and means nothing with --branch fleet")
     if a.step and a.step not in steps_for(a.branch, a.tier):
         ap.error(f"--step {a.step!r} is not a {a.branch or a.tier} step")
     if not subject:
