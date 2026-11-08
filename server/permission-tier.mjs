@@ -30,11 +30,14 @@ export function permissionTier(toolName, input, { script = PERMISSION_TIER_SCRIP
   const arg = toolName === 'Bash'
     ? (input && typeof input.command === 'string' ? input.command : '')
     : JSON.stringify(input ?? {})
-  const args = ['-I', script, '--tool', toolName, '--input', arg]
+  // ⚠️ The input travels on STDIN, not argv. A Write/Edit input can exceed the per-argument
+  // limit (~128 KiB on Linux); as an argv it fails E2BIG and the call is mislabelled `operator`,
+  // which is the routine-write half of what this tier exists to route to a manager.
+  const args = ['-I', script, '--tool', toolName, '--input', '-']
   if (runnerConfigClean === true) args.push('--runner-config-clean')
   let out
   try {
-    out = spawnSync('python3', args, { encoding: 'utf8', timeout: timeoutMs })
+    out = spawnSync('python3', args, { encoding: 'utf8', timeout: timeoutMs, input: arg })
   } catch (err) {
     return failClosed(`classifier did not start: ${err.message}`)
   }

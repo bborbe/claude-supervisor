@@ -358,6 +358,9 @@ def _glob_hits_secret(arg):
 def _prod(env, argv):
     if env.get("BRANCH") == "prod" or "BRANCH=prod" in argv:
         return "prod"
+    if any(re.search(r"=prod(uction)?$", x) for x in argv) \
+            or any(argv[i] == "prod" and argv[i - 1].startswith("-") for i in range(1, len(argv))):
+        return "prod"  # -chdir=prod / --context=prod, and the space-separated spelling
     if any(_PROD_PATH.search(a) for a in argv):
         return "prod"
     if argv and os.path.basename(argv[0]) in _PROD_WRAPPERS:
@@ -552,8 +555,8 @@ def _publish(env, argv):
         return "publish"
     if name == "goreleaser":
         return "publish"
-    if name == "docker" and a[:1] and a[0] in ("push", "login"):
-        return "publish"
+    if name == "docker" and any(x in ("push", "login") for x in a):
+        return "publish"  # the verb may follow a global flag (`docker --context prod push`)
     if name == "docker" and (a[:1] and a[0] in ("rm", "rmi", "prune")
                              or a[1:2] and a[1] in ("rm", "prune")):
         return "irreversible-delete"  # `docker rm`, `docker volume rm`, `docker system prune`
@@ -602,9 +605,9 @@ def _deploy(env, argv):
         if name == "launchctl" and a[0] == "kickstart" and a[-1:] and a[-1].endswith("/com.bborbe.attention-watcher"):
             return None  # the one documented no-ask restart
         return "service-restart"
-    if name in ("helm", "terraform", "tofu") and a[:1] and a[0] in (
-            "install", "upgrade", "uninstall", "delete", "apply", "destroy", "import"):
-        return "prod"
+    if name in ("helm", "terraform", "tofu") and any(x in (
+            "install", "upgrade", "uninstall", "delete", "apply", "destroy", "import") for x in a):
+        return "prod"  # the verb may follow a global flag (`terraform -chdir=prod apply`)
     if name in ("sudo", "doas", "su"):
         return "privilege"
     if name in ("kill", "pkill", "killall"):
@@ -681,6 +684,8 @@ def classify_bash(cmd, depth=0):
     """The first operator form found anywhere in `cmd`, or None. Raises Unverifiable."""
     if depth > 8:
         raise Unverifiable("substitution nesting too deep")
+    if "<<<" in cmd:  # a here-string feeds stdin (`bash <<< 'git push --force …'`)
+        raise Unverifiable("here-string feeds stdin this check cannot see")
     segments, nested, heredocs = lex(cmd)
     for inner in nested:
         form = classify_bash(inner, depth + 1)
@@ -938,6 +943,8 @@ def main(argv=None):
     ap.add_argument("--runner-config-clean", action="store_true",
                     help="the caller checked the runner config is unmodified (confined test entries)")
     ns = ap.parse_args(argv)
+    if ns.input == "-":  # the wrapper sends large inputs on stdin, where argv would hit E2BIG
+        ns.input = sys.stdin.read()
     context = {"runnerConfigClean": True} if ns.runner_config_clean else {}
     entries = load_allowlist()
     if ns.payload is not None:
