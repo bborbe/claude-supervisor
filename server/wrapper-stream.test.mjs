@@ -268,6 +268,116 @@ test('streamWrappedSession gives up in bounded time when the wrapper never retur
   assert.equal(attempts, 3)
 })
 
+// ⚠️ The spec the blocking review asked for. The budget used to be measured from stream
+// OPEN, so a worker whose stream had been running longer than maxElapsedMs had zero retry —
+// exactly the parked and long-running workers this change exists to protect. This test fails
+// against that implementation and passes once the clock starts at the OUTAGE.
+test('reconnects a long-lived stream that has been open far past maxElapsedMs', async () => {
+  let clock = 0
+  let n = 0
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/events')) {
+      n += 1
+      if (n === 1) {
+        // Healthy for an hour, then the daemon restarts.
+        clock += 3_600_000
+        return dyingResponse(['id: 1\ndata: {"type":"assistant"}\n\n'])
+      }
+      return sseResponse(['id: 2\ndata: {"type":"result"}\n\nevent: end\ndata: {}\n\n'])
+    }
+    return jsonResponse({ id: SESSION, state: 'exited' })
+  }
+
+  const seen = []
+  for await (const message of streamWrappedSession({
+    baseUrl: 'http://w',
+    sessionId: SESSION,
+    fetchImpl,
+    reconnect: { ...FAST_RECONNECT, now: () => clock },
+  })) {
+    seen.push(message)
+  }
+  assert.deepEqual(seen.map((m) => m.type), ['assistant', 'result'])
+  assert.equal(n, 2, 'the long-lived stream must be reopened exactly once')
+})
+
+test('returns cleanly when the signal aborts during the backoff sleep', async () => {
+  const controller = new AbortController()
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/events')) {
+      setTimeout(() => controller.abort(), 10)
+      return dyingResponse(['id: 1\ndata: {"type":"assistant"}\n\n'])
+    }
+    return jsonResponse({ id: SESSION, state: 'generating' })
+  }
+
+  const seen = []
+  await assert.doesNotReject(async () => {
+    for await (const message of streamWrappedSession({
+      baseUrl: 'http://w',
+      sessionId: SESSION,
+      fetchImpl,
+      signal: controller.signal,
+      reconnect: { maxAttempts: 5, baseDelayMs: 1_000, maxDelayMs: 1_000, maxElapsedMs: 60_000 },
+    })) {
+      seen.push(message)
+    }
+  })
+  assert.deepEqual(seen.map((m) => m.type), ['assistant'])
+})
+
+test('gives up after the retry budget when the wrapper keeps returning 5xx', async () => {
+  let n = 0
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/events')) {
+      n += 1
+      return { ok: false, status: 503 }
+    }
+    return jsonResponse({ id: SESSION, state: 'generating' })
+  }
+
+  await assert.rejects(
+    (async () => {
+      for await (const _ of streamWrappedSession({
+        baseUrl: 'http://w',
+        sessionId: SESSION,
+        fetchImpl,
+        reconnect: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1, maxElapsedMs: 500 },
+      })) {
+        // drain
+      }
+    })(),
+    (err) => err instanceof WrapperError && err.status === 503,
+  )
+  assert.equal(n, 3, 'one initial attempt plus two retries')
+})
+
+test('treats a 404 during the restart window as terminal, not a blip', async () => {
+  let n = 0
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/events')) {
+      n += 1
+      return { ok: false, status: 404 }
+    }
+    return jsonResponse({ id: SESSION, state: 'exited' })
+  }
+
+  await assert.rejects(
+    (async () => {
+      for await (const _ of streamWrappedSession({
+        baseUrl: 'http://w',
+        sessionId: SESSION,
+        fetchImpl,
+        reconnect: FAST_RECONNECT,
+      })) {
+        // drain
+      }
+    })(),
+    (err) => err instanceof WrapperError && err.status === 404,
+  )
+  assert.equal(n, 1, 'a gone session is not retried')
+})
+
 test('streamWrappedSession treats a refused connection as a restart, not a failure', async () => {
   let n = 0
   const fetchImpl = async (url) => {

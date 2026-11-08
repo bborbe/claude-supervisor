@@ -120,6 +120,9 @@ export const DEFAULT_RECONNECT = {
   // The wall-clock ceiling, so a wrapper that never comes back fails the worker in bounded
   // time rather than leaving it `running` forever.
   maxElapsedMs: 120_000,
+  // Injectable clock. It exists so a spec can prove the budget is measured per OUTAGE rather
+  // than from stream open — the defect that made every long-lived stream unretryable.
+  now: () => Date.now(),
 }
 
 /** Resolve after `ms`, or `false` as soon as `signal` aborts. */
@@ -375,8 +378,8 @@ export async function* streamWrappedSession({
   reconnect = {},
 }) {
   const policy = { ...DEFAULT_RECONNECT, ...reconnect }
+  const now = policy.now
   const url = `${baseOf(baseUrl)}/api/1.0/sessions/${encodeURIComponent(sessionId)}/events`
-  const startedAt = Date.now()
 
   // ⚠️ **A daemon restart is not the end of a turn.** The wrapper re-adopts the child and
   // serves its event file again, so the connection dying mid-turn is a gap to ride out, not a
@@ -384,7 +387,20 @@ export async function* streamWrappedSession({
   // resume from exactly where this client stopped instead of replaying — or, worse, starting
   // over and duplicating the transcript.
   let lastId = null
+
+  // ⚠️ **The budget bounds ONE OUTAGE, not the stream's lifetime.** A parked or long-running
+  // worker's stream is open for hours, and measuring from stream open gave such a stream ZERO
+  // retry once it passed `maxElapsedMs` — so a restart still failed exactly the workers this
+  // change exists to protect.
+  //
+  // So the clock starts when a connection FAILS, not when it opens: `attempt === 0` means the
+  // stream is healthy, and the first failure of an outage stamps `outageStartedAt`. A
+  // connection that delivers an event ends the outage (`attempt` back to 0), so the next
+  // failure gets its own budget. A connection that opens and dies without a frame does NOT
+  // reset, so a wrapper that accepts and immediately closes keeps consuming one budget instead
+  // of looping forever.
   let attempt = 0
+  let outageStartedAt = 0
 
   for (;;) {
     if (signal?.aborted) return
@@ -407,6 +423,7 @@ export async function* streamWrappedSession({
       // A refused connection is the normal shape of a daemon that is restarting: the port is
       // briefly not listening. Retry it on the same budget as a dropped body.
       if (await waitForRetry()) continue
+      if (signal?.aborted) return
       throw err
     }
 
@@ -423,13 +440,25 @@ export async function* streamWrappedSession({
         throw new WrapperError(`wrapper stream failed: HTTP ${resp.status}`, resp.status)
       }
       if (await waitForRetry()) continue
+      if (signal?.aborted) return
       throw new WrapperError(`wrapper stream failed: HTTP ${resp.status}`, resp.status)
     }
 
     const tracker = { lastId, ended: false }
+    // Where this connection started. A connection that delivers an id we did not already
+    // have has genuinely resumed the transcript — that is progress, and it earns a fresh
+    // budget. One that re-delivers the SAME id has not: a wrapper stuck re-sending one event
+    // and dropping the body would otherwise reset the budget on every attempt and reconnect
+    // forever.
+    const lastIdAtConnect = lastId
+    let sawProgress = false
     let bodyError = null
     try {
       for await (const message of parseSSE(resp.body, tracker)) {
+        if (!sawProgress && tracker.lastId !== null && tracker.lastId !== lastIdAtConnect) {
+          sawProgress = true
+          attempt = 0
+        }
         yield message
       }
     } catch (err) {
@@ -443,6 +472,7 @@ export async function* streamWrappedSession({
 
     // The body ended or threw without the sentinel — the connection died under a live child.
     if (await waitForRetry()) continue
+    if (signal?.aborted) return
     throw bodyError ?? new Error(`session ${sessionId} stream ended without the end sentinel and the reconnect budget is exhausted`)
   }
 
@@ -453,10 +483,20 @@ export async function* streamWrappedSession({
     throw new StreamLaggedError(sessionId, session.state)
   }
 
-  /** Advance the backoff, or report that the budget is spent. */
+  /**
+   * Advance the backoff, or report that this outage's budget is spent.
+   *
+   * Returns `false` for BOTH exhaustion and an aborted signal — the callers distinguish them
+   * by re-checking `signal.aborted`, so an abort returns cleanly instead of being reported as
+   * a failed reconnect.
+   */
   async function waitForRetry() {
+    if (attempt === 0) {
+      // First failure of a new outage: this is where its clock starts.
+      outageStartedAt = now()
+    }
     attempt += 1
-    const elapsed = Date.now() - startedAt
+    const elapsed = now() - outageStartedAt
     if (attempt > policy.maxAttempts || elapsed >= policy.maxElapsedMs) return false
     const delay = Math.min(policy.baseDelayMs * 2 ** (attempt - 1), policy.maxDelayMs)
     // Never sleep past the wall-clock ceiling: a 5 s wait when 200 ms of budget remains would

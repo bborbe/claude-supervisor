@@ -162,14 +162,17 @@ send that fails, or a session with no roster name (headless, pane-less), is repo
 tick. Never park, kill or exit the session yourself: the nudge asks, and the session acts.
 
 The selection is `bucket == watching` AND `watching_min` strictly above
-`park-event.py threshold`. `watching_min` is the span from the session's first
-`🟡 WAITING` closer to now, published by `session-activity.py`; `gated`, `working`, `idle`
+`park-event.py threshold`. `watching_min` is the span from the first `🟡 WAITING`
+closer of the session's **current watching episode** to now, published by
+`session-activity.py`; `gated`, `working`, `idle`
 and `unclassified` rows never qualify, whatever their duration. ⚠️ **`quiet_min` must never
 be substituted for it** — a watcher re-arm writes to the transcript, so a session parked
 3 h 34 m read `quiet 12m` and was never nudged, which is the defect this selection exists
-to remove. Suppression is one nudge per watching episode, keyed on the session id and
-never on the duration, which grows every round. Leaving the bucket, leaving the fleet, or
-a duration that dropped re-arms it.
+to remove. Suppression is one nudge per watching episode, keyed on the session id
+**and the episode's first-closer timestamp (`watching_since`)** — never on the duration,
+which grows every round, and never on the duration merely dropping, because a round can
+land after one park ended and the next began. Leaving the bucket, leaving the fleet, or a
+different `watching_since` re-arms it.
 
 **Report the line.** Print the `park-nudge:` summary verbatim
 (`<n> nudged · <s> suppressed · <w> within 15m · <m> watching · <l> live`) beside the

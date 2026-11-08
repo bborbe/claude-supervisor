@@ -16,9 +16,18 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
   exponential backoff (100 ms → 5 s, 24 attempts, 2 min cap) sized to ride out a daemon restart.
   A refused connection is treated as a restart rather than a failure. A `409` is never retried —
   it means the wrapper no longer retains that resume point, and serving a different one would
-  leave an invisible hole in the transcript, so it raises `StreamGapError` instead. Previously
+  leave an invisible hole in the transcript, so it raises `StreamGapError` instead. The backoff
+  budget is **per outage, not per stream** — a parked or long-running worker whose stream has
+  been open for hours still reconnects, because the clock starts when a connection fails and
+  resets only on real progress (a new event id), so a wrapper stuck re-sending one event cannot
+  loop forever. `StreamGapError` is also excluded from `runAgentLoop`'s `turnClosed`, so a
+  captured mid-turn `result` followed by a 409 settles `error`, never `done`. Previously
   undici's `TypeError: terminated` reached `runAgentLoop`'s catch and the worker settled `error`
   while its child was still generating.
+
+## v0.250.7
+
+- fix: **the park nudge's duration is measured per watching episode, and suppression is keyed on the episode itself.** `watching_min` was published as the span from the session's *first* `🟡 WAITING` closer ever, so it never dropped and the suppression ledger's re-arm clause was dead: a second park in the same session was either suppressed for its whole duration, or nudged instantly with a lifetime figure while its panel read *"you have sat `watching` 300 min"*. `session-activity.py` (vault-local) now restarts the span at the first `🟡 WAITING` closer of the current episode and clears it on any panel naming another state. The reading also publishes that episode's timestamp as **`watching_since`**, and the ledger keys suppression on it — the duration comparison alone is not enough, because the round cadence is 15 minutes and rounds are routinely skipped, so a reading can land after one park ended and the next began with the duration never falling. A reading that carries no `watching_since` keeps the old duration fallback. Also: a `watching` row whose duration could not be measured is counted in the round's `<m> watching` tally (matching the reading's own `counts.watching`) and keeps its ledger entry rather than losing suppression across a measurement gap. Docs in `commands/steps/keepalive.md` and the script header say episode, not lifetime. Change set: `scripts/park-nudge.py`, `scripts/tests/test_park_nudge.py`, `commands/steps/keepalive.md`, `CHANGELOG.md`.
 
 ## v0.250.6
 

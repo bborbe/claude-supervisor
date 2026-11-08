@@ -23,7 +23,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { runAgentLoop } from './agent-loop.mjs'
-import { StreamLaggedError } from './wrapper-stream.mjs'
+import { StreamGapError, StreamLaggedError } from './wrapper-stream.mjs'
 
 // Builds a synthetic message stream and a driver that records the agent's `status`
 // after each message has been consumed by the loop — which is the only place the
@@ -226,6 +226,35 @@ test('a StreamLaggedError is never settled done, even after a captured success r
   })
 
   assert.equal(agent.status, 'error', 'a lag is not an exit — the adapter exists to keep them apart')
+  const terminal = ledgerCalls.filter(([, patch]) => patch !== undefined)
+  assert.equal(terminal.length, 1)
+  assert.equal(terminal[0][1].status, 'error')
+})
+
+// ⚠️ The same contract as the StreamLaggedError case above, for the 409 gap. A `result` can
+// arrive mid-turn, so its presence does not prove the turn closed — and a StreamGapError means
+// the events between the resume point and the successor's first frame are missing outright.
+// Settling it `done` reports a completed turn whose transcript has an invisible hole.
+test('a StreamGapError is never settled done, even after a captured success result', async () => {
+  const agent = makeAgent()
+  const ledgerCalls = []
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-1' }
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'mid-turn', num_turns: 1, permission_denials: [] }
+    throw new StreamGapError('sess-1', 42)
+  }
+
+  await runAgentLoop({
+    q: stream(),
+    agent,
+    writeLedger: (...args) => {
+      ledgerCalls.push(args)
+      return {}
+    },
+    log: () => {},
+  })
+
+  assert.equal(agent.status, 'error', 'a transcript gap is not a finished turn')
   const terminal = ledgerCalls.filter(([, patch]) => patch !== undefined)
   assert.equal(terminal.length, 1)
   assert.equal(terminal[0][1].status, 'error')
