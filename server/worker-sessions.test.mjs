@@ -36,8 +36,13 @@ function fixture() {
 
 // A store row in the wire shape attention-controller serves: snake_case `session_id`, and
 // `live` as the ONLY field that grants liveness.
-function row(sessionId, { live = true, source = 'mcp-timer' } = {}) {
-  const out = { session_id: sessionId, source, at: '2026-10-09T00:00:00Z', age_seconds: 3 }
+//
+// ⚠️ `state` defaults to `'idle'`, not absent, because every real stamp carries one. A
+// `live: true` row with no `state` is a GHOST — a placeholder the store keeps serving after
+// its session exited (measured 2026-11-07: the cap read 51 against 49 processes) — and a
+// fixture that omitted it would model a row the store never writes.
+function row(sessionId, { live = true, source = 'mcp-timer', state = 'idle' } = {}) {
+  const out = { session_id: sessionId, source, state, at: '2026-10-09T00:00:00Z', age_seconds: 3 }
   if (live !== undefined) out.live = live
   return out
 }
@@ -77,6 +82,10 @@ async function count(dir, rows, opts = {}) {
     endpoint: FIXTURE,
     fetchImpl: endpoint(rows, { ledgerRows: dir.ledgerRows }),
     stateDir: dir.root,
+    // ⚠️ Hermetic: the counter unions the pid registry in, and a suite that read the
+    // machine's real `~/.claude/sessions` would make every case depend on whatever this
+    // laptop happens to be running.
+    registry: [],
     ...opts,
   })
   return workers
@@ -392,4 +401,58 @@ test('a body that is not a row array returns null', async () => {
   const dir = fixture()
   ledger(dir, 'ffffffff-0000-0000-0000-000000000009', 'worker')
   assert.equal(await count(dir, { error: 'nope' }), null)
+})
+
+// ⚠️ THE OVER-COUNT CASE, measured 2026-11-07. The store kept stamping `b3d743ea`
+// (`source: a2a`, `location: pod`) with `state: ''` after its session closed, and the row
+// survived the close — so the cap read 51 against 49 real processes. A `live: true` row that
+// carries no `state` is a placeholder, not a session: every real stamp reports what it is
+// doing. The ledger record alone must not make it a worker.
+test('a ghost row is not a live session', async () => {
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-000000000020'
+  ledger(dir, sid, 'exited, row still stamped')
+
+  const workers = await count(dir, [row(sid, { state: '' })])
+  assert.deepEqual(workers, [])
+})
+
+// The control for the ghost exclusion: without it the case above passes on a counter that
+// returns 0 for everything.
+test('a ghost row does not hide a real worker', async () => {
+  const dir = fixture()
+  const ghost = 'ffffffff-0000-0000-0000-000000000021'
+  const real = 'ffffffff-0000-0000-0000-000000000022'
+  ledger(dir, ghost, 'ghost')
+  ledger(dir, real, 'real')
+
+  const workers = await count(dir, [row(ghost, { state: '' }), row(real)])
+  assert.equal(workers.length, 1)
+  assert.equal(workers[0].sessionId, real)
+})
+
+// ⚠️ THE UNDER-COUNT CASE. A headless local worker (`claude --print …`) writes a ledger
+// record and holds a live pid, but never stamps a heartbeat — so its row reads `live: false`.
+// The registry is the only channel that answers for it; measured 2026-11-07, 22 of 44 live
+// sessions were exactly this shape and the count read 10.
+test('a heartbeat-less worker with a live pid is counted', async () => {
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-000000000023'
+  ledger(dir, sid, 'headless --print worker')
+
+  const workers = await count(dir, [row(sid, { live: false })], {
+    registry: [{ sessionId: sid, pid: process.pid }],
+  })
+  assert.equal(workers.length, 1)
+  assert.equal(workers[0].status, 'registry')
+})
+
+// The control: a registry entry whose pid is gone is not a live session.
+test('a registry entry with a dead pid is not counted', async () => {
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-000000000024'
+  ledger(dir, sid, 'exited headless worker')
+
+  const workers = await count(dir, [], { registry: [{ sessionId: sid, pid: 999999999 }] })
+  assert.deepEqual(workers, [])
 })
