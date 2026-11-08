@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **a worker that exits having written nothing is reported as a failure instead of reading as an idle one.** The drive leg revived `parked` candidates and reaped `finished` rows, and neither could tell a worker that never wrote from one that wrote and stopped: `finished` is decided by the task's own boxes, which a task completed before the worker spawned satisfies without the worker having done anything. Measured 2026-11-07 — a fleet manager's worker hit a plan gate, the 15-minute timeout denied it, and it exited with its task file untouched; the round had no row for it, and a nudge cannot reach a worker that never started. New step 1a compares the task file's mtime against **`metrics_sessions[].started_at` for that row's session** — never `claude_session_started`, a vault-ui Start-button flag the payload profiler records as `nonempty 0` on every task and which the orphan seed already refuses. mtime at or before the spawn time with an `execution` task and open boxes prints `wrote nothing since spawn` and drafts no nudge; mtime after it keeps the ordinary disposition, which is the positive control that stops every unexplained row reading as a dead worker. `scripts/check-wrote-nothing.py` pins the class, the key, the refusal and the control.
+
 ## v0.252.2
 
 - fix: count live workers in both directions — the fleet counter unions the identity registry in (a headless `claude --print` worker holds a live pid but stamps no heartbeat, so it was dropped: 44 live sessions counted as 10) and drops ghost rows (a `live: true` row with no `state` that the store keeps serving after its session exited: the cap read 51 against 49 real processes)

@@ -55,6 +55,15 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
 1. **Candidates.** Every `CLASSIFICATION` row whose class is `parked`. ⚠️ **`parked-on-watcher` and `waiting-on-human` are never candidates, and the naming is the trap.** Both were split out of the reader's `stalled` bucket by `agents/fleet-sweep-reader.md` step 8: a `parked-on-watcher` row is a session whose turn ended and which **declared a machine-watched wait**, and a `waiting-on-human` row is one held by an operator gate. ⚠️ **`parked-on-watcher` is not a near-miss for `parked`** — it shares the prefix and nothing else, so a `startswith` or substring match would sweep in exactly the rows this leg exists to leave alone. Match the class **exactly**, and treat any class you do not recognise as **not yours** rather than as `parked`. ⚠️ **The rendered class cell carries a leading `⌛`** — the reader emits `⌛ parked-on-watcher` and `⌛ waiting-on-human` — so strip that glyph before matching, in the row's class cell and in the `CLASSIFICATION` header's `<class>=<n>` terms. Matching the bare name against a glyph-prefixed cell fails silently, and step 2's park-row clause would then read a healthy all-parked fleet as a malformed handoff. `finished — reap candidate` rows (and `REAP CANDIDATES`) are **finished**: never nudged, but **reaped** in step 1b — before any revive is drafted. `deferred` rows are never nudged either; step 1b verifies them and lists them as freeable. `[unresolved]` rows and rows with no task are **unverifiable**.
 
+1a. **Did the worker write at all?** Before reviving a `parked` candidate or reaping a `finished` row, compare the task file's mtime against this row's spawn time — `metrics_sessions[].started_at` for its session (`date -r "<task file>"`; read the entries from the file).
+
+   ⚠️ **Never `claude_session_started`** — a vault-ui Start-button flag, `nonempty 0` on every task, already refused by `agents/fleet-sweep-reader.md` step 5. No `metrics_sessions` entry → no spawn time: keep the ordinary disposition and say the check did not run; never infer one.
+
+   - mtime **at or before** `started_at`, task `execution` with open boxes → **`wrote nothing since spawn`**: report it as a failure, never as `finished`, and draft no nudge (a nudge assumes a worker that can be woken; this one never wrote). Name both timestamps.
+   - mtime **after** `started_at` → the worker wrote: keep the ordinary disposition and do **not** call it a failure. That is the positive control.
+
+   `finished` is decided by the task's boxes, not here — step 8 needs `idle` and every box `[x]`, so this catches only what that rule cannot see: a task already complete when the worker spawned.
+
 1b. **Reap the finished — before drafting any nudge.** This is the reap contract's canonical home: `fleet-loop` Step 3b dispatches this leg on every round and points here rather than restating it. For each finished row, re-read the three disk facts this run:
 
    ```bash
