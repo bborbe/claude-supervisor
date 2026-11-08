@@ -36,13 +36,13 @@ subject decides nothing new (`docs/session-tiers.md` § The four tiers, rule 1).
 directory, not the roster: a topic manager whose session died is absent from the roster, which
 is exactly the row this leg exists to recover. ⚠️ **Resolve the directory from the vault's own
 config, never assume `23 Topics`** — a renamed directory would glob nothing and the leg would
-report a clean round, the exact silent failure it exists to remove. ⚠️ **Match the config entry by the vault's PATH (`resolve-folders.py --vault`), never take the first entry carrying the key** — on the operator's machine the first `goals_dir` is `private-starcitizen`'s `23 Goals` and the first `tasks_dir` is `seibert-agent`'s `tasks` (measured 2026-11-08), so a first-match read refuses or globs nothing for private-personal on every round. Every section below resolves its folders the same way, and an `UNKNOWN` answer records that section not run:
+report a clean round, the exact silent failure it exists to remove. ⚠️ **Match the config entry by the vault's PATH (`resolve-folders.py --vault`), never take the first entry carrying the key** — on the operator's machine the first `goals_dir` is `private-starcitizen`'s `23 Goals` and the first `tasks_dir` is `seibert-agent`'s `tasks` (measured 2026-11-08), so a first-match read refuses or globs nothing for private-personal on every round. Every section below resolves its folders the same way, requiring only the keys it reads, and an `UNKNOWN` answer records that section not run. The folders come back **absolute**, so glob `"$TOPICS"/*.md`, never `"<vault>/$TOPICS"`. `<vault>` must be the vault's configured root path — `vault-cli config list` shows it — not a symlink alias:
 
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
-IFS='|' read -r TOPICS GOALS TASKS _ < <(python3 "$P/resolve-folders.py" --vault "<vault>")
+IFS='|' read -r TOPICS GOALS TASKS _ < <(python3 "$P/resolve-folders.py" --vault "<vault>" --require topics_dir)
 case "$TOPICS" in UNKNOWN*) echo "folders: $TOPICS"; exit 2;; esac   # record this section not run
-for f in "<vault>/$TOPICS"/*.md; do
+for f in "$TOPICS"/*.md; do   # absolute — resolve-folders.py prints full paths
   name=$(basename "$f" .md)
   grep -qE '^claude_session_id: *[^ ]' "$f" || continue
   printf '%s\t' "$name"
@@ -105,7 +105,7 @@ verdict. It never acts and never writes the cap.
 
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
-IFS='|' read -r TOPICS GOALS TASKS _ < <(python3 "$P/resolve-folders.py" --vault "<vault>")
+IFS='|' read -r TOPICS GOALS TASKS _ < <(python3 "$P/resolve-folders.py" --vault "<vault>" --require goals_dir,topics_dir)
 case "$TOPICS" in UNKNOWN*) echo "folders: $TOPICS"; exit 2;; esac   # record this section not run
 python3 "$P/topicless-goal-keepalive.py" --vault "<vault>" --goals-dir "$GOALS" --topics-dir "$TOPICS"
 ```
@@ -260,9 +260,9 @@ vault's config, never assume `25 Tasks`:**
 
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
-IFS='|' read -r TOPICS GOALS TASKS _ < <(python3 "$P/resolve-folders.py" --vault "<vault>")
+IFS='|' read -r TOPICS GOALS TASKS _ < <(python3 "$P/resolve-folders.py" --vault "<vault>" --require tasks_dir,goals_dir)
 case "$TOPICS" in UNKNOWN*) echo "folders: $TOPICS"; exit 2;; esac   # record this section not run
-for f in "<vault>/$TASKS"/*.md; do
+for f in "$TASKS"/*.md; do   # absolute — resolve-folders.py prints full paths
   grep -qE '^claude_session_id: *[^ ]' "$f" || continue
   name=$(basename "$f" .md)
   printf '%s\t' "$name"
