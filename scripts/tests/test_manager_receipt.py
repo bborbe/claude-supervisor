@@ -181,6 +181,33 @@ class Receipt(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(out, "")
 
+    def test_a_partial_feed_read_is_a_completed_reading(self):
+        """`partial` is a read that RAN, so it must not be flagged as a skipped step.
+
+        The rows it resolved keep their verdict and only the rest are `unread`, so the
+        round did its work. Rejecting the value here flagged every such round
+        `INCOMPLETE ROUND — skipped: readings` and recorded false debt for a reading
+        that exists.
+        """
+        self.full_round()
+        partial = json.loads(READINGS_OK)
+        partial["feed_state"] = "partial"
+        rd = self.artifact("readings.json", json.dumps(partial))
+        self.record("readings", rd)
+        rc, out = self.check()
+        self.assertEqual(rc, 0, out)
+
+    def test_an_unknown_feed_state_is_flagged(self):
+        """The negative control: the vocabulary is still closed."""
+        self.full_round()
+        bad = json.loads(READINGS_OK)
+        bad["feed_state"] = "partial-ish"
+        rd = self.artifact("readings.json", json.dumps(bad))
+        self.record("readings", rd)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: readings", out)
+
     # --- fabricated receipts: the four cases subtask 4 names --------------------
 
     def test_sweep_payload_outside_the_round_window_is_flagged(self):
