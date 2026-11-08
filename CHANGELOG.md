@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **a manager-spawned worker's plan gate is answered by the round instead of auto-denying at 15 minutes.** `commands/steps/own-parks.md` answered only class-B routine parks, and its class table named class C — a worker's `AskUserQuestion` — as the operator's. An `AskUserQuestion` park never carries an `allowlist_entry`, so the scoped wrangler escalated it, the escalation sat, and the 15-minute timeout then auto-denied it: measured 2026-11-07, a fleet manager's worker hit a plan gate, nobody answered, and its task file was found untouched twenty minutes later. The step now **routes** every class-C park — its report gains `routed <c> (class C → step 7)` with each park's `request_id`, worker label and question, and the answered count drops its hardcoded `(class B)` — and step 7 (`commands/steps/worker-channels.md`) answers each routed id with `Manager answer, via supervisor:`. The class boundary is unchanged where it matters: a question that asks to widen the task's scope, or that names a production-touching or irreversible action, still escalates to the operator, and the new § *Is the class-C question the manager's?* names the test. Class D and E are untouched.
+
 ## v0.250.4
 
 - fix: **a failed delivery's durable record now names its producer.** `--failed` accepts `--pid` and `--row-ts` — the sender's process id and the timestamp of the ledger row it wrote in the same run — and `read_pending` carries both through every rewrite. Without them a hand-written `liveness-pending.json` reproduces every field of a real failed send exactly, so "the record was written by the tick" could only be asserted, never shown. No behaviour change to the retry, the ack or the detection limb.

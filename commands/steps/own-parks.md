@@ -12,7 +12,9 @@ When: every tick
 
 A headless worker's permission prompt parks with the session that **spawned** it, and no other session can answer it (`scripts/answer-path-check.py`; `commands/open.md` § the answer-path probe). When this session is the spawner, every park it does not answer goes to the operator's board or auto-denies at 15 minutes. Goal managers already answer theirs through `supervisor:goal-wrangler` (`/supervisor:goal-drain`). Before this step the fleet tier held `answer_permission` but no step called it.
 
-This step answers **only** routine parks — those the written allowlist already decides — and **only** for workers the spawn ledger names this session as spawner of. It is class B of the runbook's Gate triage (*"already determined by a written source"*), where the written source is `${CLAUDE_PLUGIN_ROOT}/docs/permission-allowlist.md`. It adds no class-A mandate.
+This step answers routine parks — those the written allowlist already decides — and **only** for workers the spawn ledger names this session as spawner of. Routine answering is class B of the runbook's Gate triage (*"already determined by a written source"*), where the written source is `${CLAUDE_PLUGIN_ROOT}/docs/permission-allowlist.md`. It adds no class-A mandate.
+
+⚠️ **A worker's question is not left to time out.** An `AskUserQuestion` park carries no `allowlist_entry`, so the wrangler escalates it — and until 2026-11-07 an escalation was the end of the road: the park sat until the 15-minute timeout auto-denied it and the worker exited having written nothing. Measured that day: a fleet manager spawned a worker whose plan gate asked a modal, nobody answered, and the task file was found untouched twenty minutes later. This step now **names** every class-C park in its report, and step 7 (`commands/steps/worker-channels.md`) answers it in the manager's own voice with `Manager answer, via supervisor:`. Detection is this step's; the decision is the round's — it spawned the worker and holds the task context the question is about, which a scoped wrangler reading one request payload does not.
 
 ## Preconditions — fail closed
 
@@ -40,26 +42,37 @@ Task tool with:
 
 Scoped mode reads `pending_permissions` once and never waits on `await_permission`, so it costs the tick one bounded read rather than idle timeouts. The wrangler answers `allow` only when the request's `allowlist_entry` is non-null and no deny class matches. Everything it does not answer stays pending, as an escalation.
 
+An escalation of an ordinary tool request stays pending for the operator — that is the correct result. An escalation of a class-C `AskUserQuestion` is instead **routed** to step 7, because leaving it pending is what the 15-minute timeout then answers with a denial.
+
 ⚠️ **Latency limit.** The step sees only what is parked when it runs. A park raised just after it waits for the next tick, and at a 15-minute interval it auto-denies first (`worker-channels.md`: *"Answer promptly or not at all"*). This step shortens the wait for routine parks; it does not make it zero.
 
 ## What this step never answers
 
-The class boundary is a closed list. A park in any row below stays pending for the operator, and the wrangler escalating it is the correct result, not a failure.
+The class boundary is a closed list. Class B is the only class this step **answers**; a class-C park the manager owns is **routed** to step 7 rather than left pending; every other row below stays pending for the operator, and the wrangler escalating it is the correct result, not a failure.
 
 | # | Class | Example | Who decides |
 |---|---|---|---|
-| **C** | **Not covered by the allowlist** — `allowlist_entry` is `null`; priority, scope or a choice between approaches; a worker's question (`AskUserQuestion`) | `gh -R bborbe/claude-supervisor pr ready 645` (no allowlist entry) | The operator |
+| **C** | **Not covered by the allowlist** — `allowlist_entry` is `null`; priority, scope or a choice between approaches; a worker's question (`AskUserQuestion`) | `gh -R bborbe/claude-supervisor pr ready 645` (no allowlist entry) | The manager when it owns the question, the operator when it does not — see below |
 | **D** | **Production-touching or irreversible** — the allowlist's prod, irreversible, scope-changing and credentials deny classes, even when an allowlist entry also matches; `make apply`, deploy, merge, release, tag push, force-push, a delete, spawning or stopping a session (`docs/permission-allowlist.md` § The deny list) | `BRANCH=prod make apply` | The operator, in the pane |
 | **E** | **Live-trade / TDR** — any `40 Decisions/TDR *` field, trade-create or trade-close on a funded account | `trade-create` on a live account | The operator, via `vault-cli decision ack` |
 
 Also never answered, whatever the class: a request for a worker printed `REFUSE`, and a request for a worker whose session carries an operator hold (the wrangler's hold check).
+
+### Is the class-C question the manager's?
+
+Two readings, and only the first is routed:
+
+- **The manager's** — the question asks which of two approaches the task file already permits, or what to do next inside the task's declared scope. Step 7 answers it with `Manager answer, via supervisor: <option label>`, which makes no provenance claim about the operator.
+- **The operator's** — the question asks to widen or change the task's declared scope, chooses between outcomes the task file does not decide, or names a production-touching or irreversible action. Leave it pending: the prefix releases no such gate (`${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § The two prefixes are not interchangeable).
+
+⚠️ **When the answer is not derivable from the task file and the worker's own question, it is the operator's.** A wrong manager answer is worse than a timeout, because the worker acts on it and the round reports it as answered. Escalating costs one card; a wrong answer costs a worker building on a plan nobody reviewed.
 
 ## Report
 
 One line in the round's output, always, even when skipped. It is built from the wrangler's scoped-mode report, whose allow reasons name the allowlist entry and whose escalations start with their class. Nothing in this repo parses it; it exists to be quoted when counting answered against escalated parks:
 
 ```
-own-parks: answered <n> (class B) · escalated <m> (C <c> · D <d> · E <e> · hold <h> · unverified <u>) · refused-not-own <r>
+own-parks: answered <n> · routed <c> (class C → step 7) · escalated <m> (D <d> · E <e> · hold <h> · unverified <u>) · refused-not-own <r>
 ```
 
-For each answered park, list `<request_id> | <worker label> | <tool> | allow | class B — allowlist_entry <prefix>`. An answered line that names no allowlist entry is a defect: report it as one rather than counting it.
+Every park lands in exactly one bucket, so the four counts plus `refused-not-own` account for everything the step saw. For each answered park, list `<request_id> | <worker label> | <tool> | allow | class B — allowlist_entry <prefix>`. For each routed park, list `<request_id> | <worker label> | AskUserQuestion | route | class C — <the question, one line>`. An answered line that names no allowlist entry is a defect: report it as one rather than counting it.
