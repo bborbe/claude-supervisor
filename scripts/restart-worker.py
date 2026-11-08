@@ -64,6 +64,13 @@ The resume recipe is a copy of `commands/open.md` Step 3.1's. A markdown command
 executable, so the two are kept in lockstep by hand; that is the second place this
 mechanism lives, and the reason `commands/worker-restart.md` is scoped to call THIS
 script rather than reimplement kill+resume.
+
+⚠️ **The launcher is not part of that copy.** `resolve_launcher` is the single home of the
+rule, and `commands/open.md` § 3.1 calls `scripts/resolve-launcher.py` — a thin CLI over it
+that also prints the chip — rather than restating the precedence in prose. Prose there let
+whichever session ran the resume pick the launcher: measured 2026-11-07, two `role: agent`
+rows came back as `cc-private-claude --resume … /color cyan` because their resumer ran on
+Opus.
 """
 import argparse
 import datetime
@@ -421,8 +428,8 @@ def vault_configs():
     return data if isinstance(data, list) else None
 
 
-def _launcher_field(path):
-    """The `launcher:` frontmatter value of one page, or `''`."""
+def _page_field(path, key):
+    """One frontmatter scalar from a vault page, or `''` when absent or unreadable."""
     # Read whole: a long-lived task's `metrics_sessions` can push the closing `---` past
     # any fixed head, and a truncated read would drop `launcher:` without a word.
     try:
@@ -434,8 +441,140 @@ def _launcher_field(path):
         return ""
     end = head.find("\n---", 3)
     fm = head[3:end] if end != -1 else ""
-    match = re.search(r"^launcher:[ \t]*['\"]?([^'\"\n]*?)['\"]?[ \t]*$", fm, re.M)
+    match = re.search(rf"^{re.escape(key)}:[ \t]*['\"]?([^'\"\n]*?)['\"]?[ \t]*$", fm, re.M)
     return match.group(1).strip() if match else ""
+
+
+def _launcher_field(path):
+    """The `launcher:` frontmatter value of one page, or `''`."""
+    return _page_field(path, "launcher")
+
+
+def _role_field(path):
+    """The `role:` frontmatter value of one page, or `''` when it carries none.
+
+    `''` is not `agent`: the matrix's Rule 1 default belongs to the caller, and this
+    helper reporting `agent` for a page that says nothing would make "absent" and
+    "declared agent" indistinguishable one layer up.
+    """
+    return _page_field(path, "role")
+
+
+def vault_for_cwd(cwd, configs):
+    """`(root, vault_entry)` for the configured vault whose path holds `cwd`, else None.
+
+    Longest root wins: a vault nested inside another must not be shadowed by its parent.
+    """
+    real_cwd = os.path.realpath(cwd) if cwd else ""
+    best = None
+    for vault in configs:
+        # Guard each element, inside the loop: a payload that parses to a list holding a
+        # non-dict must refuse cleanly, never raise — `resolve-task-file.py` learned this.
+        if not isinstance(vault, dict):
+            continue
+        # Guard the RAW path: `realpath("")` is the process cwd, never `""`, so an entry
+        # with no path would otherwise claim this script's own cwd as a vault root.
+        raw = str(vault.get("path") or "").strip()
+        if not raw:
+            continue
+        root = os.path.realpath(os.path.expanduser(raw))
+        if root and (real_cwd == root or real_cwd.startswith(root + os.sep)):
+            if best is None or len(root) > len(best[0]):
+                best = (root, vault)
+    return best
+
+
+def session_claimant(sid, root, fb):
+    """`(claimant, error)` — the task page claiming `sid`, or `(None, None)` for none.
+
+    `claimant` is `(path, frontmatter)`. Matched on the row's WHOLE id set —
+    `claude_session_id` plus every `metrics_sessions[].session_id`, read through
+    `manager-predispatch.py`'s `session_id_set`, never re-derived. Many tasks carry the
+    id only in `metrics_sessions`, and a single-field match would drop their `launcher:`.
+
+    Two claimants is an error, not a first-match: picking one would resume the session
+    under a launcher chosen by page ordering.
+    """
+    session_id_set = load_sibling("manager-predispatch.py").session_id_set
+    claimants = []
+    for path in fb._pages(root, fb.TASK_SUBDIRS):
+        text = fb._read(path)
+        if sid not in text:
+            continue
+        fm = fb.frontmatter(text)
+        if sid in session_id_set(fm):
+            claimants.append((path, fm))
+    if len(claimants) > 1:
+        names = ", ".join(os.path.basename(p)[:-3] for p, _ in claimants)
+        return None, f"{len(claimants)} task pages claim session {sid} ({names})"
+    return (claimants[0] if claimants else None), None
+
+
+def session_subject(sid, root, fb):
+    """`(subject, error)` — the goal or topic page claiming `sid`, or `(None, None)`.
+
+    Scanned from the PAGES, never from the live session registry, and that is the whole
+    point: the registry is deleted when a session exits, and a manager only reaches the
+    resume path once it has exited — so a registry-based lookup answers "not a manager"
+    exactly where the resume happens. Caught in review on the first cut of `resume_role`,
+    which read the registry and therefore left the bug it claimed to fix in place.
+    `commands/open.md` reads the same page field to decide the resume, so the two agree.
+
+    ⚠️ **The id is matched on the page's WHOLE id set**, exactly as `session_claimant`
+    does — `claude_session_id` plus every `metrics_sessions[].session_id`. Matching only
+    the scalar field drops a page whose manager id was recorded the other way, and the
+    asymmetry was caught in review on this function while its sibling already had it right.
+
+    Two pages claiming one id is an error, not a first-match, for the same reason: picking
+    one would resume the session under a subject chosen by page ordering.
+    """
+    session_id_set = load_sibling("manager-predispatch.py").session_id_set
+    claims = []
+    for kind, subdirs in (("topic", fb.TOPIC_SUBDIRS), ("goal", fb.GOAL_SUBDIRS)):
+        for path in fb._pages(root, subdirs):
+            text = fb._read(path)
+            if sid not in text:
+                continue
+            if sid in session_id_set(fb.frontmatter(text)):
+                claims.append((kind, os.path.basename(path)[:-3]))
+    if len(claims) > 1:
+        names = ", ".join(f"{k} {t}" for k, t in claims)
+        return None, f"{len(claims)} pages claim session {sid} ({names})"
+    return (claims[0] if claims else None), None
+
+
+def resume_role(sid, cwd, fb):
+    """`(role, subject, error)` a resume must launch and colour by.
+
+    `role` is `manager`, `human` or `agent`. A MANAGER is checked first: a manager session
+    usually carries no task page, so the claimant lookup alone would read it as a worker
+    and resume it on the worker default — the same defect the prose rule had, one layer
+    down. `subject` is passed straight to `resolve_launcher`.
+
+    ⚠️ **The manager arm is page-keyed, so a manager with no goal or topic page reads as
+    `agent` here** — the root manager is the live case. Its LAUNCHER still matches (the
+    worker chain resolves the same script), but its chip comes out `pink` rather than
+    `orange`. The page is the only source that survives an exited session, which is the
+    case this function exists for; the registry could cover the page-less root but only
+    while it is live, when no resume is happening.
+
+    An unreadable vault config is not a refusal here: there is no kill to authorise and
+    the row still has to open, so it answers `agent` and the chip follows.
+    """
+    configs = vault_configs()
+    best = vault_for_cwd(cwd, configs) if configs is not None else None
+    if best is None:
+        return "agent", None, None
+    root = best[0]
+    subject, error = session_subject(sid, root, fb)
+    if error:
+        return "agent", None, error
+    if subject is not None:
+        return "manager", subject, None
+    claimant, claimant_error = session_claimant(sid, root, fb)
+    if claimant_error:
+        return "agent", None, claimant_error
+    return (_role_field(claimant[0]) if claimant else "") or "agent", None, None
 
 
 def resolve_launcher(sid, cwd, fb, subject=None):
@@ -465,6 +604,10 @@ def resolve_launcher(sid, cwd, fb, subject=None):
     instead, mirroring `resolveManagerLauncher` in `server/spawn-cwd.mjs`: the subject page's
     `manager_launcher:`, else the vault's configured `manager_launcher` (`manager-default`),
     else the `-claude` sibling for a vault-cli too old to emit that key, else `claude_script`.
+
+    A `role: human` task takes the Claude launcher (`_human_launcher`), mirroring
+    `applyHumanLauncherRule` in `server/spawn-cwd.mjs` — the operator's own session is not a
+    delegate. Its own `launcher:` still wins.
     """
     override = os.environ.get("SUPERVISOR_LAUNCHER")
     if override:
@@ -479,22 +622,7 @@ def resolve_launcher(sid, cwd, fb, subject=None):
     configs = vault_configs()
     if configs is None:
         return None, "vault-cli config could not be read"
-    real_cwd = os.path.realpath(cwd) if cwd else ""
-    best = None
-    for vault in configs:
-        # Guard each element, inside the loop: a payload that parses to a list holding a
-        # non-dict must refuse cleanly, never raise — `resolve-task-file.py` learned this.
-        if not isinstance(vault, dict):
-            continue
-        # Guard the RAW path: `realpath("")` is the process cwd, never `""`, so an entry
-        # with no path would otherwise claim this script's own cwd as a vault root.
-        raw = str(vault.get("path") or "").strip()
-        if not raw:
-            continue
-        root = os.path.realpath(os.path.expanduser(raw))
-        if root and (real_cwd == root or real_cwd.startswith(root + os.sep)):
-            if best is None or len(root) > len(best[0]):
-                best = (root, vault)
+    best = vault_for_cwd(cwd, configs)
     if best is None:
         return None, f"cwd {cwd or '(none)'} is under no configured vault"
     root, vault = best
@@ -519,30 +647,15 @@ def resolve_launcher(sid, cwd, fb, subject=None):
             manager_default = os.path.join(os.path.dirname(vault_launcher), manager_default)
         return load_sibling("manager-launcher.py").resolve(manager_default, page, "manager-default")
 
-    # The task bound to this session, matched on the row's WHOLE id set —
-    # `claude_session_id` plus every `metrics_sessions[].session_id`, read through
-    # `manager-predispatch.py`'s `session_id_set`, never re-derived. Many tasks carry the
-    # id only in `metrics_sessions`, and a single-field match would drop their `launcher:`.
-    session_id_set = load_sibling("manager-predispatch.py").session_id_set
-    claimants = []
-    for path in fb._pages(root, fb.TASK_SUBDIRS):
-        text = fb._read(path)
-        if sid not in text:
-            continue
-        fm = fb.frontmatter(text)
-        if sid in session_id_set(fm):
-            claimants.append((path, fm))
-    if len(claimants) > 1:
-        names = ", ".join(os.path.basename(p)[:-3] for p, _ in claimants)
-        return None, f"{len(claimants)} task pages claim session {sid} ({names})"
+    claimant, claimant_error = session_claimant(sid, root, fb)
+    if claimant_error:
+        return None, claimant_error
 
     # Only the task's OWN `launcher:` is read. Its goals are deliberately not consulted: a
     # goal's `launcher:` describes its manager, and inheriting it resumed every worker under
     # such a goal on the manager's Opus launcher (measured 2026-10-22, 12 private-personal
     # goals). The worker default comes from the vault config instead.
-    own = ""
-    if claimants:
-        own = _launcher_field(claimants[0][0])
+    own = _launcher_field(claimant[0]) if claimant else ""
 
     worker_default = str(vault.get("worker_launcher") or "").strip()
     for value in [own, worker_default]:
@@ -557,9 +670,53 @@ def resolve_launcher(sid, cwd, fb, subject=None):
     if "/" not in name:
         name = os.path.join(os.path.dirname(vault_launcher), name)
     name = os.path.expanduser(name)
+
+    # A `role: human` row takes the vault's CLAUDE launcher, never the worker default — the
+    # operator's own session is not a delegate (operator ruling 2026-11-06, matrix Rule 4).
+    # Mirrors `applyHumanLauncherRule` in `server/spawn-cwd.mjs`, including its ordering: the
+    # `-claude` sibling sits AHEAD of a configured `manager_launcher`, because private-personal
+    # and seibert-brogrammers both point that key at a `-deepseek` script and taking it first
+    # would leave a human row on the worker model while the rule reported success. A task's
+    # own `launcher:` still wins — it is the operator's explicit choice for that row.
+    if claimant and source != "task" and _role_field(claimant[0]) == "human":
+        name, source = _human_launcher(vault_launcher, vault)
+        if name is None:
+            return None, source
+
     if not os.path.isfile(name):
         return None, f"launcher {name} ({source}) does not exist"
     return name, source
+
+
+def _human_launcher(vault_launcher, vault):
+    """`(name, source)` for a `role: human` row: the `-claude` sibling, else the manager chain.
+
+    Reuses `manager-launcher.py`'s `sibling()` and `resolve()` rather than restating the
+    naming convention, so the compatibility rung has one home.
+
+    ⚠️ **The last rung is the vault's `claude_script`, never the worker default.** That is
+    what matrix Rule 4 states and what `applyHumanLauncherRule` does (it falls through to
+    `resolveManagerLauncher`, whose final arm is `vaultLauncher`). Returning the worker
+    resolution here would put a `role: human` row on the `-deepseek` worker launcher in a
+    vault that configures `worker_launcher` but has neither a `-claude` sibling nor a
+    `manager_launcher` — the very outcome this rule exists to prevent. Caught in review.
+
+    `(None, reason)` when the configured `manager_launcher` is unsafe or missing: the
+    reason is `manager-launcher.py`'s own sentence and the caller refuses with it, rather
+    than turning it into a second, misleading "does not exist".
+    """
+    ml = load_sibling("manager-launcher.py")
+    sibling = os.path.expanduser(ml.sibling(vault_launcher))
+    if sibling == vault_launcher:
+        return vault_launcher, "vault"
+    if os.path.isfile(sibling):
+        return sibling, "claude-sibling"
+    manager_default = str(vault.get("manager_launcher") or "").strip()
+    if not manager_default:
+        return vault_launcher, "vault"
+    if "/" not in manager_default:
+        manager_default = os.path.join(os.path.dirname(vault_launcher), manager_default)
+    return ml.resolve(manager_default, None, "manager-default")
 
 
 def changed_inputs(load_path, load_mtime, argv, launcher, started):
