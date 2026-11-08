@@ -403,7 +403,11 @@ read `STOPPED` with a marker. The distinguishing read is `manager-quiet.py`, whi
 `<verdict>` TAB `<n_runnable>` TAB `<n_quiet>` TAB `<consecutive_quiet>` on stdout — **four
 fields**; `stood-down` is the auto-quiet verdict (field 1), so the decision reads the verdict
 without parsing the rest,
-and anything else means the marker was not quiet-driven:
+and anything else means the marker was not quiet-driven. ⚠️ **`sleep-until` is the third verdict and
+never reaches this branch:** a date-gated subject writes `<slug>.sleeping` (state `SLEEPING`), not
+`.stopped`, so it is not an auto-quiet stand-down and must not be read as one:
+
+
 
 ⚠️ **`--vault` takes the vault's ABSOLUTE ROOT, and neither the board nor this step supplies
 one.** The sweep's `sessions[]` carries no vault field, and `manager-quiet.py` runs
