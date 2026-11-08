@@ -181,11 +181,11 @@ def steps_for(branch: str, tier: str = "goal") -> tuple:
 # to the per-topic N = 3 — neither of which gates a resume. Every field above resolved, so
 # `--check` reported a full round while three managers stayed down.
 #
-# ⚠️ **A CONDITIONAL step, never a member of `STEPS`.** A round owes a keep-alive outcome
-# only for a verdict it actually read, and a goal round reads none: goal and topic rounds
-# share the `""` branch, so adding `keepalive` to `STEPS` would print `skipped: keepalive`
-# on every goal round forever — the permanent false red this file refuses elsewhere.
-# The verdict list is what makes the debt: no verdict, nothing owed.
+# ⚠️ **A CONDITIONAL step, never a member of `STEPS` or `TOPIC_STEPS`.** A round owes a
+# keep-alive outcome only for a verdict it actually read: a goal round reads none, and a
+# topic round whose goals all read `jump` / `leave` reads none either. A fixed tuple entry
+# would print `skipped: keepalive` on those rounds forever — the permanent false red this
+# file refuses elsewhere. The verdict list is what makes the debt: no verdict, nothing owed.
 #
 # ⚠️ **The verdict is written by the probe, the outcome by the round.** `topic-keepalive.py
 # --receipt <topic>` appends the entry the moment it prints `resume` / `restart`, so a

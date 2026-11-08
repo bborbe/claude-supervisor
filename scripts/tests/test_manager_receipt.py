@@ -1442,7 +1442,8 @@ class KeepAliveVerdicts(unittest.TestCase):
                         "--outcome", outcome)
 
     def check(self):
-        return self.cli("--check", "--topic", self.topic)
+        # A topic round owes TOPIC_STEPS (no `drive`), so it is judged with `--tier topic`.
+        return self.cli("--check", "--topic", self.topic, "--tier", "topic")
 
     def resume_stamp(self, epoch, session="sid-1"):
         """The stamp `topic-keepalive.py --record-resume` writes — via its own `record()`."""
