@@ -336,8 +336,7 @@ _DEV_WRAPPERS = {"kubectlnukedev", "kubectldev", "kubectlsmalldev", "kubectlquan
                  "kubectlsun", "kubectlstaging"}
 _SECRET_PATH = re.compile(
     r"(^|[/~\s=])(\.ssh/|\.netrc\b|\.aws/|\.config/gh\b|\.kube/config\b|\.env(\.[\w-]+)?$|"
-    r"id_(rsa|ed25519|ecdsa)\b|\.npmrc\b|\.git-credentials\b|\.pgpass\b|\.pypirc\b|\.docker/config\.json\b|\.gnupg/|\.vault-token\b|"
-    r"application_default_credentials\.json|\.(bash|zsh|sh)_history\b|^/proc/|/proc/\d+/environ)")
+    r"id_(rsa|ed25519|ecdsa)\b|\.npmrc\b|\.git-credentials\b|\.pgpass\b|\.pypirc\b|\.docker/config\.json\b|\.gnupg/|\.vault-token\b|application_default_credentials\.json|\.(bash|zsh|sh)_history\b|^/proc/|/proc/\d+/environ)")
 _PROTECTED_REF = re.compile(r"^(?:[^:]*:)?(refs/heads/)?(master|main)$")
 
 
