@@ -201,6 +201,54 @@ def _cause(failures):
     return (" — %s" % "; ".join(failures)) if failures else ""
 
 
+def _live_sessions(endpoint=None, on_failure=None):
+    """`{session_id: source}` for every live session, or None when the endpoint failed.
+
+    The union of two channels, and both halves are load-bearing:
+
+      * the **session-heartbeat endpoint** — a row with `live: true` **and** a non-empty
+        `state` (a row the store keeps stamping with no `state` is a ghost, not a session);
+      * the **identity registry**'s pid check — the only channel that answers for a headless
+        local worker (`claude --print …`), which writes a ledger record and holds a live pid
+        but never stamps a heartbeat.
+
+    Measured 2026-11-07: the endpoint alone counted 44 live sessions as 10 (22 headless
+    workers dropped) while adding 2 ghosts — wrong in both directions, and the two errors
+    partly cancelled, which is why the cap read 51 against 49 real processes.
+    """
+    liveness = _load("session_liveness", "session-liveness.py")
+    rows = liveness.read_endpoint(endpoint, on_failure=on_failure)
+    if rows is None:
+        return None
+
+    # The endpoint's live set, built once rather than per ledger entry. A row is live only on
+    # an explicit `live: true` — a renamed or missing key must never be read as liveness, and
+    # a malformed row is skipped rather than allowed to crash the count.
+    live = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        session_id = row.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            continue
+        if row.get("live") is not True:
+            continue
+        if _is_ghost(row):
+            continue
+        live[session_id] = row.get("source")
+
+    # An unreadable registry adds nothing rather than failing the count — the endpoint already
+    # answered, and a missing second channel is not an unknown first one.
+    identity = _identity().read_registry()
+    if identity:
+        for session_id, record in identity.items():
+            if session_id in live:
+                continue
+            if (record or {}).get("alive") is True:
+                live[session_id] = "registry"
+    return live
+
+
 def live_workers(endpoint=None, ledger=None, on_failure=None):
     """Live worker sessions as `[{session_id, status, label}]`, or None when a store failed.
 
@@ -221,43 +269,11 @@ def live_workers(endpoint=None, ledger=None, on_failure=None):
     on it.
     """
     liveness = _load("session_liveness", "session-liveness.py")
-    rows = liveness.read_endpoint(endpoint, on_failure=on_failure)
-    if rows is None:
+    live = _live_sessions(endpoint, on_failure=on_failure)
+    if live is None:
         return None
     if ledger is None:
         return None
-
-    # The endpoint's live set, built once rather than per ledger entry. A row is live only on
-    # an explicit `live: true` — a renamed or missing key must never be read as liveness, and
-    # a malformed row is skipped rather than allowed to crash the count.
-    live = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        session_id = row.get("session_id")
-        if not isinstance(session_id, str) or not session_id:
-            continue
-        if row.get("live") is not True:
-            continue
-        if _is_ghost(row):
-            continue
-        live[session_id] = row.get("source")
-
-    # ⚠️ **The half the endpoint cannot answer.** A headless local worker
-    # (`claude --print --input-format stream-json …`) writes a ledger record and holds a live
-    # pid, but it never stamps a heartbeat — so its row reads `live: false` and the endpoint's
-    # live set excludes it. Measured 2026-11-07: 44 live sessions, 10 counted, and all 22 of
-    # the difference resolved in the ledger with `role: agent`, `mode: headless` and an alive
-    # pid. The identity registry is the only channel that answers for them, so it is read here
-    # and unioned in. An unreadable registry adds nothing rather than failing the count — the
-    # endpoint already answered, and a missing second channel is not an unknown first one.
-    identity = _identity().read_registry()
-    if identity:
-        for session_id, record in identity.items():
-            if session_id in live:
-                continue
-            if (record or {}).get("alive") is True:
-                live[session_id] = "registry"
 
     workers = []
     for session_id, record in ledger.items():
@@ -290,10 +306,75 @@ def live_workers(endpoint=None, ledger=None, on_failure=None):
     return workers
 
 
+def worker_populations(endpoint=None, ledger=None, on_failure=None):
+    """`{managers, interactive, headless, total}`, or None when a store failed.
+
+    The same identity store and the same liveness union as `live_workers`; what differs is
+    the classification, and that managers are counted here rather than excluded.
+
+    ⚠️ **The manager population comes from the LEDGER, not from `fleet-board.py`.** The board
+    is the doc's named manager source, but measured 2026-11-08 it emitted
+    `{"header": …, "rows": [[display strings]]}` — no per-session `role` — and did not
+    complete inside 90 s twice on this host (exit 124 under `timeout`). The ledger carries
+    `role` and is already read on this path. A manager started by hand writes no record at
+    all, so it is absent from this count: a stated gap, not a silent one.
+
+    ⚠️ **`mode` decides interactive vs headless, and an absent `mode` reads as interactive.**
+    A pre-`mode` record is a worker (the same rule `role` follows), and defaulting it to
+    headless would move the whole pre-field population into the wrong column.
+    """
+    live = _live_sessions(endpoint, on_failure=on_failure)
+    if live is None:
+        return None
+    if ledger is None:
+        return None
+
+    # ⚠️ **Four worker modes, not two.** The ledger carries `interactive`, `headless`, `cluster`
+    # and `a2a`; a binary headless-vs-else classifier reported live cluster and a2a workers as
+    # "interactive" — the conflation this split exists to prevent. Measured 2026-11-08 on this
+    # host's ledger: 3203 interactive, 1113 headless, 46 cluster, 133 a2a.
+    managers = 0
+    modes = {"interactive": 0, "headless": 0, "cluster": 0, "a2a": 0}
+    for session_id, record in ledger.items():
+        if session_id not in live:
+            continue
+        # ⚠️ **`resumed_from` is checked FIRST, before `role`** — the same order
+        # `live_workers` and the JS twin use. An auto-resume is not counted in ANY
+        # population, so a record that is both a manager and an auto-resume is dropped
+        # rather than counted as a manager. Measured 2026-11-08: the two readers had
+        # opposite orders and therefore disagreed on exactly that record.
+        if record.get("resumed_from"):
+            continue
+        if record.get("role") == "manager":
+            managers += 1
+            continue
+        mode = record.get("mode") or "interactive"
+        if mode in modes:
+            modes[mode] += 1
+        else:
+            modes["interactive"] += 1
+    return {
+        "managers": managers,
+        "interactive": modes["interactive"],
+        "headless": modes["headless"],
+        "cluster": modes["cluster"],
+        "a2a": modes["a2a"],
+        # `total` is the cap's unit, so managers are NOT in it — the refusal prints this split
+        # beside a count that excludes them, and two irreconcilable numbers in one sentence is
+        # worse than no split at all.
+        "total": modes["interactive"] + modes["headless"] + modes["cluster"] + modes["a2a"],
+    }
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Count live worker sessions.")
     parser.add_argument("--list", action="store_true", help="print every live worker session")
     parser.add_argument("--count", action="store_true", help="print only the number of live worker sessions")
+    parser.add_argument(
+        "--populations",
+        action="store_true",
+        help="print the manager / interactive / headless populations and their total",
+    )
     parser.add_argument("--endpoint", default=None, help="override the attention store base URL")
     parser.add_argument("--ledger-dir", default=None, help="ACCEPTED AND IGNORED — the ledger comes from the endpoint")
     parser.add_argument("--dir", default=None, help="ACCEPTED AND IGNORED — the registry left the liveness path")
@@ -350,6 +431,18 @@ def main(argv=None):
             "UNKNOWN — cannot read the session-ledger endpoint at %s%s"
             % (_ledger().endpoint_base(args.endpoint), _cause(failures))
         )
+
+    if args.populations:
+        counts = worker_populations(args.endpoint, ledger, on_failure=failures.append)
+        if counts is None:
+            return failed("UNKNOWN — cannot read the session-heartbeat endpoint%s" % _cause(failures))
+        print("managers: %d" % counts["managers"])
+        print("interactive: %d" % counts["interactive"])
+        print("headless: %d" % counts["headless"])
+        print("cluster: %d" % counts["cluster"])
+        print("a2a: %d" % counts["a2a"])
+        print("total: %d" % counts["total"])
+        return 0
 
     workers = live_workers(args.endpoint, ledger, on_failure=failures.append)
     if workers is None:
