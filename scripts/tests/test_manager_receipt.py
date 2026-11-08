@@ -1269,5 +1269,227 @@ class FleetDebt(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "some-goal.debt")))
 
 
+class KeepAliveVerdicts(unittest.TestCase):
+    """A topic round that reads `resume` / `restart` owes an outcome for each verdict.
+
+    The incident (2026-11-08, topic manager eab58671): three `resume` verdicts read on two
+    consecutive ticks, none executed, and `--check` green because every field resolved. The
+    load-bearing pair is (a) verdict with no outcome → red and (c) `executed` backed by the
+    resume's own stamp → green; (b) is what keeps the word `executed` alone from clearing it.
+    """
+
+    VAULT = "/vaults/private-personal"
+    GOAL = "Auto-Merge Trust-Gated PRs"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.live = tempfile.TemporaryDirectory()
+        self.arts = tempfile.TemporaryDirectory()
+        self.resumes = tempfile.TemporaryDirectory()
+        self.exits = tempfile.TemporaryDirectory()
+        os.environ["MANAGER_RESUMES_STATE_DIR"] = self.resumes.name
+        os.environ["SUPERVISOR_SESSION_EXIT_DIR"] = self.exits.name
+        self.m = load(self.tmp.name, self.live.name)
+        self.topic = "Development Pipeline Throughput"
+
+    def tearDown(self):
+        for t in (self.tmp, self.live, self.arts, self.resumes, self.exits):
+            t.cleanup()
+        for k in ("MANAGER_RECEIPT_STATE_DIR", "MANAGER_LIVENESS_STATE_DIR",
+                  "MANAGER_RESUMES_STATE_DIR", "SUPERVISOR_SESSION_EXIT_DIR"):
+            os.environ.pop(k, None)
+
+    # --- helpers ---------------------------------------------------------------
+
+    def cli(self, *argv):
+        out, err, old = io.StringIO(), io.StringIO(), sys.argv
+        sys.argv = ["manager-receipt.py", *argv]
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        return rc, out.getvalue()
+
+    def artifact(self, name, text):
+        p = os.path.join(self.arts.name, name)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return p
+
+    def full_round(self):
+        """Every STEPS field resolves — so any red below is the keep-alive's alone."""
+        self.cli("--start", "--topic", self.topic)
+        ev = os.path.join(self.arts.name, "events.jsonl")
+        with open(ev, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"kind": "LIVENESS", "ts": iso_ts(time.time())}) + "\n")
+        for step, p in (("needs-you", self.artifact("needs-you.txt", NEEDS_YOU_OK)),
+                        ("sweep", self.artifact("sweep.txt", SWEEP_OK)),
+                        ("watcher", ev),
+                        ("readings", self.artifact("readings.json", READINGS_OK))):
+            self.cli("--record", "--topic", self.topic, "--step", step, "--path", p)
+
+    def verdict(self, verdict="resume", goal=GOAL, session="sid-1"):
+        return self.cli("--record-verdict", "--topic", self.topic, "--goal", goal,
+                        "--vault", self.VAULT, "--verdict", verdict, "--session", session)
+
+    def outcome(self, outcome, goal=GOAL):
+        return self.cli("--record-outcome", "--topic", self.topic, "--goal", goal,
+                        "--outcome", outcome)
+
+    def check(self):
+        return self.cli("--check", "--topic", self.topic)
+
+    def resume_stamp(self, epoch):
+        """The stamp `topic-keepalive.py --record-resume` writes, at its own path."""
+        p = self.m.keepalive_module().resume_path(self.VAULT, self.GOAL, "goal")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({"resumes": [epoch]}, fh)
+
+    def spawn_line(self, session, epoch):
+        """The `kind=spawn` line `session-exit-record.py` writes for a relaunched pane."""
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+        with open(os.path.join(self.exits.name, "pane-42.log"), "a", encoding="utf-8") as fh:
+            fh.write("\t".join((ts, "kind=spawn", "pane=42", f"session={session}", "pid=1",
+                                "rc=-", "signal=-", "sender=-", "writer=-")) + "\n")
+
+    # --- the four pinned fixtures ------------------------------------------------
+
+    def test_a_verdict_with_no_outcome_is_red(self):
+        self.full_round()
+        self.assertEqual(self.verdict()[0], 0)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("INCOMPLETE ROUND — skipped: keepalive", out)
+        self.assertIn(self.GOAL, out)
+
+    def test_b_executed_without_the_resume_stamp_is_red(self):
+        self.full_round()
+        self.verdict()
+        self.assertEqual(self.outcome("executed")[0], 0)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: keepalive", out)
+        self.assertIn("no --record-resume stamp", out)
+
+    def test_c_executed_with_an_in_window_resume_stamp_is_green(self):
+        self.full_round()
+        self.verdict()
+        self.outcome("executed")
+        self.resume_stamp(time.time())
+        rc, out = self.check()
+        self.assertEqual((rc, out), (0, ""))
+
+    def test_d_a_round_with_no_verdict_owes_no_keepalive(self):
+        # The goal round and the topic round whose goals all read `jump` / `leave`: the step
+        # is conditional, so a full round stays green and never names `keepalive`.
+        self.full_round()
+        rc, out = self.check()
+        self.assertEqual((rc, out), (0, ""))
+        self.assertNotIn("keepalive", self.m.STEPS)
+
+    # --- the edges -----------------------------------------------------------------
+
+    def test_a_stamp_from_before_the_round_does_not_count(self):
+        self.full_round()
+        self.verdict()
+        self.outcome("executed")
+        self.resume_stamp(time.time() - 3600)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: keepalive", out)
+
+    def test_restart_executed_needs_its_spawn_record(self):
+        self.full_round()
+        self.verdict("restart", session="sid-r")
+        self.outcome("executed")
+        self.assertEqual(self.check()[0], self.m.EXIT_SKIPPED)
+        self.spawn_line("other-sid", time.time())
+        self.assertEqual(self.check()[0], self.m.EXIT_SKIPPED)
+        self.spawn_line("sid-r", time.time())
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_known_refusal_and_deferral_tokens_clear_the_verdict(self):
+        for outcome in ("refused:held-session", "deferred:busy-target"):
+            with self.subTest(outcome=outcome):
+                self.full_round()
+                self.verdict()
+                self.assertEqual(self.outcome(outcome)[0], 0)
+                self.assertEqual(self.check(), (0, ""))
+
+    def test_an_unknown_token_is_refused_at_the_write(self):
+        self.full_round()
+        self.verdict()
+        for bad in ("refused", "refused:whatever", "deferred:cap", "refused:busy-target", "done"):
+            with self.subTest(outcome=bad):
+                self.assertEqual(self.outcome(bad)[0], 2)
+        self.assertEqual(self.check()[0], self.m.EXIT_SKIPPED)
+
+    def test_an_unknown_token_written_around_the_verb_still_reads_red(self):
+        self.full_round()
+        self.verdict()
+        p = self.m.path(self.m.slug(self.topic))
+        with open(p, encoding="utf-8") as fh:
+            d = json.load(fh)
+        d["keepalive"][0]["outcome"] = "refused:whatever"
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump(d, fh)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("not a known outcome", out)
+
+    def test_each_verdict_is_owed_separately(self):
+        self.full_round()
+        self.verdict(goal="Goal A")
+        self.verdict(goal="Goal B")
+        self.outcome("refused:held", goal="Goal A")
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("Goal B", out)
+        self.assertNotIn("Goal A", out)
+
+    def test_start_clears_the_previous_rounds_verdicts(self):
+        self.full_round()
+        self.verdict()
+        self.full_round()
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_a_verdict_needs_a_round_in_progress(self):
+        self.assertEqual(self.verdict()[0], 2)
+
+    def test_the_verbs_are_topic_tier_only(self):
+        self.full_round()
+        with self.assertRaises(SystemExit):
+            self.cli("--record-verdict", "--subject", "Fleet Manager", "--branch", "fleet",
+                     "--goal", "g", "--vault", "/v", "--verdict", "resume")
+
+    # --- the producer ------------------------------------------------------------
+
+    def test_the_probe_writes_the_verdict_onto_the_receipt(self):
+        self.full_round()
+        k = load_module("topic_keepalive", os.path.join(SCRIPTS, "topic-keepalive.py"))
+        err = io.StringIO()
+        with redirect_stderr(err):
+            k.record_on_receipt(self.topic, self.GOAL, self.VAULT, "resume", "sid-1")
+        self.assertEqual(err.getvalue(), "")
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("`resume` verdict has no outcome", out)
+
+    def test_a_receipt_fault_warns_and_never_raises(self):
+        # No `--start`: the write is refused, and the probe must still answer its verdict.
+        k = load_module("topic_keepalive", os.path.join(SCRIPTS, "topic-keepalive.py"))
+        err = io.StringIO()
+        with redirect_stderr(err):
+            k.record_on_receipt(self.topic, self.GOAL, self.VAULT, "resume", "sid-1")
+        self.assertIn("not recorded", err.getvalue())
+
+    def test_probe_and_receipt_agree_on_the_resume_path(self):
+        k = load_module("topic_keepalive", os.path.join(SCRIPTS, "topic-keepalive.py"))
+        self.assertEqual(k.state_path(self.VAULT, self.GOAL, "goal"),
+                         self.m.keepalive_module().resume_path(self.VAULT, self.GOAL, "goal"))
+
+
 if __name__ == "__main__":
     unittest.main()

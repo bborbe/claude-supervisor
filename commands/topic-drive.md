@@ -87,8 +87,11 @@ For **each remaining goal this topic declares**, one call decides:
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/topic-keepalive.py \
-  --vault "<vault-root>" --goal "<goal>"
+  --vault "<vault-root>" --goal "<goal>" --receipt "<topic>"
 ```
+
+Record each owed `resume`/`restart` outcome per
+`${CLAUDE_PLUGIN_ROOT}/commands/steps/topic-keepalive-outcome.md`. **N = 3 gates a start, never a resume.**
 
 The **first line is the verdict**:
 
@@ -113,10 +116,8 @@ reported as a dead manager is how a working session gets a second writer.
 
 ⚠️ **This tier opens a goal manager only for a goal the operator FLAGGED.** Operator ruling
 2026-10-30: *"we dont want to auto open topic-manager, goal-manager ... but flag are fine"* —
-**restart is not open.** A restart resumes a session that already has a subject and a recorded
-id; an open creates supervision where none existed, and deciding who supervises is the
-operator's act. So the Start row is gated on the flag, and `goal-spawn`'s own flag clause no
-longer excludes it.
+**restart is not open** — deciding who supervises is the operator's act, so the Start row is
+gated on the flag.
 
 A goal is **startable for this row** when all hold:
 
