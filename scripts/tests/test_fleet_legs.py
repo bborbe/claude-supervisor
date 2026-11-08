@@ -72,9 +72,10 @@ class Base(unittest.TestCase):
     def run_legs(self, *argv):
         return legs.main(["--digest", self.path] + list(argv))
 
-    def record_all(self, *, lapsed=0, dead=0, flagged=0):
-        """Record a reading for all three keys, the shape a completed round writes."""
+    def record_all(self, *, lapsed=0, topicless=0, dead=0, flagged=0):
+        """Record a reading for all four keys, the shape a completed round writes."""
         self.run_legs("--leg", "lapsed-managers", "--count", str(lapsed))
+        self.run_legs("--leg", "topicless-goal-managers", "--count", str(topicless))
         self.run_legs("--leg", "dead-workers", "--count", str(dead), "--exact")
         self.run_legs("--leg", "operator-flagged", "--count", str(flagged))
 
@@ -142,22 +143,25 @@ class TestCount(Base):
         self.assertIn("keep-alive: unactioned: 2 lapsed-managers", text)
         # The leg's OTHER key keeps its not-run reading — one leg, two counts.
         self.assertIn(
-            "keep-alive: not run — no reading recorded this round · dead-workers", text
+            "keep-alive: not run — no reading recorded this round · topicless-goal-managers, dead-workers",
+            text,
         )
         self.assertIn("flagged-open: not run — no reading recorded this round", text)
-        # Dead-workers and operator-flagged are still seeded, so the shape is not complete.
+        # The other keep-alive keys and operator-flagged are still seeded, so the shape is not complete.
         self.assertEqual(self.run_legs("--check"), legs.EXIT_INCOMPLETE)
         self.record_all(lapsed=2)
         self.assertEqual(self.run_legs("--check"), 0)
 
-    def test_all_three_counts_render_and_check_clean(self):
+    def test_all_four_counts_render_and_check_clean(self):
         self.write(digest_with_legs())
         self.assertEqual(self.run_legs("--leg", "lapsed-managers", "--count", "0"), 0)
+        self.assertEqual(self.run_legs("--leg", "topicless-goal-managers", "--count", "1"), 0)
         self.assertEqual(self.run_legs("--leg", "dead-workers", "--count", "0", "--exact"), 0)
         self.assertEqual(self.run_legs("--leg", "operator-flagged", "--count", "3"), 0)
         text = self.read()
-        self.assertEqual(text.count("unactioned:"), 3)
+        self.assertEqual(text.count("unactioned:"), 4)
         self.assertIn("keep-alive: unactioned: 0 lapsed-managers", text)
+        self.assertIn("keep-alive: unactioned: 1 topicless-goal-managers", text)
         self.assertIn("keep-alive: unactioned: 0 dead-workers", text)
         self.assertIn("flagged-open: unactioned: 3 operator-flagged", text)
         self.assertEqual(self.run_legs("--check"), 0)
@@ -212,7 +216,7 @@ class TestNotRun(Base):
         self.write(digest_with_legs())
         self.run_legs("--leg", "lapsed-managers", "--count", "2")
         self.assertIn(
-            "keep-alive: not run — no reading recorded this round · dead-workers",
+            "keep-alive: not run — no reading recorded this round · topicless-goal-managers, dead-workers",
             self.read(),
         )
 
@@ -224,15 +228,13 @@ class TestNotRun(Base):
         suppressed = self.read()
 
         self.write(digest_with_legs())
-        self.run_legs("--leg", "lapsed-managers", "--count", "0")
-        self.run_legs("--leg", "dead-workers", "--count", "0", "--exact")
-        self.run_legs("--leg", "operator-flagged", "--count", "0")
+        self.record_all()
         empty = self.read()
 
         self.assertNotEqual(suppressed, empty)
         self.assertIn("keep-alive: not run — debt gate (re-arm, exit 12)", suppressed)
         self.assertNotIn("not run —", empty)
-        self.assertEqual(empty.count("unactioned:"), 3)
+        self.assertEqual(empty.count("unactioned:"), 4)
 
     def test_a_count_after_a_not_run_clears_the_not_run_reading(self):
         """A leg that ran on a later round must not keep its earlier skip."""
@@ -241,7 +243,7 @@ class TestNotRun(Base):
         self.assertEqual(self.run_legs("--leg", "lapsed-managers", "--count", "4"), 0)
         text = self.read()
         self.assertIn("keep-alive: unactioned: 4 lapsed-managers", text)
-        self.assertIn("keep-alive: not run — debt gate · dead-workers", text)
+        self.assertIn("keep-alive: not run — debt gate · topicless-goal-managers, dead-workers", text)
         self.run_legs("--leg", "operator-flagged", "--not-run", "debt gate (exit 12)")
         self.assertEqual(self.run_legs("--check"), 0)
 
@@ -306,11 +308,12 @@ class TestDigestPreservation(Base):
 class TestSingleHome(unittest.TestCase):
     """The formats live in output-shape.md item 14, and nowhere else is a second copy."""
 
-    def test_output_shape_defines_the_three_formats(self):
+    def test_output_shape_defines_the_four_formats(self):
         with open(SHAPE, encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("**`Legs`**", text)
         self.assertIn("keep-alive: unactioned: <n> lapsed-managers", text)
+        self.assertIn("keep-alive: unactioned: <n> topicless-goal-managers", text)
         self.assertIn("keep-alive: unactioned: <n> dead-workers", text)
         self.assertIn("flagged-open: unactioned: <n> operator-flagged", text)
         self.assertIn("(lower bound, scan incomplete)", text)

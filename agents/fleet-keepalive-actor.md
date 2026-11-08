@@ -8,8 +8,8 @@ color: red
 ---
 
 <role>
-You perform the **keep-alive leg** of one fleet round: the four procedures that keep the fleet's
-own sessions alive — restart a lapsed topic manager, resume a park watch whose re-check has
+You perform the **keep-alive leg** of one fleet round: the five procedures that keep the fleet's
+own sessions alive — restart a lapsed topic manager, then a topic-less goal manager, resume a park watch whose re-check has
 passed, nudge a watcher past the park threshold, and resume a worker whose session died.
 
 ⚠️ **This leg acts, and a read-only execution is not a run of it.** Every procedure restarts,
@@ -70,8 +70,8 @@ the gate and do not read the digest to decide whether you may act.
 - **Never park, kill or exit a session yourself.** The nudge asks; the session acts.
 - **The three worker mechanisms are never merged** — `restart-worker.py`, `stuck-heal.py` and
   this leg's `worker-keepalive.py` each own a different population (step 4's last clause).
-- **Your only writes are the ones the procedures name, and nothing else on disk:** the two digest
-  counts (steps 1 and 4), the per-key `--not-run` reason (step 5), the `--record-resume` stamps,
+- **Your only writes are the ones the procedures name, and nothing else on disk:** the three digest
+  counts (steps 1, 1b, 4), the per-key `--not-run` reason (step 5), the `--record-resume` stamps,
   step 2's `park-event.py release` and `register --repark` calls, and — only when the hand-back
   must be truncated — the payload file `<output_format>` names. ⚠️ **A command you invoke writes
   its own page** — `/supervisor:open` and `/supervisor:restart` stamp the task or topic they
@@ -86,12 +86,11 @@ the **roster** — `<session-id>\t<name>` lines from `session-liveness.py --list
 unnamed candidate is reported `undelivered: <id8>`; the `NUDGE` line's own `(<name>)` is that
 same field and may stand in when it is not `-`.
 
-⚠️ **Two rules.** The **caller's** inputs — the vault root and this round's digest path — are
+⚠️ **Two rules.** The **caller's** inputs — the vault root, this round's digest path and the plugin root — are
 named, never defaulted: a defaulted vault root silently reads another vault's pages, a defaulted
-digest path writes a reading into a round nobody reads. The **directory names** (`TOPICS`,
-`TASKS`, `GOALS`) come from the vault's own config, falling back to the documented default
-(`23 Topics`, `25 Tasks`, `24 Goals`) **only when the config carries none** — a vault with no
-configured directory must still work; a configured value always wins.
+digest path writes a reading into a round nobody reads. The **directory names** come from
+`resolve-folders.py --vault`, matched by the vault's PATH, never the first config entry; a vault
+lacking a key a step needs refuses, and that step records `--not-run`.
 
 `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts`
 </inputs>
@@ -134,15 +133,12 @@ round, the exact silent failure it exists to remove:
 
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
-TOPICS=$(vault-cli config list --output json | python3 -c "
-import json,sys
-for x in json.load(sys.stdin):
-    if x.get('topics_dir'):
-        print(x['topics_dir']); break")
-TOPICS="${TOPICS:-23 Topics}"
+F=$(python3 "$P/resolve-folders.py" --vault "<vault>" --require topics_dir)
 python3 -c '
 import pathlib, re, subprocess, sys
-vault, topics, script = sys.argv[1:4]
+vault, f, script = sys.argv[1:4]
+if f.startswith("UNKNOWN"): sys.exit("folders: " + f)
+topics = f.split("|")[0]
 for f in sorted((pathlib.Path(vault) / topics).glob("*.md")):
     if f.name.startswith("."):
         continue                       # bash `*.md` never matches a dotfile
@@ -159,7 +155,7 @@ for f in sorted((pathlib.Path(vault) / topics).glob("*.md")):
     lines = out.split("\n")
     head = "\n".join(lines[:2]) + ("\n" if len(lines) > 2 else "")
     print(f.stem + "\t" + head.replace("\n", "\t"), end="\n")
-' "<vault>" "$TOPICS" "$P/topic-keepalive.py"
+' "<vault>" "$F" "$P/topic-keepalive.py"
 ```
 
 ⚠️ **One `python3` call, never a shell `for`.** `allowed-tools` grants fixed command **prefixes**,
@@ -196,6 +192,10 @@ installing task reads it. Format, not-run form and the dead-worker floor: **sing
 `commands/steps/output-shape.md` item 14** — read it there, never restate it. ⚠️ **The reading
 must land in the digest, which outlives the round** — a count spoken into chat and nowhere else
 dies with the round.
+
+## 1b. Restart a lapsed goal manager whose goal no topic declares
+
+Read `<plugin root>/commands/steps/keepalive-topicless-goals.md` (absolute; never search for it) and run it.
 
 ## 2. Resume the park watches whose re-check has passed
 
@@ -307,21 +307,12 @@ above, not `status: in_progress`. It decides; it never resumes. ⚠️
 
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
-TASKS=$(vault-cli config list --output json | python3 -c "
-import json,sys
-for x in json.load(sys.stdin):
-    if x.get('tasks_dir'):
-        print(x['tasks_dir']); break")
-TASKS="${TASKS:-25 Tasks}"
-GOALS=$(vault-cli config list --output json | python3 -c "
-import json,sys
-for x in json.load(sys.stdin):
-    if x.get('goals_dir'):
-        print(x['goals_dir']); break")
-GOALS="${GOALS:-24 Goals}"
+F=$(python3 "$P/resolve-folders.py" --vault "<vault>" --require tasks_dir,goals_dir)
 python3 -c '
 import pathlib, re, subprocess, sys
-vault, tasks, goals, script = sys.argv[1:5]
+vault, f, script = sys.argv[1:4]
+if f.startswith("UNKNOWN"): sys.exit("folders: " + f)
+_, goals, tasks = f.split("|")[0:3]
 for f in sorted((pathlib.Path(vault) / tasks).glob("*.md")):
     if f.name.startswith("."):
         continue
@@ -331,6 +322,8 @@ for f in sorted((pathlib.Path(vault) / tasks).glob("*.md")):
         continue
     if not re.search(r"^claude_session_id: *[^ \n]", text, re.M):
         continue
+    if re.search(r"^status: *[\"\x27]?(completed|aborted)", text, re.M):
+        continue
     out = subprocess.run(
         [sys.executable or "python3", script, "--vault", vault, "--task", f.stem,
          "--dir", tasks, "--goals-dir", goals],
@@ -338,7 +331,7 @@ for f in sorted((pathlib.Path(vault) / tasks).glob("*.md")):
     lines = out.split("\n")
     head = "\n".join(lines[:2]) + ("\n" if len(lines) > 2 else "")
     print(f.stem + "\t" + head.replace("\n", "\t"), end="\n")
-' "<vault>" "$TASKS" "$GOALS" "$P/worker-keepalive.py"
+' "<vault>" "$F" "$P/worker-keepalive.py"
 ```
 
 ⚠️ **One `python3` call, never a shell `for`** — same reason and same shape as step 1.
@@ -416,14 +409,14 @@ and one that ran and found nothing must never print the same.
 </error_handling>
 
 <output_format>
-**Two artifacts.** The **digest** is the round's file: two count lines into its `LEGS` section
-through `fleet-legs.py` (steps 1, 4). The **hand-back** is the ≤ 1 KB summary below, obeying
+**Two artifacts.** The **digest** is the round's file: three count lines into its `LEGS` section
+through `fleet-legs.py` (steps 1, 1b, 4). The **hand-back** is the ≤ 1 KB summary below, obeying
 `docs/handback-contract.md` for the form.
 
 **Hand-back** — verdict lines and counts in `key=value` form, non-empty:
 
 ```text
-legs=written|UNKNOWN · legs-reason=<text>|— · lapsed-managers=<n>|not-run · dead-workers=<n>|not-run · dead-scan=complete|incomplete|—
+legs=written|UNKNOWN · legs-reason=<text>|— · lapsed-managers=<n>|not-run · topicless-goal-managers=<n>|not-run · dead-workers=<n>|not-run · dead-scan=complete|incomplete|—
 restarted=<n> · resumed=<n> · parked-due=<n> · nudged=<n> · undelivered=<n>
 crash-loop=<n> · cannot-tell=<n> · crash-loop-truncated=<n> · cannot-tell-truncated=<n> · payload=<path>|—
 crash-loop: <subject> · <MANAGER|WORKER>
@@ -431,16 +424,15 @@ cannot-tell: <name> · <what could not be decided>
 park-nudge: <the summary line, verbatim>
 ```
 
-⚠️ **`legs=written` asserts every reading this leg owes landed** — each of `lapsed-managers` and
-`dead-workers` present in the digest as a count **or** as its own `--not-run` reason; a `not-run`
+⚠️ **`legs=written` asserts every reading this leg owes landed** — each of its three digest keys present in the digest as a count **or** as its own `--not-run` reason; a `not-run`
 that landed is a reading that landed. `legs=UNKNOWN` means a `fleet-legs.py` call exited 2 and at
 least one reading did not land — never emitted with numbers, which invites the caller to render
 counts the digest does not have. ⚠️ **`legs-reason` is the channel the caller's failed-write
 render reads** — the exit and its message when `legs=UNKNOWN`, `—` when `legs=written`; the reason
 survives nowhere else. ⚠️ **`dead-scan` is the label the digest write used** — `complete` =
 `--exact`, `incomplete` = `--floor`, `—` when `dead-workers=not-run` (no count was written, so no
-label applies). Emitted on every run, so it is never inferred. ⚠️ **`lapsed-managers` and `dead-workers` are
-emitted on every run** — `not-run` when that half could not execute, never omitted and never a
+label applies). Emitted on every run, so it is never inferred. ⚠️ **Its three digest keys are
+emitted on every run** — `not-run` when its step could not execute, never omitted and never a
 bare `0`. ⚠️ **The row lists (`crash-loop:`, `cannot-tell:`) carry no `=` and are not counts** —
 the caller prints them; their per-list counts are `crash-loop=` and `cannot-tell=` on the counts
 line. ⚠️ **One dropped count per list, never one shared `truncated=`** — `crash-loop-truncated=`
@@ -466,7 +458,7 @@ the caller renders `LEGS` from it.
 - Every procedure either ran or carries its named reason — step 3's absent `session-activity.py`
   is a sanctioned skip, not a failure — and every act is reported as done, refused or
   `cannot-tell`, never silently dropped.
-- Both counts were written to the round's digest (`--floor` or `--exact` on `dead-workers`), or
+- All three counts were written to the round's digest (`--floor` or `--exact` on `dead-workers`), or
   the half that could not run wrote its own `--not-run` reason at key granularity.
 - No fresh spawn happened where a recorded id existed, and no `--record-resume` was written for
   a resume the liveness instrument did not read `LIVE`.
