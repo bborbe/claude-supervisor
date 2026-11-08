@@ -24,6 +24,15 @@
 // defect as the mid-turn `result` that `agent-loop.mjs` already guards against. The end
 // frame therefore carries no reason and this module asks the wrapper directly: `exited` is a
 // real end, anything else is a `StreamLaggedError` the caller must not settle as success.
+//
+// ⚠️ **A third case: the connection died and the child did not.** The wrapper is restarted
+// routinely (`launchctl kickstart -k`), and every restart used to end every streaming worker
+// as `error` — a `TypeError: terminated` from undici reaching `runAgentLoop`'s catch while the
+// child was still generating. The wrapper re-adopts that child and serves its event file
+// again, so the correct behaviour is to RECONNECT, not to fail: every frame carries `id:` and
+// the retry sends `Last-Event-ID`, which resumes at exactly the event this client stopped at.
+// A `409` is the one answer that is not retried — it means the wrapper no longer retains that
+// point, and serving a different one would leave an invisible hole in the transcript.
 
 import { Agent, fetch as undiciFetch } from 'undici'
 
@@ -55,13 +64,61 @@ const DEFAULT_TIMEOUT_MS = 10_000
 // `dispatcher`, or drop the option.
 const SSE_DISPATCHER = new Agent({ bodyTimeout: 0 })
 
+/**
+ * Marker for "this stream did not end because the child finished".
+ *
+ * ⚠️ **Consumers must test `gap`, never a list of class names.** A name set has to be
+ * updated by hand every time a new gap class is added, and the failure when it is not is
+ * silent and in the dangerous direction: `runAgentLoop` settles `done` on any error it does
+ * not recognise, so a forgotten name reports a holed transcript as a completed turn. Every
+ * class below carries `gap = true`, and the consumer asks that one question.
+ */
+export class StreamGapBaseError extends Error {
+  constructor(name, message) {
+    super(message)
+    this.name = name
+    this.gap = true
+  }
+}
+
 /** Raised when the stream stopped for a reason other than the child exiting. */
-export class StreamLaggedError extends Error {
+export class StreamLaggedError extends StreamGapBaseError {
   constructor(sessionId, state) {
-    super(`session ${sessionId} stream ended while the child was still ${state} — the subscriber fell behind, so this is not a completed turn`)
-    this.name = 'StreamLaggedError'
+    super('StreamLaggedError', `session ${sessionId} stream ended while the child was still ${state} — the subscriber fell behind, so this is not a completed turn`)
     this.sessionId = sessionId
     this.state = state
+  }
+}
+
+/**
+ * Raised when the reconnect budget is spent before the stream reached its end sentinel.
+ *
+ * ⚠️ This is a gap, not a failure to report as `done`: the child never said it finished, and
+ * the events between the last frame this client saw and wherever the successor got to are
+ * simply missing. It covers all three exhaustion shapes — a persistent non-ok response, a
+ * body that kept throwing, and a body that closed cleanly without the sentinel (the shape a
+ * graceful drain produces).
+ */
+export class StreamExhaustedError extends StreamGapBaseError {
+  constructor(sessionId, reason) {
+    super('StreamExhaustedError', `session ${sessionId} reconnect budget exhausted before the end sentinel (${reason}) — the transcript may have a hole and this turn cannot be settled as done`)
+    this.sessionId = sessionId
+    this.reason = reason
+  }
+}
+
+/**
+ * Raised when the wrapper answers `404`/`410` for a stream.
+ *
+ * ⚠️ **A gap, not a plain failure.** The child is gone or unknown, and the stream ended
+ * without the end sentinel — so nothing here proves the turn completed. A `result` captured
+ * before the session vanished must not settle the worker `done`.
+ */
+export class StreamSessionGoneError extends StreamGapBaseError {
+  constructor(sessionId, status) {
+    super('StreamSessionGoneError', `session ${sessionId} stream ended without the end sentinel: the wrapper reports the session gone (HTTP ${status}) — this turn cannot be settled as done`)
+    this.sessionId = sessionId
+    this.status = status
   }
 }
 
@@ -72,6 +129,65 @@ export class WrapperError extends Error {
     this.name = 'WrapperError'
     this.status = status
   }
+}
+
+/**
+ * Raised when the wrapper no longer retains the event the client asked to resume from.
+ *
+ * ⚠️ This is deliberately NOT a reconnect: the wrapper answers `409` when the sequence the
+ * client holds has fallen out of its retained window, and re-opening the stream would replay
+ * from a different point. The turn's transcript would then have an invisible hole — every
+ * event before the gap delivered twice, or the gap itself skipped — and a worker settled
+ * `done` on that stream reports a completed turn that never actually completed. Surfacing it
+ * is the only honest outcome: the caller must not treat this worker as finished.
+ */
+export class StreamGapError extends StreamGapBaseError {
+  constructor(sessionId, lastEventId) {
+    super('StreamGapError', `session ${sessionId} stream resume point ${lastEventId} is no longer retained — the transcript has a gap and this turn cannot be settled as done`)
+    this.sessionId = sessionId
+    this.lastEventId = lastEventId
+  }
+}
+
+/**
+ * Reconnect policy for a stream whose connection died under a live child.
+ *
+ * ⚠️ **The defaults are sized to a daemon restart, not to a blip.** `launchctl kickstart -k`
+ * sends SIGTERM, waits out the exit timeout, then SIGKILLs, and the successor re-adopts the
+ * child and opens its listener again — so the gap a client must ride out is seconds, not
+ * milliseconds. Two minutes of budget at a 5 s ceiling is what makes "restart the wrapper as
+ * often as you like" true for a worker that is mid-turn.
+ */
+export const DEFAULT_RECONNECT = {
+  // Attempts, not seconds: each attempt is one fetch, and a refused connection fails fast.
+  maxAttempts: 24,
+  // Exponential, so a fast restart is picked up in ~100 ms instead of waiting out a fixed poll.
+  baseDelayMs: 100,
+  maxDelayMs: 5_000,
+  // The wall-clock ceiling, so a wrapper that never comes back fails the worker in bounded
+  // time rather than leaving it `running` forever.
+  maxElapsedMs: 120_000,
+  // Injectable clock. It exists so a spec can prove the budget is measured per OUTAGE rather
+  // than from stream open — the defect that made every long-lived stream unretryable.
+  now: () => Date.now(),
+}
+
+/** Resolve after `ms`, or `false` as soon as `signal` aborts. */
+function sleepUnlessAborted(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve(false)
+      return
+    }
+    const done = (value) => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', onAbort)
+      resolve(value)
+    }
+    const onAbort = () => done(false)
+    const timer = setTimeout(() => done(true), ms)
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 function baseOf(baseUrl) {
@@ -229,7 +345,7 @@ export async function readWrappedSession({ baseUrl, sessionId, fetchImpl = fetch
  * arrives as its own frame. Kept as a generator over text chunks so a partial frame split
  * across two reads is buffered rather than dropped — a chunk boundary is not a frame boundary.
  */
-export async function* parseSSE(stream) {
+export async function* parseSSE(stream, tracker) {
   const decoder = new TextDecoder()
   let buffer = ''
   let ended = false
@@ -239,9 +355,10 @@ export async function* parseSSE(stream) {
     while ((sep = buffer.indexOf('\n\n')) !== -1) {
       const frame = buffer.slice(0, sep)
       buffer = buffer.slice(sep + 2)
-      const out = frameOf(frame)
+      const out = frameOf(frame, tracker)
       if (out === END) {
         ended = true
+        if (tracker) tracker.ended = true
         break
       }
       if (out !== null) yield out
@@ -249,16 +366,42 @@ export async function* parseSSE(stream) {
     if (ended) return
   }
   // A final frame without its blank-line terminator still counts.
-  const tail = frameOf(buffer)
-  if (tail !== null && tail !== END) yield tail
+  const tail = frameOf(buffer, tracker)
+  if (tail === END) {
+    if (tracker) tracker.ended = true
+  } else if (tail !== null) {
+    yield tail
+  }
 }
 
 const END = Symbol('end')
 
-function frameOf(frame) {
+/**
+ * Decode one SSE frame.
+ *
+ * ⚠️ `tracker` is how the caller learns where it got to. The wrapper writes `id:` on every
+ * frame — the `events.jsonl` line number — and that value is the ONLY thing a reconnect can
+ * resume from: it survives a daemon restart because the file is append-only and a given
+ * line's index never changes. A parser that drops the id leaves the caller with no resume
+ * point and no way to tell a clean end from a dropped connection.
+ *
+ * `tracker.ended` records that the wrapper sent its `event: end` sentinel, which is the one
+ * end that means "the child finished" rather than "the connection died".
+ */
+function frameOf(frame, tracker) {
   let data = null
   let sawEnd = false
   for (const line of frame.split('\n')) {
+    if (line.startsWith('id:')) {
+      const id = line.slice(3).trim()
+      if (tracker && id !== '') {
+        tracker.lastId = id
+        // Distinguishes "no id on this connection" from "the same id again": only the
+        // former makes the stream unresumable, the latter is a stuck wrapper that must
+        // consume the budget instead.
+        tracker.sawId = true
+      }
+    }
     if (line.startsWith('event:') && line.slice(6).trim() === 'end') sawEnd = true
     if (line.startsWith('data:')) data = line.slice(5).trim()
   }
@@ -280,25 +423,173 @@ function frameOf(frame) {
  * messages, and treat iteration ending as the end of the turn. A non-exit end throws
  * `StreamLaggedError` so a lagging subscriber is never mistaken for a finished worker.
  */
-export async function* streamWrappedSession({ baseUrl, sessionId, fetchImpl = undiciFetch, signal }) {
-  const resp = await fetchImpl(`${baseOf(baseUrl)}/api/1.0/sessions/${encodeURIComponent(sessionId)}/events`, {
-    method: 'GET',
-    headers: { accept: 'text/event-stream' },
-    // Load-bearing: without it undici tears the body down after five idle minutes and a
-    // healthy parked child is recorded as a dead worker. See SSE_DISPATCHER above.
-    dispatcher: SSE_DISPATCHER,
-    ...(signal ? { signal } : {}),
-  })
-  if (!resp.ok) {
-    throw new WrapperError(`wrapper stream failed: HTTP ${resp.status}`, resp.status)
+export async function* streamWrappedSession({
+  baseUrl,
+  sessionId,
+  fetchImpl = undiciFetch,
+  signal,
+  reconnect = {},
+}) {
+  const policy = { ...DEFAULT_RECONNECT, ...reconnect }
+  const now = policy.now
+  const url = `${baseOf(baseUrl)}/api/1.0/sessions/${encodeURIComponent(sessionId)}/events`
+
+  // ⚠️ **A daemon restart is not the end of a turn.** The wrapper re-adopts the child and
+  // serves its event file again, so the connection dying mid-turn is a gap to ride out, not a
+  // terminal state. Every frame carries `id:`, and `Last-Event-ID` is what makes the successor
+  // resume from exactly where this client stopped instead of replaying — or, worse, starting
+  // over and duplicating the transcript.
+  let lastId = null
+
+  // ⚠️ **The budget bounds ONE OUTAGE, not the stream's lifetime.** A parked or long-running
+  // worker's stream is open for hours, and measuring from stream open gave such a stream ZERO
+  // retry once it passed `maxElapsedMs` — so a restart still failed exactly the workers this
+  // change exists to protect.
+  //
+  // So the clock starts when a connection FAILS, not when it opens: `attempt === 0` means the
+  // stream is healthy, and the first failure of an outage stamps `outageStartedAt`. A
+  // connection that delivers an event ends the outage (`attempt` back to 0), so the next
+  // failure gets its own budget. A connection that opens and dies without a frame does NOT
+  // reset, so a wrapper that accepts and immediately closes keeps consuming one budget instead
+  // of looping forever.
+  let attempt = 0
+  let outageStartedAt = 0
+  // Whether ANY frame ever arrived. A stream that carried frames but no ids cannot be
+  // resumed, and reconnecting blind would duplicate or skip the transcript.
+  let sawAnyFrame = false
+
+  for (;;) {
+    if (signal?.aborted) return
+
+    const headers = { accept: 'text/event-stream' }
+    if (lastId !== null) headers['Last-Event-ID'] = lastId
+
+    let resp
+    try {
+      resp = await fetchImpl(url, {
+        method: 'GET',
+        headers,
+        // Load-bearing: without it undici tears the body down after five idle minutes and a
+        // healthy parked child is recorded as a dead worker. See SSE_DISPATCHER above.
+        dispatcher: SSE_DISPATCHER,
+        ...(signal ? { signal } : {}),
+      })
+    } catch (err) {
+      if (signal?.aborted) return
+      // A refused connection is the normal shape of a daemon that is restarting: the port is
+      // briefly not listening. Retry it on the same budget as a dropped body.
+      if (await waitForRetry()) continue
+      if (signal?.aborted) return
+      throw new StreamExhaustedError(sessionId, `connect failed: ${err?.message ?? err}`)
+    }
+
+    // ⚠️ 409 is the wrapper saying the resume point fell out of its retained window. Re-opening
+    // would hand back a DIFFERENT point, so the transcript would carry an invisible hole — the
+    // one failure this whole stream exists to make impossible. Never retried.
+    if (resp.status === 409) {
+      throw new StreamGapError(sessionId, lastId)
+    }
+    if (!resp.ok) {
+      // A 404/410 is a settled answer about the session, not a transport blip: the child is
+      // gone or unknown, and retrying cannot change that.
+      if (resp.status === 404 || resp.status === 410) {
+        throw new StreamSessionGoneError(sessionId, resp.status)
+      }
+      if (await waitForRetry()) continue
+      if (signal?.aborted) return
+      throw new StreamExhaustedError(sessionId, `HTTP ${resp.status}`)
+    }
+
+    const tracker = { lastId, ended: false, sawId: false }
+    // Where this connection started. A connection that delivers an id we did not already
+    // have has genuinely resumed the transcript — that is progress, and it earns a fresh
+    // budget. One that re-delivers the SAME id has not: a wrapper stuck re-sending one event
+    // and dropping the body would otherwise reset the budget on every attempt and reconnect
+    // forever.
+    const lastIdAtConnect = lastId
+    let sawProgress = false
+    let sawFramesThisConnection = false
+    let bodyError = null
+    try {
+      for await (const message of parseSSE(resp.body, tracker)) {
+        sawAnyFrame = true
+        sawFramesThisConnection = true
+        if (!sawProgress && tracker.lastId !== null && tracker.lastId !== lastIdAtConnect) {
+          sawProgress = true
+          attempt = 0
+        }
+        yield message
+      }
+    } catch (err) {
+      bodyError = err
+    }
+    if (tracker.lastId !== null) lastId = tracker.lastId
+
+    // The wrapper sent its end sentinel: the child really finished, so stop reconnecting.
+    if (tracker.ended) break
+    if (signal?.aborted) return
+
+    // ⚠️ **A connection that delivered frames but no `id:` cannot be resumed.** That is an
+    // older wrapper or a deploy skew, and reconnecting blind would either replay the whole
+    // transcript (firing `onTurnComplete` again for every replayed result) or silently skip
+    // the gap. Checked per CONNECTION, not once for the stream: a successor that starts
+    // serving frames without ids is exactly as unresumable as a first connection that never
+    // had them.
+    if (sawFramesThisConnection && !tracker.sawId) {
+      throw new StreamGapError(sessionId, lastId)
+    }
+
+    // The body ended or threw without the sentinel — the connection died under a live child.
+    if (await waitForRetry()) continue
+    if (signal?.aborted) return
+    throw new StreamExhaustedError(
+      sessionId,
+      bodyError
+        ? `body failed: ${bodyError?.message ?? bodyError}`
+        : 'body closed without the end sentinel',
+    )
   }
-  for await (const message of parseSSE(resp.body)) {
-    yield message
+
+  // The stream ended on its own terms. Ask why before letting the caller settle a terminal
+  // state — a lag is still not a finished turn.
+  //
+  // ⚠️ The read itself can fail (the daemon restarts between the sentinel and this call), and
+  // an unguarded throw here would be a non-gap error: a captured `result` would then settle
+  // the worker `done` on an end nobody confirmed. Confirming is part of the classification,
+  // so a failed confirmation is a gap too.
+  let session
+  try {
+    session = await readWrappedSession({ baseUrl, sessionId, fetchImpl })
+  } catch (err) {
+    throw new StreamExhaustedError(
+      sessionId,
+      `end-of-stream confirmation failed: ${err?.message ?? err}`,
+    )
   }
-  // The stream ended. Ask why before letting the caller settle a terminal state.
-  const session = await readWrappedSession({ baseUrl, sessionId, fetchImpl })
   if (session.state !== 'exited') {
     throw new StreamLaggedError(sessionId, session.state)
+  }
+
+  /**
+   * Advance the backoff, or report that this outage's budget is spent.
+   *
+   * Returns `false` for BOTH exhaustion and an aborted signal — the callers distinguish them
+   * by re-checking `signal.aborted`, so an abort returns cleanly instead of being reported as
+   * a failed reconnect.
+   */
+  async function waitForRetry() {
+    if (attempt === 0) {
+      // First failure of a new outage: this is where its clock starts.
+      outageStartedAt = now()
+    }
+    attempt += 1
+    const elapsed = now() - outageStartedAt
+    if (attempt > policy.maxAttempts || elapsed >= policy.maxElapsedMs) return false
+    const delay = Math.min(policy.baseDelayMs * 2 ** (attempt - 1), policy.maxDelayMs)
+    // Never sleep past the wall-clock ceiling: a 5 s wait when 200 ms of budget remains would
+    // overshoot it and turn a bounded failure into an unbounded one.
+    const remaining = policy.maxElapsedMs - elapsed
+    return sleepUnlessAborted(Math.min(delay, remaining), signal)
   }
 }
 
