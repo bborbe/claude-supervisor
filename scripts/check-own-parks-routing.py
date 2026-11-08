@@ -51,6 +51,9 @@ BOUNDARY_HEADING = "### Is the class-C question the manager's?"
 BOUNDARY_TIEBREAK = "it is the operator's"
 #: The fallback for a routed park nobody answered. A routed park that comes back is escalated.
 ROUTED_FALLBACK = "escalated, not routed again"
+#: Wrapper parks are surfaced, never routed — measured: `claude-wrapper` denies the tool before
+#: the message is read, so routing one reports an answered park the worker never saw.
+WRAPPER_NOT_ROUTED = "park is never routed"
 
 
 def require(path: Path, needle: str, failures: list[str], why: str) -> None:
@@ -125,6 +128,14 @@ def main() -> int:
         failures,
         "A routed park nobody answered must escalate on the second tick. Without it a broken "
         "answer path is indistinguishable from a slow worker.",
+    )
+    require(
+        OWN_PARKS,
+        WRAPPER_NOT_ROUTED,
+        failures,
+        "A `pending_question` park must stay unrouted. `claude-wrapper` denies the tool before "
+        "the message is read (measured 2026-11-08, two probes), so routing one reports an "
+        "answered park the worker never saw — worse than the timeout it replaces.",
     )
 
     if failures:

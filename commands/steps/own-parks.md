@@ -53,13 +53,15 @@ Task tool with:
 
 Scoped mode reads the parks once and never waits on `await_permission`, so it costs the tick one bounded read rather than idle timeouts. The wrangler answers `allow` only when the request's `allowlist_entry` is non-null and no deny class matches — which is why only the `pending_permissions` ids are dispatched. Everything it does not answer stays pending, as an escalation.
 
-An escalation of an ordinary tool request stays pending for the operator — that is the correct result. A **`pending_question`** park is never dispatched to the wrangler (it carries no `allowlist_entry`, per the split above); a class-C `AskUserQuestion` among them is instead **routed** to step 7, because leaving it pending is what the 15-minute timeout then answers with a denial.
+An escalation of an ordinary tool request stays pending for the operator — that is the correct result.
+
+⚠️ **A `pending_question` park is never routed, and this is measured, not assumed.** `claude-wrapper` refuses the tool before the message is read: answering one with `answer_permission(deny, message="Manager answer, via supervisor: <option>")` returns success and the worker receives `denied by claude-wrapper`, not the answer. Measured 2026-11-08 with two headless probes — both parked, both appeared in `pending_permissions`, both received nothing. So a **wrapper-backed** class-C park is surfaced and escalated, exactly as the split above says; routing it would report an answered park that the worker never saw. Routing applies only to a **`pending_permissions`** `AskUserQuestion`, whose park this server holds and can settle.
 
 ⚠️ **Latency limit.** The step sees only what is parked when it runs. A park raised just after it waits for the next tick, and at a 15-minute interval it auto-denies first (`worker-channels.md`: *"Answer promptly or not at all"*). This step shortens the wait for routine parks; it does not make it zero.
 
 ## What this step never answers
 
-The class boundary is a closed list. Class B is the only class this step **answers**; a class-C **`AskUserQuestion`** the manager owns is **routed** to step 7 rather than left pending; every other park below stays pending for the operator, and the wrangler escalating it is the correct result, not a failure.
+The class boundary is a closed list. Class B is the only class this step **answers**; a class-C **`AskUserQuestion` from `pending_permissions`** that the manager owns is **routed** to step 7 rather than left pending; every other park below — including every `pending_question` park — stays pending for the operator, and the wrangler escalating it is the correct result, not a failure.
 
 ⚠️ **Routing is scoped to `AskUserQuestion`, not to class C as a whole.** The `Manager answer, via supervisor:` prefix is honoured on an `AskUserQuestion` only — *"a denial on `Bash`, `Edit` or `Write` stays a denial whatever prefix it carries"* (`${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § The two prefixes are not interchangeable). A class-C park that is not a question, such as the `gh pr ready` in the table below, has no channel that can carry an answer and is never routed.
 
@@ -82,7 +84,7 @@ Two readings, and only the first is routed:
 
 ⚠️ **A routed park that comes back is escalated, not routed again.** If the same `request_id` appears as a class-C escalation on **two consecutive ticks**, step 7's answer did not land — the worker is still parked. Route it once more is pointless: report it in the escalated `C` count and name it for the operator on that second tick. This is the fleet tier's only fallback for a routed park that no one answered, and without it a broken answer path looks exactly like a worker that is simply slow.
 
-⚠️ **The question you judge is the park's own text, never a guess from the tool name.** Two park sources carry it: a **`pending_question`** row holds `{request_id, kind, tool_name, tool_use_id, input}` — the raw wrapper question and its options — and a **`pending_permissions`** `AskUserQuestion` reaches you through the wrangler's escalation line, which `agents/goal-wrangler.md` § `<output_format>` requires to carry the question and its option labels. A park whose text names neither cannot be classified: leave it pending and report it as such.
+⚠️ **The question you judge is the wrangler's escalation text, never a guess from the tool name.** Only a `pending_permissions` `AskUserQuestion` is routable, and it reaches you through the wrangler's escalation line, which `agents/goal-wrangler.md` § `<output_format>` requires to carry the question and its option labels. An escalation that names only `C` cannot be classified: leave it pending and report it as such. A `pending_question` park is never classified here at all — it is not routable (see § Dispatch).
 
 ## Report
 
