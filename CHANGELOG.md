@@ -8,6 +8,28 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: a `claude-wrapper` restart no longer kills a streaming headless worker. The event stream
+  reconnects instead of failing: every SSE frame's `id:` is tracked and sent back as
+  `Last-Event-ID`, so the retry resumes at exactly the event the client stopped at, with
+  exponential backoff (100 ms → 5 s, 24 attempts, 2 min cap) sized to ride out a daemon restart.
+  A refused connection is treated as a restart rather than a failure. A `409` is never retried —
+  it means the wrapper no longer retains that resume point, and serving a different one would
+  leave an invisible hole in the transcript, so it raises `StreamGapError` instead. The backoff
+  budget is **per outage, not per stream** — a parked or long-running worker whose stream has
+  been open for hours still reconnects, because the clock starts when a connection fails and
+  resets only on real progress (a new event id), so a wrapper stuck re-sending one event cannot
+  loop forever. Every gap class — `StreamLaggedError`, `StreamGapError`, `StreamExhaustedError`
+  (retry budget spent) and `StreamSessionGoneError` (a `404`/`410` mid-stream) — carries a `gap`
+  marker, and `runAgentLoop` settles `error` on that marker rather than on a list of class
+  names, so a captured mid-turn `result` can never settle a holed transcript `done`. The
+  end-of-stream confirmation read is guarded too: a failed read there is a gap, not an
+  unconfirmed `done`. A connection that carried frames but no `id:` fails loudly instead of
+  reconnecting blind and duplicating the transcript — checked per connection, so a successor
+  that starts serving frames without ids is caught as well. Previously undici's `TypeError: terminated` reached `runAgentLoop`'s catch and the
+  worker settled `error` while its child was still generating.
+
 ## v0.251.1
 
 - fix: **`/supervisor:open`'s RESUME branch picks its launcher by running code, not by reading prose.** § 3.1 exec'd `"<claude_script>" --resume` and left the value to a sentence in the same file (*"apply the rule yourself: `vault-cli task get … launcher`"*), so whichever session ran the resume chose the launcher and nothing checked the result. Measured 2026-11-07: two `role: agent` rows with no `launcher:` were resumed as `cc-private-claude --resume … /color cyan` because their resumer ran on Opus. New `scripts/resolve-launcher.py` prints `<launcher>\t<source>\t<role>\t<chip>` from `restart-worker.py`'s `resolve_launcher` — the same rule the restart path uses, so the two cannot disagree — and the call site now uses both fields. `resolve_launcher` also gains the `role: human` arm (`_human_launcher`), a Python port of `applyHumanLauncherRule`: the `-claude` sibling ahead of a configured `manager_launcher`, then the manager chain, with a task's own `launcher:` still winning. The chip follows the ROLE through the published role map rather than defaulting to the caller's colour. ⚠️ **A manager resume is detected first** (`restart-worker.py` `resume_role` → `session_subject`): a manager session carries no task page, so a claimant-only lookup would have read it as a worker and resumed it on the worker default — the same defect one layer down. It reads the goal/topic page's `claude_session_id`, never the live session registry: the registry is deleted when a session exits, and a manager only reaches the resume path once it has exited, so a registry-based lookup answers "not a manager" exactly where the resume happens. The chip then follows `manager` → `orange`; a manager with no goal or topic page (the root) still reads as `agent` for the chip, since the page is the only source that survives an exited session. `_human_launcher`'s last rung is the vault's `claude_script`, never the worker default — matrix Rule 4 and `applyHumanLauncherRule` both end there, and returning the worker resolution would put a human row on `-deepseek` in a vault that configures `worker_launcher` but has no `-claude` sibling and no `manager_launcher`. `session_subject` refuses two pages claiming one session id, the same guard `session_claimant` carries. ⚠️ **Both values are shape-checked before they reach the spawn**: the launcher against the same plain-path rule `resolve_launcher` applies (the `SUPERVISOR_LAUNCHER` arm skips it), and the chip against the eight colours `/color` accepts — a corrupt role map carrying shell text would otherwise be re-parsed by the `bash -lc` string that re-emits it. ⚠️ **The emitted `role` is narrowed to the three known values** — it is author-controlled frontmatter, and the output is TAB-DELIMITED and split with `cut -f4` at the call site, so a tab in a `role:` would shift every field after it and hand that text to `$CHIP`. `session_subject` matches a page's whole id set (`claude_session_id` plus `metrics_sessions`), the same rule `session_claimant` already carried. `commands/open.md` § 3.1's precedence prose is deleted and replaced by a pointer to `docs/restart-worker.md`; the body grew 78389 → 79230 bytes and its `scripts/budget-baseline.json` entry was raised deliberately. Change set: `scripts/resolve-launcher.py`, `scripts/restart-worker.py`, `scripts/tests/test_resolve_launcher.py`, `scripts/tests/test_restart_worker.py`, `commands/open.md`, `docs/restart-worker.md`, `docs/role-mode-matrix.md`, `docs/fleet-surface.md`, `CLAUDE.md`, `CHANGELOG.md`.
