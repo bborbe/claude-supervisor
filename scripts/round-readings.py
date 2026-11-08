@@ -374,8 +374,8 @@ def parse_feed(text):
     # `who-needs-me.py` falls back to the event log when the store does not answer,
     # and on that branch it renders `Needs you (0)` for a fleet that may hold open
     # store-only items. Reading that as a complete, gate-free feed is the fail-open
-    # direction (the mirror of this task's defect): a fallback read cannot certify
-    # any row `clear`, so the family is `partial` and the probe is named.
+    # direction — the mirror of the fail-closed defect above: a fallback read cannot
+    # certify any row `clear`, so the family is `partial` and the probe is named.
     if _load("who-needs-me").STORE_FALLBACK_NOTE in text:
         state = "partial"
         error = error or (
@@ -711,7 +711,7 @@ def compute(subject, tracked_path, vault, interval, now=None,
     feed_state = worst_state(feed.get("state") or "unread", join_state)
     # The failing probes, named. A `clear` that came from a read nobody can point
     # at is indistinguishable from a genuinely gate-free fleet, and that is the
-    # distinction SC2 requires the document to carry.
+    # distinction the document must carry.
     probes = []
     if feed.get("error"):
         probes.append({"probe": "who-needs-me.py --section needs-you --all",
@@ -781,7 +781,8 @@ def compute(subject, tracked_path, vault, interval, now=None,
         "park_threshold_seconds": 2 * interval,
         "feed_state": feed_state,
         # The feed family's own tally, taken from the rows above: it sums to the
-        # row count by construction, so a reader can check SC1 without re-counting.
+        # row count by construction, so a reader can check the invariant without
+        # re-counting.
         "feed_counts": feed_counts,
         # Every probe that failed this round, with its own error. Empty on a clean
         # read; a transient store fault and a genuinely gate-free fleet are then

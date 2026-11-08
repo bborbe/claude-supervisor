@@ -624,7 +624,7 @@ class FeedRead(Tmp):
 
 
 class FeedFamilyInvariant(Tmp):
-    """SC1/SC2 at the document level: one failed read degrades per row.
+    """At the document level: one failed read degrades per row.
 
     `gated + clear + unread` is counted from the rows themselves, so the invariant
     is structural — these tests pin that the *distribution* is right too: a failure
