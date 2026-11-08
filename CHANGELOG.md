@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.251.2
 
 - fix: a `claude-wrapper` restart no longer kills a streaming headless worker. The event stream
   reconnects instead of failing: every SSE frame's `id:` is tracked and sent back as
