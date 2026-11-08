@@ -27,10 +27,8 @@ Exit **12** = the arm is still owed: print the `debt:` lines, skip this leg, and
 
 ## Restart a lapsed topic manager
 
-The goal tier has had a keep-alive since `topic-drive.md`'s § Keep alive; the topic tier has
-had none, so a lapsed topic manager simply stayed lapsed and nothing reported it. This leg is
-the missing rung: **restart is not open**, so resuming a topic manager that already owns its
-subject decides nothing new (`docs/session-tiers.md` § The four tiers, rule 1).
+This leg is the fleet round's keeper for topic managers — who keeps which tier, and why a
+resume needs no flag, is `docs/session-tiers.md` § Keep-alive.
 
 **Population — every topic page carrying a session id.** Read the vault's topic
 directory, not the roster: a topic manager whose session died is absent from the roster, which
@@ -192,9 +190,8 @@ them** — item 14's block is the digest's `LEGS` section, which admits exactly 
 ## Resume a worker whose session died
 
 ⚠️ **This reverses `agents/fleet-drive.md`'s *"orphan → escalate, never nudge"*.** That note
-made a dead worker the operator's problem every round; rule 1 says a crashed or lapsed worker
-is restarted automatically, and a worker that already owns its task decides nothing new by
-being resumed. The escalation stays for a worker that **cannot** be resumed (no recorded id,
+made a dead worker the operator's problem every round; the fleet round is the keeper for the
+workers `docs/session-tiers.md` § Keep-alive assigns it. The escalation stays for a worker that **cannot** be resumed (no recorded id,
 a spent cap, an undecidable probe) — it is no longer the disposition for every orphan.
 
 **Population — every task page carrying a non-empty `claude_session_id`.** The script narrows it: a terminal status, a parked one (`hold`/`blocked`, or `human_review`/`todo`/`done` phase), a future `defer_date`, no open boxes, and a live owning goal manager all return `jump`. Any other non-terminal status (`next`, for one) with an open box **is** resumed — the guard is the parks above, not `status: in_progress`. Run
@@ -249,9 +246,8 @@ goal tier's tick with its own `last_auto_resume` cap; this leg runs on the fleet
 so a check-then-act race would let two resumes land before either cap arms. The script therefore
 scans the task's frontmatter for wikilinks and, if any page one names has a session id
 (`claude_session_id`) the liveness instrument reads `LIVE`, returns `jump` with *"goal manager <id> is live and owns this
-task"* — the fleet leg never acts on a row the goal tier owns. This leg takes only the rows
-whose goal has no live manager, the same fallback `docs/fleet-surface.md` § Which manager owns a
-subject already states.
+task"* — the fleet leg never acts on a row the goal tier owns. Which rows fall to this leg is
+the chain in `docs/session-tiers.md` § Keep-alive.
 
 **Record the count — in the digest, and labelled as a floor while the scan cannot finish.**
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg dead-workers --count <n> --floor`
