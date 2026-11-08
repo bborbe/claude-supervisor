@@ -80,6 +80,18 @@ def role_map(path=None):
     return data if isinstance(data, dict) else None
 
 
+def safe_role(role):
+    """`role` narrowed to the three the chip table knows — anything else is `agent`.
+
+    ⚠️ **The role is author-controlled text read from a task page, and this script's output
+    is TAB-DELIMITED.** The call site splits it with `cut -f1` / `cut -f4`, so a `role:`
+    value carrying a tab shifts every field after it: `cut -f4` would hand that text to
+    `$CHIP`, which `commands/open.md` re-emits inside `bash -lc` — past the chip allow-list
+    and into the inner shell. Only these three values are ever emitted. Caught in review.
+    """
+    return role if role in ROLE_CHIP else "agent"
+
+
 def chip_for(role, mapping=None):
     """`(chip, source)` for a resolved role — the map's value, else the role's own default.
 
@@ -120,6 +132,7 @@ def resolve(session_id, cwd):
         return None, launcher_source, "", ""
     if not rw.SAFE_LAUNCHER.match(launcher) or ".." in launcher.split("/"):
         return None, f"launcher {launcher!r} is not a plain script name or path", "", ""
+    role = safe_role(role)
     chip, _chip_source = chip_for(role, role_map())
     return launcher, launcher_source, role, chip
 
@@ -139,6 +152,12 @@ def main(argv):
     launcher, source, role, chip = resolve(args.session_id, args.cwd)
     if launcher is None:
         print(source, file=sys.stderr)
+        return 1
+    # Belt and braces over the two field-level validations above: this line is split by
+    # `cut` at the call site, so a delimiter inside any field would shift every field after
+    # it. Refuse rather than emit a line whose shape lies about its contents.
+    if any("\t" in field or "\n" in field for field in (launcher, source, role, chip)):
+        print("a resolved field carries a tab or newline; refusing to emit", file=sys.stderr)
         return 1
     print(f"{launcher}\t{source}\t{role}\t{chip}")
     return 0

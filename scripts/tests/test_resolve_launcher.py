@@ -139,9 +139,22 @@ class ResolveLauncherCli(unittest.TestCase):
         self.assertEqual(result.stdout, "")
 
     def test_an_unreadable_role_map_falls_back_to_the_roles_own_chip(self):
-        """A missing map must not default every role to cyan — the role is the fact."""
+        """A missing map must not default every role to cyan — the role is the fact. Both
+        cases are checked because `human`'s default IS cyan: on its own it cannot tell a
+        correct fallback from "everything is cyan"."""
         self.page("T", "claude_session_id: s1\nrole: human")
         self.assertEqual(self.fields(self.run_cli("s1", role_map="/nonexistent/map.json"))[3], "cyan")
+        self.page("U", "claude_session_id: s2")
+        self.assertEqual(self.fields(self.run_cli("s2", role_map="/nonexistent/map.json"))[3], "pink")
+
+    def test_a_role_carrying_a_tab_cannot_shift_the_output_fields(self):
+        """The output is TAB-DELIMITED and the call site splits it with `cut -f4`. A tab in
+        the author-controlled `role:` would hand that text to `$CHIP`, past the allow-list
+        and into the inner `bash -lc`."""
+        self.page("T", 'claude_session_id: s1\nrole: agent\tcyan"; rm -rf / #')
+        fields = self.fields(self.run_cli("s1"))
+        self.assertEqual(len(fields), 4)
+        self.assertEqual(fields[2:], ["agent", "purple"])
 
     def test_an_unresolvable_launcher_refuses_rather_than_guessing(self):
         result = self.run_cli("nobody", cwd="/tmp")

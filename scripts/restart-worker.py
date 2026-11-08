@@ -511,7 +511,7 @@ def session_claimant(sid, root, fb):
 
 
 def session_subject(sid, root, fb):
-    """`(kind, title)` of the goal or topic page whose `claude_session_id` is `sid`.
+    """`(subject, error)` — the goal or topic page claiming `sid`, or `(None, None)`.
 
     Scanned from the PAGES, never from the live session registry, and that is the whole
     point: the registry is deleted when a session exits, and a manager only reaches the
@@ -520,14 +520,22 @@ def session_subject(sid, root, fb):
     which read the registry and therefore left the bug it claimed to fix in place.
     `commands/open.md` reads the same page field to decide the resume, so the two agree.
 
-    Two pages claiming one id is an error, not a first-match — the same rule
-    `session_claimant` enforces, and for the same reason: picking one would resume the
-    session under a subject chosen by page ordering.
+    ⚠️ **The id is matched on the page's WHOLE id set**, exactly as `session_claimant`
+    does — `claude_session_id` plus every `metrics_sessions[].session_id`. Matching only
+    the scalar field drops a page whose manager id was recorded the other way, and the
+    asymmetry was caught in review on this function while its sibling already had it right.
+
+    Two pages claiming one id is an error, not a first-match, for the same reason: picking
+    one would resume the session under a subject chosen by page ordering.
     """
+    session_id_set = load_sibling("manager-predispatch.py").session_id_set
     claims = []
     for kind, subdirs in (("topic", fb.TOPIC_SUBDIRS), ("goal", fb.GOAL_SUBDIRS)):
         for path in fb._pages(root, subdirs):
-            if _page_field(path, "claude_session_id") == sid:
+            text = fb._read(path)
+            if sid not in text:
+                continue
+            if sid in session_id_set(fb.frontmatter(text)):
                 claims.append((kind, os.path.basename(path)[:-3]))
     if len(claims) > 1:
         names = ", ".join(f"{k} {t}" for k, t in claims)
