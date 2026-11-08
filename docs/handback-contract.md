@@ -16,10 +16,13 @@ The shape a sweep's **read half** and **act half** return to their caller. Nine 
   - the **spawn leg** returns the **per-row call shape** — one line per handed-over row under
     exactly one of `open` / `resume` / `held` / `refused`, the four counts summing to the rows —
     truncating only under the size-cap exception below, with the remainder in the payload.
-  - the **keep-alive leg** returns the **two digest readings and the act counts** — `legs` (did
-    the digest write land) with `legs-reason` (the reason when it did not, `—` otherwise),
-    `lapsed-managers` and `dead-workers` (each a count or `not-run`), `dead-scan` (the `--floor` /
-    `--exact` label the write used), one count per act (`restarted`, `resumed`, `parked-due`,
+  - the **keep-alive leg** returns the **two digest readings and the act counts** — `legs`
+    (`written` = every reading this leg owes landed, each as a count **or** as its own `not-run`
+    reason; `UNKNOWN` = a `fleet-legs.py` call exited 2 and at least one reading did not land)
+    with `legs-reason` (the reason when it did not, `—` otherwise), `lapsed-managers` and
+    `dead-workers` (each a count or `not-run`), `dead-scan` (the `--floor` / `--exact` label the
+    write used, `—` when `dead-workers` is `not-run` because no count was written and no label
+    applies), one count per act (`restarted`, `resumed`, `parked-due`,
     `nudged`, `undelivered`), one count per row list (`crash-loop`, `cannot-tell`), and one
     dropped count per row list (`crash-loop-truncated`, `cannot-tell-truncated`) — including
     the zeros.

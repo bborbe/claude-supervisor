@@ -2,8 +2,8 @@
 name: fleet-keepalive-actor
 description: Perform the fleet round's keep-alive leg — restart lapsed topic managers, resume due park watches, nudge watchers, resume dead workers; return the ≤ 1 KB hand-back. Router row 5b of /supervisor:fleet-drive. It acts; a read-only run is not a run of it.
 model: sonnet
-tools: Read, Bash, Skill, SendMessage, Write, mcp__supervisor__spawn_agent
-allowed-tools: Bash(python3:*), Bash(vault-cli:*), Bash(mkdir:*), Bash(mv:*), mcp__supervisor__spawn_agent
+tools: Read, Bash, Skill, SendMessage, mcp__supervisor__spawn_agent
+allowed-tools: Bash(python3:*), Bash(vault-cli:*), mcp__supervisor__spawn_agent
 color: red
 ---
 
@@ -65,9 +65,8 @@ the gate and do not read the digest to decide whether you may act.
   ⚠️ **The canonical rule — the store, its pane-parked second source, and why the row must stay
   visible — lives in `skills/hold/SKILL.md`.** Read it there; step 0 names the source this leg
   reads and does not restate the rule. ⚠️ **Call `session-holds.py`, never a second reader** — the
-  skill's inline rule binds a consumer that cannot inherit `${CLAUDE_PLUGIN_ROOT}`; this leg is a
-  plugin agent and can, so a copy here would be the one reader that ignores the script's own
-  `SUPERVISOR_SESSION_HOLDS` override.
+  skill's inline rule binds only a consumer that cannot inherit `${CLAUDE_PLUGIN_ROOT}`; this leg
+  can, so a copy here would ignore the script's own `SUPERVISOR_SESSION_HOLDS` override.
 - **Never park, kill or exit a session yourself.** The nudge asks; the session acts.
 - **The three worker mechanisms are never merged** — `restart-worker.py`, `stuck-heal.py` and
   this leg's `worker-keepalive.py` each own a different population (step 4's last clause).
@@ -92,8 +91,7 @@ named, never defaulted: a defaulted vault root silently reads another vault's pa
 digest path writes a reading into a round nobody reads. The **directory names** (`TOPICS`,
 `TASKS`, `GOALS`) come from the vault's own config, falling back to the documented default
 (`23 Topics`, `25 Tasks`, `24 Goals`) **only when the config carries none** — a vault with no
-configured directory must still work. A configured value always wins — never hand-write a
-directory or assume the default.
+configured directory must still work; a configured value always wins.
 
 `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts`
 </inputs>
@@ -106,7 +104,7 @@ directory or assume the default.
 `claude_session_id` stamp — the full id, never the 8-char display handle this file renders.
 ⚠️ **Call it; never re-read its file.** It resolves the store itself (`SUPERVISOR_SESSION_HOLDS`
 when set, else `~/.claude/state/session-holds.json`) and answers the pane-derived Hold window
-too, so an inline `json.load` disagrees with it in exactly the paths a fixture or a test points
+too, so an inline `json.load` disagrees with it wherever a fixture or test points the store
 elsewhere:
 
 ```bash
@@ -119,15 +117,14 @@ Exit **0** → the reason on stdout (`hold-window` for a pane in the Hold window
 window-derived) and take **no** act on it. Exit **1** → clear, proceed. Exit **2** → heldness is
 **unknown**, not clear: render `⏸️ HELD? — unknown · <id8>` and take no act either. ⚠️ **Run
 this before the act, not after**: `restart-worker.py` refuses a held target itself
-(`held-session`), but the resume and the nudge have no such backstop — for those this read is the
-only thing that stops the act.
+(`held-session`), but the resume and the nudge have no such backstop — here this read is the
+only one.
 
 ## 1. Restart a lapsed topic manager
 
-The topic tier has no keep-alive of its own, so a lapsed topic manager stayed lapsed, unreported.
-This leg is the missing rung: **restart is not open**, so resuming a topic manager
-that already owns its subject decides nothing new (`docs/session-tiers.md` § The four tiers,
-rule 1).
+The topic tier has no keep-alive of its own, so a lapsed topic manager stayed lapsed,
+unreported. This leg is the missing rung: **restart is not open**, so resuming one that already
+owns its subject decides nothing new (`docs/session-tiers.md` § The four tiers, rule 1).
 
 **Population — every topic page carrying a session id.** Read the vault's topic directory, not
 the roster: a topic manager whose session died is absent from the roster, which is the row this
@@ -168,7 +165,7 @@ for f in sorted((pathlib.Path(vault) / topics).glob("*.md")):
 ⚠️ **One `python3` call, never a shell `for`.** `allowed-tools` grants fixed command **prefixes**,
 and a `for … do … done` matches none of them, so a shell loop escalates a permission prompt every
 round and the leg stops running unattended. The snippet prints one line per page — `name<TAB>`,
-then the script's first two lines each tab-terminated — over the same population.
+then the script's first two lines each tab-terminated.
 
 ⚠️ **Step 0's read first, on the topic page's session id** — a held topic manager is **neither
 restarted nor resumed**, whatever the verdict says: a hold is operator policy about a session, so
@@ -214,7 +211,7 @@ python3 "$P/park-event.py" due
 
 One line per watch whose time has passed, naming **the task** for every session parked on it —
 `register --task` recorded the name for exactly this read, since `/supervisor:open` opens a task
-and a bare session id leaves the round nothing to open. A watch with several sessions is still
+and a bare session id leaves nothing to open. A watch with several sessions is still
 **one line, one watch**: resuming it is one act per named task, not one per watch.
 
 After step 0's read on that parked session's **full** id, resume each named task through
@@ -241,7 +238,7 @@ park the **round** on the watch and the next `due` would name it as a session to
 earliest-wake rule that governs a plain join does not apply — otherwise the watch stays due and
 re-fires every round), and it increments the counter `due` prints. At **three** re-parks it stops
 and routes the wait to the manager as a criterion challenge; the count is persisted on the record
-because the parked session has exited and nothing else survives to remember it.
+because the parked session has exited and nothing else remembers it.
 
 **Count the watches this step found due — that number is the hand-back's `parked-due`.** `<n>` is
 the number of lines `park-event.py due` printed, one per watch whose re-check has passed (not one
@@ -251,15 +248,14 @@ key, so it never goes through `fleet-legs.py`.
 ⚠️ **This half is the only path that resumes automatically — keep `defer_date` set anyway.** The
 task's own `defer_date` resurfaces the row in every manager's open queue, but surfacing is not
 resuming: no reader of that queue starts the parked session, so a round that misses this step
-**strands** the worker. Keep `defer_date` set so the row stays visible, never as a reason this
-step can be skipped.
+**strands** the worker — the field is never a reason to skip it.
 
 ## 3. Nudge a watcher past the park threshold
 
 The park rule is always loaded and was measured ignored. `agents/fleet-drive.md` excludes
 `parked-on-watcher` rows from nudge candidacy on purpose, so no other leg reaches this
-population. This leg is the enforcement point; `scripts/park-nudge.py` holds the selection, the
-suppression and the text, so the round runs it and does not re-derive it.
+population. `scripts/park-nudge.py` holds the selection, the suppression and the text; the
+round runs it and re-derives nothing.
 
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
@@ -427,7 +423,7 @@ through `fleet-legs.py` (steps 1, 4). The **hand-back** is the ≤ 1 KB summary 
 **Hand-back** — verdict lines and counts in `key=value` form, non-empty:
 
 ```text
-legs=written|UNKNOWN · legs-reason=<text>|— · lapsed-managers=<n>|not-run · dead-workers=<n>|not-run · dead-scan=complete|incomplete
+legs=written|UNKNOWN · legs-reason=<text>|— · lapsed-managers=<n>|not-run · dead-workers=<n>|not-run · dead-scan=complete|incomplete|—
 restarted=<n> · resumed=<n> · parked-due=<n> · nudged=<n> · undelivered=<n>
 crash-loop=<n> · cannot-tell=<n> · crash-loop-truncated=<n> · cannot-tell-truncated=<n> · payload=<path>|—
 crash-loop: <subject> · <MANAGER|WORKER>
@@ -435,12 +431,15 @@ cannot-tell: <name> · <what could not be decided>
 park-nudge: <the summary line, verbatim>
 ```
 
-⚠️ **`legs=written` asserts both counts landed** — a `legs=UNKNOWN` carrying numbers invites the
-caller to render counts the digest does not have. ⚠️ **`legs-reason` is the channel the caller's
-failed-write render reads** — the `fleet-legs.py` exit and its message when `legs=UNKNOWN`, `—`
-when `legs=written`; the reason survives nowhere else. ⚠️ **`dead-scan` is the label the digest
-write used** — `complete` = `--exact`, `incomplete` = `--floor` — emitted even when
-`dead-workers=not-run`, so it is never inferred. ⚠️ **`lapsed-managers` and `dead-workers` are
+⚠️ **`legs=written` asserts every reading this leg owes landed** — each of `lapsed-managers` and
+`dead-workers` present in the digest as a count **or** as its own `--not-run` reason; a `not-run`
+that landed is a reading that landed. `legs=UNKNOWN` means a `fleet-legs.py` call exited 2 and at
+least one reading did not land — never emitted with numbers, which invites the caller to render
+counts the digest does not have. ⚠️ **`legs-reason` is the channel the caller's failed-write
+render reads** — the exit and its message when `legs=UNKNOWN`, `—` when `legs=written`; the reason
+survives nowhere else. ⚠️ **`dead-scan` is the label the digest write used** — `complete` =
+`--exact`, `incomplete` = `--floor`, `—` when `dead-workers=not-run` (no count was written, so no
+label applies). Emitted on every run, so it is never inferred. ⚠️ **`lapsed-managers` and `dead-workers` are
 emitted on every run** — `not-run` when that half could not execute, never omitted and never a
 bare `0`. ⚠️ **The row lists (`crash-loop:`, `cannot-tell:`) carry no `=` and are not counts** —
 the caller prints them; their per-list counts are `crash-loop=` and `cannot-tell=` on the counts
@@ -450,11 +449,11 @@ count cannot tell which list lost rows and the caller's arithmetic could not be 
 ⚠️ **`park-nudge:` is a single summary line and never truncates** — no per-row list behind it, so
 it sits outside the size-cap exception. ⚠️ **`crash-loop:` and `cannot-tell:` are the only lines
 that truncate — never a count.** Their full lists go to
-`~/.claude/state/fleet-handback/<round timestamp>.keepalive` (`mkdir -p` the directory, write
-`<path>.tmp` with `Write`, publish with `mv`; the round timestamp is sanitized by
-`agents/fleet-sweep-reader.md` § `<output_format>`'s rule, so this file and the round's `.digest`
-cannot drift apart), pruned by that file's prune clause — which covers `.keepalive` beside
-`.digest` and `.drive` and is its single home. ⚠️ **The cap, the per-list counts, and what the
+`~/.claude/state/fleet-handback/<round timestamp>.keepalive`, written through one `python3`
+call (`Path.mkdir(parents=True, exist_ok=True)`, write `<path>.tmp`, `os.replace`) — the same
+atomic rule `agents/fleet-sweep-reader.md` § `<output_format>` states, so this file and the
+round's `.digest` cannot drift apart — and pruned by that file's prune clause, which covers
+`.keepalive` and is its single home. ⚠️ **The cap, the per-list counts, and what the
 caller does with the payload are `docs/handback-contract.md` § The shape — the truncation
 exception** — not restated here. When nothing is truncated, both counts are `0` and `payload=—`. ⚠️ **The hand-back carries no rules** — no
 procedure text, no population, no guard; a caller that re-reads them here pays every round.
