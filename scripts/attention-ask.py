@@ -556,6 +556,60 @@ def manager_guard():
         return None
 
 
+_SESSION_ROLE = None
+
+
+def session_role():
+    """The declared-role resolver, loaded ONCE and reused.
+
+    ⚠️ Lazily loaded but memoized, **including a failure** — the `False`
+    sentinel stops a retry storm. Re-execing the module on every post would also
+    rebuild `session-role.py`'s own role cache from empty, turning its
+    one-call-per-session promise into a file read + compile + HTTP call per card.
+
+    A card must still post when the resolver is missing, so a load failure is a
+    warning and the declared `--producer-kind` stands — the pre-change behaviour,
+    which is the safe direction.
+    """
+    global _SESSION_ROLE
+    if _SESSION_ROLE is None:
+        try:
+            mod = _load("session_role", "session-role.py")
+            _SESSION_ROLE = mod if hasattr(mod, "resolve_producer_kind") else False
+        except Exception as err:
+            _warn(f"session-role unavailable ({err}) — producer_kind stays as declared")
+            _SESSION_ROLE = False
+    return _SESSION_ROLE or None
+
+
+def producer_kind_for(producer_id, declared):
+    """The kind to post: the declared value, or the session's ledger role.
+
+    ⚠️ Keyed on `producer_id` — the session the item is ABOUT — never on the
+    invoking process. `manager-attention-watch.py` posts on behalf of a parked
+    worker: the caller is a manager, the `producer_id` is the worker, and the
+    card must read `session`. Reading `$CLAUDE_CODE_SESSION_ID` here instead
+    would relabel exactly the cards this resolver exists to get right.
+
+    The TLS context and auth headers are forwarded so an HTTPS or authenticated
+    store resolves the same way every other call in this file does; without them
+    the resolver would silently answer `session` for every session there.
+    """
+    mod = session_role()
+    if mod is None:
+        return declared
+    try:
+        return mod.resolve_producer_kind(
+            producer_id,
+            declared,
+            ssl_context=_ssl_context(),
+            headers=_headers(),
+        )
+    except Exception as err:
+        _warn(f"producer_kind resolution failed ({err}) — using {declared!r}")
+        return declared
+
+
 def is_manager_session(guard, producer_id):
     """True when `producer_id` is a manager arm, by the guard's own rule.
 
@@ -943,7 +997,9 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out,
     try:
         item = post_question(
             producer_id=producer_id,
-            producer_kind=args.producer_kind,
+            # Resolved from the card's `producer_id`, not the caller — see
+            # `producer_kind_for`. An explicit non-`session` flag still wins.
+            producer_kind=producer_kind_for(producer_id, args.producer_kind),
             liveness_ref=liveness_ref,
             dedup_key=args.dedup_key,
             interrupt_class=args.interrupt_class,
