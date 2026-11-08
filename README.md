@@ -46,7 +46,7 @@ For a worker whose prompts you intend to answer yourself rather than letting its
 
 | Piece | Job |
 |---|---|
-| MCP server `supervisor` | spawns and owns the workers; parks their permission prompts |
+| MCP server `supervisor` | spawns and owns the workers; parks their permission prompts. ⚠️ **The plugin no longer declares it** — sessions reach it through an `http` entry in their `--mcp-config` (`http://127.0.0.1:18090/supervisor/mcp`, served by the long-running daemon). `scripts/mcp-start.py` stays as the stdio entry point for anyone who registers the server in their own MCP config |
 | skill `supervising-workers` | when to spawn a worker instead of doing the work yourself |
 | `/supervisor:goal-spawn` `/supervisor:fleet-workers` `/supervisor:goal-answer` `/supervisor:goal-drain` | the operator surface |
 | agent `goal-wrangler` | runs the routine approval loop on a cheap model, escalating only real forks |
