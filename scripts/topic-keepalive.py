@@ -198,14 +198,19 @@ def session_verdict(sid: str) -> str:
 PROBE_FAILED = "UNREADABLE"
 
 
-def cadence(subject: str, branch: str = "goal") -> str:
-    """The loop's state, or `PROBE_FAILED` when the probe itself could not answer.
+def cadence_state_detail(subject: str, branch: str = "goal") -> tuple:
+    """`(state, detail)` from ONE probe, or `(PROBE_FAILED, "")` when it could not answer.
 
     ⚠️ **Bounded and guarded exactly like `session_verdict`, because the tick runs both.**
     `PROBE_TIMEOUT`'s claim is that a hung liveness probe cannot wedge the tick; while this
     probe had no `timeout=`, half that claim was false and a stuck `manager-liveness.py`
     blocked the keep-alive forever — worse than the abort the guard prevents, because no
     verdict is ever printed at all.
+
+    ⚠️ **The detail is returned, not dropped.** `--state` prints `<STATE>\\t<slug>\\t<detail>`
+    and the detail is the only place a reader learns WHAT a state is waiting for — for a
+    sleep it carries the instant. A caller that reported `SLEEPING` without it left the
+    operator with a label and no date, which is the thing the state exists to name.
     """
     try:
         probe = subprocess.run(
@@ -214,13 +219,22 @@ def cadence(subject: str, branch: str = "goal") -> str:
             capture_output=True, text=True, timeout=PROBE_TIMEOUT,
         )
     except (OSError, subprocess.SubprocessError):
-        return PROBE_FAILED
+        return PROBE_FAILED, ""
     # `--state` exits 0 for every state it can answer, so a non-zero exit is the child dying.
     if probe.returncode != 0:
-        return PROBE_FAILED
+        return PROBE_FAILED, ""
     first = (probe.stdout.splitlines() or [""])[0]
-    state = first.split("\t")[0].strip()
-    return state if state in ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID") else "INVALID"
+    fields = first.split("\t")
+    state = fields[0].strip()
+    detail = fields[2].strip() if len(fields) > 2 else ""
+    if state not in ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID"):
+        return "INVALID", detail
+    return state, detail
+
+
+def cadence(subject: str, branch: str = "goal") -> str:
+    """The loop's state alone — `cadence_state_detail`'s first field."""
+    return cadence_state_detail(subject, branch)[0]
 
 
 def main(argv: list[str]) -> int:
@@ -271,7 +285,7 @@ def main(argv: list[str]) -> int:
     # retired-key fallback was removed once both vaults were migrated.
     sid = scalar(fm, "claude_session_id")
 
-    loop = cadence(a.subject, a.branch)
+    loop, loop_detail = cadence_state_detail(a.subject, a.branch)
 
     if loop == "STOPPED":
         print("leave")
@@ -285,8 +299,13 @@ def main(argv: list[str]) -> int:
         # own — once the instant PASSES the marker stops suppressing anything,
         # `manager-liveness.py` reports STALE, and the normal restart path below resumes
         # the session, which arms and clears the marker.
+        #
+        # ⚠️ **The reason names the INSTANT, not just the state.** `--state`'s detail is
+        # `until <ISO> (<n>s remaining)`; dropping it left a reader with a label and no
+        # date, so the one fact that makes a sleep actionable was the one the line omitted.
         print("leave")
-        print("cadence SLEEPING — waiting on its own defer_date, not a lapse")
+        print(f"cadence SLEEPING — waiting on its own defer_date, not a lapse"
+              + (f" ({loop_detail})" if loop_detail else ""))
         return 0
 
     if not sid:
