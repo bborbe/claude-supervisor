@@ -419,8 +419,8 @@ class WorkerSessionsTest(unittest.TestCase):
             result = self.run_script("--populations")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
-            result.stdout.split("\n")[:4],
-            ["managers: 1", "interactive: 1", "headless: 1", "total: 2"],
+            result.stdout.split("\n")[:6],
+            ["managers: 1", "interactive: 1", "headless: 1", "cluster: 0", "a2a: 0", "total: 2"],
         )
 
     def test_a_pre_mode_record_reads_as_interactive(self):

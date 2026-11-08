@@ -481,7 +481,7 @@ test('populations split the fleet by role and mode', async () => {
     stateDir: dir.root,
     registry: [],
   })
-  assert.deepEqual(populations, { managers: 1, interactive: 1, headless: 1, total: 2 })
+  assert.deepEqual(populations, { managers: 1, interactive: 1, headless: 1, cluster: 0, a2a: 0, total: 2 })
 })
 
 // `mode` decides the split, and an absent one reads as interactive — the same rule `role`
@@ -553,7 +553,7 @@ test('the split is exactly four integer keys', async () => {
     stateDir: dir.root,
     registry: [],
   })
-  assert.deepEqual(Object.keys(populations).sort(), ['headless', 'interactive', 'managers', 'total'])
+  assert.deepEqual(Object.keys(populations).sort(), ['a2a', 'cluster', 'headless', 'interactive', 'managers', 'total'])
   for (const [key, value] of Object.entries(populations)) {
     assert.equal(Number.isInteger(value), true, `${key} is not an integer`)
   }

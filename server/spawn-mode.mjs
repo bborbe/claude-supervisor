@@ -480,8 +480,8 @@ export function concurrentLimitRefusal({
   // the same count pass, so it cannot describe a different instant than the number beside it.
   const splitNote = populations
     ? ` The fleet splits: ${populations.managers} managers (not counted against this cap),` +
-      ` ${populations.interactive} interactive, ${populations.headless} headless` +
-      ` (${populations.total} workers).`
+      ` ${populations.interactive} interactive, ${populations.headless} headless,` +
+      ` ${populations.cluster} cluster, ${populations.a2a} a2a (${populations.total} workers).`
     : ''
   const staleNote = stale
     ? ` This decision uses the last successful count, ${Math.round((staleAgeMs ?? 0) / 1000)} s old` +

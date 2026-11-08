@@ -240,8 +240,11 @@ export async function workerSessions({
 
   const workers = []
   let managers = 0
-  let interactive = 0
-  let headless = 0
+  // ⚠️ **Four worker modes, not two.** The ledger carries `interactive`, `headless`, `cluster`
+  // and `a2a`; a binary headless-vs-else classifier reported live cluster and a2a workers as
+  // "interactive" — exactly the conflation this split exists to prevent. Measured 2026-11-08 on
+  // this host's ledger: 3203 interactive, 1113 headless, 46 cluster, 133 a2a.
+  const modes = { interactive: 0, headless: 0, cluster: 0, a2a: 0 }
   for (const [sessionId, record] of Object.entries(ledger)) {
     if (!live.has(sessionId)) continue
     // Auto-resumes are excluded — they answer to the auto-resume gate's own 30-min crash-loop
@@ -268,8 +271,9 @@ export async function workerSessions({
       managers += 1
       continue
     }
-    if (record.mode === 'headless') headless += 1
-    else interactive += 1
+    const mode = record.mode || 'interactive'
+    if (Object.prototype.hasOwnProperty.call(modes, mode)) modes[mode] += 1
+    else modes.interactive += 1
     workers.push({ sessionId, status: live.get(sessionId), label: record.label })
   }
   // Record the count for the next failed read. Best-effort: a cache that cannot be written must
@@ -281,7 +285,15 @@ export async function workerSessions({
   // ⚠️ **`total` is the cap's unit, so managers are NOT in it.** The refusal prints this split
   // beside `liveCount`, which excludes managers; a total that included them would put two
   // irreconcilable numbers in one sentence. Managers are reported as context.
-  const populations = { managers, interactive, headless, total: interactive + headless }
+  const workersByMode = modes.interactive + modes.headless + modes.cluster + modes.a2a
+  const populations = {
+    managers,
+    interactive: modes.interactive,
+    headless: modes.headless,
+    cluster: modes.cluster,
+    a2a: modes.a2a,
+    total: workersByMode,
+  }
   return { workers, populations, error: null, stale: null }
 }
 

@@ -329,7 +329,12 @@ def worker_populations(endpoint=None, ledger=None, on_failure=None):
     if ledger is None:
         return None
 
-    managers = interactive = headless = 0
+    # ⚠️ **Four worker modes, not two.** The ledger carries `interactive`, `headless`, `cluster`
+    # and `a2a`; a binary headless-vs-else classifier reported live cluster and a2a workers as
+    # "interactive" — the conflation this split exists to prevent. Measured 2026-11-08 on this
+    # host's ledger: 3203 interactive, 1113 headless, 46 cluster, 133 a2a.
+    managers = 0
+    modes = {"interactive": 0, "headless": 0, "cluster": 0, "a2a": 0}
     for session_id, record in ledger.items():
         if session_id not in live:
             continue
@@ -343,18 +348,21 @@ def worker_populations(endpoint=None, ledger=None, on_failure=None):
         if record.get("role") == "manager":
             managers += 1
             continue
-        if record.get("mode") == "headless":
-            headless += 1
+        mode = record.get("mode") or "interactive"
+        if mode in modes:
+            modes[mode] += 1
         else:
-            interactive += 1
+            modes["interactive"] += 1
     return {
         "managers": managers,
-        "interactive": interactive,
-        "headless": headless,
+        "interactive": modes["interactive"],
+        "headless": modes["headless"],
+        "cluster": modes["cluster"],
+        "a2a": modes["a2a"],
         # `total` is the cap's unit, so managers are NOT in it — the refusal prints this split
         # beside a count that excludes them, and two irreconcilable numbers in one sentence is
         # worse than no split at all.
-        "total": interactive + headless,
+        "total": modes["interactive"] + modes["headless"] + modes["cluster"] + modes["a2a"],
     }
 
 
@@ -431,6 +439,8 @@ def main(argv=None):
         print("managers: %d" % counts["managers"])
         print("interactive: %d" % counts["interactive"])
         print("headless: %d" % counts["headless"])
+        print("cluster: %d" % counts["cluster"])
+        print("a2a: %d" % counts["a2a"])
         print("total: %d" % counts["total"])
         return 0
 
