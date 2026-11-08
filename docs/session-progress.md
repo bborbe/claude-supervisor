@@ -202,7 +202,7 @@ Every blocker gets an **owner** and a **lever**; "the fleet" or "CI" is not an o
 
 | Group | Blocker | Detected by | Owner | Cheapest lever |
 |---|---|---|---|---|
-| **Operator decision** | pick, approval, scope call | gate class **C** | operator | one card, recommendation marked |
+| **Operator decision** | pick, approval, scope call — in the **fleet** round a class-C `AskUserQuestion` the manager owns is answered by step 7 instead (`commands/steps/own-parks.md` § Is the class-C question the manager's?); the goal tier still hands it over | gate class **C** | operator | one card, recommendation marked |
 | | production-touching / irreversible | gate class **D** | operator, in the pane | `jump-link.py` line; never relayed |
 | | live trade / TDR | gate class **E** | operator, via the ack flow | point at `vault-cli decision ack` |
 | **Operator action** | login, credential, OAuth click, reload, mode switch | auth errors in tool results; a `you run:` closer | operator | one card per credential, deduplicated by root-cause key |
