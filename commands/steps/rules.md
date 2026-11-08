@@ -84,7 +84,7 @@ Measured 2026-10-12 on a cold `v0.130.0` round: rows 3 (`orphan=46`, `collision=
 
 ⚠️ **Proposing is not opening, and the fleet tier does the second.** A flagged **goal** or
 **topic** with no live manager is opened by the flagged-open leg
-(`commands/steps/flagged-open.md` § Step 5d), through `scripts/flagged-subjects.py` and
+(`commands/steps/flagged-open.md` § Step 5c.1), through `scripts/flagged-subjects.py` and
 `/supervisor:open --goal` / `--topic`. That is rule 2 executing the operator's own mark, not
 the removed row returning: the removed row asked the operator to decide *which* unmanaged
 goal deserved a manager, while this leg decides nothing — it opens what the operator already

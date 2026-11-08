@@ -98,8 +98,9 @@ One line per subject, pipe-separated, so a probe can assert on the first field:
 Exit codes
 ----------
   0  the selection was computed (whether or not anything is openable)
-  2  REFUSED — the vault set, the session registry, the manager cap, the live-manager count
-     or the attention store could not be read. Never read as "nothing to open".
+  2  REFUSED — the vault set, the session registry, the manager cap, the live-manager count,
+     the attention store, or a vault's goals/topics directory could not be read. Never read
+     as "nothing to open".
 """
 import argparse
 import importlib.util
@@ -179,14 +180,21 @@ def open_card_keys():
 
 
 def page_rows(directory):
-    """`(title, frontmatter block)` for every page in a directory — frontmatter only."""
+    """`(title, frontmatter block)` for every page — or None when the directory cannot be read.
+
+    ⚠️ **`None` is "unreadable", never "empty".** An unreadable `goals_dir` or `topics_dir`
+    that returned `[]` would render as a clean round with nothing to open — the exact
+    "a suppressed leg and a leg that opened nothing must never print the same" failure. The
+    caller turns `None` into exit 2 REFUSED. A vault with no such directory at all is
+    legitimate and returns `[]`.
+    """
     rows = []
     if not directory:
         return rows
     try:
         names = sorted(os.listdir(directory))
     except OSError:
-        return rows
+        return None
     for filename in names:
         if not filename.endswith(".md"):
             continue
@@ -201,10 +209,13 @@ def page_rows(directory):
 
 
 def subjects(vault, kind):
-    """The flagged, non-terminal, approved-for-management pages of one kind in one vault."""
+    """The flagged, non-terminal pages of one kind in one vault — or None when unreadable."""
     directory = vault.get("goals_dir") if kind == "goal" else vault.get("topics_dir")
+    rows = page_rows(directory)
+    if rows is None:
+        return None
     out = []
-    for name, block in page_rows(directory):
+    for name, block in rows:
         if not truthy(pm.field(block, "flag")):
             continue
         status = (pm.field(block, "status") or "").strip().lower()
@@ -282,10 +293,15 @@ def select(roots, labels, registrations, card_keys, free):
     verdicts = []
     for vault in roots:
         topics = pm.topics_by_goal(vault)
-        for subject in subjects(vault, "topic"):
+        topic_rows = subjects(vault, "topic")
+        goal_rows = subjects(vault, "goal")
+        if topic_rows is None or goal_rows is None:
+            # A read failure is not "nothing to open" — the caller reports it as REFUSED.
+            return None
+        for subject in topic_rows:
             state, reason = classify(subject, labels, registrations, {}, card_keys)
             verdicts.append({"subject": subject, "state": state, "reason": reason})
-        for subject in subjects(vault, "goal"):
+        for subject in goal_rows:
             state, reason = classify(subject, labels, registrations, topics, card_keys)
             verdicts.append({"subject": subject, "state": state, "reason": reason})
     verdicts.sort(key=lambda v: rank(v["subject"], counts, goals_dirs))
@@ -437,6 +453,10 @@ def main(argv=None):
         free = max(0, int(hard) - manager_count)
 
     verdicts = select(roots, labels, registrations, card_keys, free)
+    if verdicts is None:
+        print("UNKNOWN — a goals or topics directory could not be read; the subject set is "
+              "unknown, never empty", file=sys.stderr)
+        return 2
 
     if args.json:
         json.dump({

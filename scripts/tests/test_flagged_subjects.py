@@ -81,6 +81,19 @@ class SubjectSelectionTest(unittest.TestCase):
         write_page(self.topics, "Done", "flag: true\nstatus: completed")
         self.assertEqual([s["name"] for s in fs.subjects(self.vault, "topic")], ["No Status"])
 
+    def test_unreadable_goals_dir_is_none_never_empty(self):
+        # A path that is a FILE, not a directory: `os.listdir` raises, and the answer must be
+        # "unreadable" — never "empty", which would render as a clean round.
+        not_a_dir = os.path.join(self.tmp.name, "not-a-dir")
+        with open(not_a_dir, "w", encoding="utf-8") as handle:
+            handle.write("x")
+        self.vault["goals_dir"] = not_a_dir
+        self.assertIsNone(fs.subjects(self.vault, "goal"))
+
+    def test_absent_topics_dir_is_empty_not_unreadable(self):
+        self.vault["topics_dir"] = None
+        self.assertEqual(fs.subjects(self.vault, "topic"), [])
+
 
 class ClassifyTest(unittest.TestCase):
     def setUp(self):

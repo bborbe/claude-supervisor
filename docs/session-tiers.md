@@ -78,9 +78,12 @@ nothing new, while opening one decides who supervises. Four rules follow:
 unmanaged goals"*). No other tier restores that behaviour under another name.
 
 ⚠️ **The fleet tier does open a flagged manager, and that is rule 2, not rule 4.** The
-flagged-open leg (`commands/steps/flagged-open.md` § Step 5d) runs
-`scripts/flagged-subjects.py` and opens every flagged goal and topic with no live manager
-through `/supervisor:open --goal` / `--topic`, up to the free manager slots. Proposing is
+flagged-open leg (`commands/steps/flagged-open.md` § Step 5c.1) runs
+`scripts/flagged-subjects.py` and opens every flagged goal and topic that has no live manager
+through `/supervisor:open --goal` / `--topic`, up to the free manager slots. Two states are
+declined rather than opened and are not the cap's doing: `phase: todo` (the operator's
+approval inbox, reported `WAITING`) and a subject already carrying an open
+`fleet-propose-manager` / `fleet-approve-manager` card (reported `CARDED`). Proposing is
 what rule 4 forbids — asking the operator *which* unmanaged goal deserves a manager; opening
 a page the operator already flagged decides nothing and executes their mark.
 
