@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.254.0
 
 - feat: **a manager-spawned worker's plan gate is answered by the round instead of auto-denying at 15 minutes.** `commands/steps/own-parks.md` answered only class-B routine parks, and its class table named class C — a worker's `AskUserQuestion` — as the operator's. An `AskUserQuestion` park never carries an `allowlist_entry`, so the scoped wrangler escalated it, the escalation sat, and the 15-minute timeout then auto-denied it: measured 2026-11-07, a fleet manager's worker hit a plan gate, nobody answered, and its task file was found untouched twenty minutes later. The step now **routes** every class-C park — its report gains `routed <routed> (class C → step 7)` with each park's `request_id`, worker label and question, and the answered count drops its hardcoded `(class B)` and `<c>`/`<co>` become `<routed>`/`<c-operator>` — and step 7 (`commands/steps/worker-channels.md`) answers each routed id with `Manager answer, via supervisor:`. The class boundary is unchanged where it matters: a question that asks to widen the task's scope, or that names a production-touching or irreversible action, still escalates to the operator, and the new § *Is the class-C question the manager's?* names the test. Class D and E are untouched.
 
