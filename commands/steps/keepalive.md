@@ -255,7 +255,7 @@ being resumed. The escalation stays for a worker that **cannot** be resumed (no 
 a spent cap, an undecidable probe) — it is no longer the disposition for every orphan.
 
 **Population — every task page carrying a non-empty `claude_session_id`.** The script narrows it: a terminal status, a parked one (`hold`/`blocked`, or `human_review`/`todo`/`done` phase), a future `defer_date`, no open boxes, and a live owning goal manager all return `jump`. Any other non-terminal status (`next`, for one) with an open box **is** resumed — the guard is the parks above, not `status: in_progress`. Run
-the script per task; it decides, it never resumes. ⚠️ **Resolve the task directory from the
+the script per task; it decides, it never resumes. ⚠️ **Filter terminal pages in the shell before the call.** The script would answer `jump` for them anyway, but each call costs a process start (~0.7 s). Measured 2026-11-08 on private-personal: 4,172 id-carrying task pages, of which 288 are non-terminal. Unfiltered, the scan costs ~44 min per round. ⚠️ **Resolve the task directory from the
 vault's config, never assume `25 Tasks`:**
 
 ```bash
@@ -264,6 +264,8 @@ IFS='|' read -r TOPICS GOALS TASKS _ < <(python3 "$P/resolve-folders.py" --vault
 case "$TOPICS" in UNKNOWN*) echo "folders: $TOPICS"; exit 2;; esac   # record this section not run
 for f in "$TASKS"/*.md; do   # absolute — resolve-folders.py prints full paths
   grep -qE '^claude_session_id: *[^ ]' "$f" || continue
+  # Terminal pages answer `jump` in the script anyway. Skipping them here saves a process each.
+  grep -qE '^status: *["'\'']?(completed|aborted)' "$f" && continue
   name=$(basename "$f" .md)
   printf '%s\t' "$name"
   python3 "$P/worker-keepalive.py" --vault "<vault>" --task "$name" --dir "$TASKS" --goals-dir "$GOALS" | head -2 | tr '\n' '\t'
