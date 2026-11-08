@@ -88,18 +88,11 @@ PROJECTS_DIR = os.environ.get("SUPERVISOR_PROJECTS_DIR") or os.path.expanduser(
     "~/.claude/projects"
 )
 
-#: Argument substrings that identify a child as one of the session's own MCP / stdio
-#: helpers rather than a command the worker backgrounded. Measured 2026-11-07: every idle
-#: worker has children and every child seen was one of these — so "has a child" is not a
-#: watcher signal, and this filter is what makes the read mean something.
-HELPER_MARKERS = (
-    "--mcp-stdio",
-    "mcp-",
-    "playwright",
-    "bun run --cwd",
-    "uvx",
-    "npm exec",
-)
+#: The helper shapes `is_helper` recognises. Measured 2026-11-07: every idle worker has
+#: children and every child seen was one of these — so "has a child" is not a watcher
+#: signal, and this filter is what makes the read mean something. The match is anchored on
+#: the executable (see `is_helper`), never on a bare substring.
+SUPERVISOR_MCP_DIR_SUFFIX = "/server"
 
 
 def refuse(token, detail):
@@ -155,8 +148,11 @@ def is_helper(args):
         return True
     exe = os.path.basename(parts[0])
     # The supervisor's own MCP server, launched by the session: `bun run --cwd …/server`.
-    if exe == "bun" and "--cwd" in parts and "run" in parts:
-        return True
+    # The `/server` suffix is required — without it a worker's own `bun run --cwd` build
+    # reads as a helper and its background work goes unseen.
+    if exe == "bun" and "run" in parts and "--cwd" in parts:
+        cwd = parts[parts.index("--cwd") + 1] if parts.index("--cwd") + 1 < len(parts) else ""
+        return cwd.rstrip("/").endswith(SUPERVISOR_MCP_DIR_SUFFIX)
     if exe not in {"uv", "uvx", "npm", "npx", "bun", "node"}:
         return False
     return "mcp-" in args or "@playwright/mcp" in args
@@ -355,6 +351,12 @@ def main(argv=None):
 
         path, rec = entries[0]
         pid = rec.get("pid")
+        # ⚠️ Sampled BEFORE the guard chain, not after it. The window this guard exists for
+        # is the whole span between reading the entry and sending the signal — the guards
+        # take seconds (HTTP reads, a process-tree walk), which is exactly the window a pid
+        # can be recycled in. Sampling afterwards would cover only the microseconds between
+        # that sample and the kill, and would look like a guard while covering nothing.
+        started_at = process_start(pid) if isinstance(pid, int) else None
         wrapper = wrapper_record(session_id)
         cards, cards_readable = open_cards(session_id)
         verdict = guard(rec, wrapper=wrapper, cards=cards, cards_readable=cards_readable)
@@ -379,7 +381,6 @@ def main(argv=None):
             continue
 
         transcript = transcript_path(rec.get("cwd"), session_id)
-        started_at = process_start(pid)
         print(
             f"🧹 reap-idle-headless · session {session_id[:8]} · pid {pid} · "
             f"{rec.get('name')!r}"
@@ -404,7 +405,17 @@ def main(argv=None):
             )
             continue
         # The same recycle, seen from the process side rather than the registry side.
-        if started_at is not None and process_start(pid) != started_at:
+        # ⚠️ Fails CLOSED: if the pre-guard start time could not be read, the pid's identity
+        # was never established, and a signal sent on an unverified identity is the defect
+        # this guard exists to prevent.
+        if started_at is None:
+            exit_code = refuse(
+                "ambiguous-pid",
+                f"the start time of pid {pid} could not be read before the guards, so its "
+                "identity was never established; nothing was signalled",
+            )
+            continue
+        if process_start(pid) != started_at:
             exit_code = refuse(
                 "ambiguous-pid",
                 f"pid {pid} was recycled during the guards (start time changed); "
