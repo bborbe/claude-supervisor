@@ -269,8 +269,13 @@ def restart_spawned(session: str, started: float, now: float) -> bool:
     for name in names:
         if not (name.startswith("pane-") and name.endswith(".log")):
             continue
+        p = os.path.join(directory, name)
         try:
-            with open(os.path.join(directory, name), encoding="utf-8") as fh:
+            # The store is append-only, so a log last written before the round opened
+            # cannot hold an in-window line — skip it rather than read the whole history.
+            if os.path.getmtime(p) < int(started):
+                continue
+            with open(p, encoding="utf-8") as fh:
                 lines = fh.readlines()
         except OSError:
             continue
@@ -534,6 +539,10 @@ def record_verdict(topic: str, goal: str, vault: str, verdict: str, session: str
     """
     if verdict not in OWING_VERDICTS:
         print(f"verdict must be one of {OWING_VERDICTS}, got {verdict!r}", file=sys.stderr)
+        return 2
+    if not session:
+        # `executed` is proved against this id; an entry without one could never be paid.
+        print("--record-verdict needs the verdict's --session id", file=sys.stderr)
         return 2
     s = slug(topic)
     d = read_receipt(s)

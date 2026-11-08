@@ -1541,6 +1541,22 @@ class KeepAliveVerdicts(unittest.TestCase):
     def test_a_verdict_needs_a_round_in_progress(self):
         self.assertEqual(self.verdict()[0], 2)
 
+    def test_a_verdict_without_a_session_is_refused(self):
+        # `executed` is proved against the session id, so an id-less entry is unpayable.
+        self.full_round()
+        self.assertEqual(self.verdict(session="")[0], 2)
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_a_spawn_log_last_written_before_the_round_is_not_read(self):
+        self.full_round()
+        self.verdict("restart", session="sid-r")
+        self.outcome("executed")
+        self.spawn_line("sid-r", time.time())
+        p = os.path.join(self.exits.name, "pane-42.log")
+        old = time.time() - 3600
+        os.utime(p, (old, old))
+        self.assertEqual(self.check()[0], self.m.EXIT_SKIPPED)
+
     def test_the_verbs_are_topic_tier_only(self):
         self.full_round()
         with self.assertRaises(SystemExit):
