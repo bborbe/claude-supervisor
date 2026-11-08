@@ -1405,6 +1405,9 @@ async function concurrentLimitError({ operatorNamed = false } = {}) {
     staleAgeMs: counted.stale?.ageMs ?? null,
     operatorNamed,
     configFile: config.configFile,
+    // The split rides on the same count pass, so the refusal's breakdown cannot describe a
+    // different instant than the number beside it.
+    populations: counted.populations ?? null,
   })
 }
 
