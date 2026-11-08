@@ -69,9 +69,10 @@ delegate rule's carve-out).
    ⚠️ **Why this instrument and not `fleet-sessions.py`:** that roster's rows are built from session
    **transcripts** with the ledger joined on, so a worker spawned seconds ago has no row yet — which
    is exactly the window this guard exists to cover (`fleet-sessions.py` says so itself: an absent
-   ledger record is a *different* claim from "not spawned"). `spawn_agent` publishes the ledger row
-   in-process at the spawn edge, before the spawn call returns, so the row is already there when the
-   hand-back can be lost.
+   ledger record is a *different* claim from "not spawned"). `spawn_agent` writes the ledger row at
+   the spawn edge — the write is issued before the spawn call returns, not when the worker first
+   speaks — so by the time the caller re-reads, a spawn seconds old has a row while a
+   transcript-derived roster row does not.
    ⚠️ **The selected names come from the payload**, `<digest minus .digest>.open` — written by
    `agents/fleet-open-actor.md` § 2 *before* § 3 acts. Its numbered rows read `  <n>. <name> — <why>`,
    and `<why>` is always one of `flagged` / `priority <n>` / `no priority`, so a name is its line
