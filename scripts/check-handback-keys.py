@@ -11,11 +11,12 @@ permanently false, and the branch behind it silently never runs.
       trigger and its body disagree, here the trigger and the data it tests do.
   (2) **The delegated legs.** Since 2026-11-06 `commands/steps/round-readings.md` and
       `commands/steps/goal-spawn.md` each dispatch a reader agent
-      (`agents/round-readings-reader.md`, `agents/goal-spawn-reader.md`), and since 2026-11-07
+      (`agents/round-readings-reader.md`, `agents/goal-spawn-reader.md`), since 2026-11-07
       the fleet round's two acting legs do the same (`commands/steps/keepalive.md` →
       `agents/fleet-keepalive-actor.md`, `commands/steps/flagged-open.md` →
-      `agents/fleet-flagged-open-actor.md`) — each returns the verdicts the step no longer
-      computes itself. A step reverted to its pre-split text
+      `agents/fleet-flagged-open-actor.md`), and since 2026-11-08 the fleet round's open leg
+      does the same (`commands/steps/open.md` → `agents/fleet-open-actor.md`) — each returns
+      the verdicts the step no longer computes itself. A step reverted to its pre-split text
       stops dispatching, and a reader that drops one value of a family leaves the caller a
       cell it cannot evaluate — both silently. `docs/handback-contract.md` § The shape — the
       readings leg's required set — requires **every value of every family, including the
@@ -33,8 +34,8 @@ values each family can take had no key at all.
 **Scope, stated precisely.** For the fleet tick this asserts the keys a router `When` cell
 *tests* — today `orphan`, `collision`, `unmanaged`, `blocked`, `context70`. For the delegated
 legs it asserts each leg's **declared required set** (`LEGS` below) — the two manager-round
-readers and the fleet round's two acting legs. It is still not
-a check of the whole contract: buckets no cell tests and no leg declares are out of reach, so
+readers and the fleet round's three acting legs. It is still not a check of the whole
+contract: buckets no cell tests and no leg declares are out of reach, so
 `held`'s original absence would pass here on the fleet side. Widening it further means reading
 a required set from somewhere this script does not own; until then it does not claim to.
 
@@ -119,6 +120,28 @@ LEGS = {
         "sites": ("commands/steps/flagged-open.md",),
         "required": (
             "legs", "legs-reason", "operator-flagged", "opened", "refused", "truncated", "payload",
+        ),
+    },
+    # The fleet round's open leg (row 16). Unlike the keep-alive and flagged-open legs it writes
+    # NO digest key — `fleet-legs.py` carries three and none is this leg's; its persisted reading
+    # is the `.open` block payload that `commands/steps/output-shape.md` item 3 renders. So the
+    # hand-back is the only channel for every verdict the step acts on, and `render` / `reason`
+    # are the two a dropped key silently breaks: a `status=ok` with no `render=` prints no block
+    # at all, and a `status=not-run` with no `reason=` renders `open leg: not run — ` with nothing
+    # after the dash. `refused` is the command's own tally, `truncated` is the difference between
+    # it and the `refused:` lines that fit, and `selected` is what `opened` is reconciled against.
+    # ⚠️ **`resumed` and `jumped` are required because the reconciliation is four-way, not two.**
+    # `/supervisor:open` reports three branches — `↪️ jumped` / `♻️ resumed <sid>` / `🆕 created
+    # <sid>` — and a resumed row is reachable for a selected row (`approved-not-started.py`: a row
+    # whose session ENDED is not started). Without them, `opened + refused == selected` is false on
+    # any round that activated a live session or resumed a dead one, so a leg that dropped either
+    # key would silently leave the caller unable to reconcile at all.
+    "supervisor:fleet-open-actor": {
+        "agent": "agents/fleet-open-actor.md",
+        "sites": ("commands/steps/open.md",),
+        "required": (
+            "status", "selected", "opened", "resumed", "jumped", "refused", "render",
+            "reason", "truncated", "payload",
         ),
     },
 }
