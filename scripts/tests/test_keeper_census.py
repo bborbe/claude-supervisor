@@ -45,8 +45,9 @@ def load():
     return mod
 
 
-def page(kind, name, sid="", status="in_progress", goals=(), topics=(), body=""):
-    lines = ["---", f"page_type: {kind}", f"status: {status}"]
+def page(kind, name, sid="", status="in_progress", phase="execution", goals=(), topics=(),
+         body=""):
+    lines = ["---", f"page_type: {kind}", f"status: {status}", f"phase: {phase}"]
     if sid:
         lines.append(f"claude_session_id: {sid}")
     if goals:
@@ -81,6 +82,7 @@ class CensusTest(unittest.TestCase):
         self.k.cadence = lambda subject, branch, vault: self.states.get(
             (branch, subject), "UNREADABLE"
         )
+        self.real_notify = self.k.notify
         self.k.notify = lambda key, payload, options, context="": (
             self.posts.append((key, payload)) or f"item-{len(self.posts)}"
         )
@@ -202,6 +204,17 @@ class CensusTest(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertIn("keeper: fleet round", text)
 
+    def test_a_topicless_goal_outside_the_fleet_legs_population_reads_unkept(self):
+        """`crashed-managers.fleet_keeps` selects `in_progress` / `execution` only."""
+        self.legs.write_text(LEGS_ALL, encoding="utf-8")
+        self.write("goal", "Waiting", sid="g-sid", phase="todo")
+        self.alive("g-sid")
+        self.states[("goal", "Waiting")] = "OK"
+
+        code, text = self.run_census("--no-card")
+        self.assertEqual(1, code)
+        self.assertIn("outside the fleet leg's population", text)
+
     def test_live_stopped_goal_manager_leaves_its_worker_unkept(self):
         """Fixture 2 — goal manager LIVE, loop STOPPED, worker with no other keeper."""
         self.write("topic", "T", sid="topic-sid", body="## Goals\n- [[G]]\n\n## Non-goals\n")
@@ -301,6 +314,68 @@ class CensusTest(unittest.TestCase):
         self.assertEqual(0, code, text)
         self.assertNotIn("Empty", text)
         self.assertIn("sessions=0", text)
+
+    def test_a_null_session_id_is_not_a_session(self):
+        raw = ("---\npage_type: task\nstatus: in_progress\nclaude_session_id: null\n---\n\nbody\n")
+        (self.vault / "25 Tasks" / "Null.md").write_text(raw, encoding="utf-8")
+
+        code, text = self.run_census("--no-card")
+        self.assertEqual(0, code, text)
+        self.assertNotIn("Null", text)
+
+    # -- the third answer and the fourth state -------------------------------------------
+
+    def test_an_unreadable_loop_probe_is_cannot_tell_never_unkept(self):
+        self.write("topic", "T", sid="t-sid", body="## Goals\n- [[G]]\n")
+        self.write("goal", "G", sid="g-sid")
+        self.write("task", "W", sid="w-sid", goals=["G"])
+        for sid in ("t-sid", "g-sid", "w-sid"):
+            self.alive(sid)
+        self.states[("topic", "T")] = "OK"
+        self.states[("goal", "G")] = "UNREADABLE"
+
+        code, text = self.run_census("--no-card")
+        self.assertEqual(0, code, text)
+        self.assertNotIn("RED", text)
+        self.assertIn("cannot-tell=1", text)
+        self.assertIn("G [UNREADABLE]", text)
+
+    def test_a_live_session_no_page_records_is_unrecorded_not_unkept(self):
+        """Outside the tree is reported and named, never counted as a keeper gap."""
+        self.alive("stray-sid", "private-personal-xx")
+
+        code, text = self.run_census("--no-card")
+        self.assertEqual(0, code, text)
+        self.assertIn("unrecorded=1", text)
+        self.assertIn("keeper-census: unkept=0 double-kept=0 sessions=1", text)
+        self.assertIn("MISMATCH live session stray-sid (private-personal-xx) — no page records it",
+                      text)
+
+    # -- the card's argv ---------------------------------------------------------------
+
+    def test_notify_pins_the_attention_argv(self):
+        """A wrong producer id or kind posts no card while every other test stays green."""
+        seen = {}
+
+        class Done:
+            stdout = "ITEM_ID: abc123\n"
+
+        def fake_run(argv, **kwargs):
+            seen["argv"] = argv
+            return Done()
+
+        original, self.k.subprocess.run = self.k.subprocess.run, fake_run
+        self.addCleanup(lambda: setattr(self.k.subprocess, "run", original))
+
+        item = self.real_notify("key-1", "payload", ["acknowledge"], context="ctx")
+        self.assertEqual("abc123", item)
+        argv = seen["argv"]
+        self.assertIn("--producer-id", argv)
+        self.assertEqual("keeper-census", argv[argv.index("--producer-id") + 1])
+        self.assertEqual("manager", argv[argv.index("--producer-kind") + 1])
+        self.assertEqual("key-1", argv[argv.index("--dedup-key") + 1])
+        self.assertEqual(["acknowledge"], [argv[i + 1] for i, a in enumerate(argv)
+                                           if a == "--option"])
 
     # -- the card's day bucket ------------------------------------------------------------
 

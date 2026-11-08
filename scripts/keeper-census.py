@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import importlib.util
 import json
 import os
 import re
@@ -48,6 +49,21 @@ from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
+
+
+def _load(name, filename):
+    """Import a sibling script by path — the filenames carry hyphens."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: `scripts/goals-declaration.py` is the one home for the `goals:` declaration, with five
+#: live shapes and YAML's `''` escape undone. A local extractor here would be the fourth
+#: copy, and its failure direction is a silent drop — a name that matches no page reads as
+#: "this worker has no goal", which the census reports green.
+GOALS = _load("goals_declaration", "goals-declaration.py")
 
 SESSION_LIVENESS = os.path.join(HERE, "session-liveness.py")
 MANAGER_LIVENESS = os.path.join(HERE, "manager-liveness.py")
@@ -87,7 +103,7 @@ OWNER_STATES = {"OK", "STALE"}
 #: The loop states the contract names as **not** an owner (`docs/session-tiers.md` § Owner).
 #: Any other token — `UNREADABLE`, or a vocabulary this file has not learned — is a
 #: cannot-tell, and the census reports it without counting it against the fleet.
-NOT_OWNER_STATES = {"STOPPED", "SLEEPING", "UNARMED", "INVALID", "ABSENT", "NO-ID", "NO-PAGE"}
+NOT_OWNER_STATES = {"STOPPED", "SLEEPING", "UNARMED", "INVALID"}
 
 STATE_DIR = os.path.expanduser(
     os.environ.get("KEEPER_CENSUS_DIR") or "~/.claude/state/keeper-census"
@@ -145,7 +161,8 @@ def scalar(fm, key):
 
 
 def links(fm, key):
-    """The wikilink targets of a list-valued key, `topics:` or `goals:`."""
+    """The wikilink targets of a list-valued key — `topics:` here; `goals:` goes through
+    `GOALS.goal_names`, which carries the shapes and the escape."""
     m = re.search(rf"^{key}:[ \t]*(.*(?:\n[ \t-].*)*)", fm, re.M)
     return re.findall(r"\[\[([^\]|#]+)", m.group(1)) if m else []
 
@@ -158,16 +175,55 @@ def section_links(text, heading):
     nothing, so every goal it named read topic-less and went red — a false violation of the
     very invariant this script asserts.
     """
-    m = re.search(rf"^## {re.escape(heading)}$(.*?)(?=^## |\Z)", text, re.M | re.S)
-    return re.findall(r"^- \[\[([^\]|#]+)", m.group(1), re.M) if m else []
+    # The section ends at the next heading of level 1 or 2 — a topic page carries its
+    # `# Split` sections after `## Goals`, and stopping only at `## ` swallowed their
+    # bullets as declared goals (`manager-predispatch.declared_members` carries the same
+    # boundary for the same reason).
+    m = re.search(rf"^## {re.escape(heading)}$(.*?)(?=^#{{1,2}} |\Z)", text, re.M | re.S)
+    return re.findall(r"^[ \t]*[-*][ \t]+\[\[([^\]|#]+)", m.group(1), re.M) if m else []
+
+
+def page_dirs(vault):
+    """The page directories that exist under `vault` — the census's own layout probe."""
+    return [os.path.join(vault, name)
+            for name in TOPIC_DIRS + GOAL_DIRS + TASK_DIRS
+            if os.path.isdir(os.path.join(vault, name))]
+
+
+def session_ids(fm):
+    """Every session id the page records — `claude_session_id` and each `metrics_sessions`
+    entry, the field set `scripts/session-ids.py` is the home of.
+
+    A page can record its session only under `metrics_sessions`: 26 non-terminal task pages
+    on `private-personal` do, and one of them was live while this was written. Reading only
+    `claude_session_id` reported that session as one no page records — a false red.
+    """
+    ids = set()
+    primary = scalar(fm, "claude_session_id")
+    if primary:
+        ids.add(primary)
+    in_block = False
+    for line in fm.splitlines():
+        if line and not line[0].isspace():
+            in_block = line.partition(":")[0].strip() == "metrics_sessions"
+            continue
+        if not in_block:
+            continue
+        key, sep, value = line.strip().lstrip("- ").partition(":")
+        if sep and key.strip() == "session_id":
+            value = value.strip().strip("'\"")
+            if value and value.lower() not in NULLS:
+                ids.add(value)
+    return ids
 
 
 def scan(vault):
-    """Every non-terminal page carrying a `claude_session_id`, plus the topic→goal edges.
+    """Every non-terminal page, its session ids, and the topic→goal edges.
 
-    Returns `(pages, by_session, by_name, goal_topics)`. `pages` is a list of dicts; the
-    indexes are the joins the census makes. A page whose frontmatter carries no session id is
-    not part of the census at all: it has no session to keep.
+    Returns `(pages, by_session, by_name, goal_topics)`. `by_name` indexes **every**
+    non-terminal page — a topic page with no session id is still a real page, and "no such
+    page" must not read the same as "a page that records no session". `by_session` indexes
+    only pages that record at least one id.
     """
     pages, by_session, by_name = [], {}, {}
     goal_topics = {}
@@ -182,24 +238,23 @@ def scan(vault):
                     continue
                 text = _read(os.path.join(directory, filename))
                 fm = frontmatter(text)
-                sid = scalar(fm, "claude_session_id")
-                if not sid:
-                    continue
                 if scalar(fm, "status") in TERMINAL:
                     continue
+                ids = session_ids(fm)
                 page = {
                     "kind": kind,
                     "name": filename[:-3],
-                    "path": os.path.join(directory, filename),
-                    "sid": sid,
+                    "sid": scalar(fm, "claude_session_id"),
+                    "sids": ids,
                     "status": scalar(fm, "status"),
                     "phase": scalar(fm, "phase"),
-                    "goals": links(fm, "goals") if kind == "task" else [],
+                    "goals": GOALS.goal_names(fm) if kind == "task" else [],
                     "topics": links(fm, "topics") if kind == "goal" else [],
                 }
                 pages.append(page)
-                by_session.setdefault(sid, []).append(page)
                 by_name.setdefault((kind, page["name"]), page)
+                for sid in ids:
+                    by_session.setdefault(sid, []).append(page)
                 if kind == "topic":
                     for goal in section_links(text, "Goals"):
                         goal_topics.setdefault(goal, []).append(page["name"])
@@ -335,8 +390,8 @@ def owner(kind, name, world):
     it is not `owns: False`** — `scripts/owner.py` returns `CANNOT_TELL` for an unreadable
     probe, and the rule it inherits is the fleet-wide one: a failed read must never license a
     definite verdict (`docs/pane-reads.md` § The rule). A row whose keeper could not be read
-    is reported and carded as an ownership gap; it is never counted unkept. `live is None`
-    (no page at all) is a cannot-tell for the same reason.
+    is reported and counted in the header; it is never counted unkept and never carded on its
+    own. `live is None` (no page at all) is a cannot-tell for the same reason.
 
     Cached per `(kind, name)` for the run: the cadence read is a subprocess, and one goal
     manager is consulted once per worker that names it — measured 2026-11-08, an uncached
@@ -353,10 +408,10 @@ def _owner(kind, name, world):
     if page is None:
         return {"live": None, "cadence": "NO-PAGE", "owns": False, "cannot": True,
                 "why": f"no {kind} page named {name}"}
-    if not page["sid"]:
+    if not page["sids"]:
         return {"live": False, "cadence": "NO-ID", "owns": False, "cannot": False,
-                "why": f"{kind} {name} records no claude_session_id"}
-    if page["sid"] not in world["live"]:
+                "why": f"{kind} {name} records no session id"}
+    if not (page["sids"] & set(world["live"])):
         return {"live": False, "cadence": "ABSENT", "owns": False, "cannot": False,
                 "why": f"{kind} {name} session is not live"}
     state = world["cadence"](name, kind, world["vault"])
@@ -420,13 +475,24 @@ def keepers_of(page, world):
         claimants = [f"topic mgr: {topic}" for topic, v in verdicts if v["owns"]]
         if claimants:
             return claimants, "", False
-        # A goal declared by no topic is kept by the fleet manager — a leg the contract
-        # records as missing (`docs/session-tiers.md` § Keep-alive, "Goal manager — goal in
-        # no topic"). The census reads whether it exists rather than assuming either way.
-        if world["legs"]["goal"]:
-            return ["fleet round"], "", False
+        # ⚠️ **The fleet goal leg covers goals in NO topic, and only those.**
+        # `commands/steps/keepalive-topicless-goals.md` selects the topic-less set, and
+        # `topic-keepalive.py` leaves a `STOPPED`/`SLEEPING` topic manager alone — so a goal
+        # a topic *does* declare, whose topic manager is stood down, is kept by nobody. An
+        # unguarded `legs["goal"]` branch reported it "kept by fleet round", which is the
+        # false green this census exists to remove.
         if not verdicts:
-            return [], "goal is in no topic and the fleet round has no goal keep-alive leg", False
+            if not world["legs"]["goal"]:
+                return [], ("goal is in no topic and the fleet round has no goal keep-alive "
+                            "leg"), False
+            # The leg's own population gate, mirrored from `crashed-managers.fleet_keeps`:
+            # it selects a topic-less goal only at `in_progress` / `execution`. Any other
+            # row is not resumed by it, so calling it kept would be a green with no keeper.
+            if page["status"] != "in_progress" or page["phase"] != "execution":
+                return ([], "goal is in no topic and outside the fleet leg's population "
+                        f"(status {page['status'] or '—'}, phase {page['phase'] or '—'})",
+                        False)
+            return ["fleet round"], "", False
         states = ", ".join(f"{t} [{v['cadence']}]" for t, v in verdicts)
         return ([], f"declaring topic(s) have no live armed manager: {states}",
                 any(v["cannot"] for _, v in verdicts))
@@ -444,18 +510,20 @@ def keepers_of(page, world):
                 deferred.append(f"{goal} [{verdict['cadence']}]")
         if claimants:
             return claimants, "", False
+        # A goal name that resolves to no page is a page-record defect, and the answer it
+        # leaves behind is cannot-tell — not "kept by the fleet round".
+        unresolved = any(owner("goal", g, world)["cannot"] for g in page["goals"])
         if deferred:
             return ([], "goal manager session LIVE but its loop is not running: "
-                    + ", ".join(deferred),
-                    any(owner("goal", g, world)["cannot"] for g in page["goals"]))
+                    + ", ".join(deferred), unresolved)
         if world["legs"]["worker"]:
-            return ["fleet round"], "", False
+            return (["fleet round"], "", unresolved)
         if not page["goals"]:
             return [], "task has no goal and the fleet round has no worker keep-alive leg", False
         states = ", ".join(f"{g} [{owner('goal', g, world)['cadence']}]"
                            for g in page["goals"])
         return ([], "goal manager(s) absent and the fleet round has no worker keep-alive "
-                f"leg: {states}", False)
+                f"leg: {states}", unresolved)
 
     return [], f"unhandled page kind {kind}", False
 
@@ -495,6 +563,11 @@ def prefetch_owners(world):
             pairs.add((page["kind"], page["name"]))
         elif page["kind"] == "task":
             pairs.update(("goal", goal) for goal in page["goals"])
+        if page["kind"] == "goal":
+            # A goal row consults every topic that declares it — the expensive half the
+            # first version left to run serially inside `census()`.
+            pairs.update(("topic", topic)
+                         for topic in world["goal_topics"].get(page["name"], []))
     if not pairs:
         return
     with ThreadPoolExecutor(max_workers=PROBE_WORKERS) as pool:
@@ -514,8 +587,15 @@ def census(world):
                          "why": "kept by the operator by design"})
             continue
         if page is None:
-            rows.append({"state": "live", "tier": "none", "name": name, "sid": sid,
-                         "keepers": [], "red": "unkept",
+            # ⚠️ **`unrecorded`, not `unkept`.** A live session no page records is outside
+            # the session tree, and `docs/session-tiers.md` § Adopt or close says nothing
+            # about one: it is an operator-opened ad-hoc tab, a drill, or a worker that never
+            # stamped its page. Reporting it as a keeper gap made the clean line unreachable
+            # (19 of 78 live sessions on 2026-11-08) and fired the card every episode-day
+            # forever. It is printed, counted in the header and named in the MISMATCH block,
+            # and `unkept` keeps its meaning: a page exists and nobody keeps it.
+            rows.append({"state": "unrecorded", "tier": "none", "name": name, "sid": sid,
+                         "keepers": [], "red": None,
                          "why": "no topic, goal or task page records this session"})
             mismatches.append(f"live session {sid} ({name}) — no page records it")
             continue
@@ -582,9 +662,11 @@ def render(rows, mismatches, live_count, leg_state, vault, card=None):
     unkept = sum(1 for r in rows if r["red"] == "unkept")
     double = sum(1 for r in rows if r["red"] == "double-kept")
     cannot = sum(1 for r in rows if r["state"] == "cannot-tell")
+    unrecorded = sum(1 for r in rows if r["state"] == "unrecorded")
     out = [f"keeper-census: {vault}",
            "  legs: " + " ".join(f"{k}={'yes' if v else 'NO'}" for k, v in leg_state.items())
-           + f" · live={live_count} rows={len(rows)} · cannot-tell={cannot}"]
+           + f" · live={live_count} rows={len(rows)} · unrecorded={unrecorded}"
+           + f" · cannot-tell={cannot}"]
     dead_printed = dead_hidden = 0
     for row in rows:
         if row["red"]:
@@ -598,9 +680,10 @@ def render(rows, mismatches, live_count, leg_state, vault, card=None):
             if dead_printed > NOT_LIVE_LIMIT:
                 dead_hidden += 1
                 continue
-        out.append(f"      {row['state']:<8} "
+        detail = (f" · {row['why']}" if row["state"] == "cannot-tell" else "")
+        out.append(f"      {row['state']:<12} "
                    f"{row['tier']:<10} {row['name'][:56]:<56} keeper: "
-                   f"{', '.join(row['keepers']) or '—'}")
+                   f"{', '.join(row['keepers']) or '—'}{detail}")
     if dead_hidden:
         out.append(f"      … and {dead_hidden} more page(s) whose session is not live "
                    "(worker-keepalive.py's population — never counted red)")
@@ -695,6 +778,17 @@ def raise_card(rows, now):
 
 
 def main(argv=None):
+    """CLI. An internal failure exits 2, never 1: `1` means "at least one red row" and the
+    round reads it as a finding — a traceback reported as a finding loses the count line and
+    sends the operator after a keeper gap that does not exist."""
+    try:
+        return _main(argv)
+    except (OSError, ValueError, KeyError, TypeError) as exc:  # noqa: BLE001 — see docstring
+        print(f"keeper-census: refused — internal error: {exc!r}", file=sys.stderr)
+        return 2
+
+
+def _main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--vault", required=True, help="the vault ROOT path")
     parser.add_argument("--no-card", action="store_true",
@@ -712,6 +806,15 @@ def main(argv=None):
     if live is None:
         print("keeper-census: refused — the session registry could not be read, so the "
               "live fleet is unknown (never 0)", file=sys.stderr)
+        return 2
+    if not page_dirs(args.vault):
+        # A vault whose layout this script does not recognise has no pages to join, so every
+        # live session would read unrecorded — a fleet-wide false red produced by a wrong
+        # path. The two must not print the same, so this refuses.
+        print(f"keeper-census: refused — no topic, goal or task page directory under "
+              f"{args.vault} (looked for {', '.join(TOPIC_DIRS + GOAL_DIRS + TASK_DIRS)}); "
+              "a vault this script cannot read must not read as a fleet with no pages",
+              file=sys.stderr)
         return 2
 
     _, by_session, by_name, goal_topics = scan(args.vault)

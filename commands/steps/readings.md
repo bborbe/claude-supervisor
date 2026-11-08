@@ -91,33 +91,50 @@ nothing.
 
 ```
 keeper-census: <vault>
-  legs: topic=yes goal=yes worker=yes · live=78 rows=328 · cannot-tell=0
-  RED unkept      none       <session>  — no topic, goal or task page records this session
-      live        topic-mgr  <topic>    keeper: fleet round
-      not-live    worker     <task>     keeper: —
+  legs: topic=yes goal=yes worker=yes · live=80 rows=405 · unrecorded=20 · cannot-tell=1
+  RED unkept      goal-mgr   <goal>    — declaring topic(s) have no live armed manager: <topic> [STOPPED]
+      live        topic-mgr  <topic>   keeper: fleet round
+      not-live    worker     <task>    keeper: —
+MISMATCH live session <id> (<name>) — no page records it
 MISMATCH page "<task>" records session <id> — the registry does not hold it
   card: <item-id>
-keeper-census: unkept=16 double-kept=0 sessions=78
+keeper-census: unkept=0 double-kept=0 sessions=80
 ```
+
+⚠️ **Three answers, not two, and the count line carries only one of them.**
+`unkept` / `double-kept` are the invariant broken by a row **a page records**. A live session
+**no page records** is `unrecorded` — reported, named in the `MISMATCH` block, counted in the
+header, and **never counted red and never carded**: it is outside the session tree, and
+`docs/session-tiers.md` § Adopt or close says nothing about it (an operator-opened ad-hoc tab,
+a drill, a worker that never stamped its page). Counting those as gaps made `unkept=0`
+unreachable and fired the card every episode-day forever. `cannot-tell` is the third: a keeper
+read that failed.
 
 ⚠️ **The count line is the block's last line, always** — the `card:` line sits above it, and
 that line is what the goal's own criterion reads.
 
 ⚠️ **The exit code is three-way, and only one of them is a finding.** `0` clean; `1` at
 least one red row — the reading's own result, **not** a refusal, so the round carries on and
-prints the block; `2` the registry or the vault could not be read, and the census says so on
-stderr rather than reporting a fleet of zero. Render `2` as
+prints the block; `2` the registry or the vault could not be read — including a vault with
+no topic, goal or task directory, and any internal error — and the census says so on stderr
+rather than reporting a fleet of zero. Render `2` as
 `keeper census: refused — <reason>`; a refusal and a clean fleet must never print the same.
 
-⚠️ **`cannot-tell` is a third row state and is never counted red.** A row whose keeper could
-not be read (an unreadable loop probe, a page naming a manager page that does not exist) is
-printed with that state and counted in the header's `cannot-tell=` — a failed read must not
-be reported as a definite gap, and the count line carries only the definite ones.
+⚠️ **`cannot-tell` is never counted red.** A row whose keeper could not be read (an
+unreadable loop probe, a page naming a manager page that does not exist) is printed with that
+state, with its reason, and counted in the header's `cannot-tell=` — a failed read must not be
+reported as a definite gap.
+
+⚠️ **"Is the keeper running" is read only for manager keepers.** A `fleet round` keeper is the
+round itself, which is running by construction — the census is run by it — so its liveness is
+not re-read; reading it would turn every fleet-kept row red whenever the fleet loop idles.
 
 ⚠️ **The script posts its own card — the round posts none.** One card per red *episode*,
-under a dedup key carrying the episode's start time and day, so a second consecutive red
-round asks nothing and a fleet that goes green and red again is asked again. Do not re-post
-it, do not add an option to it, and do not card individual red rows.
+under a dedup key carrying the episode's start time and day: a second consecutive red round
+asks nothing, and a fleet that goes green and red again is asked again under a new key. The
+day component is deliberate — a card expires after 24 h, so a fleet still red a day later is
+asked again rather than left with an expired card. Do not re-post it, do not add an option to
+it, and do not card individual red rows.
 
 ⚠️ **A red row is a report, never a work item for this round.** Fixing what the census finds
 belongs to the task that owns the gap (a missing leg, an unrecorded session, a stood-down
