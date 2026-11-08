@@ -651,12 +651,15 @@ class FeedFamilyInvariant(Tmp):
     def setUp(self):
         super().setUp()
         self.predispatch = rr._load("manager-predispatch")
+        self.filt = rr._load("gate-owner-filter")
         self._resolve = self.predispatch.resolve_tracked
+        self._checked = self.filt.headless_items_checked
         self._live = rr.liveness
         rr.liveness = lambda ids, endpoint, registry_dir: "ABSENT"
 
     def tearDown(self):
         self.predispatch.resolve_tracked = self._resolve
+        self.filt.headless_items_checked = self._checked
         rr.liveness = self._live
         super().tearDown()
 
@@ -681,15 +684,49 @@ class FeedFamilyInvariant(Tmp):
             self.assertEqual(counts[value], verdicts.count(value), value)
 
     def test_a_failed_store_read_leaves_the_other_rows_decided(self):
-        """The owner line makes the read complete even with the store down."""
+        """The owner line makes the read complete even with the store down.
+
+        The store is made to FAIL and is asserted never consulted: a key that carries
+        its owner must not fall back to the store, which is the whole point of the
+        owner line. Without the call assertion this test passes on a build that still
+        reads the store, because nothing happens to be listening on the default port.
+        """
+        calls = []
+
+        def dead_store(keys, endpoint=None):
+            calls.append(list(keys))
+            return [], "attention store read failed: URLError: timed out"
+
+        self.filt.headless_items_checked = dead_store
         doc = self.document(
             {"Gated task": ["sid-gated"], "Clear task": ["sid-clear"]},
             {"panes": {"hst:k1"}, "owners": {"hst:k1": "sid-gated"},
              "orphan_owners": [], "state": "read", "error": None})
+        self.assertEqual(calls, [], "an owner-carrying key must not read the store")
         self.assertEqual(doc["rows"]["Gated task"]["feed"], "gated")
         self.assertEqual(doc["rows"]["Clear task"]["feed"], "clear")
         self.assertEqual(doc["feed_counts"], {"gated": 1, "clear": 1, "unread": 0})
         self.assertEqual(doc["probes"], [])
+        self.assert_invariant(doc)
+
+    def test_an_ownerless_key_reads_the_store_and_a_failure_marks_the_family_partial(self):
+        """The fallback survives for an older feed, and its failure is named."""
+        calls = []
+
+        def dead_store(keys, endpoint=None):
+            calls.append(list(keys))
+            return [], "attention store read failed: URLError: timed out"
+
+        self.filt.headless_items_checked = dead_store
+        doc = self.document(
+            {"Maybe task": ["sid-maybe"], "Other task": ["sid-other"]},
+            {"panes": {"hst:k1"}, "owners": {}, "orphan_owners": [],
+             "state": "read", "error": None})
+        self.assertEqual(calls, [["hst:k1"]])
+        self.assertEqual(doc["feed_state"], "partial")
+        self.assertEqual(doc["feed_counts"], {"gated": 0, "clear": 0, "unread": 2})
+        self.assertIn("attention store read failed",
+                      doc["probes"][0]["error"])
         self.assert_invariant(doc)
 
     def test_a_partial_read_keeps_gated_rows_and_marks_only_the_rest_unread(self):
