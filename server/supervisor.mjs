@@ -28,7 +28,7 @@ import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { WRAPPER_POLICY_INTERVAL_MS, createWrapperPolicyPoller } from './wrapper-policy.mjs'
 import { confinedCandidate, loadManagerAllowlist, matchManagerEntry } from './manager-allowlist.mjs'
 import { permissionTier } from './permission-tier.mjs'
-import { checkLiveness, findRegisteredByName, namesForSessionId, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
+import { checkLiveness, findRegisteredByName, namesForSessionId, pidIsAlive, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -3542,7 +3542,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // "has a pane?" wearing a general guard's clothes: true for a headless worker, and
       // accidentally true for every cluster worker, whose record carries `paneId: null` by
       // construction.
-      const channel = resolveMessageChannel(agent, { peerNamesFor: namesForSessionId, peerHoldersFor: sessionIdsNamed })
+      // Both resolvers are PID-CHECKED: a name handed to `SendMessage` must be one a live
+      // session answers to, and a collision guard must not fire on a crashed session's
+      // leftover entry. `namesForSessionId` defaults to `pidIsAlive`; the holders read does
+      // not, because its other caller (`uniqueTabName`) wants presence.
+      const channel = resolveMessageChannel(agent, {
+        peerNamesFor: namesForSessionId,
+        peerHoldersFor: (name) => sessionIdsNamed(name, { isAlive: pidIsAlive }),
+      })
       if (channel.error) return reply({ error: channel.error })
 
       if (channel.channel === 'peer') {

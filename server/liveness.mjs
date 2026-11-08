@@ -174,10 +174,15 @@ export function findRegisteredByName(name, { dir = SESSIONS_DIR, registry = read
 //
 // null is "no information" (unreadable directory) and must stay distinct from `[]`,
 // "read, and nothing holds this name" — a caller renames on `[]` and must not on null.
-export function sessionIdsNamed(name, { dir = SESSIONS_DIR, registry = readRegistry } = {}) {
+// `isAlive` defaults to null — NO filter — because the name-claiming caller (`uniqueTabName`)
+// wants presence: a stale entry only costs a suffix. A caller asking "would this name reach
+// someone else?" wants pid-checked liveness instead, and passes `pidIsAlive` explicitly.
+export function sessionIdsNamed(name, { dir = SESSIONS_DIR, registry = readRegistry, isAlive = null } = {}) {
   const entries = registry(dir)
   if (!entries) return null
-  return entries.filter((entry) => entry.name === name).map((entry) => entry.sessionId)
+  return entries
+    .filter((entry) => entry.name === name && (!isAlive || isAlive(entry.pid)))
+    .map((entry) => entry.sessionId)
 }
 
 // The names a session id is registered under — the INVERSE of `sessionIdsNamed`, and the
@@ -194,12 +199,17 @@ export function sessionIdsNamed(name, { dir = SESSIONS_DIR, registry = readRegis
 // conversation. null is again "no information" (unreadable directory), distinct from `[]`,
 // "read, and this id is registered under nothing" — the first is retryable, the second is a
 // worker that cannot be addressed at all.
-export function namesForSessionId(sessionId, { dir = SESSIONS_DIR, registry = readRegistry } = {}) {
+// ⚠️ PID-CHECKED, unlike `sessionIdsNamed` beside it, and the direction is what decides that.
+// A name is handed to `SendMessage`, so a stale entry left by a crashed session yields an
+// address that answers `No agent named … is reachable` — the unperformable remedy this join
+// exists to remove. `uniqueTabName` reads the other way round: there PRESENCE is the safe
+// answer, because over-counting a name only appends a suffix, so its read stays unfiltered.
+export function namesForSessionId(sessionId, { dir = SESSIONS_DIR, registry = readRegistry, isAlive = pidIsAlive } = {}) {
   if (typeof sessionId !== 'string' || !sessionId) return []
   const entries = registry(dir)
   if (!entries) return null
   return entries
-    .filter((entry) => entry.sessionId === sessionId && typeof entry.name === 'string' && entry.name)
+    .filter((entry) => entry.sessionId === sessionId && typeof entry.name === 'string' && entry.name && isAlive(entry.pid))
     .map((entry) => entry.name)
 }
 

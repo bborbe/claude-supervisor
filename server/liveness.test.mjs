@@ -343,6 +343,27 @@ test('namesForSessionId is the inverse of sessionIdsNamed — the id → name jo
   }
 })
 
+test('namesForSessionId drops a crashed session\'s leftover entry; sessionIdsNamed keeps it unless asked', () => {
+  // A name handed to SendMessage must answer: a stale file from a crashed session yields
+  // `No agent named … is reachable`, the defect this join exists to remove. The holders read
+  // keeps presence by default, because uniqueTabName wants it; a collision guard opts in.
+  const dir = fixture({
+    '1.json': { pid: DEAD_PID, sessionId: SESSION, name: 'claude-dead' },
+    '2.json': { pid: process.pid, sessionId: OTHER, name: 'claude-shared' },
+    '3.json': { pid: DEAD_PID, sessionId: 'a1b2c3d4-0000-4000-8000-000000000000', name: 'claude-shared' },
+  })
+  try {
+    assert.deepEqual(namesForSessionId(SESSION, { dir }), [], 'a dead pid yields no address')
+    // Positive control: the same entry with a live pid DOES resolve, so the empty result
+    // above is the filter firing, not a blind read.
+    assert.deepEqual(namesForSessionId(SESSION, { dir, isAlive: () => true }), ['claude-dead'])
+    assert.equal(sessionIdsNamed('claude-shared', { dir }).length, 2, 'presence by default')
+    assert.deepEqual(sessionIdsNamed('claude-shared', { dir, isAlive: pidIsAlive }), [OTHER])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('uniqueTabName suffixes past every holder so the join can only be the new session', () => {
   const dir = fixture({
     '1.json': { pid: process.pid, sessionId: SESSION, name: '⚙ dup' },
