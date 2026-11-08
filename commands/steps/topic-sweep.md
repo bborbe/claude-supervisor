@@ -40,7 +40,9 @@ Rationale: `agents/topic-sweep-reader.md` is the plugin's canonical procedure fo
 
 3. **Delegate the computation to `supervisor:topic-sweep-reader`.**
 
-   `Task(subagent_type: "supervisor:topic-sweep-reader", prompt: <topic page path + the declared goal names + vault + mode: tick + timestamp + the liveness verdicts + the cadence verdicts + today>)`
+   `Task(subagent_type: "supervisor:topic-sweep-reader", prompt: <topic page path + the declared goal names + vault + mode: tick + timestamp + the liveness verdicts + the cadence verdicts + today + payload path>)`
+
+   ⚠️ **Pass the payload path — the reader is required to write the rendered table and has nowhere to put it otherwise.** Its constraint says *"Your one write is the rendered payload, at the path the caller's gate reads"*, but this step passed no path, so the write had no destination and the leg's only artifact could not exist. Name `~/.claude/state/manager-receipts/<slug>.sweep`, where `<slug>` is the receipt's own slug (`scripts/manager-receipt.py`), so the file sits beside the receipt it belongs to.
 
    ⚠️ **The `supervisor:` prefix is required** — a bare name resolves to a personal
    `~/.claude/agents/` copy, never the plugin agent. The agent owns the goal-row read, the
@@ -54,3 +56,12 @@ Rationale: `agents/topic-sweep-reader.md` is the plugin's canonical procedure fo
    `python3 .../scripts/box-table.py` reading `${CLAUDE_PLUGIN_ROOT}/docs/sweep-output.md`
    for the frame. **Never hand-draw the box.** Say so in the tick when the fallback fires: a
    table rendered through it is one whose delegation failed.
+
+6. **Record the sweep on the round's receipt — the leg's own payload, not a copy you wrote.**
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-receipt.py \
+     --record --topic "<subject>" --step sweep --path ~/.claude/state/manager-receipts/<slug>.sweep
+   ```
+
+   ⚠️ **Without this call the topic tuple cannot honestly carry `sweep`.** The topic round sweeps every tick (router row 3), so dropping the step from the tuple would let a round that skipped its sweep report complete — the very defect the receipt exists to catch. The record call is what makes keeping it honest. ⚠️ **A delegation that failed leaves no payload** — record nothing and let the tail print `skipped: sweep`; a table rendered through the `box-table.py` fallback is still the leg's output and is recorded normally.

@@ -83,6 +83,16 @@ def iso_ts(epoch):
 # repairs — the old predicate accepted exactly the shape the producer never writes.
 SWEEP_OK = render_table(["Topic", "Status"], [["Recurring Operator Gates", "running"]])
 
+# The drive leg's own report, as `commands/steps/goal-drive.md` requires it to be
+# reproduced under the table. The headers are the producer's vocabulary; a summary the
+# caller wrote in its own words is what `drive_shape()` must refuse.
+DRIVE_OK = "To open\n  none\nTo resume\n  none\nNot resumed\n  none\nEscalated\n  none\n"
+
+# The same report from a leg that found nothing to do — still a real report, and still
+# green. A predicate demanding a non-empty row set would fail here and report a healthy
+# quiet round as `skipped: drive`, which is the permanent false red this file avoids.
+DRIVE_QUIET = "To open\nTo resume\n"
+
 
 class Receipt(unittest.TestCase):
     def setUp(self):
@@ -153,7 +163,9 @@ class Receipt(unittest.TestCase):
         sw = self.artifact("sweep.json", SWEEP_OK)
         ev = self.events_log("events.jsonl", [time.time()])
         rd = self.artifact("readings.json", READINGS_OK)
-        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev), ("readings", rd)):
+        dv = self.artifact("drive.txt", DRIVE_OK)
+        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev),
+                        ("readings", rd), ("drive", dv)):
             self.record(step, p)
 
     # --- the red/green property ------------------------------------------------
@@ -180,6 +192,96 @@ class Receipt(unittest.TestCase):
         rc, out = self.check()
         self.assertEqual(rc, 0)
         self.assertEqual(out, "")
+
+    # --- the drive leg ---------------------------------------------------------
+
+    def test_a_round_that_sweeps_and_skips_the_drive_leg_is_red(self):
+        # The measured incident: readings, needs-you, sweep and watcher all present and
+        # real, five sweep readers after the last drive dispatch, and `--check` green
+        # because the tuple had no field for the leg that never ran.
+        self.start()
+        for step, p in (("needs-you", self.artifact("needs-you.txt", NEEDS_YOU_OK)),
+                        ("sweep", self.artifact("sweep.json", SWEEP_OK)),
+                        ("watcher", self.events_log("events.jsonl", [time.time()])),
+                        ("readings", self.artifact("readings.json", READINGS_OK))):
+            self.record(step, p)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: drive", out)
+
+    def test_a_quiet_drive_report_is_green(self):
+        # A leg that found nothing still reports — it says so under `To open` / `To resume`
+        # with no rows. A predicate demanding a non-empty row set would call this round
+        # skipped, which is the permanent false red the tuple exists to avoid.
+        self.full_round()
+        self.record("drive", self.artifact("quiet-drive.txt", DRIVE_QUIET))
+        rc, out = self.check()
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+
+    def test_a_stub_drive_artifact_is_red(self):
+        # The shortcut this check exists to catch: record a path, write nothing real.
+        self.full_round()
+        self.record("drive", self.artifact("stub-drive.txt", "done\n"))
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: drive", out)
+
+    def test_an_empty_drive_artifact_is_red(self):
+        self.full_round()
+        self.record("drive", self.artifact("empty-drive.txt", "   \n\n"))
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: drive", out)
+
+    # --- the topic tier --------------------------------------------------------
+
+    def topic_check(self):
+        return self.cli("--check", "--topic", self.topic, "--tier", "topic")
+
+    def test_a_topic_round_owes_no_drive_leg(self):
+        # A topic round has no drive row at all (`commands/topic-drive.md` row 5 is
+        # *Keep alive*), so it must not be asked for one. Without the tier split this
+        # round would print `skipped: drive` forever — the permanent false red that
+        # `FLEET_STEPS`' own comment names.
+        self.full_round()
+        rc, out = self.topic_check()
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+
+    def test_a_topic_round_still_owes_its_sweep(self):
+        # `sweep` stays in the topic tuple: the topic round does sweep every tick, so
+        # dropping the step would let a round that skipped its sweep report complete —
+        # this check's own defect, one tier over.
+        self.full_round()
+        rc, out = self.topic_check()
+        self.assertEqual(rc, 0)
+        d = self.m.read_receipt(self.m.slug(self.topic))
+        d["fields"].pop("sweep")
+        self.m.write_atomic(self.m.path(self.m.slug(self.topic)), json.dumps(d) + "\n")
+        rc, out = self.topic_check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: sweep", out)
+        self.assertNotIn("skipped: drive", out)
+
+    def test_the_tier_selects_the_tuple_and_never_the_slug(self):
+        # A `--tier` that reached `slug()` would re-key every receipt already on disk
+        # from `<base>` to `topic--<base>` and orphan it.
+        self.assertEqual(self.m.steps_for("", "goal"), self.m.STEPS)
+        self.assertEqual(self.m.steps_for("", "topic"), self.m.TOPIC_STEPS)
+        self.assertIn("drive", self.m.STEPS)
+        self.assertNotIn("drive", self.m.TOPIC_STEPS)
+        self.assertEqual(self.m.slug(self.topic, ""), self.m.slug(self.topic))
+        self.assertNotIn("topic", self.m.BRANCHES)
+
+    def test_record_drive_is_accepted_on_the_goal_tier_and_refused_on_topic(self):
+        self.start()
+        p = self.artifact("drive.txt", DRIVE_OK)
+        rc, _ = self.record("drive", p)
+        self.assertEqual(rc, 0)
+        with self.assertRaises(SystemExit):
+            self.cli("--record", "--topic", self.topic, "--tier", "topic",
+                     "--step", "drive", "--path", p)
 
     def test_a_partial_feed_read_is_a_completed_reading(self):
         """`partial` is a read that RAN, so it must not be flagged as a skipped step.
@@ -406,7 +508,9 @@ class Receipt(unittest.TestCase):
             fh.write("\n")                             # blank line
             fh.write(json.dumps({"kind": "LIVENESS", "ts": time.time()}) + "\n")
         rd = self.artifact("readings.json", READINGS_OK)
-        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev), ("readings", rd)):
+        dv = self.artifact("drive.txt", DRIVE_OK)
+        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev),
+                        ("readings", rd), ("drive", dv)):
             self.record(step, p)
         rc, out = self.check()
         self.assertEqual(rc, 0, out)

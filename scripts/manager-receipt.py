@@ -98,7 +98,23 @@ SENTINEL = "INCOMPLETE ROUND"
 # verdict families to `<slug>.readings`. It is the step the 12:17 round skipped while
 # still rendering a complete-looking table, so it is the one this receipt most needs
 # to name.
-STEPS = ("needs-you", "sweep", "watcher", "readings")
+STEPS = ("needs-you", "sweep", "watcher", "readings", "drive")
+
+# The steps a TOPIC round owes, and the reason this tuple exists at all.
+#
+# `steps_for()` used to return `STEPS` for every non-fleet round, so one list judged a
+# goal round and a topic round alike. The two are not alike: a topic round has no drive
+# row at all (`commands/topic-drive.md` row 5 is *Keep alive*), so adding `drive` to
+# `STEPS` alone would print `skipped: drive` on every topic round forever — a permanent
+# false red, the same failure mode the `FLEET_STEPS` comment below names for the fleet
+# tier.
+#
+# `sweep` stays IN this tuple even though the topic sweep leg records nothing yet. The
+# topic round does sweep every tick (`commands/topic-drive.md` row 3), so dropping the
+# step would let a round that skips its sweep report complete — this check's own defect,
+# one tier over. The missing record call is the topic sweep's to add, not this tuple's
+# to excuse.
+TOPIC_STEPS = ("needs-you", "readings", "sweep", "watcher")
 
 # The fleet round's own two load-bearing steps, in their own tuple rather than appended
 # to STEPS. A goal or topic round owes no digest, so a shared tuple would make every such
@@ -107,6 +123,12 @@ STEPS = ("needs-you", "sweep", "watcher", "readings")
 # that owes both a per-round arm and a per-round digest.
 FLEET_STEPS = ("re-arm", "digest")
 ALL_STEPS = STEPS + FLEET_STEPS
+
+# The tiers a round can belong to. This is NOT `BRANCHES`: `branch` is interpolated into
+# the state slug by `slug()`, so a third branch value would re-key every receipt already
+# on disk from `<base>` to `topic--<base>` and orphan it. The tier therefore selects the
+# step tuple only, and never reaches `slug()`.
+TIERS = ("goal", "topic")
 
 # The branches this receipt knows: `""` (the goal/topic tier, which carries no prefix) and
 # `fleet`. `manager-liveness.py:110-112` validates its own set before building the same
@@ -125,9 +147,16 @@ ALL_STEPS = STEPS + FLEET_STEPS
 BRANCHES = ("", "fleet")
 
 
-def steps_for(branch: str) -> tuple:
-    """The steps a round of `branch` owes. No branch is the goal/topic tier."""
-    return FLEET_STEPS if branch == "fleet" else STEPS
+def steps_for(branch: str, tier: str = "goal") -> tuple:
+    """The steps a round of `branch`/`tier` owes.
+
+    No branch is the goal/topic tier, and `tier` separates those two: a goal round owes
+    `STEPS` (which carries `drive`), a topic round owes `TOPIC_STEPS` (which does not).
+    `tier` is deliberately NOT a `branch` value — see `TIERS`.
+    """
+    if branch == "fleet":
+        return FLEET_STEPS
+    return TOPIC_STEPS if tier == "topic" else STEPS
 
 # OSC 8 hyperlink: ESC ] 8 ; params ; URI ST. The payload `--write-payload` stores is
 # already link-free, but a frame captured from the screen carries them, and they are
@@ -489,6 +518,28 @@ def readings_shape(text: str) -> bool:
     return True
 
 
+def drive_shape(text: str) -> bool:
+    """The drive leg's own report: the action lines it hands back.
+
+    `commands/steps/goal-drive.md` requires the manager to "reproduce them under the
+    table, including `Not resumed` and `Escalated`", so a real drive report carries at
+    least one of the leg's action headers. The test is therefore a POSITIVE token test
+    rather than non-emptiness: a `touch`ed file, an arbitrary string and a round-written
+    stub must all fail, exactly as they do for every other step.
+
+    ⚠️ The predicate is deliberately loose about WHICH header, because a leg that found
+    nothing still reports — it says so under `To open` / `To resume` with no rows. A
+    predicate requiring a non-empty row set would report `skipped: drive` on a healthy
+    round that had nothing to do, which is the permanent-false-red this whole file
+    exists to avoid.
+    """
+    body = text.strip()
+    if not body:
+        return False
+    markers = ("To open", "To resume", "Not resumed", "Escalated", "Nudged", "Reaped")
+    return any(marker in body for marker in markers)
+
+
 def record_ts(value):
     """A record's `ts` as epoch seconds, or None when it is not a timestamp.
 
@@ -587,7 +638,8 @@ def digest_shape(text: str) -> bool:
     return False
 
 
-def _skips(s: str, branch: str, d: dict, started: float, limit: float, now: float) -> list:
+def _skips(s: str, branch: str, d: dict, started: float, limit: float, now: float,
+           tier: str = "goal") -> list:
     """`[(step, why), …]` for the round in progress. Pure — writes nothing.
 
     Shared by `--check` (the tail's verdict) and `--debt` (the legs' gate), because
@@ -620,7 +672,7 @@ def _skips(s: str, branch: str, d: dict, started: float, limit: float, now: floa
     abandoned = {step for ts, step in read_abandoned(s) if int(started) <= ts <= now + 1}
     fields = d.get("fields") or {}
     skipped = []
-    for step in steps_for(branch):
+    for step in steps_for(branch, tier):
         if step in abandoned:
             continue
         artifact = fields.get(step)
@@ -655,6 +707,8 @@ def _skips(s: str, branch: str, d: dict, started: float, limit: float, now: floa
             ok = readings_shape(text)
         elif step == "digest":
             ok = digest_shape(text)
+        elif step == "drive":
+            ok = drive_shape(text)
         else:
             ok = sweep_shape(text)
         if not ok:
@@ -686,7 +740,7 @@ def _write_debt_for(s: str, branch: str, skipped: list) -> bool:
         return False
 
 
-def check(topic: str, branch: str = "", now: float = None) -> int:
+def check(topic: str, branch: str = "", now: float = None, tier: str = "goal") -> int:
     now = time.time() if now is None else now
     s = slug(topic, branch)
     d = read_receipt(s)
@@ -706,7 +760,7 @@ def check(topic: str, branch: str = "", now: float = None) -> int:
         print(f"{SENTINEL} — skipped: receipt — round started {int(now - started)}s ago, limit {math.ceil(limit)}s {basis}")
         return EXIT_SKIPPED
 
-    skipped = _skips(s, branch, d, started, limit, now)
+    skipped = _skips(s, branch, d, started, limit, now, tier)
     _write_debt_for(s, branch, skipped)
 
     for step, why in skipped:
@@ -828,6 +882,10 @@ def main() -> int:
     ap.add_argument("--subject", help="alias for --topic; the fleet tier's name for it")
     ap.add_argument("--branch", default="",
                     help="the session tier; `fleet` selects the fleet round's steps")
+    ap.add_argument("--tier", default="goal", choices=TIERS,
+                    help="which round owes which steps: `goal` (the default, owes `drive`) "
+                         "or `topic` (owes no drive leg). Selects the step tuple only and "
+                         "never reaches the state slug, so it cannot orphan a receipt")
     ap.add_argument("--step", choices=ALL_STEPS)
     ap.add_argument("--path", help="the artifact the step produced")
     ap.add_argument("--only", action="append", choices=FLEET_STEPS, metavar="STEP",
@@ -841,14 +899,20 @@ def main() -> int:
     # `steps_for()` would never look for it.
     if a.branch not in BRANCHES:
         ap.error(f"--branch must be one of {BRANCHES}, got {a.branch!r}")
-    if a.step and a.step not in steps_for(a.branch):
-        ap.error(f"--step {a.step!r} is not a {a.branch or 'goal/topic'} step")
+    # `--tier` selects the goal/topic step tuple and nothing else, so pairing it with the
+    # fleet branch is a silent no-op — the fleet round is the only tier that owes neither
+    # tuple. Refuse rather than accept a flag that changes nothing: a caller that passes
+    # it believes it selected something.
+    if a.tier != "goal" and a.branch == "fleet":
+        ap.error("--tier selects the goal/topic tuple and means nothing with --branch fleet")
+    if a.step and a.step not in steps_for(a.branch, a.tier):
+        ap.error(f"--step {a.step!r} is not a {a.branch or a.tier} step")
     if not subject:
         ap.error("--topic or --subject is required with every mode")
     if a.only and not a.debt:
         ap.error("--only scopes the --debt gate and means nothing with any other mode")
     if a.check:
-        return check(subject, a.branch)
+        return check(subject, a.branch, tier=a.tier)
     # `--debt` and `--abandon` are fleet-only by construction: `check()` writes the
     # file only for `--branch fleet`, so the goal/topic tier would read an empty file
     # and exit 0 — a gate that always passes. Refusing is the only honest answer; a
