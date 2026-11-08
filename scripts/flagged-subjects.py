@@ -114,8 +114,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TERMINAL_STATUSES = {"completed", "aborted", "hold"}
 
 # `session-liveness.py --check` exit codes. LIVE is the only one that means "a manager runs";
-# ABSENT is a resume, and UNKNOWN/AMBIGUOUS/MALFORMED are "cannot tell" — never a spawn.
-LIVE, ABSENT, UNKNOWN, AMBIGUOUS, MALFORMED = 0, 1, 2, 3, 4
+# ABSENT (1) is a resume, and the rest — UNKNOWN (2), AMBIGUOUS (3), MALFORMED (4) — are
+# "cannot tell", which is never a spawn.
+LIVE, ABSENT = 0, 1
 
 
 def _load(name, filename):
@@ -237,10 +238,12 @@ def classify(subject, labels, registrations, topics, card_keys):
     page_id = (subject.get("page_id") or "").strip()
     if page_id:
         state = session_state(page_id)
-        if state is None or state in (UNKNOWN, AMBIGUOUS, MALFORMED):
-            return "unknown", "page session id %s could not be read" % page_id[:8]
         if state == LIVE:
             return "managed", "page session id %s is LIVE under a renamed session" % page_id[:8]
+        if state != ABSENT:
+            # UNKNOWN, AMBIGUOUS, MALFORMED and a probe that could not run at all are all
+            # "cannot tell" — and an unreadable verdict is not permission to spawn.
+            return "unknown", "page session id %s could not be read" % page_id[:8]
         # ABSENT is a resume, not an absence — fall through and let it open.
 
     if subject["phase"] == "todo":

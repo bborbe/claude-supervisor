@@ -128,7 +128,7 @@ class ClassifyTest(unittest.TestCase):
 
     def test_page_id_unknown_is_unknown_never_open(self):
         fs.pm.managed = lambda *a, **k: False
-        for code in (fs.UNKNOWN, fs.AMBIGUOUS, fs.MALFORMED, None):
+        for code in (2, 3, 4, None):  # UNKNOWN, AMBIGUOUS, MALFORMED, probe could not run
             fs.session_state = lambda session_id, code=code: code
             state, reason = fs.classify(self.goal(page_id="abc"), [], [], {}, set())
             self.assertEqual(state, "unknown")
