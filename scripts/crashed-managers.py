@@ -11,8 +11,8 @@ holds approved work nobody opened?"* — and was removed from the round on the o
 The detection already exists in two pieces and neither is rebuilt here:
 
   * `scripts/manager-liveness.py --state` classifies a subject `OK` / `STALE` / `STOPPED` /
-    `UNARMED` / `INVALID`. `STALE` is the lapsed loop; `STOPPED` is a deliberate stand-down
-    and is **never** a crash.
+    `SLEEPING` / `UNARMED` / `INVALID`. `STALE` is the lapsed loop; `STOPPED` is a
+    deliberate stand-down and `SLEEPING` is a date-gated wait — neither is **ever** a crash.
   * `scripts/session-liveness.py --check <id>` answers whether the manager session still
     exists. `ABSENT` is an abandoned record; `LIVE` with a `STALE` cadence is the crash.
 
@@ -106,7 +106,7 @@ PROBE_TIMEOUT = 30
 POST_TIMEOUT = 60
 
 # The states `manager-liveness.py --state` can answer, plus this file's own probe failure.
-CADENCE_STATES = ("OK", "STALE", "STOPPED", "UNARMED", "INVALID")
+CADENCE_STATES = ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID")
 PROBE_FAILED = "UNREADABLE"
 
 # `session-liveness.py --check`'s documented exit codes. The instrument's contract, not a
@@ -396,7 +396,10 @@ def evaluate(vault: str, branch: str, base: str) -> dict:
         row["reason"] = "cadence probe could not answer — a probe failure is never a lapse"
         return row
     if row["state"] != "STALE":
-        row["reason"] = f"cadence {row['state']} — only STALE is a lapse (STOPPED is a stand-down)"
+        row["reason"] = (
+            f"cadence {row['state']} — only STALE is a lapse "
+            "(STOPPED is a stand-down, SLEEPING is a date-gated wait)"
+        )
         return row
 
     sid = _page_session_id(helpers().frontmatter(_read_page(subject_page)))

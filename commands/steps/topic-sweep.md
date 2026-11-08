@@ -28,7 +28,7 @@ Rationale: `agents/topic-sweep-reader.md` is the plugin's canonical procedure fo
      --state --subject "<goal>" --branch goal
    ```
 
-   Record `<goal> → OK | STALE | STOPPED | INVALID`. ⚠️ **`--branch goal` is not optional** —
+   Record `<goal> → OK | STALE | STOPPED | SLEEPING | INVALID`. ⚠️ **`--branch goal` is not optional** —
    the state slug carries the tier (`goal--<base>`), so a topic and a goal that share a name
    never overwrite each other's cadence record.
 

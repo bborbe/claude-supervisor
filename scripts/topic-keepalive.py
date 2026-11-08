@@ -8,9 +8,10 @@ Two independent signals are read every time, because neither answers the other's
      `AMBIGUOUS` (3) / `MALFORMED` (4). Only `ABSENT` licenses a resume: `UNKNOWN` and
      `AMBIGUOUS` are **cannot tell**, never dead.
   2. **Is its loop armed?** `manager-liveness.py --state --subject <goal> --branch goal`
-     → `OK` / `STALE` / `STOPPED` / `UNARMED` / `INVALID`. This is the signal a liveness
-     probe structurally cannot give — a manager process can be alive with its loop unarmed
-     after a missed re-arm. `STOPPED` is a deliberate stand-down and is left alone.
+     → `OK` / `STALE` / `STOPPED` / `SLEEPING` / `UNARMED` / `INVALID`. This is the signal
+     a liveness probe structurally cannot give — a manager process can be alive with its
+     loop unarmed after a missed re-arm. `STOPPED` is a deliberate stand-down and
+     `SLEEPING` is a date-gated wait; both are left alone.
      ⚠️ `UNARMED` (no record under either name) is **not** restart-worthy and must not be
      folded into `INVALID`: a restart resumes a session that never armed a loop, so it
      cannot create the record. It reads as `jump` for a live session — the lever is
@@ -219,7 +220,7 @@ def cadence(subject: str, branch: str = "goal") -> str:
         return PROBE_FAILED
     first = (probe.stdout.splitlines() or [""])[0]
     state = first.split("\t")[0].strip()
-    return state if state in ("OK", "STALE", "STOPPED", "UNARMED", "INVALID") else "INVALID"
+    return state if state in ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID") else "INVALID"
 
 
 def main(argv: list[str]) -> int:
@@ -275,6 +276,17 @@ def main(argv: list[str]) -> int:
     if loop == "STOPPED":
         print("leave")
         print("cadence STOPPED — a deliberate stand-down is not a lapse")
+        return 0
+
+    if loop == "SLEEPING":
+        # A date-gated subject is not re-arming until its named instant, by design. Left
+        # alone here, and NOT a lapse: restarting it would spend a full-context round to
+        # rediscover that nothing is due yet. ⚠️ The fallback wake needs no branch of its
+        # own — once the instant PASSES the marker stops suppressing anything,
+        # `manager-liveness.py` reports STALE, and the normal restart path below resumes
+        # the session, which arms and clears the marker.
+        print("leave")
+        print("cadence SLEEPING — waiting on its own defer_date, not a lapse")
         return 0
 
     if not sid:
