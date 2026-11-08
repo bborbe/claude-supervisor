@@ -139,7 +139,7 @@ Every worker blocker — a permission prompt, a question, a stall — is a recor
 ```
 .claude-plugin/marketplace.json          marketplace manifest
 .claude-plugin/plugin.json               plugin manifest
-.mcp.json                                starts the server (${CLAUDE_PLUGIN_ROOT}/server)
+(no .mcp.json)                           deliberately absent — the plugin declares no MCP server; sessions reach `supervisor` over the daemon's HTTP endpoint (`make check` fails if the file reappears)
 skills/supervising-workers/SKILL.md
 skills/open-items/SKILL.md               the operator-asks ledger — rules + /supervisor:open-items (script stays at scripts/open-items.py)
 commands/{goal-spawn,fleet-workers,goal-answer,goal-drain}.md
