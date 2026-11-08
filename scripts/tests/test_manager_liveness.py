@@ -16,6 +16,7 @@ import tempfile
 import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -431,6 +432,87 @@ class StateVerb(unittest.TestCase):
         with redirect_stdout(out):
             self.m.check()
         self.assertNotIn("STOPPED", out.getvalue())
+
+
+class SleepState(unittest.TestCase):
+    """SLEEPING — a date-gated subject that is deliberately not re-arming.
+
+    A subject whose remaining work is all future `defer_date`s does not arm until that
+    instant, so its cadence file ages past the stale limit BY DESIGN. Without this state
+    the fleet reads that as a lapse and restarts it — the defect measured 2026-11-07.
+    """
+
+    SUBJECT = "Several Clusters"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name)
+        self.s = self.m.slug(self.SUBJECT, "goal")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def arm(self, age):
+        with redirect_stdout(io.StringIO()):
+            self.m.arm(self.SUBJECT, "goal", 300)
+        p = self.m.path(self.s, "cadence")
+        t = time.time() - age
+        os.utime(p, (t, t))
+
+    def sleep(self, delta_seconds):
+        until = (datetime.now(timezone.utc) + timedelta(seconds=delta_seconds)).isoformat()
+        with redirect_stdout(io.StringIO()):
+            rc = self.m.sleep(self.SUBJECT, "goal", until)
+        return rc
+
+    def test_a_future_sleep_reads_sleeping_not_stale(self):
+        self.arm(age=5000)
+        self.sleep(3600)
+        state, detail = self.m.classify(self.s, time.time())
+        self.assertEqual(state, "SLEEPING")
+        self.assertIn("remaining", detail)
+
+    def test_a_sleeping_subject_does_not_notify_as_a_lapse(self):
+        self.arm(age=5000)
+        self.sleep(3600)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.m.check()
+        self.assertEqual((rc, out.getvalue()), (0, ""))
+
+    def test_a_passed_sleep_still_reads_stale(self):
+        """The negative control: a manager that failed to wake must not be hidden."""
+        self.arm(age=5000)
+        self.sleep(-60)
+        self.assertEqual(self.m.classify(self.s, time.time())[0], "STALE")
+
+    def test_an_arm_clears_the_sleep_marker(self):
+        self.sleep(3600)
+        self.arm(age=0)
+        self.assertFalse(os.path.exists(self.m.path(self.s, "sleeping")))
+
+    def test_stopped_beats_sleeping(self):
+        """A deliberate stand-down is the stronger statement; it must not be masked."""
+        self.sleep(3600)
+        with redirect_stdout(io.StringIO()):
+            self.m.stop(self.SUBJECT, "goal")
+        self.assertEqual(self.m.classify(self.s, time.time())[0], "STOPPED")
+
+    def test_an_unreadable_sleep_marker_reads_as_absent(self):
+        """Fail toward ARMED: a corrupt marker must not suppress a real STALE."""
+        self.arm(age=5000)
+        with open(self.m.path(self.s, "sleeping"), "w", encoding="utf-8") as fh:
+            fh.write("someday\n")
+        self.assertEqual(self.m.classify(self.s, time.time())[0], "STALE")
+
+    def test_sleep_refuses_a_bad_until_and_writes_nothing(self):
+        err = io.StringIO()
+        with redirect_stderr(err), redirect_stdout(io.StringIO()):
+            rc = self.m.sleep(self.SUBJECT, "goal", "tomorrow-ish")
+        self.assertEqual(rc, 2)
+        self.assertFalse(os.path.exists(self.m.path(self.s, "sleeping")))
+        self.assertIn("ISO 8601", err.getvalue())
 
 
 class StoodDownVersusLapsed(unittest.TestCase):
