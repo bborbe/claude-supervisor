@@ -121,22 +121,18 @@ rather than reporting a fleet of zero. Render `2` as
 `keeper census: refused — <reason>`; a refusal and a clean fleet must never print the same.
 
 ⚠️ **`cannot-tell` is never counted red.** A row whose keeper could not be read (an
-unreadable loop probe, a page naming a manager page that does not exist) is printed with that
-state, with its reason, and counted in the header's `cannot-tell=` — a failed read must not be
-reported as a definite gap.
+unreadable loop probe, a page naming a manager page that does not exist) prints that state
+with its reason and is counted in the header — a failed read is not a definite gap.
 
 ⚠️ **"Is the keeper running" is read only for manager keepers.** A `fleet round` keeper is the
-round itself, which is running by construction — the census is run by it — so its liveness is
-not re-read; reading it would turn every fleet-kept row red whenever the fleet loop idles.
+round itself, running by construction — re-reading it would turn every fleet-kept row red
+whenever the fleet loop idles.
 
-⚠️ **The script posts its own card — the round posts none.** One card per red *episode*,
-under a dedup key carrying the episode's start time and day: a second consecutive red round
-asks nothing, and a fleet that goes green and red again is asked again under a new key. The
-day component is deliberate — a card expires after 24 h, so a fleet still red a day later is
-asked again rather than left with an expired card. Do not re-post it, do not add an option to
-it, and do not card individual red rows.
+⚠️ **The script posts its own card — the round posts none.** One card per red *episode*, its
+dedup key carrying the episode's start and day: a second consecutive red round asks nothing, a
+fleet that goes green and red again is asked again, and a fleet still red after 24 h is asked
+again rather than left with an expired card. Do not re-post it, do not add an option to it,
+and do not card individual red rows.
 
-⚠️ **A red row is a report, never a work item for this round.** Fixing what the census finds
-belongs to the task that owns the gap (a missing leg, an unrecorded session, a stood-down
-manager), not to the round that read it — the census exists so the gap becomes a board line
-instead of a park.
+⚠️ **A red row is a report, never a work item for this round** — the task that owns the gap
+fixes it.

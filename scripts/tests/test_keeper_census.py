@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 """Tests for scripts/keeper-census.py — the three fixtures, the red paths and the card.
 
-The census joins two populations that no live environment can be bent into on demand (the
-session registry and a vault's page stamps), so both probes are injected: `read_live` returns
-the registry the test declares, `cadence` the loop state per subject. Everything else — the
-page scan, the tier rules, the red verdict, the exit code and the card dedup — is the real
-code, which is the point: a fixture that stubbed the census would assert nothing about it.
+Both probes are injected (`read_live`, `cadence`); everything else — the page scan, the tier
+rules, the red verdict, the exit code, the card dedup — is the real code.
 
-⚠️ **The verdicts are injected, never manufactured.** A fabricated session id answers
-`UNKNOWN` from the real instrument, so a test that invented one and asserted `kept` would be
-asserting a state the instrument never produces (`test_worker_keepalive.py` gives the same
-reason).
+⚠️ The verdicts are injected, never manufactured: a fabricated session id answers `UNKNOWN`
+from the real instrument, so a test asserting `kept` for one would assert a state the
+instrument never produces (`test_worker_keepalive.py` gives the same reason).
 """
 
 import importlib.util
@@ -22,9 +18,7 @@ from contextlib import redirect_stdout
 
 _HERE = pathlib.Path(__file__).resolve().parent
 
-#: A keeper-leg file carrying the topic and worker legs and NOT the goal leg — the shape
-#: `agents/fleet-keepalive-actor.md` ships today (`docs/session-tiers.md` § Keep-alive,
-#: "Goal manager — goal in no topic": ⚠️ none yet).
+#: The topic and worker legs, and NOT the goal leg — the shape before v0.256.0 shipped it.
 LEGS_NO_GOAL = """\
 [ "--vault", vault, "--subject", name, "--branch", "topic", "--dir", topics ]
 [ "--vault", vault, "--task", name, "--dir", tasks, "--goals-dir", goals,
@@ -111,8 +105,6 @@ class CensusTest(unittest.TestCase):
         return [ln for ln in text.splitlines()
                 if ln.startswith("      live") or ln.startswith("      not-live")]
 
-    # -- SC1: both populations get a row, and the count tracks the fixture ---------------
-
     def test_two_rows_then_one_row_plus_mismatch(self):
         self.write("topic", "T", sid="topic-sid")
         self.write("goal", "G", sid="goal-sid")
@@ -138,8 +130,6 @@ class CensusTest(unittest.TestCase):
         self.assertIn("keeper-census: unkept=0 double-kept=0 sessions=0", text)
         self.assertIn('MISMATCH page "G" records session goal-sid', text)
         self.assertEqual(0, code)
-
-    # -- SC3: red rows are named, and the exit code is non-zero -------------------------
 
     def test_unkept_exits_non_zero_and_names_the_row(self):
         self.write("goal", "Topicless", sid="goal-sid")
@@ -184,8 +174,6 @@ class CensusTest(unittest.TestCase):
         self.assertNotIn("RED", text)
         self.assertEqual("keeper-census: unkept=0 double-kept=0 sessions=3",
                          text.strip().splitlines()[-1])
-
-    # -- SC5: the three named fixtures ---------------------------------------------------
 
     def test_topicless_goal_manager_with_no_fleet_leg_reads_unkept(self):
         """Fixture 1 — a topic-less goal manager whose fleet leg is missing."""
@@ -246,8 +234,6 @@ class CensusTest(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertIn("keeper-census: unkept=0 double-kept=0 sessions=3", text)
 
-    # -- SC4: one card per red reading, none on the second consecutive run ---------------
-
     def test_first_red_run_posts_one_card_and_the_second_posts_none(self):
         self.write("goal", "Topicless", sid="goal-sid")
         self.alive("goal-sid")
@@ -288,8 +274,6 @@ class CensusTest(unittest.TestCase):
         self.assertRegex(text, r"fleet-mgr\s+Fleet Manager\s+keeper: operator")
         self.assertIn("keeper-census: unkept=0 double-kept=0 sessions=1", text)
 
-    # -- the two parsing defects the review caught --------------------------------------
-
     def test_a_goals_section_that_ends_the_file_still_declares_its_goals(self):
         """`## Goals` as the last section must still declare — the section ends at EOF."""
         self.write("topic", "T", sid="t-sid", body="## Goals\n- [[G]]\n")
@@ -323,8 +307,6 @@ class CensusTest(unittest.TestCase):
         self.assertEqual(0, code, text)
         self.assertNotIn("Null", text)
 
-    # -- the third answer and the fourth state -------------------------------------------
-
     def test_an_unreadable_loop_probe_is_cannot_tell_never_unkept(self):
         self.write("topic", "T", sid="t-sid", body="## Goals\n- [[G]]\n")
         self.write("goal", "G", sid="g-sid")
@@ -351,8 +333,6 @@ class CensusTest(unittest.TestCase):
         self.assertIn("MISMATCH live session stray-sid (private-personal-xx) — no page records it",
                       text)
 
-    # -- the card's argv ---------------------------------------------------------------
-
     def test_notify_pins_the_attention_argv(self):
         """A wrong producer id or kind posts no card while every other test stays green."""
         seen = {}
@@ -377,8 +357,6 @@ class CensusTest(unittest.TestCase):
         self.assertEqual(["acknowledge"], [argv[i + 1] for i, a in enumerate(argv)
                                            if a == "--option"])
 
-    # -- the card's day bucket ------------------------------------------------------------
-
     def test_a_still_red_census_reposts_on_the_next_day(self):
         """The card expires after 24 h, so a fleet red a day later must be asked again."""
         self.write("goal", "Topicless", sid="goal-sid")
@@ -401,8 +379,6 @@ class CensusTest(unittest.TestCase):
                          text.strip().splitlines()[-1])
         self.assertIn("  card: item-1", text)
 
-    # -- refusals ------------------------------------------------------------------------
-
     def test_unreadable_registry_is_a_refusal_never_a_clean_fleet(self):
         self.k.read_live = lambda: None
         code, text = self.run_census("--no-card")
@@ -414,8 +390,6 @@ class CensusTest(unittest.TestCase):
         with redirect_stdout(out):
             code = self.k.main(["--vault", str(self.root / "nope"), "--no-card"])
         self.assertEqual(2, code)
-
-    # -- leg detection -------------------------------------------------------------------
 
     def test_legs_are_read_from_the_file_not_assumed(self):
         self.assertEqual({"topic": True, "goal": False, "worker": True},
