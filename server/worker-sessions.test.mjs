@@ -20,7 +20,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { invalidateCountCache, workerSessions } from './worker-sessions.mjs'
+import { invalidateCountCache, workerPopulations, workerSessions } from './worker-sessions.mjs'
 
 // A fixed base URL: it is never dialled, because `fetchImpl` is always injected, but passing it
 // explicitly keeps a forgotten argument from falling back to `config.attentionStoreUrl` and
@@ -455,4 +455,106 @@ test('a registry entry with a dead pid is not counted', async () => {
 
   const workers = await count(dir, [], { registry: [{ sessionId: sid, pid: 999999999 }] })
   assert.deepEqual(workers, [])
+})
+
+// The three populations the caps act on. A manager, an interactive worker, a headless worker
+// and an auto-resume that belongs to none of them.
+test('populations split the fleet by role and mode', async () => {
+  const dir = fixture()
+  const manager = 'ffffffff-0000-0000-0000-000000000030'
+  const interactive = 'ffffffff-0000-0000-0000-000000000031'
+  const headless = 'ffffffff-0000-0000-0000-000000000032'
+  const resumed = 'ffffffff-0000-0000-0000-000000000033'
+  ledger(dir, manager, 'topic manager', { role: 'manager', mode: 'interactive' })
+  ledger(dir, interactive, 'tab worker', { mode: 'interactive' })
+  ledger(dir, headless, 'headless worker', { mode: 'headless' })
+  ledger(dir, resumed, 'auto-resumed', {
+    mode: 'headless',
+    resumed_from: 'aaaaaaaa-0000-0000-0000-000000000009',
+  })
+
+  const { populations } = await workerPopulations({
+    endpoint: FIXTURE,
+    fetchImpl: endpoint([row(manager), row(interactive), row(headless), row(resumed)], {
+      ledgerRows: dir.ledgerRows,
+    }),
+    stateDir: dir.root,
+    registry: [],
+  })
+  assert.deepEqual(populations, { managers: 1, interactive: 1, headless: 1, cluster: 0, a2a: 0, total: 2 })
+})
+
+// `mode` decides the split, and an absent one reads as interactive — the same rule `role`
+// follows. Defaulting a pre-`mode` record to headless would move the whole pre-field
+// population into the wrong column.
+test('a pre-mode record reads as interactive', async () => {
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-000000000034'
+  ledger(dir, sid, 'pre-field worker', { role: '', mode: '' })
+
+  const { populations } = await workerPopulations({
+    endpoint: FIXTURE,
+    fetchImpl: endpoint([row(sid)], { ledgerRows: dir.ledgerRows }),
+    stateDir: dir.root,
+    registry: [],
+  })
+  assert.equal(populations.interactive, 1)
+  assert.equal(populations.headless, 0)
+})
+
+// The ghost rule applies to the populations too, not only to the count.
+test('populations exclude a ghost row', async () => {
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-000000000035'
+  ledger(dir, sid, 'exited', { mode: 'headless' })
+
+  const { populations } = await workerPopulations({
+    endpoint: FIXTURE,
+    fetchImpl: endpoint([row(sid, { state: '' })], { ledgerRows: dir.ledgerRows }),
+    stateDir: dir.root,
+    registry: [],
+  })
+  assert.equal(populations.total, 0)
+})
+
+// ⚠️ THE READER-DIVERGENCE CASE. `resumed_from` is checked BEFORE `role`, so a record that is
+// both a manager and an auto-resume is dropped from every population rather than counted as a
+// manager. Measured 2026-11-08, the Python twin had the opposite order and disagreed on exactly
+// this record — the divergence this consolidation exists to remove.
+test('a manager that is an auto-resume is not a manager', async () => {
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-000000000036'
+  ledger(dir, sid, 'resumed manager', {
+    role: 'manager',
+    mode: 'interactive',
+    resumed_from: 'aaaaaaaa-0000-0000-0000-000000000009',
+  })
+
+  const { populations } = await workerPopulations({
+    endpoint: FIXTURE,
+    fetchImpl: endpoint([row(sid)], { ledgerRows: dir.ledgerRows }),
+    stateDir: dir.root,
+    registry: [],
+  })
+  assert.equal(populations.managers, 0)
+  assert.equal(populations.total, 0)
+})
+
+// The split's SHAPE is part of its contract: four integer keys, `total` being the cap's unit.
+// A caller that renders this line would otherwise have to trust the field names.
+test('the split is exactly four integer keys', async () => {
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-000000000037'
+  ledger(dir, sid, 'headless worker', { mode: 'headless' })
+
+  const { populations } = await workerPopulations({
+    endpoint: FIXTURE,
+    fetchImpl: endpoint([row(sid)], { ledgerRows: dir.ledgerRows }),
+    stateDir: dir.root,
+    registry: [],
+  })
+  assert.deepEqual(Object.keys(populations).sort(), ['a2a', 'cluster', 'headless', 'interactive', 'managers', 'total'])
+  for (const [key, value] of Object.entries(populations)) {
+    assert.equal(Number.isInteger(value), true, `${key} is not an integer`)
+  }
 })
