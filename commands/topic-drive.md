@@ -87,8 +87,11 @@ For **each remaining goal this topic declares**, one call decides:
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/topic-keepalive.py \
-  --vault "<vault-root>" --goal "<goal>"
+  --vault "<vault-root>" --goal "<goal>" --receipt "<topic>"
 ```
+
+Record each outcome per `${CLAUDE_PLUGIN_ROOT}/commands/steps/topic-keepalive-outcome.md`.
+N gates a start, never a resume.
 
 The **first line is the verdict**:
 
