@@ -923,6 +923,9 @@ rule**:
    no live manager, and any subject with no live ancestor at all, falls to the **Fleet
    Manager**.
 
+A **live** manager here is an *owner* as `docs/session-tiers.md` § Keep-alive defines it —
+this section owns the resolution order, that one owns the definition.
+
 ⚠️ **The tier is what makes the fallback answerable, and getting it wrong is silent.** Naming
 the fleet manager as the owner of an unmanaged goal inside a live topic routes the start to
 the wrong tier: the fleet manager would start a goal manager the topic manager is already
