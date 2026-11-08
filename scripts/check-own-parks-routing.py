@@ -53,7 +53,13 @@ BOUNDARY_TIEBREAK = "it is the operator's"
 ROUTED_FALLBACK = "escalated, not routed again"
 #: Wrapper parks are surfaced, never routed — measured: `claude-wrapper` denies the tool before
 #: the message is read, so routing one reports an answered park the worker never saw.
-WRAPPER_NOT_ROUTED = "park is never routed"
+#: Both halves are pinned: the prohibition AND the scope it leaves behind. A generic
+#: "never routed" substring is satisfied by any reworded sentence, so the pair is what makes a
+#: reintroduced `pending_question` route fail here rather than pass.
+WRAPPER_NOT_ROUTED = "A `pending_question` park is never routed"
+ROUTING_SCOPE = "Routing applies only to a **`pending_permissions`** `AskUserQuestion`"
+#: Step 7's own copy of the scope, so the two files cannot drift.
+CHANNELS_SCOPE = "Only `pending_permissions` parks are ever routed"
 
 
 def require(path: Path, needle: str, failures: list[str], why: str) -> None:
@@ -136,6 +142,20 @@ def main() -> int:
         "A `pending_question` park must stay unrouted. `claude-wrapper` denies the tool before "
         "the message is read (measured 2026-11-08, two probes), so routing one reports an "
         "answered park the worker never saw — worse than the timeout it replaces.",
+    )
+    require(
+        OWN_PARKS,
+        ROUTING_SCOPE,
+        failures,
+        "The prohibition must be paired with its positive scope. A `pending_question` ban alone "
+        "leaves 'what IS routable' unstated, and the next reader widens it back.",
+    )
+    require(
+        WORKER_CHANNELS,
+        CHANNELS_SCOPE,
+        failures,
+        "Step 7 must state the same scope 5d enforces; two files disagreeing about which parks "
+        "are routable is the drift this guard exists to catch.",
     )
 
     if failures:
