@@ -338,15 +338,13 @@ _DEV_WRAPPERS = {"kubectlnukedev", "kubectldev", "kubectlsmalldev", "kubectlquan
                  "kubectlsun", "kubectlstaging"}
 _SECRET_PATH = re.compile(
     r"(^|[/~\s=])(\.ssh/|\.netrc\b|\.aws/|\.config/gh\b|\.kube/config\b|\.env(\.[\w-]+)?$|"
-    r"id_(rsa|ed25519|ecdsa)\b|\.npmrc\b|\.git-credentials\b|\.pgpass\b|\.pypirc\b|\.docker/config\.json\b|\.gnupg/|"
-    r"\.vault-token\b)")
+    r"id_(rsa|ed25519|ecdsa)\b|\.npmrc\b|\.git-credentials\b|\.pgpass\b|\.pypirc\b|\.docker/config\.json\b|\.gnupg/|\.vault-token\b)")
 _PROTECTED_REF = re.compile(r"^(?:[^:]*:)?(refs/heads/)?(master|main)$")
 
 
-_SECRET_FILES = ("~/.netrc", "~/.pgpass", "~/.git-credentials", "~/.ssh/id_rsa", "~/.ssh/id_ed25519",
-                 "~/.ssh/id_ecdsa", "~/.aws/credentials", "~/.kube/config", "~/.docker/config.json",
-                 "~/.npmrc", ".env", "~/.vault-token", "~/.config/gh/hosts.yml", "~/.pypirc",
-                 "~/.config/gcloud/application_default_credentials.json")
+_SECRET_FILES = ("~/.netrc", "~/.pgpass", "~/.git-credentials", "~/.ssh/id_rsa", "~/.ssh/id_ed25519", "~/.ssh/id_ecdsa",
+                 "~/.aws/credentials", "~/.kube/config", "~/.docker/config.json", "~/.npmrc", ".env", "~/.pypirc",
+                 "~/.vault-token", "~/.config/gh/hosts.yml", "~/.config/gcloud/application_default_credentials.json")
 
 
 def _glob_hits_secret(arg):

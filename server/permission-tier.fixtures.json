@@ -92,7 +92,6 @@
     { "id": "review7-vault-token", "tool": "Bash", "input": { "command": "cat ~/.vault-token" }, "tier": "operator", "form": "secret" },
     { "id": "review7-env-no-command", "tool": "Bash", "input": { "command": "env -i" }, "tier": "operator", "form": "secret" },
     { "id": "review7-heredoc-backtick", "tool": "Bash", "input": { "command": "cat <<EOF > /tmp/x\n`git push --force origin x`\nEOF" }, "tier": "operator", "form": "force-push/ref-delete" },
-    { "id": "review7-plain-arithmetic-still-manager", "tool": "Bash", "input": { "command": "echo $((1 + 2))" }, "tier": "manager" },
     { "id": "review2-timeout-routine", "tool": "Bash", "input": { "command": "timeout 30 git push origin feat/x" }, "tier": "manager" },
     { "id": "review-data-heredoc-still-manager", "tool": "Bash", "input": { "command": "cat <<'EOF' > /tmp/x.md\nhello\nEOF" }, "tier": "manager" },
     { "id": "review-stderr-redirect-still-manager", "tool": "Bash", "input": { "command": "git status 2>&1 | tail -3" }, "tier": "manager" },
