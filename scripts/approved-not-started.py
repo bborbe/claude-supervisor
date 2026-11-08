@@ -32,6 +32,11 @@ or names a session the liveness authority does not report live. A recorded id is
 owner — measured 2026-09-30, 127 of the primary vault's 557 `phase: todo` rows carried a
 `claude_session_id` whose session had already ended.
 
+The two halves are reported separately, because they need different levers: a row with
+no id is **never started** (the lever is open), and a row whose id is not live is
+**orphaned** — its worker died (the lever is reopen). Each row carries its `class`, and
+the second output line prints both counts.
+
 Liveness is delegated, never re-derived
 ---------------------------------------
 `session-liveness.py` is the plugin's single liveness instrument (registry + heartbeat,

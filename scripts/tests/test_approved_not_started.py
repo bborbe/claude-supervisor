@@ -326,6 +326,11 @@ class Split(unittest.TestCase):
         self.assertEqual((never, orphaned), (1, 1))
         self.assertNotEqual(never + orphaned, len(rows))
 
+    def test_an_unclassified_over_tick_row_is_labelled_not_dropped(self):
+        text = ans.render([row("Odd", 45, cls=None)], ans.TICK_MINUTES)
+        self.assertIn("· Odd — 45m — unclassified — manager unmanaged", text)
+        self.assertIn("never started: 0 → open · orphaned: 0 → reopen", text)
+
     def test_render_prints_both_numbers_with_their_levers(self):
         rows = ans.collect(self.dir, self.LIVE, NOW)
         lines = ans.render(rows, ans.TICK_MINUTES).splitlines()
