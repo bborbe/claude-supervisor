@@ -1613,6 +1613,22 @@ class KeepAliveVerdicts(unittest.TestCase):
         self.assertEqual(self.cli("--record-outcome", "--topic", self.topic, "--goal", self.GOAL,
                                   "--verdict", "resume", "--outcome", "refused:start-rate")[0], 2)
 
+    def test_two_open_verdicts_of_the_same_type_are_owed_separately(self):
+        # A goal can be read twice in one round with two different recorded ids (a resume
+        # that landed and then a second one). Dedupe keys on (goal, verdict, session), so
+        # both stay open and each needs its own outcome and its own stamp.
+        self.full_round()
+        self.verdict("resume", session="sid-a")
+        self.verdict("resume", session="sid-b")
+        self.outcome("executed")
+        self.resume_stamp(time.time(), session="sid-b")
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertEqual(out.count("skipped: keepalive"), 1)
+        self.outcome("executed")
+        self.resume_stamp(time.time(), session="sid-a")
+        self.assertEqual(self.check(), (0, ""))
+
     def test_the_outcome_matches_the_goal_by_slug(self):
         self.full_round()
         self.verdict(goal="Auto-Merge Trust-Gated PRs")

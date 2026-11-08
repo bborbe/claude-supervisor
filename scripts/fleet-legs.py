@@ -29,7 +29,7 @@ Verbs, all against one digest path:
         suppressed leg and a leg that ran and found nothing must never print the same thing.
 
   --check
-        Exit 1 unless every one of the three keys is covered exactly once, by a count line or
+        Exit 1 unless every one of the four keys is covered exactly once, by a count line or
         by a not-run line that names it. Exit 2 when the digest cannot be read or written.
 
 ⚠️ **The section is written by the sweep reader, not created here.** A digest that carries no
@@ -37,7 +37,7 @@ Verbs, all against one digest path:
 pins, and it is why `--count` creating the section is a convenience for a hand-run, never the
 round's path: a round that creates its own section has already lost the not-run reading.
 
-⚠️ **The three keys and their legs live here, once.** `commands/steps/output-shape.md` item 14
+⚠️ **The four keys and their legs live here, once.** `commands/steps/output-shape.md` item 14
 renders the lines and `agents/fleet-sweep-reader.md` seeds them; neither restates the mapping.
 
 Exit codes: 0 ok, 1 the digest is missing a line (`--check`), 2 the digest could not be read
@@ -50,14 +50,15 @@ import sys
 import tempfile
 
 #: Render order. A list, not a set: the digest's line order is part of its shape.
-KEYS = ["lapsed-managers", "dead-workers", "operator-flagged"]
+KEYS = ["lapsed-managers", "topicless-goal-managers", "dead-workers", "operator-flagged"]
 LEG_OF = {
     "lapsed-managers": "keep-alive",
+    "topicless-goal-managers": "keep-alive",
     "dead-workers": "keep-alive",
     "operator-flagged": "flagged-open",
 }
 KEYS_OF = {
-    "keep-alive": ["lapsed-managers", "dead-workers"],
+    "keep-alive": ["lapsed-managers", "topicless-goal-managers", "dead-workers"],
     "flagged-open": ["operator-flagged"],
 }
 FLOOR_KEY = "dead-workers"
@@ -255,7 +256,7 @@ def main(argv=None):
     )
     parser.add_argument("--digest", required=True, help="this round's .digest path")
     parser.add_argument(
-        "--check", action="store_true", help="verify the three lines are present"
+        "--check", action="store_true", help="verify the four lines are present"
     )
     parser.add_argument("--leg", help="a count key, or a leg name for --not-run")
     parser.add_argument("--count", type=int, help="the leg's reading for this key")

@@ -63,6 +63,34 @@ Usage (from `hooks/hooks.json`, `Stop`):
 did not run rather than that nothing happened. The write is fail-open and never changes
 the verdict: a lost record is preferred to a wrong verdict.
 
+SECOND CHECK — A WAIT ON SOMETHING THAT DIES WITH THE SESSION. A `🟡 WAITING` closer whose
+`⏰ Ends:` names a session-bound mechanism — a background sub-agent, a Monitor, a
+`run_in_background` shell, a `ScheduleWakeup`, a `CronCreate` — and no durable observable
+waits on a notice that can never arrive once the session ends. Measured 2026-11-08, pane
+619 (session `e6807caf`):
+
+    ⏰ Ends:   chunk 7a and 7c completion notices (background agents)
+
+The previous session had ended, both agents died with it, and the worker sat 23 minutes at
+an empty prompt on a task unmoved for 28 hours — found only by a human reading the pane.
+Nobody keeps a background sub-agent, by design (operator decision 2026-11-08: forbid it as
+a wait rather than build a keeper), so `~/.claude/CLAUDE.md` § Async State Closer requires
+the observable to outlive the session.
+
+⚠️ **The observable is banned, not the mechanism.** The same rule REQUIRES the in-session
+watcher in the `(mechanism, id)` slot — `/github-pr-watch` is itself a background shell — so
+a closer naming a session-bound class passes whenever it also names a durable observable:
+a file, a 32-hex card id, a `defer_date` / ISO date, or an external probe (a PR, CI, `gh`,
+`kubectl`, a pod, a URL). Operator decision 2026-11-08 ("Observable only", card
+`3d9c0b310909dc8ca406169621673957`). A literal ban would exit 2 on every compliant PR-watch
+closer, which is a broken rule rather than a strict one.
+
+⚠️ **It runs before the gate checks**, because the shape it exists for ends `👤 You: nothing`,
+which the gate checks return `not-a-gate` on. It reads the `⏰ Ends:` line from the same
+message `last_closer` reads, through `reap-closer.py`'s one scanner. The record carries
+`class` (the matched mechanism) and `phrase` (the `⏰ Ends:` text) on every invocation —
+`null` when nothing was flagged.
+
 Kill switch: `SUPERVISOR_CLOSER_GATE_LINT=off`. State dir override:
 `SUPERVISOR_CLOSER_GATE_LINT_STATE_DIR`.
 """
@@ -161,6 +189,57 @@ WHEN = {
 }
 
 
+ENDS_MARKER = "⏰ Ends:"
+
+# The five session-bound classes. ⚠️ `Monitor` is case-sensitive and must stand alone: a
+# lowercase `monitor` inside a path (`~/.claude/state/monitor-check/…`) is a file, which is
+# the opposite of what this class names. A Kubernetes CronJob is external, so the cron
+# class is the `CronCreate` tool only.
+SESSION_BOUND = (
+    ("background-sub-agent", re.compile(
+        r"\b(?:background\s+(?:sub-?)?agents?|sub-?agents?|agent\s+tasks?)\b", re.IGNORECASE)),
+    ("monitor", re.compile(r"(?<![\w/.-])Monitor(?![\w/.-])")),
+    ("run-in-background-shell", re.compile(
+        r"\brun_in_background\b|\bbackground\s+(?:bash|shell)s?\b", re.IGNORECASE)),
+    ("schedule-wakeup", re.compile(r"\bScheduleWakeup\b", re.IGNORECASE)),
+    ("cron-create", re.compile(r"\bCronCreate\b", re.IGNORECASE)),
+)
+
+# Anything a keeper can read after the session is gone. ⚠️ A watcher's own timeout
+# (`times out ~18:40`) is NOT a clock observable — it dies with the watcher — so a bare
+# HH:MM never counts; only a `defer_date` or an ISO date does.
+DURABLE = (
+    ("file", re.compile(
+        r"(?:^|[\s`(\"'])(?:~|\.{0,2})/[\w.-]+|\b[\w-]+\.(?:md|jsonl?|log|ya?ml|txt|out|csv)\b"
+        r"|\b(?:files?|mtime)\b", re.IGNORECASE)),
+    ("card-id", re.compile(r"\b[0-9a-f]{32}\b", re.IGNORECASE)),
+    ("clock", re.compile(r"\bdefer_date\b|\b\d{4}-\d{2}-\d{2}\b")),
+    ("external-probe", re.compile(
+        r"\bPR\b|#\d+\b|\bCI\b|\bgh\s|\bkubectl\w*\b|https?://|\bpods?\b|\bcontainer\b"
+        r"|\brelease\b|\btag\s+v\d|\bworkflow\b|\bdeploy(?:ment)?\b", re.IGNORECASE)),
+)
+
+
+def ends_body(line):
+    """Everything after `⏰ Ends:`, entities and backticks stripped."""
+    body = line.split(ENDS_MARKER, 1)[1] if ENDS_MARKER in line else line
+    return body.replace("&nbsp;", " ").strip().strip("`").strip()
+
+
+def session_bound_class(line):
+    """The session-bound class an `⏰ Ends:` waits on with no durable observable, or `None`."""
+    body = ends_body(line)
+    if not body:
+        return None
+    for _name, pattern in DURABLE:
+        if pattern.search(body):
+            return None
+    for name, pattern in SESSION_BOUND:
+        if pattern.search(body):
+            return name
+    return None
+
+
 def state_dir():
     """The record's directory, read at call time so a test can redirect it."""
     return (os.environ.get(STATE_DIR_ENV)
@@ -230,6 +309,14 @@ def last_closer(transcript_path):
     return _reap_closer().last_closer(transcript_path)
 
 
+def last_closer_and_ends(transcript_path):
+    """`(timestamp, you_line, ends_line_or_None)` from one scan, or `None` with no closer.
+
+    Delegates to `reap-closer.py` like `last_closer` — one scanner, one message.
+    """
+    return _reap_closer().last_closer_and_ends(transcript_path)
+
+
 def closer_body(line):
     """Everything after `👤 You: `, with the entities and backticks a closer carries stripped."""
     body = line.split("👤 You:", 1)[1] if "👤 You:" in line else line
@@ -261,7 +348,7 @@ def evaluate(payload, environ=None):
     environ = os.environ if environ is None else environ
     session_id = payload.get("session_id") if isinstance(payload, dict) else None
 
-    def verdict(code, reason, verb=None, matched=None, closer=None):
+    def verdict(code, reason, verb=None, matched=None, closer=None, cls=None, phrase=None):
         return code, _message(reason, verb, matched) if code else "", {
             "ts": datetime.now(timezone.utc).isoformat(),
             "session_id": session_id,
@@ -270,6 +357,8 @@ def evaluate(payload, environ=None):
             "verb": verb,
             "matched": matched,
             "closer": (closer or "")[:200] or None,
+            "class": cls,
+            "phrase": (phrase or "")[:200] or None,
         }
 
     if (environ.get(KILL_SWITCH_ENV) or "").strip().lower() == "off":
@@ -282,13 +371,24 @@ def evaluate(payload, environ=None):
     if not transcript:
         return verdict(0, "no-transcript-path")
     try:
-        found = last_closer(transcript)
+        found = last_closer_and_ends(transcript)
     except Exception:
         return verdict(0, "transcript-unreadable")
     if not found:
         return verdict(0, "no-closer")
 
-    _ts, line = found
+    _ts, line, ends = found
+    # ⚠️ Before the gate checks: the shape this catches ends `👤 You: nothing`, which they
+    # return `not-a-gate` on. Fail-open — a matcher error skips this check, never blocks.
+    if ends:
+        try:
+            cls = session_bound_class(ends)
+        except Exception:
+            cls = None
+        if cls:
+            code, _text, record = verdict(2, "session-bound-ends", closer=line,
+                                          cls=cls, phrase=ends_body(ends))
+            return code, _ends_message(cls, ends_body(ends)), record
     body = closer_body(line)
     handle_gate = HANDLE_GATE_RE.match(body)
     if handle_gate:
@@ -305,6 +405,19 @@ def evaluate(payload, environ=None):
     if matched is None:
         return verdict(0, "not-allow-listed", verb=verb, closer=line)
     return verdict(2, "allow-listed", verb=verb, matched=matched, closer=line)
+
+
+def _ends_message(cls, phrase):
+    return (
+        f"closer-gate-lint: `⏰ Ends: {phrase}` waits on a {cls} — a mechanism that runs "
+        "inside this session and dies with it, so its notice can never arrive once the "
+        "session ends and no keeper can probe it. CLAUDE.md § Async State Closer: the "
+        "observable must outlive the session. Rewrite `⏰ Ends:` to lead with something "
+        "readable after this session is gone — a file (path or mtime), a full 32-hex card "
+        "id, a `defer_date` / ISO date, or an external probe (PR, CI, `gh`, `kubectl`, a "
+        "pod) — and keep the watcher in the `(mechanism, id)` slot as the wake. If nothing "
+        "durable exists yet, make the producer write one, or set `defer_date` and exit.\n"
+    )
 
 
 def _handle_message(handles):
@@ -350,7 +463,7 @@ def _bare_record(reason):
     """
     return {"ts": datetime.now(timezone.utc).isoformat(), "session_id": None,
             "decision": DECISION_ALLOW, "reason": reason,
-            "verb": None, "matched": None, "closer": None}
+            "verb": None, "matched": None, "closer": None, "class": None, "phrase": None}
 
 
 def main():

@@ -100,7 +100,8 @@ LEGS = {
         "agent": "agents/fleet-keepalive-actor.md",
         "sites": ("commands/steps/keepalive.md",),
         "required": (
-            "legs", "legs-reason", "lapsed-managers", "dead-workers", "dead-scan",
+            "legs", "legs-reason", "lapsed-managers", "topicless-goal-managers", "dead-workers",
+            "dead-scan",
             "restarted", "resumed", "parked-due", "nudged", "undelivered",
             # one count per truncatable row list: the caller's reconciliation is
             # `rows printed + that list's dropped count == this count`, so a list without
