@@ -8,6 +8,16 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: **the keep-alive contract has one home — `docs/session-tiers.md` § Keep-alive.** That section holds:
+  - a seven-row chain table: level, opened by, kept alive by, mechanism, guard;
+  - the definition of an owner: a session reading `LIVE` and a loop reading `OK` or `STALE`;
+  - the rule that a session no tier keeps is adopted or closed;
+  - three invariants: restart is not open; the flag gates an open, never a restart; the per-topic N gates a start, never a resume.
+
+  `commands/steps/keepalive.md`, `agents/topic-drive.md`, `commands/topic-drive.md`, `commands/open.md`, `docs/fleet-surface.md` and the `fleet-`/`topic-`/`worker-keepalive.py` docstrings now point there instead of restating pieces of it. The section also names two known gaps: no leg keeps a topic-less goal's manager alive, and `worker-keepalive.py` counts a stood-down manager as an owner. No behaviour changes.
+
 ## v0.252.3
 
 - fix: **the sleep's wake instruction no longer silently becomes an hourly wake.** `commands/steps/round-quiet.md` told the round to *"arm `ScheduleWakeup` with a delay of `<instant> − now`"* — but `ScheduleWakeup` clamps `delaySeconds` to **[60, 3600]**, and a sleep is usually hours or a day out. The documented instruction therefore did not sleep the subject; it woke it **every hour** across the whole gap, and each of those rounds re-read the same `sleep-until` and re-slept — precisely the tick-burn the sleep verdict exists to remove, produced by the instruction meant to prevent it. Measured 2026-11-08 on the Several Clusters Manager: a 69 426 s (~19 h) sleep became an hourly wake until a one-shot `CronCreate` (`36 12 9 11 *`) was armed instead. The bullet now branches on distance: `ScheduleWakeup` at or under 3600 s, otherwise a one-shot `CronCreate` pinned to the instant's minute (`recurring: false`) — the spelling `commands/goal-loop.md` § step 3 already names for *"the tick must land on a wall-clock minute"*. Every date-gated subject with a `defer_date` more than an hour out hits this, which is most of them. Change set: `commands/steps/round-quiet.md`, `CHANGELOG.md`.
