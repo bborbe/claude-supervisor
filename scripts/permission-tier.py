@@ -5,8 +5,7 @@
     manager    — everything else a worker does: writes, git reads, cluster reads.
     operator   — the operator-only class. Always reaches the operator, never a manager.
 
-The operator's ruling (2026-11-06) and the manager's rubric live in docs/permission-allowlist.md;
-this module is the machine half that decides which side of the line a call falls on.
+The ruling and the manager's rubric live in docs/permission-allowlist.md; this is the machine half.
 
 ⚠️ GIT READS ARE NOT READS. `git status` runs `core.fsmonitor`; `core.pager`, `diff.external`,
 textconv drivers and hooks do the same, and the shipped policy lets a worker write `.git/config`
@@ -24,8 +23,7 @@ over-eager manager tier is worse than a park: it hides a real gate.
 ⚠️ OPERATOR-ONLY WINS OVER THE ALLOWLIST. `cat` is an allowlist entry and `cat ~/.netrc` matches
 it; the secret form is checked first. Same order the deny list has in the doc.
 
-Pure: no filesystem, no environment, no clock in `tier_for` — the caller passes the allowlist
-entries and the confinement context. `tier_for` and `tier_for_payload` are the entry points.
+Pure: no filesystem, environment or clock — the caller passes the entries and the context.
 """
 
 import json
@@ -821,8 +819,7 @@ def classify_tool(tool, tool_input):
             return "live-trade"
         if re.search(r"(send|post|reply|publish|merge|push|delete|transition|addcomment|create(issue|page|comment))", low):
             return "publish"
-        # The tool NAME says what it is for; the INPUT says what it touches. A write tool aimed at
-        # settings, hooks or a credential store is the same operator-only form as a Bash redirect.
+        # The NAME says what a tool is for; the INPUT says what it touches — same forms as a redirect.
         for v in inp.values():
             if isinstance(v, str) and (_SETTINGS.search(v) or _SECRET_PATH.search(v)):
                 return "permission-grant" if _SETTINGS.search(v) else "secret"
