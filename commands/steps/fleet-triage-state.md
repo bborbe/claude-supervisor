@@ -431,7 +431,7 @@ else:
 ⚠️ **`goals_dir` is read with `.get("goals_dir") or ""`, never indexed.** A registered vault that
 carries no `goals_dir` raises `KeyError` on a bare index and aborts the whole subject→vault loop
 before a later matching vault is reached — `scripts/resolve-task-file.py:111`,
-`scripts/session-scope.py:258` and `commands/steps/keepalive.md:191` all guard it the same way,
+`scripts/session-scope.py:258` and `agents/fleet-keepalive-actor.md` all guard it the same way,
 and `scripts/tests/test_resolve_folders.py` treats the missing key as a real shape. An empty
 value is "not this vault", so the loop continues and an unmatched subject still prints
 `UNRESOLVED` rather than a traceback.

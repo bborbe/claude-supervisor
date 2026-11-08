@@ -4,10 +4,11 @@ Two families are covered, and both are silent when broken:
 
   (1) the fleet tick's router `When` cells against `agents/fleet-sweep-reader.md`'s
       hand-back, and
-  (2) the delegated legs — `commands/steps/round-readings.md` →
-      `agents/round-readings-reader.md`, `commands/steps/goal-spawn.md` →
-      `agents/goal-spawn-reader.md`, and `commands/steps/open.md` →
-      `agents/fleet-open-actor.md`.
+  (2) the delegated legs — `commands/steps/round-readings.md` → `agents/round-readings-reader.md`,
+      `commands/steps/goal-spawn.md` → `agents/goal-spawn-reader.md`, and the fleet round's three
+      acting legs, `commands/steps/keepalive.md` → `agents/fleet-keepalive-actor.md`,
+      `commands/steps/flagged-open.md` → `agents/fleet-flagged-open-actor.md` and
+      `commands/steps/open.md` → `agents/fleet-open-actor.md`.
 
 The load-bearing cases are the PRE-CHANGE ones. Both reader agents shipped on 2026-11-06
 with a hand-back that omitted values its own contract requires — the readings leg collapsed
@@ -148,6 +149,100 @@ class CheckHandbackKeysTest(unittest.TestCase):
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("inflight-unread", result.stderr)
+
+    def test_pre_change_keepalive_fence_fails(self):
+        """The keep-alive leg's hand-back without `legs=` — the digest-write verdict.
+
+        The counts are not the whole hand-back: the caller branches on whether the digest
+        write landed, and a fence that drops that key leaves the failed-write render
+        unreachable — the round would print numbers no digest carries.
+        """
+        self.write(
+            "agents/fleet-keepalive-actor.md",
+            fence(self.legs["supervisor:fleet-keepalive-actor"]["required"], drop=("legs",)),
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("`legs=`", result.stderr)
+
+    def test_pre_change_keepalive_fence_fails_without_per_list_dropped_counts(self):
+        """The pre-change keep-alive hand-back: one shared `truncated=`, no per-list counts.
+
+        Two truncatable row lists behind a single count cannot say which list lost rows, so
+        the caller's per-list reconciliation (`printed + that list's dropped == that list's
+        count`) is arithmetically unsatisfiable. The fixture is the exact shape this change
+        replaced, and both keys must be named.
+        """
+        self.write(
+            "agents/fleet-keepalive-actor.md",
+            fence(
+                self.legs["supervisor:fleet-keepalive-actor"]["required"],
+                drop=("crash-loop-truncated", "cannot-tell-truncated"),
+            ).replace("crash-loop=<n>", "crash-loop=<n> · truncated=<n>"),
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("crash-loop-truncated", result.stderr)
+        self.assertIn("cannot-tell-truncated", result.stderr)
+
+    def test_pre_change_keepalive_fence_fails_without_dead_scan(self):
+        """`dead-scan` is the label the digest write used — `—` when `dead-workers=not-run`.
+
+        A caller that had to infer the label from the count would read a floor as an exact
+        scan, which is the "a number with no label reads as a measurement" defect. A fence
+        that drops the key leaves that cell permanently unreadable, so it must fail here.
+        """
+        self.write(
+            "agents/fleet-keepalive-actor.md",
+            fence(
+                self.legs["supervisor:fleet-keepalive-actor"]["required"],
+                drop=("dead-scan",),
+            ),
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("`dead-scan=`", result.stderr)
+
+    def test_pre_change_flagged_open_fence_fails(self):
+        """The pre-change flagged-open hand-back: no `legs-reason`, no truncation channel.
+
+        The caller renders `legs: UNKNOWN — <reason>` from `legs-reason=` and reads the
+        refusals that did not fit from `payload=`, so a fence carrying counts alone leaves a
+        failed digest write and a lost refusal both unreportable.
+        """
+        self.write(
+            "agents/fleet-flagged-open-actor.md",
+            "**Hand-back**\n\n```text\n"
+            "operator-flagged=<n> · opened=<n> · refused=<n>\n"
+            "```\n</output_format>\n",
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        for key in ("legs", "legs-reason", "truncated", "payload"):
+            self.assertIn(f"`{key}=`", result.stderr)
+
+    def test_flagged_open_fence_without_opened_fails(self):
+        """`opened` is the batch's own footer count — the one number that separates a leg
+        which opened nothing from a leg that was told to print nothing."""
+        self.write(
+            "agents/fleet-flagged-open-actor.md",
+            fence(
+                self.legs["supervisor:fleet-flagged-open-actor"]["required"],
+                drop=("opened",),
+            ),
+        )
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("`opened=`", result.stderr)
+
+    def test_a_fleet_acting_leg_that_stops_dispatching_fails(self):
+        """The same split guard, on the fleet side: a reverted 5c is its pre-split text."""
+        site = self.legs["supervisor:fleet-flagged-open-actor"]["sites"][0]
+        self.write(site, "# Flagged open\n\n- Open what the operator marked, if any.\n")
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(site, result.stderr)
+        self.assertIn("no longer dispatches", result.stderr)
 
 
     def test_open_leg_without_a_branch_count_fails(self):
