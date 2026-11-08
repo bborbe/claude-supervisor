@@ -1,3 +1,8 @@
+---
+# Read by the router, never invoked — without this key Claude Code
+# registers this file as /<plugin>:steps:<name>.
+user-invocable: false
+---
 # Topic round — record the keep-alive outcome
 
 When: every `resume` or `restart` verdict the topic round's keep-alive reads — router row 5 of `commands/topic-drive.md`, § Keep alive.
@@ -30,7 +35,9 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 **Tokens, per verdict** — any other is refused at the write, which lists the accepted set:
 
 - **`resume`** — `/supervisor:open --goal`, whose resume path (Step 2B item 3 → Step 3) prints labels, not tokens: `⌛ waiting-approval` → `waiting-approval`; `--list --json` exited non-zero ("cannot tell") → `cannot-tell`; `start-rate.mjs` exit 1 → `start-rate`; `resolve-launcher.py` non-zero → `launcher-refused`.
-- **`restart`** — `/supervisor:restart` prints its token as the first line: `unknown-session-id`, `ambiguous-pid`, `headless-target`, `held-session`, `role-undetermined`, `stale-load-path`, `environment-fault`, and `restart-precheck.py`'s `dirty-worktree`.
+- **`restart`** — `/supervisor:restart` prints its token as the first line: `unknown-session-id`, `ambiguous-pid`, `headless-target`, `held-session`, `hold-unreadable`, `role-undetermined`, `stale-load-path`, `environment-fault`, and `restart-precheck.py`'s `dirty-worktree`.
+
+⚠️ **One goal can owe more than one verdict in a round** — a `resume` that then lapsed to a `restart`, say. `--record-outcome` answers the newest open one; add `--verdict resume|restart` to pick explicitly.
 
 ⚠️ **`executed` is checked against the work's own record, never the word.** Writing `executed` for a resume that never ran still prints `INCOMPLETE ROUND — skipped: keepalive` at the tail. A resume issued but not yet live at the tail has no stamp and reads incomplete too — wait for the liveness instrument before recording, as the keep-alive table already says.
 

@@ -202,7 +202,8 @@ OWING_VERDICTS = ("resume", "restart")
 #             `⌛ waiting-approval` (item 0), the registry read's "cannot tell" (item 1),
 #             `start-rate.mjs` exit 1 (Step 3.1) and `resolve-launcher.py` non-zero (3.1).
 #   restart → `/supervisor:restart`: `restart-worker.py`'s first-line tokens (its module
-#             docstring, plus `environment-fault`) and `restart-precheck.py`'s
+#             docstring, plus `environment-fault` and `hold-unreadable`, which it returns
+#             when the hold store cannot be read), and `restart-precheck.py`'s
 #             `dirty-worktree`.
 #
 # ⚠️ **No cap token on either path, by design.** The resume path never reaches Step 1.5's
@@ -216,7 +217,8 @@ OWING_VERDICTS = ("resume", "restart")
 REFUSAL_TOKENS = {
     "resume": ("waiting-approval", "cannot-tell", "start-rate", "launcher-refused"),
     "restart": ("unknown-session-id", "ambiguous-pid", "headless-target", "held-session",
-                "role-undetermined", "stale-load-path", "environment-fault", "dirty-worktree"),
+                "hold-unreadable", "role-undetermined", "stale-load-path",
+                "environment-fault", "dirty-worktree"),
 }
 DEFER_TOKENS = {"resume": (), "restart": ("busy-target",)}
 
@@ -596,7 +598,7 @@ def record_verdict(topic: str, goal: str, vault: str, verdict: str, session: str
     return 0
 
 
-def record_outcome(topic: str, goal: str, outcome: str) -> int:
+def record_outcome(topic: str, goal: str, outcome: str, verdict: str = "") -> int:
     """Account for the newest open verdict on `goal`: `executed`, `refused:<t>`, `deferred:<t>`.
 
     Refuses an outcome outside that verdict's vocabulary here, at the write, so the round
@@ -611,9 +613,11 @@ def record_outcome(topic: str, goal: str, outcome: str) -> int:
         return 2
     open_entries = [e for e in d.get(KEEPALIVE) or []
                     if isinstance(e, dict) and not e.get("outcome")
-                    and base_slug(e.get("goal") or "") == base_slug(goal)]
+                    and base_slug(e.get("goal") or "") == base_slug(goal)
+                    and (not verdict or e.get("verdict") == verdict)]
     if not open_entries:
-        print(f"no open keep-alive verdict for {goal!r} on {s}", file=sys.stderr)
+        which = f" `{verdict}`" if verdict else ""
+        print(f"no open{which} keep-alive verdict for {goal!r} on {s}", file=sys.stderr)
         return 2
     entry = open_entries[-1]
     verdict = entry.get("verdict") or ""
@@ -1224,7 +1228,7 @@ def main() -> int:
             return record_verdict(subject, a.goal, a.vault, a.verdict, a.session)
         if not a.outcome:
             ap.error("--record-outcome needs --outcome")
-        return record_outcome(subject, a.goal, a.outcome)
+        return record_outcome(subject, a.goal, a.outcome, a.verdict or "")
     if a.start:
         return start(subject, a.branch)
     if not a.step or not a.path:

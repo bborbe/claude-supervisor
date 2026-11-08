@@ -1593,6 +1593,26 @@ class KeepAliveVerdicts(unittest.TestCase):
         self.outcome("refused:start-rate")
         self.assertEqual(self.check(), (0, ""))
 
+    def test_two_open_verdicts_on_one_goal_are_paid_separately(self):
+        self.full_round()
+        self.verdict("resume", session="sid-1")
+        self.verdict("restart", session="sid-2")
+        # Unprefixed, the outcome answers the NEWEST open entry — the restart — so a
+        # resume token there is refused rather than silently applied to the wrong verdict.
+        self.assertEqual(self.outcome("refused:start-rate", goal=self.GOAL)[0], 2)
+        self.assertEqual(self.outcome("refused:held-session", goal=self.GOAL)[0], 0)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("`resume` verdict has no outcome", out)
+        self.assertNotIn("`restart` verdict has no outcome", out)
+        # `--verdict` names the older open entry.
+        self.assertEqual(self.cli("--record-outcome", "--topic", self.topic, "--goal", self.GOAL,
+                                  "--verdict", "resume", "--outcome", "refused:start-rate")[0], 0)
+        self.assertEqual(self.check(), (0, ""))
+        # Nothing is open for `resume` now, so the same call is refused.
+        self.assertEqual(self.cli("--record-outcome", "--topic", self.topic, "--goal", self.GOAL,
+                                  "--verdict", "resume", "--outcome", "refused:start-rate")[0], 2)
+
     def test_the_outcome_matches_the_goal_by_slug(self):
         self.full_round()
         self.verdict(goal="Auto-Merge Trust-Gated PRs")
