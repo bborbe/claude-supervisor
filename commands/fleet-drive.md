@@ -47,7 +47,7 @@ Rationale: runbook § Fleet-Manager Command — Rationale and Measured History.
 ⚠️ **Delegate; keep this session for the round.** `Task` is available — anything not the sweep
 goes to a sub-agent, or the round stalls (2026-10-30: 2h30m, 100 rows unmanaged).
 
-⚠️ **Carve-out: 5b, 5c and 5d are acting legs.** They run here, or in a sub-agent granted
+⚠️ **Carve-out: 5b, 5c, 5d and 16 are acting legs.** They run here, or in a sub-agent granted
 write tools (`Bash`, `Edit`, `Write`, `mcp__supervisor__*`); a read-only delegate is not a run of
 them — it prints the count it was told to, not the one it measured.
 
