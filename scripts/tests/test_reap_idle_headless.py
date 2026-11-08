@@ -314,7 +314,7 @@ class TestScript(unittest.TestCase):
         env["SUPERVISOR_VAULTS_ROOT"] = self.vaults
         env["SUPERVISOR_PROJECTS_DIR"] = self.projects
         env["SUPERVISOR_WRAPPER_URL"] = f"http://127.0.0.1:{self.port}"
-        env["SUPERVISOR_ATTENTION_URL"] = f"http://127.0.0.1:{self.port}"
+        env["ATTENTION_STORE_URL"] = f"http://127.0.0.1:{self.port}"
         return subprocess.run(
             [sys.executable, SCRIPT, SID, *extra],
             capture_output=True,

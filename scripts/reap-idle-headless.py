@@ -81,10 +81,20 @@ IDLE_FLOOR = 15 * 60
 EXIT_DEADLINE = 8.0
 
 WRAPPER_URL = os.environ.get("SUPERVISOR_WRAPPER_URL") or "http://localhost:18090"
-ATTENTION_URL = os.environ.get("SUPERVISOR_ATTENTION_URL") or "http://localhost:18080"
-#: The attention-controller that serves the session ledger — where a wrapper-backed
-#: worker's `wrapper_session_id` lives.
-LEDGER_URL = os.environ.get("SUPERVISOR_LEDGER_URL") or ATTENTION_URL
+#: The attention store — **the repo's own name for it**, not a second one. `session-liveness.py`,
+#: `attention-ask.py`, `restart-precheck.py` and `server/config.mjs` all resolve it from
+#: `ATTENTION_STORE_URL` (the server additionally honours `SUPERVISOR_ATTENTION_STORE`), and
+#: the rule in `server/config.mjs` is explicit: an operator who moves the store must not have
+#: to discover a second name for the same address. A private name here would leave the
+#: `gate-held` guard reading the default port after the store moved — refusing every reap, or
+#: worse, reading a stale store with no card and reaping a worker whose card lives elsewhere.
+ATTENTION_URL = (
+    os.environ.get("ATTENTION_STORE_URL")
+    or os.environ.get("SUPERVISOR_ATTENTION_STORE")
+    or "http://localhost:18080"
+).rstrip("/")
+#: The ledger is served by the same store — one address, one name.
+LEDGER_URL = ATTENTION_URL
 
 #: Where Claude Code writes transcripts, `<projects>/<escaped-cwd>/<sid>.jsonl`.
 PROJECTS_DIR = os.environ.get("SUPERVISOR_PROJECTS_DIR") or os.path.expanduser(
@@ -150,12 +160,15 @@ def is_helper(args):
     if "--mcp-stdio" in args:
         return True
     exe = os.path.basename(parts[0])
-    # The supervisor's own MCP server, launched by the session: `bun run --cwd …/server`.
-    # The `/server` suffix is required — without it a worker's own `bun run --cwd` build
-    # reads as a helper and its background work goes unseen.
+    # The supervisor's own MCP server: `bun run --cwd <claude-supervisor>/server …`.
+    # ⚠️ The `/server` suffix alone is not enough — a worker's own `bun run --cwd
+    # <repo>/server build` ends with `/server` too, and reading it as a helper would reap a
+    # worker mid-build. The supervisor's checkout is named for it, so require that.
     if exe == "bun" and "run" in parts and "--cwd" in parts:
-        cwd = parts[parts.index("--cwd") + 1] if parts.index("--cwd") + 1 < len(parts) else ""
-        return cwd.rstrip("/").endswith(SUPERVISOR_MCP_DIR_SUFFIX)
+        index = parts.index("--cwd")
+        cwd = parts[index + 1] if index + 1 < len(parts) else ""
+        trimmed = cwd.rstrip("/")
+        return trimmed.endswith(SUPERVISOR_MCP_DIR_SUFFIX) and "claude-supervisor" in trimmed
     if exe not in {"uv", "uvx", "npm", "npx", "bun", "node"}:
         return False
     # A known MCP server PACKAGE, not the bare `mcp-` substring: `node scripts/mcp-watch.js`
@@ -164,11 +177,11 @@ def is_helper(args):
     # extension — so a watcher written as `mcp-<name>.js` cannot hide behind the filter.
     if "@playwright/mcp" in args or "@modelcontextprotocol/" in args:
         return True
-    if "mcp-server-" in args:
-        return True
     for token in parts:
         name = os.path.basename(token)
-        if name.startswith("mcp-") and not name.endswith((".js", ".mjs", ".cjs", ".py", ".ts", ".sh")):
+        if name.startswith(("mcp-", "mcp-server-")) and not name.endswith(
+            (".js", ".mjs", ".cjs", ".py", ".ts", ".sh")
+        ):
             return True
     return False
 
@@ -326,6 +339,16 @@ def guard(rec, now=None, wrapper=None, cards=None, cards_readable=True, children
         return ("ambiguous-pid", "the registry entry carries no integer pid")
     if not precheck.pid_is_alive(pid):
         return ("already-gone", f"pid {pid} is not alive; nothing to reap")
+    # ⚠️ Headless only. A tab worker's session id handed to this verb would be SIGTERMed as
+    # a process, leaving its pane open behind a dead session; `sdk-cli` is the discriminator
+    # the repo already uses (`commands/close.md`, `close-worker.py`), and a tab close is that
+    # script's pane path, not this one.
+    entrypoint = (rec.get("entrypoint") or "").strip()
+    if entrypoint != "sdk-cli":
+        return (
+            "not-headless",
+            f"entrypoint is {entrypoint or '(none)'!r}, not 'sdk-cli'; use close-worker.py",
+        )
     status = (rec.get("status") or "").strip()
     if status != "idle":
         return ("busy-target", f"registry status is {status or '(none)'!r}, not 'idle'")
