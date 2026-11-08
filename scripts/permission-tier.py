@@ -261,7 +261,8 @@ _KEYWORDS = {"if", "then", "elif", "else", "do", "while", "until", "!", "{", "}"
 _NOOP_HEADS = {"for", "case", "esac", "fi", "done", "in", "select", "function", "}", "]]", "[["}
 _SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
 _WRAPPERS = _PASSTHROUGH | {"env", "xargs", "stdbuf", "ionice", "chrt", "taskset", "watch",
-                            "parallel", "flock", "unbuffer", "script", "nsenter"}
+                            "parallel", "flock", "unbuffer", "script", "nsenter", "setsid", "strace",
+                            "ltrace", "chroot", "unshare", "bwrap", "firejail", "timeout", "env"}
 
 
 def words(segment):
@@ -346,7 +347,8 @@ _SECRET_FILES = ("~/.netrc", "~/.pgpass", "~/.git-credentials", "~/.ssh/id_rsa",
 
 def _glob_hits_secret(arg):
     """True when a glob (`~/.netr?`, `~/.ss*/id_*`) could expand to a known credential file."""
-    if not re.search(r"[*?\[]", arg):
+    m = re.search(r"[*?\[]", arg)
+    if not m or len(arg[:m.start()]) < 3:  # `*` and `*.json` match everything; not a secret
         return False
     rx = re.sub(r"\\\[((?:[^\\\[\]]|\\.)+?)\\\]", r"[\1]", re.escape(arg).replace(r"\*", ".*").replace(r"\?", "."))
     try:
@@ -732,7 +734,7 @@ def classify_bash(cmd, depth=0):
             if form:
                 return form
             continue
-        if head.startswith("$") or "__SUBST__" in head:
+        if "$" in head or "__SUBST__" in head:  # `git${IFS}push` hides the program mid-word
             raise Unverifiable(f"command word is an expansion: {head!r}")
         if head in ("eval", "source", "."):
             raise Unverifiable(f"{head} runs text this check cannot see")
