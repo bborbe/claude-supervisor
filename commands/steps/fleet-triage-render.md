@@ -23,7 +23,20 @@ When: every run — after the act phase
 Under it, and only for rows that are not WORKING:
 
 **Closed** — `sid-prefix · task · closed` or `· refused: <token>`.
-**Drove** — `action | what it targeted | observed result`.
+**Drove** — `action | what it targeted | wake path | observed result`. The **wake path** is
+one of:
+
+- `pane:<target-resolution>` — `pane-wake.py --send` returned `delivered`. The resolution is
+  `manager-idle-tab`, `worker:no-manager`, `worker:manager-paneless` or `worker:manager-absent`.
+- `sendmessage` — only a cross-session `SendMessage` went out. That is a delivered nudge for a
+  **headless** session (§ 4b). For a **tab** session it is not one, because the message waits for
+  a turn that never comes.
+- `none:<reason>` — nothing reached the session. The reason is the dry run's `skip:*` verbatim
+  (`skip:operator-ask`, `skip:open-card`, `skip:spinner`, a modal skip, …), or `unverified`, or
+  `failed:<why>`, so a refusal reads as a refusal and never as a silent failure.
+
+Print a one-line tally of the wake paths under the table, plus the share that fell through to a
+worker. If most wakes fell through to `worker:*`, say that manager resolution looks broken.
 **Needs you** — one row per OPERATOR: **jump link** for a tab session, **card handle** for a
 pane-less one, the question in the session's own words, your recommended answer.
 
