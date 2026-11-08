@@ -169,6 +169,14 @@ claims, and this page's value is that a reader can trust it.
 
 ## What is deliberately excluded, and the rule that excludes it
 
+⚠️ **"Every extension" is a real test, and four commands failed it.** `sort` was on this list
+until `-o FILE` was found to write an arbitrary path; `tree -o FILE` does the same. `uniq IN OUT`
+writes `OUT` — an arbitrary-path write — and `diff -l` / `--paginate` runs `pr(1)`. All four are
+**removed** rather than special-cased — a prefix rule cannot exclude a flag or a positional, so
+the only honest fix is not to list the command. Any future entry whose extensions include an
+output, exec or write-target argument has the same problem and must not be added without a
+matcher that rejects those arguments.
+
 ⚠️ **The exclusion rule: a command that reads configuration or plugins out of the working
 tree is not allowlistable on its own, because the shipped policy already lets a worker write
 in its cwd.** The worker can therefore edit the file the command reads and have the command
