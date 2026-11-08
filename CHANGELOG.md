@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: report the three worker populations and their total — `worker-sessions.py --populations` and the server's `workerPopulations()` split the same ledger-and-liveness join into managers / interactive / headless, so the number the caps act on is visible rather than inferred. Managers come from the ledger's own `role: manager` records (`fleet-board.py` emits display rows with no role and did not complete inside 90 s twice on this host), `mode` decides interactive vs headless with an absent `mode` reading as interactive, and the ghost rule and auto-resume exclusion apply to the split exactly as they do to the count
+
 ## v0.252.2
 
 - fix: count live workers in both directions — the fleet counter unions the identity registry in (a headless `claude --print` worker holds a live pid but stamps no heartbeat, so it was dropped: 44 live sessions counted as 10) and drops ghost rows (a `live: true` row with no `state` that the store keeps serving after its session exited: the cap read 51 against 49 real processes)
