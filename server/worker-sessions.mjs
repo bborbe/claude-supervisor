@@ -239,6 +239,9 @@ export async function workerSessions({
   unionRegistry(live, registry)
 
   const workers = []
+  let managers = 0
+  let interactive = 0
+  let headless = 0
   for (const [sessionId, record] of Object.entries(ledger)) {
     if (!live.has(sessionId)) continue
     // Auto-resumes are excluded — they answer to the auto-resume gate's own 30-min crash-loop
@@ -261,13 +264,22 @@ export async function workerSessions({
     // field existed, and those are workers and managers alike, so treating absence as "manager"
     // would drop every pre-field worker out of the count this cap exists to enforce. The same
     // rule, and the same reason, is in `scripts/gate-owner-filter.py`'s `is_manager`.
-    if (record.role === 'manager') continue
+    if (record.role === 'manager') {
+      managers += 1
+      continue
+    }
+    if (record.mode === 'headless') headless += 1
+    else interactive += 1
     workers.push({ sessionId, status: live.get(sessionId), label: record.label })
   }
   // Record the count for the next failed read. Best-effort: a cache that cannot be written must
   // not fail a count that succeeded.
   await writeCountCache(workers.length, { stateDir, now })
-  return { workers, error: null, stale: null }
+  // The split rides along on the same pass: the cap gate's refusal prints what the number is
+  // made of, and reading the stores a second time to answer that would be a second measurement
+  // of a fleet that has already moved.
+  const populations = { managers, interactive, headless, total: managers + interactive + headless }
+  return { workers, populations, error: null, stale: null }
 }
 
 // The three populations the caps act on — managers, interactive workers, headless workers —
