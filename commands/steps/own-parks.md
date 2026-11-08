@@ -69,6 +69,8 @@ Two readings, and only the first is routed:
 
 ⚠️ **When the answer is not derivable from the task file and the worker's own question, it is the operator's.** A wrong manager answer is worse than a timeout, because the worker acts on it and the round reports it as answered. Escalating costs one card; a wrong answer costs a worker building on a plan nobody reviewed.
 
+⚠️ **A routed park that comes back is escalated, not routed again.** If the same `request_id` appears as a class-C escalation on **two consecutive ticks**, step 7's answer did not land — the worker is still parked. Route it once more is pointless: report it in the escalated `C` count and name it for the operator on that second tick. This is the fleet tier's only fallback for a routed park that no one answered, and without it a broken answer path looks exactly like a worker that is simply slow.
+
 ⚠️ **The question you judge is the wrangler's escalation text — you hold no read of your own.** `list_agents.pending_permissions` carries ids only and this step has no `pending_permissions` tool, so the `<class> — <why it needs the manager>` field of the wrangler's escalation is the whole of what this step knows (`agents/goal-wrangler.md` § `<output_format>` requires it to carry the question and its options for an `AskUserQuestion`). An escalation that names only `C` cannot be classified: leave it pending and report it as such, never guess an owner from the tool name.
 
 ## Report
@@ -76,7 +78,7 @@ Two readings, and only the first is routed:
 One line in the round's output on every tick that reaches the dispatch. It is built from the wrangler's scoped-mode report, whose allow reasons name the allowlist entry and whose escalations start with their class. Step 7 reads the `routed` half of it — that count is its trigger (`commands/steps/worker-channels.md`) — and nothing else parses it; it exists to be quoted when counting answered against escalated parks:
 
 ```
-own-parks: answered <n> · routed <routed> (class C → step 7) · escalated <m> (C <c-operator> · D <d> · E <e> · hold <h> · unverified <u>) · refused-not-own <r>
+own-parks: answered <answered> · routed <routed> (class C → step 7) · escalated <escalated> (C <c-operator> · D <d> · E <e> · hold <h> · unverified <u>) · refused-not-own <refused>
 ```
 
 A **skip** line is the one exception, and it means the same as `routed 0`: preconditions 1–3 print `own-parks: skipped — …` or `own-parks: nothing parked` and nothing was read, so step 7 has nothing to answer from that leg. Read a skip as zero routed, never as an unknown.

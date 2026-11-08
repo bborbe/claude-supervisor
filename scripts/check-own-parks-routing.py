@@ -45,6 +45,12 @@ ROUTED_ROW = "| AskUserQuestion | route | class C —"
 SKIP_EQUIVALENCE = "Read a skip as zero routed"
 #: The wrangler's obligation, stated in its own output format.
 WRANGLER_OBLIGATION = "carries the question itself"
+#: The safety boundary and its tie-break. Without these the routing rule is "the manager answers
+#: whatever it likes", which is the one direction this change must never fail in.
+BOUNDARY_HEADING = "### Is the class-C question the manager's?"
+BOUNDARY_TIEBREAK = "it is the operator's"
+#: The fallback for a routed park nobody answered. A routed park that comes back is escalated.
+ROUTED_FALLBACK = "escalated, not routed again"
 
 
 def require(path: Path, needle: str, failures: list[str], why: str) -> None:
@@ -98,6 +104,27 @@ def main() -> int:
         failures,
         "5d holds no `pending_permissions` tool, so an `AskUserQuestion` escalation that does not "
         "carry the question leaves the park unrouteable and the worker waiting for the timeout.",
+    )
+    require(
+        OWN_PARKS,
+        BOUNDARY_HEADING,
+        failures,
+        "The operator/manager boundary is the safety half of this change — without it the rule "
+        "reads as 'the manager answers whatever it likes'.",
+    )
+    require(
+        OWN_PARKS,
+        BOUNDARY_TIEBREAK,
+        failures,
+        "The tie-break must default to the operator. A wrong manager answer is worse than a "
+        "timeout, because the worker acts on it and the round reports it as answered.",
+    )
+    require(
+        OWN_PARKS,
+        ROUTED_FALLBACK,
+        failures,
+        "A routed park nobody answered must escalate on the second tick. Without it a broken "
+        "answer path is indistinguishable from a slow worker.",
     )
 
     if failures:
