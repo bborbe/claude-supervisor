@@ -88,6 +88,14 @@ step 2 of the goal round and of the topic round alike; nothing here is tier-spec
      `N more — pass --all`; a tracked row past the cap is absent from a capped read, and *a
      section you read and found empty is `clear`* would otherwise record it `clear`. If the
      header count exceeds the rows rendered, the truncated rows are `unread`.
+   - **`feed_counts` sums to the row count, and every failed probe is named.** The
+     document's `feed_counts` is `{gated, clear, unread}` counted from the rows themselves;
+     `gated + clear + unread` must equal the number of rows, always. A non-empty `probes`
+     list names each probe that failed and its error — a transient store fault and a
+     genuinely gate-free fleet must be distinguishable without re-running anything. ⚠️
+     **`feed_state: partial` with `unread` rows is a REPORTABLE result, not a bug**: it means
+     a read ran but one gate could not be attributed, so the gated rows keep their verdict
+     and only the rest are `unread`. Report it; never re-run to make it look clean.
 
    ⚠️ **This runs BEFORE the receipt is written, and the order is the check.** The receipt is what
    the tail reads to decide the round took its readings; recording a document that fails one of

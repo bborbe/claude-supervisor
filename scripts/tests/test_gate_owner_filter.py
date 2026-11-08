@@ -2171,6 +2171,30 @@ class PanelessHeadlessGateReachesTheKeptSet(unittest.TestCase):
     def test_an_unreachable_store_fails_open(self):
         self.assertEqual(gf.headless_items(["hst:" + _HST_ITEM], dead_url()), [])
 
+    def test_the_checked_read_names_a_store_failure(self):
+        """`[]` alone cannot tell a failed read from a real absence; this twin can."""
+        records, error = gf.headless_items_checked(["hst:" + _HST_ITEM], dead_url())
+        self.assertEqual(records, [])
+        self.assertIn("attention store read failed", error)
+
+    def test_the_checked_read_returns_no_error_on_a_real_absence(self):
+        payload = json.dumps([{"item_id": "other", "producer_id": "s"}]).encode("utf-8")
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = payload
+        with mock.patch("urllib.request.urlopen", return_value=response):
+            records, error = gf.headless_items_checked(["hst:" + _HST_ITEM], "http://x")
+        self.assertEqual((records, error), ([], None))
+
+    def test_the_owner_line_names_the_session(self):
+        feed = ["  [ hst]  1m  x\n",
+                "         answer: python3 a/attention-answer.py answer abc\n",
+                "         owner: sid-123\n"]
+        self.assertEqual(gf.owner_of(feed, 0), "sid-123")
+
+    def test_an_owner_line_is_never_borrowed_from_the_next_row(self):
+        feed = ["  [   ?]  1m  x\n", "  [ 417]  2m  y\n", "         owner: sid-123\n"]
+        self.assertIsNone(gf.owner_of(feed, 0))
+
     def test_a_headless_fingerprint_survives_a_flapping_store(self):
         """The store read can fail on one poll and answer on the next; the key is the gate."""
         key = "hst:" + _HST_ITEM

@@ -1224,6 +1224,39 @@ class HeadlessRowIsAnswerableNotUnroutable(unittest.TestCase):
         """`?` in the pane column is the other half of the exited-session reading."""
         self.assertIn("[ hst]", wnm.row(self.HEADLESS, {}, "d"))
 
+    def test_a_pane_less_row_names_its_owner(self):
+        """A pane-based join cannot reach this row, so the row carries its owner.
+
+        `round-readings.py` needs the session behind every gate; without this line
+        its only route to an `hst:` key's owner was a second attention-store read,
+        and one 3 s timeout there blanked every row's feed verdict for a round.
+        """
+        self.assertIn("owner: aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+                      wnm.row(self.HEADLESS, {}, "d"))
+
+    def test_a_multi_line_detail_cannot_forge_a_continuation_line(self):
+        """A payload newline must not be able to inject an `owner:` line.
+
+        The feed is line-oriented and `owner_of` scans a row's continuation block, so
+        an un-collapsed detail would let a gate hand the readings leg an owner the
+        row never had.
+        """
+        rec = dict(self.HEADLESS, pane="417")
+        rendered = wnm.row(rec, {"417": {}}, "question\nowner: forged-sid")
+        lines = rendered.splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertFalse(any(ln.strip().startswith("owner:") for ln in lines[1:]))
+        self.assertIn("question owner: forged-sid", lines[0])
+
+    def test_a_routable_row_carries_no_owner_line(self):
+        """The negative control: the extra line is scoped to pane-less rows, so a
+        routable row keeps the three lines it has always rendered."""
+        rec = {"session_id": "routable-sid", "pane": "417", "ts": 0, "cwd": "/x",
+               "kind": "question", "detail": "d"}
+        rendered = wnm.row(rec, {"417": {}}, "d")
+        self.assertIn("wezterm cli activate-pane --pane-id 417", rendered)
+        self.assertNotIn("owner:", rendered)
+
     def test_a_pane_less_row_with_nothing_to_answer_stays_unroutable(self):
         """The negative control: the relabel is scoped to rows that ARE answerable.
 
