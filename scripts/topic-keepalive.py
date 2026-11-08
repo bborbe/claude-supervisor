@@ -182,11 +182,36 @@ def recent(stamps: list[float], now: float) -> list[float]:
     return [s for s in stamps if now - s < RESUME_WINDOW]
 
 
-def record(path: str, stamps: list[float], now: float) -> None:
+def load_sessions(path: str) -> list[tuple[float, str]]:
+    """`[(stamp, session id), …]` — which id each recorded resume confirmed LIVE.
+
+    Kept beside `resumes`, never inside it: `resumes` is the crash-loop cap's input and stays
+    a bare list of floats, so every reader of the cap is unchanged. `manager-receipt.py`
+    reads this list to prove an `executed` resume was the VERDICT's session, not merely any
+    live id handed to `--record-resume`.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    rows = doc.get("sessions") if isinstance(doc, dict) else None
+    out = []
+    for row in rows if isinstance(rows, list) else []:
+        if (isinstance(row, list) and len(row) == 2 and isinstance(row[0], (int, float))
+                and isinstance(row[1], str)):
+            out.append((float(row[0]), row[1]))
+    return out
+
+
+def record(path: str, stamps: list[float], now: float, sid: str = "") -> None:
     keep = recent(stamps, now) + [now]
+    sessions = [[t, s] for t, s in load_sessions(path) if now - t < RESUME_WINDOW]
+    if sid:
+        sessions.append([now, sid])
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump({"resumes": keep}, fh)
+        json.dump({"resumes": keep, "sessions": sessions}, fh)
     os.replace(tmp, path)
 
 
@@ -324,7 +349,7 @@ def main(argv: list[str]) -> int:
             print("cannot-tell")
             print(f"resume {a.record_resume} is not LIVE; the cap is not armed against a retry")
             return 1
-        record(path, load_resumes(path), now)
+        record(path, load_resumes(path), now, a.record_resume)
         print("recorded")
         return 0
 

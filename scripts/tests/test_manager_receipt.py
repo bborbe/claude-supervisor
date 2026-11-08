@@ -1340,12 +1340,11 @@ class KeepAliveVerdicts(unittest.TestCase):
     def check(self):
         return self.cli("--check", "--topic", self.topic)
 
-    def resume_stamp(self, epoch):
-        """The stamp `topic-keepalive.py --record-resume` writes, at its own path."""
-        p = self.m.keepalive_module().resume_path(self.VAULT, self.GOAL, "goal")
-        os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w", encoding="utf-8") as fh:
-            json.dump({"resumes": [epoch]}, fh)
+    def resume_stamp(self, epoch, session="sid-1"):
+        """The stamp `topic-keepalive.py --record-resume` writes — via its own `record()`."""
+        km = self.m.keepalive_module()
+        p = km.state_path(self.VAULT, self.GOAL, "goal")
+        km.record(p, [], epoch, session)
 
     def spawn_line(self, session, epoch):
         """The `kind=spawn` line `session-exit-record.py` writes for a relaunched pane."""
@@ -1390,6 +1389,34 @@ class KeepAliveVerdicts(unittest.TestCase):
         self.assertNotIn("keepalive", self.m.STEPS)
 
     # --- the edges -----------------------------------------------------------------
+
+    def test_a_stamp_for_another_live_session_does_not_count(self):
+        # The round's own session is live too; stamping it must not prove the ABSENT one ran.
+        self.full_round()
+        self.verdict(session="sid-1")
+        self.outcome("executed")
+        self.resume_stamp(time.time(), session="the-rounds-own-session-id")
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("no --record-resume stamp for its session", out)
+
+    def test_a_bare_stamp_without_a_session_does_not_count(self):
+        # A stamp file in the pre-change shape carries the cap's floats only.
+        self.full_round()
+        self.verdict()
+        self.outcome("executed")
+        p = self.m.keepalive_module().state_path(self.VAULT, self.GOAL, "goal")
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({"resumes": [time.time()]}, fh)
+        self.assertEqual(self.check()[0], self.m.EXIT_SKIPPED)
+
+    def test_the_cap_still_reads_the_resumes_list(self):
+        km = self.m.keepalive_module()
+        p = km.state_path(self.VAULT, self.GOAL, "goal")
+        km.record(p, [], time.time() - 10, "a")
+        km.record(p, km.load_resumes(p), time.time(), "b")
+        self.assertEqual(len(km.load_resumes(p)), 2)
+        self.assertEqual([s for _t, s in km.load_sessions(p)], ["a", "b"])
 
     def test_a_stamp_from_before_the_round_does_not_count(self):
         self.full_round()

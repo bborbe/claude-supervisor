@@ -23,7 +23,7 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 
 | outcome | when | what `--check` needs to clear it |
 |---|---|---|
-| `executed` | the resume / restart ran | **resume:** the `topic-keepalive.py --record-resume <id>` stamp, written only once the liveness instrument reads the id live, inside the round window. **restart:** the relaunched pane's `kind=spawn` exit record for that session, inside the window |
+| `executed` | the resume / restart ran | **resume:** the `topic-keepalive.py --record-resume <id>` stamp **for the verdict's own session id**, written only once the liveness instrument reads that id live, inside the round window. **restart:** the relaunched pane's `kind=spawn` exit record for that session, inside the window |
 | `refused:<token>` | the command refused | nothing more — but the token must be one **that verdict's** command emits (below) |
 | `deferred:busy-target` | **restart only:** `/supervisor:restart` refused `busy-target` (mid-turn) | nothing more — wait a tick, never kill in-flight work |
 
@@ -34,7 +34,7 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 
 ⚠️ **`executed` is checked against the work's own record, never the word.** Writing `executed` for a resume that never ran still prints `INCOMPLETE ROUND — skipped: keepalive` at the tail. A resume issued but not yet live at the tail has no stamp and reads incomplete too — wait for the liveness instrument before recording, as the keep-alive table already says.
 
-⚠️ **The honest bound.** A `refused:` token is taken on the round's word — no artifact proves the refusal happened — and `--record-resume` stamps whatever LIVE id it is given. Both are named rather than closed: the check makes a skipped verdict a visible act, it cannot make a fabricated one impossible (the receipt's own docstring states the same bound).
+⚠️ **The honest bound.** A `refused:` token is taken on the round's word — no artifact proves the refusal happened. Named rather than closed: the check makes a skipped verdict a visible act, it cannot make a fabricated one impossible — the general bound `scripts/manager-receipt.py`'s module docstring states under *The honest bound*.
 
 ## What the tail reports
 

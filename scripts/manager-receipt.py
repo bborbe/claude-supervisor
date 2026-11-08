@@ -236,17 +236,20 @@ def session_exit_dir() -> str:
     )
 
 
-def resume_recorded(vault: str, goal: str, started: float, now: float) -> bool:
-    """A `--record-resume` stamp for this goal inside the round window.
+def resume_recorded(vault: str, goal: str, session: str, started: float, now: float) -> bool:
+    """A `--record-resume` stamp for this goal AND the verdict's session, in the round window.
 
     `topic-keepalive.py --record-resume` writes it only once `session-liveness.py` reads the
     resumed id `LIVE`, so the stamp is the resume's own proof — not the round's say-so.
+    ⚠️ **Matched on the session too.** A stamp alone proves only that SOME live id was
+    handed over — the round's own session would do — so the stamp must name the id the
+    verdict said was `ABSENT`.
     """
     if not vault:
         return False
     km = keepalive_module()
-    stamps = km.load_resumes(km.resume_path(vault, goal, "goal"))
-    return any(int(started) <= s <= now + 1 for s in stamps)
+    rows = km.load_sessions(km.resume_path(vault, goal, "goal"))
+    return any(int(started) <= t <= now + 1 and _same_session(session, s) for t, s in rows)
 
 
 def restart_spawned(session: str, started: float, now: float) -> bool:
@@ -306,8 +309,9 @@ def keepalive_skips(d: dict, started: float, now: float) -> list:
         if outcome != "executed":
             continue
         if verdict == "resume":
-            ok = resume_recorded(entry.get("vault") or "", goal, started, now)
-            proof = "no --record-resume stamp"
+            ok = resume_recorded(entry.get("vault") or "", goal, entry.get("session") or "",
+                                 started, now)
+            proof = "no --record-resume stamp for its session"
         else:
             ok = restart_spawned(entry.get("session") or "", started, now)
             proof = "no kind=spawn exit record for its session"
