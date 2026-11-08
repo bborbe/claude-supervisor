@@ -143,7 +143,7 @@ def main() -> int:
         failures.append(
             f"no file under {COMMANDS.relative_to(REPO)}/ carries the carve-out {CARVEOUT!r}.\n"
             f"      Without it the delegate rule reads as 'anything not the sweep', which\n"
-            f"      swallows rows 5b, 5c and 5d — the legs whose whole purpose is to act."
+            f"      swallows rows 5b, 5c, 5d and 16 — the legs whose whole purpose is to act."
         )
     elif total > 1:
         where = ", ".join(f"{p.relative_to(REPO)} ×{n}" for p, n in found)
