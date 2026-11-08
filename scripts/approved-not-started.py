@@ -32,6 +32,11 @@ or names a session the liveness authority does not report live. A recorded id is
 owner — measured 2026-09-30, 127 of the primary vault's 557 `phase: todo` rows carried a
 `claude_session_id` whose session had already ended.
 
+The two halves are reported separately, because they need different levers: a row with
+no id is **never started** (the lever is open), and a row whose id is not live is
+**orphaned** — its worker died (the lever is reopen). Each row carries its `class`, and
+the second output line prints both counts.
+
 Liveness is delegated, never re-derived
 ---------------------------------------
 `session-liveness.py` is the plugin's single liveness instrument (registry + heartbeat,
@@ -67,6 +72,14 @@ TICK_MINUTES = 30
 # Non-terminal scheduling states. A row that is completed, aborted, on hold or parked in
 # backlog is not "waiting to start" whatever its approval record says.
 LIVE_STATUSES = {"next", "todo", "in_progress", ""}
+
+# The two classes of a not-started row. `never_started`: no `claude_session_id` — nobody
+# ever opened it, so the lever is OPEN. `orphaned`: the id names a session that is not
+# live — its worker died, so the lever is REOPEN (resume). A live id is neither: it is
+# started and never reaches the row list.
+NEVER_STARTED = "never_started"
+ORPHANED = "orphaned"
+CLASS_LABEL = {NEVER_STARTED: "never started", ORPHANED: "orphaned"}
 
 FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 
@@ -234,30 +247,61 @@ def collect(tasks_dir, live, now):
                 "age_seconds": (now - approved).total_seconds(),
                 "manager": manager_for(list_field(block, "goals"), live_by_name,
                                        field(block, "managed_by")),
+                "class": ORPHANED if sid else NEVER_STARTED,
             }
         )
     rows.sort(key=lambda r: r["age_seconds"], reverse=True)
     return rows
 
 
+def split(rows):
+    """`(never_started, orphaned)` — each counted on its own predicate, never by remainder.
+
+    The two classes need opposite levers. A row with no `claude_session_id` was never
+    opened, and the open leg opens it. A row whose id names a session that is no longer
+    live was started and its worker died, and the reopen rule
+    (`commands/steps/keepalive.md` § Resume a worker whose session died) resumes it.
+    Measured 2026-10-30: 81 of 122 rows were orphans, invisible as a class inside the
+    single total.
+
+    ⚠️ **Count both, never derive one as `total − the other`.** A remainder makes the
+    sum check pass by construction, so a row classed as neither — the defect the sum
+    exists to catch — would vanish into whichever number was derived.
+    """
+    never = sum(1 for r in rows if r.get("class") == NEVER_STARTED)
+    orphaned = sum(1 for r in rows if r.get("class") == ORPHANED)
+    return never, orphaned
+
+
+def split_line(never, orphaned):
+    """The line beneath the head that names each class and the lever it implies."""
+    return "  never started: %s → open · orphaned: %s → reopen" % (never, orphaned)
+
+
 def render(rows, tick_minutes):
-    """The round's line, plus the over-tick block."""
+    """The round's line, the class split beneath it, plus the over-tick block."""
     if not rows:
-        return "approved, not started: 0"
+        return "approved, not started: 0\n" + split_line(0, 0)
     oldest = rows[0]
     head = "approved, not started: %d · oldest %s (%s)" % (
         len(rows),
         format_age(oldest["age_seconds"]),
         oldest["name"],
     )
+    lines = [head, split_line(*split(rows))]
     over = [r for r in rows if r["age_seconds"] > tick_minutes * 60]
     if not over:
-        return head
-    lines = [head, "  over one tick (%dm):" % tick_minutes]
+        return "\n".join(lines)
+    lines.append("  over one tick (%dm):" % tick_minutes)
     for row in over:
         lines.append(
-            "    · %s — %s — manager %s"
-            % (row["name"], format_age(row["age_seconds"]), row["manager"] or "unmanaged")
+            "    · %s — %s — %s — manager %s"
+            % (
+                row["name"],
+                format_age(row["age_seconds"]),
+                CLASS_LABEL.get(row.get("class"), "unclassified"),
+                row["manager"] or "unmanaged",
+            )
         )
     return "\n".join(lines)
 
@@ -297,6 +341,9 @@ def main(argv=None):
         # otherwise render nothing at all, which reads as a clean round rather than a
         # failed one. The line is honest on either stream and is never a number.
         print("approved, not started: unknown")
+        # Both class counts inherit the same third state: without the live set a recorded
+        # id cannot be told from a live owner, so neither class is countable.
+        print(split_line("unknown", "unknown"))
         print(
             "⚠️ session registry unreadable — cannot tell started from unstarted; "
             "this is not a count of 0",
@@ -307,7 +354,18 @@ def main(argv=None):
     rows = collect(args.tasks_dir, live, now)
 
     if args.json:
-        json.dump({"rows": rows, "tick_minutes": args.tick_minutes, "count": len(rows)}, sys.stdout, indent=2)
+        never, orphaned = split(rows)
+        json.dump(
+            {
+                "rows": rows,
+                "tick_minutes": args.tick_minutes,
+                "count": len(rows),
+                "never_started": never,
+                "orphaned": orphaned,
+            },
+            sys.stdout,
+            indent=2,
+        )
         sys.stdout.write("\n")
         return 0
 
