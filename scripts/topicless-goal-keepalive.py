@@ -56,8 +56,6 @@ from contextlib import redirect_stdout
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-DEFAULT_GOALS_DIR = "24 Goals"
-DEFAULT_TOPICS_DIR = "23 Topics"
 
 #: The verdicts this leg acts on. Every other `topic-keepalive.py` verdict maps to no command.
 ACTING = ("resume", "restart")
@@ -90,6 +88,30 @@ def crashed():
             raise Refused(f"{path} is missing {', '.join(missing)} — a broken install")
         _CM = module
     return _CM
+
+
+def folders(vault: str) -> tuple[str, str]:
+    """`(goals_dir, topics_dir)` for THIS vault, absolute, from `resolve-folders.py --vault`.
+
+    Matched by the vault's path, never the first config entry carrying the key: on the
+    operator's machine that entry is `private-starcitizen` (`23 Goals`), wrong for
+    private-personal (measured 2026-11-08).
+    """
+    path = os.path.join(REPO, "scripts", "resolve-folders.py")
+    try:
+        spec = importlib.util.spec_from_file_location("resolve_folders", path)
+        rf = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rf)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = rf.main(["--vault", vault, "--require", "goals_dir,topics_dir"])
+    except Exception as exc:  # noqa: BLE001 — any failure is a refusal
+        raise Refused(f"cannot resolve folders via {path}: {exc}") from exc
+    line = out.getvalue().strip()
+    if rc != 0 or line.startswith("UNKNOWN"):
+        raise Refused(f"folders: {line or 'resolve-folders.py printed nothing'}")
+    topics, goals = line.split("|")[0:2]
+    return goals, topics
 
 
 def keepalive():
@@ -151,12 +173,18 @@ def command(verdict_word: str, name: str, sid: str) -> str:
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--vault", required=True, help="the vault ROOT path")
-    ap.add_argument("--goals-dir", default=DEFAULT_GOALS_DIR,
-                    help="the vault's goals directory (resolve it from `vault-cli config`)")
-    ap.add_argument("--topics-dir", default=DEFAULT_TOPICS_DIR,
-                    help="the vault's topics directory (resolve it from `vault-cli config`)")
+    ap.add_argument("--goals-dir", help="override the goals directory (default: the vault's config)")
+    ap.add_argument("--topics-dir", help="override the topics directory (default: the vault's config)")
     a = ap.parse_args(argv)
     vault = os.path.abspath(os.path.expanduser(a.vault))
+    if not (a.goals_dir and a.topics_dir):
+        try:
+            goals, topics = folders(vault)
+        except Refused as exc:
+            print(f"REFUSED: {exc}", file=sys.stderr)
+            return 2
+        a.goals_dir = a.goals_dir or goals
+        a.topics_dir = a.topics_dir or topics
 
     try:
         cm = crashed()

@@ -27,6 +27,7 @@ import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { WRAPPER_POLICY_INTERVAL_MS, createWrapperPolicyPoller } from './wrapper-policy.mjs'
 import { confinedCandidate, loadManagerAllowlist, matchManagerEntry } from './manager-allowlist.mjs'
+import { permissionTier } from './permission-tier.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
@@ -597,6 +598,10 @@ const publicPerm = (p) => ({
   // The manager-allowlist entry covering this prompt, so the answering manager can see WHY it
   // is allowed to answer before it does — rather than re-deriving a match from the command text.
   allowlist_entry: p.allowlistEntry?.prefix ?? null,
+  // allowlist | manager | operator, from scripts/permission-tier.py. `operator` is never a
+  // manager's to answer; how a manager decides a `manager`-tier prompt is the doc's to state.
+  permission_tier: p.permissionTier?.tier ?? 'operator',
+  permission_tier_reason: p.permissionTier?.reason ?? null,
   requested_at: p.requestedAt,
 })
 
@@ -688,6 +693,13 @@ function makeCanUseTool(agent) {
         allowlistEntry: managerAllowlistEntry(toolName, inputKey(input), agent.cwd),
         settle,
       }
+      // The tier is computed at park time for the same reason as the entry: the answer record
+      // should carry what the server decided, not what the answering manager claims. A confined
+      // entry only matched above when its runner config was verified clean, so that verdict is
+      // what the classifier is told.
+      record.permissionTier = permissionTier(toolName, input, {
+        runnerConfigClean: record.allowlistEntry?.confine === 'clean-runner-config',
+      })
       // Fail safe: an unanswered prompt must not park a worker forever.
       // ⚠️ The timeout writes a record BEFORE it settles, and that ordering is the point:
       // this path used to settle with no `permissions.jsonl` row at all, so a timeout and a
@@ -1405,6 +1417,9 @@ async function concurrentLimitError({ operatorNamed = false } = {}) {
     staleAgeMs: counted.stale?.ageMs ?? null,
     operatorNamed,
     configFile: config.configFile,
+    // The split rides on the same count pass, so the refusal's breakdown cannot describe a
+    // different instant than the number beside it.
+    populations: counted.populations ?? null,
   })
 }
 

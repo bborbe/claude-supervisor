@@ -90,7 +90,8 @@ class LegTest(unittest.TestCase):
     def run_leg(self):
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = self.leg.main(["--vault", str(self.vault)])
+            rc = self.leg.main(["--vault", str(self.vault), "--goals-dir", "24 Goals",
+                                  "--topics-dir", "23 Topics"])
         return rc, out.getvalue(), err.getvalue()
 
     def rows(self, text):
@@ -178,6 +179,30 @@ class LegTest(unittest.TestCase):
         rows = self.rows(out)
         self.assertEqual(rows["Broken Goal"][1:3], ["cannot-tell", "-"])
         self.assertEqual(rows["Lonely Goal"][1], "resume")
+
+    def test_without_dir_flags_the_folders_come_from_the_vaults_own_config(self):
+        self.goal("Lonely Goal", "sid-absent")
+        self.verdicts["sid-absent"] = "ABSENT"
+        seen = []
+        self.leg.folders = lambda vault: (seen.append(vault) or
+                                          (str(self.vault / "24 Goals"), str(self.vault / "23 Topics")))
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.leg.main(["--vault", str(self.vault)])
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen, [str(self.vault)])
+        self.assertIn("Lonely Goal\tresume", out.getvalue())
+
+    def test_an_unresolvable_vault_refuses_with_two(self):
+        def refuse(vault):
+            raise self.leg.Refused("folders: UNKNOWN vault does not configure topics_dir")
+        self.leg.folders = refuse
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = self.leg.main(["--vault", str(self.vault)])
+        self.assertEqual(rc, 2)
+        self.assertIn("does not configure topics_dir", err.getvalue())
+        self.assertNotIn("selected:", out.getvalue())
 
     def test_an_empty_population_is_zero_not_a_refusal(self):
         rc, out, _ = self.run_leg()

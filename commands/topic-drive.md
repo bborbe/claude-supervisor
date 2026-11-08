@@ -112,11 +112,9 @@ reported as a dead manager is how a working session gets a second writer.
 ## Start — inline, because it is this tier's whole product
 
 ⚠️ **This tier opens a goal manager only for a goal the operator FLAGGED.** Operator ruling
-2026-10-30: *"we dont want to auto open topic-manager, goal-manager ... but flag are fine"* —
-**restart is not open.** A restart resumes a session that already has a subject and a recorded
-id; an open creates supervision where none existed, and deciding who supervises is the
-operator's act. So the Start row is gated on the flag, and `goal-spawn`'s own flag clause no
-longer excludes it.
+2026-10-30: *"we dont want to auto open topic-manager, goal-manager ... but flag are fine"*.
+Restart is not open (`docs/session-tiers.md` § Keep-alive), so the Start row is gated on the
+flag, and `goal-spawn`'s own flag clause no longer excludes it.
 
 A goal is **startable for this row** when all hold:
 

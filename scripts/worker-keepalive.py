@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 """The fleet tier's worker keep-alive: did this worker's session die, and may we resume it?
 
-The goal tier already resumes an orphan — `agents/goal-drive.md`'s auto-resume gate, on
-every tick, capped by `last_auto_resume`. The fleet tier did not: `agents/fleet-drive.md`
-dispositioned an absent session as `blocked` with cause `orphan` and the note *"escalate,
-never nudge"*, so a worker whose session simply died was reported to the operator and left
-dead. Rule 1 is *a crashed or lapsed manager or worker is restarted automatically*
-(`docs/session-tiers.md` § The four tiers) — a worker that already owns its task decides
-nothing new by being resumed.
+Which workers the fleet round keeps, and which fall to a goal manager's auto-resume gate, is
+`docs/session-tiers.md` § Keep-alive. Before this script, `agents/fleet-drive.md` reported a
+worker whose session simply died to the operator and left it dead.
 
 ⚠️ **This is not `scripts/stuck-heal.py`.** That ladder heals a *stuck* headless worker — one
 whose permission channel died while the session lives — and its two rungs (resume headless,
@@ -25,8 +21,8 @@ The first line of stdout is the verdict, one token:
   crash-loop    the resume cap is spent; stop resuming and escalate once
   cannot-tell   the probe could not decide, or the task records no id; report, never act
 
-⚠️ **Never a fresh spawn while a recorded id exists.** `/supervisor:open --task` resumes the
-recorded id; a second worker on one task is the double-writer failure.
+⚠️ **`/supervisor:open --task` resumes the recorded id in place** (`docs/session-tiers.md`
+§ Keep-alive).
 
 ⚠️ **The cap counts only resumes that took** — `--record-resume` refuses an id the liveness
 instrument does not read `LIVE`, so a resume that never landed does not arm the cap against
