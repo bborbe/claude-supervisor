@@ -635,6 +635,8 @@ CHIP=$(jq -r --arg r "${ROLE:-agent}" '
 
 **`role:` absent means agent, and that is the correct default** — matrix Rule 1 ([`docs/role-mode-matrix.md`](../docs/role-mode-matrix.md)).
 
+⚠️ **The RESUME arm (§ 3.1) takes its chip from `resolve-launcher.py`, not from this block** — launcher and chip are read together, from one page and one rule. `$CHIP` below is the create arm's.
+
 ⚠️ **If `$MAP` is missing or `WINDOW_ID` comes back empty, fall back to today's behaviour and SAY SO in the report** — spawn into the caller's window with `pink`. Do **not** silently proceed as if routing worked.
 
 Then pass the pair to whichever spawn path runs:
@@ -660,7 +662,15 @@ Then pass the pair to whichever spawn path runs:
 # an explicit timeout on the call (the Bash tool's maximum is 600s).
 node "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/start-rate.mjs" || exit 1
 
-wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- env SESSION_EXIT_RECORD="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-exit-record.py" bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; _sx() { rc=$?; "$SESSION_EXIT_RECORD" append --session "<session_id>" --pid $$ --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn --session "<session_id>" --pid $$ || true; "$SESSION_EXIT_RECORD" observe --pid $$ --session "<session_id>" || true; trap _sx EXIT; "<claude_script>" --resume <session_id> -n "<title>" "/color '"$CHIP"'"'
+# Launcher and chip both come from CODE: `resolve-launcher.py` prints
+# `<launcher>\t<source>\t<role>\t<chip>` from `restart-worker.py`'s `resolve_launcher`,
+# shared with the restart path. Non-zero is a refusal — stop the row, never fall back to
+# this session's own launcher.
+RESOLVED=$(python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/resolve-launcher.py" "<session_id>" --cwd "<cwd>") || exit 1
+LAUNCHER=$(printf '%s' "$RESOLVED" | cut -f1)
+CHIP=$(printf '%s' "$RESOLVED" | cut -f4)
+
+wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- env SESSION_EXIT_RECORD="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-exit-record.py" bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; _sx() { rc=$?; "$SESSION_EXIT_RECORD" append --session "<session_id>" --pid $$ --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn --session "<session_id>" --pid $$ || true; "$SESSION_EXIT_RECORD" observe --pid $$ --session "<session_id>" || true; trap _sx EXIT; "'"$LAUNCHER"'" --resume <session_id> -n "<title>" "/color '"$CHIP"'"'
 ```
 
 ⚠️ **No `exec` in this shape — adding one back silently destroys the exit status.** `exec` replaces the pane's shell with Claude, so nothing is left to `waitpid` and `137` (a value only the *parent* can read) stops existing. Measured 2026-10-27: with the launcher as a child behind `trap _sx EXIT`, a `kill -9` prints `rc=137`; behind `exec`, the trap cannot fire at all and nothing is recorded. The trap is what turns a death into a line in `~/.claude/state/session-exit/pane-<pane>.log`.
@@ -671,7 +681,7 @@ wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- env SE
 
 ⚠️ **`env` is load-bearing, not decoration.** A spawned pane inherits wezterm's *mux server* environment, not this shell's — which is also why the `unset` prefix exists. Pass the writer path as an `env` assignment before `bash`, never inline inside the single-quoted `bash -lc` string, where it cannot expand.
 
-⚠️ **For a task, `<claude_script>` is the task's resolved launcher, not the vault default** — this path bypasses the server, so apply the rule yourself: `vault-cli task get "<task>" launcher --vault <vault>`, and when that is empty use the vault's `worker_launcher` — or, for `ROLE=human`, the `-claude` sibling, else `manager_launcher` (matrix Rule 4). ⚠️ **Do NOT read the goal's launcher** — a goal states how its manager runs, never its workers (rule home: [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker) item 8).
+⚠️ **Never hand this shape a launcher, and never restate the rule here.** `$LAUNCHER` and `$CHIP` are `resolve-launcher.py`'s fields 1 and 4: the task's own `launcher:`, else the vault `worker_launcher`, with the `role: human` Claude rule and the manager rule already applied inside `resolve_launcher` — and never a goal's `launcher:`, which states how its MANAGER runs. Restating the precedence in prose is what let a caller resume a `role: agent` row on its own Opus launcher (measured 2026-11-07: two rows came back as `cc-private-claude --resume … /color cyan`). Rule home: [`docs/restart-worker.md`](../docs/restart-worker.md) § Which launcher the resume runs.
 
 ⚠️ **`<title>` is the row's subject — the same value as `label`.** It is what `claude -n` writes into the session record; empty or omitted leaves the session unnamed, exactly as an omitted `label` does on the server path. Task rows pass the task name, manager rows `<goal> Manager` / `<topic> Manager` (§ 2B / § 2C). Step 4 refuses an unnamed result.
 

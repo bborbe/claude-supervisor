@@ -40,7 +40,7 @@ A missing or empty `phase` is not decided here: it takes the existing entry path
 ## Rule 4 — how a `role: human` row opens
 
 - Always opened, into the **Direct** window, as the operator's own session — never skipped, never as a worker.
-- On the vault's **Claude launcher** (the `-claude` sibling of `claude_script` when it exists, else `manager_launcher`) instead of the worker default — unless the task carries its own `launcher:`. A vault with neither falls back to its `claude_script` (better open wrong than not open). Server: `applyHumanLauncherRule` in `server/spawn-cwd.mjs`, applied by `spawn_agent` **whenever the caller passes `role: human`**, with or without a task (the server does not read `role:` from the task file); the wezterm fallback applies it by hand.
+- On the vault's **Claude launcher** (the `-claude` sibling of `claude_script` when it exists, else `manager_launcher`) instead of the worker default — unless the task carries its own `launcher:`. A vault with neither falls back to its `claude_script` (better open wrong than not open). Server: `applyHumanLauncherRule` in `server/spawn-cwd.mjs`, applied by `spawn_agent` **whenever the caller passes `role: human`**, with or without a task (the server does not read `role:` from the task file). The resume path applies the same rule in `restart-worker.py` `_human_launcher`, reached through `scripts/resolve-launcher.py` — the `-claude` sibling ahead of a configured `manager_launcher`, exactly as the server does it.
 - A previous run's "leave them closed" answer never carries to the next run.
 
 ## Labelling

@@ -29,6 +29,11 @@ from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from unittest import mock
 
+# Side effect only: pins `SUPERVISOR_WORKER_MODE` for the run, so a suite that runs inside a
+# headless supervised worker does not inherit `headless` and take `main()`'s early exit in the
+# cases that expect the polling path.
+import worker_mode_isolation  # noqa: E402,F401
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 PATH = os.path.join(HERE, "..", "permission-answer-poll.py")
 

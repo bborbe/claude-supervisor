@@ -76,6 +76,14 @@ restarting that subject for the round, say so, and let a later round retry.
 stand-down on a non-`execution` subject, and this leg must not undo it — restarting one would
 turn a refused arm into a restart loop that still runs a round every tick.
 
+⚠️ **`SLEEPING` is not a lapse either, and it is the state this leg would otherwise create.**
+A date-gated subject waits on its own earliest `defer_date` with a deliberately frozen
+cadence, so it reads as a fault to every signal this leg uses. `topic-keepalive.py` returns
+`leave` for it, and this leg must do the same: a restart spends a full-context round to
+rediscover that nothing is due, and a hand `--arm` would clear the marker and un-sleep it.
+The fallback wake needs no branch here — once the instant passes the marker stops
+suppressing anything, the subject reads `STALE`, and the ordinary restart path resumes it.
+
 **Record the count — in the digest, not only in chat.** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg lapsed-managers --count <n>`, with `<n>` the topic rows this leg found and did not act on — the `# Regression metric` on the task that installed this leg reads it, and a round that prints the number without moving it is the defect it exists to remove. The line's format, its not-run form and the dead-worker floor have their **single home in `commands/steps/output-shape.md` item 14** — read it there and never restate it here. ⚠️ **The reading must land in the digest, which is the file that outlives the round.** A count spoken into chat and nowhere else dies with the round: measured 2026-11-06, a real 69-line digest over 24 sessions carried **zero** `unactioned:` lines while this file instructed the round to print them.
 
 ## Resume the park watches whose re-check has passed
@@ -162,14 +170,17 @@ send that fails, or a session with no roster name (headless, pane-less), is repo
 tick. Never park, kill or exit the session yourself: the nudge asks, and the session acts.
 
 The selection is `bucket == watching` AND `watching_min` strictly above
-`park-event.py threshold`. `watching_min` is the span from the session's first
-`🟡 WAITING` closer to now, published by `session-activity.py`; `gated`, `working`, `idle`
+`park-event.py threshold`. `watching_min` is the span from the first `🟡 WAITING`
+closer of the session's **current watching episode** to now, published by
+`session-activity.py`; `gated`, `working`, `idle`
 and `unclassified` rows never qualify, whatever their duration. ⚠️ **`quiet_min` must never
 be substituted for it** — a watcher re-arm writes to the transcript, so a session parked
 3 h 34 m read `quiet 12m` and was never nudged, which is the defect this selection exists
-to remove. Suppression is one nudge per watching episode, keyed on the session id and
-never on the duration, which grows every round. Leaving the bucket, leaving the fleet, or
-a duration that dropped re-arms it.
+to remove. Suppression is one nudge per watching episode, keyed on the session id
+**and the episode's first-closer timestamp (`watching_since`)** — never on the duration,
+which grows every round, and never on the duration merely dropping, because a round can
+land after one park ended and the next began. Leaving the bucket, leaving the fleet, or a
+different `watching_since` re-arms it.
 
 **Report the line.** Print the `park-nudge:` summary verbatim
 (`<n> nudged · <s> suppressed · <w> within 15m · <m> watching · <l> live`) beside the

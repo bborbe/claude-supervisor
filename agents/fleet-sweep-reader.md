@@ -100,7 +100,7 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
    | Signal | Reading |
    |---|---|
    | session carries an **operator hold** | **held** — render `⏸️ HELD — <reason> · <age>`; never `stalled`, never `parked`, never a nudge |
-   | manager subject reads **`STOPPED`** / **`STALE`** via `manager-liveness.py --state` | **`STOPPED` → `stood-down`** — a *correct* self-stand-down, never nudged · **`STALE` → `lapsed`** — no `<slug>.stopped` marker |
+   | manager subject reads **`STOPPED`** / **`SLEEPING`** / **`STALE`** via `manager-liveness.py --state` | **`STOPPED` → `stood-down`** — a *correct* self-stand-down, never nudged · **`SLEEPING` → `sleeping`** — a date-gated subject waiting on its own `defer_date`, never nudged and never restarted · **`STALE` → `lapsed`** — no `.stopped` or `.sleeping` marker |
    | status changed since last sweep | progressing |
    | session carries an **open permission / AskUserQuestion gate** | **waiting-on-human** — render `⌛ waiting-on-human`; never `stalled` |
    | `idle` **and** all boxes `[x]` / task complete | **finished — reap candidate** |
@@ -155,7 +155,7 @@ CLASSIFICATION  <total> classified · <class>=<n> · <class>=<n> …    — or: 
 BLOCKED (feed, raised — not verified open)
   <name> · pane <id> · <link> · <gate text, ≤80 chars>
 CLOSERS (last-turn closer and class)
-  <name> · pane <id> · <link> · <class> · <closer text, ≤80 chars>  ← CLASSIFICATION only, joined by pane id
+  <name> · pane <id|hst> · <link|—> · <class> · <closer text, ≤80 chars>  ← live sessions, joined by id
 ORPHAN CANDIDATES (park filter + 7d bound applied)  — or: UNKNOWN (check failed)
   <task> · claimed by <session id 8> · file age <h>
 REAP CANDIDATES (3 disk facts read this run)

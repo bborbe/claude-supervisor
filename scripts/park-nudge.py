@@ -16,8 +16,8 @@ population the park rule targets. This script is the enforcement point the
 round's keep-alive leg runs beside the park-watch resume.
 
 WHAT IT SELECTS. A row is a candidate only when its bucket is exactly
-`watching` AND its `watching_min` — the span from the session's first
-`🟡 WAITING` closer, published by `session-activity.py` — exceeds
+`watching` AND its `watching_min` — the span from the first `🟡 WAITING` closer
+of its CURRENT watching episode, published by `session-activity.py` — exceeds
 `park-event.py`'s threshold. The comparison is strict: 15 min is inside the
 allowance, 16 is not. The bucket is the gate, not the duration. A `working`,
 `light`, `gated`, `idle` or `unclassified` row is never a candidate however long
@@ -31,14 +31,20 @@ never nudged — the defect this selection exists to remove. `watching_min` does
 not reset on a re-arm. The emitted line keeps its `quiet <N>m` field name for
 compatibility with the round's parser, but N is the watching-state duration.
 
-SUPPRESSION: ONE NUDGE PER WATCHING EPISODE. Keyed on the session id, never on
-the duration. `watching_min` grows every round, so a key carrying it never
-matches twice and the session would be re-nudged every tick. An episode ends,
-and the session becomes nudgeable again, when the session is seen outside the
-`watching` bucket, is absent from the reading, or its duration went DOWN (a
-fresh measurement, e.g. after a transcript rotation). The ledger lives at
-`$PARK_NUDGE_STATE`, default `~/.claude/state/park-nudge/ledger.json`; its
-`last_quiet` key holds the watching-state duration.
+SUPPRESSION: ONE NUDGE PER WATCHING EPISODE. Keyed on the session id AND the
+episode's first-closer timestamp (`watching_since`), never on the duration —
+`watching_min` grows every round, so a key carrying it never matches twice and
+the session would be re-nudged every tick. An episode ends, and the session
+becomes nudgeable again, when the session is seen outside the `watching` bucket,
+is absent from the reading, or the reading carries a DIFFERENT `watching_since`
+— a new park began. Keying on the timestamp rather than on the duration dropping
+matters: the round cadence is 15 minutes and rounds are routinely skipped, so a
+reading can land after one park ended and the next began, where the duration
+never fell and a drop-based key would suppress the new park for its whole
+length. A reading that carries no `watching_since` falls back to the duration
+comparison. The ledger lives at `$PARK_NUDGE_STATE`, default
+`~/.claude/state/park-nudge/ledger.json`; its `last_quiet` key holds the
+watching-state duration and its `episode` key the episode timestamp.
 
 WHAT IT DOES NOT DO. It never parks, kills, reaps or exits a session: the nudge
 asks, the session performs it. It does not deliver the nudge either. It prints
@@ -145,6 +151,23 @@ def write_ledger(path: Path, data: dict) -> None:
     os.replace(tmp, path)
 
 
+def same_episode(prev: dict, row: dict, quiet: int) -> bool:
+    """True when this reading is the episode the ledger already nudged.
+
+    Keyed on the episode's first-closer timestamp (`watching_since`) when the
+    instrument publishes one: a round can MISS the boundary between two parks —
+    the cadence is 15 minutes and rounds are routinely skipped — so a duration
+    that merely failed to drop is not proof of the same episode. The duration
+    comparison stays as the fallback for a reading that carries no
+    `watching_since`."""
+    if not prev.get("nudged"):
+        return False
+    episode = row.get("watching_since")
+    if episode is not None:
+        return prev.get("episode") == episode
+    return quiet >= int(prev.get("last_quiet", 0))
+
+
 def evaluate(sessions: list, ledger: dict, limit_s: int, exit_script: str):
     """Pure decision over one reading. Returns (nudges, next_ledger, stats).
 
@@ -155,28 +178,38 @@ def evaluate(sessions: list, ledger: dict, limit_s: int, exit_script: str):
     stats = dict(watching=0, over=0, suppressed=0, within=0)
     limit_min = limit_s // 60
     for row in sessions:
-        sid = row.get("sid") or ""
-        if not sid or row.get("bucket") != "watching":
+        if row.get("bucket") != "watching":
             continue
+        # Counted before the sid and measurement guards: the reading's own
+        # `counts.watching` counts every watching row, and a summary that
+        # disagrees with it is a number the operator cannot reconcile.
+        stats["watching"] += 1
+        sid = row.get("sid") or ""
+        if not sid:
+            continue
+        prev = ledger.get(sid) or {}
         quiet = row.get("watching_min")
         if not isinstance(quiet, int) or isinstance(quiet, bool):
+            # Not measurable this round. Carry the episode's ledger entry rather
+            # than dropping it: dropping would re-arm suppression and re-nudge
+            # the same park on the next reading that can measure it.
+            if prev:
+                nxt[sid] = prev
             continue
-        stats["watching"] += 1
-        prev = ledger.get(sid) or {}
-        # The duration went DOWN: a fresh measurement started, a new episode.
-        nudged = bool(prev.get("nudged")) and quiet >= int(prev.get("last_quiet", 0))
+        nudged = same_episode(prev, row, quiet)
+        episode = row.get("watching_since")
         if quiet * 60 <= limit_s:
             stats["within"] += 1
-            nxt[sid] = dict(nudged=nudged, last_quiet=quiet)
+            nxt[sid] = dict(nudged=nudged, last_quiet=quiet, episode=episode)
             continue
         stats["over"] += 1
         if nudged:
             stats["suppressed"] += 1
-            nxt[sid] = dict(nudged=True, last_quiet=quiet)
+            nxt[sid] = dict(nudged=True, last_quiet=quiet, episode=episode)
             continue
         nudges.append(dict(sid=sid, name=row.get("name") or "-", quiet_min=quiet,
                            message=nudge_text(row, quiet, limit_min, exit_script)))
-        nxt[sid] = dict(nudged=True, last_quiet=quiet)
+        nxt[sid] = dict(nudged=True, last_quiet=quiet, episode=episode)
     return nudges, nxt, stats
 
 
