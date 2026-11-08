@@ -257,9 +257,11 @@ class FeedParse(Tmp):
         super().setUp()
         self.filt = rr._load("gate-owner-filter")
         self._orig_checked = self.filt.headless_items_checked
+        self._orig_log = self.filt.log_items
 
     def tearDown(self):
         self.filt.headless_items_checked = self._orig_checked
+        self.filt.log_items = self._orig_log
         super().tearDown()
 
     def _store(self, records, error=None):
@@ -298,6 +300,21 @@ class FeedParse(Tmp):
         self.assertEqual(state, "partial")
         self.assertIn("attention store read failed", error)
         self.assertEqual(rr.feed_verdict(["sid-other"], gated, state), "unread")
+
+    def test_a_failed_event_log_read_is_unread_and_named(self):
+        """A digit pane joins through the event log; an unreadable log blanks nothing
+        silently — it is `unread`, and the failing probe is named."""
+        def boom(_state_dir):
+            raise RuntimeError("log dir unreadable")
+
+        self.filt.log_items = boom
+        feed = {"panes": {"417"}, "owners": {}, "orphan_owners": [],
+                "state": "read", "error": None}
+        gated, state, error = rr.gated_sessions_from_panes(feed, self.attention)
+        self.assertEqual(gated, set())
+        self.assertEqual(state, "unread")
+        self.assertIn("event-log read failed", error)
+        self.assertIn("log dir unreadable", error)
 
     def test_a_raising_store_read_is_named_not_crashed(self):
         def boom(keys, endpoint=None):

@@ -1861,6 +1861,20 @@ def answer_handover(rec):
     return cmd + " --decision allow|deny" if rec.get("kind") == "permission" else cmd
 
 
+def one_line(text, limit):
+    """One rendered field, collapsed to a single line and clipped to `limit`.
+
+    The feed is a LINE-oriented format: `feed_rows`, `headless_key` and `owner_of` all
+    find a row's continuation block by scanning until the next `[...]` marker. A value
+    carrying a newline therefore forges lines — a gate detail containing
+    `\\nowner: <session>` would hand `owner_of` an owner the row never had, and the
+    readings leg would mark a tracked row gated on a stranger's gate. Collapsing all
+    whitespace first makes the injection impossible regardless of what the producer
+    put in the payload.
+    """
+    return " ".join(str(text).split())[:limit]
+
+
 def row(rec, pmap, what, registry=None):
     pane = rec.get("pane")
     headless = False
@@ -1914,7 +1928,7 @@ def row(rec, pmap, what, registry=None):
     if not pane and rec.get("session_id"):
         owner_line = f"\n         owner: {rec['session_id']}"
     return (f"  [{pane_col:>4}] {age(rec['ts']):>6}  {mark}"
-            f"{name_of(rec, pmap, registry)[:50]:<50}  {what[:60]}\n"
+            f"{one_line(name_of(rec, pmap, registry), 50):<50}  {one_line(what, 60)}\n"
             f"         {provenance_of(rec)}\n"
             f"         {jump}{owner_line}")
 

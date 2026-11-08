@@ -1228,6 +1228,20 @@ class HeadlessRowIsAnswerableNotUnroutable(unittest.TestCase):
         self.assertIn("owner: aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
                       wnm.row(self.HEADLESS, {}, "d"))
 
+    def test_a_multi_line_detail_cannot_forge_a_continuation_line(self):
+        """A payload newline must not be able to inject an `owner:` line.
+
+        The feed is line-oriented and `owner_of` scans a row's continuation block, so
+        an un-collapsed detail would let a gate hand the readings leg an owner the
+        row never had.
+        """
+        rec = dict(self.HEADLESS, pane="417")
+        rendered = wnm.row(rec, {"417": {}}, "question\nowner: forged-sid")
+        lines = rendered.splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertFalse(any(ln.strip().startswith("owner:") for ln in lines[1:]))
+        self.assertIn("question owner: forged-sid", lines[0])
+
     def test_a_routable_row_carries_no_owner_line(self):
         """The negative control: the extra line is scoped to pane-less rows, so a
         routable row keeps the three lines it has always rendered."""
