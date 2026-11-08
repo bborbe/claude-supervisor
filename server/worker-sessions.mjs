@@ -176,6 +176,26 @@ export async function readLedger({ endpoint, fetchImpl, onFailure } = {}) {
 // heartbeat, `cluster` for a mirrored cluster session. It is no longer the registry's own
 // `status`, because the registry is no longer on this path. Descriptive only — nothing decides
 // on it.
+// ⚠️ **The half the endpoint cannot answer.** A headless local worker
+// (`claude --print --input-format stream-json …`) writes a ledger record and holds a live pid,
+// but it never stamps a heartbeat — so its row reads `live: false` and the endpoint's live set
+// excludes it. Measured 2026-11-07 on the shell twin: 44 live sessions, 10 counted, and all 22
+// of the difference resolved in the ledger with `role: agent`, `mode: headless` and an alive
+// pid. The registry is the only channel that answers for them, so it is unioned into the live
+// map here — one home, so the count and the population split cannot drift.
+//
+// An unreadable registry adds nothing rather than failing the count: the endpoint already
+// answered, and a missing second channel is not an unknown first one.
+function unionRegistry(live, registry) {
+  for (const entry of (registry ?? readRegistry()) ?? []) {
+    if (!entry || typeof entry.sessionId !== 'string' || !entry.sessionId) continue
+    if (live.has(entry.sessionId)) continue
+    if (!pidIsAlive(entry.pid)) continue
+    live.set(entry.sessionId, 'registry')
+  }
+  return live
+}
+
 export async function workerSessions({
   endpoint,
   fetchImpl,
@@ -216,21 +236,7 @@ export async function workerSessions({
   }
   const live = liveFromHeartbeat(rows)
 
-  // ⚠️ **The half the endpoint cannot answer.** A headless local worker
-  // (`claude --print --input-format stream-json …`) writes a ledger record and holds a live
-  // pid, but it never stamps a heartbeat — so its row reads `live: false` and the endpoint's
-  // live set excludes it. Measured 2026-11-07 on the shell twin: 44 live sessions, 10 counted,
-  // and all 22 of the difference resolved in the ledger with `role: agent`, `mode: headless`
-  // and an alive pid. The registry is the only channel that answers for them, so it is read
-  // once here and unioned in. An unreadable registry adds nothing rather than failing the
-  // count — the endpoint already answered, and a missing second channel is not an unknown
-  // first one.
-  for (const entry of (registry ?? readRegistry()) ?? []) {
-    if (!entry || typeof entry.sessionId !== 'string' || !entry.sessionId) continue
-    if (live.has(entry.sessionId)) continue
-    if (!pidIsAlive(entry.pid)) continue
-    live.set(entry.sessionId, 'registry')
-  }
+  unionRegistry(live, registry)
 
   const workers = []
   for (const [sessionId, record] of Object.entries(ledger)) {
@@ -262,4 +268,51 @@ export async function workerSessions({
   // not fail a count that succeeded.
   await writeCountCache(workers.length, { stateDir, now })
   return { workers, error: null, stale: null }
+}
+
+// The three populations the caps act on — managers, interactive workers, headless workers —
+// and their total. Same identity store and same liveness union as `workerSessions`; what
+// differs is the classification, and that managers are counted here rather than excluded.
+//
+// ⚠️ **The manager population comes from the LEDGER, not from `fleet-board.py`.** The board is
+// the doc's named manager source, but measured 2026-11-08 it emitted `{header, rows}` of
+// display strings — no per-session `role` — and did not complete inside 90 s twice on this
+// host. The ledger carries `role` and is already read here. A manager started by hand writes
+// no record at all, so it is absent from this count: a stated gap, not a silent one.
+//
+// ⚠️ **`mode` decides interactive vs headless, and an absent `mode` reads as interactive** —
+// the same rule `role` follows. Defaulting a pre-`mode` record to headless would move the
+// whole pre-field population into the wrong column.
+export async function workerPopulations({ endpoint, fetchImpl, now = Date.now, onFailure, registry } = {}) {
+  const failures = []
+  const observe = (message) => {
+    failures.push(message)
+    onFailure?.(message)
+  }
+  const cause = (fallback) => failures.join('; ') || fallback
+
+  const ledger = await readLedger({ endpoint, fetchImpl, onFailure: observe })
+  if (ledger === null) {
+    return { populations: null, error: cause('the session-ledger endpoint could not be read') }
+  }
+  const rows = await readHeartbeat({ endpoint, fetchImpl, onFailure: observe })
+  if (rows === null) {
+    return { populations: null, error: cause('the session-heartbeat endpoint could not be read') }
+  }
+  const live = unionRegistry(liveFromHeartbeat(rows), registry)
+
+  let managers = 0
+  let interactive = 0
+  let headless = 0
+  for (const [sessionId, record] of Object.entries(ledger)) {
+    if (!live.has(sessionId)) continue
+    if (record.role === 'manager') {
+      managers += 1
+      continue
+    }
+    if (record.resumed_from) continue
+    if (record.mode === 'headless') headless += 1
+    else interactive += 1
+  }
+  return { populations: { managers, interactive, headless, total: managers + interactive + headless }, error: null }
 }
