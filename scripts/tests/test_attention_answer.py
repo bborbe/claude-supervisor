@@ -633,13 +633,95 @@ class FetchDeliveryTest(unittest.TestCase):
                 return False
 
         def _urlopen(url, timeout=None):
-            captured["url"] = url
+            # `fetch_delivery` builds a Request so it can carry the bearer token;
+            # accept either shape so this test asserts the endpoint, not the call
+            # convention.
+            captured["url"] = getattr(url, "full_url", url)
             return _Resp(json.dumps({"item_id": "i1", "status": "delivered"}).encode())
 
         with mock.patch.object(aa.urllib.request, "urlopen", _urlopen):
             report = aa.fetch_delivery("i1")
         self.assertTrue(captured["url"].endswith("/api/1.0/attention/i1/attempt"))
         self.assertEqual(report["status"], "delivered")
+
+
+class BearerTokenTest(unittest.TestCase):
+    """Every store call carries the token, and an option card answers by label.
+
+    Measured 2026-11-08: `attention-answer.py` sent no `Authorization` header at
+    any of its five request sites, so every answer against a token-requiring
+    store returned 401 while `attention-ask.py poll` through the same wrapper
+    read the card fine. The operator's own prod command failed twice on it.
+    """
+
+    class _Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _capture(self):
+        seen = []
+
+        def _urlopen(req, timeout=None):
+            seen.append(req)
+            return self._Resp(json.dumps([]).encode())
+
+        return seen, _urlopen
+
+    def test_every_read_carries_the_token(self):
+        seen, _urlopen = self._capture()
+        with mock.patch.object(aa, "TOKEN", "secret"), \
+             mock.patch.object(aa.urllib.request, "urlopen", _urlopen):
+            aa.fetch_open()
+            try:
+                aa.fetch_item("i1")
+            except Exception:
+                pass
+            try:
+                aa.fetch_delivery("i1")
+            except Exception:
+                pass
+        self.assertEqual(len(seen), 3)
+        for req in seen:
+            self.assertEqual(req.get_header("Authorization"), "Bearer secret")
+
+    def test_no_token_sends_no_header(self):
+        seen, _urlopen = self._capture()
+        with mock.patch.object(aa, "TOKEN", ""), \
+             mock.patch.object(aa.urllib.request, "urlopen", _urlopen):
+            aa.fetch_open()
+        self.assertIsNone(seen[0].get_header("Authorization"))
+
+    def test_option_rides_beside_answered_by(self):
+        captured = {}
+
+        def _urlopen(req, timeout=None):
+            captured["body"] = json.loads(req.data.decode())
+            return self._Resp(json.dumps({"answered_by": "operator"}).encode())
+
+        with mock.patch.object(aa.urllib.request, "urlopen", _urlopen):
+            aa.post_answer("i1", "operator", "", option="approve")
+        self.assertEqual(captured["body"]["option"], "approve")
+        self.assertNotIn("decision", captured["body"])
+
+    def test_permission_card_refuses_an_option(self):
+        out = io.StringIO()
+        with mock.patch.object(aa, "fetch_item",
+                               lambda _id: {"answer_mechanism": "permission"}):
+            rc = aa.cmd_answer("i1", "operator", {}, out=out, option="allow")
+        self.assertEqual(rc, 2)
+        self.assertIn("takes --decision allow|deny, not --option", out.getvalue())
+
+    def test_unknown_option_label_is_refused(self):
+        out = io.StringIO()
+        item = {"answer_mechanism": "pick",
+                "options": [{"label": "approve"}, {"label": "decline"}]}
+        with mock.patch.object(aa, "fetch_item", lambda _id: item):
+            rc = aa.cmd_answer("i1", "operator", {}, out=out, option="maybe")
+        self.assertEqual(rc, 2)
+        self.assertIn("has no option 'maybe'", out.getvalue())
 
 
 if __name__ == "__main__":

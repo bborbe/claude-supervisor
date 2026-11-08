@@ -72,6 +72,23 @@ STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("
 # Local store; a hung one must cost a clear failure, never a stalled session.
 STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
 
+# Bearer token for a store that requires authentication.
+#
+# Empty by default, so a local unauthenticated store behaves exactly as before.
+# An in-cluster or prod store answers 401 without it, and a 401 on the answer
+# endpoint is the confusing failure this exists to remove: the caller is told
+# the store refused, not that this script never sent a credential. Read from the
+# environment only — never written, logged or echoed.
+TOKEN = os.environ.get("ATTENTION_STORE_TOKEN", "").strip()
+
+
+def _headers(extra=None):
+    """Request headers, carrying the bearer token when one is configured."""
+    headers = dict(extra or {})
+    if TOKEN:
+        headers["Authorization"] = "Bearer " + TOKEN
+    return headers
+
 # How long a permission answer waits for the store's delivery report before it
 # calls the delivery unconfirmed. ⚠️ It must outlast the poller's IDLE interval,
 # not its busy one: `server/attention-poll.mjs` reads every `intervalMs = 2000`
@@ -161,21 +178,26 @@ def target_line(producer_id, registry):
 
 
 def fetch_open():
-    with urllib.request.urlopen(f"{STORE}/api/1.0/attention", timeout=STORE_TIMEOUT) as resp:
+    req = urllib.request.Request(f"{STORE}/api/1.0/attention", headers=_headers())
+    with urllib.request.urlopen(req, timeout=STORE_TIMEOUT) as resp:
         items = json.load(resp)
     items = [i for i in items if i.get("state") == "open"]
     return sorted(items, key=lambda i: i.get("created_at", ""))
 
 
 def fetch_item(item_id):
-    with urllib.request.urlopen(f"{STORE}/api/1.0/attention/{item_id}", timeout=STORE_TIMEOUT) as resp:
+    req = urllib.request.Request(f"{STORE}/api/1.0/attention/{item_id}", headers=_headers())
+    with urllib.request.urlopen(req, timeout=STORE_TIMEOUT) as resp:
         return json.load(resp)
 
 
 def fetch_delivery(item_id, timeout=None):
     """Return the store's delivery report for `item_id` (`GET …/attempt`)."""
+    req = urllib.request.Request(
+        f"{STORE}/api/1.0/attention/{item_id}/attempt", headers=_headers()
+    )
     with urllib.request.urlopen(
-        f"{STORE}/api/1.0/attention/{item_id}/attempt",
+        req,
         timeout=STORE_TIMEOUT if timeout is None else timeout,
     ) as resp:
         return json.load(resp)
@@ -232,7 +254,7 @@ def resolved_session_id(environ=None):
     return (os.environ if environ is None else environ).get("CLAUDE_CODE_SESSION_ID", "")
 
 
-def post_answer(item_id, answered_by, resolved_by="", decision=""):
+def post_answer(item_id, answered_by, resolved_by="", decision="", option=""):
     body = {"answered_by": answered_by}
     # Omitted rather than sent empty: downstream, "" is a set value, not an absent one.
     if resolved_by:
@@ -242,10 +264,16 @@ def post_answer(item_id, answered_by, resolved_by="", decision=""):
     # *present* field holding no verdict instead of an absent one.
     if decision:
         body["decision"] = decision
+    # An option card's verdict goes in `option`, never in `decision`: `decision`
+    # is validated against allow/deny, so a pick card answered with
+    # `decision: "approve"` is rejected as `unknown decision 'approve'` even when
+    # the caller authenticated. Omitted, not empty, for the same reason as above.
+    if option:
+        body["option"] = option
     req = urllib.request.Request(
         f"{STORE}/api/1.0/attention/{item_id}/answer",
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=_headers({"Content-Type": "application/json"}),
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=STORE_TIMEOUT) as resp:
@@ -353,11 +381,52 @@ def cmd_next(registry, out=sys.stdout):
     return 0
 
 
-def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None, decision=""):
+def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None, decision="", option=""):
     item = fetch_item(item_id)
     mech = item.get("answer_mechanism")
     if mech == "permission":
+        # A permission card is settled by a verdict, never by an option label:
+        # letting `--option allow` through here would be a second spelling of
+        # `--decision`, and the guard that refuses an omitted decision exists
+        # precisely so an irreversible prompt is never settled by default.
+        if option:
+            print(
+                f"REFUSED: {item_id} is permission-class; it takes --decision allow|deny, not --option",
+                file=out,
+            )
+            return 2
         return cmd_answer_permission(item, answered_by, resolved_by, decision, out)
+    if option:
+        # An option card's verdict is the chosen label, carried in `option`.
+        # `decision` is validated against allow/deny by the store, so sending an
+        # option label there fails with `unknown decision '<label>'` even when
+        # the request authenticated — the defect this path exists to close.
+        labels = [o.get("label") for o in (item.get("options") or []) if isinstance(o, dict)]
+        if option not in labels:
+            print(
+                f"REFUSED: {item_id} has no option {option!r}; it offers {labels or 'none'}",
+                file=out,
+            )
+            return 2
+        if decision:
+            print(
+                f"REFUSED: {item_id} is an option card; it takes --option, not --decision",
+                file=out,
+            )
+            return 2
+        if resolved_by is None:
+            resolved_by = resolved_session_id()
+        try:
+            answered = post_answer(item_id, answered_by, resolved_by, option=option)
+        except urllib.error.HTTPError as err:
+            if err.code == 409:
+                print(answer_conflict_line(item_id, err, "send"), file=out)
+            else:
+                print(f"FAILED: store returned {err.code} for {item_id}", file=out)
+            return 1
+        print(f"ANSWERED: {item_id} option={option} by {answered.get('answered_by')}", file=out)
+        print(target_line(item.get("producer_id", ""), registry), file=out)
+        return 0
     if mech != "message":
         print(f"REFUSED: {item_id} is {mech}-class; it asks nothing, so there is nothing to route", file=out)
         return 2
@@ -453,7 +522,7 @@ def post_attempt(item_id, carrier, outcome):
     req = urllib.request.Request(
         f"{STORE}/api/1.0/attention/{item_id}/attempt",
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=_headers({"Content-Type": "application/json"}),
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=STORE_TIMEOUT) as resp:
@@ -491,6 +560,10 @@ def main(argv=None):
     # verdict on the caller's behalf, and the refusal belongs to this script so
     # its wording stays testable rather than becoming an argparse usage dump.
     ans.add_argument("--decision", default="")
+    # An option card is settled by its label, not by a verdict. No `choices=` and
+    # no default, for the same reason as --decision: the label must come from the
+    # caller and be validated against the card's own options, never inferred.
+    ans.add_argument("--option", default="")
     att = sub.add_parser("attempt")
     att.add_argument("item_id")
     att.add_argument("--by", default=DEFAULT_ARM)
@@ -505,7 +578,7 @@ def main(argv=None):
             return cmd_next(registry)
         if args.cmd == "attempt":
             return cmd_attempt(args.item_id, args.by, args.outcome)
-        return cmd_answer(args.item_id, args.by, registry, decision=args.decision)
+        return cmd_answer(args.item_id, args.by, registry, decision=args.decision, option=args.option)
     except urllib.error.HTTPError as err:
         print(f"FAILED: store returned {err.code}")
         return 1
