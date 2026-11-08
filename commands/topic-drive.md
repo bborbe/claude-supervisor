@@ -90,8 +90,8 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
   --vault "<vault-root>" --goal "<goal>" --receipt "<topic>"
 ```
 
-Record each owed `resume`/`restart` outcome per
-`${CLAUDE_PLUGIN_ROOT}/commands/steps/topic-keepalive-outcome.md`. **N = 3 gates a start, never a resume.**
+Record each outcome per `${CLAUDE_PLUGIN_ROOT}/commands/steps/topic-keepalive-outcome.md`.
+N gates a start, never a resume.
 
 The **first line is the verdict**:
 
@@ -115,9 +115,9 @@ reported as a dead manager is how a working session gets a second writer.
 ## Start — inline, because it is this tier's whole product
 
 ⚠️ **This tier opens a goal manager only for a goal the operator FLAGGED.** Operator ruling
-2026-10-30: *"we dont want to auto open topic-manager, goal-manager ... but flag are fine"* —
-**restart is not open** — deciding who supervises is the operator's act, so the Start row is
-gated on the flag.
+2026-10-30: *"we dont want to auto open topic-manager, goal-manager ... but flag are fine"*.
+Restart is not open (`docs/session-tiers.md` § Keep-alive), so the Start row is gated on the
+flag, and `goal-spawn`'s own flag clause no longer excludes it.
 
 A goal is **startable for this row** when all hold:
 

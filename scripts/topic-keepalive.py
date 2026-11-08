@@ -33,15 +33,10 @@ The first line of stdout is the verdict, one token:
   cannot-tell     the probe could not decide; report, never act
   crash-loop      the resume cap is spent; stop restarting and escalate once
 
-⚠️ **`open` and `open-unflagged` are one case split in two, and `resume` is not one of
-them.** An absent session id means no session was ever created, so the row is an
-**open** — which rule 4 makes the operator's act. A recorded id whose session has died is a
-**resume**, which continues a subject that already exists. Collapsing the first into the
-second is how an unflagged goal manager gets opened by a round that was told not to.
-
-⚠️ **Never a fresh spawn while a recorded id exists.** A second manager on one goal is the
-double-writer failure `commands/open.md` § Step 2C exists to prevent. The resume is the
-only route, and `restart` resumes in place.
+⚠️ **`open` / `open-unflagged` (no recorded id) and `resume` (recorded id, session dead)
+must never collapse** — the first is an open, the second a keep-alive resume. Why that
+distinction, and why a recorded id is only ever resumed in place, is
+`docs/session-tiers.md` § Keep-alive.
 
 ⚠️ **The cap counts only resumes that took.** A resume is recorded once
 `session-liveness.py --check` shows the resumed id live; a resume that never landed must

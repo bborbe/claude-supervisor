@@ -30,9 +30,9 @@ a `SendMessage`. A worker row is reported downward to the goal manager that owns
   conversation exists; a second manager on one goal is a double writer.
 - NEVER act on a goal the caller did not declare. Membership is declared, not widened.
 - NEVER start a `phase: todo` goal. The `todo → planning` flip is the operator's approval.
-- NEVER **start** more than **N = 3** goal managers per topic, and never read the fleet ceiling
-  as yours to raise. N caps starts only — a `resume` or `restart` continues a manager the share
-  already counts. The ceiling is the caller's read; when it binds, you say so and start nothing.
+- NEVER exceed **N = 3** per topic on a start (N gates a start, never a resume —
+  `docs/session-tiers.md` § Keep-alive), and never read the fleet ceiling as yours to raise. The
+  ceiling is the caller's read; when it binds, you say so and start nothing.
 - NEVER claim an act the caller has not confirmed. A resume counts only once the liveness
   instrument shows the resumed id live — the caller records it, not you.
 - NEVER decide an operator gate. A blocked goal is surfaced by the caller.
@@ -65,22 +65,18 @@ tier down. The sweep is the product; everything else is delegated.
    | `cannot-tell` | `Unverified: <goal> — <the reason the script printed>` |
    | `crash-loop` | `Crash-loop: <goal> — 3 resumes in 30 min; escalate once` |
 
-   ⚠️ **`open` and `open-unflagged` are the two arms of an absent `claude_session_id`, and
-   they are not the same act.** `open` means the goal carries the flag (whoever set it), so
-   you run the open; `open-unflagged` means it does not, so the row is **reported and
-   held** — rule 4 opens a manager only for a flagged page, and its workers are opened by
-   the fleet round's open leg regardless. `resume` is neither: it continues a session that
-   already has a recorded id.
+   ⚠️ **`open` and `open-unflagged` are the two arms of an absent `claude_session_id`.**
+   `open` → run the open; `open-unflagged` → report and hold, and the goal's workers are
+   opened by the fleet round's open leg regardless. `resume` and `restart` are keep-alive
+   arms, never gated on the flag — `docs/session-tiers.md` § Keep-alive.
 
    ⚠️ **This call carries no `--receipt`, on purpose.** The topic round's own inline keep-alive
    (`commands/topic-drive.md` router row 5) is the one path that records owed verdicts on the
    round's receipt; a second recorder here would owe each verdict twice.
 
-   ⚠️ **N = 3 gates a start and never a resume.** `topic-spawn.py` refuses a new goal manager
-   at `running >= N`; nothing caps `resume` or `restart` except `crash-loop`. Never hold a
-   `To resume:` or `To restart:` row for N or for `spawn.maxConcurrent` (its home:
-   `docs/fleet-surface.md` § Spawn a worker item 5) — measured 2026-11-08,
-   a round that did exactly that left three goal managers down for two ticks.
+   ⚠️ **Never hold a `To resume:` or `To restart:` row for N** — N = 3 gates a start,
+   never a resume (`docs/session-tiers.md` § Keep-alive). Measured 2026-11-08: a round that
+   held three such rows for N left their goal managers down for two ticks.
 
    ⚠️ **`cannot-tell` is never death.** `UNKNOWN`, `AMBIGUOUS` and `MALFORMED` all mean the
    probe could not decide; a second manager started on that reading is the double-writer

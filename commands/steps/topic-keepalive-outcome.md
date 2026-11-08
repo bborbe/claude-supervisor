@@ -42,4 +42,4 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 
 ## N never gates a resume
 
-N = 3 caps **starts** (`scripts/topic-spawn.py` refuses a new goal manager at `running >= N`). A resume or restart continues a manager the share already counts, and the resume path never reaches `/supervisor:open`'s Gate 3 — so neither N nor `spawn.maxConcurrent` (its home: `docs/fleet-surface.md` § Spawn a worker item 5) is ever a `refused:` reason. The vocabulary above carries no token for either, by design: those are the excuses the measured round gave.
+N gates a start and never a resume — the rule's single home is `docs/session-tiers.md` § Keep-alive. Its consequence here: neither N nor `spawn.maxConcurrent` (its home: `docs/fleet-surface.md` § Spawn a worker item 5) is ever a `refused:` reason, so the vocabulary above carries no token for either — those are the excuses the measured round gave.
