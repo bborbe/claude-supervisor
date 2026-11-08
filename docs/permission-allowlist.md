@@ -61,13 +61,14 @@ Each entry names the tool, an **exact command prefix**, and its confinement. Und
 not `lsof` — and tokens after it are unconstrained, so an entry is included only when
 **every** extension of it is read-only.
 
-⚠️ **"Every extension" is a real test, and two commands failed it.** `sort` was on this list
+⚠️ **"Every extension" is a real test, and four commands failed it.** `sort` was on this list
 until a review caught that `sort -o FILE`, `sort --output=FILE` and
 `sort --compress-program=PROG` all match the prefix and write a file or run a program;
-`tree -o FILE` does the same. Both are **removed** rather than special-cased — a prefix rule
-cannot exclude a flag, so the only honest fix is not to list the command. Any future entry
-whose extensions include an output or exec flag has the same problem and must not be added
-without a matcher that rejects those flags.
+`tree -o FILE` does the same. `uniq IN OUT` writes `OUT` — an arbitrary-path write — and
+`diff -l` / `--paginate` runs `pr(1)`. All four are **removed** rather than special-cased — a
+prefix rule cannot exclude a flag or a positional, so the only honest fix is not to list the
+command. Any future entry whose extensions include an output, exec or write-target argument
+has the same problem and must not be added without a matcher that rejects those arguments.
 
 | Tool | Prefix | Confinement | Why every extension is safe |
 |---|---|---|---|
@@ -76,8 +77,6 @@ without a matcher that rejects those flags.
 | `Bash` | `head` | any path | reads a prefix of a file |
 | `Bash` | `tail` | any path | reads a suffix of a file (`-f` blocks, it does not act) |
 | `Bash` | `wc` | any path | counts lines, words and bytes |
-| `Bash` | `uniq` | any path | filters adjacent duplicate lines |
-| `Bash` | `diff` | any path | compares two files; `-r` walks directories, still read-only |
 | `Bash` | `grep` | any path | matches patterns; cannot execute a match |
 | `Bash` | `shasum` | any path | hashes file content |
 | `Bash` | `md5` | any path | hashes file content |
