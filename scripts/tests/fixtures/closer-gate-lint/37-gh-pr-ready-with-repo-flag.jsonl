@@ -1,0 +1,1 @@
+{"type": "assistant", "timestamp": "2026-11-08T20:10:00Z", "message": {"content": [{"type": "text", "text": "🟢 ACTIVE · nothing running · nothing needed\n👤 You: approve: `gh -R Seibert-Data/shared pr ready 24` then `/github-pr-review-trigger 24` — reply `yes, flip PR 24 to ready`"}]}}
