@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.257.1
 
 - fix: **`closer-gate-lint` blocks a re-emitted closer once more instead of releasing it through the `stop_hook_active` loop guard, and recognises `gh pr ready` in the form CLAUDE.md mandates.** The retry was admitting already-authorised verbs back to the operator as gates — 21 such admissions on the deciding 7-day window `2026-11-01T10:43:59Z → 2026-11-08T10:43:59Z`, each one a closer the lint had already blocked. The guard keeps its purpose and gains a bound: when the previous `Stop` blocked this same closer and it is re-emitted unchanged, it is blocked once more (`blocked-retry`), and only a third identical stop is allowed, so the worst case is two blocks and never a loop; the bound is read from the hook's own record, whose every failure path still allows. Separately, the `gh-pr-ready` entry required `gh` and `pr ready` to be adjacent, so `gh -R <owner>/<repo> pr ready N` — the only form the global rules' § Git permits — fell through as `not-allow-listed` while the bare form was released; the entry now uses the same loose shape as `gh-pr-merge`, with `--admin` still denied globally. Change set: `scripts/closer-gate-lint.py`, `scripts/tests/test_closer_gate_lint.py`, `scripts/tests/fixtures/closer-gate-lint/37-gh-pr-ready-with-repo-flag.jsonl`, `hooks/hooks.json`, `CHANGELOG.md`.
 
