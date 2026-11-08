@@ -76,6 +76,8 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
      **Fail closed on a missing row.** A candidate with **no** `CLOSERS` row is **unverifiable**, never revive — absence means the closer was not captured, not that there is none. A `pick` asked only in chat, with no rendered panel, reaches neither `CLOSERS` nor the task file ([`fleet-drive-rationale.md`](../docs/fleet-drive-rationale.md) § Why a missing `CLOSERS` row fails closed). **Revive therefore requires an observed `CLOSERS` row — either classed `routine`, or an `approve:` whose text passes the routine-continue table.** ⚠️ **A row whose class is `none` is NOT a missing row** — it is a captured absence and follows the class rule below.
 
+     **The channel is pane-free** — `CLOSERS` reads the transcript, so a headless row carries a row with `hst` (pane-free, still classifiable; the fail-closed rule on a genuinely missing row is unchanged). [`closer-classes.md`](../docs/closer-classes.md) § The channel is pane-free.
+
      **The row's class decides the verdict — read it first.** `routine` → **revive**; `ask` → **blocked**; `parked-wait` / `none` → **unverifiable**. `python3 $P/closer-verdict.py --class <class>` prints it; `${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/docs/closer-classes.md` § The classes is the canonical table. ⚠️ **`routine` does not skip test 4** — the class describes the turn's LAST line, so a session whose last closer reads `nothing` but which carries another `BLOCKED` row is still blocked ([`fleet-drive-rationale.md`](../docs/fleet-drive-rationale.md) § Why `routine` does not skip the `BLOCKED` check).
 
      **Routine continue — the one `approve:` that is not a gate.** A worker in `phase: execution` often parks on `approve: <go on with my own next step>`, which its own execution-no-reask rules already let it take — so that closer asks nothing only the operator can decide. Its four tests are `${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/docs/closer-classes.md` § The routine-continue table; apply them from there, never from memory. If that file is missing, report the gap in NOTES and treat every `ask:` closer as blocked — a missing table is never a licence to judge one from memory. Any test fails → it is a gate, **blocked**. A routine continue is not an answer: the nudge says the operator has not answered and that the worker proceeds only under its own execution rules.
@@ -109,7 +111,7 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 Return exactly this in the payload, each section `(none)` rather than dropped:
 
 ```
-fleet-drive — <N> candidates (<L> retained from the ledger) · <F> finished (reaped) · <R> revive (<C> routine continue) · <B> blocked · <U> unverifiable
+fleet-drive — <N> candidates (<L> retained from the ledger) · <F> finished (reaped) · <R> revive (<C> routine continue) · <B> blocked · <U> unverifiable · headless=<H> · channel=pane-free-closer
   <name> [<sid8>] · <bucket> · <open boxes> · <verdict>
       probe: <command → result>   |   (revive: the CLOSERS row + the four step-4a rows)
       ledger: <drafted | suppressed: <reason> | excluded>
@@ -159,7 +161,7 @@ the caller prints what you hand it.
 **Hand-back** — obey `${CLAUDE_PLUGIN_ROOT}/docs/handback-contract.md` **for the form**: verdict lines and counts in `key=value` form, **≤ 1 KB**, non-empty, payload off the hand-back. ⚠️ **The contract's payload-path section does not cover this leg** — its table lists the manager store only and its keying rule is the subject slug, while the fleet loop keys on the round. The path rule that applies here is the one in this `<output_format>`. This leg's required set is the **drive verdicts — one line per candidate you decided, carrying the decision**:
 
 ```text
-candidates=<N> · finished=<F> · revive=<R> · blocked=<B> · unverifiable=<U> · truncated=<n> · payload=<path>
+candidates=<N> · finished=<F> · revive=<R> · blocked=<B> · unverifiable=<U> · headless=<H> · truncated=<n> · payload=<path>
 <name> [<sid8>] = <verdict>
 ```
 
