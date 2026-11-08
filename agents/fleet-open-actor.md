@@ -102,7 +102,7 @@ round nobody reads. The block payload is that path's sibling: replace the `.dige
 ## 1. Run the leg — once
 
 ```
-python3 "$P/open-queue.py" --tasks-dir "<tasks dir>" --vault "<vault>" --json
+python3 "$P/open-queue.py" --tasks-dir "<vault>/<tasks-dir>" --vault "<vault>" --json
 ```
 
 The script owns the population, the guards, the rank and the cap. It opens nothing. ⚠️ **The exit
