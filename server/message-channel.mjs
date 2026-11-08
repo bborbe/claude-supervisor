@@ -115,8 +115,11 @@ export function resolveMessageChannel(agent, { peerNamesFor = null } = {}) {
   const registered = [...new Set(names)]
   if (registered.length === 1) return { channel: 'peer', name: registered[0] }
   if (registered.length > 1) {
-    // Two entries can carry one name, and picking either would deliver to the wrong
-    // conversation — so the candidates are named and the choice is the caller's.
+    // ONE session id can be registered under MORE than one name (a renamed session whose
+    // older entry has not been pruned), and picking either would deliver to the wrong
+    // conversation — so the candidates are named and the choice is the caller's. Repeats of
+    // the SAME name are deduped above rather than refused: one id answering to one name is
+    // not ambiguous however many entries carry it.
     return {
       error:
         `agent ${id} is a headless worker registered under ${registered.length} names ` +
@@ -127,8 +130,8 @@ export function resolveMessageChannel(agent, { peerNamesFor = null } = {}) {
   return {
     error:
       `agent ${id} is a headless worker (status "${agent.status}") with no session-registry entry — ` +
-      `the session exited, or it runs in-process under the SDK, which registers no name — so no ` +
-      `SendMessage can address it. Check it with agent_status, or answer its parked prompts with ` +
-      `answer_permission.`,
+      `the session exited, its first turn has not reported an id yet, or it runs in-process under ` +
+      `the SDK, which registers no name — so no SendMessage can address it. Check it with ` +
+      `agent_status, or answer its parked prompts with answer_permission.`,
   }
 }
