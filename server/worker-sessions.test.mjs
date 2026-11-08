@@ -20,7 +20,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { workerSessions } from './worker-sessions.mjs'
+import { invalidateCountCache, workerSessions } from './worker-sessions.mjs'
 
 // A fixed base URL: it is never dialled, because `fetchImpl` is always injected, but passing it
 // explicitly keeps a forgotten argument from falling back to `config.attentionStoreUrl` and
@@ -293,6 +293,32 @@ test('a successful count is written to the cache', async () => {
   assert.equal(counted.workers.length, 1)
   const cached = JSON.parse(readFileSync(join(dir.root, 'last-worker-count.json'), 'utf8'))
   assert.deepEqual(cached, { count: 1, at: '2026-10-20T00:00:00.000Z' })
+})
+
+test('a spawn invalidates the cache, so a failed read after it has no fallback', async () => {
+  // ⚠️ THE CASE THE CACHE COULD NOT SURVIVE. A count taken before a spawn is not a count that
+  // includes it; releasing the next spawn on it is how a burst during a store outage ran past the
+  // ceiling. Deleting the cache on spawn turns that into a refusal, which is the safe direction.
+  const dir = fixture()
+  writeFileSync(
+    join(dir.root, 'last-worker-count.json'),
+    JSON.stringify({ count: 29, at: new Date().toISOString() }),
+  )
+  await invalidateCountCache({ stateDir: dir.root })
+  const counted = await workerSessions({
+    endpoint: FIXTURE,
+    fetchImpl: deadEndpoint(),
+    stateDir: dir.root,
+  })
+  assert.equal(counted.workers, null)
+  assert.equal(counted.stale, null, 'a post-spawn failed read must refuse, not decide on a pre-spawn count')
+})
+
+test('invalidating an absent cache is not an error', async () => {
+  // The normal case: nothing was written yet, and `ENOENT` must not fail the spawn.
+  const dir = fixture()
+  await invalidateCountCache({ stateDir: dir.root })
+  await invalidateCountCache({ stateDir: dir.root })
 })
 
 test('a failed read falls back to a fresh cached count, labelled', async () => {

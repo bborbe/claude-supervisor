@@ -42,7 +42,7 @@
 // cap exists to bound. Managers started by hand — `/supervisor:open` in a plain wezterm tab —
 // write no record at all. `scripts/worker-sessions.py` carries the same definition for shell
 // callers.
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { config } from './config.mjs'
@@ -60,6 +60,16 @@ import { ledgerBySessionId, readSessionLedger } from './session-ledger.mjs'
 // ⚠️ **The window is 60 s and the fallback is labelled.** A count from minutes ago is not evidence
 // about the fleet now; past the window the refusal stands. And it is never `0`: the cache holds a
 // real earlier count, and an absent cache is a refusal.
+//
+// ⚠️ **A SPAWN INVALIDATES IT, and that is what keeps the fallback from releasing a burst.** The
+// cache is written only by a successful live count, so without invalidation a spawn that lands
+// after the last count leaves a cached number that predates it — and the very next spawn, if its
+// live read fails, decides on that pre-spawn number. Every spawn in a burst during an outage would
+// then be allowed on the same stale value, which is a rate guard that cannot see the rate. So the
+// spawn path deletes the cache: a failed read after a spawn has NO fallback and refuses, until a
+// successful count re-establishes one that already includes the spawn. The refusal is the safe
+// direction — a limit that cannot count must not open — and it costs the fallback nothing in the
+// case it was added for (a transient store failure with no spawn immediately before it).
 export const COUNT_CACHE_TTL_MS = 60_000
 export const COUNT_CACHE_FILE = 'last-worker-count.json'
 
@@ -84,6 +94,17 @@ export async function readCountCache({ stateDir = config.stateDir, now = Date.no
     return { count: parsed.count, ageMs }
   } catch {
     return null
+  }
+}
+
+// Delete the cache, so a failed read after a spawn refuses instead of deciding on a pre-spawn
+// number. Best-effort in the same sense as the write: a cache that cannot be removed must never
+// fail the spawn it was invalidated for. `ENOENT` is the normal case — there was nothing to drop.
+export async function invalidateCountCache({ stateDir = config.stateDir } = {}) {
+  try {
+    await unlink(countCachePath(stateDir))
+  } catch {
+    // Swallowed on purpose — see above.
   }
 }
 
