@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- chore: restate the `do-not-merge` gate message to name its bypass actors — the Admin repository role and Integration `3907226`, both `bypass_mode: always` in the `master-protection` ruleset — instead of asserting an unqualified block
+
 ## v0.251.3
 
 - fix: **the drive leg's `CLOSERS` source now covers headless sessions, so a pane-less row is classifiable instead of permanently `unverifiable`.** `who-needs-me.py --section last-closers` built its population from the attention store's own records, so a session that raised no gate had no row at all — and step 4a fail-closes a candidate with no row, which made every headless worker unverifiable on every round. Measured 2026-11-07: **237 of 242** drive candidates carried no pane, **232** landed `unverifiable`, and only 14 reached the closer probe. The population is now the **heartbeat store** (`session-liveness.py --list`, union with the attention store, prefix-deduped in both directions) — the registry cannot see an in-process SDK headless worker at all — and the class is read from the **transcript**, which needs no pane; a pane-less row renders `hst` and the header prints `Last closers (<N>, headless=<H>)`. `agents/fleet-drive.md` carries the count as `headless=<H>` on the payload header and the counts line, and `docs/closer-classes.md` § The channel is pane-free records the source and the `hst` meaning.
