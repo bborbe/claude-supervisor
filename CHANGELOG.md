@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **the `Stop` closer lint now blocks a `🟡 WAITING` closer whose `⏰ Ends:` waits on something that dies with the session.** Measured 2026-11-08, pane 619: `⏰ Ends: chunk 7a and 7c completion notices (background agents)` — the previous session had ended, both agents died with it, and the worker sat 23 minutes at an empty prompt on a task unmoved for 28 hours, found only by a human reading the pane. `scripts/closer-gate-lint.py` exits 2 when `⏰ Ends:` names one of five session-bound classes (background sub-agent, Monitor, `run_in_background` shell, `ScheduleWakeup`, `CronCreate`) **and** no durable observable (a file, a 32-hex card id, a `defer_date` / ISO date, or an external probe such as a PR, CI, `gh`, `kubectl` or a pod). ⚠️ The observable is banned, not the mechanism: `~/.claude/CLAUDE.md` § Async State Closer requires the watcher in the `(mechanism, id)` slot and `/github-pr-watch` is itself a background shell, so a literal ban would block every compliant PR-watch closer (operator decision 2026-11-08, "observable only"). The check runs before the gate checks, because the shape ends `👤 You: nothing`, which they read as `not-a-gate`; it reads `⏰ Ends:` from the same message through the new `reap-closer.py` `last_closer_and_ends` — one scanner, never a second. A watcher's own timeout (`times out ~18:40`) is not a clock observable. Each record gains `class` and `phrase`, null unless the check fired. Tests: five positive fixtures (one per class, pane 619's line verbatim first) and six negatives, each carrying a session-bound watcher in its slot so only the durable observable keeps it clean.
+
 ## v0.254.1
 
 - docs: **the keep-alive contract has one home — `docs/session-tiers.md` § Keep-alive.** That section holds:
