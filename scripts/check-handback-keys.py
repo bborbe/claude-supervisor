@@ -9,10 +9,12 @@ permanently false, and the branch behind it silently never runs.
       forever, so the step silently never runs. That is the same defect class
       `check-step-when.py` catches for a drifted `When:` line, one layer down: there the
       trigger and its body disagree, here the trigger and the data it tests do.
-  (2) **The manager round's delegated legs.** Since 2026-11-06 `commands/steps/
+  (2) **The delegated legs.** Since 2026-11-06 `commands/steps/
       round-readings.md` and `commands/steps/goal-spawn.md` each dispatch a reader agent
-      (`agents/round-readings-reader.md`, `agents/goal-spawn-reader.md`) that returns the
-      verdicts the step no longer computes itself. A step reverted to its pre-split text
+      (`agents/round-readings-reader.md`, `agents/goal-spawn-reader.md`), and since 2026-11-08
+      the fleet round's open leg does the same (`commands/steps/open.md` →
+      `agents/fleet-open-actor.md`) — each returns the verdicts the step no longer computes
+      itself. A step reverted to its pre-split text
       stops dispatching, and a reader that drops one value of a family leaves the caller a
       cell it cannot evaluate — both silently. `docs/handback-contract.md` § The shape — the
       readings leg's required set — requires **every value of every family, including the
@@ -28,8 +30,9 @@ see. The readings leg shipped the same shape: `in_flight()` and `external_wait()
 values each family can take had no key at all.
 
 **Scope, stated precisely.** For the fleet tick this asserts the keys a router `When` cell
-*tests* — today `orphan`, `collision`, `unmanaged`, `blocked`, `context70`. For the two
-delegated legs it asserts each leg's **declared required set** (`LEGS` below). It is still not
+*tests* — today `orphan`, `collision`, `unmanaged`, `blocked`, `context70`. For the delegated
+legs it asserts each leg's **declared required set** (`LEGS` below) — the two manager-round
+readers and the fleet round's open leg. It is still not
 a check of the whole contract: buckets no cell tests and no leg declares are out of reach, so
 `held`'s original absence would pass here on the fleet side. Widening it further means reading
 a required set from somewhere this script does not own; until then it does not claim to.
@@ -83,6 +86,22 @@ LEGS = {
             "workers", "target", "cap", "payload",
             # the a2a branch's required argument — never emitted before the 2026-11-06 fix
             "task",
+        ),
+    },
+    # The fleet round's open leg (row 16). Unlike the keep-alive and flagged-open legs it writes
+    # NO digest key — `fleet-legs.py` carries three and none is this leg's; its persisted reading
+    # is the `.open` block payload that `commands/steps/output-shape.md` item 3 renders. So the
+    # hand-back is the only channel for every verdict the step acts on, and `render` / `reason`
+    # are the two a dropped key silently breaks: a `status=ok` with no `render=` prints no block
+    # at all, and a `status=not-run` with no `reason=` renders `open leg: not run — ` with nothing
+    # after the dash. `refused` is the command's own tally, `truncated` is the difference between
+    # it and the `refused:` lines that fit, and `selected` is what `opened` is reconciled against.
+    "supervisor:fleet-open-actor": {
+        "agent": "agents/fleet-open-actor.md",
+        "sites": ("commands/steps/open.md",),
+        "required": (
+            "status", "selected", "opened", "refused", "render", "reason",
+            "truncated", "payload",
         ),
     },
 }

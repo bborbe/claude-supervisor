@@ -1,8 +1,8 @@
 # Hand-back contract
 
-The shape a sweep's **read half** and **act half** return to their caller. Seven agents carry it — `agents/goal-sweep-reader.md` and `agents/goal-drive.md` for the manager loop, `agents/fleet-sweep-reader.md` and `agents/fleet-drive.md` for the fleet loop, `agents/round-readings-reader.md` and `agents/goal-spawn-reader.md` for the manager round's readings and spawn legs, and `agents/worker-drive-reader.md` for the worker-drive round's read half — and each carries **a pointer to this file** rather than its own copy of the rule. What a leg computes stays in its own agent file; only the shape of what it hands back is here.
+The shape a sweep's **read half** and **act half** return to their caller. Eight agents carry it — `agents/goal-sweep-reader.md` and `agents/goal-drive.md` for the manager loop, `agents/fleet-sweep-reader.md` and `agents/fleet-drive.md` for the fleet loop, `agents/round-readings-reader.md` and `agents/goal-spawn-reader.md` for the manager round's readings and spawn legs, `agents/worker-drive-reader.md` for the worker-drive round's read half, and `agents/fleet-open-actor.md` for the fleet round's open leg — and each carries **a pointer to this file** rather than its own copy of the rule. What a leg computes stays in its own agent file; only the shape of what it hands back is here.
 
-**Why one file.** Seven agents returning seven shapes is a liability the caller cannot see. The caller renders one table from whichever leg answered, so a leg that returns prose where verdict lines were expected degrades the round **silently** — the table still renders, nothing errors, and the missing verdict reads as *nothing to report*. The size cap is here for the same reason the shape is: a leg that hands back its whole corpus charges the caller's context for it on every round, and that recurring cost is what this contract exists to remove. The rule was carried verbatim by each agent before this file existed, and a rule carried by seven copies drifts — one copy is amended and the others silently keep the old behaviour.
+**Why one file.** Eight agents returning eight shapes is a liability the caller cannot see. The caller renders one table from whichever leg answered, so a leg that returns prose where verdict lines were expected degrades the round **silently** — the table still renders, nothing errors, and the missing verdict reads as *nothing to report*. The size cap is here for the same reason the shape is: a leg that hands back its whole corpus charges the caller's context for it on every round, and that recurring cost is what this contract exists to remove. The rule was carried verbatim by each agent before this file existed, and a rule carried by eight copies drifts — one copy is amended and the others silently keep the old behaviour.
 
 ## The shape
 
@@ -16,6 +16,12 @@ The shape a sweep's **read half** and **act half** return to their caller. Seven
   - the **spawn leg** returns the **per-row call shape** — one line per handed-over row under
     exactly one of `open` / `resume` / `held` / `refused`, the four counts summing to the rows —
     truncating only under the size-cap exception below, with the remainder in the payload.
+  - the **open leg** returns the **selection, the acts and the block's path** — `status`
+    (`ok` / `unknown` / `not-run`), `selected` and `opened` (the two the caller reconciles),
+    `refused` with one `refused:` line per refusal **verbatim**, `render` (the path of the block
+    the caller prints), `reason` (why the leg did not run, `—` otherwise), and its truncation pair
+    `truncated` / `payload`. It carries **no digest count** — its persisted reading is the block
+    payload, which `commands/steps/output-shape.md` item 3 renders.
 - **The full payload never rides the hand-back.** A leg that rendered a table, classified a set or drafted a batch writes it to disk and hands back the verdict about it. Inlining the payload is the failure this half of the contract removes: it is the same information at many times the size, and it arrives in prose where nothing downstream can check it.
 - **The truncation exception — the size cap's only sanctioned exception, homed here rather than in a leg's own file.** A leg whose required set cannot fit, because it is one line per handed-over row, emits its counts plus as many rows as fit and `truncated=<n>`, and the **payload carries the rest**; the caller reads those `n` from the payload and nothing else. That is the only case in which the cap and the per-row required set can both hold, and a batch small enough to fit is never truncated.
 
