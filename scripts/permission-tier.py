@@ -20,8 +20,7 @@ apart — an unterminated quote, an unterminated heredoc (a truncated payload en
 command word that is itself an expansion, `eval`, `source` — is `operator`, never `manager`. An
 over-eager manager tier is worse than a park: it hides a real gate.
 
-⚠️ OPERATOR-ONLY WINS OVER THE ALLOWLIST. `cat` is an allowlist entry and `cat ~/.netrc` matches
-it; the secret form is checked first. Same order the deny list has in the doc.
+⚠️ OPERATOR-ONLY WINS OVER THE ALLOWLIST: `cat` is an allowlist entry and `cat ~/.netrc` matches it, so the secret form is checked first — same order as the doc's deny list.
 
 Pure: no filesystem, environment or clock — the caller passes the entries and the context.
 """
