@@ -114,7 +114,8 @@ def _nested_in_double(s, start, end, nested):
             j += 2
             continue
         if s.startswith("$((", j):
-            _, j = _read_balanced(s, j + 3, "(", ")")
+            inner, j = _read_balanced(s, j + 3, "(", ")")
+            _nested_in_double(inner, 0, len(inner), nested)  # arithmetic can embed a substitution
             continue
         if s.startswith("$(", j):
             inner, j = _read_balanced(s, j + 2, "(", ")")
@@ -278,11 +279,11 @@ def segment_words(segment):
     # A redirect is dropped as an operator but its TARGET is kept as an argument AND recorded
     # as a write, so the path checks see it: `echo k >~/.ssh/authorized_keys` must not lose
     # `~/.ssh/` with the `>`, and `echo x > ~/.claude/settings.json` is a write, not a read.
-    kept, writes, next_is_write = [], [], False
+    kept, tail, writes, next_is_write = [], [], [], False
     for t in toks:
         if next_is_write:
             next_is_write = False
-            kept.append(t)
+            tail.append(t)  # same reason: a leading redirect must not become argv[0]
             writes.append(t)
             continue
         if ">" in t and not _REDIRECT_TOKEN.match(t):  # `x>~/f` is one shlex word: `x` + a redirect
@@ -297,10 +298,13 @@ def segment_words(segment):
             next_is_write = is_output
             continue
         if not re.fullmatch(r"\d+|-", target):
-            kept.append(target)
+            # Kept as an operand for the path checks, but at the END: a redirect written before
+            # the command word (`> /dev/null git push --force …`) would otherwise become argv[0]
+            # and the real command would never be classified.
+            tail.append(target)
             if is_output:
                 writes.append(target)
-    toks = kept
+    toks = kept + tail
     while toks and toks[0] in _KEYWORDS:
         toks = toks[1:]
     env = {}
@@ -333,8 +337,8 @@ _PROD_WRAPPERS = {"kubectlprod", "kubectlnukeprod", "kubectlsmallprod"}
 _DEV_WRAPPERS = {"kubectlnukedev", "kubectldev", "kubectlsmalldev", "kubectlquant", "kubectlhell",
                  "kubectlsun", "kubectlstaging"}
 _SECRET_PATH = re.compile(
-    r"(^|[/~\s=])(\.ssh/|\.netrc\b|\.aws/|\.config/gh\b|\.kube/config\b|\.env(\.[\w-]+)?$|"
-    r"id_(rsa|ed25519|ecdsa)\b|\.npmrc\b|\.git-credentials\b|\.pgpass\b|\.pypirc\b|\.docker/config\.json\b|\.gnupg/|\.vault-token\b|application_default_credentials\.json|\.(bash|zsh|sh)_history\b|^/proc/|/proc/\d+/environ)")
+    r"(^|[/~\s=])(\.ssh(/|$)|\.netrc\b|\.aws(/|$)|\.config/gh\b|\.kube/config\b|\.env(\.[\w-]+)?$|"
+    r"id_(rsa|ed25519|ecdsa)\b|\.npmrc\b|\.git-credentials\b|\.pgpass\b|\.pypirc\b|\.docker/config\.json\b|\.gnupg(/|$)|\.vault-token\b|application_default_credentials\.json|\.(bash|zsh|sh)_history\b|^/proc/|/proc/\d+/environ)")
 _PROTECTED_REF = re.compile(r"^(?:[^:]*:)?(refs/heads/)?(master|main)$")
 
 
@@ -506,6 +510,7 @@ def _files(env, argv):
     if name == "rm":
         targets = [x for x in rest if not x.startswith("-")]
         if not targets or not all(t.startswith(("/tmp/", "/private/tmp/")) and ".." not in t
+                                  and "$" not in t  # `rm -r /tmp/$X` expands to anything
                                   for t in targets):
             return "irreversible-delete"
         return None
