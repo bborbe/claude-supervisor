@@ -539,3 +539,22 @@ test('a manager that is an auto-resume is not a manager', async () => {
   assert.equal(populations.managers, 0)
   assert.equal(populations.total, 0)
 })
+
+// The split's SHAPE is part of its contract: four integer keys, `total` being the cap's unit.
+// A caller that renders this line would otherwise have to trust the field names.
+test('the split is exactly four integer keys', async () => {
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-000000000037'
+  ledger(dir, sid, 'headless worker', { mode: 'headless' })
+
+  const { populations } = await workerPopulations({
+    endpoint: FIXTURE,
+    fetchImpl: endpoint([row(sid)], { ledgerRows: dir.ledgerRows }),
+    stateDir: dir.root,
+    registry: [],
+  })
+  assert.deepEqual(Object.keys(populations).sort(), ['headless', 'interactive', 'managers', 'total'])
+  for (const [key, value] of Object.entries(populations)) {
+    assert.equal(Number.isInteger(value), true, `${key} is not an integer`)
+  }
+})
