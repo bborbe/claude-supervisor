@@ -148,7 +148,7 @@ other side.
 | `/supervisor:fleet-drive` | fleet manager | worker; topic manager (use `topic-drive`); goal manager (use `goal-drive`) |
 | `/supervisor:fleet-workers` | fleet manager | worker |
 | `/supervisor:fleet-verify` | fleet manager | worker; topic manager (use `topic-verify`); goal manager (use `goal-verify`) |
-| `/supervisor:fleet-triage` | fleet manager — one pass over every live session: classify, close, drive, card; ends green only on all five of zero stuck, zero uncarded, zero finished-but-open, zero no-loop, and every live session accounted for | worker; topic manager (use `topic-drive` — it serves one subject); goal manager (use `goal-drive` — same) |
+| `/supervisor:fleet-triage` | **Fleet Pusher** — a dedicated session the operator opens and names `Fleet Pusher`, doing nothing but this. One pass over every live session: classify, close, drive (including the guarded pane wake), card. Ends green only on all five of zero stuck, zero uncarded, zero finished-but-open, zero no-loop, and every live session accounted for | **Fleet Manager** (it must stay shallow, and a fleet-wide pass with its pane reads fills the manager's context until it can no longer do its own job); worker; topic manager (use `topic-drive` — it serves one subject); goal manager (use `goal-drive` — same) |
 | `/supervisor:topic-loop` | topic manager | worker; goal manager — arming it collapses the two roles silently |
 | `/supervisor:topic-status` | topic manager | worker; goal manager |
 | `/supervisor:topic-drive` | topic manager | worker; goal manager |
