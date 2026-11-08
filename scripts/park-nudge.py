@@ -16,8 +16,8 @@ population the park rule targets. This script is the enforcement point the
 round's keep-alive leg runs beside the park-watch resume.
 
 WHAT IT SELECTS. A row is a candidate only when its bucket is exactly
-`watching` AND its `watching_min` — the span from the session's first
-`🟡 WAITING` closer, published by `session-activity.py` — exceeds
+`watching` AND its `watching_min` — the span from the first `🟡 WAITING` closer
+of its CURRENT watching episode, published by `session-activity.py` — exceeds
 `park-event.py`'s threshold. The comparison is strict: 15 min is inside the
 allowance, 16 is not. The bucket is the gate, not the duration. A `working`,
 `light`, `gated`, `idle` or `unclassified` row is never a candidate however long
@@ -35,10 +35,11 @@ SUPPRESSION: ONE NUDGE PER WATCHING EPISODE. Keyed on the session id, never on
 the duration. `watching_min` grows every round, so a key carrying it never
 matches twice and the session would be re-nudged every tick. An episode ends,
 and the session becomes nudgeable again, when the session is seen outside the
-`watching` bucket, is absent from the reading, or its duration went DOWN (a
-fresh measurement, e.g. after a transcript rotation). The ledger lives at
-`$PARK_NUDGE_STATE`, default `~/.claude/state/park-nudge/ledger.json`; its
-`last_quiet` key holds the watching-state duration.
+`watching` bucket, is absent from the reading, or its duration went DOWN — a new
+park began (the instrument restarts the span at the new episode's first closer)
+or the transcript rotated. The ledger lives at `$PARK_NUDGE_STATE`, default
+`~/.claude/state/park-nudge/ledger.json`; its `last_quiet` key holds the
+watching-state duration.
 
 WHAT IT DOES NOT DO. It never parks, kills, reaps or exits a session: the nudge
 asks, the session performs it. It does not deliver the nudge either. It prints
@@ -158,10 +159,13 @@ def evaluate(sessions: list, ledger: dict, limit_s: int, exit_script: str):
         sid = row.get("sid") or ""
         if not sid or row.get("bucket") != "watching":
             continue
+        stats["watching"] += 1
         quiet = row.get("watching_min")
         if not isinstance(quiet, int) or isinstance(quiet, bool):
+            # Counted above: this IS a watching row, it just could not be
+            # measured. Excluding it from the tally would make the summary
+            # disagree with the reading's own `counts.watching`.
             continue
-        stats["watching"] += 1
         prev = ledger.get(sid) or {}
         # The duration went DOWN: a fresh measurement started, a new episode.
         nudged = bool(prev.get("nudged")) and quiet >= int(prev.get("last_quiet", 0))

@@ -162,8 +162,9 @@ send that fails, or a session with no roster name (headless, pane-less), is repo
 tick. Never park, kill or exit the session yourself: the nudge asks, and the session acts.
 
 The selection is `bucket == watching` AND `watching_min` strictly above
-`park-event.py threshold`. `watching_min` is the span from the session's first
-`🟡 WAITING` closer to now, published by `session-activity.py`; `gated`, `working`, `idle`
+`park-event.py threshold`. `watching_min` is the span from the first `🟡 WAITING`
+closer of the session's **current watching episode** to now, published by
+`session-activity.py`; `gated`, `working`, `idle`
 and `unclassified` rows never qualify, whatever their duration. ⚠️ **`quiet_min` must never
 be substituted for it** — a watcher re-arm writes to the transcript, so a session parked
 3 h 34 m read `quiet 12m` and was never nudged, which is the defect this selection exists
