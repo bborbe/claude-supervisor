@@ -39,10 +39,11 @@ def reading(sessions):
     return dict(window_min=15, live=len(sessions), sessions=sessions)
 
 
-def row(sid=OVER, bucket="watching", quiet=31, watching=None):
+def row(sid=OVER, bucket="watching", quiet=31, watching=None, since=None):
     return dict(sid=sid, name="Synthetic", status="shell", bucket=bucket,
                 calls=0, out_tok=0, quiet_min=quiet,
                 watching_min=quiet if watching is None else watching,
+                watching_since=since,
                 waits_on="CI run 1111 completes")
 
 
@@ -89,10 +90,24 @@ class ParkNudgeTest(unittest.TestCase):
                       "the emitted number must be watching_min, not quiet_min")
 
     def test_a_row_without_a_state_duration_is_skipped_not_treated_as_zero(self):
-        """An unmeasured row is not a legal short wait — it is not a candidate."""
+        """An unmeasured row is not a legal short wait — it is not a candidate,
+        but it IS a watching row and must still be counted."""
         unmeasured = row(quiet=99)
         unmeasured.pop("watching_min")
-        self.assertEqual(self.nudges(self.run_script(reading([unmeasured]))), [])
+        p = self.run_script(reading([unmeasured]))
+        self.assertEqual(self.nudges(p), [])
+        self.assertIn("1 watching", p.stdout)
+
+    def test_a_new_episode_re_nudges_even_when_the_duration_grew(self):
+        """SC4's missed boundary: two parks with no reading in between.
+
+        Keyed on the duration alone, the second park is suppressed for its whole
+        length because the value never fell."""
+        self.assertEqual(len(self.nudges(self.run_script(
+            reading([row(quiet=16, since="2026-11-08T00:00:00Z")])))), 1)
+        self.assertEqual(len(self.nudges(self.run_script(
+            reading([row(quiet=40, since="2026-11-08T00:30:00Z")])))), 1,
+            "a different episode timestamp must re-arm suppression")
 
     def test_an_old_transcript_does_not_nudge_a_young_watch(self):
         """SC2: quiet 99m but watching 12m — a stale transcript alone never nudges."""
