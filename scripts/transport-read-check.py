@@ -76,6 +76,13 @@ SITE_LIST = {
     # `session-liveness.py` holds no `subprocess` call at all.
     ("session-identity.py", "_ps_starts"),
     ("stop-probe.py", "gate_processes"),
+    # added 2026-11-08 — `reap-idle-headless.py`'s watcher probe: `pgrep -P` plus a
+    # `ps -o args=` per child, asking whether a backgrounded command is still running.
+    # It carries the three-state contract for a sharper reason than most: `None` means
+    # the tree could not be read and the verb REFUSES, `[]` means read-and-empty and the
+    # close may proceed, and a list means a watcher would die with the process. Collapsing
+    # `None` into `[]` would reap a worker whose watcher was merely unobservable.
+    ("reap-idle-headless.py", "watchers"),
     # added 2026-10-07 — `plugin-version-census.py`, the fleet reading of which plugin
     # version each live session serves. Its two READS keep the three-state contract and are
     # driven below: `wezterm_panes` (the pane map the jump target is joined through) and

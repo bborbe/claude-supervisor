@@ -141,14 +141,19 @@ def is_helper(args):
 
 
 def watchers(pid):
-    """Child pids of `pid` that are not MCP/stdio helpers — possible background work."""
+    """Child pids of `pid` that are not MCP/stdio helpers — possible background work.
+
+    ⚠️ **Three-state, like every transport read in this repo:** `None` means the process
+    tree could not be read, `[]` means it was read and holds no non-helper child, and a
+    list means that work is still running. Collapsing `None` into `[]` would reap a worker
+    whose watcher merely could not be observed.
+    """
     try:
         listed = subprocess.run(
             ["pgrep", "-P", str(pid)], capture_output=True, text=True, timeout=5
         ).stdout.split()
     except (OSError, subprocess.SubprocessError):
-        # Cannot read the tree: fail closed, the caller refuses.
-        return ["unreadable"]
+        return None
     out = []
     for child in listed:
         try:
@@ -159,7 +164,7 @@ def watchers(pid):
                 timeout=5,
             ).stdout.strip()
         except (OSError, subprocess.SubprocessError):
-            return ["unreadable"]
+            return None
         if args and not is_helper(args):
             out.append(child)
     return out
@@ -241,6 +246,11 @@ def guard(rec, now=None, wrapper=None, cards=None, cards_readable=True, children
         )
     if children is None:
         children = watchers(pid)
+    if children is None:
+        return (
+            "watcher-alive",
+            "the process tree could not be read, so a background watcher cannot be ruled out",
+        )
     if children:
         return (
             "watcher-alive",
