@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.251.0
 
 - feat: **a date-gated manager subject sleeps to its earliest `defer_date` instead of standing down.** `manager-quiet.py` gained a third verdict: when every quiet row is quiet *for a future `defer_date`* and none is runnable, it prints `sleep-until` with the earliest instant instead of `stood-down`. Standing such a subject down put a human in the loop every morning — measured 2026-11-07, the Several Clusters Manager was re-armed by hand twice in one day, fired one round, and stood itself down again. `manager-liveness.py` gained a matching fifth state: `--sleep --until <ISO>` writes `<slug>.sleeping`, `--state` reads `SLEEPING` while the instant is future (never `STALE`, which the deliberately frozen cadence would otherwise produce), a **passed** instant falls through to the normal arithmetic so a manager that failed to wake still reads `STALE`, and `--arm` clears the marker. `round-quiet.md` arms the wakeup at that instant instead of calling `/supervisor:stop`, and every liveness consumer was taught the new state — `topic-keepalive.py`, `crashed-managers.py`, `fleet-keeper.py`, `propose-managers.py` (a sleeping manager owns its subject, so it must suppress a manager proposal), `round-liveness.md` (arming clears `.sleeping`, so a sleeping subject must not be armed), `docs/sweep-output.md` (a `sleeping` disposition ranking with `stood-down`), `drive-share.py`, the two topic-sweep readers and `keepalive.md`.
 
