@@ -18,10 +18,11 @@ terminal-task worker is **refused** here and stays with `close-worker.py`.
 survive: the resume consumer needs both. The success path asserts the transcript still
 exists before reporting, so a change that turned this into a session delete fails loudly.
 
-Nine refusals, each exit 1 with a stable token as the first line of output:
+Ten refusals, each exit 1 with a stable token as the first line of output:
 
   unknown-session-id    no registry entry carries that session id.
-  ambiguous-pid         more than one entry claims the id, or none carries an integer pid.
+  ambiguous-pid         more than one entry claims the id, none carries an integer pid, or
+                        the pid was recycled between the guards and the signal.
   already-gone          the pid is not alive; nothing to reap (a stale entry is removed).
   busy-target           registry `status` is not `idle` — the worker is mid-turn.
   not-idle-long-enough  idle less than `IDLE_FLOOR` (15 min) per `statusUpdatedAt`.
@@ -33,6 +34,9 @@ Nine refusals, each exit 1 with a stable token as the first line of output:
                         helpers — a backgrounded command would die with the process.
   task-terminal         the task is terminal (`completed`/`aborted`/`hold`) or deferred to
                         the future: that is `close-worker.py`'s population, not this one.
+  task-unresolved       no task, goal or topic page carries this session id. Not a
+                        finished task, but this verb needs a resolvable anchor to know
+                        what the worker is waiting on — absent evidence fails closed.
 
 ⚠️ **The watcher read has a stated hole.** It inspects children of the claude pid; a
 watcher detached with `setsid`/`nohup` leaves that tree and escapes it. The read guards the
@@ -136,8 +140,26 @@ def idle_seconds(rec, now=None):
 
 
 def is_helper(args):
-    """True when a child's command line is one of the session's MCP / stdio helpers."""
-    return any(marker in args for marker in HELPER_MARKERS)
+    """True when a child's command line is one of the session's MCP / stdio helpers.
+
+    ⚠️ **Biased toward "not a helper"**, because the two mistakes are not symmetric: a
+    helper read as a watcher costs one refusal, while a watcher read as a helper reaps a
+    process that was still working. So the match is anchored on the executable, not on a
+    bare substring — a backgrounded `bash -c 'uvx foo'` is a watcher, and the old
+    substring form called it a helper.
+    """
+    parts = args.split()
+    if not parts:
+        return False
+    if "--mcp-stdio" in args:
+        return True
+    exe = os.path.basename(parts[0])
+    # The supervisor's own MCP server, launched by the session: `bun run --cwd …/server`.
+    if exe == "bun" and "--cwd" in parts and "run" in parts:
+        return True
+    if exe not in {"uv", "uvx", "npm", "npx", "bun", "node"}:
+        return False
+    return "mcp-" in args or "@playwright/mcp" in args
 
 
 def watchers(pid):
@@ -168,6 +190,25 @@ def watchers(pid):
         if args and not is_helper(args):
             out.append(child)
     return out
+
+
+def process_start(pid):
+    """The pid's start time as `ps` reports it, or None when it cannot be read.
+
+    Compared before and after the guards: the guards take seconds (a registry read, HTTP
+    calls, a process-tree walk), and a pid that exited in that window can be recycled onto
+    an unrelated process. A changed start time is proof the pid is not the one we vetted.
+    """
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return " ".join(out.split()) or None
 
 
 def fetch_json(url, timeout=3):
@@ -202,9 +243,31 @@ def open_cards(session_id, attention_url=None):
 
 
 def transcript_path(cwd, session_id, projects_dir=None):
-    """`~/.claude/projects/<escaped-cwd>/<sid>.jsonl` — the artifact a resume reads."""
-    escaped = (cwd or "").replace("/", "-")
+    """`~/.claude/projects/<escaped-cwd>/<sid>.jsonl` — the artifact a resume reads.
+
+    ⚠️ **Both `/` and `.` munge to `-`.** Claude Code escapes the cwd that way, so a
+    checkout under `github.com` lands in `-repos-github-com-…`; escaping only `/` derived
+    a path that never exists, and the success assertion then reported `transcript MISSING`
+    for a reap that worked. The same formula is in `manager-menu-guard.py`.
+    """
+    escaped = (cwd or "").replace("/", "-").replace(".", "-")
     return os.path.join(projects_dir or PROJECTS_DIR, escaped, f"{session_id}.jsonl")
+
+
+def resolve_transcript(cwd, session_id, projects_dir=None):
+    """The transcript this session actually wrote, or None.
+
+    The cwd-derived path is preferred, with a `*/<sid>.jsonl` glob as the fallback: a
+    vault reached through a symlink produces two project directories, and the derived one
+    can be the copy that does not exist.
+    """
+    derived = transcript_path(cwd, session_id, projects_dir)
+    if os.path.isfile(derived):
+        return derived
+    hits = glob.glob(
+        os.path.join(projects_dir or PROJECTS_DIR, "*", f"{session_id}.jsonl")
+    )
+    return hits[0] if hits else None
 
 
 def guard(rec, now=None, wrapper=None, cards=None, cards_readable=True, children=None):
@@ -316,6 +379,7 @@ def main(argv=None):
             continue
 
         transcript = transcript_path(rec.get("cwd"), session_id)
+        started_at = process_start(pid)
         print(
             f"🧹 reap-idle-headless · session {session_id[:8]} · pid {pid} · "
             f"{rec.get('name')!r}"
@@ -337,6 +401,14 @@ def main(argv=None):
                 "ambiguous-pid",
                 f"the registry entry changed during the guards (pid {pid} → "
                 f"{fresh.get('pid')}); nothing was signalled",
+            )
+            continue
+        # The same recycle, seen from the process side rather than the registry side.
+        if started_at is not None and process_start(pid) != started_at:
+            exit_code = refuse(
+                "ambiguous-pid",
+                f"pid {pid} was recycled during the guards (start time changed); "
+                "nothing was signalled",
             )
             continue
 
@@ -367,7 +439,8 @@ def main(argv=None):
                 print(f"   ⚠️ registry entry {path} survived pid {pid}: {error}")
 
         # The whole point of this verb over close-worker: the resume consumer needs both.
-        transcript_kept = os.path.exists(transcript)
+        kept = resolve_transcript(rec.get("cwd"), session_id)
+        transcript_kept = kept is not None
         ok = not alive and not entry_present and transcript_kept
         print(
             f"   {'✅' if ok else '⚠️'} reaped pid {pid} · "

@@ -72,6 +72,39 @@ class TestHelperFilter(unittest.TestCase):
         for args in ("sleep 600", "/bin/sh -c 'tail -f x.log'", "python3 watch.py"):
             self.assertFalse(reap.is_helper(args), args)
 
+    def test_a_backgrounded_uvx_is_not_a_helper(self):
+        """The old substring form called this a helper; a watcher read as a helper reaps
+        a process that was still working, so the match is anchored on the executable."""
+        for args in ("/bin/bash -c 'uvx mcp-obsidian'", "sh -c 'npm exec evil'"):
+            self.assertFalse(reap.is_helper(args), args)
+
+
+class TestTranscriptPath(unittest.TestCase):
+    def test_both_slash_and_dot_munge_to_dash(self):
+        path = reap.transcript_path("/w/github.com/acme/repo", SID, projects_dir="/p")
+        self.assertEqual(path, os.path.join("/p", "-w-github-com-acme-repo", f"{SID}.jsonl"))
+
+    def test_resolve_falls_back_to_the_glob(self):
+        tmp = tempfile.mkdtemp(prefix="reap-tp-")
+        try:
+            other = os.path.join(tmp, "-elsewhere")
+            os.makedirs(other)
+            with open(os.path.join(other, f"{SID}.jsonl"), "w", encoding="utf-8") as handle:
+                handle.write("{}\n")
+            self.assertEqual(
+                reap.resolve_transcript("/w/x", SID, projects_dir=tmp),
+                os.path.join(other, f"{SID}.jsonl"),
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_resolve_returns_none_when_absent(self):
+        tmp = tempfile.mkdtemp(prefix="reap-tp2-")
+        try:
+            self.assertIsNone(reap.resolve_transcript("/w/x", SID, projects_dir=tmp))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 class TestGuard(unittest.TestCase):
     """The predicate, driven with injected readings — no live worker needed."""
@@ -250,10 +283,12 @@ class TestScript(unittest.TestCase):
         return path
 
     def _transcript(self):
-        escaped = os.path.join(self.vaults, VAULT).replace("/", "-")
-        directory = os.path.join(self.projects, escaped)
-        os.makedirs(directory, exist_ok=True)
-        path = os.path.join(directory, f"{SID}.jsonl")
+        # Deliberately the implementation's own resolver, so the fixture lands where the
+        # script looks — the escaping rule is pinned separately in TestTranscriptPath.
+        path = reap.transcript_path(
+            os.path.join(self.vaults, VAULT), SID, projects_dir=self.projects
+        )
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             handle.write('{"type":"assistant"}\n')
         return path
@@ -279,6 +314,17 @@ class TestScript(unittest.TestCase):
         done = self._run()
         self.assertEqual(done.returncode, 1)
         self.assertEqual(done.stdout.splitlines()[0], "unknown-session-id")
+
+    def test_ambiguous_pid(self):
+        child = self._spawn()
+        self._registry(child.pid)
+        # A second entry claiming the same session id, from a pid that is also alive.
+        other = self._spawn()
+        self._registry(other.pid)
+        self._task()
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "ambiguous-pid")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
 
     def test_already_gone(self):
         child = self._spawn(["true"])
@@ -368,6 +414,15 @@ class TestScript(unittest.TestCase):
         self.assertFalse(os.path.exists(entry), "the registry entry must be gone")
         self.assertTrue(os.path.exists(transcript), "the transcript must survive")
         self.assertIn("transcript kept", done.stdout)
+
+    def test_a_missing_transcript_fails_the_reap(self):
+        """The transcript is what `--resume` reads; a reap that loses it must not report OK."""
+        child = self._spawn()
+        self._registry(child.pid)
+        self._task()
+        done = self._run()
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("transcript MISSING", done.stdout)
 
 
 if __name__ == "__main__":
