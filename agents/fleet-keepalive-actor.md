@@ -1,6 +1,6 @@
 ---
 name: fleet-keepalive-actor
-description: Perform the fleet round's keep-alive leg — restart lapsed topic managers, resume due park watches, nudge watchers past the park threshold, and resume dead workers — then record the leg's `lapsed-managers` and `dead-workers` counts in the round's digest and return the ≤ 1 KB verdict hand-back. Dispatched by router row 5b of /supervisor:fleet-drive (armed by /supervisor:fleet-loop, or run by hand). It acts; a read-only run is not a run of it.
+description: Perform the fleet round's keep-alive leg — restart lapsed topic managers, resume due park watches, nudge watchers, resume dead workers; return the ≤ 1 KB hand-back. Router row 5b of /supervisor:fleet-drive. It acts; a read-only run is not a run of it.
 model: sonnet
 tools: Read, Bash, Skill, SendMessage, Write, mcp__supervisor__spawn_agent, mcp__supervisor__send_agent_message
 allowed-tools: Bash(python3:*), Bash(vault-cli:*), Bash(mkdir:*), Bash(mv:*), mcp__supervisor__spawn_agent, mcp__supervisor__send_agent_message
@@ -277,28 +277,23 @@ python3 "<vault>/.claude/scripts/session-activity.py" --json | python3 "$P/park-
 `park-nudge: unknown — instrument absent` and skip the leg. Never render that as `0 nudged`. Exit
 **2** prints `park-nudge: unknown — …`; render it verbatim.
 
-**Act on each `NUDGE <session-id> quiet <N>m (<name>) :: <message>` line.** The field name is
-historical — **`N` is the watching-state duration, not transcript silence** (see the selection
-rule below). ⚠️ **Check step 0's heldness on the line's session id first** — a held session is
-rendered `⏸️ HELD — <reason> · <age>` and **no `SendMessage` is sent**, whatever its duration;
-this act has no downstream backstop, so the read here is the only thing that stops it. Then send
-the text after `::` with `SendMessage(to: <the roster name for that session id>, message: <text>)`.
-⚠️ **Do not apply the drive leg's busy/`shell` skip here** — a `watching` row is `shell` because
-its watcher is running, and that watcher is what the nudge targets. A send that fails, or a
-session with no roster name (headless, pane-less), is reported as `undelivered: <id8>`; the
-ledger already counts it as nudged, so it is not retried every tick. Never park, kill or exit it
-yourself: the nudge asks; the session acts.
+**Act on each `NUDGE <session-id> quiet <N>m (<name>) :: <message>` line.** ⚠️ **Check step 0's
+heldness on the line's session id first** — a held session renders `⏸️ HELD — <reason> · <age>`
+and **no `SendMessage` is sent**, whatever its duration; this act has no downstream backstop, so
+this read is the only thing that stops it. Then send the text after `::` with
+`SendMessage(to: <the roster name for that session id>, message: <text>)`. ⚠️ **Do not apply the
+drive leg's busy/`shell` skip** — a `watching` row is `shell` because its watcher is running, and
+that watcher is what the nudge targets. A failed send, or a session with no roster name
+(headless, pane-less), is reported `undelivered: <id8>`; the ledger counts it as nudged, so it is
+not retried every tick. Never park, kill or exit it yourself: the nudge asks; the session acts.
 
-The selection is `bucket == watching` AND `watching_min` strictly above `park-event.py
-threshold`. `watching_min` is the span from the first `🟡 WAITING` closer of the session's
-**current watching episode** to now, published by `session-activity.py`; `gated`, `working`,
-`idle` and `unclassified` never qualify, whatever their duration. ⚠️ **`quiet_min` must never be
-substituted for it** — a watcher re-arm writes to the transcript, so a session parked 3 h 34 m
-read `quiet 12m` and was never nudged, which is the defect this selection exists to remove.
-Suppression is one nudge per watching episode, keyed on the session id **and the episode's
-first-closer timestamp (`watching_since`)** — never on the duration, which grows every round,
-and never on the duration merely dropping, because a round can land after one park ended and
-the next began. Leaving the bucket, leaving the fleet, or a different `watching_since` re-arms it.
+Selection is `bucket == watching` AND `watching_min` strictly above `park-event.py threshold`
+— the span from the first `🟡 WAITING` closer of the **current watching episode**, published by
+`session-activity.py`. ⚠️ **Never substitute `quiet_min`:** a watcher re-arm writes to the
+transcript, so a session parked 3 h 34 m read `quiet 12m` and was never nudged. Suppression is
+one nudge per episode, keyed on the session id **and `watching_since`** — never on the duration,
+and never on the duration merely dropping. Leaving the bucket, leaving the fleet, or a different
+`watching_since` re-arms it.
 
 **Report the line.** Print the `park-nudge:` summary verbatim
 (`<n> nudged · <s> suppressed · <w> within 15m · <m> watching · <l> live`) beside the three
