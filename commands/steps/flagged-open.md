@@ -59,17 +59,60 @@ model, not a defect — but it is named here so nobody reads the `flag_set_by` c
 authentication control.** If the model ever changes, this leg and the keep-alive are the two
 places that must change with it.
 
-⚠️ **This leg opens work, never a manager — and not because rule 4 forbids it.** Rule 4
-explicitly permits a manager opened *because it was flagged*; what stops this leg is that
-`/supervisor:open --flagged` selects **tasks** only (`commands/open.md` § the batch). A flagged
-manager is rule 2's subject and opens through `/supervisor:open --goal` or `--topic`. ⚠️ **No
-fleet-tier leg opens a flagged goal manager today** — `fleet-drive.md` removed the
-manager-proposal row on 2026-10-29, so the tier table's *"a goal manager only when that goal is
-flagged"* has no fleet executor; the operator opens one, or the topic tier's ranking does on
-their instruction (`commands/topic-drive.md` § Start). Say that plainly rather than implying
-this leg covers it.
+## Step 5c.1 — Open the flagged managers
 
-**Record the count — in the digest, not only in chat.** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg operator-flagged --count <n>`, with `<n>` the rows this leg left unopened — the `# Regression metric` reads it. The line's format and its not-run form have their **single home in `commands/steps/output-shape.md` item 14** — read it there and never restate it here.
+⚠️ **`/supervisor:open --flagged` selects tasks only** (`commands/open.md` § the batch), so the
+goal and topic tiers have their own caller here. A flagged **goal** or **topic** with no live
+manager is opened by this round too — the operator's ruling is that a flag means *open me* at
+every tier, not only at the task tier.
+
+Run the selector and act on what it prints:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/flagged-subjects.py"
+```
+
+**It owns the predicate, the ordering, the registry match, the free-slot gate and the
+attention-card check** — none of that is restated here, and none may be re-derived at this
+call site. Read its header for what qualifies a subject and why the gate reads the cap it
+reads. `--json` prints the whole computation and opens nothing, for a diagnosis.
+
+**Act on `OPEN` lines only, in the order printed.** The order is the selector's — topics
+before goals — and it is not this leg's to re-sort: a topic manager owns its goals the moment
+it starts, and the selector already reports those goals as `COVERED` rather than opening
+both. For each `OPEN | <vault> | <kind> | <name>`:
+
+```
+/supervisor:open --topic "<name>" --vault "<vault>"      # kind: topic
+/supervisor:open --goal "<name>" --vault "<vault>"       # kind: goal
+```
+
+That command resolves the manager, jumps to a live one, resumes an `ABSENT` one and spawns
+only when neither exists — so this leg never decides *how* to open, only *whether*.
+
+**Everything else is reported, never opened.** `MANAGED` (a live manager already owns it),
+`DEFERRED | … | manager cap` (a free slot ran out — **name it in the round's render**),
+`COVERED` (its topic is being opened this round), `WAITING | … | phase: todo` (the operator's
+approval inbox — `commands/open.md` § Step 2B refuses it), `CARDED` (an open
+`fleet-propose-manager` / `fleet-approve-manager` card already asks the operator) and
+`UNKNOWN | … | <reason>` (a page session id the liveness probe could not read) each print
+their line verbatim.
+
+⚠️ **Exit 2 is REFUSED, never "nothing to open".** The selector exits 2 when the vault set,
+the session registry, the manager cap, the live-manager count, the attention store or a
+vault's goals/topics directory could not be read; it prints the reason to stderr and no
+`SUMMARY`. Open nothing this round, print the reason, and record this half of the leg as
+not-run (below).
+
+⚠️ **This leg opens a manager, and that is rule 2, not rule 4.** Rule 4 forbids opening a
+manager *on the operator's behalf*; a flagged page is the operator's own mark, so opening it
+executes their decision and decides nothing new (`docs/session-tiers.md` § The four tiers,
+rule 2). `flag_set_by` is **not** read here — operator ruling 2026-10-30, *"it should not
+matter how set the flag"* — so the cap is the only bound after the flag. The `--flagged`
+task batch keeps its provenance gate because it writes `approved_by: operator`; that split
+has one home in `docs/fleet-surface.md` § Approval provenance.
+
+**Record the count — in the digest, not only in chat.** `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg operator-flagged --count <n>`, with `<n>` the flagged subjects this leg **declined to act on**: the tasks the `--flagged` batch refused, held or skipped, plus every goal or topic the selector reported as `DEFERRED`, `WAITING`, `CARDED` or `UNKNOWN`. ⚠️ **`MANAGED` and `COVERED` are excluded** — a live manager already owning the subject, and a goal whose topic opened this round, are both the leg working correctly, and counting them would render a healthy round as a regression in the `# Regression metric`. The same logic already excludes a JUMP/RESUME-bound task, which counts as opened rather than unactioned. The line's format and its not-run form have their **single home in `commands/steps/output-shape.md` item 14** — read it there and never restate it here.
 
 ⚠️ **A leg that does not execute records WHY.** When the debt gate skips this leg (exit 12 = a step is still owed, exit 2 = the gate could not read the debt file), write `fleet-legs.py --leg flagged-open --not-run "<reason>"` rather than leaving the sweep's seeded `not run — no reading recorded this round` standing — `--check` reads that seed as "nobody has spoken for this key". ⚠️ **Never render `unactioned: 0` for a leg that did not run** — a suppressed leg and a leg that opened nothing must never print the same, which is the whole reason the count is written to the digest instead of spoken into chat.
 
