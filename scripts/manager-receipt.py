@@ -470,7 +470,12 @@ def readings_shape(text: str) -> bool:
         return False
     if not isinstance(doc.get("recorded_at"), (int, float)):
         return False
-    if doc.get("feed_state") not in ("read", "unread"):
+    # `partial` is a read that RAN but could not attribute every gate it saw: the
+    # rows it did resolve keep their verdict and only the rest are `unread`. It is a
+    # completed reading, not a skipped step — rejecting it here flagged every such
+    # round `INCOMPLETE ROUND — skipped: readings` and recorded false debt for work
+    # the round actually did.
+    if doc.get("feed_state") not in ("read", "partial", "unread"):
         return False
     rows = doc.get("rows")
     if not isinstance(rows, dict):

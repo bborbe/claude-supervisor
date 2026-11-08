@@ -106,6 +106,11 @@ KIND_FROM_MECHANISM = {"permission": "permission", "message": "question"}
 # failed to report. `--all` lifts the cap.
 CAP = 20
 
+# The header line that says the store did not answer and the event log carried the
+# read. Exported as a constant because a consumer that must not treat a fallback as
+# a healthy empty queue matches THIS value, never the prose around it.
+STORE_FALLBACK_NOTE = "store unreachable — reading event log"
+
 # Which source answered the last `needs_source()` call: None for the store, or
 # the one-line note printed when the fallback carried the read. A silent
 # fallback would read as a working store and hide the outage.
@@ -314,7 +319,7 @@ def needs_source():
     except StoreUnreachable:
         STORE_OK = False
         STORE_EVENTS = None
-        SOURCE_NOTE = "store unreachable — reading event log"
+        SOURCE_NOTE = STORE_FALLBACK_NOTE
         # Stamp every row this fallback produced, so the ROW says where it came from.
         # The note above is printed once, before any row, and every row then renders
         # through the same `row()` a live read uses — so a manager could not tell a
@@ -1889,6 +1894,20 @@ def answer_handover(rec):
     return cmd + " --decision allow|deny" if rec.get("kind") == "permission" else cmd
 
 
+def one_line(text, limit):
+    """One rendered field, collapsed to a single line and clipped to `limit`.
+
+    The feed is a LINE-oriented format: `feed_rows`, `headless_key` and `owner_of` all
+    find a row's continuation block by scanning until the next `[...]` marker. A value
+    carrying a newline therefore forges lines — a gate detail containing
+    `\\nowner: <session>` would hand `owner_of` an owner the row never had, and the
+    readings leg would mark a tracked row gated on a stranger's gate. Collapsing all
+    whitespace first makes the injection impossible regardless of what the producer
+    put in the payload.
+    """
+    return " ".join(str(text).split())[:limit]
+
+
 LIVENESS_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "session-liveness.py")
 
@@ -2020,10 +2039,22 @@ def row(rec, pmap, what, registry=None):
     # headless worker there would be the same overstatement this change removes
     # one branch up. Column width is unchanged, so the table does not shift.
     pane_col = pane if pane else ("hst" if headless else "?")
+    # A pane-less row carries its OWNER on the row, because no pane-based join can
+    # reach it. `round-readings.py` needs the session behind every gate to say
+    # whether a tracked row is gated, and without this line its only route to the
+    # owner of an `hst:` key was a SECOND attention-store read — one 3 s timeout
+    # there blanked every row's feed verdict for a whole manager round (measured
+    # 2026-11-08 05:06:29Z: `gated=0 · clear=0 · unread=11` for 11 rows, while the
+    # feed itself was answering). This row already knows the owner; rendering it
+    # removes that read and the failure with it. Scoped to pane-less rows so a
+    # routable row keeps the three lines it has always rendered.
+    owner_line = ""
+    if not pane and rec.get("session_id"):
+        owner_line = f"\n         owner: {rec['session_id']}"
     return (f"  [{pane_col:>4}] {age(rec['ts']):>6}  {mark}"
-            f"{name_of(rec, pmap, registry)[:50]:<50}  {what[:60]}\n"
+            f"{one_line(name_of(rec, pmap, registry), 50):<50}  {one_line(what, 60)}\n"
             f"         {provenance_of(rec)}\n"
-            f"         {jump}")
+            f"         {jump}{owner_line}")
 
 
 def capped(rows, show_all):
