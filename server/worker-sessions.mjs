@@ -9,7 +9,18 @@
 //   (a) present in the **spawn ledger**, which the **session-ledger endpoint** answers — what makes it a
 //       session this supervisor opened, rather than a manager or one of the operator's own;
 //       and
-//   (b) **live**, which the **session-heartbeat endpoint** answers.
+//   (b) **live**, which is answered by **two channels, unioned**: the **session-heartbeat
+//       endpoint** (a row with `live: true` **and** a non-empty `state`), or the **identity
+//       registry**'s pid check for a local session that holds no heartbeat.
+//
+// ⚠️ **Both halves of (b) are load-bearing, and each fixes a different error direction.**
+// Without the registry, a headless local worker (`claude --print --input-format stream-json …`)
+// is invisible: it writes a ledger record and holds a live pid but never stamps a heartbeat, so
+// its row reads `live: false` — measured 2026-11-07, 44 live sessions counted as 10, all 22 of
+// the difference this shape. Without the `state` requirement, the store's **ghost** rows are
+// counted: a placeholder the store keeps stamping after its session exited (`b3d743ea`,
+// `source: a2a`, `state: ""`), which made the cap read 51 against 49 real processes. A counter
+// that fixes one direction only trades an under-count for an over-count.
 //
 // ⚠️ **The liveness source is the endpoint, and the join survived the move.** Until 2026-10-09
 // this read two channels — the registry (`~/.claude/sessions/<pid>.json`, pid-keyed and
@@ -46,6 +57,7 @@ import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { config } from './config.mjs'
+import { pidIsAlive, readRegistry } from './liveness.mjs'
 import { liveFromHeartbeat, readHeartbeat } from './session-heartbeat.mjs'
 import { ledgerBySessionId, readSessionLedger } from './session-ledger.mjs'
 
@@ -170,6 +182,7 @@ export async function workerSessions({
   now = Date.now,
   onFailure,
   stateDir,
+  registry,
 } = {}) {
   // ⚠️ `ledgerDir` left the signature with the file read, and a caller still passing it is
   // harmless rather than broken — an extra key on a destructured parameter is ignored. It is
@@ -202,6 +215,22 @@ export async function workerSessions({
     return failed('the session-heartbeat endpoint could not be read')
   }
   const live = liveFromHeartbeat(rows)
+
+  // ⚠️ **The half the endpoint cannot answer.** A headless local worker
+  // (`claude --print --input-format stream-json …`) writes a ledger record and holds a live
+  // pid, but it never stamps a heartbeat — so its row reads `live: false` and the endpoint's
+  // live set excludes it. Measured 2026-11-07 on the shell twin: 44 live sessions, 10 counted,
+  // and all 22 of the difference resolved in the ledger with `role: agent`, `mode: headless`
+  // and an alive pid. The registry is the only channel that answers for them, so it is read
+  // once here and unioned in. An unreadable registry adds nothing rather than failing the
+  // count — the endpoint already answered, and a missing second channel is not an unknown
+  // first one.
+  for (const entry of (registry ?? readRegistry()) ?? []) {
+    if (!entry || typeof entry.sessionId !== 'string' || !entry.sessionId) continue
+    if (live.has(entry.sessionId)) continue
+    if (!pidIsAlive(entry.pid)) continue
+    live.set(entry.sessionId, 'registry')
+  }
 
   const workers = []
   for (const [sessionId, record] of Object.entries(ledger)) {

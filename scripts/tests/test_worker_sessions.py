@@ -63,6 +63,10 @@ class WorkerSessionsTest(unittest.TestCase):
         shutil.copy(SCRIPT, self.bin)
         shutil.copy(SCRIPTS / "session-liveness.py", self.bin)
         shutil.copy(SCRIPTS / "spawn-ledger.py", self.bin)
+        # The counter unions the identity registry in — the only channel that answers for a
+        # headless local worker holding no heartbeat. Without it here, every case would run
+        # against a counter that could not import its second liveness channel.
+        shutil.copy(SCRIPTS / "session-identity.py", self.bin)
         # ⚠️ The count cache is a real file under `$XDG_STATE_HOME/claude-supervisor`. A suite that
         # used the machine's state dir would read whatever the last real count left there and
         # write into it — so every case gets its own.
@@ -367,6 +371,31 @@ class WorkerSessionsTest(unittest.TestCase):
             result = self.run_script("--count")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "0")
+
+    def test_a_ghost_row_is_not_a_live_session(self):
+        """⚠️ THE OVER-COUNT CASE, measured 2026-11-07. The store kept stamping `b3d743ea`
+        (`source: a2a`, `location: pod`) with `state: ""` after its session closed, and the
+        row survived the close — so the cap read 51 against 49 real processes. A `live: true`
+        row that carries no `state` is a placeholder, not a session: every real stamp reports
+        what it is doing. The ledger record alone must not make it a worker."""
+        sid = "ffffffff-0000-0000-0000-000000000020"
+        ledger = [self.ledger_entry(sid, "exited, row still stamped")]
+        with FixtureEndpoint(rows=[row(sid, state="")], ledger_rows=ledger) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
+        self.assertEqual(result.stdout.strip(), "0", result.stderr)
+
+    def test_a_ghost_row_does_not_hide_a_real_worker(self):
+        """The control for the ghost exclusion: a store carrying one ghost and one real
+        worker must read 1. Without this, the case above passes on a counter that returns 0
+        for everything."""
+        ghost = "ffffffff-0000-0000-0000-000000000021"
+        real = "ffffffff-0000-0000-0000-000000000022"
+        ledger = [self.ledger_entry(ghost, "ghost"), self.ledger_entry(real, "real")]
+        with FixtureEndpoint(rows=[row(ghost, state=""), row(real)], ledger_rows=ledger) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
+        self.assertEqual(result.stdout.strip(), "1", result.stderr)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ color: red
 
 <role>
 You perform the **flagged-open leg** of one fleet round: the round's only caller of
-`/supervisor:open --flagged`.
+`/supervisor:open --flagged` and of `scripts/flagged-subjects.py`.
 
 ⚠️ **This leg acts, and a read-only execution is not a run of it.** It opens each admitted row;
 a run that only reports `unactioned: <n> operator-flagged` without invoking the command has
@@ -66,8 +66,10 @@ the gate.
   refusal, never "fix" one.
 - **Never widen the admitted `flag_set_by` set** to make a row openable, and never write
   `flag_set_by` on a row.
-- **Never open a manager here.** The batch selects **tasks** only.
-- **Your only writes are the digest count step 3 names and, only when the hand-back must be
+- **Never open a manager through the task batch.** It selects **tasks** only; a flagged goal or
+  topic opens through § 3's selector and `/supervisor:open --goal` / `--topic`, never through
+  `/supervisor:open --flagged` and never by hand.
+- **Your only writes are the digest count step 4 names and, only when the hand-back must be
   truncated, the payload file `<output_format>` names.** Nothing else on disk. ⚠️ **A command
   you invoke writes its own page** — `/supervisor:open --flagged` approves and stamps the task
   pages it opens; that is its write, not yours. ⚠️ **The spawn writes the ledger row** —
@@ -120,22 +122,62 @@ is the accepted model, not a defect — but it is named here so nobody reads the
 check as an authentication control.** If the model ever changes, this leg and the keep-alive are
 the two places that must change with it.
 
-⚠️ **This leg opens work, never a manager — and not because rule 4 forbids it.** Rule 4
-explicitly permits a manager opened *because it was flagged*; what stops this leg is that
-`/supervisor:open --flagged` selects **tasks** only (`commands/open.md` § the batch). A flagged
-manager is rule 2's subject and opens through `/supervisor:open --goal` or `--topic`. ⚠️ **No
-fleet-tier leg opens a flagged goal manager today** — `fleet-drive.md` removed the
-manager-proposal row on 2026-10-29, so the tier table's *"a goal manager only when that goal is
-flagged"* has no fleet executor; the operator opens one, or the topic tier's ranking does on
-their instruction (`commands/topic-drive.md` § Start). Say that plainly rather than implying
-this leg covers it.
+⚠️ **The task batch opens work; the manager half opens flagged goals and topics — rule 2, not
+rule 4.** Rule 4 forbids opening a manager *on the operator's behalf*; a flagged page is the
+operator's own mark, so opening it executes their decision and decides nothing new
+(`docs/session-tiers.md` § The four tiers, rule 2). `/supervisor:open --flagged` selects
+**tasks** only (`commands/open.md` § the batch), so the manager tiers have their own caller here
+— the operator's ruling is that a flag means *open me* at every tier. `flag_set_by` is **not**
+read on this half (operator ruling 2026-10-30, *"it should not matter how set the flag"*), so the
+manager cap is the only bound; the task batch keeps its provenance gate because it writes
+`approved_by: operator`. That split has one home in `docs/fleet-surface.md` § Approval
+provenance.
 
-## 3. Record the count — in the digest, not only in chat
+## 3. Open the flagged managers
+
+```bash
+python3 "$P/flagged-subjects.py"
+```
+
+⚠️ **It owns the predicate, the ordering, the registry match, the free-slot gate and the
+attention-card check** — none of that is restated here, and none may be re-derived at this call
+site. Read its header for what qualifies a subject and why the gate reads the cap it reads;
+`--json` prints the whole computation and opens nothing, for a diagnosis.
+
+**Act on `OPEN` lines only, in the order printed** — the order is the selector's, topics before
+goals, and it is not yours to re-sort: a topic manager owns its goals the moment it starts, and
+the selector already reports those goals as `COVERED` rather than opening both. For each
+`OPEN | <vault> | <kind> | <name>`:
+
+```
+/supervisor:open --topic "<name>" --vault "<vault>"      # kind: topic
+/supervisor:open --goal "<name>" --vault "<vault>"       # kind: goal
+```
+
+That command resolves the manager, jumps to a live one, resumes an `ABSENT` one and spawns only
+when neither exists — so this leg never decides *how* to open, only *whether*.
+
+**Everything else is reported, never opened.** `MANAGED` (a live manager already owns it),
+`DEFERRED | … | manager cap` (a free slot ran out — **name it in the hand-back**), `COVERED`,
+`WAITING | … | phase: todo` (the operator's approval inbox), `CARDED` (an open
+`fleet-propose-manager` / `fleet-approve-manager` card already asks the operator) and
+`UNKNOWN | … | <reason>` each print their line verbatim.
+
+⚠️ **Exit 2 is REFUSED, never "nothing to open".** The selector exits 2 when the vault set, the
+session registry, the manager cap, the live-manager count, the attention store or a vault's
+goals/topics directory could not be read; it prints the reason to stderr and no `SUMMARY`. Open
+nothing, report the reason, and record this half `not-run` at key granularity.
+
+## 4. Record the count — in the digest, not only in chat
 
 `python3 "$P/fleet-legs.py" --digest "<this round's digest>" --leg operator-flagged --count <n>`,
-with `<n>` the rows this leg left unopened — the `# Regression metric` reads it. The line's
-format and its not-run form have their **single home in `commands/steps/output-shape.md` item
-14** — read it there and never restate it here.
+with `<n>` the flagged subjects this leg **declined to act on**: the tasks the batch refused,
+held or skipped, plus every goal or topic the selector reported `DEFERRED`, `WAITING`, `CARDED`
+or `UNKNOWN`. ⚠️ **`MANAGED` and `COVERED` are excluded** — a live manager already owning the
+subject, and a goal whose topic opened this round, are both the leg working correctly, and
+counting them would render a healthy round as a regression in the `# Regression metric`. The
+line's format and its not-run form have their **single home in `commands/steps/output-shape.md`
+item 14** — read it there and never restate it here.
 
 ⚠️ **Never render `unactioned: 0` for a leg that did not run** — a suppressed leg and a leg that
 opened nothing must never print the same, which is the whole reason the count is written to the
@@ -157,7 +199,7 @@ digest instead of spoken into chat.
 
 <output_format>
 **Two artifacts, two shapes.** The **digest** is the round's own file: you write one count line
-into its `LEGS` section, through `fleet-legs.py`, exactly as step 3 states. The **hand-back** is
+into its `LEGS` section, through `fleet-legs.py`, exactly as step 4 states. The **hand-back** is
 the ≤ 1 KB verdict summary below, obeying `${CLAUDE_PLUGIN_ROOT}/docs/handback-contract.md` for
 the form.
 
@@ -214,6 +256,9 @@ carry. The caller renders `LEGS` from the digest, not from your counts.
 - Every row opened through the **headless** create path (`spawn_agent`), never the wezterm
   fallback: a tab is not an opened worker, and a fallback run reports `opened=` for tabs.
 - Every `REFUSED` line reaches the caller verbatim, and nothing it names was opened.
+- Every `OPEN` line the selector printed was opened through `/supervisor:open --goal` /
+  `--topic`, and nothing it reported `MANAGED` / `COVERED` / `DEFERRED` / `WAITING` / `CARDED` /
+  `UNKNOWN` was opened.
 - `operator-flagged` was written to the round's digest, or `not-run` with the reason at key
   granularity.
 - The hand-back is ≤ 1 KB (or carries its own `truncated=` plus a payload) and every key above
