@@ -850,3 +850,26 @@ test('both spawn paths are wired — the claim no pure-helper test can reach', (
     'the cluster path must refuse env rather than accepting and dropping it',
   )
 })
+
+// The refusal prints what the number is made of. A card that says only "32 live" cannot be
+// acted on — 32 tabs and 32 headless workers are different problems, and the operator reading
+// it is deciding which to close.
+test('the cap refusal prints the three-population split', () => {
+  const populations = { managers: 4, interactive: 2, headless: 7, cluster: 1, a2a: 0, total: 10 }
+  const soft = concurrentLimitRefusal({ limits: PAIR, liveCount: 30, populations })
+  assert.match(soft, /4 managers/)
+  assert.match(soft, /2 interactive/)
+  assert.match(soft, /7 headless/)
+  assert.match(soft, /not counted against this cap/)
+
+  const hard = concurrentLimitRefusal({ limits: PAIR, liveCount: 50, operatorNamed: true, populations })
+  assert.match(hard, /4 managers/)
+  assert.match(hard, /\(10 workers\)/)
+})
+
+// A caller with no split prints exactly what it printed before — the line is additive, never
+// a replacement for the count or the limit.
+test('a refusal with no populations carries no split line', () => {
+  const soft = concurrentLimitRefusal({ limits: PAIR, liveCount: 30 })
+  assert.doesNotMatch(soft, /The fleet splits:/)
+})
