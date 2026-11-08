@@ -333,10 +333,15 @@ def worker_populations(endpoint=None, ledger=None, on_failure=None):
     for session_id, record in ledger.items():
         if session_id not in live:
             continue
+        # ⚠️ **`resumed_from` is checked FIRST, before `role`** — the same order
+        # `live_workers` and the JS twin use. An auto-resume is not counted in ANY
+        # population, so a record that is both a manager and an auto-resume is dropped
+        # rather than counted as a manager. Measured 2026-11-08: the two readers had
+        # opposite orders and therefore disagreed on exactly that record.
+        if record.get("resumed_from"):
+            continue
         if record.get("role") == "manager":
             managers += 1
-            continue
-        if record.get("resumed_from"):
             continue
         if record.get("mode") == "headless":
             headless += 1

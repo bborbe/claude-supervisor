@@ -435,6 +435,24 @@ class WorkerSessionsTest(unittest.TestCase):
         self.assertIn("interactive: 1", result.stdout, result.stderr)
         self.assertIn("headless: 0", result.stdout, result.stderr)
 
+    def test_a_manager_that_is_an_auto_resume_is_not_a_manager(self):
+        """⚠️ THE READER-DIVERGENCE CASE. `resumed_from` is checked BEFORE `role`, so a record
+        that is both is dropped from every population rather than counted as a manager. The JS
+        twin and `live_workers` use the same order; measured 2026-11-08, the two readers had
+        opposite orders and disagreed on exactly this record."""
+        sid = "ffffffff-0000-0000-0000-000000000036"
+        ledger = [
+            self.ledger_entry(
+                sid, "resumed manager", role="manager", mode="interactive",
+                resumed_from="aaaaaaaa-0000-0000-0000-000000000009",
+            )
+        ]
+        with FixtureEndpoint(rows=[row(sid)], ledger_rows=ledger) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--populations")
+        self.assertIn("managers: 0", result.stdout, result.stderr)
+        self.assertIn("total: 0", result.stdout, result.stderr)
+
     def test_populations_exclude_a_ghost_row(self):
         """The ghost rule applies to the populations too, not only to `--count`."""
         sid = "ffffffff-0000-0000-0000-000000000035"

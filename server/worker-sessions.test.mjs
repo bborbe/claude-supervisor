@@ -516,3 +516,26 @@ test('populations exclude a ghost row', async () => {
   })
   assert.equal(populations.total, 0)
 })
+
+// ⚠️ THE READER-DIVERGENCE CASE. `resumed_from` is checked BEFORE `role`, so a record that is
+// both a manager and an auto-resume is dropped from every population rather than counted as a
+// manager. Measured 2026-11-08, the Python twin had the opposite order and disagreed on exactly
+// this record — the divergence this consolidation exists to remove.
+test('a manager that is an auto-resume is not a manager', async () => {
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-000000000036'
+  ledger(dir, sid, 'resumed manager', {
+    role: 'manager',
+    mode: 'interactive',
+    resumed_from: 'aaaaaaaa-0000-0000-0000-000000000009',
+  })
+
+  const { populations } = await workerPopulations({
+    endpoint: FIXTURE,
+    fetchImpl: endpoint([row(sid)], { ledgerRows: dir.ledgerRows }),
+    stateDir: dir.root,
+    registry: [],
+  })
+  assert.equal(populations.managers, 0)
+  assert.equal(populations.total, 0)
+})
