@@ -8,11 +8,15 @@ fixtures pin *discrimination*, not parsing:
 - **The threshold discriminates.** Over 15 min emits, inside it does not. A run
   that emits for both, or for neither, fails.
 - **The bucket is the gate.** Every non-`watching` row in the bucket fixture
-  sits ABOVE the threshold, so an implementation that filters on quiet alone
-  emits for them and fails here.
-- **Suppression is per episode, not per quiet value.** `quiet_min` grows every
-  round, so a key carrying it never suppresses in a live fleet. Run 2 advances
-  the quiet on purpose; run 4 proves re-entry into `watching` re-arms.
+  sits ABOVE the threshold, so an implementation that filters on the duration
+  alone emits for them and fails here.
+- **The duration is `watching_min`, not `quiet_min`.** A watcher re-arm writes to
+  the transcript and resets the quiet clock, so a session parked 3 h 34 m read
+  `quiet 12m` and was never nudged. The `divergent` fixture carries both fields
+  disagreeing; the selection must follow `watching_min`.
+- **Suppression is per episode, not per duration value.** `watching_min` grows
+  every round, so a key carrying it never suppresses in a live fleet. Run 2
+  advances the duration on purpose; run 4 proves re-entry into `watching` re-arms.
 - **The nudge carries the park.** register, `defer_date` at a TIME, self-exit
   by a path that resolves, because the self-exit script ships in vault-cli.
 """
@@ -35,9 +39,12 @@ def reading(sessions):
     return dict(window_min=15, live=len(sessions), sessions=sessions)
 
 
-def row(sid=OVER, bucket="watching", quiet=31):
+def row(sid=OVER, bucket="watching", quiet=31, watching=None, since=None):
     return dict(sid=sid, name="Synthetic", status="shell", bucket=bucket,
-                calls=0, out_tok=0, quiet_min=quiet, waits_on="CI run 1111 completes")
+                calls=0, out_tok=0, quiet_min=quiet,
+                watching_min=quiet if watching is None else watching,
+                watching_since=since,
+                waits_on="CI run 1111 completes")
 
 
 class ParkNudgeTest(unittest.TestCase):
@@ -72,6 +79,45 @@ class ParkNudgeTest(unittest.TestCase):
         self.assertIn("quiet 31m", lines[0])
         self.assertNotIn(WITHIN, p.stdout)
         self.assertIn("park-nudge: 1 nudged · 0 suppressed · 1 within 15m · 2 watching · 2 live", p.stdout)
+
+    def test_a_re_arming_watcher_is_nudged_on_its_state_duration(self):
+        """The defect: quiet 12m, state 214m. The re-arm must not hide the park."""
+        p = self.run_script(FIXTURE["divergent"])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        lines = self.nudges(p)
+        self.assertEqual(len(lines), 1, p.stdout)
+        self.assertIn("quiet 214m", lines[0],
+                      "the emitted number must be watching_min, not quiet_min")
+
+    def test_a_row_without_a_state_duration_is_skipped_not_treated_as_zero(self):
+        """An unmeasured row is not a legal short wait — it is not a candidate,
+        but it IS a watching row and must still be counted."""
+        unmeasured = row(quiet=99)
+        unmeasured.pop("watching_min")
+        p = self.run_script(reading([unmeasured]))
+        self.assertEqual(self.nudges(p), [])
+        self.assertIn("1 watching", p.stdout)
+
+    def test_a_new_episode_re_nudges_even_when_the_duration_grew(self):
+        """SC4's missed boundary: two parks with no reading in between.
+
+        Keyed on the duration alone, the second park is suppressed for its whole
+        length because the value never fell."""
+        self.assertEqual(len(self.nudges(self.run_script(
+            reading([row(quiet=16, since="2026-11-08T00:00:00Z")])))), 1)
+        self.assertEqual(len(self.nudges(self.run_script(
+            reading([row(quiet=40, since="2026-11-08T00:30:00Z")])))), 1,
+            "a different episode timestamp must re-arm suppression")
+
+    def test_an_old_transcript_does_not_nudge_a_young_watch(self):
+        """SC2: quiet 99m but watching 12m — a stale transcript alone never nudges."""
+        p = self.run_script(FIXTURE["stale_transcript"])
+        self.assertEqual(p.returncode, 0, p.stderr)
+        lines = self.nudges(p)
+        self.assertEqual(len(lines), 1, p.stdout)
+        self.assertIn("quiet 214m", lines[0])
+        self.assertNotIn("bbbbbbbb-0000-4000-8000-000000000013", p.stdout)
+        self.assertIn("1 within 15m", p.stdout)
 
     def test_exactly_fifteen_is_inside_the_allowance(self):
         p = self.run_script(reading([row(quiet=15)]))
@@ -108,8 +154,8 @@ class ParkNudgeTest(unittest.TestCase):
     # --- SC3: the bucket is the gate ----------------------------------------
 
     def test_only_the_watching_row_emits_though_every_row_is_over_threshold(self):
-        quiets = {r["bucket"]: r["quiet_min"] for r in FIXTURE["buckets"]["sessions"]}
-        self.assertEqual(quiets, {"working": 40, "gated": 22, "idle": 60, "watching": 31})
+        watched = {r["bucket"]: r["watching_min"] for r in FIXTURE["buckets"]["sessions"]}
+        self.assertEqual(watched, {"working": 40, "gated": 22, "idle": 60, "watching": 31})
         p = self.run_script(FIXTURE["buckets"])
         lines = self.nudges(p)
         self.assertEqual(len(lines), 1, p.stdout)
@@ -117,16 +163,16 @@ class ParkNudgeTest(unittest.TestCase):
 
     # --- SC4: one nudge per watching episode --------------------------------
 
-    def test_suppression_survives_growing_quiet_and_rearms_on_reentry(self):
+    def test_suppression_survives_growing_duration_and_rearms_on_reentry(self):
         runs = [("watching", 31, 1), ("watching", 35, 0), ("gated", 35, 0), ("watching", 35, 1)]
         for i, (bucket, quiet, want) in enumerate(runs, 1):
             p = self.run_script(reading([row(bucket=bucket, quiet=quiet)]))
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertEqual(len(self.nudges(p)), want, f"run {i} ({bucket} {quiet}m): {p.stdout}")
 
-    def test_quiet_dropping_starts_a_new_episode(self):
+    def test_a_duration_dropping_starts_a_new_episode(self):
         self.assertEqual(len(self.nudges(self.run_script(reading([row(quiet=31)])))), 1)
-        # The session woke, re-armed, and has been quiet 20 min since: nudge again.
+        # A fresh measurement (e.g. after a transcript rotation): nudge again.
         self.assertEqual(len(self.nudges(self.run_script(reading([row(quiet=20)])))), 1)
 
     def test_absence_from_the_reading_ends_the_episode(self):
