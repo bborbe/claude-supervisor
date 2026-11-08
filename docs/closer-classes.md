@@ -23,6 +23,29 @@ closed)`.
 and `who-needs-me.py --section last-closers` prints it. The section is **opt-in**: the
 no-flag render keeps its six sections byte-for-byte, so no existing consumer changes.
 
+## The channel is pane-free
+
+A row's class is read from the **session transcript**, never from a pane. The
+population is the **session registry** — an entry is deleted when its session exits,
+so presence means live — unioned with the attention store's own records. That union is
+load-bearing: a headless worker owns no pane by construction and often raises no gate,
+so it has no store record at all, and a `CLOSERS` section built from the store alone
+carried no row for it. Step 4a then fail-closed it to `unverifiable` on **every** round,
+forever. Measured 2026-11-07: 237 of 242 drive candidates carried no pane, 232 landed
+`unverifiable`, and only 14 rows reached the closer probe at all.
+
+⚠️ **Registry presence is not liveness — `alive` is the verdict.** A crashed session
+leaves its `<pid>.json` behind, and a stale transcript whose last line reads `nothing`
+would then revive a dead worker. A store row is vouched server-side, which is why
+`read_registry()` skips `alive` for those; a synthetic row has no voucher, so only
+`alive is True` admits one. `None` (cannot tell) is excluded too — fail closed, which
+is the pre-change behaviour.
+
+A pane-less row renders `hst` in the pane column and prints
+`Last closers (<N>, headless=<H>)` in the section header. `hst` means *no pane resolved
+for this session* — not unroutable, and not an exited session. The drive leg carries the
+same count as `headless=<H>` on its payload header and counts line.
+
 ## The classes
 
 | class | the turn ended on | drive-leg verdict |
