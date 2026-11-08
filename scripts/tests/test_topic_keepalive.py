@@ -75,6 +75,7 @@ class KeepAliveTest(unittest.TestCase):
     def run_keepalive(self, live="ABSENT", cadence="OK", argv=()):
         self.k.session_verdict = lambda sid: live
         self.k.cadence = lambda subject, branch="goal": cadence
+        self.k.cadence_state_detail = lambda subject, branch="goal": (cadence, "")
         out = io.StringIO()
         with redirect_stdout(out):
             rc = self.k.main(["--vault", str(self.vault), "--goal", "A Goal", *argv])
@@ -135,6 +136,7 @@ class KeepAliveTest(unittest.TestCase):
 
         self.k.session_verdict = verdict
         self.k.cadence = lambda subject, branch="goal": "OK"
+        self.k.cadence_state_detail = lambda subject, branch="goal": ("OK", "")
         out = io.StringIO()
         with redirect_stdout(out):
             self.k.main(["--vault", str(self.vault), "--goal", "A Goal"])
@@ -232,6 +234,7 @@ class KeepAliveTest(unittest.TestCase):
         )
         self.k.session_verdict = lambda sid: "LIVE"
         self.k.cadence = lambda subject, branch="goal": "OK"
+        self.k.cadence_state_detail = lambda subject, branch="goal": ("OK", "")
         out = io.StringIO()
         with redirect_stdout(out):
             rc = self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
@@ -262,6 +265,7 @@ class KeepAliveTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.k.cadence = lambda subject, branch="goal": "OK"
+        self.k.cadence_state_detail = lambda subject, branch="goal": ("OK", "")
         out = io.StringIO()
         with redirect_stdout(out):
             self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
@@ -275,6 +279,7 @@ class KeepAliveTest(unittest.TestCase):
         (self.vault / "23 Topics" / "A Topic.md").write_text(
             GOAL_PAGE.format(sid="", extra=""), encoding="utf-8")
         self.k.cadence = lambda subject, branch="goal": "OK"
+        self.k.cadence_state_detail = lambda subject, branch="goal": ("OK", "")
         out = io.StringIO()
         with redirect_stdout(out):
             self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
@@ -288,6 +293,7 @@ class KeepAliveTest(unittest.TestCase):
         )
         self.k.session_verdict = lambda sid: "LIVE"
         self.k.cadence = lambda subject, branch="goal": "STOPPED"
+        self.k.cadence_state_detail = lambda subject, branch="goal": ("STOPPED", "")
         out = io.StringIO()
         with redirect_stdout(out):
             rc = self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
@@ -579,6 +585,24 @@ class CadenceTest(unittest.TestCase):
         # `manager-liveness.py`'s own INVALID, not a probe failure.
         self._stub(stdout="BANANA\tslug\tdetail\n")
         self.assertEqual("INVALID", self.k.cadence("A Goal"))
+
+    def test_the_sleeping_detail_is_returned_with_its_state(self):
+        """A sleep is only actionable if the line names the instant, not just the state."""
+        self._stub(
+            stdout="SLEEPING\tslug\tuntil 2026-11-09T08:00:00+01:00 (70856s remaining)\n"
+        )
+        self.assertEqual(
+            ("SLEEPING", "until 2026-11-09T08:00:00+01:00 (70856s remaining)"),
+            self.k.cadence_state_detail("A Goal"),
+        )
+
+    def test_the_state_alone_is_still_available(self):
+        self._stub(stdout="SLEEPING\tslug\tuntil 2026-11-09T08:00:00+01:00\n")
+        self.assertEqual("SLEEPING", self.k.cadence("A Goal"))
+
+    def test_a_state_line_with_no_detail_yields_an_empty_detail(self):
+        self._stub(stdout="OK\n")
+        self.assertEqual(("OK", ""), self.k.cadence_state_detail("A Goal"))
 
     def test_an_unreadable_loop_never_licenses_a_restart(self):
         """The consequence, pinned end to end: LIVE + unreadable probe must not restart."""

@@ -174,7 +174,11 @@ class PostBatchTest(unittest.TestCase):
             rc = ask.cmd_post_batch(batch_args(task=["Alpha", "Beta", "Gamma"]), out=out)
 
         self.assertEqual(rc, 0)
-        self.assertEqual(len(calls), 1)
+        # Count POSTS, not every request: the producer-kind resolver reads the
+        # session ledger first, and that read is not a card. The contract under
+        # test is "N rows, ONE card", so a GET must not be counted as one.
+        posts = [url for url in calls if url.rstrip("/").endswith("/api/1.0/attention")]
+        self.assertEqual(len(posts), 1, calls)
         body = captured["body"]
         self.assertEqual(body["answer_mechanism"], "message")
         # ⚠️ Both new defaults are pinned HERE as well as on `post`, and the
