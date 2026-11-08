@@ -133,7 +133,7 @@ check-wrote-nothing:
 check: check-manager-allowlist check-open-manager-resolution
 	@for f in server/*.mjs scripts/*.mjs; do case "$$f" in *.test.mjs) continue ;; esac; node --check "$$f" || exit 1; done; echo "  server + scripts modules parse"
 	@python3 -c "import json;[json.load(open(f)) for f in ['.claude-plugin/plugin.json','.claude-plugin/marketplace.json','server/package.json','server/policy.json','server/manager-allowlist.json']]" && echo "  manifests parse"
-	@test -f .mcp.json && test -f README.md && echo "  plugin files present"
+	@test ! -e .mcp.json && test -f README.md && echo "  plugin files present"
 
 # Two artifacts, one policy: `server/manager-allowlist.json` is what the server matches against,
 # `docs/permission-allowlist.md` is what a human reads. Without this check they drift silently and
