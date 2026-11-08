@@ -346,7 +346,10 @@ def worker_populations(endpoint=None, ledger=None, on_failure=None):
         "managers": managers,
         "interactive": interactive,
         "headless": headless,
-        "total": managers + interactive + headless,
+        # `total` is the cap's unit, so managers are NOT in it — the refusal prints this split
+        # beside a count that excludes them, and two irreconcilable numbers in one sentence is
+        # worse than no split at all.
+        "total": interactive + headless,
     }
 
 

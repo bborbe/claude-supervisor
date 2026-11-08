@@ -278,13 +278,17 @@ export async function workerSessions({
   // The split rides along on the same pass: the cap gate's refusal prints what the number is
   // made of, and reading the stores a second time to answer that would be a second measurement
   // of a fleet that has already moved.
-  const populations = { managers, interactive, headless, total: managers + interactive + headless }
+  // ⚠️ **`total` is the cap's unit, so managers are NOT in it.** The refusal prints this split
+  // beside `liveCount`, which excludes managers; a total that included them would put two
+  // irreconcilable numbers in one sentence. Managers are reported as context.
+  const populations = { managers, interactive, headless, total: interactive + headless }
   return { workers, populations, error: null, stale: null }
 }
 
 // The three populations the caps act on — managers, interactive workers, headless workers —
-// and their total. Same identity store and same liveness union as `workerSessions`; what
-// differs is the classification, and that managers are counted here rather than excluded.
+// and their total. **A thin wrapper over `workerSessions`, not a second classifier.** Measured
+// 2026-11-08, the review found three copies of these rules and two of them already disagreed on
+// manager+auto-resume records; delegating is what keeps one home.
 //
 // ⚠️ **The manager population comes from the LEDGER, not from `fleet-board.py`.** The board is
 // the doc's named manager source, but measured 2026-11-08 it emitted `{header, rows}` of
@@ -292,39 +296,9 @@ export async function workerSessions({
 // host. The ledger carries `role` and is already read here. A manager started by hand writes
 // no record at all, so it is absent from this count: a stated gap, not a silent one.
 //
-// ⚠️ **`mode` decides interactive vs headless, and an absent `mode` reads as interactive** —
-// the same rule `role` follows. Defaulting a pre-`mode` record to headless would move the
-// whole pre-field population into the wrong column.
-export async function workerPopulations({ endpoint, fetchImpl, now = Date.now, onFailure, registry } = {}) {
-  const failures = []
-  const observe = (message) => {
-    failures.push(message)
-    onFailure?.(message)
-  }
-  const cause = (fallback) => failures.join('; ') || fallback
-
-  const ledger = await readLedger({ endpoint, fetchImpl, onFailure: observe })
-  if (ledger === null) {
-    return { populations: null, error: cause('the session-ledger endpoint could not be read') }
-  }
-  const rows = await readHeartbeat({ endpoint, fetchImpl, onFailure: observe })
-  if (rows === null) {
-    return { populations: null, error: cause('the session-heartbeat endpoint could not be read') }
-  }
-  const live = unionRegistry(liveFromHeartbeat(rows), registry)
-
-  let managers = 0
-  let interactive = 0
-  let headless = 0
-  for (const [sessionId, record] of Object.entries(ledger)) {
-    if (!live.has(sessionId)) continue
-    if (record.role === 'manager') {
-      managers += 1
-      continue
-    }
-    if (record.resumed_from) continue
-    if (record.mode === 'headless') headless += 1
-    else interactive += 1
-  }
-  return { populations: { managers, interactive, headless, total: managers + interactive + headless }, error: null }
+// ⚠️ **`total` is interactive + headless, NOT including managers** — the cap's unit, so the
+// refusal's split reconciles with the count printed beside it.
+export async function workerPopulations(opts = {}) {
+  const { populations, error } = await workerSessions(opts)
+  return { populations, error }
 }

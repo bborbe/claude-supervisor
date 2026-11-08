@@ -481,7 +481,7 @@ test('populations split the fleet by role and mode', async () => {
     stateDir: dir.root,
     registry: [],
   })
-  assert.deepEqual(populations, { managers: 1, interactive: 1, headless: 1, total: 3 })
+  assert.deepEqual(populations, { managers: 1, interactive: 1, headless: 1, total: 2 })
 })
 
 // `mode` decides the split, and an absent one reads as interactive — the same rule `role`

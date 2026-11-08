@@ -855,16 +855,16 @@ test('both spawn paths are wired — the claim no pure-helper test can reach', (
 // acted on — 32 tabs and 32 headless workers are different problems, and the operator reading
 // it is deciding which to close.
 test('the cap refusal prints the three-population split', () => {
-  const populations = { managers: 4, interactive: 2, headless: 7, total: 13 }
+  const populations = { managers: 4, interactive: 2, headless: 7, total: 9 }
   const soft = concurrentLimitRefusal({ limits: PAIR, liveCount: 30, populations })
   assert.match(soft, /4 managers/)
   assert.match(soft, /2 interactive/)
   assert.match(soft, /7 headless/)
-  assert.match(soft, /\(total 13\)/)
+  assert.match(soft, /not counted against this cap/)
 
   const hard = concurrentLimitRefusal({ limits: PAIR, liveCount: 50, operatorNamed: true, populations })
   assert.match(hard, /4 managers/)
-  assert.match(hard, /\(total 13\)/)
+  assert.match(hard, /\(9 workers\)/)
 })
 
 // A caller with no split prints exactly what it printed before — the line is additive, never
