@@ -165,34 +165,53 @@ def steps_for(branch: str) -> tuple:
 KEEPALIVE = "keepalive"
 OWING_VERDICTS = ("resume", "restart")
 
-# `refused:<token>` must name a refusal a real producer emits — a free-form token would let
-# a round label an unexecuted resume `refused:whatever` and pass. Two sources:
-#   - `scripts/restart-worker.py` prints its token verbatim as the first line (module
-#     docstring: its refusals plus `environment-fault`).
-#   - `/supervisor:open` prints a labelled line instead, so each label maps to one token:
-#     `⏸️ HELD` → `held`, `❓ SESSION UNREADABLE` → `session-unreadable`,
-#     `⏸️ CONCURRENCY LIMIT` (soft cap) → `concurrency-limit`, the hard cap / `MANAGER_FLEET_FULL`
-#     → `fleet-full`, `🔒 LIVE ELSEWHERE` → `live-elsewhere`.
-# `busy-target` is absent on purpose: a mid-turn target is a deferral, `deferred:busy-target`,
-# because the round is told to wait a tick, not to give up.
-REFUSAL_TOKENS = (
-    "unknown-session-id", "ambiguous-pid", "headless-target", "held-session",
-    "role-undetermined", "stale-load-path", "environment-fault",
-    "held", "session-unreadable", "concurrency-limit", "fleet-full", "live-elsewhere",
-)
-DEFER_TOKENS = ("busy-target",)
+# `refused:<token>` must name a refusal the verdict's OWN command can emit — a free-form
+# token, or one borrowed from another path, would let a round label an unexecuted resume
+# and pass. So the vocabulary is per verdict:
+#
+#   resume  → `/supervisor:open --goal`, Step 2B item 3 → Step 3. That path's refusals:
+#             `⌛ waiting-approval` (item 0), the registry read's "cannot tell" (item 1),
+#             `start-rate.mjs` exit 1 (Step 3.1) and `resolve-launcher.py` non-zero (3.1).
+#   restart → `/supervisor:restart`: `restart-worker.py`'s first-line tokens (its module
+#             docstring, plus `environment-fault`) and `restart-precheck.py`'s
+#             `dirty-worktree`.
+#
+# ⚠️ **No cap token on either path, by design.** The resume path never reaches Step 1.5's
+# Gate 3, so `spawn.maxConcurrent` and the per-topic N cannot refuse it — and they are
+# exactly the excuses the 2026-11-08 round gave. A vocabulary carrying them would let that
+# round pass.
+#
+# `busy-target` is a restart deferral (`deferred:busy-target`), never a refusal and never
+# valid on a resume: the round is told to wait a tick for a mid-turn session, and a resume
+# targets a session that is ABSENT, so it cannot be mid-turn.
+REFUSAL_TOKENS = {
+    "resume": ("waiting-approval", "cannot-tell", "start-rate", "launcher-refused"),
+    "restart": ("unknown-session-id", "ambiguous-pid", "headless-target", "held-session",
+                "role-undetermined", "stale-load-path", "environment-fault", "dirty-worktree"),
+}
+DEFER_TOKENS = {"resume": (), "restart": ("busy-target",)}
 
 
-def outcome_valid(outcome: str) -> bool:
-    """`executed`, `refused:<known token>` or `deferred:<known token>` — nothing else."""
+def outcome_valid(outcome: str, verdict: str) -> bool:
+    """`executed`, or a refusal / deferral token the verdict's own command emits."""
     if outcome == "executed":
         return True
     kind, _, token = (outcome or "").partition(":")
     if kind == "refused":
-        return token in REFUSAL_TOKENS
+        return token in REFUSAL_TOKENS.get(verdict, ())
     if kind == "deferred":
-        return token in DEFER_TOKENS
+        return token in DEFER_TOKENS.get(verdict, ())
     return False
+
+
+def _same_session(recorded: str, seen: str) -> bool:
+    """Equal, or one an 8+-char prefix of the other — `/supervisor:restart` takes a prefix."""
+    if not recorded or not seen:
+        return False
+    if recorded == seen:
+        return True
+    short, long_ = sorted((recorded, seen), key=len)
+    return len(short) >= 8 and long_.startswith(short)
 
 
 _KEEPALIVE_MOD = None
@@ -254,7 +273,10 @@ def restart_spawned(session: str, started: float, now: float) -> bool:
             continue
         for line in lines:
             fields = line.rstrip("\n").split("\t")
-            if "kind=spawn" not in fields or f"session={session}" not in fields:
+            if "kind=spawn" not in fields:
+                continue
+            seen = next((f[len("session="):] for f in fields if f.startswith("session=")), "")
+            if not _same_session(session, seen):
                 continue
             try:
                 ts = datetime.datetime.strptime(fields[0], "%Y-%m-%dT%H:%M:%SZ").replace(
@@ -278,8 +300,8 @@ def keepalive_skips(d: dict, started: float, now: float) -> list:
         if not outcome:
             out.append((KEEPALIVE, f"{goal}: `{verdict}` verdict has no outcome"))
             continue
-        if not outcome_valid(outcome):
-            out.append((KEEPALIVE, f"{goal}: `{outcome}` is not a known outcome"))
+        if not outcome_valid(outcome, verdict):
+            out.append((KEEPALIVE, f"{goal}: `{outcome}` is not a known outcome for `{verdict}`"))
             continue
         if outcome != "executed":
             continue
@@ -514,7 +536,16 @@ def record_verdict(topic: str, goal: str, vault: str, verdict: str, session: str
     if not d.get("round_started_at"):
         print(f"no round in progress for {s} — run --start first", file=sys.stderr)
         return 2
-    d.setdefault(KEEPALIVE, []).append({
+    entries = d.setdefault(KEEPALIVE, [])
+    # A probe re-run in the same round reads the same verdict again; one owed entry per
+    # (goal, verdict, session) while it is open, or one outcome would leave a twin red.
+    for e in entries:
+        if (isinstance(e, dict) and not e.get("outcome")
+                and base_slug(e.get("goal") or "") == base_slug(goal)
+                and e.get("verdict") == verdict and e.get("session") == session):
+            print(f"already owed {s} {KEEPALIVE} {goal} {verdict}")
+            return 0
+    entries.append({
         "goal": goal, "vault": vault, "verdict": verdict, "session": session,
         "read_at": time.time(), "outcome": "",
     })
@@ -526,25 +557,32 @@ def record_verdict(topic: str, goal: str, vault: str, verdict: str, session: str
 def record_outcome(topic: str, goal: str, outcome: str) -> int:
     """Account for the newest open verdict on `goal`: `executed`, `refused:<t>`, `deferred:<t>`.
 
-    Refuses an outcome outside the vocabulary here, at the write, so the round learns of a
-    bad token while it can still correct it — `--check` would only report it at the tail.
+    Refuses an outcome outside that verdict's vocabulary here, at the write, so the round
+    learns of a bad token while it can still correct it — `--check` would only report it at
+    the tail. The goal is matched on its slug, as the probe matches goal pages
+    case-insensitively.
     """
-    if not outcome_valid(outcome):
-        print(f"unknown outcome {outcome!r}: use `executed`, `refused:<token>` "
-              f"({', '.join(REFUSAL_TOKENS)}) or `deferred:<token>` "
-              f"({', '.join(DEFER_TOKENS)})", file=sys.stderr)
-        return 2
     s = slug(topic)
     d = read_receipt(s)
     if not d.get("round_started_at"):
         print(f"no round in progress for {s} — run --start first", file=sys.stderr)
         return 2
-    entries = [e for e in d.get(KEEPALIVE) or [] if isinstance(e, dict) and e.get("goal") == goal]
-    open_entries = [e for e in entries if not e.get("outcome")]
+    open_entries = [e for e in d.get(KEEPALIVE) or []
+                    if isinstance(e, dict) and not e.get("outcome")
+                    and base_slug(e.get("goal") or "") == base_slug(goal)]
     if not open_entries:
         print(f"no open keep-alive verdict for {goal!r} on {s}", file=sys.stderr)
         return 2
-    open_entries[-1]["outcome"] = outcome
+    entry = open_entries[-1]
+    verdict = entry.get("verdict") or ""
+    if not outcome_valid(outcome, verdict):
+        refusals = ", ".join(REFUSAL_TOKENS.get(verdict, ())) or "none"
+        defers = ", ".join(DEFER_TOKENS.get(verdict, ())) or "none"
+        print(f"unknown outcome {outcome!r} for a `{verdict}` verdict: use `executed`, "
+              f"`refused:<token>` ({refusals}) or `deferred:<token>` ({defers})",
+              file=sys.stderr)
+        return 2
+    entry["outcome"] = outcome
     write_atomic(path(s), json.dumps(d) + "\n")
     print(f"recorded {s} {KEEPALIVE} {goal} {outcome}")
     return 0

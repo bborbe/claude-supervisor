@@ -24,12 +24,17 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 | outcome | when | what `--check` needs to clear it |
 |---|---|---|
 | `executed` | the resume / restart ran | **resume:** the `topic-keepalive.py --record-resume <id>` stamp, written only once the liveness instrument reads the id live, inside the round window. **restart:** the relaunched pane's `kind=spawn` exit record for that session, inside the window |
-| `refused:<token>` | the command refused | nothing more — but the token must be one the command emits (below) |
-| `deferred:busy-target` | `/supervisor:restart` refused `busy-target` (mid-turn) | nothing more — wait a tick, never kill in-flight work |
+| `refused:<token>` | the command refused | nothing more — but the token must be one **that verdict's** command emits (below) |
+| `deferred:busy-target` | **restart only:** `/supervisor:restart` refused `busy-target` (mid-turn) | nothing more — wait a tick, never kill in-flight work |
 
-`/supervisor:restart` prints its token as its first line (`unknown-session-id`, `ambiguous-pid`, `headless-target`, `held-session`, `role-undetermined`, `stale-load-path`, `environment-fault`). `/supervisor:open` prints a label instead — map it: `⏸️ HELD` → `held`, `❓ SESSION UNREADABLE` → `session-unreadable`, `⏸️ CONCURRENCY LIMIT` → `concurrency-limit`, fleet full (`MANAGER_FLEET_FULL`) → `fleet-full`, `🔒 LIVE ELSEWHERE` → `live-elsewhere`. Any other token is refused at the write, and listed in the refusal.
+**Tokens, per verdict** — any other is refused at the write, which lists the accepted set:
 
-⚠️ **`executed` is checked against the work's own record, never the word.** Writing `executed` for a resume that never ran still prints `INCOMPLETE ROUND — skipped: keepalive` at the tail.
+- **`resume`** — `/supervisor:open --goal`, whose resume path (Step 2B item 3 → Step 3) prints labels, not tokens: `⌛ waiting-approval` → `waiting-approval`; `--list --json` exited non-zero ("cannot tell") → `cannot-tell`; `start-rate.mjs` exit 1 → `start-rate`; `resolve-launcher.py` non-zero → `launcher-refused`.
+- **`restart`** — `/supervisor:restart` prints its token as the first line: `unknown-session-id`, `ambiguous-pid`, `headless-target`, `held-session`, `role-undetermined`, `stale-load-path`, `environment-fault`, and `restart-precheck.py`'s `dirty-worktree`.
+
+⚠️ **`executed` is checked against the work's own record, never the word.** Writing `executed` for a resume that never ran still prints `INCOMPLETE ROUND — skipped: keepalive` at the tail. A resume issued but not yet live at the tail has no stamp and reads incomplete too — wait for the liveness instrument before recording, as the keep-alive table already says.
+
+⚠️ **The honest bound.** A `refused:` token is taken on the round's word — no artifact proves the refusal happened — and `--record-resume` stamps whatever LIVE id it is given. Both are named rather than closed: the check makes a skipped verdict a visible act, it cannot make a fabricated one impossible (the receipt's own docstring states the same bound).
 
 ## What the tail reports
 
@@ -37,4 +42,4 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 
 ## N never gates a resume
 
-N = 3 caps **starts** (`scripts/topic-spawn.py` refuses a new goal manager at `running >= N`). A resume or restart continues a manager the share already counts, so neither N nor `spawn.maxConcurrent` (its home: `docs/fleet-surface.md` § Spawn a worker item 5) is ever a `refused:` reason — the vocabulary above carries no token for either, by design.
+N = 3 caps **starts** (`scripts/topic-spawn.py` refuses a new goal manager at `running >= N`). A resume or restart continues a manager the share already counts, and the resume path never reaches `/supervisor:open`'s Gate 3 — so neither N nor `spawn.maxConcurrent` (its home: `docs/fleet-surface.md` § Spawn a worker item 5) is ever a `refused:` reason. The vocabulary above carries no token for either, by design: those are the excuses the measured round gave.

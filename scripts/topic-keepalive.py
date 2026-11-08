@@ -111,8 +111,13 @@ def resume_path(vault: str, subject: str, branch: str = "goal") -> str:
 
     `manager-receipt.py` reads it to prove an `executed` resume outcome, so it must be the
     same path this script writes; `MANAGER_RESUMES_STATE_DIR` relocates the store for tests.
+
+    ⚠️ **`realpath`, so one vault is one store.** `~/Documents/Obsidian/Personal` is a symlink
+    to `private-personal`; keyed on the spelling, a probe and a `--record-resume` given the
+    two names would write and read different files — an honest resume would read unproven
+    and the crash-loop count would split in two.
     """
-    name = os.path.basename(vault.rstrip(os.sep)) or "vault"
+    name = os.path.basename(os.path.realpath(os.path.expanduser(vault)).rstrip(os.sep)) or "vault"
     root = os.environ.get("MANAGER_RESUMES_STATE_DIR") or "~/.claude/state/manager-resumes"
     return os.path.join(os.path.expanduser(root), name, f"{branch}--{base_slug(subject)}.json")
 

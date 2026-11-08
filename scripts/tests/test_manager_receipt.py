@@ -1410,11 +1410,15 @@ class KeepAliveVerdicts(unittest.TestCase):
         self.spawn_line("sid-r", time.time())
         self.assertEqual(self.check(), (0, ""))
 
-    def test_known_refusal_and_deferral_tokens_clear_the_verdict(self):
-        for outcome in ("refused:held-session", "deferred:busy-target"):
-            with self.subTest(outcome=outcome):
+    def test_each_verdicts_own_tokens_clear_it(self):
+        for verdict, outcome in (("resume", "refused:start-rate"),
+                                 ("resume", "refused:waiting-approval"),
+                                 ("restart", "refused:held-session"),
+                                 ("restart", "refused:dirty-worktree"),
+                                 ("restart", "deferred:busy-target")):
+            with self.subTest(verdict=verdict, outcome=outcome):
                 self.full_round()
-                self.verdict()
+                self.verdict(verdict)
                 self.assertEqual(self.outcome(outcome)[0], 0)
                 self.assertEqual(self.check(), (0, ""))
 
@@ -1424,6 +1428,58 @@ class KeepAliveVerdicts(unittest.TestCase):
         for bad in ("refused", "refused:whatever", "deferred:cap", "refused:busy-target", "done"):
             with self.subTest(outcome=bad):
                 self.assertEqual(self.outcome(bad)[0], 2)
+        self.assertEqual(self.check()[0], self.m.EXIT_SKIPPED)
+
+    def test_the_incidents_own_excuses_are_not_tokens(self):
+        # The 2026-11-08 round blamed the fleet cap, then N. The resume path never reaches
+        # either gate, so no spelling of them may clear a resume verdict.
+        self.full_round()
+        self.verdict("resume")
+        for excuse in ("refused:concurrency-limit", "refused:fleet-full", "refused:manager-cap",
+                       "refused:n-cap", "deferred:busy-target", "refused:held-session"):
+            with self.subTest(outcome=excuse):
+                self.assertEqual(self.outcome(excuse)[0], 2)
+        self.assertEqual(self.check()[0], self.m.EXIT_SKIPPED)
+
+    def test_a_token_from_the_other_verdict_reads_red_when_written_around_the_verb(self):
+        self.full_round()
+        self.verdict("resume")
+        p = self.m.path(self.m.slug(self.topic))
+        with open(p, encoding="utf-8") as fh:
+            d = json.load(fh)
+        d["keepalive"][0]["outcome"] = "deferred:busy-target"
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump(d, fh)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("not a known outcome for `resume`", out)
+
+    def test_a_reread_verdict_is_owed_once(self):
+        self.full_round()
+        self.verdict()
+        self.verdict()
+        self.outcome("refused:start-rate")
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_the_outcome_matches_the_goal_by_slug(self):
+        self.full_round()
+        self.verdict(goal="Auto-Merge Trust-Gated PRs")
+        self.assertEqual(self.outcome("refused:start-rate", goal="auto-merge trust-gated prs")[0], 0)
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_a_restart_by_prefix_matches_its_spawn_record(self):
+        full = "0123456789abcdef-0000-1111"
+        self.full_round()
+        self.verdict("restart", session=full)
+        self.outcome("executed")
+        self.spawn_line(full[:8], time.time())
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_a_too_short_prefix_does_not_match(self):
+        self.full_round()
+        self.verdict("restart", session="0123456789abcdef")
+        self.outcome("executed")
+        self.spawn_line("0123", time.time())
         self.assertEqual(self.check()[0], self.m.EXIT_SKIPPED)
 
     def test_an_unknown_token_written_around_the_verb_still_reads_red(self):
@@ -1443,7 +1499,7 @@ class KeepAliveVerdicts(unittest.TestCase):
         self.full_round()
         self.verdict(goal="Goal A")
         self.verdict(goal="Goal B")
-        self.outcome("refused:held", goal="Goal A")
+        self.outcome("refused:start-rate", goal="Goal A")
         rc, out = self.check()
         self.assertEqual(rc, self.m.EXIT_SKIPPED)
         self.assertIn("Goal B", out)
@@ -1489,6 +1545,61 @@ class KeepAliveVerdicts(unittest.TestCase):
         k = load_module("topic_keepalive", os.path.join(SCRIPTS, "topic-keepalive.py"))
         self.assertEqual(k.state_path(self.VAULT, self.GOAL, "goal"),
                          self.m.keepalive_module().resume_path(self.VAULT, self.GOAL, "goal"))
+
+    def test_a_symlinked_vault_spelling_is_the_same_store(self):
+        k = load_module("topic_keepalive", os.path.join(SCRIPTS, "topic-keepalive.py"))
+        real = os.path.join(self.arts.name, "private-personal")
+        os.makedirs(real)
+        link = os.path.join(self.arts.name, "Personal")
+        os.symlink(real, link)
+        self.assertEqual(k.resume_path(link, self.GOAL), k.resume_path(real, self.GOAL))
+
+    # --- the probe's own CLI, end to end in-process ----------------------------------
+
+    def probe(self, liveness, loop, stamps=0, sid="sid-9"):
+        """Run `topic-keepalive.py main(... --receipt)` against a one-goal vault."""
+        k = load_module("topic_keepalive", os.path.join(SCRIPTS, "topic-keepalive.py"))
+        vault = os.path.join(self.arts.name, "vault")
+        os.makedirs(os.path.join(vault, "24 Goals"), exist_ok=True)
+        with open(os.path.join(vault, "24 Goals", f"{self.GOAL}.md"), "w", encoding="utf-8") as fh:
+            fh.write(f"---\nclaude_session_id: {sid}\n---\nbody\n")
+        if stamps:
+            p = k.state_path(vault, self.GOAL)
+            with open(p, "w", encoding="utf-8") as fh:
+                json.dump({"resumes": [time.time() - 60] * stamps}, fh)
+        k.session_verdict = lambda _sid: liveness
+        k.cadence_state_detail = lambda _subject, _branch="goal": (loop, "")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = k.main(["--vault", vault, "--goal", self.GOAL, "--receipt", self.topic])
+        return rc, out.getvalue().splitlines()
+
+    def owed(self):
+        return self.m.read_receipt(self.m.slug(self.topic)).get("keepalive") or []
+
+    def test_the_probe_owes_a_resume_and_keeps_its_two_line_output(self):
+        self.full_round()
+        rc, lines = self.probe("ABSENT", "STALE")
+        self.assertEqual((rc, lines[0], len(lines)), (0, "resume", 2))
+        self.assertEqual([(e["verdict"], e["session"]) for e in self.owed()], [("resume", "sid-9")])
+        self.assertEqual(self.check()[0], self.m.EXIT_SKIPPED)
+
+    def test_the_probe_owes_a_restart(self):
+        self.full_round()
+        rc, lines = self.probe("LIVE", "STALE")
+        self.assertEqual((lines[0], len(lines)), ("restart", 2))
+        self.assertEqual([e["verdict"] for e in self.owed()], ["restart"])
+
+    def test_jump_leave_and_crash_loop_owe_nothing(self):
+        for liveness, loop, stamps, verdict in (("LIVE", "OK", 0, "jump"),
+                                               ("ABSENT", "STOPPED", 0, "leave"),
+                                               ("ABSENT", "STALE", 3, "crash-loop")):
+            with self.subTest(verdict=verdict):
+                self.full_round()
+                _rc, lines = self.probe(liveness, loop, stamps)
+                self.assertEqual(lines[0], verdict)
+                self.assertEqual(self.owed(), [])
+                self.assertEqual(self.check(), (0, ""))
 
 
 if __name__ == "__main__":

@@ -72,6 +72,10 @@ tier down. The sweep is the product; everything else is delegated.
    the fleet round's open leg regardless. `resume` is neither: it continues a session that
    already has a recorded id.
 
+   ⚠️ **This call carries no `--receipt`, on purpose.** The topic round's own inline keep-alive
+   (`commands/topic-drive.md` router row 5) is the one path that records owed verdicts on the
+   round's receipt; a second recorder here would owe each verdict twice.
+
    ⚠️ **N = 3 gates a start and never a resume.** `topic-spawn.py` refuses a new goal manager
    at `running >= N`; nothing caps `resume` or `restart` except `crash-loop`. Never hold a
    `To resume:` or `To restart:` row for N or for `spawn.maxConcurrent` (its home:
