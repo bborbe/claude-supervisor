@@ -150,5 +150,18 @@ class CheckHandbackKeysTest(unittest.TestCase):
         self.assertIn("inflight-unread", result.stderr)
 
 
+    def test_open_leg_without_a_branch_count_fails(self):
+        """The open leg's reconciliation is four-way: `opened + resumed + jumped + refused == selected`."""
+        for dropped in ("resumed", "jumped"):
+            with self.subTest(dropped=dropped):
+                self.write(
+                    "agents/fleet-open-actor.md",
+                    fence(self.legs["supervisor:fleet-open-actor"]["required"], drop=(dropped,)),
+                )
+                result = self.run_check()
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(dropped, result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

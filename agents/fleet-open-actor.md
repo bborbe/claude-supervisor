@@ -60,7 +60,8 @@ without it the command falls back to the wezterm route, which opens a tab whatev
   row name is a task-file stem and the vault is worker-writable, so a `"` in it breaks naive
   quoting and a `$(…)` or backtick executes in this session's shell. `open-queue.py` emits each
   selected row's action already `shlex.quote`d (`selected[].action`), the same shape
-  `next-focus.py` uses for its `action` field. Paste it verbatim.
+  `next-focus.py` uses for its `action` field. Carry it verbatim into `args` (§ 3) — never a shell
+  line, never a retyped name.
 - **Nothing else**: no batch helper, no in-line `spawn_agent` (that tool is held for `resume=`
   alone — `docs/fleet-surface.md` § Spawn a worker item 6), no reordering.
 - **Never open a row the leg skipped.** `open-queue.py` prints a reason per skipped row and those
@@ -122,15 +123,41 @@ truncated block is indistinguishable from a small selection.
 
 ## 3. Run every action, in order
 
-For each `selected[].action`, invoke it through `Skill`, **verbatim and in the order given**. It
-carries `--vault` already; never append one.
+For each `selected[].action`, invoke it through `Skill`, **in the order given and with the action's
+own bytes split across the tool's two fields**:
+
+- `skill: "supervisor:open"` — the action's first token with its leading `/` dropped.
+- `args: "<everything after that first space, byte-for-byte>"` — the `shlex.quote`d name, `--task`,
+  and the `shlex.quote`d `--vault`. It already carries `--vault`; never append one.
+
+⚠️ **"Verbatim" means verbatim inside `args`, never a pasted shell line.** `Skill` takes `skill` and
+`args` as separate fields, so a whole command line cannot be handed to it. The split is safe because
+it is **prefix removal, not re-composition**: `open-queue.py` emits the prefix as a literal
+(`"/supervisor:open %s --task%s"`), so the remainder is the identical byte string it produced —
+quotes included — and nothing re-quotes, interpolates or re-orders it. That is what keeps the
+never-compose rule intact: the name and the vault are never retyped here, only carried.
 
 ⚠️ **`/supervisor:open` decides admissibility.** Every gate it owns runs unchanged for every row
 this leg hands it, and the leg never pre-clears one — a row that clears the rank can still be
 refused at the spawn. **Report that refusal and continue to the next row**; a refusal is not a
 reason to reorder the list or to retry the same row.
 
-Count `opened` (the rows the command reported opening) and `refused` (the rows it refused).
+**Count the branch the command reported**, one count per selected row:
+
+| the command printed | count |
+|---|---|
+| `🆕 created <sid>` | `opened` |
+| `♻️ resumed <sid>` | `resumed` |
+| `↪️ jumped` | `jumped` |
+| a refusal line | `refused` |
+
+⚠️ **Each branch is its own count because each means something different.** `opened` is a **new
+worker** the headless create path opened — the number the round's `opened: <n> of <m>` tally and
+this leg's own success criterion are about. A `♻️ resumed` row re-enters an existing conversation and
+opens no new worker; a `↪️ jumped` row opened nothing at all (its session was already live and the
+command only activated it). The arithmetic that holds is
+**`opened + resumed + jumped + refused == selected`**; a selected row in none of the four is a row
+this leg failed to invoke, never a zero.
 
 ## 4. This leg writes no digest line — deliberately
 
@@ -151,7 +178,7 @@ this leg** — a fourth key is an output-shape change, not a side effect of a sp
 - **The payload write fails** → `status=not-run` with the reason; never hand back a `render=` path
   that does not exist. A block the round cannot print is a leg that did not run.
 - **`selected` is empty, or the block is `no free slots` / `target unlimited`** → `status=ok`,
-  `selected=0`, `opened=0`, and the payload carries the one line that says which. ⚠️ **`target
+  `selected=0`, `opened=0`, `resumed=0`, `jumped=0`, and the payload carries the one line that says which. ⚠️ **`target
   unlimited` is the `spawn.maxConcurrent: 0` config and the leg opens nothing there on purpose**
   (`docs/fleet-surface.md` § Spawn a worker item 5 owns the constant and its cap) — `0` removes
   the server's cap, and the cap is the only bound this leg ranks against; admitting every eligible
@@ -172,7 +199,7 @@ this leg** — a fourth key is an output-shape change, not a side effect of a sp
 `refused:` line per refusal after them:
 
 ```text
-status=ok|unknown|not-run · selected=<n> · opened=<n> · refused=<n> · render=<path>|— · reason=<text>|— · truncated=<n> · payload=<path>|—
+status=ok|unknown|not-run · selected=<n> · opened=<n> · resumed=<n> · jumped=<n> · refused=<n> · render=<path>|— · reason=<text>|— · truncated=<n> · payload=<path>|—
 ```
 
 then, one line each, every refusal exactly as `/supervisor:open` printed it:
@@ -180,6 +207,9 @@ then, one line each, every refusal exactly as `/supervisor:open` printed it:
 ```text
 refused: <the command's own refusal line, verbatim>
 ```
+
+⚠️ **`opened` / `resumed` / `jumped` / `refused` are the four branches § 3 maps**, and the caller
+reconciles them against `selected` (`opened + resumed + jumped + refused == selected`).
 
 ⚠️ **`render` is the path the round prints; `payload` is only the truncation overflow.** When
 nothing is truncated, `payload=—`. ⚠️ **`reason` is the channel the caller's failed-write render
@@ -189,19 +219,22 @@ the reason survives only in your own transcript, which the caller never reads.
 
 ⚠️ **Every `refused:` line appears here verbatim**, one line each, because the caller prints them
 and the operator reads them — a count cannot be reconciled against a list of names. ⚠️ **Those
-`refused:` lines are the only ones that truncate — never a count.** When they do, the full list
-goes to `<digest minus .digest>.open-refusals` (`mkdir -p` the directory, write `<path>.tmp`, then
-publish with `mv`), and the caller reconciles `printed + truncated == refused`. The cap and what
-the caller does with the payload are `docs/handback-contract.md` § The shape — the truncation
-exception — and are not restated here. ⚠️ **The hand-back carries no rules**: no block shape, no
+`refused:` lines are the only ones that truncate — never a count.** When they do, the hand-back
+carries as many as fit plus `truncated=<n>`, and **only the remainder** — the `n` that did not fit,
+never the full list — goes to `<digest minus .digest>.open-refusals` (`mkdir -p` the directory,
+write `<path>.tmp`, then publish with `mv`). The caller prints the hand-back's lines and then the
+payload's, and reconciles `printed + truncated == refused`, where `printed` is the number of
+`refused:` lines in the hand-back. The cap, and the rule that the payload carries the **rest** rather
+than the whole list, are `docs/handback-contract.md` § The shape — the truncation exception — and
+are not restated here. ⚠️ **The hand-back carries no rules**: no block shape, no
 rank, no gate description — those live in this file, `scripts/open-queue.py` and `commands/open.md`.
 </output_format>
 
 <success_criteria>
 - `open-queue.py --json` was invoked exactly once this round, with `--vault`.
 - The block at `render=` is `render` from that JSON, byte-for-byte, and the round can print it.
-- Every `selected[].action` was invoked verbatim, in order, through `/supervisor:open` — no row
-  opened by hand, no action composed from a printed name.
+- Every `selected[].action` was invoked in order through `Skill` as its own `skill` + `args` split
+  (§ 3) — no row opened by hand, no action composed from a printed name.
 - Every row opened through the **headless** create path (`spawn_agent`), never the wezterm
   fallback: a tab is not an opened worker, and a fallback run reports `opened=` for tabs.
 - Every refusal reaches the caller verbatim, and nothing past the printed selection was opened.

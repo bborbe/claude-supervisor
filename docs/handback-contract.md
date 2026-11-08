@@ -17,11 +17,13 @@ The shape a sweep's **read half** and **act half** return to their caller. Eight
     exactly one of `open` / `resume` / `held` / `refused`, the four counts summing to the rows —
     truncating only under the size-cap exception below, with the remainder in the payload.
   - the **open leg** returns the **selection, the acts and the block's path** — `status`
-    (`ok` / `unknown` / `not-run`), `selected` and `opened` (the two the caller reconciles),
-    `refused` with one `refused:` line per refusal **verbatim**, `render` (the path of the block
-    the caller prints), `reason` (why the leg did not run, `—` otherwise), and its truncation pair
-    `truncated` / `payload`. It carries **no digest count** — its persisted reading is the block
-    payload, which `commands/steps/output-shape.md` item 3 renders.
+    (`ok` / `unknown` / `not-run`), `selected` and the four act counts the caller reconciles
+    (`opened + resumed + jumped + refused == selected`: `opened` is a new worker, `resumed` a
+    re-entered conversation, `jumped` an activated live session, `refused` a row `/supervisor:open`
+    turned away), `refused` carrying one `refused:` line per refusal **verbatim**, `render` (the
+    path of the block the caller prints), `reason` (why the leg did not run, `—` otherwise), and its
+    truncation pair `truncated` / `payload`. It carries **no digest count** — its persisted reading
+    is the block payload, which `commands/steps/output-shape.md` item 3 renders.
 - **The full payload never rides the hand-back.** A leg that rendered a table, classified a set or drafted a batch writes it to disk and hands back the verdict about it. Inlining the payload is the failure this half of the contract removes: it is the same information at many times the size, and it arrives in prose where nothing downstream can check it.
 - **The truncation exception — the size cap's only sanctioned exception, homed here rather than in a leg's own file.** A leg whose required set cannot fit, because it is one line per handed-over row, emits its counts plus as many rows as fit and `truncated=<n>`, and the **payload carries the rest**; the caller reads those `n` from the payload and nothing else. That is the only case in which the cap and the per-row required set can both hold, and a batch small enough to fit is never truncated.
 

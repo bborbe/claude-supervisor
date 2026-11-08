@@ -96,12 +96,18 @@ LEGS = {
     # at all, and a `status=not-run` with no `reason=` renders `open leg: not run — ` with nothing
     # after the dash. `refused` is the command's own tally, `truncated` is the difference between
     # it and the `refused:` lines that fit, and `selected` is what `opened` is reconciled against.
+    # ⚠️ **`resumed` and `jumped` are required because the reconciliation is four-way, not two.**
+    # `/supervisor:open` reports three branches — `↪️ jumped` / `♻️ resumed <sid>` / `🆕 created
+    # <sid>` — and a resumed row is reachable for a selected row (`approved-not-started.py`: a row
+    # whose session ENDED is not started). Without them, `opened + refused == selected` is false on
+    # any round that activated a live session or resumed a dead one, so a leg that dropped either
+    # key would silently leave the caller unable to reconcile at all.
     "supervisor:fleet-open-actor": {
         "agent": "agents/fleet-open-actor.md",
         "sites": ("commands/steps/open.md",),
         "required": (
-            "status", "selected", "opened", "refused", "render", "reason",
-            "truncated", "payload",
+            "status", "selected", "opened", "resumed", "jumped", "refused", "render",
+            "reason", "truncated", "payload",
         ),
     },
 }

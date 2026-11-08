@@ -31,7 +31,11 @@ delegate rule's carve-out).
      `open leg:` block `commands/steps/output-shape.md` item 3 renders — the head with its
      `workers` reading, the selected rows in rank order, and the `skipped:` tally by reason. Then
      print the tally `opened: <n> of <m>` and every `refused:` line **verbatim**.
-     ⚠️ **Open nothing a refusal names**, and never reorder or retry a row.
+     ⚠️ **Open nothing a refusal names**, and never reorder or retry a row. ⚠️ **The gap between
+     `opened` and `selected` is the refusals plus the `resumed=` and `jumped=` rows** — `opened`
+     counts only the rows that produced a **new worker**; a resumed row re-enters an existing
+     conversation and a jumped row only activated a live session
+     (`agents/fleet-open-actor.md` § 3 owns the mapping).
    - **`status=unknown`** → print `open leg: unknown` and **open nothing this tick.** The agent has
      already opened nothing; do not retry the leg. ⚠️ **`unknown` is a third answer, never `0`** —
      *"no free slots"* and *"I could not count"* must not render the same, and a leg that opened
@@ -55,12 +59,25 @@ delegate rule's carve-out).
    the missing hand-back, never on a matched error string. ⚠️ **A hand-back carrying a block but no
    `opened` count is the read-only failure this leg exists to remove** — treat it as no usable
    hand-back and run the leg. ⚠️ **Re-invoke only when nothing was opened** — the leg is not
-   idempotent across a lost hand-back: the first invocation may have spawned rows whose
-   `claude_session_id` registration had not landed when the hand-back was lost, and a second run
-   would spawn a second worker onto those tasks. One read decides it: the roster
-   (`python3 $P/fleet-sessions.py`). A session whose `ATTRIBUTION` names a row the block selected
-   was opened — report `opened=unknown` and open nothing more. Only with no roster row naming a
-   selected task may the leg run again.
+   idempotent across a lost hand-back: the first invocation may have spawned rows before the
+   hand-back was lost, and a second run would spawn a second worker onto those tasks. One read
+   decides it, and that read is the **spawn ledger**, never the roster: import
+   `scripts/spawn-ledger.py` and call its `read_ledger()` (session-id → wire row), then look for a
+   row whose `label` is one of the block's selected task names. `label` **is** the task name —
+   `/supervisor:open` § 3 passes `label <task>` — and a row with `resumed_from` set is a resume, not
+   a create.
+   ⚠️ **Why this instrument and not `fleet-sessions.py`:** that roster's rows are built from session
+   **transcripts** with the ledger joined on, so a worker spawned seconds ago has no row yet — which
+   is exactly the window this guard exists to cover (`fleet-sessions.py` says so itself: an absent
+   ledger record is a *different* claim from "not spawned"). `spawn_agent` publishes the ledger row
+   in-process at the spawn edge, before the spawn call returns, so the row is already there when the
+   hand-back can be lost.
+   ⚠️ **The selected names come from the payload**, `<digest minus .digest>.open` — written by
+   `agents/fleet-open-actor.md` § 2 *before* § 3 acts. Its numbered rows read `  <n>. <name> — <why>`,
+   and `<why>` is always one of `flagged` / `priority <n>` / `no priority`, so a name is its line
+   minus that prefix and that suffix. **No payload ⇒ the leg never reached its act step ⇒ nothing
+   was opened ⇒ a re-run is safe.** A ledger row naming a selected task means that task was opened —
+   report `opened=unknown` and open nothing more. Only with no such row may the leg run again.
 
 ## What the leg does not decide
 
