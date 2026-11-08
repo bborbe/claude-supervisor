@@ -398,5 +398,70 @@ class WorkerSessionsTest(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), "1", result.stderr)
 
 
+    def test_populations_split_the_fleet_by_role_and_mode(self):
+        """The three populations the caps are meant to act on: a manager, an interactive
+        worker, a headless worker, and an auto-resume that belongs to none of them."""
+        manager = "ffffffff-0000-0000-0000-000000000030"
+        interactive = "ffffffff-0000-0000-0000-000000000031"
+        headless = "ffffffff-0000-0000-0000-000000000032"
+        resumed = "ffffffff-0000-0000-0000-000000000033"
+        ledger = [
+            self.ledger_entry(manager, "topic manager", role="manager", mode="interactive"),
+            self.ledger_entry(interactive, "tab worker", mode="interactive"),
+            self.ledger_entry(headless, "headless worker", mode="headless"),
+            self.ledger_entry(
+                resumed, "auto-resumed", mode="headless", resumed_from="aaaaaaaa-0000-0000-0000-000000000009"
+            ),
+        ]
+        rows = [row(s) for s in (manager, interactive, headless, resumed)]
+        with FixtureEndpoint(rows=rows, ledger_rows=ledger) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--populations")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.split("\n")[:6],
+            ["managers: 1", "interactive: 1", "headless: 1", "cluster: 0", "a2a: 0", "total: 2"],
+        )
+
+    def test_a_pre_mode_record_reads_as_interactive(self):
+        """`mode` decides the split, and an absent one reads as interactive — the same rule
+        `role` follows. Defaulting a pre-field record to headless would move the whole
+        pre-`mode` population into the wrong column."""
+        sid = "ffffffff-0000-0000-0000-000000000034"
+        ledger = [self.ledger_entry(sid, "pre-field worker", role="", mode="")]
+        with FixtureEndpoint(rows=[row(sid)], ledger_rows=ledger) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--populations")
+        self.assertIn("interactive: 1", result.stdout, result.stderr)
+        self.assertIn("headless: 0", result.stdout, result.stderr)
+
+    def test_a_manager_that_is_an_auto_resume_is_not_a_manager(self):
+        """⚠️ THE READER-DIVERGENCE CASE. `resumed_from` is checked BEFORE `role`, so a record
+        that is both is dropped from every population rather than counted as a manager. The JS
+        twin and `live_workers` use the same order; measured 2026-11-08, the two readers had
+        opposite orders and disagreed on exactly this record."""
+        sid = "ffffffff-0000-0000-0000-000000000036"
+        ledger = [
+            self.ledger_entry(
+                sid, "resumed manager", role="manager", mode="interactive",
+                resumed_from="aaaaaaaa-0000-0000-0000-000000000009",
+            )
+        ]
+        with FixtureEndpoint(rows=[row(sid)], ledger_rows=ledger) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--populations")
+        self.assertIn("managers: 0", result.stdout, result.stderr)
+        self.assertIn("total: 0", result.stdout, result.stderr)
+
+    def test_populations_exclude_a_ghost_row(self):
+        """The ghost rule applies to the populations too, not only to `--count`."""
+        sid = "ffffffff-0000-0000-0000-000000000035"
+        ledger = [self.ledger_entry(sid, "exited", mode="headless")]
+        with FixtureEndpoint(rows=[row(sid, state="")], ledger_rows=ledger) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--populations")
+        self.assertIn("total: 0", result.stdout, result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
