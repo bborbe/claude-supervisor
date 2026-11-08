@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the sleep's wake instruction no longer silently becomes an hourly wake.** `commands/steps/round-quiet.md` told the round to *"arm `ScheduleWakeup` with a delay of `<instant> − now`"* — but `ScheduleWakeup` clamps `delaySeconds` to **[60, 3600]**, and a sleep is usually hours or a day out. The documented instruction therefore did not sleep the subject; it woke it **every hour** across the whole gap, and each of those rounds re-read the same `sleep-until` and re-slept — precisely the tick-burn the sleep verdict exists to remove, produced by the instruction meant to prevent it. Measured 2026-11-08 on the Several Clusters Manager: a 69 426 s (~19 h) sleep became an hourly wake until a one-shot `CronCreate` (`36 12 9 11 *`) was armed instead. The bullet now branches on distance: `ScheduleWakeup` at or under 3600 s, otherwise a one-shot `CronCreate` pinned to the instant's minute (`recurring: false`) — the spelling `commands/goal-loop.md` § step 3 already names for *"the tick must land on a wall-clock minute"*. Every date-gated subject with a `defer_date` more than an hour out hits this, which is most of them. Change set: `commands/steps/round-quiet.md`, `CHANGELOG.md`.
+
 ## v0.252.2
 
 - fix: count live workers in both directions — the fleet counter unions the identity registry in (a headless `claude --print` worker holds a live pid but stamps no heartbeat, so it was dropped: 44 live sessions counted as 10) and drops ghost rows (a `live: true` row with no `state` that the store keeps serving after its session exited: the cap read 51 against 49 real processes)
