@@ -18,7 +18,18 @@ that is
   (a) present in the **supervisor spawn ledger**, which the **session-ledger endpoint**
       serves — what makes it a session the supervisor opened, rather than a manager or one
       of the operator's own; and
-  (b) **live**, which the **session-heartbeat endpoint** answers.
+  (b) **live**, which is answered by **two channels, unioned**: the **session-heartbeat
+      endpoint** (a row with `live: true` **and** a non-empty `state`), or the **identity
+      registry**'s pid check for a local session that holds no heartbeat.
+
+⚠️ **Both halves of (b) are load-bearing, and each fixes a different error direction.**
+Without the registry, a headless local worker (`claude --print --input-format stream-json …`)
+is invisible: it writes a ledger record and holds a live pid but never stamps a heartbeat, so
+its row reads `live: false` — measured 2026-11-07, 44 live sessions counted as 10, all 22 of
+the difference this shape. Without the `state` requirement, the store's **ghost** rows are
+counted: a placeholder the store keeps stamping after its session exited (`b3d743ea`,
+`source: a2a`, `state: ""`), which made the cap read 51 against 49 real processes. A counter
+that fixes one direction only trades an under-count for an over-count.
 
 ⚠️ **The liveness source is the endpoint, and the join survived the move.** Until 2026-10-09
 this read two channels — the registry (`~/.claude/sessions/<pid>.json`, pid-keyed and
@@ -70,6 +81,7 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 _SPAWN_LEDGER = None
+_SESSION_IDENTITY = None
 
 # The last successful count, shared with the server. See `server/worker-sessions.mjs` for why it is
 # a FILE: this process exits after printing, so an in-memory cache could never outlive it.
@@ -151,6 +163,35 @@ def _ledger():
     return _SPAWN_LEDGER
 
 
+def _identity():
+    """Import `session-identity.py` — the pid-keyed registry reader.
+
+    The second liveness channel, and the only one that answers for a local worker that holds
+    no heartbeat. Read for its `alive` three-state; never for its `status`, which is the
+    registry's own stale field.
+    """
+    global _SESSION_IDENTITY
+    if _SESSION_IDENTITY is None:
+        _SESSION_IDENTITY = _load("session_identity", "session-identity.py")
+    return _SESSION_IDENTITY
+
+
+def _is_ghost(row):
+    """A row the store keeps stamping for a session that has exited.
+
+    Measured 2026-11-07: `b3d743ea` (`source: a2a`, `location: pod`, `state: ""`, `task: ""`,
+    `vault: ""`) still stamped at age 1–3 s after its session closed, and `a1026e2f` carried
+    no `source` and no `location` at all. Every real stamp carries a `state` — it is the
+    session's own report of what it is doing — so a live row without one is a placeholder,
+    not a session. Counting those is what made the cap read 51 against 49 real processes.
+
+    ⚠️ The test is deliberately narrow — `state` only. A wider rule (empty `task`, `vault`,
+    or `source`) would drop a real cluster worker during the seconds before it reports one,
+    and a cap that under-counts at startup is the defect this file exists to fix.
+    """
+    return not row.get("state")
+
+
 def _cause(failures):
     """` — <cause>` when a reader named one, else the empty string.
 
@@ -198,7 +239,25 @@ def live_workers(endpoint=None, ledger=None, on_failure=None):
             continue
         if row.get("live") is not True:
             continue
+        if _is_ghost(row):
+            continue
         live[session_id] = row.get("source")
+
+    # ⚠️ **The half the endpoint cannot answer.** A headless local worker
+    # (`claude --print --input-format stream-json …`) writes a ledger record and holds a live
+    # pid, but it never stamps a heartbeat — so its row reads `live: false` and the endpoint's
+    # live set excludes it. Measured 2026-11-07: 44 live sessions, 10 counted, and all 22 of
+    # the difference resolved in the ledger with `role: agent`, `mode: headless` and an alive
+    # pid. The identity registry is the only channel that answers for them, so it is read here
+    # and unioned in. An unreadable registry adds nothing rather than failing the count — the
+    # endpoint already answered, and a missing second channel is not an unknown first one.
+    identity = _identity().read_registry()
+    if identity:
+        for session_id, record in identity.items():
+            if session_id in live:
+                continue
+            if (record or {}).get("alive") is True:
+                live[session_id] = "registry"
 
     workers = []
     for session_id, record in ledger.items():
