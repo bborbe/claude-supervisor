@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Classify a parked tool call into one of three permission tiers.
 
-    allowlist  — matches a server/manager-allowlist.json entry; answered without judgment.
-    manager    — everything else a worker does: writes, git reads, cluster reads.
-    operator   — the operator-only class. Always reaches the operator, never a manager.
+    allowlist — a server/manager-allowlist.json entry, answered without judgment.
+    manager   — everything else a worker does: writes, git reads, cluster reads.
+    operator  — the operator-only class; always reaches the operator, never a manager.
 
 The ruling and the manager's rubric live in docs/permission-allowlist.md; this is the machine half.
 
