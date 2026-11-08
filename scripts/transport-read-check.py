@@ -329,6 +329,7 @@ def main():
             ("mmf", "manager-menu-footer.py"),
             ("sg", "spawn-goal.py"),
             ("ser", "session-exit-record.py"),
+            ("rih", "reap-idle-headless.py"),
         )
     }
 
@@ -372,6 +373,12 @@ def main():
         ("sg", "pane_text", (1,)),
         # added 2026-11-06 — the observer's process-tree read, driven like `pvc._pid_ttys`.
         ("ser", "_process_table", ()),
+        # added 2026-11-08 — the reap verb's two transport reads, DRIVEN and not merely
+        # listed. An enumeration entry nothing reaches is a false green for exactly the
+        # read it claims to protect (the `mmf` pair above was found that way), and here
+        # the property is load-bearing: `watchers` returning `[]` for an unreadable tree
+        # would reap a worker whose background watcher was merely unobservable.
+        ("rih", "watchers", (1,)), ("rih", "process_start", (1,)),
     ]
     if args.capture:
         print(f"== three-state captures — {os.path.abspath(args.tree)}")
