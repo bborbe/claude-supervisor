@@ -194,24 +194,36 @@ test('an explicitly-off endpoint is null and dials nothing', async () => {
 
 test('only an explicit live: true is live', () => {
   const rows = [
-    { session_id: 'a', live: true, source: 'mcp-timer' },
-    { session_id: 'b', live: false },
-    { session_id: 'c', live: 'true' },
-    { session_id: 'd', live: 1 },
-    { session_id: 'e' },
+    { session_id: 'a', live: true, source: 'mcp-timer', state: 'idle' },
+    { session_id: 'b', live: false, state: 'idle' },
+    { session_id: 'c', live: 'true', state: 'idle' },
+    { session_id: 'd', live: 1, state: 'idle' },
+    { session_id: 'e', state: 'idle' },
   ]
   const live = liveFromHeartbeat(rows)
   assert.deepEqual([...live.keys()], ['a'])
   assert.equal(live.get('a'), 'mcp-timer')
 })
 
+// ⚠️ THE GHOST RULE. A `live: true` row carrying no `state` is a placeholder the store keeps
+// serving after its session exited — measured 2026-11-07, `b3d743ea` still stamped at age 1–3 s
+// after the close and the cap read 51 against 49 real processes. Every real stamp reports what
+// it is doing, so `state` is the discriminator.
+test('a live row with no state is a ghost, not a session', () => {
+  const live = liveFromHeartbeat([
+    { session_id: 'ghost', live: true, source: 'a2a' },
+    { session_id: 'real', live: true, source: 'a2a', state: 'busy' },
+  ])
+  assert.deepEqual([...live.keys()], ['real'])
+})
+
 test('a malformed row is skipped, never thrown on', () => {
   // This runs on the spawn path: an uncaught throw is a failed spawn, not a wrong count.
-  const rows = [null, 'nope', 42, { live: true }, { session_id: 42, live: true }, { session_id: '', live: true }, { session_id: 'ok', live: true }]
+  const rows = [null, 'nope', 42, { live: true }, { session_id: 42, live: true }, { session_id: '', live: true }, { session_id: 'ok', live: true, state: 'idle' }]
   assert.deepEqual([...liveFromHeartbeat(rows).keys()], ['ok'])
 })
 
 test('a missing source maps to null rather than undefined', () => {
-  const live = liveFromHeartbeat([{ session_id: 'a', live: true }])
+  const live = liveFromHeartbeat([{ session_id: 'a', live: true, state: 'idle' }])
   assert.equal(live.get('a'), null)
 })
