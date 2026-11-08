@@ -81,3 +81,13 @@ Measured 2026-10-12 on a cold `v0.130.0` round: rows 3 (`orphan=46`, `collision=
 ⚠️ **The round does not propose managers for unmanaged goals.** The row was removed 2026-10-29 by operator ruling, so a round that reports an unmanaged topic reports it and stops. This lives here rather than in `commands/fleet-drive.md` because the router table carries rows that run, and an absence is not a row — but it is stated, so a future reader does not read the gap as an omission and add it back.
 
 **The opening condition, stated because the prohibition above is otherwise only half a rule: the only subject this fleet opens is one carrying `flag: true` with no loop armed.** The flag is the operator's alone to set — an agent setting it, or reading an importance judgement as a substitute for it, is the removed row coming back by hand. A subject that is non-terminal, has live workers, or looks important is **not** a reason to propose a manager: none of those three is the flag, and all three are the reasoning the removed row used.
+
+⚠️ **Proposing is not opening, and the fleet tier does the second.** A flagged **goal** or
+**topic** with no live manager is opened by the flagged-open leg
+(`commands/steps/flagged-open.md` § Step 5c.1), through `scripts/flagged-subjects.py` and
+`/supervisor:open --goal` / `--topic`. That is rule 2 executing the operator's own mark, not
+the removed row returning: the removed row asked the operator to decide *which* unmanaged
+goal deserved a manager, while this leg decides nothing — it opens what the operator already
+flagged and stops at the cap. **Never restore the ask**: a round that finds an unmanaged,
+unflagged goal reports it and stops.
+
