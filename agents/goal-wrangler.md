@@ -78,9 +78,13 @@ Report exactly once, at the end:
 Answered: <n>
   <request_id> | <worker label> | <tool> | allow|deny | <one-line reason>
 Escalated: <n>
-  <request_id> | <worker label> | <tool> | <why it needs the manager>
+  <request_id> | <worker label> | <tool> | <class> — <why it needs the manager>
 Workers: <label> — <status> — <one-line result>   (loop mode only)
 Unclassified: <anything you could not place>
+
+⚠️ **An `AskUserQuestion` escalation carries the question itself.** For that tool, `<why it needs the manager>` holds the question text and every option label, verbatim — e.g. `C — "Which approach for the parser?" options: extract-to-helper / inline-rewrite`. The caller that routes a class-C park cannot read `pending_permissions` on its own (`list_agents.pending_permissions` is ids only), so this report is its only view of the question: an escalation that names only `C` leaves the park unrouteable and the worker waiting for the timeout.
+
+⚠️ **The line is pipe-delimited, so the question is flattened before it goes in** — collapse every newline to a space and write `\|` for a literal `|`. The `request_id` is the first cell and stays safe either way, but an unescaped delimiter shifts every cell after it and the reader's question becomes a fragment of the options.
 </output_format>
 
 <success_criteria>
