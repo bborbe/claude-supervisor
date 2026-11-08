@@ -983,31 +983,59 @@ def is_headless_key(pane):
     return str(pane).startswith(HEADLESS_PREFIX)
 
 
-def headless_items(keys, endpoint=None):
-    """Synthetic event-log records for the `hst:<id>` keys, read from the store.
+def owner_of(lines, index):
+    """The session id a pane-less row declares on its `owner:` line, or None.
 
-    The second read of the attention store this route costs, made only when the
-    feed carried a headless row. Each record carries `pane: hst:<id>` so the
-    pane-keyed hops (`session_for_pane`, `gate_fingerprint`) resolve it unchanged:
-    `session_id` from the store's `producer_id`, the text from its `payload`.
+    A row with no pane cannot be joined to its session through the event log —
+    `session_for_pane` has no pane to match. `who-needs-me.py` knows the owner (it
+    read it from the store, or from the log on the fallback branch), so it renders
+    it on the row's continuation block; this reads it back.
 
-    ⚠️ **An unreachable store fails OPEN** — no record, so the session reads
-    `unowned` and the gate EMITS. Silence is the failure this route removes; a
-    store read that failed must not reintroduce it.
+    The scan stops at the next `[...]` row marker, so an `owner:` line can never be
+    borrowed from a neighbouring row — the same guard `headless_key` applies.
+
+    ⚠️ **The alternative is a SECOND attention-store read.** `headless_items`
+    re-reads the store to recover exactly this mapping, and a transient 3 s
+    timeout there blanked every row's feed verdict for a whole manager round
+    (measured 2026-11-08 05:06:29Z: `gated=0 · clear=0 · unread=11` for 11 rows,
+    while the feed itself was answering). Carrying the owner on the row removes
+    that read and the failure with it.
+    """
+    import re
+
+    for line in lines[index + 1:]:
+        if re.match(r"\s*\[", line):
+            return None
+        match = re.search(r"^\s*owner:\s*(\S+)\s*$", line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def headless_items_checked(keys, endpoint=None):
+    """`(records, error)` — `headless_items`, with a store failure named.
+
+    `headless_items` returns `[]` both for an unreachable store and for a read
+    that matched nothing, so its caller cannot tell a failed read from a real
+    absence. That ambiguity is fine on the emit path, which fails OPEN by design
+    (silence must not reintroduce a dropped gate), and it is fatal on the readings
+    path, which must never render a failed read as a verdict about a row.
+
+    `error` is None on a read that ran, and a message naming the probe otherwise.
     """
     wanted = {str(k)[len(HEADLESS_PREFIX):] for k in keys if is_headless_key(k)}
     if not wanted:
-        return []
+        return [], None
     import urllib.request
 
     base = (endpoint or os.environ.get("ATTENTION_STORE_URL") or "http://localhost:18080").rstrip("/")
     try:
         with urllib.request.urlopen(base + "/api/1.0/attention", timeout=3) as resp:
             data = json.loads(resp.read().decode("utf-8") or "[]")
-    except (OSError, ValueError):
-        return []
+    except (OSError, ValueError) as exc:
+        return [], f"attention store read failed: {type(exc).__name__}: {exc}"
     if not isinstance(data, list):
-        return []
+        return [], "attention store returned a non-list body"
     out, now = [], time.time()
     for item in data:
         if not isinstance(item, dict) or item.get("item_id") not in wanted:
@@ -1020,7 +1048,22 @@ def headless_items(keys, endpoint=None):
                 "ts": now,
             }
         )
-    return out
+    return out, None
+
+
+def headless_items(keys, endpoint=None):
+    """Synthetic event-log records for the `hst:<id>` keys, read from the store.
+
+    Each record carries `pane: hst:<id>` so the pane-keyed hops
+    (`session_for_pane`, `gate_fingerprint`) resolve it unchanged: `session_id`
+    from the store's `producer_id`, the text from its `payload`.
+
+    ⚠️ **An unreachable store fails OPEN** — no record, so the session reads
+    `unowned` and the gate EMITS. Silence is the failure this route removes; a
+    store read that failed must not reintroduce it. Callers that must tell a
+    failed read from an empty one use `headless_items_checked` instead.
+    """
+    return headless_items_checked(keys, endpoint)[0]
 
 
 def panes_from_feed(stream):
