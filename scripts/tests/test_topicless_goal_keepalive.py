@@ -16,10 +16,12 @@ instrument never produces (the same rule `test_topic_keepalive.py` documents).
 
 import importlib.util
 import io
+import json
 import os
 import pathlib
 import shutil
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 
@@ -147,8 +149,6 @@ class LegTest(unittest.TestCase):
     def test_a_spent_cap_is_a_crash_loop_with_no_command(self):
         self.goal("Looping Goal", "sid-loop")
         self.verdicts["sid-loop"] = "ABSENT"
-        import json
-        import time
         now = time.time()
         (self.state / "goal--looping-goal.json").write_text(
             json.dumps({"resumes": [now - 60, now - 120, now - 180]}), encoding="utf-8")
@@ -161,6 +161,23 @@ class LegTest(unittest.TestCase):
         self.verdicts["sid-absent"] = "ABSENT"
         self.run_leg()
         self.assertEqual(list(self.state.iterdir()), [])
+
+    def test_an_error_inside_one_verdict_is_that_goals_cannot_tell(self):
+        """An OSError from topic-keepalive must not end the run with an undefined exit code."""
+        self.goal("Broken Goal", "sid-broken")
+        self.goal("Lonely Goal", "sid-absent")
+        self.verdicts["sid-absent"] = "ABSENT"
+
+        def boom(subject, branch="goal"):
+            if subject == "Broken Goal":
+                raise OSError("state dir unwritable")
+            return ("OK", "")
+        self.ka.cadence_state_detail = boom
+        rc, out, _ = self.run_leg()
+        self.assertEqual(rc, 0)
+        rows = self.rows(out)
+        self.assertEqual(rows["Broken Goal"][1:3], ["cannot-tell", "-"])
+        self.assertEqual(rows["Lonely Goal"][1], "resume")
 
     def test_an_empty_population_is_zero_not_a_refusal(self):
         rc, out, _ = self.run_leg()

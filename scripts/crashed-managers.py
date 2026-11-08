@@ -38,6 +38,13 @@ topic declares at all, once it sits at `status: in_progress` + `phase: execution
 recorded id: `commands/steps/keepalive.md` § Restart a lapsed goal manager whose goal no
 topic declares restarts it every fleet round, and a card would duplicate that action.
 
+⚠️ **Coverage is read from the predicate, not from a run of the leg — a deliberate trade.** In
+a round whose keep-alive leg was debt-gated or refused, a kept goal's lapsed manager gets
+neither a restart nor a card that round. The same holds for a declared goal under a live
+topic manager, whose own round may be debt-gated too. The leg records its skip in the
+digest's `LEGS` section (`keep-alive: not run — <reason>`), which is where that round's gap
+is visible; a card per manager would duplicate the restart on every round the leg does run.
+
 ⚠️ **`branch == "fleet"` is counted and reported but never carded, and that is not a gap.**
 Nothing sits above a fleet manager, so it is uncovered in the keep-alive sense — but the
 crash this script detects is *a LIVE session whose loop lapsed*, and a fleet record carries

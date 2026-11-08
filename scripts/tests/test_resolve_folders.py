@@ -85,6 +85,23 @@ class Base(unittest.TestCase):
 
 
 class ResolvesTheOwningVault(Base):
+    def test_vault_flag_resolves_the_named_vault_not_the_cwd(self):
+        """The fleet round acts on a vault other than its cwd; first-match picked the wrong one."""
+        other = self.make_vault("private-starcitizen", os.path.join(self.root, "..", "sc"))
+        vaults = [other] + self.vaults
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out, \
+             mock.patch.object(rf.subprocess, "run", return_value=mock.Mock(
+                 returncode=0, stdout=json.dumps(vaults), stderr="")), \
+             mock.patch.object(rf.os, "getcwd", lambda: "/definitely/not/a/vault"):
+            code = rf.main(["--vault", self.root])
+        self.assertEqual(code, 0)
+        self.assertTrue(out.getvalue().strip().endswith("|private-personal"))
+
+    def test_a_malformed_argument_list_is_refused(self):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(rf.main(["--vault"]), 1)
+        self.assertIn("UNKNOWN usage", out.getvalue())
+
     def test_from_the_vault_root(self):
         code, out, seen = run_main(self.vaults, cwd=self.root)
         self.assertEqual(code, 0)

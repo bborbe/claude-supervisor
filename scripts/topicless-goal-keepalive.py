@@ -129,6 +129,11 @@ def verdict(vault: str, goals_dir: str, name: str) -> tuple[str, str]:
         # argparse refused its own arguments. That is a fault in this caller, so report it
         # as undecidable, never as a resume.
         return "cannot-tell", "topic-keepalive.py refused its arguments"
+    except Exception as exc:  # noqa: BLE001 — an unreadable page or state dir is undecidable
+        # `topic-keepalive.main` opens the goal page and creates its state dir unguarded. An
+        # OSError escaping here would end the run with exit 1, a code this script does not
+        # define, and drop every later row. One goal's failure is that goal's `cannot-tell`.
+        return "cannot-tell", f"topic-keepalive.py raised {type(exc).__name__}: {exc}"
     lines = out.getvalue().splitlines()
     if not lines:
         return "cannot-tell", "topic-keepalive.py printed nothing"

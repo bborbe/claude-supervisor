@@ -36,16 +36,12 @@ subject decides nothing new (`docs/session-tiers.md` § The four tiers, rule 1).
 directory, not the roster: a topic manager whose session died is absent from the roster, which
 is exactly the row this leg exists to recover. ⚠️ **Resolve the directory from the vault's own
 config, never assume `23 Topics`** — a renamed directory would glob nothing and the leg would
-report a clean round, the exact silent failure it exists to remove:
+report a clean round, the exact silent failure it exists to remove. ⚠️ **Match the config entry by the vault's PATH (`resolve-folders.py --vault`), never take the first entry carrying the key** — on the operator's machine the first `goals_dir` is `private-starcitizen`'s `23 Goals` and the first `tasks_dir` is `seibert-agent`'s `tasks` (measured 2026-11-08), so a first-match read refuses or globs nothing for private-personal on every round. Every section below resolves its folders the same way, and an `UNKNOWN` answer records that section not run:
 
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
-TOPICS=$(vault-cli config list --output json | python3 -c "
-import json,sys
-for x in json.load(sys.stdin):
-    if x.get('topics_dir'):
-        print(x['topics_dir']); break")
-TOPICS="${TOPICS:-23 Topics}"
+IFS='|' read -r TOPICS GOALS TASKS _ < <(python3 "$P/resolve-folders.py" --vault "<vault>")
+case "$TOPICS" in UNKNOWN*) echo "folders: $TOPICS"; exit 2;; esac   # record this section not run
 for f in "<vault>/$TOPICS"/*.md; do
   name=$(basename "$f" .md)
   grep -qE '^claude_session_id: *[^ ]' "$f" || continue
@@ -109,18 +105,8 @@ verdict. It never acts and never writes the cap.
 
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
-GOALS=$(vault-cli config list --output json | python3 -c "
-import json,sys
-for x in json.load(sys.stdin):
-    if x.get('goals_dir'):
-        print(x['goals_dir']); break")
-GOALS="${GOALS:-24 Goals}"
-TOPICS=$(vault-cli config list --output json | python3 -c "
-import json,sys
-for x in json.load(sys.stdin):
-    if x.get('topics_dir'):
-        print(x['topics_dir']); break")
-TOPICS="${TOPICS:-23 Topics}"
+IFS='|' read -r TOPICS GOALS TASKS _ < <(python3 "$P/resolve-folders.py" --vault "<vault>")
+case "$TOPICS" in UNKNOWN*) echo "folders: $TOPICS"; exit 2;; esac   # record this section not run
 python3 "$P/topicless-goal-keepalive.py" --vault "<vault>" --goals-dir "$GOALS" --topics-dir "$TOPICS"
 ```
 
@@ -149,8 +135,10 @@ it is `commands/steps/flagged-open.md`'s job, and only when the goal is flagged.
 
 **Record the count in the digest.**
 `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg topicless-goal-managers --count <n>`
-- `<n>` is the rows this section found actionable and did not act on: a `crash-loop`, a
-  `cannot-tell`, or a command that failed.
+- `<n>` is the rows that needed action and got none: every `crash-loop` and `cannot-tell`
+  row, plus each `resume`/`restart` whose command failed. The script's own `actionable:`
+  line counts only `resume`/`restart` rows — the work handed to the round — so the two
+  numbers differ by design.
 - On exit 2, write `--leg topicless-goal-managers --not-run "<reason>"` instead, so the other
   keep-alive readings stay intact.
 - The line's format has its single home in `commands/steps/output-shape.md` item 14.
@@ -253,8 +241,8 @@ different `watching_since` re-arms it.
 
 **Report the line.** Print the `park-nudge:` summary verbatim
 (`<n> nudged · <s> suppressed · <w> within 15m · <m> watching · <l> live`) beside the
-three counts that `commands/steps/output-shape.md` item 14 renders. ⚠️ **It is not one of
-them** — item 14's block is the digest's `LEGS` section, which admits exactly three
+four counts that `commands/steps/output-shape.md` item 14 renders. ⚠️ **It is not one of
+them** — item 14's block is the digest's `LEGS` section, which admits exactly four
 `unactioned:` lines, so a `park-nudge:` line printed inside it would fail that item's own
 `--check`.
 
@@ -272,18 +260,8 @@ vault's config, never assume `25 Tasks`:**
 
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
-TASKS=$(vault-cli config list --output json | python3 -c "
-import json,sys
-for x in json.load(sys.stdin):
-    if x.get('tasks_dir'):
-        print(x['tasks_dir']); break")
-TASKS="${TASKS:-25 Tasks}"
-GOALS=$(vault-cli config list --output json | python3 -c "
-import json,sys
-for x in json.load(sys.stdin):
-    if x.get('goals_dir'):
-        print(x['goals_dir']); break")
-GOALS="${GOALS:-24 Goals}"
+IFS='|' read -r TOPICS GOALS TASKS _ < <(python3 "$P/resolve-folders.py" --vault "<vault>")
+case "$TOPICS" in UNKNOWN*) echo "folders: $TOPICS"; exit 2;; esac   # record this section not run
 for f in "<vault>/$TASKS"/*.md; do
   grep -qE '^claude_session_id: *[^ ]' "$f" || continue
   name=$(basename "$f" .md)
@@ -334,9 +312,9 @@ Both flags are refused on any other key. Format, not-run form and rationale:
 ⚠️ **A leg that does not execute records WHY, in the same file — at the granularity that failed.**
 When the debt gate skips the whole leg (exit 12 or 2), write
 `fleet-legs.py --leg keep-alive --not-run "<reason>"`, which covers all three of its keys.
-⚠️ **When only one half failed, name that KEY, never the leg** — a scan whose instrument is
+⚠️ **When only one section failed, name that KEY, never the leg** — a scan whose instrument is
 absent is `fleet-legs.py --leg dead-workers --not-run "scan instrument absent"`, because
-`--leg keep-alive` would wipe the lapsed-manager reading this leg already recorded. Never
+`--leg keep-alive` would wipe the readings the other sections already recorded. Never
 leave the sweep's seeded `not run — no reading recorded this round` standing: `--check`
 treats that text as "nobody has spoken for this key", so a round that renders it is reported
 as incomplete. A suppressed leg and a leg that ran and found nothing must never print the same.

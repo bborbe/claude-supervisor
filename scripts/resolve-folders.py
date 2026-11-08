@@ -45,6 +45,7 @@ reconstruct it, so the resolver hands it over rather than leaving the caller to 
 import json
 import os
 import subprocess
+import sys
 
 TIMEOUT_SECONDS = 10
 KEYS = ("topics_dir", "goals_dir", "tasks_dir")
@@ -94,10 +95,10 @@ def configured_vaults() -> tuple[list[dict], int, str]:
     return vaults, len(payload), ""
 
 
-def owning_vault(vaults: list[dict]) -> tuple[dict, str] | str:
-    """The vault whose root is the cwd or its nearest ancestor, or a reason string."""
+def owning_vault(vaults: list[dict], target: str | None = None) -> tuple[dict, str] | str:
+    """The vault whose root is `target` (default: the cwd) or its nearest ancestor, or a reason."""
     try:
-        cwd = os.path.realpath(os.getcwd())
+        cwd = os.path.realpath(os.path.expanduser(target) if target else os.getcwd())
     except OSError as exc:
         return f"the session's cwd could not be read: {exc.strerror or exc}"
 
@@ -124,12 +125,25 @@ def owning_vault(vaults: list[dict]) -> tuple[dict, str] | str:
     return best_vault, best_root
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    # `--vault <path>` resolves a NAMED vault instead of the cwd's. The fleet round runs in
+    # whatever vault its session started in and acts on another, so a cwd match answers for
+    # the wrong vault there. Before this flag its keep-alive snippets took the FIRST config
+    # entry carrying the key, which on the operator's machine is `private-starcitizen`
+    # (`23 Goals`) and `seibert-agent` (`tasks`): measured 2026-11-08, wrong for
+    # private-personal on every round.
+    argv = list(argv or [])
+    target = None
+    if argv:
+        if len(argv) != 2 or argv[0] != "--vault" or not argv[1].strip():
+            return fail("usage: resolve-folders.py [--vault <vault root path>]")
+        target = argv[1]
+
     vaults, total, reason = configured_vaults()
     if reason:
         return fail(reason)
 
-    owned = owning_vault(vaults)
+    owned = owning_vault(vaults, target)
     if isinstance(owned, str):
         return fail(owned)
     vault, root = owned
@@ -166,4 +180,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))
