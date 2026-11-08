@@ -78,6 +78,21 @@ class TestHelperFilter(unittest.TestCase):
         for args in ("/bin/bash -c 'uvx mcp-obsidian'", "sh -c 'npm exec evil'"):
             self.assertFalse(reap.is_helper(args), args)
 
+    def test_a_listed_executable_running_a_watcher_is_not_a_helper(self):
+        """`node mcp-watch.js` is a script, not an MCP package — the bare `mcp-` substring
+        called it a helper and the watcher went unseen."""
+        for args in (
+            "node scripts/mcp-watch.js",
+            "/usr/local/bin/node /w/repo/mcp-probe.js",
+            "npx mcp-runner.py",
+            "bun run mcp-thing.ts",
+        ):
+            self.assertFalse(reap.is_helper(args), args)
+
+    def test_an_mcp_package_under_a_listed_executable_is_a_helper(self):
+        for args in ("uvx mcp-obsidian", "npm exec @modelcontextprotocol/server-x"):
+            self.assertTrue(reap.is_helper(args), args)
+
 
 class TestTranscriptPath(unittest.TestCase):
     def test_both_slash_and_dot_munge_to_dash(self):

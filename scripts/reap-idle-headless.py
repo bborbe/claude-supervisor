@@ -82,6 +82,9 @@ EXIT_DEADLINE = 8.0
 
 WRAPPER_URL = os.environ.get("SUPERVISOR_WRAPPER_URL") or "http://localhost:18090"
 ATTENTION_URL = os.environ.get("SUPERVISOR_ATTENTION_URL") or "http://localhost:18080"
+#: The attention-controller that serves the session ledger — where a wrapper-backed
+#: worker's `wrapper_session_id` lives.
+LEDGER_URL = os.environ.get("SUPERVISOR_LEDGER_URL") or ATTENTION_URL
 
 #: Where Claude Code writes transcripts, `<projects>/<escaped-cwd>/<sid>.jsonl`.
 PROJECTS_DIR = os.environ.get("SUPERVISOR_PROJECTS_DIR") or os.path.expanduser(
@@ -155,7 +158,19 @@ def is_helper(args):
         return cwd.rstrip("/").endswith(SUPERVISOR_MCP_DIR_SUFFIX)
     if exe not in {"uv", "uvx", "npm", "npx", "bun", "node"}:
         return False
-    return "mcp-" in args or "@playwright/mcp" in args
+    # A known MCP server PACKAGE, not the bare `mcp-` substring: `node scripts/mcp-watch.js`
+    # is a backgrounded watcher and must read as one, while `uvx mcp-obsidian` is a server.
+    # The discriminator is the shape of the token — a package name carries no script
+    # extension — so a watcher written as `mcp-<name>.js` cannot hide behind the filter.
+    if "@playwright/mcp" in args or "@modelcontextprotocol/" in args:
+        return True
+    if "mcp-server-" in args:
+        return True
+    for token in parts:
+        name = os.path.basename(token)
+        if name.startswith("mcp-") and not name.endswith((".js", ".mjs", ".cjs", ".py", ".ts", ".sh")):
+            return True
+    return False
 
 
 def watchers(pid):
@@ -216,16 +231,50 @@ def fetch_json(url, timeout=3):
         return None
 
 
-def wrapper_record(session_id, wrapper_url=None):
-    return fetch_json(f"{wrapper_url or WRAPPER_URL}/api/1.0/sessions/{session_id}")
+def wrapper_handle(session_id, ledger_url=None):
+    """The key the wrapper's routes use for this session.
+
+    ⚠️ **Usually the Claude id, but not always.** Measured 2026-11-08: 22 of 22 live
+    `sdk-cli` sessions answered `/api/1.0/sessions/<claude-id>` with a matching `id` —
+    none of them wrapper-backed. A session spawned through `spawn_agent` carries a
+    distinct `wrapper_session_id` in the ledger (`server/ledger.mjs:179-185`), and
+    `server/supervisor.mjs:2983-2985` says every wrapper route keys off that handle.
+    Those are exactly the workers this verb exists to reap, so resolving it matters.
+    """
+    row = fetch_json(
+        f"{ledger_url or LEDGER_URL}/api/1.0/session-ledger/{session_id}"
+    )
+    if isinstance(row, dict):
+        handle = row.get("wrapper_session_id")
+        if isinstance(handle, str) and handle:
+            return handle
+    return session_id
+
+
+def wrapper_record(session_id, wrapper_url=None, ledger_url=None):
+    handle = wrapper_handle(session_id, ledger_url)
+    return fetch_json(f"{wrapper_url or WRAPPER_URL}/api/1.0/sessions/{handle}")
 
 
 def open_cards(session_id, attention_url=None):
-    """`(cards, readable)` — the session's open attention cards, and whether the store answered."""
+    """`(cards, readable)` — the session's open attention cards, and whether the store answered.
+
+    ⚠️ **An unrecognised payload is unreadable, not empty.** `server/open-cards.mjs` returns
+    `null` when the body is neither a list nor an object carrying `items`/`data`; collapsing
+    that into `[]` would let a store answering `{"error": …}` satisfy the `gate-held` guard
+    and close a session whose card was never read.
+    """
     data = fetch_json(f"{attention_url or ATTENTION_URL}/api/1.0/attention")
     if data is None:
         return None, False
-    items = data if isinstance(data, list) else (data.get("items") or data.get("data") or [])
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = data.get("items")
+        if items is None:
+            items = data.get("data")
+    else:
+        return None, False
     if not isinstance(items, list):
         return None, False
     cards = [
@@ -261,7 +310,7 @@ def resolve_transcript(cwd, session_id, projects_dir=None):
     if os.path.isfile(derived):
         return derived
     hits = glob.glob(
-        os.path.join(projects_dir or PROJECTS_DIR, "*", f"{session_id}.jsonl")
+        os.path.join(projects_dir or PROJECTS_DIR, "*", f"{glob.escape(session_id)}.jsonl")
     )
     return hits[0] if hits else None
 
@@ -367,9 +416,22 @@ def main(argv=None):
             task = close_worker.find_task(session_id, rec.get("cwd"))
             bad = close_worker.task_verdict(task, today)
             if bad is None and task is not None:
+                # `task_verdict` returns None for three different states — terminal, handed
+                # off, and deferred to the future — and only the first is "already terminal".
+                # Naming the wrong one sends the operator to close-worker.py on a false
+                # premise, so say which it is.
+                path_, fm, handed_off = task
+                status = (fm.get("status") or "").strip()
+                defer = fm.get("defer_date")
+                if handed_off:
+                    why = "has been handed off to a successor session"
+                elif status in close_worker.TERMINAL:
+                    why = f"is already terminal (status {status})"
+                else:
+                    why = f"is deferred to {defer}"
                 verdict = (
                     "task-terminal",
-                    f"{os.path.basename(task[0])} is already terminal; use close-worker.py",
+                    f"{os.path.basename(path_)} {why}; use close-worker.py",
                 )
             elif bad is not None and bad[0] != "task-not-terminal":
                 # `task-unresolved` is not a finished task, but this verb needs a resolvable
@@ -377,7 +439,18 @@ def main(argv=None):
                 verdict = ("task-unresolved", bad[1])
 
         if verdict is not None:
+            # `already-gone` promises the stale entry is removed, so remove it: the file is
+            # known to claim this session id and its pid is provably dead, and a liveness
+            # record for a dead pid is stale by construction. Without this the entry
+            # re-refuses on every run and the docstring is a lie. The refusal prints FIRST
+            # — the token is the caller's contract, so nothing may precede it.
             exit_code = refuse(verdict[0], verdict[1])
+            if verdict[0] == "already-gone":
+                try:
+                    os.unlink(path)
+                    print(f"   ℹ️ removed the stale registry entry for dead pid {pid}")
+                except OSError as error:
+                    print(f"   ⚠️ stale registry entry {path} could not be removed: {error}")
             continue
 
         transcript = transcript_path(rec.get("cwd"), session_id)
