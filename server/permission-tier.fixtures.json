@@ -1,8 +1,7 @@
 {
   "note": "Shared cases for the permission-tier classifier. Both scripts/permission-tier.py and server/permission-tier.mjs must return `tier` (and `form`, when given) for every case. The three `bad-example-*` cases are the operator's own cards from 2026-11-06 that must stop reaching the board. Edit a case here and every suite that runs this fixture moves with it.",
   "cases": [
-    { "id": "sc1-git-status", "tool": "Bash", "input": { "command": "git status" }, "tier": "manager" },
-    { "id": "sc1-git-log", "tool": "Bash", "input": { "command": "git log --oneline -5" }, "tier": "manager" },
+    { "id": "sc1-git-status", "tool": "Bash", "input": { "command": "git status" }, "tier": "manager" }, { "id": "sc1-git-log", "tool": "Bash", "input": { "command": "git log --oneline -5" }, "tier": "manager" },
     { "id": "sc1-git-diff", "tool": "Bash", "input": { "command": "git diff origin/master -- CHANGELOG.md" }, "tier": "manager" },
     { "id": "sc1-git-show", "tool": "Bash", "input": { "command": "git show HEAD:README.md" }, "tier": "manager" },
     { "id": "sc1-git-rev-parse", "tool": "Bash", "input": { "command": "git rev-parse --abbrev-ref @{upstream}" }, "tier": "manager" },
@@ -89,8 +88,7 @@
     { "id": "review6-embedded-redirect", "tool": "Bash", "input": { "command": "echo x>~/.claude/settings.json" }, "tier": "operator", "form": "permission-grant" },
     { "id": "review6-clustered-git-flags", "tool": "Bash", "input": { "command": "git push -uf origin feat/x" }, "tier": "operator", "form": "force-push/ref-delete" },
     { "id": "review7-arithmetic-embedded-subst", "tool": "Bash", "input": { "command": "echo $((1 + $(git push --force origin x)))" }, "tier": "operator", "form": "force-push/ref-delete" },
-    { "id": "review7-vault-token", "tool": "Bash", "input": { "command": "cat ~/.vault-token" }, "tier": "operator", "form": "secret" },
-    { "id": "review7-env-no-command", "tool": "Bash", "input": { "command": "env -i" }, "tier": "operator", "form": "secret" },
+    { "id": "review7-vault-token", "tool": "Bash", "input": { "command": "cat ~/.vault-token" }, "tier": "operator", "form": "secret" }, { "id": "review7-env-no-command", "tool": "Bash", "input": { "command": "env -i" }, "tier": "operator", "form": "secret" },
     { "id": "review7-heredoc-backtick", "tool": "Bash", "input": { "command": "cat <<EOF > /tmp/x\n`git push --force origin x`\nEOF" }, "tier": "operator", "form": "force-push/ref-delete" },
     { "id": "review2-timeout-routine", "tool": "Bash", "input": { "command": "timeout 30 git push origin feat/x" }, "tier": "manager" },
     { "id": "review-data-heredoc-still-manager", "tool": "Bash", "input": { "command": "cat <<'EOF' > /tmp/x.md\nhello\nEOF" }, "tier": "manager" },
