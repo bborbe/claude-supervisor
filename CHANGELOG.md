@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.252.1
 
 - fix: **the keep-alive's `SLEEPING` line names the instant, not just the state.** `manager-liveness.py --state` prints `<STATE>\t<slug>\t<detail>` and the detail is the only place a reader learns *what* a state is waiting for — for a sleep it carries `until <ISO> (<n>s remaining)`. `topic-keepalive.py` parsed field 0 and dropped the rest, so a date-gated subject was reported as `cadence SLEEPING — waiting on its own defer_date, not a lapse` with no date: the one fact that makes a sleep actionable was the one the line omitted, and an operator could not tell a sleep ending in an hour from one ending in a week. New `cadence_state_detail()` returns `(state, detail)` from the same single bounded probe and `cadence()` becomes a thin wrapper over its first field, so every existing caller and test keeps its contract. Change set: `scripts/topic-keepalive.py`, `scripts/tests/test_topic_keepalive.py`, `CHANGELOG.md`.
 ## v0.252.0
