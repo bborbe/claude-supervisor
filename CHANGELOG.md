@@ -8,6 +8,18 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: a `claude-wrapper` restart no longer kills a streaming headless worker. The event stream
+  reconnects instead of failing: every SSE frame's `id:` is tracked and sent back as
+  `Last-Event-ID`, so the retry resumes at exactly the event the client stopped at, with
+  exponential backoff (100 ms → 5 s, 24 attempts, 2 min cap) sized to ride out a daemon restart.
+  A refused connection is treated as a restart rather than a failure. A `409` is never retried —
+  it means the wrapper no longer retains that resume point, and serving a different one would
+  leave an invisible hole in the transcript, so it raises `StreamGapError` instead. Previously
+  undici's `TypeError: terminated` reached `runAgentLoop`'s catch and the worker settled `error`
+  while its child was still generating.
+
 ## v0.250.4
 
 - fix: **a failed delivery's durable record now names its producer.** `--failed` accepts `--pid` and `--row-ts` — the sender's process id and the timestamp of the ledger row it wrote in the same run — and `read_pending` carries both through every rewrite. Without them a hand-written `liveness-pending.json` reproduces every field of a real failed send exactly, so "the record was written by the tick" could only be asserted, never shown. No behaviour change to the retry, the ack or the detection limb.

@@ -13,6 +13,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  StreamGapError,
   StreamLaggedError,
   WrapperError,
   answerWrappedSession,
@@ -50,6 +51,22 @@ function sseResponse(chunks) {
     body: bodyOf(...chunks),
   }
 }
+
+/** A body that delivers its chunks and then throws — the shape of a connection dying. */
+function dyingResponse(chunks, err = new TypeError('terminated')) {
+  const encoder = new TextEncoder()
+  return {
+    ok: true,
+    status: 200,
+    body: (async function* () {
+      for (const chunk of chunks) yield encoder.encode(chunk)
+      throw err
+    })(),
+  }
+}
+
+// Fast, bounded policy so a test never waits on real backoff.
+const FAST_RECONNECT = { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 1, maxElapsedMs: 500 }
 
 test('parseSSE buffers a frame split across two chunks', async () => {
   const seen = []
@@ -135,6 +152,143 @@ test('streamWrappedSession reports a non-200 as a WrapperError', async () => {
     })(),
     (err) => err instanceof WrapperError && err.status === 404,
   )
+})
+
+// ── Reconnect across a daemon restart ──────────────────────────────────────────────────────
+// The wrapper is restarted routinely, so a connection dying mid-turn is a GAP to ride out,
+// not the end of the turn. `id:` is the only resume point that survives the restart, and a
+// client that ignores it settles a still-working worker as `error` — the defect this exists
+// to remove. The 409 case is the opposite: a resume point the wrapper no longer retains must
+// never be papered over, because the transcript would carry an invisible hole.
+
+test('parseSSE records the id of every frame and marks the end sentinel', async () => {
+  const tracker = { lastId: null, ended: false }
+  const seen = []
+  for await (const message of parseSSE(
+    bodyOf('id: 1\ndata: {"type":"a"}\n\nid: 2\ndata: {"type":"b"}\n\nevent: end\ndata: {}\n\n'),
+    tracker,
+  )) {
+    seen.push(message)
+  }
+  assert.deepEqual(seen.map((m) => m.type), ['a', 'b'])
+  assert.equal(tracker.lastId, '2')
+  assert.equal(tracker.ended, true)
+})
+
+test('streamWrappedSession resumes with Last-Event-ID and finishes the turn instead of erroring', async () => {
+  const calls = []
+  let n = 0
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, headers: init?.headers })
+    if (url.endsWith('/events')) {
+      n += 1
+      if (n === 1) {
+        // The daemon dies mid-turn: two frames land, then the socket drops.
+        return dyingResponse(['id: 1\ndata: {"type":"system"}\n\n', 'id: 2\ndata: {"type":"assistant"}\n\n'])
+      }
+      // The successor re-adopts the child and serves from the requested point.
+      return sseResponse(['id: 3\ndata: {"type":"result"}\n\nevent: end\ndata: {}\n\n'])
+    }
+    return jsonResponse({ id: SESSION, state: 'exited' })
+  }
+
+  const seen = []
+  for await (const message of streamWrappedSession({
+    baseUrl: 'http://w',
+    sessionId: SESSION,
+    fetchImpl,
+    reconnect: FAST_RECONNECT,
+  })) {
+    seen.push(message)
+  }
+
+  assert.deepEqual(seen.map((m) => m.type), ['system', 'assistant', 'result'])
+  const streamCalls = calls.filter((c) => c.url.endsWith('/events'))
+  assert.equal(streamCalls.length, 2, 'the stream must be reopened exactly once')
+  assert.equal(streamCalls[0].headers['Last-Event-ID'], undefined, 'the first attempt has nothing to resume from')
+  assert.equal(streamCalls[1].headers['Last-Event-ID'], '2', 'the retry resumes from the last id it saw')
+})
+
+test('streamWrappedSession throws StreamGapError when the wrapper no longer retains the resume point', async () => {
+  let n = 0
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/events')) {
+      n += 1
+      if (n === 1) return dyingResponse(['id: 7\ndata: {"type":"assistant"}\n\n'])
+      return { ok: false, status: 409, json: async () => ({}) }
+    }
+    return jsonResponse({ id: SESSION, state: 'generating' })
+  }
+
+  await assert.rejects(
+    (async () => {
+      for await (const _ of streamWrappedSession({
+        baseUrl: 'http://w',
+        sessionId: SESSION,
+        fetchImpl,
+        reconnect: FAST_RECONNECT,
+      })) {
+        // drain
+      }
+    })(),
+    (err) => {
+      assert.ok(err instanceof StreamGapError, `expected StreamGapError, got ${err?.name}`)
+      assert.equal(err.lastEventId, '7')
+      return true
+    },
+  )
+  // A gap is never retried: reopening from a different point is the failure it reports.
+  assert.equal(n, 2)
+})
+
+test('streamWrappedSession gives up in bounded time when the wrapper never returns', async () => {
+  let attempts = 0
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/events')) {
+      attempts += 1
+      return dyingResponse(['id: 1\ndata: {"type":"assistant"}\n\n'])
+    }
+    return jsonResponse({ id: SESSION, state: 'generating' })
+  }
+
+  await assert.rejects(
+    (async () => {
+      for await (const _ of streamWrappedSession({
+        baseUrl: 'http://w',
+        sessionId: SESSION,
+        fetchImpl,
+        reconnect: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1, maxElapsedMs: 500 },
+      })) {
+        // drain
+      }
+    })(),
+    (err) => err instanceof TypeError,
+  )
+  // 1 initial + 2 retries, then it stops rather than spinning forever.
+  assert.equal(attempts, 3)
+})
+
+test('streamWrappedSession treats a refused connection as a restart, not a failure', async () => {
+  let n = 0
+  const fetchImpl = async (url) => {
+    if (url.endsWith('/events')) {
+      n += 1
+      if (n === 1) throw new TypeError('fetch failed')
+      return sseResponse(['id: 4\ndata: {"type":"result"}\n\nevent: end\ndata: {}\n\n'])
+    }
+    return jsonResponse({ id: SESSION, state: 'exited' })
+  }
+
+  const seen = []
+  for await (const message of streamWrappedSession({
+    baseUrl: 'http://w',
+    sessionId: SESSION,
+    fetchImpl,
+    reconnect: FAST_RECONNECT,
+  })) {
+    seen.push(message)
+  }
+  assert.deepEqual(seen.map((m) => m.type), ['result'])
 })
 
 test('spawnWrappedSession posts the options and returns the session', async () => {
