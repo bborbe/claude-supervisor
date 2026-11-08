@@ -21,7 +21,7 @@
 
 import { isA2ATarget } from './a2a-spawn.mjs'
 
-export function resolveMessageChannel(agent, { peerNamesFor = null } = {}) {
+export function resolveMessageChannel(agent, { peerNamesFor = null, peerHoldersFor = null } = {}) {
   if (!agent || typeof agent !== 'object') {
     return { error: 'no agent record to resolve a message channel from' }
   }
@@ -113,7 +113,23 @@ export function resolveMessageChannel(agent, { peerNamesFor = null } = {}) {
     }
   }
   const registered = [...new Set(names)]
-  if (registered.length === 1) return { channel: 'peer', name: registered[0] }
+  if (registered.length === 1) {
+    // ⚠️ THE NAME MUST BE THIS WORKER'S ALONE, not merely one this id answers to. `SendMessage`
+    // resolves a NAME to a session, so a name two live sessions hold reaches whichever the
+    // harness picks — a delivery that reports success while landing in a different worker's
+    // conversation. The registry is the only place that can see the collision, and the caller
+    // that read it is the only one that can answer the question, so it is asked here.
+    const holders = typeof peerHoldersFor === 'function' ? peerHoldersFor(registered[0]) : null
+    if (Array.isArray(holders) && holders.filter((sid) => sid !== agent.sessionId).length > 0) {
+      return {
+        error:
+          `agent ${id} is a headless worker registered as "${registered[0]}", a name another live session ` +
+          `also answers to — SendMessage would reach whichever the harness picks, so nothing is ` +
+          `addressed. Pick the worker from list_agents, or answer its parked prompts with answer_permission.`,
+      }
+    }
+    return { channel: 'peer', name: registered[0] }
+  }
   if (registered.length > 1) {
     // ONE session id can be registered under MORE than one name (a renamed session whose
     // older entry has not been pruned), and picking either would deliver to the wrong

@@ -3542,7 +3542,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // "has a pane?" wearing a general guard's clothes: true for a headless worker, and
       // accidentally true for every cluster worker, whose record carries `paneId: null` by
       // construction.
-      const channel = resolveMessageChannel(agent, { peerNamesFor: namesForSessionId })
+      const channel = resolveMessageChannel(agent, { peerNamesFor: namesForSessionId, peerHoldersFor: sessionIdsNamed })
       if (channel.error) return reply({ error: channel.error })
 
       if (channel.channel === 'peer') {

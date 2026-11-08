@@ -70,6 +70,25 @@ test('a headless worker registered under two names is refused rather than guesse
   assert.match(r.error, /wrong conversation/)
 })
 
+test('a name another live session also holds is refused, not addressed', () => {
+  // `SendMessage` resolves a NAME to a session, so a shared name reaches whichever the
+  // harness picks — a delivery that reports success while landing in another worker's
+  // conversation. The id's own other entries are not a collision; another session's is.
+  const holders = (list) => () => list
+  const shared = resolveMessageChannel(agent({ status: 'running', paneId: null, sessionId: 'me' }), {
+    peerNamesFor: names(['claude-1f']),
+    peerHoldersFor: holders(['me', 'someone-else']),
+  })
+  assert.match(shared.error, /another live session/)
+  assert.doesNotMatch(JSON.stringify(shared), /"channel":"peer"/)
+
+  const alone = resolveMessageChannel(agent({ status: 'running', paneId: null, sessionId: 'me' }), {
+    peerNamesFor: names(['claude-1f']),
+    peerHoldersFor: holders(['me']),
+  })
+  assert.deepEqual(alone, { channel: 'peer', name: 'claude-1f' })
+})
+
 test('an unreadable registry is retryable, not a claim that the worker is gone', () => {
   // null is "no information"; folding it into "no entry" would report a live worker as
   // exited and send the caller looking for a replacement.
