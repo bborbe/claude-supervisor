@@ -145,6 +145,14 @@ export function liveFromHeartbeat(rows) {
     const sessionId = row.session_id
     if (typeof sessionId !== 'string' || !sessionId) continue
     if (row.live !== true) continue
+    // ⚠️ A `live: true` row with no `state` is a GHOST — a placeholder the store keeps
+    // serving after its session exited. Measured 2026-11-07: `b3d743ea` (source `a2a`,
+    // location `pod`) still stamped at age 1–3 s after the close, and `a1026e2f` carried no
+    // source at all; both were counted, and the cap read 51 against 49 real processes. Every
+    // real stamp reports what it is doing, so `state` is the discriminator. Deliberately
+    // narrow: keying on `task`/`vault` too would drop a cluster worker during the seconds
+    // before it reports one, and under-counting at startup is the defect this exists to fix.
+    if (!row.state) continue
     live.set(sessionId, row.source ?? null)
   }
   return live
