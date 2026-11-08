@@ -12,13 +12,11 @@ textconv drivers and hooks do the same, and the shipped policy lets a worker wri
 (or the `.git` gitdir pointer in a linked worktree). So no git subcommand is ever `allowlist`
 here — it is `manager` at best. See README § Allowing a Bash command.
 
-⚠️ EVERY SEGMENT IS CHECKED, AND WHAT CANNOT BE SPLIT IS `operator`. A compound command is split
-on `;`, `&&`, `||`, `|`, `&`, newline and subshell parens, outside quotes. Command substitution
-(`$(…)`, backticks, `<(…)`) and `sh -c '…'` bodies are split recursively. Heredoc bodies are
-scanned as text, and split as shell when they feed a shell. A shape the splitter cannot fully take
-apart — an unterminated quote, an unterminated heredoc (a truncated payload ends in one), a
-command word that is itself an expansion, `eval`, `source` — is `operator`, never `manager`. An
-over-eager manager tier is worse than a park: it hides a real gate.
+⚠️ EVERY SEGMENT IS CHECKED, AND WHAT CANNOT BE SPLIT IS `operator`. Split on `;`, `&&`, `||`, `|`,
+`&`, newline and subshell parens outside quotes, recursing into `$(…)`, backticks, `<(…)`, `sh -c`
+and shell-fed heredocs. A shape it cannot fully take apart — an unterminated quote or heredoc (a
+truncated payload ends in one), an expansion as the command word, `eval`, `source` — is `operator`,
+never `manager`. An over-eager manager tier is worse than a park: it hides a real gate.
 
 ⚠️ OPERATOR-ONLY WINS OVER THE ALLOWLIST: `cat` is an allowlist entry and `cat ~/.netrc` matches it, so the secret form is checked first — same order as the doc's deny list.
 
