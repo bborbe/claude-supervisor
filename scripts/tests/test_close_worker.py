@@ -361,8 +361,8 @@ class TestCliRefusals(unittest.TestCase):
         The override is what makes it private, and it is load-bearing: every gate-held case
         writes the same fixture session id, and `transcript_path()` resolves it as
         `next(iter(glob(PROJECTS_DIR/*/<sid>.jsonl)))` — an arbitrary pick among matches,
-        memoized. Written into the real `~/.claude/projects`, a transcript collides with any
-        concurrent run's and with any earlier run's whose cleanup never ran (SIGKILL, a
+        memoized. Written into the shared user-level projects dir, a transcript collides with
+        any concurrent run's and with any earlier run's whose cleanup never ran (SIGKILL, a
         timeout), and the gate check then reads the wrong closer. Measured 2026-11-09:
         38/50 failures with one such leftover present, 0/50 without it.
         """
