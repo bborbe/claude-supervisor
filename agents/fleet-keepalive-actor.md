@@ -372,11 +372,11 @@ naming the evidence; a manager stood down with `/supervisor:stop` does not hold 
 
 **Record the count — in the digest, and labelled as a floor while the scan cannot finish.**
 `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg dead-workers --count <n> --floor`.
-`--floor` is what renders `(lower bound, scan incomplete)`; `--exact` asserts the scan completed.
-⚠️ **The script refuses a bare `dead-workers` count** — one of the two is mandatory, because a
-number with no label reads as a measurement, and while the scan cannot finish inside its own
-timeout the floor is the only honest form. Both flags are refused on any other key. Format and
-rationale: `commands/steps/output-shape.md` item 14.
+`--floor` is what renders `(lower bound, scan incomplete)`; `--exact` asserts completion.
+⚠️ **A bare `dead-workers` count is refused** — one of the two is mandatory: a number with
+no label reads as a measurement, and while the scan cannot finish the floor is the only
+honest form. Both flags are refused on any other key. Format and rationale:
+`commands/steps/output-shape.md` item 14. Stood-down: `commands/steps/keepalive-stood-down.md`.
 
 ## 5. Record why a half did not run — and never leave the sweep's seed standing
 

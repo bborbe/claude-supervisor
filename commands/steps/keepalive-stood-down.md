@@ -49,8 +49,12 @@ clear `claude_session_id`. ⚠️ **The proof is that a fresh `page_verdict` no 
 ## 3. Then close, through the one close path
 
 ```bash
-python3 "$P/close-worker.py" --session <session-id>
+python3 "$P/close-worker.py" <session-id>
 ```
+
+⚠️ **The session id is POSITIONAL** (`close-worker.py:537`, `parser.add_argument("session_id")`).
+`--session <id>` is not a flag it accepts and exits 2 with a usage error. `--dry-run` checks
+everything and closes nothing — use it first on a row whose handover you are unsure of.
 
 Never a bare kill and never a direct process signal. Every refusal token it returns
 (`gate-held`, `busy-target`, `dirty-worktree`, `task-not-terminal`, …) is honoured and reported
