@@ -12,14 +12,16 @@
 //
 //   tab      → its pane, typed into and submitted
 //   cluster  → its session id, one more turn over HTTP
-//   headless → neither, and the refusal says which channel DOES reach it
+//   headless → its REGISTRY NAME, handed back to the caller, who sends it with `SendMessage`
 //
 // A pure function over the agent record, so it is testable without a server, a pane or a
-// pod. Nothing here reads the filesystem, the environment, or the clock.
+// pod. Nothing here reads the filesystem, the environment, or the clock — the registry read
+// the headless branch needs arrives as the injected `peerNamesFor`, because the id → name
+// join belongs to the caller that holds the session id (`namesForSessionId` in liveness.mjs).
 
 import { isA2ATarget } from './a2a-spawn.mjs'
 
-export function resolveMessageChannel(agent) {
+export function resolveMessageChannel(agent, { peerNamesFor = null, peerHoldersFor = null } = {}) {
   if (!agent || typeof agent !== 'object') {
     return { error: 'no agent record to resolve a message channel from' }
   }
@@ -89,10 +91,63 @@ export function resolveMessageChannel(agent) {
     }
   }
 
+  // ⚠️ A headless worker IS reachable, and this branch used to say it was not. Its claude
+  // child registers a NAME in the session registry, and the peer channel (`SendMessage`)
+  // takes a name — so the delivery is the CALLER's and what this server owes it is the
+  // address. Measured 2026-11-08: session 6d16758d was live and registered as `claude-1f`,
+  // while this refusal told the caller to "reach it mid-task with SendMessage" — which, given
+  // only the id the caller held, answers "No agent named '6d16758d…' is reachable". A remedy
+  // the caller cannot perform is the defect, not the wording.
+  //
+  // The resolver is INJECTED rather than imported: this module stays a pure function over the
+  // record, and the registry read belongs to the caller that already holds the session id.
+  // `peerNamesFor` returning null means "the registry could not be read" — retryable, and
+  // deliberately not folded into "no entry", which means the worker is gone.
+  const names = typeof peerNamesFor === 'function' ? peerNamesFor(agent.sessionId) : null
+  if (!Array.isArray(names)) {
+    return {
+      error:
+        `agent ${id} is a headless worker (status "${agent.status}") whose session registry could not be ` +
+        `read, so its SendMessage name is unknown — retry, and answer its parked prompts with ` +
+        `answer_permission meanwhile.`,
+    }
+  }
+  const registered = [...new Set(names)]
+  if (registered.length === 1) {
+    // ⚠️ THE NAME MUST BE THIS WORKER'S ALONE, not merely one this id answers to. `SendMessage`
+    // resolves a NAME to a session, so a name two live sessions hold reaches whichever the
+    // harness picks — a delivery that reports success while landing in a different worker's
+    // conversation. The registry is the only place that can see the collision, and the caller
+    // that read it is the only one that can answer the question, so it is asked here.
+    const holders = typeof peerHoldersFor === 'function' ? peerHoldersFor(registered[0]) : null
+    if (Array.isArray(holders) && holders.filter((sid) => sid !== agent.sessionId).length > 0) {
+      return {
+        error:
+          `agent ${id} is a headless worker registered as "${registered[0]}", a name another live session ` +
+          `also answers to — SendMessage would reach whichever the harness picks, so nothing is ` +
+          `addressed. Pick the worker from list_agents, or answer its parked prompts with answer_permission.`,
+      }
+    }
+    return { channel: 'peer', name: registered[0] }
+  }
+  if (registered.length > 1) {
+    // ONE session id can be registered under MORE than one name (a renamed session whose
+    // older entry has not been pruned), and picking either would deliver to the wrong
+    // conversation — so the candidates are named and the choice is the caller's. Repeats of
+    // the SAME name are deduped above rather than refused: one id answering to one name is
+    // not ambiguous however many entries carry it.
+    return {
+      error:
+        `agent ${id} is a headless worker registered under ${registered.length} names ` +
+        `(${registered.join(', ')}), so a bare name would reach the wrong conversation — pick the ` +
+        `worker from list_agents, or answer its parked prompts with answer_permission.`,
+    }
+  }
   return {
     error:
-      `agent ${id} is a headless worker (status "${agent.status}"), which has neither a pane nor a ` +
-      `cluster session, so no follow-up can reach it. Answer its parked prompts with ` +
-      `answer_permission, or reach it mid-task with SendMessage.`,
+      `agent ${id} is a headless worker (status "${agent.status}") with no session-registry entry — ` +
+      `the session exited, its first turn has not reported an id yet, or it runs in-process under ` +
+      `the SDK, which registers no name — so no SendMessage can address it. Check it with ` +
+      `agent_status, or answer its parked prompts with answer_permission.`,
   }
 }
