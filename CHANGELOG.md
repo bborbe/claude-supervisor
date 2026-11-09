@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.264.7
 
 - fix: **`close-worker.py` resolves a session's task in any configured vault, not only those whose directory is named `25 Tasks` or `24 Tasks`.** The resolution path carried a hardcoded `TASK_DIRS = ("25 Tasks", "24 Tasks")`, so a vault whose `vault-cli` config declares `tasks_dir: tasks` (`seibert-agent`, `private-agent`) was dropped from both the cwd walk-up and the whole-vault scan — a finished worker anchored there read `task-unresolved` forever and could never be reaped. `local_task_dirs` and `task_dirs_for` now take the directory from each vault's declared `tasks_dir` (read once per process from `vault-cli config list --output json`, overridable with `SUPERVISOR_VAULT_CONFIG` for drills), and the goal/topic lookup keeps its explicit tuples. A vault with `tasks_dir: null` contributes nothing. ⚠️ **The refusal now names its cause:** the no-page case prints `no page carries <id>`, while a session whose own vault is not among the directories searched prints `searched <dirs>; <vault> not among them` — the second was previously indistinguishable from the first and sent every reader after a missing page that existed.
 
