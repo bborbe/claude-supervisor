@@ -93,12 +93,19 @@ class Refused(Exception):
 
 
 def _task_state(vault, tasks_dir, name):
-    """`(status, phase)` for the row, or empty strings when the file is unreadable."""
-    text, err = nf.read_text(Path(vault) / tasks_dir / f"{name}.md")
-    if err:
-        return "", ""
-    fm = nf.frontmatter(text)
-    return str(fm.get("status", "")), str(fm.get("phase", ""))
+    """`(status, phase)` for the row, or empty strings when no page carries it.
+
+    Both board dirs are tried: a proposal row is a task OR a blocked goal, and a
+    tasks-only read recorded a goal's `hold` as nothing at all.
+    """
+    board = nf.Board(vault, tasks_dir)
+    for directory in (Path(vault) / tasks_dir, Path(board.dirs["goal"])):
+        text, err = nf.read_text(directory / f"{name}.md")
+        if err:
+            continue
+        fm = nf.frontmatter(text)
+        return str(fm.get("status", "")), str(fm.get("phase", ""))
+    return "", ""
 
 
 def _block_number(lines):
@@ -158,8 +165,13 @@ def _insert_picked_row(lines, name, why):
         at = heading + 1
         while at < len(lines) and not lines[at].strip():
             at += 1
+        start = at
         while at < len(lines) and lines[at].lstrip().startswith("|"):
             at += 1
+        if at == start:
+            # The heading has no table under it — refuse rather than writing a row line
+            # into whatever prose follows the heading.
+            return lines, None
         number = int(PICKED_RE.match(lines[heading]).group(1)) + 1
         return lines[:at] + [f"| {number} | 📌 {name} | {why} |"] + lines[at:], number
     number = max(int(ROW_RE.match(lines[i]).group(1)) for i in rows) + 1
@@ -223,7 +235,9 @@ def add_to_plan(vault, tasks_dir, name, day, why_text=""):
     why = (f"Added {day.isoformat()} on the operator's answer — "
            f"{why_text or 'in no current plan'}.")
     if status or phase:
-        why += f" `{status}` / `{phase}`."
+        # Joined over the non-empty parts: a `status: backlog` row with no `phase:`
+        # (the vault's normal shape) otherwise wrote a malformed `` `backlog` / ``.
+        why += " `" + " / ".join(p for p in (status, phase) if p) + "`."
 
     row = None
     if not already_row:
@@ -507,6 +521,12 @@ def main(argv=None):
         )
     except Refused as exc:
         print(f"next-focus-answer: REFUSED — {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001 — a write failure is a refusal too
+        # The round renders "a refused consume (exit 2)"; an escaped traceback exits 1,
+        # a code its caller has no render for. Same mapping `next-focus.py`'s `main` uses.
+        print(f"next-focus-answer: REFUSED — "
+              f"{exc.__class__.__name__}: {exc}", file=sys.stderr)
         return 2
 
     open_cards = sum(

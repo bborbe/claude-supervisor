@@ -281,6 +281,43 @@ class ConsumeTests(unittest.TestCase):
         self.assertIn("block 5", rendered)
         self.assertNotIn("None", rendered)
 
+    def test_a_task_without_a_phase_has_no_empty_code_span(self):
+        """`status: backlog` with no `phase:` is the vault's normal P1 shape."""
+        (self.vault / "25 Tasks" / f"{TASK_NAME}.md").write_text(
+            "---\nstatus: backlog\npriority: \"1\"\n---\n\nbody\n", encoding="utf-8")
+        self.run_consume([self.card("add it to the plan")])
+        text = self.weekly.read_text(encoding="utf-8")
+
+        self.assertIn("`backlog`.", text)
+        self.assertNotIn("`backlog` /", text)
+
+    def test_a_goal_row_records_its_state(self):
+        goals = self.vault / "24 Goals"
+        goals.mkdir(parents=True, exist_ok=True)
+        (goals / "Some Goal.md").write_text(
+            "---\nstatus: hold\nblocked_by: bug\n---\n\nbody\n", encoding="utf-8")
+        card = self.card(
+            "add it to the plan",
+            payload="Some Goal — blocked on bug, in no current plan — /x:1",
+            key="next-focus:vault:goal:some-goal-abcdef12",
+        )
+        self.run_consume([card])
+
+        self.assertIn("`hold`", self.weekly.read_text(encoding="utf-8"))
+
+    def test_a_picked_heading_with_no_table_writes_no_row(self):
+        self.weekly.write_text(
+            "# Weekly\n\n## ✅ Picked (0)\n\nSome prose, no table here.\n\n"
+            "# Tasks\n\n### 1. 🔧 E\n\n**Task:** [[E]]\n\n",
+            encoding="utf-8",
+        )
+        consumed, notes = self.run_consume([self.card("add it to the plan")])
+        text = self.weekly.read_text(encoding="utf-8")
+
+        self.assertNotIn(f"| 1 | 📌 {TASK_NAME} |", text)
+        self.assertTrue(any("row not written" in note for note in notes))
+        self.assertIsNotNone(consumed[0]["block"], "the block should still be written")
+
     def test_notes_render_on_an_empty_round(self):
         """A round that could not look must not read like a round that found nothing."""
         rendered = answer.render([], ["k: unhandled answer 'x' — not consumed"], 2, 1)
