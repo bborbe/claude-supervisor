@@ -8,7 +8,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { LEGS, reachPath, readReach, recordReach } from './answer-reach.mjs'
+import { LEGS, reachPath, recordReach } from './answer-reach.mjs'
 
 const fixedNow = () => new Date('2026-11-09T06:00:00.000Z')
 
@@ -74,21 +74,6 @@ test('a failed write is reported, never thrown — the caller owes a quotable re
   const out = await recordReach({ dir: '/reach', sessionId: 'sid-1', leg: 'mcp', write: fs.write, mkdirp: fs.mkdirp })
   assert.equal(out.written, false)
   assert.match(out.reason, /could not write mcp reach/)
-})
-
-test('absent and broken are different facts', async () => {
-  const fs = fakeFs()
-  fs.files.set(`${'/reach'}/sid-1.mcp.json`, '{"session_id":"sid-1"}') // no ts
-  fs.files.set(`${'/reach'}/sid-1.wrapper.json`, 'not json at all')
-
-  const out = await readReach({ dir: '/reach', sessionId: 'sid-1', read: fs.read })
-  assert.equal(out.mcp.state, 'broken')
-  assert.match(out.mcp.reason, /no string ts/)
-  assert.equal(out.wrapper.state, 'broken')
-  // The leg that was never written reads as absent, which is what the probe's SC1 needs.
-  const none = await readReach({ dir: '/reach', sessionId: 'sid-2', read: fs.read })
-  assert.equal(none.mcp.state, 'absent')
-  assert.equal(none.wrapper.state, 'absent')
 })
 
 test('LEGS is the two routes the probe reports, in report order', () => {

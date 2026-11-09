@@ -30,6 +30,16 @@
 // `request_id` differently from a live one. The real-delivery half of the criterion reads
 // `permissions.jsonl` and the session ledger instead; see the task file.
 //
+// ⚠️ **The two legs are keyed on two different resolutions of "this session", and they can
+// disagree.** The `mcp` leg uses `parentSessionId()` — the nearest registered ancestor of the
+// server process — because that is what the spawn gate itself uses, so the record and the
+// gate cannot disagree. The `wrapper` leg uses the manager's own `$CLAUDE_CODE_SESSION_ID`,
+// because a shell command has nothing else to go on. Measured 2026-09-22 across 42 live
+// servers those two agreed in 41. ⚠️ **The disagreement fails CLOSED**: the probe reads one id
+// and finds at most one leg, so a manager in the 1-in-42 case is refused rather than wrongly
+// certified. That is the right direction, but it is why the two legs are reported separately
+// in the probe's `detail` — a reader has to be able to see which one is missing.
+//
 // ⚠️ **This is not a second counter of the loop's liveness.** `manager-liveness.py` answers
 // "is this subject's manager loop alive?" from the marker it writes at every re-arm. This
 // answers a different question — "did an answer command reach a route?" — and the probe
@@ -37,7 +47,7 @@
 // even when both legs are fresh. Writing a reach is also not a heartbeat: nothing refreshes
 // it on a timer, so it ages out on its own.
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 /** The two answer routes a manager can take. Order is the probe's report order. */
@@ -85,34 +95,4 @@ export async function recordReach({
     return { written: false, reason: `could not write ${leg} reach: ${err.message}` }
   }
   return { written: true, record }
-}
-
-/**
- * Read this session's reaches. Returns `{ mcp, wrapper }` where each value is the record or
- * `null`, plus the reason a leg is unreadable when it is present but broken.
- *
- * A malformed file is reported as `broken`, never as absent: "no record" and "a record I
- * could not parse" are different facts, and the probe's `detail` has to say which one it saw.
- */
-export async function readReach({ dir, sessionId, read = readFile }) {
-  const out = {}
-  for (const leg of LEGS) {
-    if (typeof sessionId !== 'string' || !sessionId) {
-      out[leg] = { state: 'absent', reason: 'no session id' }
-      continue
-    }
-    try {
-      const raw = await read(reachPath(dir, sessionId, leg), 'utf8')
-      const parsed = JSON.parse(raw)
-      if (!parsed || typeof parsed !== 'object' || typeof parsed.ts !== 'string') {
-        out[leg] = { state: 'broken', reason: 'record has no string ts' }
-        continue
-      }
-      out[leg] = { state: 'present', record: parsed }
-    } catch (err) {
-      if (err && err.code === 'ENOENT') out[leg] = { state: 'absent', reason: 'no record' }
-      else out[leg] = { state: 'broken', reason: err.message }
-    }
-  }
-  return out
 }

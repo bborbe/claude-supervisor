@@ -49,6 +49,8 @@ When: every tick — arm `ScheduleWakeup` FIRST, before the read half
 
   ⚠️ **A `--sleep`ped manager stops re-arming, so its reaches age out and it is refused.** That is correct rather than a regression: a manager that has stopped its loop is not answering parks. Re-arm before spawning headless workers.
 
+  ⚠️ **The two legs are keyed on two resolutions of "this session", and they can disagree.** `mcp` uses `parentSessionId()` — what the spawn gate itself uses — while `wrapper` uses this session's `$CLAUDE_CODE_SESSION_ID`, since a shell command has nothing else. They agreed in 41 of 42 measured servers. A disagreement fails **closed**: the probe finds at most one leg and refuses, which is why it reports each leg separately — so a refusal naming only `wrapper=absent` on a session that did run the curl means the ids diverged, not that the route was unreachable.
+
 - **Record the arm on the receipt, after it lands.** The window was opened above, before the arm, for the reason stated there.
 
   ```bash
