@@ -36,8 +36,8 @@ Non-authorising, by construction
 This script kills nothing and writes no session state. It emits the same evidence
 hand-over the task reap emits (`scripts/reap-line.py`, subject form), and the session ends
 by its own `/supervisor:close` — or `/exit` when it has no task anchor. There is no
-`os.kill`, no `signal`, no write under `~/.claude/state/`, and no write to the page: a leg
-that could close the manager itself would be a different, riskier change.
+`os.kill`, no `signal`, no write under the supervisor state directory, and no write to the
+page: a leg that could close the manager itself would be a different, riskier change.
 
 Which page field carries the manager
 ------------------------------------
