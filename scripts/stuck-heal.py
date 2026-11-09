@@ -41,7 +41,7 @@ shape and does not arrive here at all: the watcher files it as a park reason
 (`registry:waiting` / `idle+closer`), not as a `stuck-tab:` cause. Only the
 VERBLESS closer — `👤 You: nothing`, where no card was minted and nobody was told —
 still reaches `--kind blocked-closer`, and it stays report-only like any other
-non-`stream-closed` kind.
+non-`HEALABLE_KINDS` kind.
 """
 import argparse
 import importlib.util
@@ -52,9 +52,21 @@ ACTION_RESUME_HEADLESS = "resume-headless"
 ACTION_REOPEN_INTERACTIVE = "reopen-interactive"
 ACTION_REPORT_ONLY = "report-only"
 
-# The only death this heals. A parked gate is not a death — see the module
-# docstring — and an unrecognised kind is reported rather than guessed at.
+# The deaths this heals. A parked gate is not a death — see the module docstring —
+# and an unrecognised kind is reported rather than guessed at.
+#
+# ⚠️ **`permission-channel` is a death, not a park, and the ladder is the same one.**
+# `stream-closed` is the same failure read at its most immediate (the LAST tool
+# aborted); `permission-channel` is the same transport read over a window, for the
+# shape where reads keep working between aborts. The fix measured on both is a fresh
+# process: 2026-10-28 session `b6e447e4` reported "writes abort with `Stream
+# closed`; reads still work" and a resume restored the channel. Reporting it
+# instead — the treatment every non-`stream-closed` kind gets — would leave the one
+# session that holds a live repair unable to run it, which is the defect this
+# cause exists to name.
 KIND_STREAM_CLOSED = "stream-closed"
+KIND_PERMISSION_CHANNEL = "permission-channel"
+HEALABLE_KINDS = (KIND_STREAM_CLOSED, KIND_PERMISSION_CHANNEL)
 
 _SPAWN_LEDGER = None
 
@@ -85,12 +97,12 @@ def decide(kind, deaths):
     only ever 0 or 1 (see the module docstring). Any non-zero value is the
     interactive rung — never a second headless resume.
 
-    ⚠️ A kind that is not `stream-closed` is REPORT-ONLY, never a resume and never
+    ⚠️ A kind outside `HEALABLE_KINDS` is REPORT-ONLY, never a resume and never
     an answer. A parked judgement gate reaching a resume would restart a worker
     that is working correctly, and reaching an answer would settle the operator's
     question for them.
     """
-    if kind != KIND_STREAM_CLOSED:
+    if kind not in HEALABLE_KINDS:
         return ACTION_REPORT_ONLY
     if deaths == 0:
         return ACTION_RESUME_HEADLESS
@@ -195,7 +207,7 @@ def main(argv=None):
     # `stuck-tab:` cause. The choice stays because the verbless class still exists,
     # and `decide()` already reports it rather than resuming or answering it.
     ap.add_argument("--kind", required=True,
-                    choices=(KIND_STREAM_CLOSED, "blocked-closer", "permission-failures"),
+                    choices=HEALABLE_KINDS + ("blocked-closer", "permission-failures"),
                     help="the stuck cause: the reason after `stuck:` (`blocked-closer` "
                          "is the VERBLESS closer — a verb-carrying one is a park, "
                          "not a stuck cause)")
