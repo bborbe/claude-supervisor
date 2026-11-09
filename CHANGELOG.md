@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.259.4
 
 - fix: **`manager-liveness.py --state` no longer answers `UNARMED` for a subject it cannot resolve or a probe on the wrong branch.** Measured 2026-11-07: a cadence table named five managers `UNARMED`; four were `OK` under their full names and one was deliberately `STOPPED` on the goal branch, and acting on the table sent five arm instructions that were not needed. An abbreviated name (no record under any branch, no page under `--vault`) is now refused with exit 3 and nothing on stdout, naming the name on stderr; a record on another tier reads `WRONG-BRANCH` with `record is on branch <b>`. `--branch fleet` keeps `UNARMED` (no page by design). `commands/steps/round-liveness.md` now arms on an allow-list (`OK`/`STALE`/`UNARMED`/`INVALID`) instead of a `*) --arm` fallback that armed on an empty `STATE` or `WRONG-BRANCH`, pinned by `scripts/tests/test_round_liveness_step.py`. `topic-keepalive.py` maps an unrecognised word to its probe failure instead of `INVALID`, which restarted a live manager; `unarmed-goals.py` passes `--vault`; `crashed-managers.py`, the fleet-triage table and the topic sweep name the new outcomes. `classify()` already measured the observed period, and no reader in the repo derives a limit from the requested interval — pinned by a regression fixture (`.cadence` 900, arm gaps 1244 s, age 1300 s → `OK`).
 
