@@ -1752,7 +1752,7 @@ class KeepAliveVerdicts(unittest.TestCase):
             with open(p, "w", encoding="utf-8") as fh:
                 json.dump({"resumes": [time.time() - 60] * stamps}, fh)
         k.session_verdict = lambda _sid: liveness
-        k.cadence_state_detail = lambda _subject, _branch="goal": (loop, "")
+        k.cadence_state_detail = lambda _subject, _branch="goal", _vault="": (loop, "")
         out = io.StringIO()
         with redirect_stdout(out):
             rc = k.main(["--vault", vault, "--goal", self.GOAL, "--receipt", self.topic])
