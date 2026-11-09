@@ -64,7 +64,7 @@ subject whose session died is still not due until its instant.
 
 The loop is per SUBJECT, and its record is keyed by `<branch>--<slug>`. A caller holding only a
 session id (the gate filter's spawner, its claim holder) gets the subject from the manager's own
-registration, `~/.claude/state/worker-manager/<session-id>.json`, which carries `subject`,
+registration file in `MANAGER_DIR` (`<session-id>.json`, below), which carries `subject`,
 `branch` and `vault` — written by the tier resolution that already decided which manager a
 session is, so this module and that decision cannot disagree. No registration means no subject to
 read, which is `loop-unread`: `cannot-tell`, never `not-owner`.
@@ -323,7 +323,11 @@ def registration(sid: str) -> tuple:
         return None, None, f"{path} is not a registration object"
     subject = record.get("subject")
     branch = record.get("branch")
-    if not subject or branch not in BRANCHES:
+    # ⚠️ **`isinstance(subject, str)` is load-bearing, not defensive dressing.** A record whose
+    # `subject` is a list or a number is truthy, so a bare `not subject` check lets it through
+    # and it reaches `os.path.join` / `subprocess.run` as a non-string: an uncaught `TypeError`
+    # out of the resolver, which is neither a verdict nor `cannot-tell`.
+    if not isinstance(subject, str) or not subject or branch not in BRANCHES:
         return None, None, f"{path} carries no usable subject/branch"
     return subject, branch, ""
 
@@ -451,9 +455,14 @@ def main(argv: list[str]) -> int:
 
     if a.subject and a.vault:
         o = of_subject(a.vault, a.subject, a.branch, a.dir or "")
-    elif a.session or a.subject:
-        o = of_session(a.session or "", a.subject or "", a.branch)
+    elif a.session:
+        o = of_session(a.session, a.subject or "", a.branch)
     else:
+        # ⚠️ **`--subject` without `--vault` is a REFUSAL, never a verdict.** The page is
+        # where the subject's manager is recorded, so a run that cannot read it has not
+        # established that nobody owns the subject — and answering `not-owner` from the loop
+        # state alone is exactly the licence to start a second writer that this module exists
+        # to withhold. Exit 2 is the cannot-tell direction, matching the flag-less call.
         print("owner.py needs --session, or --subject with --vault", file=sys.stderr)
         return 2
     print("\t".join((o.verdict, o.reason, o.session, o.loop, o.detail)))
