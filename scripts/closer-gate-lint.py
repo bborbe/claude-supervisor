@@ -217,16 +217,28 @@ SESSION_BOUND = (
 
 # Anything a keeper can read after the session is gone. ⚠️ A watcher's own timeout
 # (`times out ~18:40`) is NOT a clock observable — it dies with the watcher — so a bare
-# HH:MM never counts; only a `defer_date`, an ISO date, or an ISO datetime does. The
-# datetime arm is optional and shape-bounded so it stays a SUBSET of what
-# `defer-date.py`'s `parse_defer_date` accepts — the lint must never bless a clock every
-# fail-closed reader would reject as invalid.
+# HH:MM never counts; only a `defer_date`, an ISO date, or an ISO datetime does.
+#
+# ⚠️ The datetime arm ends in a lookahead, never `\b`. A `Z` suffix is a WORD character,
+# so `\b` after the final digit can never match `2026-11-09T15:30Z` — the identical
+# digit/word-character boundary bug the date-only arm carried, one form over.
+# `(?![\w-])` rejects a trailing word run (`2026-11-09T15`, `2026-11-09T15:30abc`,
+# `2026-11-09123`) while permitting `Z`, an offset, and end-of-token.
+#
+# The arm is a SHAPE-subset of `defer-date.py`'s `parse_defer_date`, not a range subset:
+# `2026-11-09T99:99` matches here and the parser calls it invalid. That looseness is
+# pre-existing on the date-only arm (`2026-13-45` already matched) and is deliberately
+# NOT tightened — a narrowing would newly block closers that pass today, and a
+# range-invalid clock is the writer's typo, not a reason to block a compliant closer.
 DURABLE = (
     ("file", re.compile(
         r"(?:^|[\s`(\"'])(?:~|\.{0,2})/[\w.-]+|\b[\w-]+\.(?:md|jsonl?|log|ya?ml|txt|out|csv)\b"
         r"|\b(?:files?|mtime)\b", re.IGNORECASE)),
     ("card-id", re.compile(r"\b[0-9a-f]{32}\b", re.IGNORECASE)),
-    ("clock", re.compile(r"\bdefer_date\b|\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2})?\b")),
+    ("clock", re.compile(
+        r"\bdefer_date\b|\b\d{4}-\d{2}-\d{2}"
+        r"(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?"
+        r"(?![\w-])")),
     ("external-probe", re.compile(
         r"\bPR\b|#\d+\b|\bCI\b|\bgh\s|\bkubectl\w*\b|https?://|\bpods?\b|\bcontainer\b"
         r"|\brelease\b|\btag\s+v\d|\bworkflow\b|\bdeploy(?:ment)?\b", re.IGNORECASE)),

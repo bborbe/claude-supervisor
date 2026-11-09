@@ -446,26 +446,65 @@ class CloserGateLintTest(unittest.TestCase):
             "⏰ Ends:   chunk 7a done (background agent a1, times out ~18:40)"))
 
     def test_an_iso_datetime_is_a_clock_observable(self):
-        # ⚠️ The trailing `\b` after `\d{2}` cannot match between `9` and `T` — both are
-        # word characters — so `2026-11-09T15:30:00+01:00`, which CLAUDE.md § Async State
-        # Closer names as a legal clock ("a clock (`defer_date` / timestamp)"), did not
-        # match and the closer was blocked. Two-sided on purpose: the datetime arm is
-        # optional, so the date-only and `defer_date` forms must keep matching.
+        # ⚠️ A trailing `\b` cannot match between two word characters, so it failed at
+        # BOTH ends of the datetime: between `9` and `T` (the first regression) and
+        # between the final digit and a `Z` suffix (`2026-11-09T15:30Z`, the second).
+        # CLAUDE.md § Async State Closer names a clock as legal, so each of these must
+        # clear. Two-sided on purpose: the datetime arm is optional, so the date-only and
+        # `defer_date` forms must keep matching too.
         for body in (
             "⏰ Ends:   2026-11-09T15:30:00+01:00 (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09T15:30Z (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09T15:30:00Z (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09T00:00:00Z (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09T15:30:00.5+01:00 (CronCreate j4f2 as early wake)",
             "⏰ Ends:   2026-11-09 15:30 (CronCreate j4f2 as early wake)",
             "⏰ Ends:   2026-11-09 (CronCreate j4f2 as early wake)",
             "⏰ Ends:   defer_date 2026-11-09 (CronCreate j4f2 as early wake)",
         ):
             with self.subTest(body=body):
                 self.assertIsNone(self.mod.session_bound_class(body))
-        # The other half, and the guard against a permissive fix: `2026-11-9` is not a
-        # date `defer-date.py`'s `parse_defer_date` accepts, so the clock class must NOT
-        # bless it and the session-bound watcher still blocks. This keeps the class a
-        # subset of the parser — the lint must never release a clock every fail-closed
-        # reader rejects as invalid.
-        self.assertEqual("cron-create", self.mod.session_bound_class(
-            "⏰ Ends:   2026-11-9 (CronCreate j4f2 as early wake)"))
+        # The other half, and the guard against a permissive fix: a truncated or trailing
+        # word run is not a date `parse_defer_date` accepts, so the clock class must NOT
+        # bless it and the session-bound watcher still blocks.
+        for body in (
+            "⏰ Ends:   2026-11-9 (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09T15 (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09T15:30abc (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09123 (CronCreate j4f2 as early wake)",
+        ):
+            with self.subTest(body=body):
+                self.assertEqual("cron-create", self.mod.session_bound_class(body))
+
+    def test_every_datetime_parse_defer_date_accepts_clears_the_clock_class(self):
+        # ⚠️ Parity, not a sample: the lint and `defer-date.py` must agree on the shapes
+        # the operator's rule calls a clock, or the gate blocks a closer the readers
+        # accept. Both boundary bugs found so far (`…T15:30` and `…T15:30Z`) were a
+        # missing form in this list, which is why it is driven from the parser's own
+        # accepted set rather than a hand-picked one.
+        spec = importlib.util.spec_from_file_location(
+            "defer_date", os.path.join(os.path.dirname(_HERE), "defer-date.py"))
+        defer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(defer)
+        accepted = (
+            "2026-11-09",
+            "2026-11-09T00:00:00Z",
+            "2026-11-09T15:30Z",
+            "2026-11-09T15:30:00Z",
+            "2026-11-09T15:30:00+01:00",
+            "2026-11-09T15:30:00-05:00",
+            "2026-11-09T15:30:00",
+            "2026-11-09 15:30:00",
+            "2026-11-09T15:30",
+        )
+        for value in accepted:
+            with self.subTest(value=value):
+                _parsed, reason = defer.parse_defer_date(value)
+                self.assertIsNone(reason, f"{value!r} is not parser-accepted — fix the list")
+                self.assertIsNone(
+                    self.mod.session_bound_class(
+                        f"⏰ Ends:   {value} (CronCreate j4f2 as early wake)"),
+                    f"{value!r} is parser-accepted but the lint blocks it")
 
     def test_lowercase_monitor_in_a_path_is_not_the_monitor_class(self):
         self.assertIsNone(self.mod.session_bound_class(
