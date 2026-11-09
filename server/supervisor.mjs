@@ -3986,6 +3986,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // `answer_permission` — resolved the same way the spawn gate resolves it, so the two
         // cannot disagree about who this is. A null (unresolvable) writes "", which the hook
         // reads as "manager, unnamed" rather than dropping the record.
+        //
+        // ⚠️ `record.agentId` is the WORKER'S SESSION ID, which is the key the hook reads —
+        // not an internal `agent_N` label. The evidence is the field itself: it is what
+        // `logPermission({ agent: record.agentId })` above writes into `permissions.jsonl`'s
+        // `agent` column, and measured 2026-11-09 every manager-decided `AskUserQuestion` row
+        // in that column resolves to an existing `<agent>.events.jsonl` in the attention
+        // state dir. So that value IS the session id the event log is keyed on, and a marker
+        // written under it is one the hook will find.
         if (record.toolName === 'AskUserQuestion') {
           writeAnswerMarker({
             stateDir: config.attentionStateDir,
