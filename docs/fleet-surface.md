@@ -522,11 +522,12 @@ Answering another session's operator gate by `send-text` is forbidden. Typing in
 showing `Enter to select` turns any keystroke into a menu selection.
 
 **Why A is preferred over B:** A removes the typed *task*; B only hardens the typist. **B is a
-fallback, never the default** — it types into a pane and steals focus, and it has **no target at
+fallback, never the default** — it types into a pane, and it has **no target at
 all for a headless worker**. Reach for it only where A cannot do the job: a resume of a session
 whose liveness cannot be determined, or a resume where headless is not permitted for the phase.
-`send_agent_message` is not an alternative channel **for a tab worker** — it types into the pane
-and steals focus. ⚠️ **It IS the channel for a cluster worker**, and that case is different in kind:
+`send_agent_message` is not an alternative channel **for a tab worker** — it types one message into
+the pane without taking focus, which delivers to a session that is already running and resumes
+nothing. ⚠️ **It IS the channel for a cluster worker**, and that case is different in kind:
 a cluster worker has no pane, so the tool posts one more turn on that worker's **existing session
 id** and blocks until the pod answers — no focus is taken and no keystroke is involved. Two limits on
 A: it can only supervise sessions **it created**, and `spawn_agent({resume})` refuses a
