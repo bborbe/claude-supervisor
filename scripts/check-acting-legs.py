@@ -2,10 +2,11 @@
 """The round's delegate rule carves out its acting legs, and each leg says so at its own home.
 
 `commands/fleet-drive.md`'s delegate rule tells every round to hand anything that is not the
-sweep to a sub-agent. Rows 5b (keep alive), 5c (flagged open), 5d (own parks) and 16 (open leg)
-*are* "anything not the sweep", and they are also the only rows whose purpose is to **act** —
-restart or resume a session, open a page the operator flagged, answer a parked permission prompt,
-open the rows the rank selected. With no carve-out the natural reading of the rule swallows
+sweep to a sub-agent. Rows 5b (keep alive), 5c (flagged open), 5d (own parks), 16 (open leg)
+and 16b (manager-subject reap) *are* "anything not the sweep", and they are also the only rows
+whose purpose is to **act** — restart or resume a session, open a page the operator flagged,
+answer a parked permission prompt, open the rows the rank selected, post the reap card and
+hand over the reap lines. With no carve-out the natural reading of the rule swallows
 exactly those legs, and a delegated sub-agent runs read-only, so the round prints a count it was
 told to print instead of doing the thing the row exists for.
 
@@ -58,7 +59,7 @@ STEPS = COMMANDS / "steps"
 #: Phrase from the carve-out's own first sentence. A plain substring, so a reflow of the
 #: surrounding prose leaves it intact; rewording that sentence is a deliberate act, and the
 #: failure is the reminder that this home assertion moves with it.
-CARVEOUT = "5b, 5c, 5d and 16 are acting legs"
+CARVEOUT = "5b, 5c, 5d, 16 and 16b are acting legs"
 CARVEOUT_HOME = COMMANDS / "fleet-drive.md"
 CARVEOUT_NEEDS = ("write tools", "read-only")
 
@@ -75,6 +76,10 @@ LEGS = {
     # and it was delegated by the same rule, so it needs the same two guarantees: a write
     # grant when it is delegated, and its own file saying so.
     "16": STEPS / "open.md",
+    # 16b joined on 2026-11-09 with the manager-subject reap: it posts the reap card and
+    # hands every reap line to the caller to send, so it is delegated by the same rule and
+    # needs the same two guarantees.
+    "16b": STEPS / "manager-reap.md",
 }
 HEADER = ("#", "Step", "When", "File")
 
@@ -143,7 +148,7 @@ def main() -> int:
         failures.append(
             f"no file under {COMMANDS.relative_to(REPO)}/ carries the carve-out {CARVEOUT!r}.\n"
             f"      Without it the delegate rule reads as 'anything not the sweep', which\n"
-            f"      swallows rows 5b, 5c, 5d and 16 — the legs whose whole purpose is to act."
+            f"      swallows rows 5b, 5c, 5d, 16 and 16b — the legs whose whole purpose is to act."
         )
     elif total > 1:
         where = ", ".join(f"{p.relative_to(REPO)} ×{n}" for p, n in found)
