@@ -76,6 +76,23 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
                                     ack. One lapse still notifies once, not on every
                                     poll — "once" now means once *delivered*, not once
                                     *detected*.
+  --stood-down-past MINUTES        every subject whose <slug>.stopped marker is older
+                                    than MINUTES, as `<age-seconds>\t<slug>`, oldest
+                                    first. The selection half of the stood-down-manager
+                                    close: `--stop` writes that marker and `--arm`
+                                    clears it, so the path and the timestamp format
+                                    have one owner and a caller never re-derives them.
+                                    ⚠️ The marker outlives the session it describes —
+                                    measured 2026-11-09: 83 markers, 41 on pages still
+                                    holding a `claude_session_id`, only 2 of them LIVE —
+                                    so the caller must still join this to session
+                                    liveness and to the page before acting.
+                                    ⚠️ SLEEPING cannot appear: a sleep writes
+                                    <slug>.sleeping, so a date-gated manager is excluded
+                                    structurally rather than by a filter a caller must
+                                    remember. Exit 0 whenever the scan completed (an
+                                    empty list is a real answer); exit 2 when the state
+                                    dir cannot be read, never 0 on a failed scan.
   --delivered SLUG                 ACK a lapse: move SLUG from the owed set to the
                                     delivered set. Called by the sender after the
                                     transport returns success. Carries the CROSSING
@@ -792,6 +809,59 @@ def stop(subject: str, branch: str) -> int:
     return 0
 
 
+def stood_down_past(minutes: float, now: float | None = None) -> int:
+    """Every subject whose stand-down is older than MINUTES: `<age-seconds>\\t<slug>`.
+
+    The selection half of the stood-down-manager close. `--stop` writes the marker and
+    `--arm` clears it, so this script already owns both the path and the timestamp
+    format; a caller that globbed the state dir itself would re-derive both, and drift
+    the moment either changed.
+
+    ⚠️ **The marker's existence is not the population.** Measured 2026-11-09: 83
+    `<slug>.stopped` markers in the state dir, 41 of them on pages still carrying a
+    `claude_session_id`, and only **2** whose session the registry read LIVE — the
+    marker outlives the session it describes. This verb answers "how long has this
+    subject read STOPPED", which is the half the close leg needs; the caller must still
+    join it to session liveness and to the page before acting.
+
+    ⚠️ **`SLEEPING` never appears here, and that is the point.** A sleep writes
+    `<slug>.sleeping`, not `<slug>.stopped`, so a date-gated manager cannot be selected
+    however long it waits — the exclusion is structural, not a filter a caller must
+    remember to apply.
+
+    Order: oldest first, so a leg that acts on a prefix acts on the longest-standing
+    stand-downs. Exit 0 whenever the scan completed — an empty list is a real answer.
+    Exit 2 when the state dir cannot be read; never 0 on a failed scan.
+    """
+    now = time.time() if now is None else now
+    bound = minutes * 60
+    try:
+        names = os.listdir(STATE_DIR)
+    except OSError as e:
+        print(f"state dir unreadable: {e}", file=sys.stderr)
+        return 2
+    rows = []
+    for name in names:
+        if not name.endswith(".stopped"):
+            continue
+        s = name[: -len(".stopped")]
+        try:
+            with open(os.path.join(STATE_DIR, name), encoding="utf-8") as fh:
+                text = fh.read().strip()
+            when = datetime.strptime(text, "%Y-%m-%dT%H:%M:%S%z").timestamp()
+        except (OSError, ValueError):
+            # An unreadable marker is not a close candidate: report it, never guess an age.
+            print(f"unreadable stopped marker: {name}", file=sys.stderr)
+            continue
+        age = now - when
+        if age > bound:
+            rows.append((age, s))
+    rows.sort(reverse=True)
+    for age, s in rows:
+        print(f"{int(age)}\t{s}")
+    return 0
+
+
 def classify(s: str, now: float) -> tuple:
     """(state, detail) for one subject: OK, STALE, STOPPED, SLEEPING, UNARMED or INVALID.
 
@@ -917,6 +987,16 @@ def main() -> int:
     mode.add_argument("--stop", action="store_true", help="mark a deliberate stand-down")
     mode.add_argument("--check", action="store_true", help="report subjects that turned stale")
     mode.add_argument(
+        "--stood-down-past",
+        metavar="MINUTES",
+        type=float,
+        help="every subject whose <slug>.stopped marker is older than MINUTES -> "
+             "`<age-seconds>\\t<slug>`, oldest first. The selection half of the "
+             "stood-down-manager close; a sleep writes .sleeping, so SLEEPING is "
+             "excluded structurally. Exit 0 whenever the scan completed, 2 when the "
+             "state dir cannot be read",
+    )
+    mode.add_argument(
         "--sleep",
         action="store_true",
         help="record a sleep until --until (a date-gated subject, waiting on its own clock)",
@@ -968,6 +1048,10 @@ def main() -> int:
         print("--topic is deprecated; use --subject", file=sys.stderr)
     elif a.topic_alias and a.subject and a.topic_alias != a.subject:
         ap.error("--topic and --subject disagree")
+    if a.stood_down_past is not None:
+        if a.stood_down_past <= 0:
+            ap.error("--stood-down-past needs MINUTES > 0")
+        return stood_down_past(a.stood_down_past)
     if a.check:
         return check()
     if a.delivered:

@@ -1111,3 +1111,82 @@ class StateResolution(unittest.TestCase):
         state, detail = self.m.classify(s, now)
         self.assertEqual("OK", state, detail)
         self.assertIn("(observed)", detail)
+
+
+class StoodDownPast(unittest.TestCase):
+    """--stood-down-past: the selection half of the stood-down-manager close.
+
+    The load-bearing properties: the bound is on the marker's own timestamp, not on any
+    file mtime; a SLEEPING subject is excluded structurally because a sleep writes
+    `.sleeping` and never `.stopped`; and an empty or unreadable state dir is reported,
+    never rendered as "nothing stood down".
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def marker(self, slug, age_seconds):
+        when = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+        self.m.write_atomic(
+            self.m.path(slug, "stopped"), when.strftime("%Y-%m-%dT%H:%M:%S%z") + "\n"
+        )
+
+    def run_verb(self, minutes):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.m.stood_down_past(minutes)
+        return rc, [ln for ln in out.getvalue().splitlines() if ln]
+
+    def test_selects_only_past_bound(self):
+        self.marker("goal--old", 3 * 3600)
+        self.marker("goal--fresh", 10 * 60)
+        rc, rows = self.run_verb(60)
+        self.assertEqual(0, rc)
+        self.assertEqual(["goal--old"], [r.split("\t")[1] for r in rows])
+
+    def test_oldest_first(self):
+        self.marker("goal--newer", 2 * 3600)
+        self.marker("goal--oldest", 9 * 3600)
+        rc, rows = self.run_verb(60)
+        self.assertEqual(0, rc)
+        self.assertEqual(["goal--oldest", "goal--newer"], [r.split("\t")[1] for r in rows])
+        self.assertGreater(int(rows[0].split("\t")[0]), int(rows[1].split("\t")[0]))
+
+    def test_sleeping_is_never_selected(self):
+        # A date-gated wait writes .sleeping and never .stopped, however long it lasts.
+        self.m.write_atomic(self.m.path("goal--asleep", "sleeping"), "2099-01-01T00:00:00+0000\n")
+        self.marker("goal--stopped", 5 * 3600)
+        rc, rows = self.run_verb(60)
+        self.assertEqual(0, rc)
+        self.assertEqual(["goal--stopped"], [r.split("\t")[1] for r in rows])
+
+    def test_bound_is_inclusive_of_nothing_and_empty_is_a_real_answer(self):
+        self.marker("goal--old", 3 * 3600)
+        rc, rows = self.run_verb(100000)
+        self.assertEqual(0, rc)
+        self.assertEqual([], rows)
+
+    def test_unreadable_marker_is_reported_not_guessed(self):
+        self.marker("goal--good", 3 * 3600)
+        self.m.write_atomic(self.m.path("goal--junk", "stopped"), "not a timestamp\n")
+        err = io.StringIO()
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = self.m.stood_down_past(60)
+        self.assertEqual(0, rc)
+        self.assertEqual(["goal--good"], [r.split("\t")[1] for r in out.getvalue().splitlines() if r])
+        self.assertIn("unreadable stopped marker", err.getvalue())
+
+    def test_unreadable_state_dir_exits_two(self):
+        with tempfile.TemporaryDirectory() as gone:
+            m = load(os.path.join(gone, "does-not-exist"))
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = m.stood_down_past(60)
+        self.assertEqual(2, rc)
+        self.assertIn("state dir unreadable", err.getvalue())
