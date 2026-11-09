@@ -84,9 +84,10 @@ SITE_LIST = {
     # `None` into `[]` would reap a worker whose watcher was merely unobservable.
     ("reap-idle-headless.py", "watchers"),
     # the same file's pid-identity read: `ps -o lstart=` taken before and after the guards.
-    # `None` means the start time could not be read (the caller then falls back to the
-    # registry re-read alone), a string means it was read — never collapsed into "no
-    # process", which would make a recycled pid indistinguishable from a live one.
+    # `None` means the start time could not be read and the caller REFUSES — an identity
+    # that was never established is never signalled, so there is no fallback path; a string
+    # means it was read. Never collapsed into "no process", which would make a recycled pid
+    # indistinguishable from a live one.
     ("reap-idle-headless.py", "process_start"),
     # added 2026-10-07 — `plugin-version-census.py`, the fleet reading of which plugin
     # version each live session serves. Its two READS keep the three-state contract and are

@@ -18,12 +18,14 @@ terminal-task worker is **refused** here and stays with `close-worker.py`.
 survive: the resume consumer needs both. The success path asserts the transcript still
 exists before reporting, so a change that turned this into a session delete fails loudly.
 
-Ten refusals, each exit 1 with a stable token as the first line of output:
+Eleven refusals, each exit 1 with a stable token as the first line of output:
 
   unknown-session-id    no registry entry carries that session id.
   ambiguous-pid         more than one entry claims the id, none carries an integer pid, or
                         the pid was recycled between the guards and the signal.
   already-gone          the pid is not alive; nothing to reap (a stale entry is removed).
+  not-headless          `entrypoint` is not `sdk-cli` — a tab worker's pane would be left
+                        open behind a dead session; that close is `close-worker.py`'s.
   busy-target           registry `status` is not `idle` — the worker is mid-turn.
   not-idle-long-enough  idle less than `IDLE_FLOOR` (15 min) per `statusUpdatedAt`.
   wrapper-busy          the wrapper record is unreadable, or reads a non-idle state, a
@@ -477,17 +479,14 @@ def main(argv=None):
             continue
 
         transcript = transcript_path(rec.get("cwd"), session_id)
-        print(
-            f"🧹 reap-idle-headless · session {session_id[:8]} · pid {pid} · "
-            f"{rec.get('name')!r}"
-        )
-        print(f"   idle {int(idle_seconds(rec) or 0)}s · transcript {transcript}")
-        if args.dry_run:
-            print(f"   ✅ would close pid {pid} (transcript kept)")
-            continue
 
-        # Re-read the entry immediately before the signal: the guards take seconds, and a
-        # session that exited in that window can have its pid recycled onto another process.
+        # --- the pre-signal re-read ----------------------------------------------------
+        # Everything above was read once; the guards take seconds (two HTTP reads and a
+        # process-tree walk), and the state they vetted can move in that window. The
+        # readings are therefore re-taken immediately before the signal, and the whole
+        # block runs BEFORE the success-looking header is printed: the refusal token is
+        # the caller's contract, so a token printed under a `🧹` header reads as a
+        # successful reap to anything branching on the first output line.
         try:
             with open(path, encoding="utf-8") as handle:
                 fresh = json.load(handle)
@@ -498,6 +497,41 @@ def main(argv=None):
                 "ambiguous-pid",
                 f"the registry entry changed during the guards (pid {pid} → "
                 f"{fresh.get('pid')}); nothing was signalled",
+            )
+            continue
+        # A turn accepted during the guards flips the entry out of `idle` and re-stamps
+        # `statusUpdatedAt`, so the guard chain's reading is stale exactly when it matters.
+        fresh_status = (fresh.get("status") or "").strip()
+        if fresh_status != "idle":
+            exit_code = refuse(
+                "busy-target",
+                f"registry status became {fresh_status or '(none)'!r} during the guards; "
+                "nothing was signalled",
+            )
+            continue
+        fresh_idle = idle_seconds(fresh)
+        if fresh_idle is None or fresh_idle < IDLE_FLOOR:
+            exit_code = refuse(
+                "not-idle-long-enough",
+                f"idle dropped to {int(fresh_idle or 0)}s during the guards; "
+                "nothing was signalled",
+            )
+            continue
+        # The wrapper record is the authoritative "nothing pending" reading, and for a
+        # wrapper-backed worker it is the only one: a continuation that arrived during the
+        # guards would otherwise be killed with the process.
+        fresh_wrapper = wrapper_record(session_id)
+        if fresh_wrapper is None or fresh_wrapper.get("state") != "idle":
+            exit_code = refuse(
+                "wrapper-busy",
+                "the wrapper record became unreadable or non-idle during the guards; "
+                "nothing was signalled",
+            )
+            continue
+        if fresh_wrapper.get("pending_turns") != 0 or fresh_wrapper.get("question"):
+            exit_code = refuse(
+                "wrapper-busy",
+                "a turn or a question arrived during the guards; nothing was signalled",
             )
             continue
         # The same recycle, seen from the process side rather than the registry side.
@@ -517,6 +551,15 @@ def main(argv=None):
                 f"pid {pid} was recycled during the guards (start time changed); "
                 "nothing was signalled",
             )
+            continue
+
+        print(
+            f"🧹 reap-idle-headless · session {session_id[:8]} · pid {pid} · "
+            f"{rec.get('name')!r}"
+        )
+        print(f"   idle {int(idle_seconds(rec) or 0)}s · transcript {transcript}")
+        if args.dry_run:
+            print(f"   ✅ would close pid {pid} (transcript kept)")
             continue
 
         if precheck.pid_is_alive(pid):

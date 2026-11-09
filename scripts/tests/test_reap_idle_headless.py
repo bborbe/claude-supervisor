@@ -121,6 +121,25 @@ class TestTranscriptPath(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestProcessStart(unittest.TestCase):
+    """The pid-identity read: a string when read, `None` when it could not be — never a
+    collapsed "no process", which would make a recycled pid indistinguishable from a live
+    one and let a signal go to an unvetted identity."""
+
+    def test_a_live_pid_reads_its_start_time(self):
+        child = subprocess.Popen(["sleep", "60"])
+        try:
+            self.assertTrue(reap.process_start(child.pid))
+        finally:
+            child.kill()
+            child.wait(timeout=10)
+
+    def test_a_dead_pid_reads_none(self):
+        child = subprocess.Popen(["true"])
+        child.wait(timeout=10)
+        self.assertIsNone(reap.process_start(child.pid))
+
+
 class TestGuard(unittest.TestCase):
     """The predicate, driven with injected readings — no live worker needed."""
 
@@ -216,9 +235,15 @@ class _Store(http.server.BaseHTTPRequestHandler):
 
     wrapper = {}
     items = []
+    mutate = None
 
     def do_GET(self):
         if self.path.startswith("/api/1.0/sessions/"):
+            # Fires while the guard chain is still running, which is exactly the window the
+            # pre-signal re-read exists for: a fixture that could only change state BEFORE
+            # the run would leave that window untested.
+            if _Store.mutate is not None:
+                _Store.mutate()
             body = json.dumps(_Store.wrapper).encode()
         elif self.path == "/api/1.0/attention":
             body = json.dumps(_Store.items).encode()
@@ -249,6 +274,7 @@ class TestScript(unittest.TestCase):
 
         _Store.wrapper = {"id": SID, "state": "idle", "pending_turns": 0, "question": None}
         _Store.items = []
+        _Store.mutate = None
         self.httpd = http.server.HTTPServer(("127.0.0.1", 0), _Store)
         self.port = self.httpd.server_address[1]
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
@@ -275,7 +301,7 @@ class TestScript(unittest.TestCase):
         threading.Thread(target=child.wait, daemon=True).start()
         return child
 
-    def _registry(self, pid, **over):
+    def _registry(self, pid, path=None, **over):
         rec = {
             "sessionId": SID,
             "pid": pid,
@@ -286,9 +312,10 @@ class TestScript(unittest.TestCase):
             "statusUpdatedAt": int((time.time() - 20 * 60) * 1000),
         }
         rec.update(over)
-        with open(os.path.join(self.sessions, f"{pid}.json"), "w", encoding="utf-8") as handle:
+        path = path or os.path.join(self.sessions, f"{pid}.json")
+        with open(path, "w", encoding="utf-8") as handle:
             json.dump(rec, handle)
-        return os.path.join(self.sessions, f"{pid}.json")
+        return path
 
     def _task(self, status="in_progress", session_id=SID):
         lines = ["---", f"claude_session_id: {session_id}", f"status: {status}", "---", ""]
@@ -308,13 +335,16 @@ class TestScript(unittest.TestCase):
             handle.write('{"type":"assistant"}\n')
         return path
 
-    def _run(self, *extra, sessions_dir=None):
+    def _env(self):
         env = dict(os.environ)
         env["SUPERVISOR_SESSIONS_DIR"] = self.sessions
         env["SUPERVISOR_VAULTS_ROOT"] = self.vaults
         env["SUPERVISOR_PROJECTS_DIR"] = self.projects
         env["SUPERVISOR_WRAPPER_URL"] = f"http://127.0.0.1:{self.port}"
         env["ATTENTION_STORE_URL"] = f"http://127.0.0.1:{self.port}"
+        return env
+
+    def _run_env(self, env, *extra):
         return subprocess.run(
             [sys.executable, SCRIPT, SID, *extra],
             capture_output=True,
@@ -322,6 +352,32 @@ class TestScript(unittest.TestCase):
             env=env,
             timeout=60,
         )
+
+    def _run(self, *extra, sessions_dir=None):
+        return self._run_env(self._env(), *extra)
+
+    def _run_with_unreadable_start_time(self):
+        """Run with a `ps` shim that answers nothing for `-o lstart=`.
+
+        The fail-closed arm is otherwise unreachable — a live pid always has a readable
+        start time. The shim delegates every other form to the real `ps`, so the watcher
+        read still works.
+        """
+        bindir = os.path.join(self.tmp, "bin")
+        os.makedirs(bindir, exist_ok=True)
+        shim = os.path.join(bindir, "ps")
+        with open(shim, "w", encoding="utf-8") as handle:
+            handle.write(
+                "#!/bin/sh\n"
+                'case "$*" in\n'
+                "  *lstart*) exit 0 ;;\n"
+                "esac\n"
+                'exec /bin/ps "$@"\n'
+            )
+        os.chmod(shim, 0o755)
+        env = self._env()
+        env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+        return self._run_env(env)
 
     # --- refusals ---------------------------------------------------------------------
 
@@ -341,12 +397,80 @@ class TestScript(unittest.TestCase):
         self.assertEqual(done.stdout.splitlines()[0], "ambiguous-pid")
         self.assertIsNone(child.poll(), "a refusal must send no signal")
 
-    def test_already_gone(self):
+    def test_already_gone_removes_the_stale_entry(self):
+        """The token promises the entry is gone, so it must be gone — otherwise the same
+        dead pid re-refuses on every run and the docstring is a lie."""
         child = self._spawn(["true"])
         child.wait(timeout=10)
+        entry = self._registry(child.pid)
+        self._task()
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "already-gone")
+        self.assertFalse(os.path.exists(entry), "the stale registry entry must be removed")
+
+    def test_not_headless_refuses(self):
+        """A tab worker's id here would be SIGTERMed as a process, pane left open behind it."""
+        child = self._spawn()
+        self._registry(child.pid, entrypoint="interactive")
+        self._task()
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "not-headless")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_registry_entry_changing_during_the_guards_refuses(self):
+        """The pre-signal re-read exists for this window, and its token must be the FIRST
+        line — a refusal printed under the `🧹` header reads as a successful reap."""
+        child = self._spawn()
+        entry = self._registry(child.pid)
+        other = self._spawn()
+        self._task()
+        self._transcript()
+        _Store.mutate = lambda: self._registry(other.pid, path=entry)
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "ambiguous-pid")
+        self.assertNotIn("🧹", done.stdout, "no success-looking header may precede a refusal")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_a_turn_arriving_during_the_guards_refuses(self):
+        """A worker that becomes busy mid-chain must not be signalled on the stale read."""
+        child = self._spawn()
         self._registry(child.pid)
         self._task()
-        self.assertEqual(self._run().stdout.splitlines()[0], "already-gone")
+        self._transcript()
+        _Store.mutate = lambda: self._registry(child.pid, status="busy")
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "busy-target")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_a_continuation_arriving_during_the_guards_refuses(self):
+        """The wrapper record is the authoritative 'nothing pending' read."""
+        child = self._spawn()
+        self._registry(child.pid)
+        self._task()
+        self._transcript()
+
+        def continuation():
+            _Store.wrapper = {
+                "id": SID,
+                "state": "idle",
+                "pending_turns": 1,
+                "question": None,
+            }
+
+        _Store.mutate = continuation
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "wrapper-busy")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_an_unreadable_start_time_fails_closed(self):
+        """An identity never established is never signalled — there is no fallback path."""
+        child = self._spawn()
+        self._registry(child.pid)
+        self._task()
+        self._transcript()
+        done = self._run_with_unreadable_start_time()
+        self.assertEqual(done.stdout.splitlines()[0], "ambiguous-pid")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
 
     def test_busy_target_sends_no_signal(self):
         child = self._spawn()
