@@ -1618,13 +1618,25 @@ class TestTrackedArtifacts(Base):
         """Work Approval tick #90: 11 names a side, sharing none. Two independently-derived
         memberships cannot each hold every name the other lacks, so the shape is itself the
         tell — a caller-side format error (here a `sed` that never fired and kept each
-        bullet's `— description` tail), not a disagreement of any size."""
+        bullet's `— description` tail), not a disagreement of any size.
+
+        ⚠️ This is the ONE divergence that blocks rather than reports, so it carries its
+        own exit code. Measured 2026-11-08 (Development Pipeline Throughput): 38
+        vault-relative page paths against 543 real task rows classified `caller-format`,
+        the round continued on the shared exit 10, and the readings document rendered
+        `clear=38 · none=38` for a fleet it never read. A caller branching on 10 for
+        "stop and look" cannot also treat it as "refuse the round", so the two verdicts
+        are two codes.
+        """
         self.tracked("ATopic", ["ATask", "AGoal"])
         self.snapshot("ATopic", ["Other1", "Other2"])
         rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
-        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertEqual(rc, self.m.EXIT_CALLER_FORMAT, out)
+        self.assertNotEqual(self.m.EXIT_CALLER_FORMAT, self.m.EXIT_DIVERGENT,
+                            "a blocking verdict must not share the report-only code")
         self.assertIn("caller-format", out)
         self.assertIn("format error", out)
+        self.assertIn("⛔", out, "the refusal must be legible on the first line")
 
     def test_compare_names_the_caller_side_when_the_scan_overshot(self):
         """The other direction of the same cause: gate-only is empty and the caller carries
