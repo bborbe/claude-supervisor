@@ -203,8 +203,6 @@ class CliTest(unittest.TestCase):
         o = load()
         o.session_verdict = lambda sid: "LIVE"
         o.loop_state = lambda subject, branch="goal": ("STOPPED", "marker present")
-        import io
-        from contextlib import redirect_stdout
         out = io.StringIO()
         with redirect_stdout(out):
             rc = o.main(["--session", "gm-1", "--subject", "A Goal"])
@@ -601,29 +599,54 @@ class PageResolutionTest(unittest.TestCase):
         self.assertEqual("not-owner", o.verdict)
         self.assertIn("no page", o.detail)
 
-    def test_an_unreadable_page_is_a_verdict_not_a_traceback(self):
-        """THE DEFECT THIS CLASS WAS ADDED FOR.
+    def test_an_unreadable_page_is_cannot_tell_not_not_owner(self):
+        """THE INVARIANT THIS MODULE EXISTS FOR.
 
-        `page_path` only proves a directory entry matched; the read can still fail on
-        permissions, a symlink to nowhere, or a page that is not UTF-8. Letting that raise
-        turns a caller's tick into a traceback, which is neither a verdict nor `cannot-tell`.
+        The page exists and may record a live manager; we simply could not read it. Answering
+        `not-owner` would license a second keeper over a possibly-live manager — the very
+        double-writer the module is written to withhold.
         """
         path = self.page("A Goal", "claude_session_id: gm-1\n")
         path.write_bytes(b"---\nclaude_session_id: gm-1\n\xff\xfe not utf-8\n---\n")
         o = self.o.of_subject(str(self.vault), "A Goal")
-        self.assertEqual("not-owner", o.verdict)
+        self.assertEqual("cannot-tell", o.verdict)
+        self.assertEqual("page-unreadable", o.reason)
         self.assertIn("unreadable", o.detail)
 
     def test_an_unreadable_page_keeps_the_loop_fact_it_could_read(self):
-        # The loop probe still runs, so the answer is graded by the same table as any other
-        # read that came back with no session. ⚠️ The page is a DIRECTORY named `<subject>.md`,
-        # not a `chmod 000` file: a mode-based fixture passes as root, and the reviewer's own
-        # container runs as root, so `make test` would fail there while passing here.
-        directory = self.vault / "24 Goals" / "A Goal.md"
-        directory.mkdir()
+        # The loop probe still runs, so a reader can see which subject was unmeasurable.
+        # ⚠️ The page is a DIRECTORY named `<subject>.md`, not a `chmod 000` file: a
+        # mode-based fixture passes as root, and the review container runs as root, so
+        # `make test` would fail there while passing here.
+        (self.vault / "24 Goals" / "A Goal.md").mkdir()
         o = self.o.of_subject(str(self.vault), "A Goal")
-        self.assertIn(o.verdict, ("not-owner", "cannot-tell"))
-        self.assertIn("unreadable", o.detail)
+        self.assertEqual("cannot-tell", o.verdict)
+        self.assertEqual("page-unreadable", o.reason)
+
+    def test_an_unlistable_subject_folder_is_cannot_tell(self):
+        """An unlistable FOLDER is not an absent page — it is a failed read.
+
+        ⚠️ The override is a FILE, so `os.listdir` raises `NotADirectoryError` for any uid.
+        A `chmod 000` directory would be listable as root, and the review container runs as
+        root, so that fixture would pass here and fail there.
+        """
+        not_a_dir = self.vault / "24 Goals" / "A Goal.md"
+        not_a_dir.write_text("x", encoding="utf-8")
+        o = self.o.of_subject(str(self.vault), "A Goal", "goal", str(not_a_dir))
+        self.assertEqual("cannot-tell", o.verdict)
+        self.assertEqual("page-unreadable", o.reason)
+
+    def test_a_missing_override_folder_is_a_known_absence(self):
+        # The complement: a folder that is genuinely not there proves no page exists.
+        o = self.o.of_subject(str(self.vault), "A Goal", "goal",
+                              str(self.vault / "no-such-folder"))
+        self.assertEqual("not-owner", o.verdict)
+
+    def test_a_genuinely_absent_page_is_not_owner(self):
+        # The complement of the two above: absence that was ESTABLISHED stays not-owner.
+        o = self.o.of_subject(str(self.vault), "No Such Goal")
+        self.assertEqual("not-owner", o.verdict)
+        self.assertEqual("no-session", o.reason)
 
 
 if __name__ == "__main__":

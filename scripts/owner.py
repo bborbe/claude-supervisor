@@ -395,6 +395,33 @@ def of_page(fm: str, subject: str, branch: str = "goal") -> Ownership:
     return Ownership(verdict, reason, session, loop, sid, detail)
 
 
+def locate(vault: str, subject: str, branch: str = "goal", directory: str = "") -> tuple:
+    """`(path, reason)` — the subject page, or why it could not be shown that there is none.
+
+    ⚠️ **An unreadable FOLDER is not an absent page, and the two must not collapse.** The
+    caller answers `not-owner` when no page exists, and `not-owner` licenses a second keeper;
+    a directory this process cannot list tells us nothing about whether the subject has a
+    manager, so it is reported as a reason and the caller answers `cannot-tell`. A folder that
+    genuinely is not there (`FileNotFoundError`) IS a known absence — the vault may keep its
+    goals elsewhere — so it stays on the not-owner path.
+    """
+    if branch not in SUBJECT_DIRS:
+        return "", ""
+    roots = [directory] if directory else list(SUBJECT_DIRS[branch])
+    for root in roots:
+        base = os.path.join(vault, root)
+        try:
+            entries = os.listdir(base)
+        except FileNotFoundError:
+            continue
+        except OSError as err:
+            return "", f"{base} is unreadable ({err})"
+        for entry in entries:
+            if entry.lower() == subject.lower() + ".md":
+                return os.path.join(base, entry), ""
+    return "", ""
+
+
 def page_path(vault: str, subject: str, branch: str = "goal", directory: str = "") -> str:
     """The subject page's path, matched by exact basename — never a fuzzy or prefix match.
 
@@ -404,43 +431,45 @@ def page_path(vault: str, subject: str, branch: str = "goal", directory: str = "
     ⚠️ **`fleet` has no subject page, and returns none.** The fleet manager manages no page
     (`scripts/fleet-register.py`), so falling back to the goal folders for that branch would
     resolve a GOAL page as if it were the fleet's subject.
+
+    ⚠️ **A caller that decides an OWNERSHIP verdict must use `locate()` instead.** This returns
+    `""` for both "no such page" and "the folder could not be read", and only the first of those
+    is a known absence.
     """
-    if branch not in SUBJECT_DIRS:
-        return ""
-    roots = [directory] if directory else list(SUBJECT_DIRS[branch])
-    for root in roots:
-        base = os.path.join(vault, root)
-        try:
-            for entry in os.listdir(base):
-                if entry.lower() == subject.lower() + ".md":
-                    return os.path.join(base, entry)
-        except OSError:
-            continue
-    return ""
+    return locate(vault, subject, branch, directory)[0]
 
 
 def of_subject(vault: str, subject: str, branch: str = "goal", directory: str = "") -> Ownership:
-    """Resolve a subject named by the caller, reading its page and its loop."""
-    path = page_path(vault, subject, branch, directory)
+    """Resolve a subject named by the caller, reading its page and its loop.
+
+    ⚠️ **"Could not read it" is `cannot-tell`, never `not-owner`, at both hops.** `not-owner` is
+    the answer that licenses a caller to hand the subject to another keeper, so answering it
+    because a folder or a page would not open is precisely the second writer over a possibly
+    live manager that this module exists to withhold. Only a page that was READ and records no
+    session is `not-owner` (`no-session`), and only a folder that is genuinely absent is a known
+    absence.
+    """
+    path, why = locate(vault, subject, branch, directory)
+    if why:
+        loop, detail = loop_state(subject, branch)
+        return Ownership(CANNOT_TELL, "page-unreadable", NONE, loop, "", why)
     if not path:
         loop, detail = loop_state(subject, branch)
         verdict, reason = verdict_of(NONE, loop)
         return Ownership(verdict, reason, NONE, loop, "",
                          detail or f"no page for {subject} under {branch}")
-    # ⚠️ **A page that exists but cannot be READ is a failed probe, not a crash.** `page_path`
-    # only proves a directory entry matched; the read that follows can still fail on
-    # permissions, a symlink to nowhere, or a page that is not UTF-8. Letting that raise would
-    # turn a caller's whole tick into a traceback — and a traceback is what a keep-alive reads
-    # as `cannot-tell` at best and as an abort at worst, so the answer this module owes is the
-    # verdict, never an exception.
+    # ⚠️ **A page that exists but cannot be READ is a failed probe, not a crash and not an
+    # absence.** `locate()` only proves a directory entry matched; the read that follows can
+    # still fail on permissions, a symlink to nowhere, or a page that is not UTF-8. Letting
+    # that raise would turn a caller's whole tick into a traceback, and answering `not-owner`
+    # would license a second writer on a subject whose manager is merely unmeasurable.
     try:
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
     except (OSError, UnicodeDecodeError) as err:
         loop, detail = loop_state(subject, branch)
-        verdict, reason = verdict_of(NONE, loop)
-        return Ownership(verdict, reason, NONE, loop, "",
-                         detail or f"{path} is unreadable ({err})")
+        return Ownership(CANNOT_TELL, "page-unreadable", NONE, loop, "",
+                         f"{path} is unreadable ({err})")
     return of_page(frontmatter(text), subject, branch)
 
 
