@@ -348,8 +348,14 @@ class SessionVerdictTest(unittest.TestCase):
         self.assertEqual("UNKNOWN", self.k.session_verdict("sid-1"))
 
 
-class VerdictTableTest(unittest.TestCase):
+class SessionLivenessTableTest(unittest.TestCase):
     """`VERDICT_BY_EXIT` must equal the exit codes `session-liveness.py` actually emits.
+
+    ⚠️ **The class name is NOT `VerdictTableTest`.** This file already defines one — the
+    ownership table above — and a second class of that name silently REBINDS the module
+    attribute, so unittest discovery collects only the later one and the ownership table's
+    tests never run. That happened once: the exhaustive `LIVE × {OK, STALE}` check and the
+    `LIVE + STOPPED` boundary were both shadowed while the suite still reported green.
 
     The table is a duplicate of the instrument's contract, and it has to be: both scripts run
     standalone out of the plugin cache, so there is no shared module to import at run time.
@@ -395,7 +401,7 @@ class VerdictTableTest(unittest.TestCase):
 
 
 class CadenceTest(unittest.TestCase):
-    """`cadence()` is the second probe, and it must be bounded and guarded like the first.
+    """`loop_state()` is the second probe, and it must be bounded and guarded like the first.
 
     `PROBE_TIMEOUT`'s comment claims a hung probe cannot wedge the tick, and the tick runs
     BOTH probes — so an unbounded `manager-liveness.py` made that comment false for half its
@@ -406,7 +412,6 @@ class CadenceTest(unittest.TestCase):
     def setUp(self):
         self.k = load()
         self._orig = self.k.subprocess
-        self._orig_verdict = self.k.session_verdict
         self.kwargs = []
         self.addCleanup(self._restore)
 
@@ -496,6 +501,102 @@ class CadenceTest(unittest.TestCase):
     def test_a_state_line_with_no_detail_yields_an_empty_detail(self):
         self._stub(stdout="OK\n")
         self.assertEqual(("OK", ""), self.k.loop_state("A Goal"))
+
+
+class PageResolutionTest(unittest.TestCase):
+    """The page half: finding the subject page and reading its manager stamp.
+
+    ⚠️ **This half had no tests at first, and that is exactly where a defect hid.** `of_subject`
+    read the page with an unguarded `open()`, so a page that existed but could not be read
+    raised out of the resolver instead of answering — the one outcome a keep-alive tick cannot
+    survive, because a traceback is neither a verdict nor a `cannot-tell`.
+    """
+
+    def setUp(self):
+        self.o = load()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.vault = pathlib.Path(self.tmp.name)
+        (self.vault / "24 Goals").mkdir(parents=True)
+        (self.vault / "23 Topics").mkdir(parents=True)
+        self._orig = (self.o.session_verdict, self.o.loop_state)
+        self.addCleanup(self._restore)
+        self.o.session_verdict = lambda sid: "LIVE"
+        self.o.loop_state = lambda subject, branch="goal": ("OK", "")
+
+    def _restore(self):
+        self.o.session_verdict, self.o.loop_state = self._orig
+
+    def page(self, name, front, directory="24 Goals"):
+        path = self.vault / directory / (name + ".md")
+        path.write_text("---\n" + front + "---\n# Success Criteria\n", encoding="utf-8")
+        return path
+
+    def test_frontmatter_is_empty_without_a_leading_delimiter(self):
+        self.assertEqual("", self.o.frontmatter("no frontmatter here"))
+        self.assertEqual("", self.o.frontmatter("---\nnever closed"))
+
+    def test_scalar_does_not_swallow_the_next_key_on_an_empty_value(self):
+        # `\s*` would match the newline and return the NEXT key's line as this one's value —
+        # a page carrying `claude_session_id:` with no id would read as having one.
+        self.assertEqual("", self.o.scalar("claude_session_id:\nstatus: in_progress\n",
+                                           "claude_session_id"))
+        self.assertEqual("abc", self.o.scalar("claude_session_id: abc\n", "claude_session_id"))
+
+    def test_page_session_id_strips_quotes(self):
+        self.assertEqual("sid-1", self.o.page_session_id("claude_session_id: 'sid-1'\n"))
+        self.assertEqual("", self.o.page_session_id("status: in_progress\n"))
+
+    def test_page_path_matches_the_exact_basename(self):
+        self.page("A Goal", "claude_session_id: gm-1\n")
+        self.page("A Goal Extra", "claude_session_id: gm-2\n")
+        found = self.o.page_path(str(self.vault), "A Goal")
+        self.assertEqual("A Goal.md", os.path.basename(found))
+
+    def test_page_path_finds_a_topic_page_under_its_own_folder(self):
+        self.page("A Topic", "claude_session_id: tm-1\n", directory="23 Topics")
+        self.assertTrue(self.o.page_path(str(self.vault), "A Topic", "topic").endswith(
+            os.path.join("23 Topics", "A Topic.md")))
+
+    def test_page_path_returns_nothing_for_a_branch_with_no_subject_page(self):
+        # `fleet` manages no page. Falling back to the goal folders would resolve a GOAL page
+        # as if it were the fleet's subject.
+        self.page("A Goal", "claude_session_id: gm-1\n")
+        self.assertEqual("", self.o.page_path(str(self.vault), "A Goal", "fleet"))
+
+    def test_of_subject_resolves_the_page_and_its_loop(self):
+        self.page("A Goal", "claude_session_id: gm-1\n")
+        o = self.o.of_subject(str(self.vault), "A Goal")
+        self.assertEqual("owner", o.verdict)
+        self.assertEqual("gm-1", o.session_id)
+
+    def test_of_subject_on_a_missing_page_is_not_an_owner(self):
+        o = self.o.of_subject(str(self.vault), "No Such Goal")
+        self.assertEqual("not-owner", o.verdict)
+        self.assertIn("no page", o.detail)
+
+    def test_an_unreadable_page_is_a_verdict_not_a_traceback(self):
+        """THE DEFECT THIS CLASS WAS ADDED FOR.
+
+        `page_path` only proves a directory entry matched; the read can still fail on
+        permissions, a symlink to nowhere, or a page that is not UTF-8. Letting that raise
+        turns a caller's tick into a traceback, which is neither a verdict nor `cannot-tell`.
+        """
+        path = self.page("A Goal", "claude_session_id: gm-1\n")
+        path.write_bytes(b"---\nclaude_session_id: gm-1\n\xff\xfe not utf-8\n---\n")
+        o = self.o.of_subject(str(self.vault), "A Goal")
+        self.assertEqual("not-owner", o.verdict)
+        self.assertIn("unreadable", o.detail)
+
+    def test_an_unreadable_page_keeps_the_loop_fact_it_could_read(self):
+        # The loop probe still runs, so the answer is graded by the same table as any other
+        # read that came back with no session.
+        path = self.page("A Goal", "claude_session_id: gm-1\n")
+        path.chmod(0o000)
+        self.addCleanup(path.chmod, 0o644)
+        o = self.o.of_subject(str(self.vault), "A Goal")
+        self.assertIn(o.verdict, ("not-owner", "cannot-tell"))
+        self.assertIn("unreadable", o.detail)
 
 
 if __name__ == "__main__":
