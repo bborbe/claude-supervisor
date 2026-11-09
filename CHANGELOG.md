@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.264.3
 
 - fix: **A pane delivery no longer takes the operator's focus.** `sendToPane` (`server/tab.mjs`) ran `activate-pane` before every `send-text`, and nothing restored the previously focused pane — so an operator typing while the fleet pushed had their half-written line land in the worker's composer, where the following Enter submitted it as an instruction. The activation existed because a 2026-09-14 measurement showed `send-text` "doing nothing" until `activate-tab` ran first; **that measurement does not reproduce.** Against a raw-mode target (`stty -icanon -echo`) `send-text --pane-id` delivers 6/6 bytes with `wezterm cli list-clients` reporting the same `focused_pane_id` before and after (measured 2026-11-09, wezterm `20260716-195552-76b606ec`). ⚠️ The original 0-byte readings were a **canonical-mode artefact**: a line-buffered tty echoes the text into `get-text` while withholding it from the process until a newline, so the screen showed a delivery that never happened — the same reason `get-text` is not a delivery receipt. Change set: `server/tab.mjs` (activation removed, header note 1 corrected), `server/tab.test.mjs` (asserts the absence of activation rather than its order), `server/supervisor.mjs` (`send_agent_message`'s description no longer advertises focus theft), `scripts/send-delivery-drill.py`, `scripts/pane-wake.py`, `scripts/plugin-version-census.py`, `CLAUDE.md`, `docs/fleet-surface.md`. `scripts/jump.py` keeps its activation — taking you to the pane is what it is for.
 
