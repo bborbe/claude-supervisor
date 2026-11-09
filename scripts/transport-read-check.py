@@ -165,6 +165,10 @@ SITE_LIST = {
     # collapsing one into an empty result — so it is enumerated for the mechanism/list
     # agreement and, like `close-worker.py`'s `main`, deliberately not driven.
     ("spawn-goal.py", "pane_text"), ("spawn-goal.py", "send"),
+    # added 2026-11-08 — the fleet-triage pane wake's two viewport reads (#692). `None` on a
+    # failed `get-text`: the guard maps it to `error:unreadable` and the wake skips the pane,
+    # so a failed read can never read as an empty, wakeable composer.
+    ("pane-wake-guard.py", "read_pane"), ("pane-wake.py", "read_pane"),
     # added 2026-10-22 — `manager-attention-watch.py`'s pane-title read, the join that
     # gives a re-registered park card its jump target. It returns `None` for a failed
     # query, never `""`: a `wezterm cli list` that never answered cannot prove a pane is
@@ -250,6 +254,8 @@ POPULATED = {
     ("mmf", "pane_lines"): "context\nEnter to select",
     ("sg", "pane_text"): "  ⎿  Goal set: Task \"t\" is finished.",
     ("ser", "_process_table"): "101 1 claude",
+    ("pwg", "read_pane"): "\u276f\u00a0",
+    ("pw", "read_pane"): "\u276f\u00a0",
 }
 
 
@@ -331,6 +337,8 @@ def main():
             ("sg", "spawn-goal.py"),
             ("ser", "session-exit-record.py"),
             ("rih", "reap-idle-headless.py"),
+            ("pwg", "pane-wake-guard.py"),
+            ("pw", "pane-wake.py"),
         )
     }
 
@@ -380,6 +388,8 @@ def main():
         # the property is load-bearing: `watchers` returning `[]` for an unreadable tree
         # would reap a worker whose background watcher was merely unobservable.
         ("rih", "watchers", (1,)), ("rih", "process_start", (1,)),
+        # added 2026-11-08 — the pane wake's viewport reads, driven like `sg.pane_text`.
+        ("pwg", "read_pane", (1,)), ("pw", "read_pane", (1,)),
     ]
     if args.capture:
         print(f"== three-state captures — {os.path.abspath(args.tree)}")

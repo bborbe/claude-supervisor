@@ -70,6 +70,32 @@ EXPECTED = {
     "23-partial-tool-use-quoting-a-closer.jsonl": 0,
     "24-partial-cut-inside-the-closer.jsonl": 0,
     "25-partial-literal-backslash-before-admin.jsonl": 0,
+    # ⚠️ The `⏰ Ends:` check: one positive per session-bound class (26 is pane 619's
+    # recorded line verbatim), then six negatives that each carry a session-bound watcher
+    # in their `(mechanism, id)` slot — so only the durable observable keeps them clean.
+    "26-ends-background-agents-pane-619.jsonl": 2,
+    "27-ends-monitor.jsonl": 2,
+    "28-ends-run-in-background-shell.jsonl": 2,
+    "29-ends-schedule-wakeup.jsonl": 2,
+    "30-ends-cron-create.jsonl": 2,
+    "31-ends-file-path.jsonl": 0,
+    "32-ends-card-id.jsonl": 0,
+    "33-ends-defer-date.jsonl": 0,
+    "34-ends-external-probe.jsonl": 0,
+    "35-ends-monitor-in-path.jsonl": 0,
+    "36-ends-pr-watch-compliant.jsonl": 0,
+    # ⚠️ `gh -R <owner>/<repo> pr ready N` is the form CLAUDE.md mandates, and the entry
+    # originally required `gh` and `pr ready` to be adjacent — so the mandated form fell
+    # through as `not-allow-listed` while the bare form was released.
+    "37-gh-pr-ready-with-repo-flag.jsonl": 2,
+}
+
+ENDS_POSITIVE = {
+    "26-ends-background-agents-pane-619.jsonl": "background-sub-agent",
+    "27-ends-monitor.jsonl": "monitor",
+    "28-ends-run-in-background-shell.jsonl": "run-in-background-shell",
+    "29-ends-schedule-wakeup.jsonl": "schedule-wakeup",
+    "30-ends-cron-create.jsonl": "cron-create",
 }
 
 
@@ -284,11 +310,47 @@ class CloserGateLintTest(unittest.TestCase):
             self.payload("08-prod-buca.jsonl"), environ={})
         self.assertEqual("not-allow-listed", record["reason"])
 
-    def test_stop_hook_active_allows_even_a_gated_closer(self):
+    def test_stop_hook_active_allows_when_nothing_was_blocked(self):
         # The loop guard: without it a continued turn ending on the same closer re-blocks
-        # forever.
+        # forever. With no prior block on record the retry is allowed, exactly as before.
         code, _text, record = self.mod.evaluate(
-            self.payload("01-github-pr-watch.jsonl", stop_hook_active=True), environ={})
+            self.payload("01-github-pr-watch.jsonl", stop_hook_active=True),
+            environ={self.mod.STATE_DIR_ENV: self.dir})
+        self.assertEqual(0, code)
+        self.assertEqual("stop-hook-active", record["reason"])
+
+    def test_a_re_emitted_closer_is_blocked_once_more_then_allowed(self):
+        # ⚠️ The SC2 fixture: a closer the lint blocked once must NOT be admitted on the
+        # retry. The bound comes from the hook's own record, so the sequence is
+        # block → blocked-retry → allow. Three asserts, because a fix that blocks the
+        # retry but never releases it would loop, and that is the guard's whole purpose.
+        env = {self.mod.STATE_DIR_ENV: self.dir}
+        payload = self.payload("37-gh-pr-ready-with-repo-flag.jsonl")
+
+        first = self.mod.evaluate(payload, environ=env)
+        self.assertEqual(2, first[0])
+        self.assertEqual("allow-listed", first[2]["reason"])
+        self.mod.write_record(first[2], directory=self.dir)
+
+        retry = self.mod.evaluate(dict(payload, stop_hook_active=True), environ=env)
+        self.assertEqual(2, retry[0], "the retry must be blocked, not released")
+        self.assertEqual("blocked-retry", retry[2]["reason"])
+        self.assertIn("re-emitted unchanged", retry[1])
+        self.mod.write_record(retry[2], directory=self.dir)
+
+        third = self.mod.evaluate(dict(payload, stop_hook_active=True), environ=env)
+        self.assertEqual(0, third[0], "a third identical stop is allowed — the guard is bounded")
+        self.assertEqual("stop-hook-active", third[2]["reason"])
+
+    def test_a_different_closer_on_the_retry_is_allowed(self):
+        # The bound keys on the closer, not the session: a continued turn that ends on a
+        # *different* gate is the guard's normal case and must not be re-blocked.
+        env = {self.mod.STATE_DIR_ENV: self.dir}
+        first = self.mod.evaluate(
+            self.payload("37-gh-pr-ready-with-repo-flag.jsonl"), environ=env)
+        self.mod.write_record(first[2], directory=self.dir)
+        code, _text, record = self.mod.evaluate(
+            self.payload("01-github-pr-watch.jsonl", stop_hook_active=True), environ=env)
         self.assertEqual(0, code)
         self.assertEqual("stop-hook-active", record["reason"])
 
@@ -339,6 +401,86 @@ class CloserGateLintTest(unittest.TestCase):
                     self.assertIn("closer-gate-lint", proc.stderr)
                 else:
                     self.assertEqual("", proc.stderr)
+
+    def test_each_session_bound_class_is_flagged_with_class_and_phrase(self):
+        for name, cls in ENDS_POSITIVE.items():
+            with self.subTest(fixture=name):
+                code, text, record = self.mod.evaluate(self.payload(name), environ={})
+                self.assertEqual(2, code)
+                self.assertEqual("session-bound-ends", record["reason"])
+                self.assertEqual("block", record["decision"])
+                self.assertEqual(cls, record["class"])
+                self.assertIn(record["phrase"], text)
+                self.assertIn("must outlive the session", text)
+
+    def test_pane_619_closer_is_the_regression(self):
+        # ⚠️ The measured shape: `👤 You: nothing`, which the gate checks read as
+        # `not-a-gate`. The `⏰ Ends:` check must run first or it never sees this line.
+        _code, _text, record = self.mod.evaluate(
+            self.payload("26-ends-background-agents-pane-619.jsonl"), environ={})
+        self.assertEqual("chunk 7a and 7c completion notices (background agents)",
+                         record["phrase"])
+        self.assertIn("nothing", record["closer"])
+
+    def test_a_durable_observable_clears_a_watcher_in_the_slot(self):
+        # The operator's "observable only" scope: the watcher may stay in the slot.
+        for name in ("31-ends-file-path.jsonl", "32-ends-card-id.jsonl",
+                     "33-ends-defer-date.jsonl", "34-ends-external-probe.jsonl",
+                     "35-ends-monitor-in-path.jsonl", "36-ends-pr-watch-compliant.jsonl"):
+            with self.subTest(fixture=name):
+                code, text, record = self.mod.evaluate(self.payload(name), environ={})
+                self.assertEqual(0, code)
+                self.assertEqual("", text)
+                self.assertIsNone(record["class"])
+                self.assertIsNone(record["phrase"])
+
+    def test_a_watcher_timeout_is_not_a_clock_observable(self):
+        # ⚠️ `times out ~18:40` dies with the watcher; only defer_date / an ISO date count.
+        self.assertEqual("background-sub-agent", self.mod.session_bound_class(
+            "⏰ Ends:   chunk 7a done (background agent a1, times out ~18:40)"))
+
+    def test_lowercase_monitor_in_a_path_is_not_the_monitor_class(self):
+        self.assertIsNone(self.mod.session_bound_class(
+            "⏰ Ends:   the monitor-check job reports done (polled 30s, b77)"))
+
+    def test_ends_from_an_older_message_is_never_read(self):
+        # ⚠️ The latest closer has no `⏰ Ends:`; an older WAITING message does. Reading
+        # the older one would judge a wait the session already left.
+        path = os.path.join(self.dir, "t.jsonl")
+        older = {"type": "assistant", "message": {"content": [{"type": "text", "text":
+                 "🟡 WAITING\n👤 You: nothing\n⏰ Ends:   notices (background agents)"}]}}
+        newer = {"type": "assistant", "message": {"content": [{"type": "text", "text":
+                 "🔵 READY\n👤 You: pick — 1. X (recommended) · 2. Y"}]}}
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(older) + "\n" + json.dumps(newer) + "\n")
+        code, _text, record = self.mod.evaluate(
+            {"transcript_path": path, "stop_hook_active": False, "session_id": "s"},
+            environ={})
+        self.assertEqual(0, code)
+        self.assertIsNone(record["class"])
+
+    def test_stop_hook_active_allows_a_session_bound_ends(self):
+        code, _text, record = self.mod.evaluate(
+            self.payload("26-ends-background-agents-pane-619.jsonl", stop_hook_active=True),
+            environ={})
+        self.assertEqual(0, code)
+        self.assertEqual("stop-hook-active", record["reason"])
+
+    def test_record_carries_class_and_phrase_on_allow_and_block(self):
+        env = dict(os.environ)
+        env[self.mod.STATE_DIR_ENV] = self.dir
+        for name, expected in (("26-ends-background-agents-pane-619.jsonl", 2),
+                               ("36-ends-pr-watch-compliant.jsonl", 0)):
+            proc = subprocess.run(
+                [sys.executable, _SCRIPT], input=json.dumps(self.payload(name)),
+                capture_output=True, text=True, env=env, check=False)
+            self.assertEqual(expected, proc.returncode)
+        with open(os.path.join(self.dir, "test-session.jsonl"), encoding="utf-8") as fh:
+            rows = [json.loads(line) for line in fh]
+        self.assertEqual("background-sub-agent", rows[0]["class"])
+        self.assertIn("background agents", rows[0]["phrase"])
+        self.assertIn("class", rows[1])
+        self.assertIsNone(rows[1]["class"])
 
     def test_cli_malformed_stdin_fails_open(self):
         env = dict(os.environ)

@@ -102,6 +102,13 @@ all and belongs in `STUCK`; a row whose record shows two consecutive unanswered 
 become an OPERATOR card and appears there instead. That is why the row carries no counter of its
 own: the record, not the count, is what makes it legitimate.
 
+**A STUCK tab row counts as driven only on `pane:*`.** Its wake path (`commands/steps/fleet-triage-render.md`
+§ Drove) must read `pane:<resolution>`, meaning `pane-wake.py --send` returned `delivered`. A tab
+row whose only action was `sendmessage` stays in `STUCK`, because that message was never read. A
+`none:<skip>` row stays STUCK unless the skip names a valid wait: `skip:operator-ask` or
+`skip:open-card` → it belongs in OPERATOR with its card; `skip:machine-wait` → EXTERNAL;
+`skip:spinner` → WORKING. ⚠️ Never count `unverified` as driven.
+
 **Green requires all five of:** `STUCK == 0`, `UNCARDED == 0`, `FINISHED-OPEN == 0`,
 `NO-LOOP == 0`, and `accounted for == sessions` (every live session landed in exactly one row —
 an unclassified session is a hole in the sweep, not a clean bill).
