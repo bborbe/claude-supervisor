@@ -378,6 +378,66 @@ number with no label reads as a measurement, and while the scan cannot finish in
 timeout the floor is the only honest form. Both flags are refused on any other key. Format and
 rationale: `commands/steps/output-shape.md` item 14.
 
+## 4b. Close a stood-down manager past its bound
+
+`/supervisor:stop` disarms the loop and **keeps the session** by design. Nothing closes it,
+so it holds a fleet slot, a full context and a keeper-census row for a manager that no longer
+runs. This procedure is the reverse direction of the keep-alive: a session no tier keeps is
+adopted or closed, never left live and unkept (`docs/session-tiers.md` § Adopt or close).
+
+**Population — the bound, then the join.** `--stood-down-past` answers only "how long has
+this subject read STOPPED"; the marker outlives the session it describes, so the join is the
+half that matters:
+
+```bash
+P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
+python3 "$P/manager-liveness.py" --stood-down-past 60
+```
+
+⚠️ **60 minutes is 4× the round's own cadence** (15 min default, 15 min floor,
+`commands/fleet-loop.md`). It exceeds one cadence so a round that has not yet looked cannot
+close anything, and sits far below the smallest observed live dwell — measured 2026-11-09,
+two live stood-down managers at 9.3 h and 15.0 h, with 83 markers of which only 2 were LIVE.
+
+For each `\t<slug>` row: split the slug on `--` into `<branch>` and `<base>`, resolve the
+page, and keep the row **only** when the page's `claude_session_id` is a session
+`session-liveness.py` reads `LIVE`. A dead session needs no close — the marker simply
+outlived it, and closing nothing is the correct answer for those 39 rows.
+
+**Step 0's heldness read applies** — a held session is neither closed nor adopted.
+
+**Hand over the page first, and prove it landed.** `close-worker.py`'s `page_verdict()`
+refuses `task-not-terminal` while the page still names the session as `claude_session_id` on
+a non-terminal page, and returns `None` only when the session has **handed the page over**
+(its id in `metrics_sessions` while `claude_session_id` names another session), or the page
+is `completed`/`aborted`, or it carries a future `defer_date`. So the handover is two writes
+against the page — record the session in `metrics_sessions`, then clear
+`claude_session_id` — and the **proof** is that a fresh `page_verdict` no longer returns
+`task-not-terminal`, never that the write commands exited 0.
+
+⚠️ **A refusal is a recorded failure, never an alternative pass.** `task-not-terminal` is
+precisely the token a leg that skips the handover earns on every manager, so a run that stops
+there is reported as **refused** with its token and its page, never as closed. Report the two
+outcomes as distinct lines; a leg whose every row is refused has closed nothing and must read
+that way.
+
+**Then close, through the one close path:**
+
+```bash
+python3 "$P/close-worker.py" --session <session-id>
+```
+
+Never a bare kill and never a direct process signal — every refusal token it returns
+(`gate-held`, `busy-target`, `dirty-worktree`, `task-not-terminal`, …) is honoured and
+reported verbatim.
+
+⚠️ **Closing a stood-down topic manager does not make its goals fleet-kept.** Read
+`keeper-census.py:361-397`: the topic page itself becomes `fleet round`, but every goal that
+topic declares still reads `unkept` — `"declaring topic(s) have no live armed manager"` —
+until § 1 opens a fresh topic manager and it arms. The close is the *first* step of that
+chain, not a single-step fix, and a round that reports the goals kept immediately after the
+close has reported something the census does not say.
+
 ## 5. Record why a half did not run — and never leave the sweep's seed standing
 
 ⚠️ **A leg that does not execute records WHY, in the same file — at the granularity that
