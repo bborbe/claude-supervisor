@@ -16,7 +16,9 @@ tests pin the three properties that make that claim true:
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -754,6 +756,91 @@ class TestFindPages(unittest.TestCase):
         _, _, error = self._find()
         self.assertIsNotNone(error)
         self.assertIn("goal lookup failed", error)
+
+
+class _FakeJump:
+    """A `jump.py` stand-in whose WezTerm listing changes between calls.
+
+    `pane_for_session` is exercised for real — only the transport is faked — so the
+    successive-listing race is driven without a `sleep` or a live mux.
+    """
+
+    def __init__(self, *listings):
+        self._listings = list(listings)
+        self.list_calls = 0
+
+    def wezterm_panes(self):
+        index = min(self.list_calls, len(self._listings) - 1)
+        self.list_calls += 1
+        return self._listings[index]
+
+    def pane_sessions(self, pmap):
+        return {pane: p["session"] for pane, p in pmap.items() if p.get("session")}
+
+
+def _pane(pane_id, session):
+    return {"pane_id": pane_id, "tty_name": f"/dev/ttys{pane_id}", "session": session}
+
+
+class _Kill:
+    """Records every `wezterm` invocation, so a refusal can prove none happened."""
+
+    def __init__(self, returncode=0, stderr=""):
+        self.calls = []
+        self.returncode = returncode
+        self.stderr = stderr
+
+    def __call__(self, argv, **_kwargs):
+        self.calls.append(argv)
+        return self
+
+
+class TestTabKill(unittest.TestCase):
+    """A pane id is a lease: the tab arm must re-resolve it before it kills."""
+
+    def _kill(self, jump, pane):
+        out = io.StringIO()
+        runner = _Kill()
+        with contextlib.redirect_stdout(out):
+            rc = cw.tab_kill(jump, SID, pane, runner=runner)
+        return rc, runner, out.getvalue()
+
+    def test_unchanged_pane_is_killed(self):
+        """`tab_kill` re-resolves; the same id means the lease still holds."""
+        rc, runner, out = self._kill(_FakeJump({"238": _pane(238, SID)}), "238")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(runner.calls, [["wezterm", "cli", "kill-pane", "--pane-id", "238"]])
+
+    def test_reassigned_pane_id_refuses_and_never_kills(self):
+        """The race: the session moved to 301 and 238 now belongs to someone else."""
+        after = {"238": _pane(238, OTHER), "301": _pane(301, SID)}
+        rc, runner, out = self._kill(_FakeJump(after), "238")
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(runner.calls, [], "a reassigned id must never be killed")
+        self.assertIn("changed before the kill", out)
+        self.assertIn("pane 238 → 301", out)
+
+    def test_pane_gone_refuses(self):
+        after = {"238": _pane(238, OTHER)}
+        rc, runner, out = self._kill(_FakeJump(after), "238")
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(runner.calls, [])
+        self.assertIn("no single live pane maps to it", out)
+
+    def test_unreadable_listing_refuses(self):
+        """A failed `wezterm cli list` is not an empty answer — it is not a clearance."""
+        rc, runner, out = self._kill(_FakeJump(None), "238")
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(runner.calls, [])
+        self.assertIn("wezterm cli list unavailable", out)
+
+    def test_wezterm_refusal_is_an_error(self):
+        runner = _Kill(returncode=1, stderr="no such pane")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cw.tab_kill(_FakeJump({"238": _pane(238, SID)}), SID, "238", runner=runner)
+        self.assertEqual(rc, 1)
+        self.assertIn("wezterm refused to close pane 238", out.getvalue())
 
 
 if __name__ == "__main__":
