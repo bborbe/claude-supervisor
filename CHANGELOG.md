@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.259.0
 
 - feat: `scripts/resume-check.py` answers whether a resume actually ran a turn, from the transcript rather than from the spawn response — a manager could not tell a productive resume from an empty one, because `spawn_agent(resume=…)` answers `running` with a wrapper id either way (measured 2026-11-05: agent_12 / agent_13 returned `num_turns: 0` with an empty result while agent_14 worked). It reads `<projects>/*/<session-id>.jsonl` by session id, deduplicated by inode, counts a turn only from an `assistant` record or a `result` with `num_turns > 0`, and counts the synthetic `<task-notification>` records the CLI injects on resume separately — so the input that produced the false green can never be read as work. Verdicts `productive` / `zero-turn` / `no-evidence` / `running`; `--since` and `--until` bound the window, because a transcript keeps growing on later resumes and an unbounded window credits that later work to the resume being judged; `--fail-on-zero-turn` exits 1 for a manager loop. Change set: `scripts/resume-check.py`, `scripts/tests/test_resume_check.py`, `CHANGELOG.md`.
 
