@@ -6,7 +6,7 @@ user-invocable: false
 
 # Readings
 
-When: every tick — take all five readings (commands in the step)
+When: every tick — take all six readings (commands in the step)
 
 ## The saturation reading — the ratio, not tok/s
 
@@ -80,3 +80,59 @@ Read it from `python3 $P/next-focus.py --vault "<vault>" --tasks-dir "25 Tasks"`
 ## The service-guard reading
 
 Every tick runs `python3 $P/service-guard.py --apply` and prints its lines. Unlike the four readings above, this one acts: a breach on a terminal owning row reopens it. The contract — config, instrument, the three states, and why it reopens but never restarts — lives in `${CLAUDE_PLUGIN_ROOT}/commands/steps/service-guard.md`.
+
+## The keeper-census reading
+
+Every tick runs `python3 $P/keeper-census.py --vault "<vault>"` and prints its block. It is
+the reading that asserts the fleet's invariant — **every live session has exactly one
+keeper** — against the contract in `docs/session-tiers.md` § Keep-alive, which is the single
+home of the rule set. It reads and never acts: it resumes nothing, closes nothing, adopts
+nothing.
+
+```
+keeper-census: <vault>
+  legs: topic=yes goal=yes worker=yes · live=80 rows=405 · unrecorded=20 · cannot-tell=1
+  RED unkept      goal-mgr   <goal>    — declaring topic(s) have no live armed manager: <topic> [STOPPED]
+      live        topic-mgr  <topic>   keeper: fleet round
+      not-live    worker     <task>    keeper: —
+MISMATCH live session <id> (<name>) — no page records it
+MISMATCH page "<task>" records session <id> — the registry does not hold it
+  card: <item-id>
+keeper-census: unkept=0 double-kept=0 sessions=80
+```
+
+⚠️ **Three answers, not two, and the count line carries only one of them.**
+`unkept` / `double-kept` are the invariant broken by a row **a page records**. A live session
+**no page records** is `unrecorded` — reported, named in the `MISMATCH` block, counted in the
+header, and **never counted red and never carded**: it is outside the session tree, and
+`docs/session-tiers.md` § Adopt or close says nothing about it (an operator-opened ad-hoc tab,
+a drill, a worker that never stamped its page). Counting those as gaps made `unkept=0`
+unreachable and fired the card every episode-day forever. `cannot-tell` is the third: a keeper
+read that failed.
+
+⚠️ **The count line is the block's last line, always** — the `card:` line sits above it, and
+that line is what the goal's own criterion reads.
+
+⚠️ **The exit code is three-way, and only one of them is a finding.** `0` clean; `1` at
+least one red row — the reading's own result, **not** a refusal, so the round carries on and
+prints the block; `2` the registry or the vault could not be read — including a vault with
+no topic, goal or task directory, and any internal error — and the census says so on stderr
+rather than reporting a fleet of zero. Render `2` as
+`keeper census: refused — <reason>`; a refusal and a clean fleet must never print the same.
+
+⚠️ **`cannot-tell` is never counted red.** A row whose keeper could not be read (an
+unreadable loop probe, a page naming a manager page that does not exist) prints that state
+with its reason and is counted in the header — a failed read is not a definite gap.
+
+⚠️ **"Is the keeper running" is read only for manager keepers.** A `fleet round` keeper is the
+round itself, running by construction — re-reading it would turn every fleet-kept row red
+whenever the fleet loop idles.
+
+⚠️ **The script posts its own card — the round posts none.** One card per red *episode*, its
+dedup key carrying the episode's start and day: a second consecutive red round asks nothing, a
+fleet that goes green and red again is asked again, and a fleet still red after 24 h is asked
+again rather than left with an expired card. Do not re-post it, do not add an option to it,
+and do not card individual red rows.
+
+⚠️ **A red row is a report, never a work item for this round** — the task that owns the gap
+fixes it.

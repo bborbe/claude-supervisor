@@ -194,6 +194,7 @@ scripts/session-scope.py                         that arm's durable ownership in
 commands/read-guides.md                          load every guide in docs/
 scripts/{jump,who-needs-me}.py                   their helpers
 scripts/service-guard.py                         the fleet round's standing resource guard (fifth reading, router row 15) — `phys_footprint` + CPU per launchd service against `~/.claude/state/service-guard.json`; `--apply` reopens the owning row on a breach, never restarts
+scripts/keeper-census.py                         the sixth reading (router row 15) — every live session's keeper tier and every page's, against `docs/session-tiers.md` § Keep-alive; names each unkept / double-kept row and exits 1, posts one card per red episode, never acts
 scripts/declared-wait.py                         the shared `⏰ Ends:` reader — one home for the slot `fleet-board.py`, `manager-predispatch.py` and the fleet sweep all key on (the "fourth definition of idle" guard)
 agents/goal-wrangler.md                routine approval loop over headless workers
 agents/topic-sweep-reader.md            the TOPIC sweep's read half — goal rows and their managers (called by topic-loop/topic-status)
