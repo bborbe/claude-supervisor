@@ -757,9 +757,19 @@ def compute(subject, tracked_path, vault, interval, now=None,
     predispatch = _load("manager-predispatch")
 
     members = read_tracked(tracked_path)
-    rows = predispatch.resolve_tracked(vault, members) if vault else []
-    if not rows:
-        rows = [{"name": n, "mtime": None, "session": None, "sessions": []} for n in members]
+    rows, matched_members = (
+        predispatch.resolve_tracked_by_member(vault, members) if vault else ([], []))
+    # ⚠️ NO synthesised rows. A placeholder carrying `sessions: []` is not an observation:
+    # `feed_verdict([], gated, "read")` answers `clear` and `external_wait([])` answers
+    # `none`, so N placeholders render `clear=N · none=N` for a fleet that was never read.
+    # Measured 2026-11-08 (Development Pipeline Throughput): the tracked set was 38
+    # vault-relative page paths, which `resolve_tracked` matches against neither a task's
+    # name nor its `goals:`, so every one of the 38 synthesised rows read `clear` while 543
+    # real task rows — 387 of them carrying a session id — went unseen. An unresolved
+    # member is routed to the unread vocabulary below instead, which is the answer the
+    # document already had and could never reach.
+    matched = set(matched_members)
+    unresolved = [n for n in dict.fromkeys(members) if n not in matched]
 
     registry = wnm.registry_records(sessions_dir)
     feed = feed_panes(endpoint) if feed is None else feed
@@ -801,19 +811,23 @@ def compute(subject, tracked_path, vault, interval, now=None,
             "task_mtime": row.get("mtime"),
             "stuck": sv,
             "stuck_reason": sreason,
+            # The marker the families are read through: a resolved row's empty id set is a
+            # real answer (no owner), an unresolved row's is not an observation at all.
+            "resolved": True,
         }
 
     # A tracked name that resolved to no task file is NOT silently dropped: an absent
     # row reads exactly like a row that was never declared, and the reader's table
     # would then quietly shrink. It carries the unread vocabulary instead.
-    for name in members:
-        if name in out_rows:
+    for name in unresolved:
+        if name in out_rows:  # a name that is both a task and a member keeps its row
             continue
         out_rows[name] = {
             "ids": [], "liveness": "UNKNOWN", "in_flight": "unread",
             "in_flight_limb": "no task file resolved", "feed": "unread",
             "external_wait": "unread", "task_mtime": None,
             "stuck": "unread", "stuck_reason": "no task file resolved for this name",
+            "resolved": False,
         }
 
     # Counted from the rows themselves, not accumulated beside them, so the
@@ -822,6 +836,21 @@ def compute(subject, tracked_path, vault, interval, now=None,
     feed_counts = {"gated": 0, "clear": 0, "unread": 0}
     for rec in out_rows.values():
         feed_counts[rec["feed"]] += 1
+
+    # What the tracked set actually resolved to, as counts rather than an adjective.
+    # `state` is the one word a caller may branch on, and two of its four values mean
+    # NO family value in this document came from an observation: `unresolved` (members
+    # were declared, none admitted a task) and `empty` (no members at all). A reader
+    # that renders a table from either renders a quiet fleet out of nothing — the
+    # 2026-11-08 defect. `partial` names, by name, the members that admitted nothing.
+    if not members:
+        resolution_state = "empty"
+    elif not rows:
+        resolution_state = "unresolved"
+    elif unresolved:
+        resolution_state = "partial"
+    else:
+        resolution_state = "resolved"
 
     return {
         "subject": subject,
@@ -841,6 +870,15 @@ def compute(subject, tracked_path, vault, interval, now=None,
         # row count by construction, so a reader can check the invariant without
         # re-counting.
         "feed_counts": feed_counts,
+        # Did the tracked set resolve to anything? `resolved_rows` is the count of
+        # TASK rows, never the member count — a goal member admits many rows.
+        "resolution": {
+            "state": resolution_state,
+            "tracked": len(members),
+            "matched_members": len(matched),
+            "resolved_rows": len(rows),
+            "unresolved": unresolved,
+        },
         # Every probe that failed this round, with its own error. Empty on a clean
         # read; a transient store fault and a genuinely gate-free fleet are then
         # distinguishable without re-running anything.
