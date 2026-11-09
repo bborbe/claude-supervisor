@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.264.0
 
 - fix: **the ownership-filtered feed no longer wakes a manager on attention cards that are already closed or answered, and a store-read failure is now a different line.** `GET /api/1.0/attention` returns OPEN items only, so `headless_items` answered "no record" both for a card that is no longer open and for a read that raised; both rendered `session=unresolved` and both woke the arm. Measured 2026-11-05 → 11-07 on one goal manager: 3 of 3, then 7 of 10, then **18 of 18** wake rows dead or foreign, and the arm was stopped rather than re-armed. New `store_states()` derives a per-key state — `open`, `not-open` (a good read, and the card is not on it) or `unread` (the read itself failed) — and `evaluate_panes()` drops `not-open` rows as `dropped(not-open)` before any ownership hop, counted on every `LIVENESS` line. A headless wake line now carries **exactly one of three tokens**: `session=<id>`, `session=unattributed` (open gate whose record carries no `producer_id` — a candidate to confirm, never foreign) or `store=unreachable` (fail-open, unchanged). ⚠️ **`session=unresolved` is retired** — it was the collision itself. `headless_items_checked()` names a failed read; `headless_items()` keeps its `[]`-as-unread contract for `round-readings.py`. Change set: `scripts/gate-owner-filter.py`, `scripts/tests/test_gate_owner_filter.py`, `commands/steps/attention-watcher.md`, `commands/steps/round-tail.md`, `CHANGELOG.md`.
 ## v0.263.1
