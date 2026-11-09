@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.259.4
 
 - fix: **the tab arm of `close-worker.py` re-resolves the pane before `kill-pane`, and refuses a pane whose id changed.** The headless arm re-reads its registry entry immediately before signalling because `pid` is resolved *before* the guards — a `git status`, a transcript read and a vault-wide `grep` — so a recycled pid could be signalled. The tab arm resolves its `pane` *after* those guards, so its window is short, but it is not zero: `kill-pane` is a separate `wezterm` invocation that re-resolves the id in a new process, and a pane id is a lease — freed when its pane closes and reassigned after a WezTerm mux restart (`~/.claude/state/session-exit/pane-525.log` carries two spawns under the same id six days apart, and a restart renumbers both namespaces at once, measured 2026-09-18: 238 → 33, 241 → 31, 257 → 36). `kill-pane` refuses a *dead* pane, never a *live* one that now belongs to someone else. The arm now calls `tab_kill()`, which re-runs `pane_for_session()` immediately before the kill and refuses on any change — a different id, no id, or an unreadable `wezterm cli list` — printing `❌ error: the pane for <sid> changed before the kill (pane A → B, <why>); nothing was signalled`. The comment claiming the tab path needed no equivalent is corrected. Change set: `scripts/close-worker.py`, `scripts/tests/test_close_worker.py`, `CHANGELOG.md`.
 
