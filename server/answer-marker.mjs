@@ -36,8 +36,13 @@ export const ANSWERER_KINDS = ['manager', 'operator', 'other']
 // One marker per session, single-slot: the hook reads it when the gate closes, which is the
 // next event after the answer. A per-request filename would accumulate one file per park and
 // nothing would ever remove them.
+// A Claude session id — the only thing the hook keys a marker on. Validated before the value
+// reaches a filesystem path: an absolute value would make `join` discard the state dir and
+// `..` segments would walk out of it.
+const SESSION_ID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+
 export function answerMarkerPath({ stateDir, sessionId }) {
-  if (typeof sessionId !== 'string' || sessionId === '') return null
+  if (typeof sessionId !== 'string' || !SESSION_ID.test(sessionId)) return null
   return join(stateDir, `${sessionId}.answer.json`)
 }
 

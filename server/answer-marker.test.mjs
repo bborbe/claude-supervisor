@@ -12,7 +12,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, readFileSync, existsSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
@@ -102,8 +102,17 @@ test('writeAnswerMarker never throws when the directory cannot be created', () =
   }), false)
 })
 
-test('attentionStateDir mirrors the hook resolution', () => {
+test('attentionStateDir resolves the hook\'s directory, override included', () => {
   // Resolved in config.mjs, not here: this module reads no environment variable, so the
   // assertion belongs on the config surface that owns the default.
-  assert.match(config.attentionStateDir, /(\.claude\/state\/attention|ATTENTION_STATE_DIR)/)
+  //
+  // Asserted as an equality against the resolution the hook itself performs, not as a loose
+  // regex — a regex matching "either the default or the literal env name" pins neither, and
+  // would pass if the override were silently dropped.
+  const expected =
+    process.env.ATTENTION_STATE_DIR || join(homedir(), '.claude', 'state', 'attention')
+  assert.equal(config.attentionStateDir, expected)
+  // The default must NOT be the supervisor's own state dir: a writer pointed there is a
+  // marker no hook reads.
+  assert.notEqual(config.attentionStateDir, config.stateDir)
 })

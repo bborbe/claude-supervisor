@@ -111,9 +111,15 @@ class AnswerGateTest(unittest.TestCase):
         if delivery is None:
             delivery = {"item_id": "i1", "status": "delivered", "carrier": "supervisor:attention-poll"}
         out = io.StringIO()
+        # ⚠️ `ATTENTION_STATE_DIR` is redirected into a throwaway dir. `cmd_answer` writes an
+        # answer marker beside the worker's event log, so without this every message-class
+        # test would write into the real `~/.claude/state/attention` — polluting the operator's
+        # live state from the test suite, and making the assertions depend on a file that
+        # outlives the run.
         with mock.patch.object(aa, "fetch_item", return_value=item), \
              mock.patch.object(aa, "post_answer", side_effect=post) as posted, \
              mock.patch.object(aa, "fetch_delivery", return_value=delivery), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", tempfile.mkdtemp()), \
              mock.patch.object(aa, "_sleep", lambda _s: None):
             rc = aa.cmd_answer("i1", "arm", self.REG, out=out, decision=decision)
         return rc, out.getvalue(), posted

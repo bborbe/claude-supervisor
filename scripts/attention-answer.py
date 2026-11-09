@@ -63,6 +63,7 @@ import http.client
 import json
 import math
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -88,6 +89,10 @@ ATTENTION_STATE_DIR = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduse
 # be a write that can never be read.
 ANSWERER_KINDS = ("manager", "operator", "other")
 
+# A Claude session id, which is the only thing the hook keys a marker on. Validated before the
+# value reaches a filesystem path — see `write_answer_marker`.
+_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
 
 def write_answer_marker(producer_id, answerer_session, answerer_kind):
     """Record who answered `producer_id`'s item, for its own hook to stamp on close.
@@ -101,7 +106,12 @@ def write_answer_marker(producer_id, answerer_session, answerer_kind):
     """
     if answerer_kind not in ANSWERER_KINDS:
         return False
-    if not isinstance(producer_id, str) or not producer_id:
+    # ⚠️ Validated as a UUID, not merely non-empty. `producer_id` is external store data —
+    # the store is an unauthenticated localhost endpoint — and it is interpolated into a
+    # filesystem path. An absolute value makes `os.path.join` discard ATTENTION_STATE_DIR
+    # outright, and `..` segments walk out of it; both would write a marker outside the
+    # directory the hook reads, or over a file that has nothing to do with attention.
+    if not isinstance(producer_id, str) or not _UUID.match(producer_id):
         return False
     path = os.path.join(ATTENTION_STATE_DIR, f"{producer_id}.answer.json")
     # pid-suffixed temp + replace, the same reason `<sid>.posted.json` does it: a fixed `.tmp`
@@ -437,11 +447,18 @@ def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None,
     # answer, never before: a marker for an answer that failed to land would attribute a
     # question nobody answered.
     #
-    # `manager` is the honest kind for this arm — it is a session answering on a manager's
-    # behalf, and `resolved_by` is that session's own id. An arm stripped of
-    # `CLAUDE_CODE_SESSION_ID` still writes the marker with `""`, which the hook reads as
-    # "answered, unnamed" rather than as "nothing known" — the distinction a later count needs.
-    write_answer_marker(item.get("producer_id", ""), resolved_by, "manager")
+    # ⚠️ `operator`, not `manager`. This arm is `/supervisor:attention-next`, which
+    # `commands/attention-next.md` defines as relaying the operator's own words — *"This
+    # command relays an operator answer; it is not a channel for a manager's own decisions."*
+    # Hardcoding `manager` here would inflate the count this marker exists to produce, in the
+    # exact direction that makes SC8 look better than it is. A manager answering a park goes
+    # through `answer_permission`, which is a different writer.
+    #
+    # The session is `resolved_by` — the session that RAN the relay — but the party is the
+    # operator, so `answerer_session` stays empty: the board and the operator are arms, not
+    # sessions, and naming the relaying session as the answerer would be the same
+    # misattribution one field over.
+    write_answer_marker(item.get("producer_id", ""), "", "operator")
     print(target_line(item.get("producer_id", ""), registry), file=out)
     return 0
 
