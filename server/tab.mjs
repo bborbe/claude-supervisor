@@ -4,10 +4,16 @@
 // reach it mid-run is to type into that pane. Three things were measured 2026-09-14
 // against live panes rather than assumed, and each one shapes the code below:
 //
-//  1. `send-text` reaches a pane ONLY once its tab is activated. Two attempts against
-//     a running worker did nothing — first with "\n", then with "\r" — and its
-//     transcript was unchanged for three minutes. Running `activate-tab` first made
-//     the same call land immediately. Hence activate-before-send, always.
+//  1. `send-text` DOES reach a pane in an inactive tab, so nothing here activates.
+//     This note previously claimed the opposite — two attempts "did nothing" until
+//     `activate-tab` ran first — and that measurement does not reproduce: against a
+//     raw-mode target (`stty -icanon -echo`) 6/6 bytes land with the focused pane
+//     unchanged (2026-11-09). The 0-byte readings were a canonical-mode artefact — a
+//     line-buffered tty echoes text into `get-text` while withholding it from the
+//     process until a newline, so the screen showed a delivery that never happened.
+//     Activation was therefore pure cost: it stole the operator's focus mid-keystroke
+//     and never restored it, so their half-written line landed in the worker's
+//     composer and was submitted as an instruction.
 //  2. Readiness is an EMPTY composer in `get-text`, not merely a drawn one. The glyph
 //     alone appears too early: the TUI paints the composer with a placeholder
 //     suggestion (`Try "fix lint errors"`) before it will honour a submit, and a
@@ -22,9 +28,9 @@
 //  3. A terminal's Enter is "\r", not "\n". `\n` types a line break into the input box
 //     without submitting it, which looks exactly like a message that was ignored.
 //
-// The channel drives a terminal, not an API. It steals focus when it activates, and
-// it types — so it is deliberately confined to tab workers, which are real sessions a
-// human could drive by hand anyway.
+// The channel drives a terminal, not an API. It types into a pane without taking focus,
+// so it is deliberately confined to tab workers — real sessions a human could drive by
+// hand anyway.
 
 import { spawnSync } from 'node:child_process'
 
@@ -274,27 +280,21 @@ export async function confirmSubmission(paneId, message, opts = {}) {
   }
 }
 
-// Activate, wait for the prompt, type, submit. Every failure is returned rather than
+// Wait for the prompt, type, submit. Every failure is returned rather than
 // swallowed: a message that did not arrive and a message that arrived look identical
 // from the caller's side, which is exactly the confusion this must not create.
+//
+// Nothing here activates the target pane. `send-text --pane-id` reaches a pane in an
+// inactive tab, so taking focus buys nothing and costs the operator their keystrokes:
+// activation moved the front tab mid-typing and never gave it back, so the operator's
+// half-written line landed in the worker's composer and was submitted as an
+// instruction. The tab lookup below is only for the return value.
 export async function sendToPane(paneId, message, opts = {}) {
   const { wezterm = defaultWezterm, confirm = null } = opts
   if (!paneId) return { error: 'no pane to send into' }
 
-  // Activate by PANE id, never tab id. A tab id is renumbered when its tab moves
-  // windows (2026-09-18: tabs 158/159/160 in window 0 became 163/164/165 in
-  // window 2, and `activate-tab --tab-id 159` failed outright while
-  // `activate-pane --pane-id 239` worked). Pane ids survive the move, and this
-  // function already holds one — so the tab lookup is only needed for the return
-  // value, not for the activation.
   const tabId = tabIdForPane(paneId, opts)
   if (!tabId) return { error: `no tab owns pane ${paneId} — is it still open?` }
-
-  const activated = wezterm(['cli', 'activate-pane', '--pane-id', String(paneId)])
-  if (!activated || activated.error || activated.status !== 0) {
-    const why = activated?.error?.message || activated?.stderr?.trim() || `exit ${activated?.status}`
-    return { error: `could not activate pane ${paneId}: ${why}` }
-  }
 
   const ready = await waitUntilReady(paneId, opts)
   if (!ready.ready) return { error: `pane ${paneId} is not accepting input (${ready.reason})` }

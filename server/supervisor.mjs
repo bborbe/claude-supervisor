@@ -1,4 +1,18 @@
 #!/usr/bin/env node
+// ⚠️ DEPRECATED AS THE LIVE MCP SURFACE — do not fix spawn behaviour here.
+//
+// The `supervisor` tool a session actually binds is the Go claude-wrapper daemon at
+// http://127.0.0.1:18090/supervisor/mcp. Every cc-* launcher loads
+// ~/.claude/mcp-private-personal.json with --strict-mcp-config, and this plugin ships no
+// .mcp.json of its own, so nothing on the operator's machine starts this file: it is
+// reachable only from the drill scripts and from scripts/mcp-start.py, the plugin's own
+// launcher for a deployment that DOES wire an .mcp.json.
+//
+// A spawn, model or permission fix belongs in bborbe/claude-wrapper:
+// `pkg/roster_mcp.go` (spawn handler) and `pkg/spawn_cwd.go` (launcher + model resolution).
+// Measured 2026-11-09: a headless model fix was written here, tested, and discarded —
+// the live path was the Go daemon. A PreToolUse hook on this machine now refuses edits to
+// this file, so a session that tries gets the redirect before writing.
 // supervisor.mjs — MCP server that spawns Claude sessions and lets the calling
 // manager session answer THEIR permission prompts.
 //
@@ -3362,7 +3376,7 @@ const TOOLS = [
   {
     name: 'send_agent_message',
     description:
-      'Send a follow-up message to a running worker — the send_to_agent this server has never had. FOUR transports, chosen from the worker\'s own record. A TAB worker: activates its tab, waits for the input prompt, and types the message, so it STEALS FOCUS; returns an error rather than a false success when the pane is gone, the tab cannot be activated, or the prompt never appears. A CLUSTER worker: posts one more turn on its EXISTING session id through the claude-interactive service — the bearer token is resolved inside the server, so the caller passes no credential — and BLOCKS until the pod answers, so expect a long call on a long turn. ⚠️ A 2xx proves a turn ran, not that the SAME conversation ran: the pod\'s own log (`turn start id=<id>` / `turn end id=<id>`) is the only proof of that, so never read the returned `answer` as a delivery receipt. An A2A worker (`docker` / `k8s`): sends one more turn to the WORKER\'s own endpoint on the conversation its first turn opened — the controller is not in the path — and returns once the worker acknowledges, with `send_ms`; the result is collected in the background and read with `agent_status`. A row re-adopted after a reconnect holds no token and is refused. A headless worker has neither a pane nor a cluster session, but it IS addressable — this call returns its session-registry `name` with `sent: false`, and YOU deliver with `SendMessage(to: <name>)`, which this server cannot call itself. ⚠️ Never read `sent: false` as a failure: for the peer channel it means the address is resolved and the send is yours. A headless worker with no registry entry (the session exited, or it runs in-process under the SDK) is refused; answer its parked prompts with `answer_permission`.',
+      'Send a follow-up message to a running worker — the send_to_agent this server has never had. FOUR transports, chosen from the worker\'s own record. A TAB worker: waits for the input prompt and types the message WITHOUT activating, so the send reaches a background tab and the operator\'s focus is never taken; returns an error rather than a false success when the pane is gone or the prompt never appears. A CLUSTER worker: posts one more turn on its EXISTING session id through the claude-interactive service — the bearer token is resolved inside the server, so the caller passes no credential — and BLOCKS until the pod answers, so expect a long call on a long turn. ⚠️ A 2xx proves a turn ran, not that the SAME conversation ran: the pod\'s own log (`turn start id=<id>` / `turn end id=<id>`) is the only proof of that, so never read the returned `answer` as a delivery receipt. An A2A worker (`docker` / `k8s`): sends one more turn to the WORKER\'s own endpoint on the conversation its first turn opened — the controller is not in the path — and returns once the worker acknowledges, with `send_ms`; the result is collected in the background and read with `agent_status`. A row re-adopted after a reconnect holds no token and is refused. A headless worker has neither a pane nor a cluster session, but it IS addressable — this call returns its session-registry `name` with `sent: false`, and YOU deliver with `SendMessage(to: <name>)`, which this server cannot call itself. ⚠️ Never read `sent: false` as a failure: for the peer channel it means the address is resolved and the send is yours. A headless worker with no registry entry (the session exited, or it runs in-process under the SDK) is refused; answer its parked prompts with `answer_permission`.',
     inputSchema: {
       type: 'object',
       properties: {
