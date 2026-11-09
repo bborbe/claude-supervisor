@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.259.2
 
 - feat: **"who owns this session" has one definition and one implementation — `scripts/owner.py`, the executable form of `docs/session-tiers.md` § Keep-alive.** It answers one of three words: `owner` (session `LIVE` **and** loop `OK`/`STALE`), `not-owner` (loop `STOPPED` whatever the session reads, session `ABSENT`, or no session recorded — the only answer that licenses handing the subject to another keeper), and `cannot-tell` (an unreadable probe **and** the deliberately-not-running loop states `SLEEPING`/`UNARMED`/`INVALID`, never read as `not-owner`, because a second writer on a failed read is the failure every probe in this repo avoids). `verdict_of()` is the only place the two signals are combined: a caller may branch on the raw facts to choose an ACTION (`leave` a stopped manager, `restart` a live one whose loop is `INVALID`) but never to decide ownership. Before it, four scripts each combined the same two signals their own way and disagreed — `worker-keepalive.py` read the session alone, so a manager stood down with `/supervisor:stop` still counted as an owner there, its worker was deferred to a goal round that had stopped, and nothing kept it. The consumers are ported in a stacked follow-up, which is also where `docs/session-tiers.md` § Owner starts pointing at this module — until they are ported it is a definition with no callers, so that sentence would be false at this commit. Change set: `scripts/owner.py`, `scripts/tests/test_owner.py`, `CHANGELOG.md`.
 
