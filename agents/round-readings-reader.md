@@ -74,8 +74,22 @@ step 2 of the goal round and of the topic round alike; nothing here is tier-spec
    file and check four things; they are the shape the sweep reader consumes, and a document that
    fails one is a caller bug, not a reading:
 
-   - **Every tracked row appears exactly once**, and the row count equals the tracked-set line
-     count. A row the document dropped is a row the sweep renders from a stale cell.
+   - **`resolution.state` is read FIRST, and two of its four values are a refusal.** `resolved`
+     — every member admitted at least one task. `partial` — some members admitted nothing; the
+     document names them under `resolution.unresolved`, and each of their rows reads `unread`.
+     **`unresolved`** (members were declared, none admitted a task) and **`empty`** (no members
+     at all) mean **no family value in the document came from an observation**: report
+     `readings=REFUSED` naming the state and the member count, record nothing, and stop. ⚠️
+     **Never render `unresolved`/`empty` as a quiet fleet.** Measured 2026-11-08 (Development
+     Pipeline Throughput): a tracked set of 38 vault-relative page paths resolved to zero rows,
+     and the document reported `clear=38 · none=38` for a fleet of 543 real task rows it never
+     looked at. A `clear` that came from a member nobody resolved is the silent direction this
+     whole leg exists to remove.
+   - **Every tracked member appears exactly once, and the row count is
+     `resolution.resolved_rows` plus `len(resolution.unresolved)`** — **not** the tracked-set
+     line count. A member may be a GOAL, and one goal admits many task rows, so two rows behind
+     a one-line tracked set is correct. A row the document dropped, or one member carrying two
+     rows, is the caller bug.
    - **Every verdict is one of its family's three values**, and `unread` is **never** folded
      into a negative (`clear`, `none`, `quiet`). A store that could not be reached is `unread`;
      reading it as *no gate* is the silent direction this whole leg exists to remove.
@@ -122,8 +136,10 @@ step 2 of the goal round and of the topic round alike; nothing here is tier-spec
 - **The receipt record fails** → report the failure and hand back the payload path anyway. A
   round that recorded nothing is the defect the tail check exists to catch, and hiding it is
   worse than showing it.
-- **The tracked set is empty** → hand back `rows=0` with `readings=written` and say the set was
-  empty. An empty set is a reading; do not widen it.
+- **The tracked set is empty, or resolved to no task at all** → `resolution.state` reads
+  `empty` or `unresolved`. That is **not** a reading: nothing was observed, so hand back
+  `readings=REFUSED` naming the state and the member count, and record nothing. An empty set is
+  the absence of a reading, not a quiet fleet — and never widen it to one.
 - **A row appears twice or not at all** → report it as a caller bug naming the row, and hand
   back the counts you could take. Never patch the document.
 - **Producing your mandated output seems to need a command outside your `Bash`** → that is a
@@ -141,9 +157,15 @@ form.
 
 ```text
 readings=written|REFUSED · rows=<n> · payload=<path>
+resolution=resolved|partial|unresolved|empty · tracked=<n> · unresolved=<n>
 live=<n> · absent=<n> · unknown=<n> · inflight=<n> · quiet=<n> · inflight-unread=<n>
 gated=<n> · clear=<n> · unread=<n> · external=<n> · none=<n> · external-unread=<n> · stuck=<n>
 ```
+
+⚠️ **`resolution=` leads the second line and `unresolved=` is the count of members that admitted
+no task** — the two fields a caller needs to tell a quiet fleet from a set that was never read.
+`rows=` is `resolution.resolved_rows` plus `len(resolution.unresolved)`, never the tracked-set
+line count (a goal member admits many rows).
 
 ⚠️ **Every family carries all three of its values, including the zeros** — the caller's render
 tests the counts, and a missing key is a cell it cannot evaluate. ⚠️ **A family whose read
@@ -166,8 +188,9 @@ not the rows, are what your hand-back carries.
 <success_criteria>
 - `round-readings.py` was run once, with the caller's own inputs, and its path quoted.
 - The receipt carries a `readings` record naming that path.
-- Every tracked row appears exactly once in the document, and every verdict is one of its
-  family's three values with `unread` never folded into a negative.
+- Every tracked member appears exactly once in the document, and every verdict is one of its
+  family's three values with `unread` never folded into a negative. `resolution.state` is
+  reported, and `unresolved`/`empty` is a `readings=REFUSED`, never a quiet fleet.
 - The hand-back is ≤ 1 KB, carries every key above including the zeros, and names the `stuck`
   rows rather than only counting them.
 - No ad-hoc probe, no feed read, no act.
