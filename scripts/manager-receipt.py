@@ -882,7 +882,7 @@ def rearm_shape(artifact: str, started: float, now: float) -> bool:
     """
     try:
         with open(artifact, encoding="utf-8") as fh:
-            vals = [epoch for epoch, _ in liveness().parse_arm_lines(fh.read())]
+            vals = [epoch for epoch, _, _ in liveness().parse_arm_lines(fh.read())]
     except OSError:
         return False
     # The ring stores WHOLE seconds, so both bounds are floored to that resolution: an arm
