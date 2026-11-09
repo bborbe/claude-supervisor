@@ -658,9 +658,9 @@ def build(vault, tasks_dir, day, live=None, target=None, plugin=None, alerts_scr
         "overflow": [r["name"] for r in overflow],
         "proposed": proposed_rows[:PROPOSAL_CAP],
         "proposed_overflow": [r["name"] for r in proposed_overflow],
-        # The dismissals themselves, not only their effect: SC2's probe reads a POSITIVE
-        # marker here, because absence from `proposed` is also what a rank demotion or the
-        # 3-per-round cap produces.
+        # The dismissals themselves, not only their effect: the positive marker is what
+        # a caller reads, because absence from `proposed` is also what a rank demotion or
+        # the 3-per-round cap produces.
         "dismissed": dismissals,
         "notes": list(dict.fromkeys(notes)),
     }

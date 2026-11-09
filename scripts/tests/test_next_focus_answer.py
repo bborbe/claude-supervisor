@@ -50,7 +50,7 @@ CARD_KEY = "next-focus:testvault:task:my-task-abcdef12"
 ITEM_ID = "a" * 32
 TASK_NAME = "My Task"
 
-def weekly_text(blocks=1, picked=1):
+def weekly_text(blocks=1):
     lines = [
         "---", "page_type: weekly", "---", "",
         "# Weekly", "",
@@ -109,10 +109,11 @@ class ConsumeTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_consume(self, items):
-        return answer.consume_items(
+        consumed, notes, _pending = answer.consume_items(
             items, str(self.vault), "25 Tasks",
             str(self.dismissed), str(self.consumed), NOW,
         )
+        return consumed, notes
 
     def card(self, answer_value, **kwargs):
         kwargs.setdefault("key", self.card_key)
@@ -154,7 +155,7 @@ class ConsumeTests(unittest.TestCase):
         self.assertEqual(consumed, [], "the same card was consumed twice")
 
     def test_leave_after_add_leaves_the_plan_row_intact(self):
-        """SC3's path: a dismissal must not undo a plan entry already written.
+        """A dismissal must not undo a plan entry already written.
 
         Both keyings get this wrong — a title-keyed dismissal deletes the row it
         matches, and a card-keyed one that rewrites the note can drop it by accident.
@@ -171,6 +172,36 @@ class ConsumeTests(unittest.TestCase):
         after = self.weekly.read_text(encoding="utf-8")
         self.assertEqual(before, after, "the dismissal rewrote the weekly note")
         self.assertEqual(after.count(f"| 2 | 📌 {TASK_NAME} |"), 1)
+
+    def test_row_numbering_comes_from_the_table_not_the_blocks(self):
+        """The real weekly shape carries far more blocks than Picked rows.
+
+        W44 has 72 `### N.` blocks and 42 Picked rows, so reusing the block number
+        appends `| 73 |` after row 42 and rewrites the heading to `(73)`.
+        """
+        self.weekly.write_text(weekly_text(blocks=5), encoding="utf-8")
+        self.run_consume([self.card("add it to the plan")])
+        text = self.weekly.read_text(encoding="utf-8")
+
+        self.assertIn("## ✅ Picked (2)", text)
+        self.assertIn(f"| 2 | 📌 {TASK_NAME} |", text)
+        self.assertNotIn("## ✅ Picked (6)", text)
+        self.assertNotIn("| 6 |", text)
+
+    def test_notes_render_on_an_empty_round(self):
+        """A round that could not look must not read like a round that found nothing."""
+        rendered = answer.render([], ["k: unhandled answer 'x' — not consumed"], 2, 1)
+        self.assertIn("unhandled answer", rendered)
+        self.assertIn("1 answered card(s) awaiting", rendered)
+
+    def test_consume_flag_is_required(self):
+        """Without `--consume` the script must refuse, not quietly write."""
+        out = subprocess.run(
+            [sys.executable, str(ANSWER), "--vault", str(self.vault)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("--consume", out.stderr)
 
     # -------------------------------------------------------------- leave path
 

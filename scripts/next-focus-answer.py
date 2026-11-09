@@ -23,7 +23,7 @@ Two records, two readers
               suppression is per key.
 
   consumption ~/.claude/state/next-focus-consumed/<vault-slug>.jsonl
-              append-only, written here, read by the round's render (SC4). A
+              append-only, written here, read by the round's render. A
               per-key state file cannot answer "what did THIS round consume".
 
 The two are not one thing: a dismissal is durable state, a consumption entry is
@@ -125,32 +125,45 @@ def _insert_block(lines, number, name):
     return lines[:end] + block + lines[end:]
 
 
-def _insert_picked_row(lines, number, name, why):
-    """Insert a `| N | … |` row after the last row of the `## ✅ Picked` table."""
+def _picked_table(lines):
+    """`(heading_index, row_indices)` for the `## ✅ Picked` table, or `(None, [])`.
+
+    ⚠️ The row number and the heading count come from THIS table's own rows — never
+    from the `### N.` block number. A weekly note routinely carries far more blocks
+    than Picked rows (W44: 72 blocks, 42 rows), so reusing the block number appends
+    `| 73 |` after row 42 and rewrites the heading to `(73)`.
+    """
     heading = next((i for i, line in enumerate(lines) if PICKED_RE.match(line)), None)
     if heading is None:
-        return lines, False
+        return None, []
     end = len(lines)
     for i in range(heading + 1, len(lines)):
         if HEADING_RE.match(lines[i]):
             end = i
             break
-    rows = [i for i in range(heading + 1, end) if ROW_RE.match(lines[i])]
-    if not rows:
-        return lines, False
+    return heading, [i for i in range(heading + 1, end) if ROW_RE.match(lines[i])]
+
+
+def _insert_picked_row(lines, name, why):
+    """`(lines, number)` — append a row, numbered from the table itself."""
+    heading, rows = _picked_table(lines)
+    if heading is None or not rows:
+        return lines, None
+    number = max(int(ROW_RE.match(lines[i]).group(1)) for i in rows) + 1
     row = f"| {number} | 📌 {name} | {why} |"
-    return lines[: rows[-1] + 1] + [row] + lines[rows[-1] + 1:], True
+    at = rows[-1] + 1
+    return lines[:at] + [row] + lines[at:], number
 
 
 def _bump_picked_count(lines, number):
-    for i, line in enumerate(lines):
-        if PICKED_RE.match(line):
-            lines[i] = f"## ✅ Picked ({number})"
-            return lines
+    heading, _ = _picked_table(lines)
+    if heading is None:
+        return lines
+    lines[heading] = f"## ✅ Picked ({number})"
     return lines
 
 
-def add_to_plan(vault, tasks_dir, name, day):
+def add_to_plan(vault, tasks_dir, name, day, why_text=""):
     """`(detail, notes)` — write both weekly-note artifacts, idempotent by task name.
 
     Idempotency is by NAME, not by card key: the same task can be proposed under a
@@ -162,34 +175,39 @@ def add_to_plan(vault, tasks_dir, name, day):
         raise Refused(f"weekly note unreadable: {weekly} ({err})")
 
     lines = text.splitlines()
-    already = any(name in row["names"] for row in nf.parse_weekly(text))
+    already_block = any(name in row["names"] for row in nf.parse_weekly(text))
     already_row = any(name in line for line in lines if ROW_RE.match(line))
-    if already and already_row:
+    if already_block and already_row:
         return {"weekly": str(weekly), "block": None, "row": None}, ["already present"]
 
-    number = _block_number(lines)
     notes = []
-    if not already:
-        lines = _insert_block(lines, number, name)
+    block = None
+    if not already_block:
+        block = _block_number(lines)
+        lines = _insert_block(lines, block, name)
     else:
         notes.append("block already present")
 
     status, phase = _task_state(vault, tasks_dir, name)
-    why = (
-        f"P1, in no current plan. Added {day.isoformat()} on the operator's answer"
-        + (f" — `{status}` / `{phase}`." if status or phase else ".")
-    )
+    # The card's own `why` — segment 2 of `<name> — <why> — <file>:<line>` — so a
+    # firing-alert or blocked-goal row is not recorded as if it were a P1 task.
+    why = (f"Added {day.isoformat()} on the operator's answer — "
+           f"{why_text or 'in no current plan'}.")
+    if status or phase:
+        why += f" `{status}` / `{phase}`."
+
+    row = None
     if not already_row:
-        lines, inserted = _insert_picked_row(lines, number, name, why)
-        if not inserted:
+        lines, row = _insert_picked_row(lines, name, why)
+        if row is None:
             notes.append("no `## ✅ Picked` table — row not written")
         else:
-            lines = _bump_picked_count(lines, number)
+            lines = _bump_picked_count(lines, row)
     else:
         notes.append("picked row already present")
 
     _write_atomic(weekly, "\n".join(lines) + "\n")
-    return {"weekly": str(weekly), "block": number, "row": number}, notes
+    return {"weekly": str(weekly), "block": block, "row": row}, notes
 
 
 def write_dismissal(state_dir, card_key, name, kind, item_id, now):
@@ -294,14 +312,17 @@ def consume_items(items, vault, tasks_dir, dismissed_dir, consumed_dir, now):
             continue
 
         answer = str((card.get("answer") or {}).get("value", ""))
-        name = split_payload(card.get("payload", ""))
+        payload = str(card.get("payload", ""))
+        name = split_payload(payload)
+        segments = payload.split(" — ")
+        why_text = segments[1] if len(segments) > 1 else ""
         kind = kind_of_key(card_key)
         if not name:
             notes.append(f"{card_key}: card carries no payload name — not consumed")
             continue
 
         if answer == ADD:
-            detail, extra = add_to_plan(vault, tasks_dir, name, now.date())
+            detail, extra = add_to_plan(vault, tasks_dir, name, now.date(), why_text)
             notes.extend(extra)
             entry = {
                 "at": now.isoformat(), "card_key": card_key, "item_id": item_id,
@@ -320,27 +341,46 @@ def consume_items(items, vault, tasks_dir, dismissed_dir, consumed_dir, now):
 
         append_consumed(log_path, entry)
         consumed.append(entry)
+        done.add((card_key, item_id))
 
-    return consumed, notes
+    # Answered cards still awaiting consumption — the count the empty render reports.
+    # Computed from the same `done` set the loop used, so a note-only run cannot report
+    # a clean zero while an answer sits unconsumed.
+    pending = 0
+    for card_key, cards in by_key.items():
+        card, err = lookup.select_latest(cards)
+        if err or card is None:
+            continue
+        if (card_key, str(card.get("item_id", ""))) not in done:
+            pending += 1
+
+    return consumed, notes, pending
 
 
-def render(consumed, notes, open_cards):
+def render(consumed, notes, open_cards, pending):
     if not consumed:
-        return (
+        lines = [
             f"next-focus consume: nothing to consume "
-            f"(0 answered card(s) awaiting; {open_cards} open)"
-        )
-    lines = []
-    for entry in consumed:
-        card = entry["item_id"][:8]
-        if entry["action"] == "added":
-            where = (
-                f"block {entry['block']}, picked row {entry['row']}"
-                if entry.get("block") else "already present"
-            )
-            lines.append(f'next-focus consume: added "{entry["name"]}" ({where}) — card {card}')
-        else:
-            lines.append(f'next-focus consume: dismissed "{entry["name"]}" — card {card}')
+            f"({pending} answered card(s) awaiting; {open_cards} open)"
+        ]
+    else:
+        lines = []
+        for entry in consumed:
+            card = entry["item_id"][:8]
+            if entry["action"] == "added":
+                where = (
+                    f"block {entry['block']}, picked row {entry['row']}"
+                    if entry.get("block") else "already present"
+                )
+                lines.append(
+                    f'next-focus consume: added "{entry["name"]}" ({where}) — card {card}'
+                )
+            else:
+                lines.append(f'next-focus consume: dismissed "{entry["name"]}" — card {card}')
+    # ⚠️ The notes print on BOTH branches. Dropping them on the empty branch swallowed
+    # exactly the failures this script exists to surface — an unhandled answer, a card
+    # carrying no payload name, an unreadable log line, an undecidable "latest answer" —
+    # and left "nothing to consume" reading as a clean tick.
     for note in notes:
         lines.append(f"  note: {note}")
     return "\n".join(lines)
@@ -368,6 +408,13 @@ def main(argv=None):
     if not Path(args.vault).is_dir():
         print(f"next-focus-answer: REFUSED — vault not found: {args.vault}", file=sys.stderr)
         return 2
+    # The flag is a real gate, not a label: every invocation writes the operator's weekly
+    # note, so a caller that omitted `--consume` is asking for an inspection and must not
+    # mutate anything.
+    if not args.consume:
+        print("next-focus-answer: REFUSED — pass --consume to apply answers "
+              "(nothing was written)", file=sys.stderr)
+        return 2
     try:
         now = nf.defer_date.as_now(args.now)
     except ValueError:
@@ -382,7 +429,7 @@ def main(argv=None):
         return 2
 
     try:
-        consumed, notes = consume_items(
+        consumed, notes, pending = consume_items(
             items, args.vault, args.tasks_dir,
             args.dismissed_dir, args.consumed_dir, now,
         )
@@ -397,9 +444,9 @@ def main(argv=None):
     )
     if args.json:
         print(json.dumps({"consumed": consumed, "notes": notes,
-                          "open": open_cards}, indent=2))
+                          "open": open_cards, "pending": pending}, indent=2))
     else:
-        print(render(consumed, notes, open_cards))
+        print(render(consumed, notes, open_cards, pending))
     return 0
 
 
