@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.259.0
 
 - fix: **the closure step no longer claims a safety net `vault-cli goal complete` does not have.** `commands/steps/goal-closure.md` told every goal manager *"The verb re-checks its own gate. **Its verdict is the authority, never this step's read** — when the two disagree, the verb wins"*. That is true for `vault-cli task complete`, which refuses on any open box anywhere on the page, and **false for `vault-cli goal complete`**, which re-checks only its open-task gate and reads no success criterion at all — so a manager trusting it would let a disagreement stand as a close. Measured 2026-11-09 on a scratch goal carrying an open `# Success Criteria` box: `vault-cli goal complete` printed `✅ Goal completed` and wrote `status: completed` (exit 0), while `vault-cli task complete` on a scratch task with the same open box exited 1 with `Error: incomplete subtasks`. The paragraph now states the per-tier split — task: the verb's verdict is the authority; goal and topic: this step's read is, and a close the verb accepts is no evidence that any criterion was checked — and `vault-cli topic complete` is named as carrying no gate at all. Change set: `commands/steps/goal-closure.md`, `CHANGELOG.md`.
 
