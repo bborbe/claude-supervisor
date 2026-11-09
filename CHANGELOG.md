@@ -10,8 +10,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- **Record answer-route reaches, so the spawn gate can stop trusting an armed loop alone.** `server/answer-reach.mjs` writes one record per (session, leg) — `mcp` from the server's existing foreign-park reply to `answer_permission`, `wrapper` from `scripts/answer-reach.py` on a `409`/`404` only. `scripts/answer-path-check.py` reports both legs in its `detail`; its verdict is still the loop state, so nothing that runs headless today changes behaviour.
-- `commands/steps/re-arm.md` and the goal-loop arm gain the two reach calls — a **fleet-wide re-arm contract change**: every manager now emits both on every re-arm.
+- feat: **Record answer-route reaches, so the spawn gate can stop trusting an armed loop alone.** `server/answer-reach.mjs` writes one record per (session, leg) — `mcp` from the server's existing foreign-park reply to `answer_permission`, `wrapper` from `scripts/answer-reach.py` on a `409`/`404` only. `scripts/answer-path-check.py` reports both legs in its `detail`; its verdict is still the loop state, so nothing that runs headless today changes behaviour.
+- feat: `commands/steps/re-arm.md` and the goal-loop arm gain the two reach calls — a **fleet-wide re-arm contract change**: every manager now emits both on every re-arm.
 
 ## v0.260.3
 
