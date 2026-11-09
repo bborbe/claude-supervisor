@@ -77,7 +77,7 @@ that stale bucket.
 
 ⚠️ **Opening a worker is bound by `docs/fleet-surface.md` § Spawn a worker item 6** — the mode is passed in both directions (`mode: headless` → `interactive=false`, `mode: interactive` → `interactive=true`). This file grants the tool but does not open; the binding and the call live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-spawn.md`.
 
-**Read a step file only when its `When` holds**, and if a step's text is not in context — after a compaction, say — **re-read it** rather than assuming it survived.
+**Read a step file only when its `When` holds**, and if a step's text is not in context — after a compaction, say — **re-read it** rather than assuming it survived. **Re-read it on a content change too** — `steps/rules.md` § Re-read the router.
 
 ⚠️ **The `#` column is a stable label, not a running order — `When` sequences the round.** Rows 6 and 7 are referenced **by number** from other step files, so a new step takes a letter suffix rather than renumbering: `4b` sits between 4 and 5.
 
