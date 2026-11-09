@@ -41,6 +41,9 @@ def _load(name, filename):
     return module
 
 
+#: `scripts/owner.py` — the one place ownership is decided (see `owner()` below).
+OWNER = _load("owner", "owner.py")
+
 #: `scripts/goals-declaration.py` is the one home for the `goals:` declaration, with five
 #: live shapes and YAML's `''` escape undone. A local extractor here would be the fourth
 #: copy, and its failure direction is a silent drop — a name that matches no page reads as
@@ -48,7 +51,6 @@ def _load(name, filename):
 GOALS = _load("goals_declaration", "goals-declaration.py")
 
 SESSION_LIVENESS = os.path.join(HERE, "session-liveness.py")
-MANAGER_LIVENESS = os.path.join(HERE, "manager-liveness.py")
 ATTENTION_ASK = os.path.join(HERE, "attention-ask.py")
 
 #: Where a keeper leg is declared: the actor that runs three of the four procedures, and every
@@ -71,12 +73,6 @@ GOAL_DIRS = ("24 Goals", "23 Goals")
 TASK_DIRS = ("25 Tasks", "24 Tasks")
 
 TERMINAL = {"completed", "aborted"}
-
-#: `docs/session-tiers.md` § Owner: LIVE **and** loop OK/STALE owns; nothing else runs the round.
-OWNER_STATES = {"OK", "STALE"}
-
-#: Any token outside both sets (`UNREADABLE`, an unlearned one) is cannot-tell, never unkept.
-NOT_OWNER_STATES = {"STOPPED", "SLEEPING", "UNARMED", "INVALID"}
 
 STATE_DIR = os.path.expanduser(
     os.environ.get("KEEPER_CENSUS_DIR") or "~/.claude/state/keeper-census"
@@ -148,6 +144,10 @@ def session_ids(fm):
     """Every session id the page records — `claude_session_id` plus `metrics_sessions[].session_id`
     (the field set `scripts/session-ids.py` owns). 26 task pages on `private-personal` record
     only the latter, one of them live — reading one field reported it as a false red.
+
+    ⚠️ This is the JOIN (which live session is this page?), never an ownership read: ownership
+    is `OWNER.verdict_of`, and the manager a goal or topic page records is
+    `OWNER.page_session_id`. Do not let a second ownership decision grow here.
     """
     ids = set()
     primary = scalar(fm, "claude_session_id")
@@ -194,7 +194,7 @@ def scan(vault):
                 page = {
                     "kind": kind,
                     "name": filename[:-3],
-                    "sid": scalar(fm, "claude_session_id"),
+                    "fm": fm,
                     "sids": ids,
                     "status": scalar(fm, "status"),
                     "phase": scalar(fm, "phase"),
@@ -246,17 +246,9 @@ def read_live():
 
 
 def cadence(subject, branch, vault):
-    """The manager's loop state, one token — `OK` / `STALE` / `STOPPED` / … / `UNREADABLE`."""
-    try:
-        out = subprocess.run(
-            [sys.executable, MANAGER_LIVENESS, "--state", "--subject", subject,
-             "--branch", branch, "--vault", vault],
-            capture_output=True, text=True, timeout=PROBE_TIMEOUT,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "UNREADABLE"
-    token = (out.stdout or "").split()
-    return token[0] if token else "UNREADABLE"
+    """The manager's loop state, one token — `owner.py`'s own loop read, not a second copy."""
+    state, _ = OWNER.loop_state(subject, branch)
+    return state or "UNREADABLE"
 
 
 def legs(leg_file=None):
@@ -295,22 +287,25 @@ def notify(dedup_key, payload, options, context=""):
     return None
 
 
-# ownership — the one provisional read
+# ownership — decided by the shared resolver, never here
 
 def owner(kind, name, world):
-    """Resolve whether the manager of `(kind, name)` is an owner.
+    """Whether the manager of `(kind, name)` is an owner — `scripts/owner.py` decides.
 
-    ⚠️ **ADAPTER — replace with `scripts/owner.py`, do not grow this function.**
-    [[Every Keeper Resolves Ownership Through One Resolver]] ships the single ownership read
-    there; it is still in progress, so this is the same definition (`docs/session-tiers.md`
-    § Owner) carried provisionally. Nothing else here decides ownership, so the swap is one
-    function: `owner.of_subject(...)` with `CANNOT_TELL` mapping to `cannot`.
+    ⚠️ **The verdict is `OWNER.verdict_of(session, loop)`, the one place in the tree that
+    combines the two signals.** This function supplies the two *facts* and reads the answer;
+    it never compares them itself, which is the defect the resolver exists to remove
+    ([[Every Keeper Resolves Ownership Through One Resolver]]).
+
+    The facts come from the census's own single reads rather than from `owner.of_page`, whose
+    every call costs an HTTP `session-liveness.py --check`: the registry is already read once
+    (`read_live`), so the session word is derived from it, and only the loop is probed — via
+    `world["cadence"]`, the seam the tests inject.
 
     Returns `{"live", "cadence", "owns", "cannot", "why"}`. **`cannot` is a third answer, not
     `owns: False`** — a failed read never licenses a definite verdict, so it is counted in the
-    header and never carded as a keeper gap. Cached per `(kind, name)`: the cadence read is a
-    subprocess, and one goal manager is consulted once per worker that names it (uncached,
-    a 327-page vault took over two minutes).
+    header and never carded as a keeper gap. Cached per `(kind, name)`: one goal manager is
+    consulted once per worker that names it (uncached, a 327-page vault took over two minutes).
     """
     cache = world.setdefault("owners", {})
     if (kind, name) not in cache:
@@ -321,21 +316,22 @@ def owner(kind, name, world):
 def _owner(kind, name, world):
     page = world["by_name"].get((kind, name))
     if page is None:
+        # Not an ownership question the resolver can answer: there is no page to resolve.
         return {"live": None, "cadence": "NO-PAGE", "owns": False, "cannot": True,
                 "why": f"no {kind} page named {name}"}
-    if not page["sids"]:
-        return {"live": False, "cadence": "NO-ID", "owns": False, "cannot": False,
-                "why": f"{kind} {name} records no session id"}
-    if not (page["sids"] & set(world["live"])):
-        return {"live": False, "cadence": "ABSENT", "owns": False, "cannot": False,
-                "why": f"{kind} {name} session is not live"}
-    state = world["cadence"](name, kind, world["vault"])
-    if state not in OWNER_STATES and state not in NOT_OWNER_STATES:
-        # An unreadable probe (or an unlearned token): cannot tell, never "no owner".
-        return {"live": True, "cadence": state, "owns": False, "cannot": True,
-                "why": f"{kind} {name} loop unreadable ({state})"}
-    return {"live": True, "cadence": state, "owns": state in OWNER_STATES, "cannot": False,
-            "why": f"{kind} {name} loop {state}"}
+    sid = OWNER.page_session_id(page["fm"])
+    if not sid:
+        session = OWNER.NONE
+    elif sid in world["live"]:
+        session = "LIVE"
+    else:
+        session = "ABSENT"
+    loop = world["cadence"](name, kind, world["vault"])
+    verdict, reason = OWNER.verdict_of(session, loop)
+    return {"live": session == "LIVE", "cadence": loop,
+            "owns": verdict == OWNER.OWNER,
+            "cannot": verdict == OWNER.CANNOT_TELL,
+            "why": f"{kind} {name} {verdict} ({reason})"}
 
 
 # the census
