@@ -97,6 +97,32 @@ class ResumeCheckTest(unittest.TestCase):
         unbounded = self.module.measure("s3", since, self.root)
         self.assertEqual(unbounded["verdict"], "productive")
 
+    def test_malformed_lines_and_untimestamped_records_are_ignored(self):
+        project = os.path.join(self.root, "project")
+        os.makedirs(project, exist_ok=True)
+        path = os.path.join(project, "s5.jsonl")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("{not json\n")
+            handle.write(json.dumps({"type": "assistant", "message": {"content": "no timestamp"}}) + "\n")
+            handle.write(json.dumps(ASSISTANT) + "\n")
+        result = self.module.measure("s5", None, self.root)
+        self.assertEqual(result["verdict"], "productive")
+        self.assertEqual(result["turns"], 1)
+
+    def test_records_without_a_turn_yet_read_running(self):
+        user = {"type": "user", "timestamp": "2026-11-05T21:09:00.000Z", "message": {"role": "user", "content": "go"}}
+        write_transcript(self.root, "s6", [user])
+        result = self.module.measure("s6", None, self.root)
+        self.assertEqual(result["verdict"], "running")
+
+    def test_an_empty_window_is_distinguishable_from_a_missing_transcript(self):
+        write_transcript(self.root, "s7", [ASSISTANT, REAL_RESULT])
+        late = self.module.parse_time("2026-11-06T00:00:00Z")
+        result = self.module.measure("s7", late, self.root)
+        self.assertEqual(result["verdict"], "no-evidence")
+        self.assertIsNotNone(result["transcript"])
+        self.assertIsNone(self.module.measure("absent", None, self.root)["transcript"])
+
     def test_fail_on_zero_turn_is_opt_in(self):
         write_transcript(self.root, "s4", [SYNTHETIC, ZERO_RESULT])
         base = ["--session", "s4", "--projects-root", self.root]
