@@ -84,6 +84,28 @@ def strip_glyphs(text):
     return " ".join(_GLYPHS.sub(" ", text or "").split()).strip().lower()
 
 
+#: The budget for one `wezterm cli list`, and for its single retry. Same measurement and
+#: same reasoning as `who-needs-me.py`'s constants of the same name — the distribution of
+#: this call is bimodal (0.05–0.39 s quiet, 88.78 s contended, measured 2026-11-08/09), so
+#: a 5 s budget refused a healthy-but-slow mux. Kept as a local copy rather than an import
+#: because this script is shipped standalone and imports no sibling.
+PANE_LIST_TIMEOUT = 120
+PANE_LIST_RETRY_TIMEOUT = 30
+
+#: Why the last `wezterm_panes()` returned `None` — see the sibling's constants. A
+#: timed-out read is a mux that is ALIVE and slow; a non-zero exit is a socket that is
+#: NOT answering. The refusal in `main()` names which, so the operator is not sent to
+#: restart a GUI that is running.
+PANE_FAIL_TIMEOUT = "timeout"
+PANE_FAIL_UNREADABLE = "unreadable"
+_pane_read_failure = None
+
+
+def pane_read_failure():
+    """Why the last `wezterm_panes()` returned `None`, or `None` if it did not fail."""
+    return _pane_read_failure
+
+
 def wezterm_panes():
     """`pane id -> wezterm record`, or `None` when the query failed.
 
@@ -91,18 +113,53 @@ def wezterm_panes():
     is gone, so no caller may read it as "no panes exist". Same convention as the
     sibling's own `wezterm_panes()`, and the reason this file returns `None` rather than
     an empty map on every transport failure.
+
+    Retried once at a shorter budget, and `pane_read_failure()` records which failure
+    ended the read — same contract as the sibling's.
     """
-    try:
-        result = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
-                                capture_output=True, text=True, timeout=5)
-    except Exception:
-        return None
-    if result.returncode != 0:
-        return None
-    try:
-        return {str(p["pane_id"]): p for p in json.loads(result.stdout)}
-    except (ValueError, KeyError, TypeError):
-        return None
+    global _pane_read_failure
+    _pane_read_failure = None
+    failure = PANE_FAIL_UNREADABLE
+    for budget in (PANE_LIST_TIMEOUT, PANE_LIST_RETRY_TIMEOUT):
+        try:
+            result = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
+                                    capture_output=True, text=True, timeout=budget)
+        except subprocess.TimeoutExpired:
+            failure = PANE_FAIL_TIMEOUT
+            continue
+        except Exception:
+            failure = PANE_FAIL_UNREADABLE
+            continue
+        if result.returncode != 0:
+            failure = PANE_FAIL_UNREADABLE
+            continue
+        try:
+            return {str(p["pane_id"]): p for p in json.loads(result.stdout)}
+        except (ValueError, KeyError, TypeError):
+            failure = PANE_FAIL_UNREADABLE
+            continue
+    _pane_read_failure = failure
+    return None
+
+
+def pane_read_refusal():
+    """The refusal text for a failed pane read, naming WHICH failure happened.
+
+    Same distinction the sibling's `pane_read_refusal()` makes: a timed-out read is a
+    slow mux, not a dead one, and the two send the operator to different places.
+    """
+    if pane_read_failure() == PANE_FAIL_TIMEOUT:
+        return (
+            f"WezTerm pane list slow — neither attempt answered within "
+            f"{PANE_LIST_TIMEOUT} s then {PANE_LIST_RETRY_TIMEOUT} s, so no manager pane "
+            "can be proven footer-free. The socket is not proven dead; it is too slow to "
+            "certify. Refusing to print a sweep that would read as a clean fleet."
+        )
+    return (
+        "WezTerm pane list unreadable — the mux socket is not answering, so no "
+        "manager pane can be proven footer-free. Refusing to print a sweep that "
+        "would read as a clean fleet."
+    )
 
 
 def pane_lines(pane_id):
@@ -258,9 +315,7 @@ def main(argv=None):
 
     rows, unreadable = sweep()
     if rows is None:
-        print("WezTerm pane list unreadable — the mux socket is not answering, so no "
-              "manager pane can be proven footer-free. Refusing to print a sweep that "
-              "would read as a clean fleet.", file=sys.stderr)
+        print(pane_read_refusal(), file=sys.stderr)
         return 1
 
     with_footer = [r for r in rows if r["footer"] is True]

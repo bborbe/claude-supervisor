@@ -1199,6 +1199,15 @@ def sweep_live(shape_of=pane_shape, link_of=jump_link):
     """Read the live fleet through the sibling's own readers, then classify it."""
     pmap = wnm.wezterm_panes()
     if pmap is None:
+        # The sibling owns the read, so it owns the failure kind too: a timed-out read
+        # is a slow mux, not a dead one, and only `wnm.pane_read_failure()` can say
+        # which. Asserting "not answering" for a timeout is the defect this distinguishes.
+        if wnm.pane_read_failure() == wnm.PANE_FAIL_TIMEOUT:
+            refuse(f"WezTerm pane list slow — neither attempt answered within "
+                   f"{wnm.PANE_LIST_TIMEOUT} s then {wnm.PANE_LIST_RETRY_TIMEOUT} s, so "
+                   "no session can be proven live. The socket is not proven dead; it is "
+                   "too slow to certify. Refusing to print a sweep that would read as an "
+                   "empty fleet.")
         refuse("WezTerm pane list unreadable — the mux socket is not answering, so "
                "no session can be proven live. Refusing to print a sweep that would "
                "read as an empty fleet.")

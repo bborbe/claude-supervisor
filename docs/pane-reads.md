@@ -24,6 +24,39 @@ So the accessor's contract:
 | decides liveness or identity from it | **preserve `None`** and refuse to draw the conclusion | `jump-link.py:71` — returns `None`, docstring: *"a label is a nicety, not a gate"* |
 | already exits non-zero on failure | **refuse non-zero**, naming the transport | `who-needs-me.py:1291` — `if pmap is None: … sys.exit(1)` |
 
+## A failure has a kind
+
+`None` says *the read failed*. It does not say **how**, and the how is what the refusal
+text is for — an operator acts on it.
+
+⚠️ **A timeout is not a dead transport.** The two were reported identically for months:
+`who-needs-me.py` gave `wezterm cli list` a **5 s** budget and printed *"the mux socket is
+not answering"* for every failure, including the ones where the socket was answering
+fine, just slowly. Measured 2026-11-08 on a healthy mux: `0.05, 0.09, 2.10, 6.20,
+88.78 s`, against that 5 s budget — three watcher deaths in 15 minutes, each one sending
+the operator to restart a GUI that was running.
+
+So the accessor carries a **failure kind** beside its `None`:
+
+| kind | what happened | what the refusal must say |
+|---|---|---|
+| `timeout` | neither attempt answered inside its budget | **slow** — the socket is not proven dead, it is too slow to certify |
+| `unreadable` | non-zero exit, or output that would not parse | **not answering** — the socket refused |
+
+Two rules follow:
+
+1. **The budget is derived from a measurement of the exact call, never guessed.** Record
+   the distribution (and the load and pane count it was taken under) next to the constant.
+   A budget inside the tail turns a working channel into a refusal.
+2. **Retry once before refusing.** A single outlier must not kill a poll loop whose
+   interval is shorter than the outlier. Retry at a *shorter* budget: a read that has
+   already burned the first budget is unlikely to need a second full one, and the loop
+   should not stall for the sum of two long ones.
+
+A per-pane `get-text` read is a different surface from the pane *list* — it is cheaper,
+one call per pane, and a timeout there degrades to "unknown" rather than refusing the
+whole feed. Do not import the list's budget into it.
+
 ## The four severities
 
 A collapse is not one bug. Classify it before fixing it, because the fix differs:

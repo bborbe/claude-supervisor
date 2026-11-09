@@ -455,21 +455,73 @@ def load_events():
     return out
 
 
+#: The budget for one `wezterm cli list`, and for its single retry. Measured on this
+#: machine with the exact command below:
+#:
+#:   2026-11-08, load 21–102 on 18 cores, 51–52 panes — 0.05, 0.09, 2.10, 6.20, 88.78 s
+#:   2026-11-09, load 54.76 on 18 cores, 19 panes — 0.05–0.39 s over 12 runs
+#:
+#: The distribution is bimodal: a quiet mux answers in well under a second, a contended
+#: one answers in tens of seconds. The old 5 s budget sat *inside* that tail, so a
+#: healthy mux read as a dead one — measured three watcher deaths in 15 minutes on
+#: 2026-11-08, every one printing "the mux socket is not answering" while direct probes
+#: answered. 120 s clears the observed 88.78 s maximum by 35 %. The retry is deliberately
+#: shorter: a read that has already burned 120 s is unlikely to need another 120 s, and
+#: the 60 s poll loop should not stall for four minutes.
+PANE_LIST_TIMEOUT = 120
+PANE_LIST_RETRY_TIMEOUT = 30
+
+#: Why the last `wezterm_panes()` returned `None`. `None` alone cannot say which failure
+#: happened, and the two want different words: a timed-out read is a mux that is ALIVE and
+#: slow, a non-zero exit is a socket that is NOT answering. The refusal in `main()` is the
+#: one place a human reads that difference, and before this it asserted "not answering"
+#: for both — a claim a timeout cannot support, and one that sends the operator to
+#: restart a GUI that is running.
+PANE_FAIL_TIMEOUT = "timeout"
+PANE_FAIL_UNREADABLE = "unreadable"
+_pane_read_failure = None
+
+
+def pane_read_failure():
+    """Why the last `wezterm_panes()` returned `None`, or `None` if it did not fail."""
+    return _pane_read_failure
+
+
 def wezterm_panes():
     """The live panes as `pane id -> the wezterm record`, or `None` if the query failed.
 
     `None` is a distinct answer from `{}` — a failed `wezterm cli list` cannot prove
     a pane is gone any more than it can prove one is live, so no caller may read it
     as "no panes exist". Same convention as `read_registry()` below, same reason.
+
+    A timeout is a third answer again, and it is why this retries: a single 6 s outlier
+    must not kill a 60 s poll loop. Two attempts are made — the second at the shorter
+    budget — and `pane_read_failure()` names which failure ended the read, so the
+    refusal can say "slow" instead of asserting a dead socket.
     """
-    try:
-        r = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
-                           capture_output=True, text=True, timeout=5)
+    global _pane_read_failure
+    _pane_read_failure = None
+    failure = PANE_FAIL_UNREADABLE
+    for budget in (PANE_LIST_TIMEOUT, PANE_LIST_RETRY_TIMEOUT):
+        try:
+            r = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
+                               capture_output=True, text=True, timeout=budget)
+        except subprocess.TimeoutExpired:
+            failure = PANE_FAIL_TIMEOUT
+            continue
+        except Exception:
+            failure = PANE_FAIL_UNREADABLE
+            continue
         if r.returncode != 0:
-            return None
-        return {str(p["pane_id"]): p for p in json.loads(r.stdout)}
-    except Exception:
-        return None
+            failure = PANE_FAIL_UNREADABLE
+            continue
+        try:
+            return {str(p["pane_id"]): p for p in json.loads(r.stdout)}
+        except Exception:
+            failure = PANE_FAIL_UNREADABLE
+            continue
+    _pane_read_failure = failure
+    return None
 
 
 def live_pane_ids():
@@ -2236,6 +2288,29 @@ def refuse(reason):
     sys.exit(1)
 
 
+def pane_read_refusal():
+    """The refusal text for a failed pane read, naming WHICH failure happened.
+
+    A timed-out read and an unanswering socket both yield `None`, and this site used to
+    report both as "the mux socket is not answering" — a claim a timeout cannot support,
+    and one that sends the operator to restart a GUI that is running. Measured
+    2026-11-08: three watcher deaths in 15 minutes on a healthy mux whose worst read was
+    88.78 s against a 5 s budget, every one of them asserting the socket was down.
+    """
+    if pane_read_failure() == PANE_FAIL_TIMEOUT:
+        return (
+            f"WezTerm pane list slow — neither attempt answered within "
+            f"{PANE_LIST_TIMEOUT} s then {PANE_LIST_RETRY_TIMEOUT} s, so no record can "
+            "be proven live. The socket is not proven dead; it is too slow to certify. "
+            "Refusing to print a feed that would read as an empty queue."
+        )
+    return (
+        "WezTerm pane list unreadable — the mux socket is not answering, so no "
+        "record can be proven live. Refusing to print a feed that would read as "
+        "an empty queue."
+    )
+
+
 def pane_table_implausible(pmap, registry):
     """True when a READABLE socket's pane table cannot be this machine's.
 
@@ -2341,11 +2416,7 @@ def main():
     # same distinction `wezterm_panes()` documents.
     pmap = wezterm_panes()
     if pmap is None:
-        refuse(
-            "WezTerm pane list unreadable — the mux socket is not answering, so no "
-            "record can be proven live. Refusing to print a feed that would read as "
-            "an empty queue."
-        )
+        refuse(pane_read_refusal())
     # One registry read serves both questions: which sessions are live (the `quiet`
     # pass) and what each is called now (the ownership check). Reading it twice would
     # let the two disagree about which entries exist.
