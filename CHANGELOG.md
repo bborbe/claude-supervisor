@@ -8,6 +8,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- **Record answer-route reaches, so the spawn gate can stop trusting an armed loop alone.** `server/answer-reach.mjs` writes one record per (session, leg) — `mcp` from the server's existing foreign-park reply to `answer_permission`, `wrapper` from `scripts/answer-reach.py` on a `409`/`404` only. `scripts/answer-path-check.py` reports both legs in its `detail`; its verdict is still the loop state, so nothing that runs headless today changes behaviour.
+- `commands/steps/re-arm.md` and the goal-loop arm gain the two reach calls — a **fleet-wide re-arm contract change**: every manager now emits both on every re-arm.
+
 ## v0.260.2
 
 - fix: **`manager-liveness.py --state` no longer answers `UNARMED` for a subject it cannot resolve or a probe on the wrong branch.** Measured 2026-11-07: a cadence table named five managers `UNARMED`; four were `OK` under their full names and one was deliberately `STOPPED` on the goal branch, and acting on the table sent five arm instructions that were not needed. An abbreviated name (no record under any branch, no page under `--vault`) is now refused with exit 3 and nothing on stdout, naming the name on stderr; a record on another tier reads `WRONG-BRANCH` with `record is on branch <b>`. `--branch fleet` keeps `UNARMED` (no page by design). `commands/steps/round-liveness.md` now arms on an allow-list (`OK`/`STALE`/`UNARMED`/`INVALID`) instead of a `*) --arm` fallback that armed on an empty `STATE` or `WRONG-BRANCH`, pinned by `scripts/tests/test_round_liveness_step.py`. `scripts/owner.py`'s `loop_state` (the probe `topic-keepalive.py` and the keepers now share) maps an unrecognised word to its probe failure instead of `INVALID`, which restarted a live manager, and forwards `--vault`; `unarmed-goals.py` passes `--vault`; `crashed-managers.py`, the fleet-triage table and the topic sweep name the new outcomes. `classify()` already measured the observed period, and no reader in the repo derives a limit from the requested interval — pinned by a regression fixture (`.cadence` 900, arm gaps 1244 s, age 1300 s → `OK`).

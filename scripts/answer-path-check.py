@@ -58,6 +58,22 @@ MANAGER_DIR = os.path.expanduser(
     or "~/.claude/state/worker-manager"
 )
 
+# ⚠️ **The two answer routes, and the reach records that prove they were reached.**
+# Same env var and same default as `server/config.mjs`'s `reachDir` and `scripts/answer-reach.py`
+# — the writers are two different processes (the server for `mcp`, a shell command for
+# `wrapper`), so a reader honouring a different name than either writer is how a manager that
+# reached both routes reads as having reached none and is refused. The env var is also the
+# fixture knob the controls set.
+REACH_LEGS = ("mcp", "wrapper")
+REACH_DIR = os.path.expanduser(
+    os.environ.get("SUPERVISOR_ANSWER_REACH_DIR")
+    or os.path.join(
+        os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+        "claude-supervisor",
+        "answer-reach",
+    )
+)
+
 
 def registration(session_id):
     """(subject, branch) for this session, or (None, reason)."""
@@ -132,6 +148,53 @@ def liveness_state(subject, branch):
     return state, None
 
 
+def reach_report(session_id):
+    """A one-line report of this session's answer-route reaches, or None when unreadable.
+
+    ⚠️ **STAGE 1: this REPORTS, it does not decide.** The verdict below is still the loop
+    state, so nothing that runs headless today changes behaviour while the fleet accumulates
+    its first reaches. Stage 2 flips the verdict onto these records once every manager whose
+    loop reads OK is measured carrying both legs — flipping first would refuse every headless
+    spawn from a manager that has not yet re-armed on the new step.
+
+    ⚠️ A leg that is present but unparseable reads as `broken`, never as absent: "no record"
+    and "a record I could not parse" are different facts and the caller has to be able to
+    tell them apart.
+    """
+    parts = []
+    for leg in REACH_LEGS:
+        path = os.path.join(REACH_DIR, f"{session_id}.{leg}.json")
+        try:
+            with open(path, encoding="utf-8") as handle:
+                record = json.load(handle)
+        except FileNotFoundError:
+            parts.append(f"{leg}=absent")
+            continue
+        except (OSError, ValueError) as err:
+            parts.append(f"{leg}=broken({err})")
+            continue
+        if not isinstance(record, dict) or not isinstance(record.get("ts"), str):
+            parts.append(f"{leg}=broken(no string ts)")
+            continue
+        age = reach_age_seconds(record["ts"])
+        age_text = f"{int(age)}s" if age is not None else "unknown-age"
+        parts.append(f"{leg}=present({record.get('outcome') or 'no-outcome'},{age_text})")
+    return " ".join(parts)
+
+
+def reach_age_seconds(ts):
+    """Age of a reach record in seconds, or None when its timestamp does not parse."""
+    try:
+        from datetime import datetime, timezone
+
+        when = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - when).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
 def check(session_id):
     """(ok, subject, branch, detail) — never raises."""
     found, reason = registration(session_id)
@@ -146,7 +209,8 @@ def check(session_id):
             f"this session's manager loop on {branch} '{subject}' reads {state}, not OK — "
             f"nothing is armed to answer a headless worker's parked prompt"
         )
-    return True, subject, branch, f"{branch} '{subject}' loop is OK"
+    reach = reach_report(session_id)
+    return True, subject, branch, f"{branch} '{subject}' loop is OK; reach: {reach}"
 
 
 def main():

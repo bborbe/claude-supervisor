@@ -96,8 +96,16 @@ test('supervisor.mjs routes a missed request through the refusal, not a bare id'
   // foreign park must follow the answered/error arm and nothing else may sit between them.
   assert.match(
     src,
-    /if \(viaWrapper\.answered \|\| viaWrapper\.error\) return reply\([\s\S]{0,400}?error: await foreignParkRefusal\(\{ requestId: args\.request_id, readLedger: readSessionLedger \}\)/,
+    /if \(viaWrapper\.answered \|\| viaWrapper\.error\) return reply\([\s\S]{0,1500}?const foreign = await foreignParkRefusal\(\{ requestId: args\.request_id, readLedger: readSessionLedger \}\)/,
   )
+  // And the reply must carry THAT value — never a re-derived message or a bare id. Asserted as
+  // two anchored facts rather than a byte window: the reach write (`recordReach`) now sits
+  // between the refusal and the reply, and a window wide enough to span that comment block
+  // would also span anything else a later edit put there — the failure mode this test's own
+  // header warns about. `foreign` is a unique identifier in this file, so `const foreign =
+  // await foreignParkRefusal(...)` plus `error: foreign` pins the wiring exactly.
+  assert.match(src, /const foreign = await foreignParkRefusal\(\{ requestId: args\.request_id, readLedger: readSessionLedger \}\)/)
+  assert.match(src, /return reply\(\{ error: foreign, sources_consulted: consulted \}\)/)
   // And the outage arm must still be tested BEFORE it, or it is dead code.
   assert.match(
     src,
