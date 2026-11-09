@@ -94,18 +94,22 @@ test('supervisor.mjs routes a missed request through the refusal, not a bare id'
   // "reached from the not-found arm" from "reached from somewhere else in the same function",
   // and the wrapper answer path added a second refusal arm inside the old 700-byte span. The
   // foreign park must follow the answered/error arm and nothing else may sit between them.
-  assert.match(
-    src,
-    /if \(viaWrapper\.answered \|\| viaWrapper\.error\) return reply\([\s\S]{0,1500}?const foreign = await foreignParkRefusal\(\{ requestId: args\.request_id, readLedger: readSessionLedger \}\)/,
-  )
-  // And the reply must carry THAT value — never a re-derived message or a bare id. Asserted as
-  // two anchored facts rather than a byte window: the reach write (`recordReach`) now sits
-  // between the refusal and the reply, and a window wide enough to span that comment block
-  // would also span anything else a later edit put there — the failure mode this test's own
-  // header warns about. `foreign` is a unique identifier in this file, so `const foreign =
-  // await foreignParkRefusal(...)` plus `error: foreign` pins the wiring exactly.
-  assert.match(src, /const foreign = await foreignParkRefusal\(\{ requestId: args\.request_id, readLedger: readSessionLedger \}\)/)
-  assert.match(src, /return reply\(\{ error: foreign, sources_consulted: consulted \}\)/)
+  // ⚠️ Asserted as ORDER, not as a byte window. The foreign park must follow the
+  // answered/error arm, the `mcp` reach must be recorded on that same arm, and the reply must
+  // carry the refusal — in that order and nowhere else. A window cannot say "and nothing else
+  // in between", and widening it far enough to span the reach's comment block (which a first
+  // draft of this change did) makes the test pass on almost any shape — a regression in the
+  // contract this test exists to hold.
+  const arm = src.indexOf('if (viaWrapper.answered || viaWrapper.error) return reply(')
+  const refusal = src.indexOf('const foreign = await foreignParkRefusal({ requestId: args.request_id, readLedger: readSessionLedger })')
+  const reach = src.indexOf('await recordReach({', arm)
+  const wired = src.indexOf('return reply({ error: foreign, sources_consulted: consulted })', arm)
+  assert.ok(arm > 0, 'the answered/error arm is gone')
+  assert.ok(refusal > arm, 'the refusal is no longer computed after that arm')
+  assert.ok(reach > refusal, 'the mcp reach is no longer recorded on that arm — the reach wiring is unpinned')
+  assert.ok(wired > reach, 'the reply must come after the reach, or a failed write would gate the answer')
+  // And the reach it records must be the MCP leg — the wrapper leg belongs to the shell script.
+  assert.match(src.slice(reach, wired), /leg: 'mcp'/)
   // And the outage arm must still be tested BEFORE it, or it is dead code.
   assert.match(
     src,

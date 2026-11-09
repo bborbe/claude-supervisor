@@ -8,7 +8,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { LEGS, reachPath, recordReach } from './answer-reach.mjs'
+import { LEGS, isBareSessionId, reachPath, recordReach } from './answer-reach.mjs'
 
 const fixedNow = () => new Date('2026-11-09T06:00:00.000Z')
 
@@ -67,6 +67,26 @@ test('an unknown leg writes nothing', async () => {
   assert.equal(out.written, false)
   assert.match(out.reason, /unknown leg/)
   assert.equal(fs.files.size, 0)
+})
+
+test('a session id that is not a bare filename writes nothing', async () => {
+  const fs = fakeFs()
+  // ⚠️ The id is joined into a path, and the Python sibling refuses these same shapes. A
+  // writer that accepted `../x` while the reader refused it would produce a permanent `absent`
+  // leg nobody could explain.
+  for (const bad of ['..', '.', 'a/b', 'a\\b']) {
+    assert.equal(isBareSessionId(bad), false, `${bad} was treated as bare`)
+    const out = await recordReach({ dir: '/reach', sessionId: bad, leg: 'mcp', write: fs.write, mkdirp: fs.mkdirp })
+    assert.equal(out.written, false)
+    assert.match(out.reason, /not a bare filename/)
+  }
+  assert.equal(fs.files.size, 0)
+})
+
+test('a real session id is bare', () => {
+  assert.equal(isBareSessionId('0110c4a3-c7d0-4c1e-9987-ef543409158c'), true)
+  assert.equal(isBareSessionId(''), false)
+  assert.equal(isBareSessionId(null), false)
 })
 
 test('a failed write is reported, never thrown — the caller owes a quotable refusal', async () => {

@@ -56,9 +56,27 @@ export const LEGS = ['mcp', 'wrapper']
 /**
  * The file a (session, leg) reach lives in. Exported so the probe's tests and any reader
  * resolve the same name rather than re-deriving the suffix.
+ *
+ * ⚠️ The id is joined into a path, so it must be a bare filename — `recordReach` refuses
+ * anything else. The Python sibling (`scripts/answer-reach.py`) carries the same guard, and
+ * the two must not disagree about which ids are writable: a reader that accepted `../x` while
+ * the writer refused it would produce a permanent `absent` leg nobody could explain.
  */
 export function reachPath(dir, sessionId, leg) {
   return join(dir, `${sessionId}.${leg}.json`)
+}
+
+/** True when the id is safe to join into a path — one filename, no traversal. */
+export function isBareSessionId(sessionId) {
+  return (
+    typeof sessionId === 'string' &&
+    sessionId !== '' &&
+    sessionId !== '.' &&
+    sessionId !== '..' &&
+    !sessionId.includes('/') &&
+    !sessionId.includes('\\') &&
+    !sessionId.includes('\x00')
+  )
 }
 
 /**
@@ -71,6 +89,13 @@ export function reachPath(dir, sessionId, leg) {
  * (`server/ledger.mjs`), and the spawn gate already refuses a null session id because it
  * cannot name the session. A reach keyed on a null id could never be read back, so fabricating
  * one would only manufacture evidence for a check that has already refused.
+ *
+ * ⚠️ **Threat model: a reach is evidence, not proof.** These are plain files under the user's
+ * own state directory with no signature and no ownership check, so any process running as the
+ * same user can write both legs and certify itself. That is the correct bar for what this
+ * answers — "did this manager do the work?" — and it is deliberately not a security boundary:
+ * the thing it gates is a spawn decision this same user could already make by hand. Say it
+ * here so nobody later reads a green probe as proof that a session could deliver.
  */
 export async function recordReach({
   dir,
@@ -83,6 +108,9 @@ export async function recordReach({
 }) {
   if (typeof sessionId !== 'string' || !sessionId) {
     return { written: false, reason: 'no session id — a reach keyed on nothing could never be read back' }
+  }
+  if (!isBareSessionId(sessionId)) {
+    return { written: false, reason: `session id ${JSON.stringify(sessionId)} is not a bare filename — refusing to join it into a path` }
   }
   if (!LEGS.includes(leg)) {
     return { written: false, reason: `unknown leg ${JSON.stringify(leg)} — expected one of ${LEGS.join(', ')}` }

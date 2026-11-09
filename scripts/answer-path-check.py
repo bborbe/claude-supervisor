@@ -190,7 +190,9 @@ def reach_age_seconds(ts):
         when = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         if when.tzinfo is None:
             when = when.replace(tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - when).total_seconds()
+        # ⚠️ Clamped at 0: a record written by a host whose clock is ahead of this one has a
+        # negative age, and printing `-3s` reads as a bug in the probe rather than as skew.
+        return max(0.0, (datetime.now(timezone.utc) - when).total_seconds())
     except (TypeError, ValueError):
         return None
 

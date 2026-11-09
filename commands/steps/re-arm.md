@@ -36,7 +36,7 @@ When: every tick — arm `ScheduleWakeup` FIRST, before the read half
 
   ```bash
   curl -s -o /dev/null -w '%{http_code}' -X POST \
-    "http://localhost:18090/api/1.0/sessions/${CLAUDE_CODE_SESSION_ID}/answer" \
+    "${SUPERVISOR_WRAPPER_URL:-http://localhost:18090}/api/1.0/sessions/${CLAUDE_CODE_SESSION_ID}/answer" \
     -H 'content-type: application/json' \
     -d '{"request_id":"answer-path-reach-sentinel","behavior":"allow"}'
   ```
