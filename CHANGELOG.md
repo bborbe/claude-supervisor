@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.259.2
 
 - fix: **the `gate-held` tests no longer read another run's transcript, so the suite stops failing for a reason unrelated to the code under test.** `TestCliRefusals._transcript()` wrote a real `~/.claude/projects/close-worker-test-<rand>/<SID>.jsonl` while all five gate-held cases reuse one fixture session id, and `who-needs-me.py`'s `transcript_path()` resolves that id as `next(iter(glob(PROJECTS_DIR/*/<sid>.jsonl)))` — an arbitrary, memoized pick among matches. Cleanup is `addCleanup`, which never runs on a SIGKILL or a timeout, so one interrupted run leaves a transcript every later run shares: measured 2026-11-09 at **38/50 failures with one such leftover present and 0/50 with it parked**, serially, no concurrency — the variable was never the branch, which is why two workers on two branches hit it in the same hour and each burned a precommit cycle establishing it was not theirs. `_transcript()` now writes into a per-test `PROJECTS_DIR`, the override `who-needs-me.py` already reads for exactly this purpose, alongside the four other env overrides `_run` sets; the stale docstring claiming the path takes no override is gone. Post-fix **50/50 green with the same leftover still in place**, and the full `TestCliRefusals` class (27 tests) green while a second loop ran concurrently — the collision the fix removes. Change set: `scripts/tests/test_close_worker.py`, `CHANGELOG.md`.
 
