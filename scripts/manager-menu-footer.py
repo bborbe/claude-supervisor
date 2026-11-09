@@ -84,81 +84,20 @@ def strip_glyphs(text):
     return " ".join(_GLYPHS.sub(" ", text or "").split()).strip().lower()
 
 
-#: The budget for one `wezterm cli list`, and for its single retry. Same measurement and
-#: same reasoning as `who-needs-me.py`'s constants of the same name — the distribution of
-#: this call is bimodal (0.05–0.39 s quiet, 88.78 s contended, measured 2026-11-08/09), so
-#: a 5 s budget refused a healthy-but-slow mux. Kept as a local copy rather than an import
-#: because this script is shipped standalone and imports no sibling.
-PANE_LIST_TIMEOUT = 120
-PANE_LIST_RETRY_TIMEOUT = 30
-
-#: Why the last `wezterm_panes()` returned `None` — see the sibling's constants. A
-#: timed-out read is a mux that is ALIVE and slow; a non-zero exit is a socket that is
-#: NOT answering. The refusal in `main()` names which, so the operator is not sent to
-#: restart a GUI that is running.
-PANE_FAIL_TIMEOUT = "timeout"
-PANE_FAIL_UNREADABLE = "unreadable"
-_pane_read_failure = None
-
-
-def pane_read_failure():
-    """Why the last `wezterm_panes()` returned `None`, or `None` if it did not fail."""
-    return _pane_read_failure
-
-
-def wezterm_panes():
-    """`pane id -> wezterm record`, or `None` when the query failed.
-
-    `None` is a distinct answer from `{}`: a failed `wezterm cli list` cannot prove a pane
-    is gone, so no caller may read it as "no panes exist". Same convention as the
-    sibling's own `wezterm_panes()`, and the reason this file returns `None` rather than
-    an empty map on every transport failure.
-
-    Retried once at a shorter budget, and `pane_read_failure()` records which failure
-    ended the read — same contract as the sibling's.
-    """
-    global _pane_read_failure
-    _pane_read_failure = None
-    failure = PANE_FAIL_UNREADABLE
-    for budget in (PANE_LIST_TIMEOUT, PANE_LIST_RETRY_TIMEOUT):
-        try:
-            result = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
-                                    capture_output=True, text=True, timeout=budget)
-        except subprocess.TimeoutExpired:
-            failure = PANE_FAIL_TIMEOUT
-            continue
-        except Exception:
-            failure = PANE_FAIL_UNREADABLE
-            continue
-        if result.returncode != 0:
-            failure = PANE_FAIL_UNREADABLE
-            continue
-        try:
-            return {str(p["pane_id"]): p for p in json.loads(result.stdout)}
-        except (ValueError, KeyError, TypeError):
-            failure = PANE_FAIL_UNREADABLE
-            continue
-    _pane_read_failure = failure
-    return None
+# The pane read is the sibling's, imported rather than copied — the same argument the
+# `guard` import above makes. `who-needs-me.py` owns the budget (120 s, one 30 s retry,
+# derived from the measured 0.05–88.78 s distribution) and the slow-vs-dead failure kind;
+# a second copy is exactly what drifts, and the previous copy's comment claimed this file
+# "imports no sibling" while `guard` sat thirty lines above it. Only the sentence's
+# subject differs between callers, and that is a parameter.
+wnm = _load("who_needs_me", "who-needs-me.py")
 
 
 def pane_read_refusal():
-    """The refusal text for a failed pane read, naming WHICH failure happened.
-
-    Same distinction the sibling's `pane_read_refusal()` makes: a timed-out read is a
-    slow mux, not a dead one, and the two send the operator to different places.
-    """
-    if pane_read_failure() == PANE_FAIL_TIMEOUT:
-        return (
-            f"WezTerm pane list slow — neither attempt answered within "
-            f"{PANE_LIST_TIMEOUT} s then {PANE_LIST_RETRY_TIMEOUT} s, so no manager pane "
-            "can be proven footer-free. The socket is not proven dead; it is too slow to "
-            "certify. Refusing to print a sweep that would read as a clean fleet."
-        )
-    return (
-        "WezTerm pane list unreadable — the mux socket is not answering, so no "
-        "manager pane can be proven footer-free. Refusing to print a sweep that "
-        "would read as a clean fleet."
+    """This sweep's wording of the shared refusal; the failure kind comes from the sibling."""
+    return wnm.pane_read_refusal(
+        subject="manager pane can be proven footer-free",
+        consequence="print a sweep that would read as a clean fleet",
     )
 
 
@@ -210,7 +149,7 @@ def manager_panes():
     than sweep an empty set, because an empty sweep and a broken mux socket are the same
     render and only one of them is a clean bill.
     """
-    panes = wezterm_panes()
+    panes = wnm.wezterm_panes()
     if panes is None:
         return None
     topics, goals = guard.vault_page_names()

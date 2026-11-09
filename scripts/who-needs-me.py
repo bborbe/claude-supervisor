@@ -494,10 +494,18 @@ def wezterm_panes():
     a pane is gone any more than it can prove one is live, so no caller may read it
     as "no panes exist". Same convention as `read_registry()` below, same reason.
 
-    A timeout is a third answer again, and it is why this retries: a single 6 s outlier
-    must not kill a 60 s poll loop. Two attempts are made — the second at the shorter
-    budget — and `pane_read_failure()` names which failure ended the read, so the
-    refusal can say "slow" instead of asserting a dead socket.
+    A timeout is a third answer again, and it is why this retries: the measured tail
+    includes single reads of 6.20 s and 88.78 s, and one such outlier must not kill a
+    60 s poll loop. Two attempts are made — the second at the shorter budget — and
+    `pane_read_failure()` names which failure ended the read, so the refusal can say
+    "slow" instead of asserting a dead socket.
+
+    ⚠️ **Read `pane_read_failure()` on the statement right after a `None` return.** This
+    resets it on ENTRY, so any intervening call silently flips the verdict — and
+    `panes()` is exactly such an intervening caller.
+
+    ⚠️ **Worst case is 150 s, not 120 s** — 2.5× the 60 s poll interval this exists to
+    protect. That is deliberate: one skipped tick is cheap, a dead push channel is not.
     """
     global _pane_read_failure
     _pane_read_failure = None
@@ -507,19 +515,24 @@ def wezterm_panes():
             r = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
                                capture_output=True, text=True, timeout=budget)
         except subprocess.TimeoutExpired:
+            # The one failure a retry can fix: a contended mux answers late, and the
+            # next attempt may well answer in time.
             failure = PANE_FAIL_TIMEOUT
             continue
         except Exception:
+            # Deterministic — a missing binary, a permission error. A second attempt
+            # cannot help, and `break` keeps the refusal honest: the timeout wording
+            # is then only reachable when EVERY attempt timed out.
             failure = PANE_FAIL_UNREADABLE
-            continue
+            break
         if r.returncode != 0:
             failure = PANE_FAIL_UNREADABLE
-            continue
+            break
         try:
             return {str(p["pane_id"]): p for p in json.loads(r.stdout)}
-        except Exception:
+        except (ValueError, KeyError, TypeError):
             failure = PANE_FAIL_UNREADABLE
-            continue
+            break
     _pane_read_failure = failure
     return None
 
@@ -2174,7 +2187,11 @@ def pane_for(session_id):
 
     pmap = wezterm_panes()
     if pmap is None:
-        sys.stderr.write("pane-for: WezTerm pane list unreadable\n")
+        # The same distinction `main()` makes, and for the same reason: `--pane-for` is
+        # the per-row lookup every fleet sweep takes, so it is the path most likely to
+        # meet a contended mux — and it used to report that as an unreadable socket.
+        sys.stderr.write("pane-for: " + pane_read_refusal(
+            subject="pane can be proven live", consequence="answer") + "\n")
         return 1
 
     # A session holds several records at once — the store returns one item per open
@@ -2288,7 +2305,8 @@ def refuse(reason):
     sys.exit(1)
 
 
-def pane_read_refusal():
+def pane_read_refusal(subject="record can be proven live",
+                      consequence="print a feed that would read as an empty queue"):
     """The refusal text for a failed pane read, naming WHICH failure happened.
 
     A timed-out read and an unanswering socket both yield `None`, and this site used to
@@ -2296,18 +2314,32 @@ def pane_read_refusal():
     and one that sends the operator to restart a GUI that is running. Measured
     2026-11-08: three watcher deaths in 15 minutes on a healthy mux whose worst read was
     88.78 s against a 5 s budget, every one of them asserting the socket was down.
+
+    `subject` and `consequence` are the only parts that differ between callers — the
+    sentence itself is one definition, so a wording fix cannot leave a sibling asserting
+    the claim this exists to retire. `who-needs-my-help.py` and `manager-menu-footer.py`
+    both call this rather than carrying a copy.
     """
-    if pane_read_failure() == PANE_FAIL_TIMEOUT:
+    kind = pane_read_failure()
+    if kind == PANE_FAIL_TIMEOUT:
+        # Reached only when EVERY attempt timed out — `wezterm_panes()` breaks out on a
+        # deterministic failure — so "neither attempt answered" is a fact, not a guess.
         return (
             f"WezTerm pane list slow — neither attempt answered within "
-            f"{PANE_LIST_TIMEOUT} s then {PANE_LIST_RETRY_TIMEOUT} s, so no record can "
-            "be proven live. The socket is not proven dead; it is too slow to certify. "
-            "Refusing to print a feed that would read as an empty queue."
+            f"{PANE_LIST_TIMEOUT} s then {PANE_LIST_RETRY_TIMEOUT} s, so no {subject}. "
+            "The socket is not proven dead; it is too slow to certify. "
+            f"Refusing to {consequence}."
         )
+    if kind in (None, PANE_FAIL_UNREADABLE):
+        return (
+            f"WezTerm pane list unreadable — the mux socket is not answering, so no "
+            f"{subject}. Refusing to {consequence}."
+        )
+    # A kind this renderer does not know must not silently borrow the socket wording —
+    # that would be the same defect one level up, introduced by adding a third kind.
     return (
-        "WezTerm pane list unreadable — the mux socket is not answering, so no "
-        "record can be proven live. Refusing to print a feed that would read as "
-        "an empty queue."
+        f"WezTerm pane list unreadable ({kind}) — the read failed for a reason this "
+        f"message does not model, so no {subject}. Refusing to {consequence}."
     )
 
 

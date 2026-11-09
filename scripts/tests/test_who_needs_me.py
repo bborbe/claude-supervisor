@@ -41,7 +41,6 @@ import shutil
 import subprocess
 import tempfile
 import time
-import time
 import unittest
 from unittest import mock
 
@@ -2783,6 +2782,12 @@ class PaneReadFailureKind(unittest.TestCase):
     text, and the budget actually clears the measured maximum rather than being a guess.
     """
 
+    def setUp(self):
+        # `_pane_read_failure` is module state and this class writes it. Every other suite
+        # that stubs `wezterm_panes` outright bypasses the reset in `wezterm_panes()`, so
+        # without this the refusal a later test reads depends on which test ran before it.
+        self.addCleanup(setattr, wnm, "_pane_read_failure", None)
+
     def _patch(self, *results):
         """Patch `subprocess.run` with one outcome per call, in order."""
         return mock.patch.object(wnm.subprocess, "run", side_effect=list(results))
@@ -2808,11 +2813,37 @@ class PaneReadFailureKind(unittest.TestCase):
         self.assertIn(str(wnm.PANE_LIST_RETRY_TIMEOUT), text)
 
     def test_one_retry_returns_a_map_when_the_second_call_succeeds(self):
-        # The 6 s outlier case: one slow read must not kill a 60 s poll loop.
+        # The 88.78 s outlier case: one slow read must not kill a 60 s poll loop.
         with self._patch(self._timeout(wnm.PANE_LIST_TIMEOUT),
                          self._ok([{"pane_id": 7}])):
             self.assertEqual({"7": {"pane_id": 7}}, wnm.wezterm_panes())
         self.assertIsNone(wnm.pane_read_failure())
+
+    def test_the_budget_that_reaches_subprocess_is_the_constant(self):
+        """⚠️ Pins the USE of the budget, not the constant.
+
+        Measured against a mutant of this very change: restoring `timeout=5` while
+        leaving `PANE_LIST_TIMEOUT = 120` in place passed every other test in this class.
+        `test_the_budget_clears_the_measured_maximum` asserts the constant clears
+        88.78 s; nothing asserted the call uses it — so the original defect could be
+        reintroduced green. A probe that cannot go red on the defect is not a probe.
+        """
+        with self._patch(self._timeout(wnm.PANE_LIST_TIMEOUT),
+                         self._timeout(wnm.PANE_LIST_RETRY_TIMEOUT)) as run:
+            wnm.wezterm_panes()
+        self.assertEqual([wnm.PANE_LIST_TIMEOUT, wnm.PANE_LIST_RETRY_TIMEOUT],
+                         [c.kwargs["timeout"] for c in run.call_args_list])
+
+    def test_a_deterministic_failure_is_not_retried(self):
+        """Only a timeout is transient — a dead socket is not fixed by asking again.
+
+        Also what keeps the timeout wording honest: `break` on a deterministic failure
+        means `pane_read_refusal()`'s "neither attempt answered" is only reachable when
+        every attempt really did time out.
+        """
+        with self._patch(self._dead()) as run:
+            self.assertIsNone(wnm.wezterm_panes())
+        self.assertEqual(1, run.call_count)
 
     def test_a_dead_socket_keeps_the_not_answering_text(self):
         with self._patch(self._dead(), self._dead()):

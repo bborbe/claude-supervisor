@@ -22,7 +22,6 @@ read that never happened, which is the false-green this instrument exists to avo
 Run: python3 -m unittest discover -s scripts/tests
 """
 import importlib.util
-import json
 import os
 import subprocess
 import unittest
@@ -121,42 +120,40 @@ class TestTransportContract(unittest.TestCase):
 
 
 class TestSlowMuxIsNotADeadSocket(unittest.TestCase):
-    """A timed-out pane read is a SLOW mux, not a dead one — the refusal must say which.
+    """A timed-out pane read is a SLOW mux, not a dead one — this sweep says so too.
 
-    Same defect and same measurement as `who-needs-me.py`'s `PaneReadFailureKind` class:
-    a 5 s budget inside an 88.78 s tail turned a healthy mux into "the socket is not
-    answering". This copy is shipped standalone, so it carries its own budget and its own
-    failure kind and needs its own pins.
+    The budget, the retry and the failure kind are `who-needs-me.py`'s, imported rather
+    than copied (this file already imports `manager-menu-guard.py` the same way), so the
+    implementation is pinned once in `test_who_needs_me.py::PaneReadFailureKind`. What is
+    local — and what these tests pin — is this sweep's own wording: the shared sentence
+    is parameterised, and a caller that passes the wrong subject would tell the operator
+    a feed was refused when it was a sweep.
     """
 
     def _patch(self, *results):
-        return mock.patch.object(footer.subprocess, "run", side_effect=list(results))
+        return mock.patch.object(footer.wnm.subprocess, "run", side_effect=list(results))
 
-    def _ok(self, panes):
-        return mock.Mock(returncode=0, stdout=json.dumps(panes), stderr="")
-
-    def test_a_timeout_refusal_names_slow_and_never_asserts_a_dead_socket(self):
-        with self._patch(subprocess.TimeoutExpired(["wezterm"], footer.PANE_LIST_TIMEOUT),
+    def test_the_refusal_is_the_shared_sentence_with_this_sweeps_subject(self):
+        with self._patch(subprocess.TimeoutExpired(["wezterm"], footer.wnm.PANE_LIST_TIMEOUT),
                          subprocess.TimeoutExpired(["wezterm"],
-                                                   footer.PANE_LIST_RETRY_TIMEOUT)):
-            self.assertIsNone(footer.wezterm_panes())
-        self.assertEqual(footer.PANE_FAIL_TIMEOUT, footer.pane_read_failure())
+                                                   footer.wnm.PANE_LIST_RETRY_TIMEOUT)):
+            self.assertIsNone(footer.wnm.wezterm_panes())
+        self.assertEqual(footer.wnm.PANE_FAIL_TIMEOUT, footer.wnm.pane_read_failure())
         text = footer.pane_read_refusal()
         self.assertIn("slow", text)
         self.assertNotIn("not answering", text)
+        self.assertIn("manager pane can be proven footer-free", text)
+        self.assertIn("clean fleet", text)
 
-    def test_one_retry_returns_a_map_when_the_second_call_succeeds(self):
-        with self._patch(subprocess.TimeoutExpired(["wezterm"], footer.PANE_LIST_TIMEOUT),
-                         self._ok([{"pane_id": 3}])):
-            self.assertEqual({"3": {"pane_id": 3}}, footer.wezterm_panes())
-        self.assertIsNone(footer.pane_read_failure())
-
-    def test_a_dead_socket_keeps_the_not_answering_text(self):
+    def test_a_dead_socket_keeps_the_not_answering_text_and_the_local_subject(self):
         dead = mock.Mock(returncode=1, stdout="", stderr="")
-        with self._patch(dead, dead):
-            self.assertIsNone(footer.wezterm_panes())
-        self.assertEqual(footer.PANE_FAIL_UNREADABLE, footer.pane_read_failure())
-        self.assertIn("not answering", footer.pane_read_refusal())
+        with self._patch(dead):
+            self.assertIsNone(footer.wnm.wezterm_panes())
+        self.assertEqual(footer.wnm.PANE_FAIL_UNREADABLE, footer.wnm.pane_read_failure())
+        text = footer.pane_read_refusal()
+        self.assertIn("not answering", text)
+        self.assertNotIn("slow", text)
+        self.assertIn("manager pane can be proven footer-free", text)
 
 
 if __name__ == "__main__":
