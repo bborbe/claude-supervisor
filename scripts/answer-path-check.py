@@ -149,7 +149,10 @@ def liveness_state(subject, branch):
 
 
 def reach_report(session_id):
-    """A one-line report of this session's answer-route reaches, or None when unreadable.
+    """A one-line report of this session's answer-route reaches — ALWAYS a string, never None.
+
+    Every leg is rendered: `present(<outcome>,<age>)`, `absent`, or `broken(<reason>)`, so a
+    stage-2 caller can branch on all three and never read an unreadable leg as a fresh one.
 
     ⚠️ **STAGE 1: this REPORTS, it does not decide.** The verdict below is still the loop
     state, so nothing that runs headless today changes behaviour while the fleet accumulates
