@@ -391,15 +391,6 @@ def reload_pane(pane_id, pid, cache_dir, marketplace, plugin):
         # No marker to compare against: the send could land, but nothing could confirm it.
         return {"pane": pane_id, "ok": False, "why": "no marker before the send — unverified"}
 
-    try:
-        activated = subprocess.run(["wezterm", "cli", "activate-pane", "--pane-id", str(pane_id)],
-                                   capture_output=True, text=True, timeout=20)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {"pane": pane_id, "ok": False, "why": f"activate-pane failed: {exc}"}
-    if activated.returncode != 0:
-        return {"pane": pane_id, "ok": False,
-                "why": f"activate-pane exited {activated.returncode}: {activated.stderr.strip()}"}
-
     deadline = time.time() + RELOAD_READY_TIMEOUT
     while time.time() < deadline:
         try:
