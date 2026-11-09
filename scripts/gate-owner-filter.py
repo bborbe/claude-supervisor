@@ -353,6 +353,54 @@ REEMIT_SECONDS = int(os.environ.get("GATE_FEED_REEMIT_SECONDS") or 3600)
 
 _SPAWN_LEDGER = None
 _SESSION_SCOPE = None
+_OWNER = None
+
+
+def _owner():
+    """Import `owner.py` — the ONE ownership definition (`docs/session-tiers.md` § Keep-alive).
+
+    Loaded lazily and cached, the same shape `_session_scope()` uses, so a run with `--no-scope`
+    never pays for it. ⚠️ **This file must not carry a second definition.** Its § GOAL SCOPE row
+    used to decide "a manager owns this" from the vault alone; the verdict itself now comes from
+    `scripts/owner.py`, and this file only asks.
+    """
+    global _OWNER
+    if _OWNER is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "owner.py")
+        spec = importlib.util.spec_from_file_location("owner", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _OWNER = mod
+    return _OWNER
+
+
+def scope_input(self_id, vault_paths=None):
+    """This watcher's vault scope, or `None` when it must not exclude anything.
+
+    Two conditions, both required: the session must be an **owner** by
+    `docs/session-tiers.md` § Keep-alive (resolved by `scripts/owner.py`), and the vault must
+    resolve it a scope.
+
+    ⚠️ **The ownership gate is what stops a stood-down manager's watcher from filtering.** A
+    manager that ran `/supervisor:stop` keeps its session, so its attention watcher keeps
+    running and keeps excluding other goals' gates as foreign — while the round that would make
+    it a manager is exactly what stopped. Answering that with the one definition rather than a
+    second one local to this file is the point of the resolver.
+
+    ⚠️ **`cannot-tell` does NOT drop the scope.** Only a definite `not-owner` does; an
+    unreadable probe leaves the filter exactly as it was, which is the direction every hop in
+    this file fails.
+    """
+    if not self_id:
+        return _session_scope().load(None, vault_paths)
+    ownership = _owner().of_session(self_id)
+    if ownership.verdict == _owner().NOT_OWNER:
+        return _session_scope().Scope(
+            {}, {}, set(), [],
+            f"session {self_id[:8]} is stamped as a manager but is not an owner "
+            f"({ownership.reason}: {ownership.describe()})",
+        )
+    return _session_scope().load(self_id, vault_paths, ownership)
 
 
 def _session_scope():
@@ -1529,7 +1577,7 @@ def main():
     # notification stream.
     scope = None
     if not args.no_scope:
-        scope = _session_scope().load(args.self_id, args.scope_vault or None)
+        scope = scope_input(args.self_id, args.scope_vault or None)
         if not scope.resolved:
             print(
                 f"SCOPE  unresolved: {scope.reason} — no row is excluded by the scope; "
