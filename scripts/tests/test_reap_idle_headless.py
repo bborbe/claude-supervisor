@@ -271,6 +271,12 @@ class TestScript(unittest.TestCase):
         os.makedirs(self.sessions)
         os.makedirs(self.tasks)
         os.makedirs(self.projects)
+        self.vault_config = os.path.join(self.tmp, "vault-config.json")
+        with open(self.vault_config, "w", encoding="utf-8") as handle:
+            json.dump(
+                [{"path": os.path.join(self.vaults, VAULT), "tasks_dir": "25 Tasks"}],
+                handle,
+            )
 
         _Store.wrapper = {"id": SID, "state": "idle", "pending_turns": 0, "question": None}
         _Store.items = []
@@ -339,6 +345,7 @@ class TestScript(unittest.TestCase):
         env = dict(os.environ)
         env["SUPERVISOR_SESSIONS_DIR"] = self.sessions
         env["SUPERVISOR_VAULTS_ROOT"] = self.vaults
+        env["SUPERVISOR_VAULT_CONFIG"] = self.vault_config
         env["SUPERVISOR_PROJECTS_DIR"] = self.projects
         env["SUPERVISOR_WRAPPER_URL"] = f"http://127.0.0.1:{self.port}"
         env["ATTENTION_STORE_URL"] = f"http://127.0.0.1:{self.port}"
