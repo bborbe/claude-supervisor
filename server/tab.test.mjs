@@ -1,10 +1,12 @@
 // Unit tests for the tab channel.
 //
-// The one that matters most is `activates before sending`: measured 2026-09-14, a
-// `send-text` against a live pane silently did nothing until its tab was activated,
-// and the failure looked identical to a message the worker ignored. If activation is
-// ever skipped, or reordered after the send, the channel becomes a no-op that reports
-// success — so it is asserted on call order, not on the result.
+// The one that matters most is `never activates the pane`: activation used to precede
+// every send on the belief that a background tab drops the text. It does not — with a
+// raw-mode target 6/6 bytes land and the focused pane never changes (2026-11-09) — so
+// the only thing activation ever bought was stealing the operator's focus mid-keystroke,
+// which put their half-written line in the worker's composer. The absence of activation
+// is asserted on the call list, because a future "fix" that re-adds it would look
+// harmless in the result.
 //
 // These do NOT replace the end-to-end drill: that a worker actually *acts on* a
 // message is a fact about a real TUI, which a fake wezterm cannot see.
@@ -101,7 +103,7 @@ test('waitUntilReady distinguishes "never ready" from "could not read"', async (
   assert.match(unreadable.reason, /could not be read/, 'an unreadable pane is not the same as a slow one')
 })
 
-test('sendToPane activates the tab before it types', async () => {
+test('sendToPane never activates the pane', async () => {
   const wezterm = fakeWezterm({
     'cli list': () => ok(panesJson),
     'cli get-text': () => ok(PROMPT),
@@ -110,28 +112,26 @@ test('sendToPane activates the tab before it types', async () => {
   assert.equal(res.sent, true)
   assert.equal(res.delivered, true, 'the composer was empty after the send, so the Enter submitted')
 
-  const activateAt = wezterm.calls.findIndex((c) => c.startsWith('cli activate-pane'))
-  const sendAt = wezterm.calls.findIndex((c) => c.startsWith('cli send-text'))
-  assert.ok(activateAt >= 0, 'the pane must be activated')
-  assert.ok(
-    !wezterm.calls.some((c) => c.startsWith('cli activate-tab')),
-    'activation must go through the pane id — a tab id is renumbered when its tab moves windows',
+  assert.equal(
+    wezterm.calls.some((c) => c.startsWith('cli activate-pane') || c.startsWith('cli activate-tab')),
+    false,
+    'activation steals the operator\'s focus mid-keystroke — send-text --pane-id reaches a background tab',
   )
-  assert.ok(sendAt > activateAt, 'activation must precede the send — without it the send is silently dropped')
+  const sendAt = wezterm.calls.findIndex((c) => c.startsWith('cli send-text'))
+  assert.ok(sendAt >= 0, 'the message is sent')
   assert.ok(wezterm.calls[sendAt].endsWith('/color pink\r'), 'the message is submitted with a carriage return')
 })
 
-test('sendToPane sends nothing at all when the pane cannot be activated', async () => {
+test('sendToPane takes no focus even when the delivery fails', async () => {
   const wezterm = fakeWezterm({
-    'cli list': () => ok(panesJson),
-    'cli activate-pane': () => fail('cannot activate'),
+    'cli list': () => ok('[]'),
   })
   const res = await sendToPane(PANE, 'hello', { wezterm, sleep: sleepNoop, timeoutMs: 200 })
-  assert.match(res.error, /could not activate pane/)
+  assert.match(res.error, /no tab owns pane/)
   assert.equal(
-    wezterm.calls.some((c) => c.startsWith('cli send-text')),
+    wezterm.calls.some((c) => c.startsWith('cli activate-pane')),
     false,
-    'an unactivated send would appear to succeed and deliver nothing',
+    'a failed delivery must not have taken focus on the way',
   )
 })
 
