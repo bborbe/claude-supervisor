@@ -357,7 +357,7 @@ class Liveness(unittest.TestCase):
     # ~900) would have its lapse detection loosened, the opposite of what this file
     # exists for.
 
-    # Real `.arms` epochs, read 2026-11-08 from ~/.claude/state/sweep-gate.
+    # Real `.arms` epochs, read 2026-11-08 from the machine's sweep-gate state dir.
     WEEKLY = [1794093605, 1794094567, 1794095525, 1794096495, 1794097745,
               1794128286, 1794129254, 1794130333, 1794130564, 1794134105,
               1794137848, 1794141605]
