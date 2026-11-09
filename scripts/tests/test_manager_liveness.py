@@ -433,6 +433,48 @@ class Liveness(unittest.TestCase):
         self.arm("Manager Layer", 300, age=0)
         self.assertEqual(len(self.m.read_arms("goal--manager-layer")), 2)
 
+    def plant_beats(self, topic, interval, round_seconds, rounds):
+        """A ring of head+tail beats: `rounds` rounds of `round_seconds` at `interval`."""
+        s = self.m.slug(topic, "goal")
+        now = time.time()
+        start = now - (rounds - 1) * interval
+        lines = []
+        for r in range(rounds):
+            head = start + r * interval
+            lines.append(f"{head:.0f} {interval}\n")
+            lines.append(f"{head + round_seconds:.0f} {interval} tail\n")
+        with open(self.m.path(s, "arms"), "w") as fh:
+            fh.write("".join(lines))
+
+    def test_observed_period_ignores_intra_round_tail_beats(self):
+        # A two-beat ring must measure the SAME cadence as the head-only ring it
+        # replaces. The tail beat exists so a long round does not reach its own end
+        # already reading STALE; if it also redefines the period, it manufactures the
+        # very STALE it was added to remove.
+        #
+        # Against the beat-to-beat population the gaps alternate [D, I-D]: six of 120
+        # and five of 780 on a 900 s interval, so median=120, the 2.5x cap=300, p90=780
+        # and `observed_period()` returns min(780, 300) = 300 — while the round-to-round
+        # gap it has to cover is 900. limit=480 < 900: every quiet round reads STALE.
+        self.plant_beats("Manager Layer", interval=900, round_seconds=120, rounds=6)
+        self.assertEqual(int(self.m.observed_period("goal--manager-layer")), 900)
+
+    def test_observed_period_is_unchanged_without_tail_beats(self):
+        # The fix must not move a ring that has no tail beats: every `.arms` file on
+        # every machine today is head-only, and their periods must be untouched.
+        self.plant_arms("Manager Layer", [2700, 1800, 900, 0])
+        self.assertEqual(int(self.m.observed_period("goal--manager-layer")), 900)
+
+    def test_a_legacy_two_column_line_reads_as_a_head_beat(self):
+        # The original single-column format carries no marker at all. It must keep
+        # counting as a head, or every pre-existing ring would contribute no gaps and
+        # every subject would fall back to its declared interval for ever.
+        s = self.m.slug("Manager Layer", "goal")
+        now = time.time()
+        with open(self.m.path(s, "arms"), "w") as fh:
+            fh.write("".join(f"{now - o:.0f}\n" for o in (2700, 1800, 900, 0)))
+        self.assertEqual(int(self.m.observed_period("goal--manager-layer")), 900)
+
     def test_observed_period_returns_after_four_further_arms(self):
         # The criterion's own probe: stop, arm, then four more arms — `observed_gaps`
         # must come back, or the adaptive stale limit never returns and every subject is

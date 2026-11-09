@@ -57,3 +57,19 @@ When: every round, before the pre-dispatch gate
   ⚠️ **`SUPERVISOR_WRAPPER_URL` must be an ORIGIN, with no path.** `server/config.mjs` resolves it to `url.origin`, so a value carrying a path would have the server call `/api/1.0/...` while this curl posts to `<path>/api/1.0/...` — a route-level `404`, which the recorder accepts as a valid reach and which would therefore certify a route that was never reached.
 
   ⚠️ **`409` or `404` are the only statuses the recorder accepts**, and the only ones that mean the request arrived and was refused harmlessly. Any other status writes nothing and says why: a `5xx`, an unreachable wrapper, or a command the classifier denied all leave this session with **no** wrapper reach. **Do not retry a refused curl into a passing status** — the refusal is the finding.
+
+## A second beat at the tail
+
+**Run the `case "$STATE"` allow-list block above a second time — that block, not the curl block below it — as the tick's last write**, from `commands/steps/round-tail.md` step 9. The head arm is what keeps a by-hand round that stops at the pre-dispatch gate from going unrecorded; this second run is what stops a round that outruns `period + SLACK` from reaching its own end already reading `STALE` — the reading that made a live, working manager look lapsed to every session checking `--state` mid-round.
+
+⚠️ **After `commands/steps/round-tail.md` step 8's receipt check, never before it.** That check is what proves the round ran its legs; a beat written ahead of it would make a skipped leg invisible.
+
+⚠️ **Same allow-list, same arguments, `--beat tail`, never `--resume`.** Only `OK` / `STALE` / `UNARMED` / `INVALID` arm; `STOPPED`, `SLEEPING`, `WRONG-BRANCH` and an empty `STATE` do not. A `SLEEPING` subject is the one that bites: a date-gated manager is *supposed* to have an ageing cadence, so an unconditional arm looks like the ordinary write and silently cancels the sleep the round just armed.
+
+⚠️ **It is a liveness RECORD, not the `ScheduleWakeup` arm.** `commands/steps/round-tail.md` step 7 says *"do not re-arm here"*, and that is the **wakeup**, one-shot per call. The paragraph above already separates the two (*"two files, two jobs"*).
+
+⚠️ **It is a ninth item in `commands/steps/round-tail.md`, not a line in this file.** That placement is deliberate: a mandatory tail action stated only here, at the head, has to survive a whole round in the reader's memory while the file it is actually following at the tail says nothing — which is the "a round that skips a step reads as complete" failure this beat exists to prevent. The cost is that `round-tail.md` now carries 31626 bytes against its 30720 body budget, and `scripts/budget-baseline.json` records that size. ⚠️ **That entry is a ratchet, not an allowance:** `scripts/check-budget.py` fails when the file grows past it, so any further addition to `round-tail.md` needs its own justification, not this one.
+
+⚠️ **`--beat tail` is load-bearing, and the reason is a defect this change had to fix.** `observed_period()` is a **p90 capped at 2.5× the median**. With a second beat the gap population becomes `[D, I−D]`, so the **median collapses to the smaller gap** and the cap lands *below* the round-to-round gap it has to cover. Measured on a 900 s interval with 120 s rounds: median 120, cap 300, p90 780 → period 300, limit 480, against a 900 s gap — a false `STALE` on every quiet round, which is the exact failure the tail beat exists to remove. `observed_period()` therefore counts **head beats only**; a tail beat's gap is intra-round and never enters the population. **Do not drop the marker**, and do not re-derive the period from all arms.
+
+⚠️ **A round longer than the limit still reads `STALE` during it** — only the post-round reading is fixed. A mid-round beat would shorten the gap instead; that is a different change and is not made here.
