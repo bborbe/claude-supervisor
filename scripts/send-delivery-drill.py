@@ -60,8 +60,11 @@ def pane_exists(pane_id):
 
 
 def type_and_enter(pane_id, text):
-    """What sendToPane does: frame the message with \\r and push it in one write."""
-    wezterm(["cli", "activate-pane", "--pane-id", str(pane_id)])
+    """What sendToPane does: frame the message with \\r and push it in one write.
+
+    No activation — the send reaches a background tab, and activating would steal the
+    operator's focus mid-keystroke (measured 2026-11-09).
+    """
     return wezterm(["cli", "send-text", "--pane-id", str(pane_id), "--no-paste", f"{text}\r"])
 
 
