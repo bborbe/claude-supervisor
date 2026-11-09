@@ -165,6 +165,7 @@ than cleared: no `CLEARED` is emitted, because nothing was answered.
   condition is visible on evidence rather than inferred.
 """
 import argparse
+import datetime
 import glob
 import hashlib
 import importlib.util
@@ -226,6 +227,31 @@ LIVE_SKIP = ("_cluster-reachability",)
 # PERMISSION OUTCOMES, not consecutive records — see `permission_failure_run`.
 STUCK_PERM_FAILURES = 3
 PERM_FAILURE_MARK = "permission request failed"
+
+# The `permission-channel` cause — a WINDOWED reading, and deliberately not the
+# trailing run above. `trailing_failures` resets on any tool that ran, which is the
+# right rule for "did the worker exhaust its retries" and the wrong one for "is the
+# channel dead": a session whose writes abort while its reads keep working resets the
+# run on every successful `Read`, so the trailing rule reads it clean at every point
+# between aborts. Measured 2026-11-09 on `b6e447e4`: 12 aborts in 2 minutes
+# (09:46:33–09:48:41Z) interleaved with successful reads and Edits, `trailing_run=0`
+# at the end of that window, `stuck_reason=None`. The operator's own words for that
+# session — "writes abort with `Stream closed`; reads still work" — are the shape.
+#
+# The unit is TIME, not records, and the anchor is the transcript's own last stamp
+# rather than wall clock: the reading must be reproducible against a stored
+# transcript, and a wall-clock anchor would make every historical transcript read
+# clean. A genuinely dead session is settled by the `unregistered` branch BEFORE the
+# stuck limb, so a frozen transcript cannot hold a gate open (see `is_gated`).
+#
+# ⚠️ Clearing is by AGEING OUT, never by a success. Three aborts inside 15 minutes is
+# a channel that cannot be trusted to carry an approval; a fourth tool that happened
+# to run proves only that one tool ran, and treating it as recovery is the defect
+# this cause exists to name. A recovered channel clears when the aborts fall out of
+# the window, which is bounded staleness rather than the unbounded one the old
+# longest-run reading was rejected for.
+PERM_CHANNEL_WINDOW_S = 15 * 60
+PERM_CHANNEL_MIN = 3
 
 # The state line a worker writes when it gives up. Matched as a line PREFIX, not a
 # substring: the e4fd1919 transcript also *quotes* the phrase while discussing it.
@@ -627,6 +653,63 @@ def read_tail(path, window=400_000):
         return None
 
 
+_TS_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
+
+
+def read_recent_tail(path, window_s, chunk=400_000, max_bytes=8_000_000):
+    """The transcript tail spanning at least `window_s` of its OWN record time.
+
+    ⚠️ **`read_tail`'s fixed byte window is the wrong unit for the channel read, and
+    the loss is measured.** On session `b6e447e4` (11.5 MB, measured 2026-11-09) the
+    permission-channel aborts sit at lines 2862–3287 of 6324 — roughly the middle of
+    the file — while `read_tail`'s 400 KB tail reaches only the last 28 tool results.
+    Every abort was outside it, so `permission_outcomes` counted ZERO and the session
+    read `stuck_reason=None` while its writes were aborting. A byte window is a
+    proxy for recency that fails in exactly the sessions worth watching: the long,
+    busy ones.
+
+    So this reader walks BACKWARD in chunks and stops once the collected text spans
+    `window_s` of transcript time, or the file start, or `max_bytes`. Recency is then
+    measured in the unit the question is actually about.
+
+    Returns the decoded text, or None when it cannot be read. A transcript with no
+    parseable timestamp yields whatever one chunk held — the caller's count is then
+    simply not fired, which is the fail-safe direction.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    chunks = []
+    end = size
+    try:
+        with open(path, "rb") as fh:
+            while end > 0 and (size - end) < max_bytes:
+                start = max(0, end - chunk)
+                fh.seek(start)
+                chunks.append(fh.read(end - start))
+                end = start
+                text = b"\n".join(reversed(chunks)).decode("utf-8", "replace")
+                stamps = [_iso_epoch_any(m) for m in _TS_RE.findall(text)]
+                stamps = [s for s in stamps if s is not None]
+                if stamps and max(stamps) - min(stamps) >= window_s:
+                    break
+    except OSError:
+        return None
+    return b"\n".join(reversed(chunks)).decode("utf-8", "replace")
+
+
+def _iso_epoch_any(value):
+    """An ISO-8601 timestamp as epoch seconds, or None. Local twin of
+    `round-readings._iso_epoch` — this script ships as a plugin artifact that must
+    run with no sibling on the path (see `_ENTITY`)."""
+    try:
+        return datetime.datetime.fromisoformat(
+            value.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return None
+
+
 def assistant_text_from_tail(tail):
     """Last assistant text block in a decoded tail, or None when there is none.
 
@@ -834,8 +917,58 @@ def permission_failure_run(tail):
     return trailing_failures(permission_outcomes(tail))
 
 
-def stuck_reason(text, tail):
-    """Why a worker reads STUCK, or None. Three triggers, OR'd, most specific first.
+def channel_aborts(tail, window=PERM_CHANNEL_WINDOW_S):
+    """How many `Stream closed` aborts fall inside the tail's last `window` seconds.
+
+    A WINDOWED reading, and the whole point is that it does NOT reset on a success.
+    See `PERM_CHANNEL_WINDOW_S` for the measurement and for why the anchor is the
+    transcript's own last stamp rather than wall clock.
+
+    Returns 0 when the tail carries no parseable timestamp: an undated tail cannot
+    establish recency, and firing on one would mark every transcript whose clock
+    field this reader failed to parse.
+
+    ⚠️ **The anchor is the tail's LAST record, never its last abort.** Anchoring on
+    the aborts themselves would make the window self-referential: three aborts an
+    hour ago would always sit inside "the last 15 minutes of abort time" and the
+    cause would never clear, which is the unbounded reading `trailing_failures`
+    exists to avoid. Recency is measured against the transcript's own now.
+    """
+    if not tail:
+        return 0
+    aborts, stamps = [], []
+    for line in tail.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        ts = _iso_epoch_any(rec.get("timestamp") or "")
+        if ts is None:
+            continue
+        stamps.append(ts)
+        content = (rec.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        if any(
+            isinstance(blk, dict)
+            and blk.get("type") == "tool_result"
+            and blk.get("is_error")
+            and PERM_FAILURE_MARK in str(blk.get("content") or "")
+            and "Stream closed" in str(blk.get("content") or "")
+            for blk in content
+        ):
+            aborts.append(ts)
+    if not stamps:
+        return 0
+    anchor = max(stamps)
+    return sum(1 for ts in aborts if ts >= anchor - window)
+
+
+def stuck_reason(text, tail, channel_tail=None):
+    """Why a worker reads STUCK, or None. Four triggers, OR'd, most specific first.
 
     Ordering is not cosmetic: when a worker both lost its channel and counted three
     failures, the reason names the CAUSE (`stream-closed`) rather than the symptom
@@ -860,11 +993,27 @@ def stuck_reason(text, tail):
     positions on either side of this limb are what says so: a dead channel and an
     exhausted retry run are stuck whoever wrote the last panel, so a verb-carrying
     closer sitting on a three-failure run still reads `permission-failures`.
+
+    ⚠️ **`permission-channel` sits between `stream-closed` and `blocked-closer`, and
+    both neighbours are deliberate.** AFTER `stream-closed` because the trailing
+    reading is the same cause at its most immediate — a worker whose LAST tool
+    aborted keeps the name it already had, and moving the windowed cause ahead of it
+    would rename every case that fires today without adding one. BEFORE
+    `blocked-closer` because a dead channel is a measured fact about the transport
+    while a `🔴 BLOCKED` panel is the worker's own account of the symptom it
+    produced; cause-beats-symptom is the same rule that puts `stream-closed` ahead of
+    `permission-failures` above.
+
+    `channel_tail` is the WIDER read the windowed cause needs (`read_recent_tail`).
+    It defaults to `tail` so every existing caller and fixture keeps its exact
+    current reading; the poll loop passes the wide read explicitly.
     """
     outcomes = permission_outcomes(tail)
     run = trailing_failures(outcomes)
     if run and any(sc for _, sc in outcomes[len(outcomes) - run:]):
         return "stream-closed"
+    if channel_aborts(tail if channel_tail is None else channel_tail) >= PERM_CHANNEL_MIN:
+        return "permission-channel"
     if (text
             and any(l.strip().startswith(BLOCKED_PREFIX) for l in text.splitlines())
             and not is_ask(closer_body(text))):
@@ -1046,7 +1195,15 @@ def probe(tracked_path, tasks_dir, projects_root, sessions_dir=SESSIONS_DIR,
             body = _CLOSER_UNKNOWN
         else:
             body = closer_body(text)
-        stuck = stuck_reason(text, tail)
+        # ⚠️ A SECOND, WIDER read for the channel cause alone. `tail` above is the
+        # 400 KB window the closer reader has always used, and on a long transcript
+        # it does not reach the aborts (measured on b6e447e4: 11.5 MB, aborts at the
+        # file's midpoint, zero inside the 400 KB tail). Paying one bounded reverse
+        # read per session per poll is what makes the windowed cause able to fire at
+        # all; reusing `tail` would leave it structurally unable to see its evidence.
+        stuck = stuck_reason(
+            text, tail,
+            channel_tail=read_recent_tail(cands[0], PERM_CHANNEL_WINDOW_S))
         verdict, reason = is_gated(
             registry_status(sid8, sessions_dir, warned), body,
             headless_live=heartbeat_live(sid8, live_dir), stuck=stuck,
