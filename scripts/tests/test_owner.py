@@ -181,6 +181,22 @@ class PageAndSessionTest(unittest.TestCase):
             json.dumps({"subject": "A Goal", "branch": "nonsense"}), encoding="utf-8")
         self.assertIsNone(self.o.registration("gm-1")[0])
 
+    def test_a_registration_with_a_non_string_subject_is_refused(self):
+        """⚠️ A truthy non-string subject is the shape a bare `not subject` check lets through.
+
+        It would then reach `os.path.join` / `subprocess.run` as a list or a number and raise
+        `TypeError` out of the resolver — neither a verdict nor `cannot-tell`.
+        """
+        for bad in ([["A Goal"]], 7, {"name": "A Goal"}):
+            with self.subTest(subject=bad):
+                (self.manager_dir / "gm-1.json").write_text(
+                    json.dumps({"subject": bad, "branch": "goal"}), encoding="utf-8")
+                self.assertIsNone(self.o.registration("gm-1")[0])
+
+    def test_a_registration_that_is_not_an_object_is_refused(self):
+        (self.manager_dir / "gm-1.json").write_text("[1, 2]", encoding="utf-8")
+        self.assertIsNone(self.o.registration("gm-1")[0])
+
 
 class CliTest(unittest.TestCase):
     def test_the_cli_prints_the_verdict_line(self):
@@ -199,6 +215,16 @@ class CliTest(unittest.TestCase):
     def test_the_cli_refuses_when_it_has_nothing_to_resolve(self):
         o = load()
         self.assertEqual(2, o.main([]))
+
+    def test_a_subject_without_a_vault_is_a_refusal_not_a_verdict(self):
+        """THE DOUBLE-WRITER GUARD.
+
+        The page is where the subject's manager is recorded, so a run that cannot read it has
+        not established that nobody owns the subject. Answering `not-owner` from the loop state
+        alone would licence a second writer — the exact failure this module withholds.
+        """
+        o = load()
+        self.assertEqual(2, o.main(["--subject", "A Goal"]))
 
 
 class SessionVerdictTest(unittest.TestCase):
@@ -590,10 +616,11 @@ class PageResolutionTest(unittest.TestCase):
 
     def test_an_unreadable_page_keeps_the_loop_fact_it_could_read(self):
         # The loop probe still runs, so the answer is graded by the same table as any other
-        # read that came back with no session.
-        path = self.page("A Goal", "claude_session_id: gm-1\n")
-        path.chmod(0o000)
-        self.addCleanup(path.chmod, 0o644)
+        # read that came back with no session. ⚠️ The page is a DIRECTORY named `<subject>.md`,
+        # not a `chmod 000` file: a mode-based fixture passes as root, and the reviewer's own
+        # container runs as root, so `make test` would fail there while passing here.
+        directory = self.vault / "24 Goals" / "A Goal.md"
+        directory.mkdir()
         o = self.o.of_subject(str(self.vault), "A Goal")
         self.assertIn(o.verdict, ("not-owner", "cannot-tell"))
         self.assertIn("unreadable", o.detail)
