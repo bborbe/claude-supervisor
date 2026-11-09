@@ -51,7 +51,7 @@ import { buildRecord, ledgerWriteRoute, mergeRecord, parentSessionId, stoppedPat
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 import { resumeRefusal } from './resume-guard.mjs'
 import { resumeAdmission } from './context-guard.mjs'
-import { shouldEndIdleWorker } from './idle-worker.mjs'
+import { armZeroTurnGrace, shouldEndIdleWorker, ZERO_TURN_GRACE_MS } from './idle-worker.mjs'
 import { fetchAttentionItems, fetchOpenCards, openCardsOf } from './open-cards.mjs'
 import { foreignParkRefusal } from './park-refusal.mjs'
 import { answerPathRefusal } from './answer-path.mjs'
@@ -3041,7 +3041,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // `question` is waiting on a manager; a worker with an open attention card is waiting on a
   // person. Neither is finished, and stopping either would orphan exactly the card this whole
   // task exists to protect.
-  const endWorkerIfIdle = async (current) => {
+  const endWorkerIfIdle = async (current, { zeroTurnGraceExpired = false } = {}) => {
     let session
     try {
       session = await readWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id })
@@ -3052,12 +3052,13 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // Decide everything except the card check first, so an incomplete wrapper record is reported
     // before we spend an attention-store round trip on it — and is reported at all, because a
     // silent keep would let the idle-worker leak survive the fix that exists to remove it.
-    const pre = shouldEndIdleWorker({ session, cards: [] })
+    const pre = shouldEndIdleWorker({ session, cards: [], lastResult: current.result, zeroTurnGraceExpired })
     if (pre.reason === 'wrapper-record-incomplete') {
       log(`WARNING: the wrapper's record for ${current.id} carries no state/pending_turns — the idle-worker end-of-life is a no-op for it until it does`)
       return
     }
-    if (!pre.end) return
+    // `zero-turn-result` is decided only after the card check, so it proceeds to it.
+    if (!pre.end && pre.reason !== 'zero-turn-result') return
     // ⚠️ **A deliberately-absent store is NOT an unreadable one.** With
     // `SUPERVISOR_ATTENTION_STORE=off`, `config.attentionStoreUrl` is null and `fetchOpenCards`
     // returns null without issuing a request — which the predicate would read as
@@ -3068,7 +3069,14 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     const cards = config.attentionStoreUrl
       ? await fetchOpenCards({ storeUrl: config.attentionStoreUrl, sessionId: current.sessionId })
       : []
-    const verdict = shouldEndIdleWorker({ session, cards })
+    const verdict = shouldEndIdleWorker({ session, cards, lastResult: current.result, zeroTurnGraceExpired })
+    if (verdict.reason === 'zero-turn-result') {
+      // Bounded keep: the timer re-runs THIS whole decision with the grace expired, so it can
+      // only end a session that is still idle, unparked and cardless — never a live turn.
+      log(`WARNING: agent ${current.id}: zero-turn result — keeping the session ${ZERO_TURN_GRACE_MS} ms so a queued prompt can still run`)
+      armZeroTurnGrace({ agent: current, recheck: endWorkerIfIdle })
+      return
+    }
     if (!verdict.end) {
       // The two keeps that explain a worker which is never reaped are logged; `not-idle` and
       // `turn-in-flight` are the ordinary mid-turn path and would log on every result.
