@@ -6,7 +6,7 @@ user-invocable: false
 
 # Manager-subject reap
 
-When: every tick — after the open leg
+When: every tick — after the open
 
 A manager's subject is a goal or a topic page, not a task. The reap contract
 (`agents/fleet-drive.md` step 1b) reads three facts from a **task** file, so a manager

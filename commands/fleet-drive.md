@@ -32,7 +32,7 @@ allowed-tools:
   - Edit
 argument-hint: "[--interval <N>m] (default 15m; repeats by default)"
 ---
-Fleet-drive — **the round**: once over the whole fleet, runnable by hand. The show is `/supervisor:fleet-status`.
+Fleet-drive — **the round**: once over the fleet, runnable by hand. The show is `/supervisor:fleet-status`.
 
 ⚠️ **This is the round, not the arm.** A wakeup names THIS command (`/supervisor:fleet-drive --interval <N>m`) — this file is the **round**, read every wakeup; `commands/fleet-loop.md` is the **arm**, invoked **once** and never re-invoked.
 
@@ -45,15 +45,15 @@ Hard invariants and gates: `${CLAUDE_PLUGIN_ROOT}/commands/steps/rules.md`; INLI
 Rationale: runbook § Fleet-Manager Command.
 
 ⚠️ **Delegate; keep this session for the round.** `Task` is available — anything not the sweep
-goes to a sub-agent, or the round stalls (2026-10-30: 2h30m unmanaged).
+goes to a sub-agent, or the round stalls (2026-10-30: 2h30m).
 
 ⚠️ **Carve-out: 5b, 5c, 5d, 16 and 16b are acting legs.** They run here, or in a sub-agent granted
 write tools (`Bash`, `Edit`, `Write`, `mcp__supervisor__*`); a read-only delegate is not a run of
-them — a read-only run prints a count it was told to, not one measured.
+them — it prints the count it was told to, not the one it measured.
 
 ## Router
 
-Read a step file only when its **When** holds; re-read it if its text is not in context (e.g. after a compaction).
+Read a step file only when its **When** holds; re-read it if its text is not in context (e.g. after a compaction) **or its content changed** — `steps/rules.md` § Re-read the router.
 
 | # | Step | When | File |
 |---|---|---|---|
@@ -77,13 +77,13 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 14 | Auto-compaction | the hand-back reports `context70` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/auto-compaction.md` |
 | 15 | Readings | every tick — take all six readings (commands in the step) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |
 | 16 | Open leg | every tick — after Readings | `${CLAUDE_PLUGIN_ROOT}/commands/steps/open.md` |
-| 16b | Manager reap | every tick — after the open leg | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-reap.md` |
+| 16b | Manager reap | every tick — after the open | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-reap.md` |
 | 17 | Voice + notification | every tick — run the `{"gates": []}` prune on every round, and publish only the gates the operator must decide (§ Gate triage classes C, D, E) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/voice-notify.md` |
 | 18 | Persist | the snapshot path is missing or the write failed — run: `python3 $P/fleet-snapshot.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
 | 19 | Round tail | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/fleet-round-tail.md` |
 | 20 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
 
-⚠️ **The table is read more than once per round, and the later reads are the ones that get skipped.** Re-read it once the sweep hand-back exists, and again before the output shape renders, honouring every row whose `When` has newly become decidable **and that has not run this round**. Never re-run a leg — **each `every tick` row is once-per-round**, and a second sweep or drive leg duplicates sends. Rule: `steps/rules.md` § Re-read the router.
+⚠️ **The table is read more than once per round, and the later reads are the ones that get skipped.** Re-read it once the sweep hand-back exists, and again before the output shape renders, honouring every row whose `When` has newly become decidable **and that has not run this round**. Never re-run a leg — **each `every tick` row is once-per-round**, and a second sweep or drive leg duplicates sends.
 
 ## INLINE — the hard rules
 
