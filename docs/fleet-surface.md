@@ -924,7 +924,14 @@ rule**:
    Manager**.
 
 A **live** manager here is an *owner* as `docs/session-tiers.md` § Keep-alive defines it —
-this section owns the resolution order, that one owns the definition.
+this section owns the resolution order, that one owns the definition, and
+**`scripts/owner.py` is its one implementation.** ⚠️ **Tier 4 asks the resolver; it does not
+compute liveness itself.** A `claude_session_id` on a goal or topic page is a *lead*, not a
+verdict — a manager that ran `/supervisor:stop` keeps its session and its stamp, so reading
+either as ownership routes a subject to a manager whose round has stopped. The resolver's three
+answers decide the fallback: `owner` keeps the subject where it is, `not-owner` walks up to the
+next live ancestor, and `cannot-tell` **stops** the walk — an undecidable read is not a licence
+to hand the subject to another tier, because two managers on one subject are a double writer.
 
 ⚠️ **The tier is what makes the fallback answerable, and getting it wrong is silent.** Naming
 the fleet manager as the owner of an unmanaged goal inside a live topic routes the start to
@@ -954,7 +961,13 @@ before the task's `goals:`. What remains missing is the field's **writer**, not 
 erroring.
 
 Then read the owner's `claude_session_id` off its page — a goal or topic page carries the
-session id of the manager that armed it — and treat it as a **lead only**, never as a verdict:
+session id of the manager that armed it — and treat it as a **lead only**, never as a verdict.
+⚠️ **`scripts/owner.py` turns the lead into the verdict, and this table is the ACTION a caller
+takes once it has one.** The resolver reads the session with `session-liveness.py --check` and
+the loop with `manager-liveness.py --state` and answers `owner` / `not-owner` / `cannot-tell`;
+only `owner` (session `LIVE` **and** loop `OK`/`STALE`) is a manager that will keep the subject
+alive. The session verdicts below remain the caller's action guide — they say what to do about a
+session, not whether it owns anything:
 
 | `session-liveness.py --check` | exit | action |
 |---|---|---|
