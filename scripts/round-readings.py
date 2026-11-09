@@ -612,21 +612,75 @@ def denial_still_blocks(sid, rec, attention_dir, now, projects_dir=None):
     return later_success(sid, tool, ts, projects_dir or PROJECTS_DIR) is not True
 
 
+def permission_channel_sid(session_ids, projects_dir, now=None):
+    """The first session id whose permission channel is dead, or None.
+
+    A row carries every id it ever ran under, so all of them are read — but only
+    those whose transcript is still FRESH (`PERM_CHANNEL_STALE_S`). ⚠️ **Without that
+    bound the carrier is a permanent false positive:** the channel window is anchored
+    on the transcript's own last stamp, so an id from a session that died with its
+    last 15 minutes full of aborts keeps matching forever, and pins a healthy live row
+    to `permission-channel`. Measured on this change's first review, 2026-11-09.
+
+    ⚠️ **The RULE is not restated here.** `manager-attention-watch.py` owns the
+    window, the threshold, the staleness bound and the reason string; this function
+    only supplies the wider read that rule needs and reports the id. A second copy
+    would be a second place for the window to drift — and the drift would be silent,
+    because too short a window reads as "no aborts" rather than as an error.
+    """
+    watch = _load("manager-attention-watch")
+    now = time.time() if now is None else now
+    for sid in session_ids or []:
+        if not sid or os.path.basename(sid) != sid:
+            continue
+        try:
+            hits = glob.glob(os.path.join(projects_dir, "*",
+                                          glob.escape(sid) + "*.jsonl"))
+        except OSError:
+            continue
+        if not hits:
+            continue
+        try:
+            path = max(hits, key=os.path.getmtime)
+            if now - os.path.getmtime(path) > watch.PERM_CHANNEL_STALE_S:
+                continue
+        except OSError:
+            continue
+        wide = watch.read_recent_tail(path, watch.PERM_CHANNEL_WINDOW_S)
+        if wide is None:
+            continue
+        if watch.channel_aborts(wide) >= watch.PERM_CHANNEL_MIN:
+            return sid
+    return None
+
+
 def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=None,
                   projects_dir=None):
-    """`(verdict, reason)` — denied | frozen | none | unread.
+    """`(verdict, reason)` — denied | permission-channel | frozen | none | unread.
 
-    Two carriers, both of which today render `progressing`:
+    Three carriers, all of which would otherwise render `progressing`:
 
     * **denied** — the worker declared a denial it could not get past (its
       `<sid>.denial.json` marker, written before it messages its manager). The feed
       cannot carry this class at all, so without this carrier a denied worker is
       invisible for as long as it keeps retrying.
+    * **permission-channel** — the session's permission channel is aborting, read
+      from its transcript by `manager-attention-watch.channel_aborts`. The registry
+      reads such a worker `busy` or `waiting` and the feed calls it progressing,
+      while every write it exists to make fails; measured 2026-10-28 on three
+      sessions, one of them holding a live dev repair it could not run.
     * **frozen** — the task file has not moved for a whole interval while its owner
       is LIVE. That is shorter than the park cell's 2x threshold, and unlike it this
       is a stuck claim rather than a check-in.
 
-    `none` is only returned when both carriers were actually examined.
+    `none` is only returned when every carrier was actually examined.
+
+    ⚠️ **`permission-channel` is read BEFORE the `feed == "gated"` short-circuit, and
+    that ordering is the point.** A gated row is reported by the park cell — but a
+    park on a session whose channel is dead is a park no answer can reach: the
+    operator answers, the delivery aborts, and the row goes back to looking parked.
+    The channel death is the more specific fact, exactly as `is_gated` in the watcher
+    puts its `stuck` limb ahead of the registry half for the same reason.
 
     The `denied` carrier is a *live* claim, so it is read through
     `denial_still_blocks` rather than taken at face value — a marker whose tool has
@@ -641,6 +695,9 @@ def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=Non
         if denial_still_blocks(sid, rec, attention_dir, now, projects_dir):
             tool = rec.get("tool") or "a tool"
             return "denied", f"{tool} denied — {rec.get('reason') or 'no reason recorded'}"
+    dead = permission_channel_sid(session_ids, projects_dir or PROJECTS_DIR, now)
+    if dead:
+        return "permission-channel", f"{dead[:8]} — permission channel aborting (Stream closed)"
     if feed == "gated":
         # A genuinely gated worker is reported by the park cell, never double-reported.
         return "none", ""
