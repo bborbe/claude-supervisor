@@ -28,7 +28,16 @@ _SCRIPT = os.path.join(os.path.dirname(_HERE), "answer-path-check.py")
 
 
 def load(manager_dir):
-    """Import the hyphenated module with its registration dir pointed at `manager_dir`."""
+    """Import the hyphenated module with its registration dir pointed at `manager_dir`.
+
+    ⚠️ The reach dir is pinned to a tempdir for the same reason, and the established override
+    is cleared first: both stores are resolved from the environment AT IMPORT, so a test that
+    left `SUPERVISOR_ANSWER_REACH_DIR` ambient would read the operator's real reach store —
+    and a real reach from this machine would make an `absent` assertion pass or fail by
+    accident.
+    """
+    os.environ.pop("SUPERVISOR_ANSWER_REACH_DIR", None)
+    os.environ["SUPERVISOR_ANSWER_REACH_DIR"] = os.path.join(manager_dir, "reach")
     os.environ["WORKER_MANAGER_STATE_DIR"] = manager_dir
     spec = importlib.util.spec_from_file_location("answer_path_check", _SCRIPT)
     mod = importlib.util.module_from_spec(spec)
@@ -256,6 +265,55 @@ class AnswerPathCheckTest(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["subject"], "A Goal")
 
+
+    # --- the reach half --------------------------------------------------------
+    #
+    # Stage 1 only REPORTS reaches; the verdict is still the loop state. These pin the report,
+    # because stage 2 flips the verdict onto exactly this string and a report that silently
+    # read a broken record as absent would then certify on nothing.
+
+    def write_reach(self, session_id, leg, payload):
+        directory = os.path.join(self.tmp, "reach")
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, f"{session_id}.{leg}.json"), "w", encoding="utf-8") as fh:
+            fh.write(payload if isinstance(payload, str) else json.dumps(payload))
+
+    def test_reach_report_reads_both_legs_absent(self):
+        report = self.mod.reach_report("sid")
+        self.assertIn("mcp=absent", report)
+        self.assertIn("wrapper=absent", report)
+
+    def test_reach_report_names_a_present_leg_with_its_outcome_and_age(self):
+        self.write_reach("sid", "mcp", {"session_id": "sid", "leg": "mcp", "ts": self.mod_now(), "outcome": "foreign-park"})
+        report = self.mod.reach_report("sid")
+        self.assertIn("mcp=present(foreign-park,", report)
+        self.assertIn("wrapper=absent", report)
+
+    def test_reach_report_reads_a_malformed_record_as_broken_never_absent(self):
+        self.write_reach("sid", "mcp", "{not json")
+        report = self.mod.reach_report("sid")
+        self.assertIn("mcp=broken", report)
+        self.assertNotIn("mcp=absent", report)
+
+    def test_reach_report_reads_a_record_without_ts_as_broken(self):
+        self.write_reach("sid", "mcp", {"session_id": "sid", "leg": "mcp"})
+        self.assertIn("mcp=broken(no string ts)", self.mod.reach_report("sid"))
+
+    def test_reach_age_clamps_a_future_timestamp_to_zero(self):
+        # A writer whose clock is ahead must not print a negative age, which reads as a probe bug.
+        self.assertGreaterEqual(self.mod.reach_age_seconds("2999-01-01T00:00:00Z"), 0.0)
+
+    def test_ok_detail_carries_the_reach_report(self):
+        self.write_registration("good", {"subject": "A Goal", "branch": "goal"})
+        self.mod.LIVENESS = fake_liveness(self.tmp, "OK\tgoal--a-goal\tfresh\n")
+        ok, _, _, detail = self.mod.check("good")
+        self.assertTrue(ok)
+        self.assertIn("reach: mcp=", detail)
+
+    def mod_now(self):
+        from datetime import datetime, timezone
+
+        return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 if __name__ == "__main__":
     unittest.main()

@@ -54,6 +54,7 @@ import { resumeAdmission } from './context-guard.mjs'
 import { armZeroTurnGrace, shouldEndIdleWorker, ZERO_TURN_GRACE_MS } from './idle-worker.mjs'
 import { fetchAttentionItems, fetchOpenCards, openCardsOf } from './open-cards.mjs'
 import { foreignParkRefusal } from './park-refusal.mjs'
+import { recordReach } from './answer-reach.mjs'
 import { answerPathRefusal } from './answer-path.mjs'
 import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
 import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
@@ -3931,10 +3932,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         if (viaWrapper.answered || viaWrapper.error) return reply({ ...viaWrapper, sources_consulted: consulted })
         // Both sources were read and neither holds the id.
-        return reply({
-          error: await foreignParkRefusal({ requestId: args.request_id, readLedger: readSessionLedger }),
-          sources_consulted: consulted,
+        const foreign = await foreignParkRefusal({ requestId: args.request_id, readLedger: readSessionLedger })
+        // ⚠️ **This reply IS the MCP reach**, and it is the only place it can be recorded.
+        // Reaching here means this session's `answer_permission` call actually arrived at the
+        // answer route, was consulted against both sources, and was refused harmlessly —
+        // nothing was settled and no gate moved. `scripts/answer-path-check.py` reads this
+        // record instead of trusting an armed loop, because an armed loop is not a channel
+        // (measured 2026-11-09: 27 workers, 56 store-released parks, 0 by the spawner, exit 0).
+        // ⚠️ Written BEFORE the reply and never on an error path: a call that never arrived —
+        // a classifier denial, a crashed server, a transport failure — must leave no reach,
+        // or the probe would certify exactly the spawner this exists to refuse.
+        await recordReach({
+          dir: config.reachDir,
+          // The server's own session, resolved the same way the spawn gate resolves it
+          // (`parentSessionId`), so the record and the gate cannot disagree about who this is.
+          // Null writes nothing — see `recordReach`.
+          sessionId: parentSessionId({ dir: config.sessionsDir }),
+          leg: 'mcp',
+          outcome: 'foreign-park',
         })
+        return reply({ error: foreign, sources_consulted: consulted })
       }
       // Record the manager's verdict too: a key the manager allows over and over
       // is the raw material for the next policy rule.
