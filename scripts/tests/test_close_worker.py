@@ -157,10 +157,20 @@ class TestTaskVerdict(unittest.TestCase):
 
 class TestFindTask(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        self.tmp = os.path.realpath(tempfile.mkdtemp())
         self.vaults = os.path.join(self.tmp, "vaults")
         self.tasks = os.path.join(self.vaults, "somevault", "25 Tasks")
         os.makedirs(self.tasks)
+        self._config({"somevault": "25 Tasks"})
+
+    def _config(self, mapping):
+        """Pin the vault config to the fixture: {vault name: tasks_dir}."""
+        prior = cw._VAULT_CONFIG
+        cw._VAULT_CONFIG = {
+            os.path.realpath(os.path.join(self.vaults, name)): tasks_dir
+            for name, tasks_dir in mapping.items()
+        }
+        self.addCleanup(setattr, cw, "_VAULT_CONFIG", prior)
 
     def _write(self, name, body):
         path = os.path.join(self.tasks, name)
@@ -248,6 +258,7 @@ class TestFindTask(unittest.TestCase):
 
     def test_a_task_in_another_vault_is_still_found(self):
         """The repo-worktree case: a cwd with no task dir must still reach the vault scan."""
+        self._config({"somevault": "25 Tasks", "othervault": "25 Tasks"})
         nested = os.path.join(self.vaults, "somevault", "deep")
         os.makedirs(nested)
         other = os.path.join(self.vaults, "othervault", "25 Tasks")
@@ -319,6 +330,13 @@ class TestCliRefusals(unittest.TestCase):
         os.makedirs(self.attention)
         os.makedirs(self.projects)
         os.makedirs(self.repo)
+        self.vault_config = os.path.join(self.tmp, "vault-config.json")
+        with open(self.vault_config, "w", encoding="utf-8") as handle:
+            json.dump(
+                [{"path": os.path.join(self.vaults, "somevault"),
+                  "tasks_dir": "25 Tasks"}],
+                handle,
+            )
         subprocess.run(["git", "init", "-q", self.repo], check=True)
         with open(os.path.join(self.repo, "a.txt"), "w", encoding="utf-8") as handle:
             handle.write("one\n")
@@ -350,6 +368,7 @@ class TestCliRefusals(unittest.TestCase):
         env = dict(os.environ)
         env["SUPERVISOR_SESSIONS_DIR"] = self.sessions
         env["SUPERVISOR_VAULTS_ROOT"] = self.vaults
+        env["SUPERVISOR_VAULT_CONFIG"] = self.vault_config
         env["SUPERVISOR_SESSION_HOLDS"] = holds or os.path.join(self.tmp, "no-holds.json")
         env["ATTENTION_STATE_DIR"] = self.attention
         env["ATTENTION_STORE_URL"] = self.store_url
