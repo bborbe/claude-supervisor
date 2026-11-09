@@ -2236,9 +2236,10 @@ class PanelessHeadlessGateReachesTheKeptSet(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("gates: 2  emit: 2", result.stderr)
+        # The store is unreachable here, so the headless row fails OPEN and says so.
         self.assertEqual(
             result.stdout.splitlines(),
-            ["hst:" + _HST_ITEM + "  session=unresolved", "417"],
+            ["hst:" + _HST_ITEM + "  store=unreachable", "417"],
         )
 
     def test_the_store_resolves_the_session_and_ownership_applies(self):
@@ -2301,11 +2302,15 @@ class PanelessHeadlessGateReachesTheKeptSet(unittest.TestCase):
         again, _ = gf.emit_decisions([key], state, [], 160.0, 3600)
         self.assertEqual(again, set())
 
-    def test_the_wake_line_names_the_session_or_says_unresolved(self):
+    def test_the_wake_line_names_the_session_or_one_of_two_fixed_tokens(self):
         args = mock.Mock(json=False, explain=False, feed=True)
         rows = [
-            {"pane": "hst:a", "replayed": False, "verdict": gf.EMIT, "session_id": GATED},
-            {"pane": "hst:b", "replayed": False, "verdict": gf.EMIT, "session_id": None},
+            {"pane": "hst:a", "replayed": False, "verdict": gf.EMIT, "session_id": GATED,
+             "store": gf.STORE_OPEN},
+            {"pane": "hst:b", "replayed": False, "verdict": gf.EMIT, "session_id": None,
+             "store": gf.STORE_OPEN},
+            {"pane": "hst:c", "replayed": False, "verdict": gf.EMIT, "session_id": None,
+             "store": gf.STORE_UNREAD},
             {"pane": "417", "replayed": False, "verdict": gf.EMIT, "session_id": GATED},
         ]
         out = io.StringIO()
@@ -2313,8 +2318,194 @@ class PanelessHeadlessGateReachesTheKeptSet(unittest.TestCase):
             gf.render(rows, args)
         self.assertEqual(
             out.getvalue().splitlines(),
-            [f"hst:a  session={GATED}", "hst:b  session=unresolved", "417"],
+            [f"hst:a  session={GATED}", "hst:b  session=unattributed",
+             "hst:c  store=unreachable", "417"],
         )
+
+
+# Four `[ hst]` rows, one per store state the filter must tell apart.
+_OPEN_OWNED = "a0000000000000000000000000000001"
+_OPEN_UNATTRIBUTED = "b0000000000000000000000000000002"
+_CLOSED = "c0000000000000000000000000000003"
+_ANSWERED = "d0000000000000000000000000000004"
+_UNATTRIBUTED_TOKEN = "session=unattributed"
+_STORE_FAILED_TOKEN = "store=unreachable"
+
+
+def _hst_row(item_id, label):
+    return (
+        f"  [ hst]     1m  {label}    awaiting-operator · permission: Bash: date\n"
+        "         headless — no pane to jump to; answer with the command below\n"
+        f"         answer: python3 x/attention-answer.py answer {item_id} --decision allow|deny\n"
+    )
+
+
+_FOUR_ROW_FEED = "Needs you (4)\n" + "".join(
+    _hst_row(item, label)
+    for item, label in (
+        (_OPEN_OWNED, "open-owned"),
+        (_OPEN_UNATTRIBUTED, "open-unattributed"),
+        (_CLOSED, "closed-card"),
+        (_ANSWERED, "answered-card"),
+    )
+)
+
+
+class _AttentionStub:
+    """The attention store's OPEN list — `GET /api/1.0/attention` — and nothing else.
+
+    The real route returns open items only (`attention-card-lookup.py`), so the closed and
+    answered cards are modelled the way the store models them: by their ABSENCE from a
+    successful read. Every other route 404s, so the ledger read fails open to `{}`.
+    """
+
+    def __init__(self, rows):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+
+        body = json.dumps(rows).encode("utf-8")
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_a):
+                pass
+
+            def do_GET(self):
+                if self.path.split("?", 1)[0] == "/api/1.0/attention":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def url(self):
+        host, port = self.server.server_address[:2]
+        return "http://%s:%d" % (host, port)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+
+_OPEN_LIST = [
+    {"item_id": _OPEN_OWNED, "producer_id": GATED, "payload": "Bash: date", "state": "open"},
+    {"item_id": _OPEN_UNATTRIBUTED, "producer_id": "", "payload": "Bash: date", "state": "open"},
+]
+
+
+def _run_feed(endpoint):
+    with tempfile.TemporaryDirectory() as tmp:
+        return subprocess.run(
+            [sys.executable, _SCRIPT, "--feed", "--no-scope",
+             "--state-dir", tmp, "--registry-dir", tmp,
+             "--endpoint", endpoint,
+             "--claims-file", os.path.join(tmp, "none.json")],
+            input=_FOUR_ROW_FEED, capture_output=True, text=True,
+        )
+
+
+class ClosedCardsDoNotWakeTheFeed(unittest.TestCase):
+    """A closed or answered card is not a gate; a failed store read still is one.
+
+    ⚠️ The open list is the store's whole answer, so "absent from a GOOD read" and "the
+    read FAILED" were the same empty record, and both rendered `session=unresolved` and
+    woke the manager. Measured 2026-11-05 to 11-07: 3 of 3, then 7 of 10, then 18 of 18
+    wake rows on one goal manager's arm were dead or foreign, and the arm was stopped.
+
+    ⚠️ Row (b) — an OPEN gate whose `producer_id` is empty — is the discriminator. It
+    carried `unresolved` too, so a fix that drops every `unresolved` row drops a live
+    gate and fails `test_the_four_row_fixture_emits_exactly_the_two_open_cards`. The
+    drop must key on the store's state, never on the label.
+    """
+
+    def test_the_four_row_fixture_emits_exactly_the_two_open_cards(self):
+        with _AttentionStub(_OPEN_LIST) as store:
+            result = _run_feed(store.url)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [f"hst:{_OPEN_OWNED}  session={GATED}",
+             f"hst:{_OPEN_UNATTRIBUTED}  {_UNATTRIBUTED_TOKEN}"],
+        )
+        self.assertIn("gates: 4  emit: 2", result.stderr)
+        self.assertIn("dropped(not-open): 2", result.stderr)
+
+    def test_an_unreachable_store_still_emits_all_four_and_says_so(self):
+        result = _run_feed(dead_url())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [f"hst:{item}  {_STORE_FAILED_TOKEN}"
+             for item in (_OPEN_OWNED, _OPEN_UNATTRIBUTED, _CLOSED, _ANSWERED)],
+        )
+        self.assertIn("dropped(not-open): 0", result.stderr)
+
+    def test_the_two_fail_open_tokens_are_separable_by_grep(self):
+        """Proven mechanically over the combined output, never by prose.
+
+        Each fixed token is matched with `grep -F`. The two match sets must both be
+        non-empty and disjoint, no line may still say `unresolved`, and every line matching
+        neither token must carry a resolved session id.
+        """
+        with _AttentionStub(_OPEN_LIST) as store:
+            healthy = _run_feed(store.url).stdout
+        failed = _run_feed(dead_url()).stdout
+        combined = healthy + failed
+        lines = combined.splitlines()
+
+        def grep(token):
+            proc = subprocess.run(["grep", "-F", "--", token], input=combined,
+                                  capture_output=True, text=True)
+            return set(proc.stdout.splitlines())
+
+        unattributed, store_failed = grep(_UNATTRIBUTED_TOKEN), grep(_STORE_FAILED_TOKEN)
+        self.assertEqual(len(unattributed), 1)
+        self.assertEqual(len(store_failed), 4)
+        self.assertEqual(unattributed & store_failed, set())
+        self.assertEqual(grep("unresolved"), set())
+        resolved = [ln for ln in lines if ln not in unattributed | store_failed]
+        self.assertEqual(resolved, [f"hst:{_OPEN_OWNED}  session={GATED}"])
+
+    def test_store_states_names_each_keys_store_state(self):
+        keys = ["hst:" + i for i in (_OPEN_OWNED, _OPEN_UNATTRIBUTED, _CLOSED, _ANSWERED)]
+        with _AttentionStub(_OPEN_LIST) as store:
+            records, error = gf.headless_items_checked(keys + ["417"], store.url)
+            states = gf.store_states(keys, records, error)
+        self.assertIsNone(error)
+        self.assertEqual(states, {
+            "hst:" + _OPEN_OWNED: gf.STORE_OPEN,
+            "hst:" + _OPEN_UNATTRIBUTED: gf.STORE_OPEN,
+            "hst:" + _CLOSED: gf.STORE_NOT_OPEN,
+            "hst:" + _ANSWERED: gf.STORE_NOT_OPEN,
+        })
+        self.assertEqual(sorted(r["pane"] for r in records),
+                         ["hst:" + _OPEN_OWNED, "hst:" + _OPEN_UNATTRIBUTED])
+        records, error = gf.headless_items_checked(keys, dead_url())
+        self.assertEqual(set(gf.store_states(keys, records, error).values()), {gf.STORE_UNREAD})
+
+    def test_a_non_list_body_is_a_failed_read_not_an_empty_store(self):
+        """An empty-looking answer must never read as "every card closed" — that is a silence."""
+        keys = ["hst:" + _CLOSED]
+        with _AttentionStub({"error": "nope"}) as store:
+            records, error = gf.headless_items_checked(keys, store.url)
+        self.assertIsNotNone(error)
+        self.assertEqual(gf.store_states(keys, records, error), {keys[0]: gf.STORE_UNREAD})
+
+    def test_headless_items_keeps_its_contract_for_round_readings(self):
+        """`round-readings.py` reads `headless_items` and treats `[]` as unread — unchanged."""
+        self.assertEqual(gf.headless_items(["hst:" + _CLOSED], dead_url()), [])
 
 
 if __name__ == "__main__":
