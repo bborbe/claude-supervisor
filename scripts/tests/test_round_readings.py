@@ -442,6 +442,50 @@ class FeedParse(Tmp):
                                       self.attention, self.projects)
         self.assertEqual(verdict, "none")
 
+    def test_a_fresh_aborting_transcript_yields_permission_channel(self):
+        sid = "abcd0007"
+        now = time.time()
+        self._abort_transcript(sid, now - 120, now)
+        verdict, reason = rr.stuck_verdict({"mtime": now}, [sid], "LIVE", "clear",
+                                           900, now, self.attention, self.projects)
+        self.assertEqual(verdict, "permission-channel")
+        self.assertIn("abcd0007", reason)
+
+    def test_a_STALE_aborting_transcript_is_not_permission_channel(self):
+        """⚠️ The blocking defect from this change's first review, 2026-11-09.
+
+        A row carries every id it ever ran under, and the window is anchored on the
+        transcript's own last stamp — so an id whose session died months ago with its
+        last 15 minutes full of aborts matches forever and pins a healthy LIVE row to
+        `permission-channel`. The staleness bound is what stops it.
+        """
+        sid = "abcd0008"
+        now = time.time()
+        self._abort_transcript(sid, now - 3 * 60 * 60, now - 3 * 60 * 60)
+        verdict, _ = rr.stuck_verdict({"mtime": now}, [sid], "LIVE", "clear",
+                                      900, now, self.attention, self.projects)
+        self.assertEqual(verdict, "none")
+
+    def _abort_transcript(self, sid, first_ts, last_ts):
+        """A transcript whose tool results carry the closed-channel marker."""
+        lines = []
+        for i in range(4):
+            ts = first_ts + (last_ts - first_ts) * i / 3
+            iso = datetime.datetime.fromtimestamp(
+                ts, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+            lines.append(json.dumps({"type": "user", "timestamp": iso, "message": {
+                "content": [{"type": "tool_result", "tool_use_id": f"t{i}",
+                             "is_error": True,
+                             "content": "Tool permission request failed: "
+                                        "AbortError: Stream closed"}]}}))
+        project = os.path.join(self.projects, "project")
+        os.makedirs(project, exist_ok=True)
+        path = os.path.join(project, f"{sid}.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        os.utime(path, (last_ts, last_ts))
+        return path
+
     def test_a_stale_denial_still_falls_through_to_the_frozen_carrier(self):
         """Dropping the denial must not short-circuit to `none`: a live worker whose
         task file has not moved is still frozen."""
