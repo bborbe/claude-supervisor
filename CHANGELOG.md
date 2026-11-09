@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.260.1
 
 - fix: **the keeper census now takes its ownership verdict from `scripts/owner.py`, so the one definition has one home.** The census shipped with a marked adapter implementing `docs/session-tiers.md` § Owner itself; that adapter is gone. `owner()` now supplies the two *facts* — the session word, derived from the registry read it already performs rather than an HTTP probe per manager, and the loop state from `OWNER.loop_state` — and reads back `OWNER.verdict_of(session, loop)`, the only place in the tree that combines them. `cannot-tell` maps to the census's own `cannot` row state, which is counted in the header and never carded as a keeper gap. Nothing in the file compares session and loop to decide ownership: the page's `claude_session_id` is read only through `OWNER.page_session_id`, and the `metrics_sessions` set beside it is the join that asks *which live session is this page*, never *who owns it*. Live reading after the swap, 2026-11-09: `keeper-census: unkept=8 double-kept=0 sessions=82` — 8 goal managers whose declaring topic reads `STOPPED`, which is the gap the resolver's `STOPPED`-outranks-the-session rule exists to surface. Change set: `scripts/keeper-census.py`, `CHANGELOG.md`.
 
