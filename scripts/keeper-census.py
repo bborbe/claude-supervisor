@@ -247,7 +247,7 @@ def read_live():
 
 def cadence(subject, branch, vault):
     """The manager's loop state, one token — `owner.py`'s own loop read, not a second copy."""
-    state, _ = OWNER.loop_state(subject, branch)
+    state, _ = OWNER.loop_state(subject, branch, vault)
     return state or "UNREADABLE"
 
 

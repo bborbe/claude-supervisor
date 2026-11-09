@@ -93,14 +93,20 @@ def session_verdict(sid: str) -> str:
     return _owner().session_verdict(sid)
 
 
-def cadence_state_detail(subject: str, branch: str = "goal") -> tuple:
-    """`(state, detail)` from ONE `manager-liveness.py --state` probe — `owner.py`'s probe."""
-    return _owner().loop_state(subject, branch)
+def cadence_state_detail(subject: str, branch: str = "goal", vault: str = "") -> tuple:
+    """`(state, detail)` from ONE `manager-liveness.py --state` probe — `owner.py`'s probe.
+
+    ⚠️ **`vault` is passed through, and it is what makes `UNARMED` mean what this file says.**
+    `--state` answers `UNARMED` only once the subject's page resolves under `--vault`; without
+    it the page test runs against THIS process's cwd, so a goal whose page lives in another
+    vault reads as a refused, unresolvable name instead of a never-armed loop.
+    """
+    return _owner().loop_state(subject, branch, vault)
 
 
-def cadence(subject: str, branch: str = "goal") -> str:
+def cadence(subject: str, branch: str = "goal", vault: str = "") -> str:
     """The loop's state alone — `cadence_state_detail`'s first field."""
-    return cadence_state_detail(subject, branch)[0]
+    return cadence_state_detail(subject, branch, vault)[0]
 
 
 def frontmatter(text: str) -> str:
@@ -307,7 +313,7 @@ def main(argv: list[str]) -> int:
     # two signals itself. The probes stay reachable here (the wrappers above) because
     # `worker-keepalive.py` and the suites patch them at this module.
     sid = scalar(fm, "claude_session_id")
-    loop, loop_detail = cadence_state_detail(a.subject, a.branch)
+    loop, loop_detail = cadence_state_detail(a.subject, a.branch, a.vault)
     live = session_verdict(sid) if sid else _owner().NONE
     verdict, reason = _owner().verdict_of(live, loop)
     o = _owner().Ownership(verdict, reason, live, loop, sid, loop_detail)

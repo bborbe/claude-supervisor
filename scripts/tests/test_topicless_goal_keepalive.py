@@ -75,7 +75,7 @@ class LegTest(unittest.TestCase):
         self.verdicts = {}
         self.cadences = {}
         self.ka.session_verdict = lambda sid: self.verdicts.get(sid, "UNKNOWN")
-        self.ka.cadence_state_detail = lambda subject, branch="goal": (
+        self.ka.cadence_state_detail = lambda subject, branch="goal", vault="": (
             self.cadences.get(subject, "OK"), "")
 
     def goal(self, name, sid, status="in_progress", phase="execution"):
@@ -169,7 +169,7 @@ class LegTest(unittest.TestCase):
         self.goal("Lonely Goal", "sid-absent")
         self.verdicts["sid-absent"] = "ABSENT"
 
-        def boom(subject, branch="goal"):
+        def boom(subject, branch="goal", vault=""):
             if subject == "Broken Goal":
                 raise OSError("state dir unwritable")
             return ("OK", "")

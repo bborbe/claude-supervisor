@@ -48,6 +48,7 @@ failed probe and never treats it as fine).
   loop INVALID                   cannot-tell  loop-invalid         a record exists and cannot be read
   loop UNREADABLE                cannot-tell  loop-unreadable      the loop probe itself failed
   loop UNARMED                   cannot-tell  loop-unarmed          nothing has ever armed it
+  loop WRONG-BRANCH              cannot-tell  loop-wrong-branch     the record lives on another tier
   session LIVE, loop OK/STALE    owner        live-armed           the definition
   session LIVE, loop not read    cannot-tell  loop-unread          a caller that named no subject
 ```
@@ -120,7 +121,9 @@ _ABSENT_WORD = re.compile(r"ABSENT\b")
 #: not answer at all". ⚠️ `UNREADABLE` is NOT one of the five: it is a fact about the instrument,
 #: not about the subject, and folding it into `INVALID` (a record that exists and cannot be
 #: read) would report a crashed probe as a broken record.
-LOOP_STATES = ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID")
+#: `WRONG-BRANCH` is the record-on-another-tier answer `--state` gained 2026-11-09: a probe
+#: that named the wrong tier is not a lapse, so it must never be restarted on.
+LOOP_STATES = ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID", "WRONG-BRANCH")
 PROBE_FAILED = "UNREADABLE"
 
 #: `manager-liveness.py`'s three tiers. A loop record carries its branch in the slug
@@ -227,6 +230,11 @@ def verdict_of(session: str, loop: str) -> tuple:
         return CANNOT_TELL, "loop-unreadable"
     if loop == "UNARMED":
         return CANNOT_TELL, "loop-unarmed"
+    #    A record on ANOTHER tier is the same shape: the probe named the wrong branch, so this
+    #    subject's own loop is unknown. Its own reason, because a reader acting on "unreadable"
+    #    would go looking for a broken probe instead of a wrong `--branch`.
+    if loop == "WRONG-BRANCH":
+        return CANNOT_TELL, "loop-wrong-branch"
     # 9. THE DEFINITION.
     if session == "LIVE" and loop in ("OK", "STALE"):
         return OWNER, "live-armed"
@@ -266,7 +274,7 @@ def session_verdict(sid: str) -> str:
     return verdict
 
 
-def loop_state(subject: str, branch: str = "goal") -> tuple:
+def loop_state(subject: str, branch: str = "goal", vault: str = "") -> tuple:
     """`(state, detail)` for one subject's loop, or `(PROBE_FAILED, "")` when it could not answer.
 
     ⚠️ **Bounded and guarded, because a keep-alive tick runs this for every subject it holds.**
@@ -279,10 +287,16 @@ def loop_state(subject: str, branch: str = "goal") -> tuple:
     """
     if not subject or branch not in BRANCHES:
         return NONE, ""
+    argv = [sys.executable, os.path.join(SCRIPTS, "manager-liveness.py"),
+            "--state", "--subject", subject, "--branch", branch]
+    # ⚠️ `--vault` is passed when the caller has one: `--state` answers `UNARMED` only once the
+    # subject's page resolves under it, so without the vault a never-armed goal whose page lives
+    # in another vault reads as a refused, unresolvable name instead of an unarmed loop.
+    if vault:
+        argv += ["--vault", vault]
     try:
         probe = subprocess.run(
-            [sys.executable, os.path.join(SCRIPTS, "manager-liveness.py"),
-             "--state", "--subject", subject, "--branch", branch],
+            argv,
             capture_output=True, text=True, timeout=PROBE_TIMEOUT,
         )
     except (OSError, subprocess.SubprocessError):
@@ -293,8 +307,12 @@ def loop_state(subject: str, branch: str = "goal") -> tuple:
     fields = ((probe.stdout.splitlines() or [""])[0]).split("\t")
     state = fields[0].strip()
     detail = fields[2].strip() if len(fields) > 2 else ""
+    # ⚠️ An unrecognised word is the INSTRUMENT's answer, not the subject's, so it reads as
+    # `PROBE_FAILED` — never `INVALID`, which the action ladder restarts a LIVE manager on.
+    # Folding it into `INVALID` is how a state the probe later learns (`WRONG-BRANCH`, 2026-11-09)
+    # would restart a healthy manager on a word this module had never seen.
     if state not in LOOP_STATES:
-        return "INVALID", detail
+        return PROBE_FAILED, detail
     return state, detail
 
 
@@ -386,10 +404,10 @@ def of_session(sid: str, subject: str = "", branch: str = "goal") -> Ownership:
     return Ownership(verdict, reason, session, loop, sid, detail)
 
 
-def of_page(fm: str, subject: str, branch: str = "goal") -> Ownership:
+def of_page(fm: str, subject: str, branch: str = "goal", vault: str = "") -> Ownership:
     """Resolve the manager a goal or topic page records, reading that subject's loop."""
     sid = page_session_id(fm)
-    loop, detail = loop_state(subject, branch)
+    loop, detail = loop_state(subject, branch, vault)
     session = session_verdict(sid) if sid else NONE
     verdict, reason = verdict_of(session, loop)
     return Ownership(verdict, reason, session, loop, sid, detail)
@@ -451,10 +469,10 @@ def of_subject(vault: str, subject: str, branch: str = "goal", directory: str = 
     """
     path, why = locate(vault, subject, branch, directory)
     if why:
-        loop, detail = loop_state(subject, branch)
+        loop, detail = loop_state(subject, branch, vault)
         return Ownership(CANNOT_TELL, "page-unreadable", NONE, loop, "", why)
     if not path:
-        loop, detail = loop_state(subject, branch)
+        loop, detail = loop_state(subject, branch, vault)
         verdict, reason = verdict_of(NONE, loop)
         return Ownership(verdict, reason, NONE, loop, "",
                          detail or f"no page for {subject} under {branch}")
@@ -467,10 +485,10 @@ def of_subject(vault: str, subject: str, branch: str = "goal", directory: str = 
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
     except (OSError, UnicodeDecodeError) as err:
-        loop, detail = loop_state(subject, branch)
+        loop, detail = loop_state(subject, branch, vault)
         return Ownership(CANNOT_TELL, "page-unreadable", NONE, loop, "",
                          f"{path} is unreadable ({err})")
-    return of_page(frontmatter(text), subject, branch)
+    return of_page(frontmatter(text), subject, branch, vault)
 
 
 def main(argv: list[str]) -> int:

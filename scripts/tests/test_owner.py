@@ -62,7 +62,8 @@ class VerdictTableTest(unittest.TestCase):
         for loop, reason in (("SLEEPING", "loop-sleeping"),
                              ("UNARMED", "loop-unarmed"),
                              ("INVALID", "loop-invalid"),
-                             ("UNREADABLE", "loop-unreadable")):
+                             ("UNREADABLE", "loop-unreadable"),
+                             ("WRONG-BRANCH", "loop-wrong-branch")):
             self.assertEqual(("cannot-tell", reason),
                              self.o.verdict_of("LIVE", loop), loop)
 
@@ -111,7 +112,7 @@ class PageAndSessionTest(unittest.TestCase):
         self.sessions = {}
         self.loops = {}
         self.o.session_verdict = lambda sid: self.sessions.get(sid, "ABSENT")
-        self.o.loop_state = lambda subject, branch="goal": self.loops.get(
+        self.o.loop_state = lambda subject, branch="goal", vault="": self.loops.get(
             (subject, branch), ("UNARMED", ""))
 
     def _restore(self):
@@ -202,7 +203,7 @@ class CliTest(unittest.TestCase):
     def test_the_cli_prints_the_verdict_line(self):
         o = load()
         o.session_verdict = lambda sid: "LIVE"
-        o.loop_state = lambda subject, branch="goal": ("STOPPED", "marker present")
+        o.loop_state = lambda subject, branch="goal", vault="": ("STOPPED", "marker present")
         out = io.StringIO()
         with redirect_stdout(out):
             rc = o.main(["--session", "gm-1", "--subject", "A Goal"])
@@ -476,6 +477,37 @@ class CadenceTest(unittest.TestCase):
         self.assertIn("timeout", self.kwargs[0])
         self.assertEqual(self.k.PROBE_TIMEOUT, self.kwargs[0]["timeout"])
 
+    def test_the_vault_is_forwarded_to_the_probe(self):
+        """⚠️ `--state` answers `UNARMED` only once the subject's page resolves under `--vault`.
+
+        Without the flag the page test runs against THIS process's cwd, so a goal whose page
+        lives in another vault is refused as an unresolvable name instead of read as a
+        never-armed loop — the collapse this task exists to remove.
+        """
+        seen = self._capture_argv()
+        self.k.loop_state("A Goal", "goal", "/tmp/some-vault")
+        self.assertIn("--vault", seen[0])
+        self.assertEqual("/tmp/some-vault", seen[0][seen[0].index("--vault") + 1])
+
+    def test_no_vault_flag_when_the_caller_has_none(self):
+        seen = self._capture_argv()
+        self.k.loop_state("A Goal")
+        self.assertNotIn("--vault", seen[0])
+
+    def _capture_argv(self):
+        seen = []
+
+        class R:
+            returncode = 0
+            stdout, stderr = "UNARMED\tslug\tno cadence file under either name\n", ""
+
+        def run(argv, *a, **kw):
+            seen.append(list(argv))
+            return R()
+
+        self.k.subprocess = self._namespace(run)
+        return seen
+
     def test_an_unrunnable_cadence_probe_does_not_raise(self):
         # Without the guard a missing interpreter aborts the whole tick with a traceback.
         self._stub_raising(OSError("no interpreter"))
@@ -497,16 +529,23 @@ class CadenceTest(unittest.TestCase):
         self.assertEqual(self.k.PROBE_FAILED, self.k.loop_state("A Goal")[0])
 
     def test_every_documented_state_still_maps(self):
-        for state in ("OK", "STALE", "STOPPED", "UNARMED", "INVALID"):
+        for state in ("OK", "STALE", "STOPPED", "UNARMED", "INVALID", "WRONG-BRANCH"):
             with self.subTest(state=state):
                 self._stub(stdout=f"{state}\tslug\tdetail\n")
                 self.assertEqual(state, self.k.loop_state("A Goal")[0])
 
-    def test_an_unrecognised_state_is_invalid(self):
-        # The pre-existing fallback, unchanged: a well-formed exit with unparseable text is
-        # `manager-liveness.py`'s own INVALID, not a probe failure.
+    def test_an_unrecognised_state_is_a_probe_failure_not_invalid(self):
+        # An unrecognised word is the INSTRUMENT's answer, not the subject's. Folding it into
+        # INVALID restarts a LIVE manager on a word this module has never seen -- which is what
+        # a new state (`WRONG-BRANCH`, 2026-11-09) would have done on every tier at once.
         self._stub(stdout="BANANA\tslug\tdetail\n")
-        self.assertEqual("INVALID", self.k.loop_state("A Goal")[0])
+        self.assertEqual("UNREADABLE", self.k.loop_state("A Goal")[0])
+
+    def test_wrong_branch_is_a_known_state(self):
+        self._stub(stdout="WRONG-BRANCH\tslug\trecord is on branch goal\n")
+        self.assertEqual(
+            ("WRONG-BRANCH", "record is on branch goal"), self.k.loop_state("A Goal")
+        )
 
     def test_the_sleeping_detail_is_returned_with_its_state(self):
         """A sleep is only actionable if the line names the instant, not just the state."""
@@ -546,7 +585,7 @@ class PageResolutionTest(unittest.TestCase):
         self._orig = (self.o.session_verdict, self.o.loop_state)
         self.addCleanup(self._restore)
         self.o.session_verdict = lambda sid: "LIVE"
-        self.o.loop_state = lambda subject, branch="goal": ("OK", "")
+        self.o.loop_state = lambda subject, branch="goal", vault="": ("OK", "")
 
     def _restore(self):
         self.o.session_verdict, self.o.loop_state = self._orig

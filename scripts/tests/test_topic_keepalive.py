@@ -74,8 +74,8 @@ class KeepAliveTest(unittest.TestCase):
 
     def run_keepalive(self, live="ABSENT", cadence="OK", argv=()):
         self.k.session_verdict = lambda sid: live
-        self.k.cadence = lambda subject, branch="goal": cadence
-        self.k.cadence_state_detail = lambda subject, branch="goal": (cadence, "")
+        self.k.cadence = lambda subject, branch="goal", vault="": cadence
+        self.k.cadence_state_detail = lambda subject, branch="goal", vault="": (cadence, "")
         out = io.StringIO()
         with redirect_stdout(out):
             rc = self.k.main(["--vault", str(self.vault), "--goal", "A Goal", *argv])
@@ -135,8 +135,8 @@ class KeepAliveTest(unittest.TestCase):
             return "LIVE"
 
         self.k.session_verdict = verdict
-        self.k.cadence = lambda subject, branch="goal": "OK"
-        self.k.cadence_state_detail = lambda subject, branch="goal": ("OK", "")
+        self.k.cadence = lambda subject, branch="goal", vault="": "OK"
+        self.k.cadence_state_detail = lambda subject, branch="goal", vault="": ("OK", "")
         out = io.StringIO()
         with redirect_stdout(out):
             self.k.main(["--vault", str(self.vault), "--goal", "A Goal"])
@@ -233,8 +233,8 @@ class KeepAliveTest(unittest.TestCase):
             GOAL_PAGE.format(sid="sid-2", extra=""), encoding="utf-8"
         )
         self.k.session_verdict = lambda sid: "LIVE"
-        self.k.cadence = lambda subject, branch="goal": "OK"
-        self.k.cadence_state_detail = lambda subject, branch="goal": ("OK", "")
+        self.k.cadence = lambda subject, branch="goal", vault="": "OK"
+        self.k.cadence_state_detail = lambda subject, branch="goal", vault="": ("OK", "")
         out = io.StringIO()
         with redirect_stdout(out):
             rc = self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
@@ -264,8 +264,8 @@ class KeepAliveTest(unittest.TestCase):
             GOAL_PAGE.format(sid="", extra="flag: true\nflag_set_by: operator\n"),
             encoding="utf-8"
         )
-        self.k.cadence = lambda subject, branch="goal": "OK"
-        self.k.cadence_state_detail = lambda subject, branch="goal": ("OK", "")
+        self.k.cadence = lambda subject, branch="goal", vault="": "OK"
+        self.k.cadence_state_detail = lambda subject, branch="goal", vault="": ("OK", "")
         out = io.StringIO()
         with redirect_stdout(out):
             self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
@@ -278,8 +278,8 @@ class KeepAliveTest(unittest.TestCase):
         (self.vault / "23 Topics").mkdir(parents=True)
         (self.vault / "23 Topics" / "A Topic.md").write_text(
             GOAL_PAGE.format(sid="", extra=""), encoding="utf-8")
-        self.k.cadence = lambda subject, branch="goal": "OK"
-        self.k.cadence_state_detail = lambda subject, branch="goal": ("OK", "")
+        self.k.cadence = lambda subject, branch="goal", vault="": "OK"
+        self.k.cadence_state_detail = lambda subject, branch="goal", vault="": ("OK", "")
         out = io.StringIO()
         with redirect_stdout(out):
             self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
@@ -292,8 +292,8 @@ class KeepAliveTest(unittest.TestCase):
             GOAL_PAGE.format(sid="sid-2", extra=""), encoding="utf-8"
         )
         self.k.session_verdict = lambda sid: "LIVE"
-        self.k.cadence = lambda subject, branch="goal": "STOPPED"
-        self.k.cadence_state_detail = lambda subject, branch="goal": ("STOPPED", "")
+        self.k.cadence = lambda subject, branch="goal", vault="": "STOPPED"
+        self.k.cadence_state_detail = lambda subject, branch="goal", vault="": ("STOPPED", "")
         out = io.StringIO()
         with redirect_stdout(out):
             rc = self.k.main(["--vault", str(self.vault), "--subject", "A Topic",
