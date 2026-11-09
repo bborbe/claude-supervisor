@@ -376,9 +376,9 @@ def pane_is_ready(text):
 def reload_pane(pane_id, pid, cache_dir, marketplace, plugin):
     """Type `/reload-plugins` into an idle pane and confirm the reload landed.
 
-    Activate first: `send-text` reaches a pane only once its tab is active (measured
-    2026-09-20 in `server/tab.mjs`, and again here). Readiness is an empty composer, not a
-    sleep.
+    Nothing is activated: `send-text --pane-id` reaches a pane in an inactive tab (measured
+    2026-11-09 — 6/6 bytes with `focused_pane_id` unchanged; the earlier "activate first"
+    reading was a canonical-mode artefact). Readiness is an empty composer, not a sleep.
 
     ⚠️ **Success is the newest marker for this pid changing — never the pre-reload version
     directory's mtime.** A reload writes a NEW `.in_use/<pid>` entry under the *installed*
