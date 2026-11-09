@@ -28,6 +28,35 @@ When: every tick — arm `ScheduleWakeup` FIRST, before the read half
 
    ⚠️ **Both lines, in that order, and both are load-bearing.** `fleet-register.py` writes `~/.claude/state/worker-manager/<session-id>.json` — the registration `answer-path-check.py` gates on, idempotent and safe to rewrite every round. `--arm` writes the cadence that `--state` then classifies, so a session registered but never armed reads `UNARMED` and is refused exactly like an unregistered one. ⚠️ **The cadence expires**: `--state` calls it STALE past the observed period plus `SLACK` (180 s) — the declared `interval` plus the same `SLACK` before four arms exist — so an arm written once at the first round goes stale roughly one period later and every later spawn is refused again. This step is the round, so this is where it must be refreshed. ⚠️ **`--branch fleet` is its own tier**, not a stand-in for `goal` or `topic`: the Fleet Manager manages no subject page, and the slug `fleet--fleet-manager` is what keeps it out of those namespaces. The interval is the **clamped** one, in **seconds**, never the requested minutes. ⚠️ **A second `ScheduleWakeup` supersedes the first rather than stacking** — so a later re-arm in the same round is a correction, never a second loop.
 
+- **Emit the two answer reaches, beside the arm — this is the evidence the spawn gate will read.** `scripts/answer-path-check.py` records them because an armed loop is not an answer channel. Measured 2026-11-09, spawner `0110c4a3` read `exit 0` while its 27 workers' parks were released 56 times by the attention store and **never once by it** — an armed loop that had never answered anything, certified as able to.
+
+  ⚠️ **Stage 1 only REPORTS a reach; the verdict is still the loop state.** `check()` passes on `OK` and appends `reach: mcp=… wrapper=…` to its `detail`. The verdict flips onto the reaches in stage 2, gated on a coverage reading. Emit them now regardless — the coverage reading is what licenses the flip.
+
+  ⚠️ **This file is the FLEET tier's copy. The goal and topic tiers emit the same two reaches from `commands/steps/round-liveness.md`, every round.** All three tiers open headless workers, so all three must refresh; a tier that emitted neither would have its headless spawns refused once stage 2 ships.
+
+  **Leg `mcp` is the server's.** Nothing to run here: the server records it on `answer_permission`'s existing foreign-park path, which is the reply a call with an unknown `request_id` already gets. If the call is refused before it reaches the server — a classifier denial, the outage case the Impact names — no record is written, which is the correct outcome.
+
+  **Leg `wrapper` is a Bash `curl`, in its own call, then the recorder in another.** Two calls, deliberately: folding the recorder onto the same line changes the command shape the permission classifier judges, and a green reach would then prove the wrong thing.
+
+  ```bash
+  curl -s -o /dev/null -w '%{http_code}' -X POST \
+    "${SUPERVISOR_WRAPPER_URL:-http://localhost:18090}/api/1.0/sessions/${CLAUDE_CODE_SESSION_ID}/answer" \
+    -H 'content-type: application/json' \
+    -d '{"request_id":"answer-path-reach-sentinel","behavior":"allow"}'
+  ```
+
+  ```bash
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/answer-reach.py" --status "<the status printed above>"
+  ```
+
+  ⚠️ **`SUPERVISOR_WRAPPER_URL` must be an ORIGIN, with no path.** `server/config.mjs` resolves it to `url.origin`, so a value carrying a path would have the server call `/api/1.0/...` while this curl posts to `<path>/api/1.0/...` — a route-level `404`, which the recorder accepts as a valid reach and which would therefore certify a route never reached.
+
+  ⚠️ **`409` or `404` are the only statuses the recorder accepts**, and they are the only ones that mean the request arrived and was refused there harmlessly — 409 no open question, 404 unknown session. Any other status writes nothing and says why: a `5xx`, an unreachable wrapper, or a command the classifier denied all leave this session with **no** wrapper reach, which is exactly what the gate should then refuse. ⚠️ **Do not retry a refused curl into a passing status** — the refusal is the finding, and a session that cannot reach the wrapper route must not be certified as able to.
+
+  ⚠️ **A `--sleep`ped manager stops re-arming, so its reaches age out and it is refused.** That is correct rather than a regression: a manager that has stopped its loop is not answering parks. Re-arm before spawning headless workers.
+
+  ⚠️ **The two legs are keyed on two resolutions of "this session", and they can disagree.** `mcp` uses `parentSessionId()` — what the spawn gate itself uses — while `wrapper` uses this session's `$CLAUDE_CODE_SESSION_ID`, since a shell command has nothing else. They agreed in 41 of 42 measured servers. A disagreement fails **closed**: the probe finds at most one leg and refuses, which is why it reports each leg separately — so a refusal naming only `wrapper=absent` on a session that did run the curl means the ids diverged, not that the route was unreachable.
+
 - **Record the arm on the receipt, after it lands.** The window was opened above, before the arm, for the reason stated there.
 
   ```bash

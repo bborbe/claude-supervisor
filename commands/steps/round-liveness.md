@@ -34,3 +34,26 @@ When: every round, before the pre-dispatch gate
   ⚠️ **Arm on an allow-list, never on a fallback.** Only `OK` / `STALE` / `UNARMED` / `INVALID` arm; every other answer — `STOPPED`, `SLEEPING`, `WRONG-BRANCH`, and an **empty** `STATE` — does not. `--state` prints its verdict as the first field and **exits 0 for every state**, but it **exits 3 with nothing on stdout** when the subject resolves neither a record under any branch nor a page under `--vault` (an abbreviated or mistyped name), so `STATE` comes back empty. `WRONG-BRANCH` means the record lives on another tier. Both are misreads of the subject, and arming on a misread re-arms the wrong record — a live loop's cadence history reset, or a stand-down reversed. The previous `*) --arm` fallback did exactly that for any word it did not name; `scripts/tests/test_round_liveness_step.py` pins this block.
 
   ⚠️ **`--vault` is the vault ROOT**, the same value the round's other scripts take; it is what lets `--state` resolve a subject that has no record yet.
+
+- **Emit the two answer reaches, every round, beside the liveness write.** The `mcp` and `wrapper` reaches are what `scripts/answer-path-check.py` reads instead of trusting an armed loop (measured 2026-11-09: spawner `0110c4a3` read exit 0 while its 27 workers' parks were released 56 times by the store and never by it). They **age out**, so they belong in the ROUND, not the one-shot arm: a manager that writes them once at loop start has a `wrapper` leg that expires one period later.
+
+  ⚠️ **This is the goal and topic tiers' half of a contract the fleet round writes in `commands/steps/re-arm.md`.** All three tiers can open headless workers and all three answer parks, so all three must refresh. The fleet round does it per tick in its own step; this one covers `commands/goal-drive.md` and `commands/topic-drive.md`, which run this step every round. A tier that emitted neither would have its headless spawns refused once the probe's verdict flips onto the reaches.
+
+  **Leg `mcp` needs nothing here** — the server records it on `answer_permission`'s existing foreign-park reply, which a call with an unknown `request_id` already gets.
+
+  **Leg `wrapper` is two calls, deliberately separate** so the curl keeps the exact command shape the permission classifier judges:
+
+  ```bash
+  curl -s -o /dev/null -w '%{http_code}' -X POST \
+    "${SUPERVISOR_WRAPPER_URL:-http://localhost:18090}/api/1.0/sessions/${CLAUDE_CODE_SESSION_ID}/answer" \
+    -H 'content-type: application/json' \
+    -d '{"request_id":"answer-path-reach-sentinel","behavior":"allow"}'
+  ```
+
+  ```bash
+  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/answer-reach.py" --status "<the status printed above>"
+  ```
+
+  ⚠️ **`SUPERVISOR_WRAPPER_URL` must be an ORIGIN, with no path.** `server/config.mjs` resolves it to `url.origin`, so a value carrying a path would have the server call `/api/1.0/...` while this curl posts to `<path>/api/1.0/...` — a route-level `404`, which the recorder accepts as a valid reach and which would therefore certify a route that was never reached.
+
+  ⚠️ **`409` or `404` are the only statuses the recorder accepts**, and the only ones that mean the request arrived and was refused harmlessly. Any other status writes nothing and says why: a `5xx`, an unreachable wrapper, or a command the classifier denied all leave this session with **no** wrapper reach. **Do not retry a refused curl into a passing status** — the refusal is the finding.
