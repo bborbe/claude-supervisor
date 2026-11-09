@@ -144,8 +144,8 @@ fold into `stale`. It is omitted only when it is zero. `installed: unknown` is a
 so an unreadable `installed_plugins.json` never prints as a clean `stale: 0` fleet.
 
 `--json` emits the same rows for a caller that renders its own table. **`--reload` is the
-lever**: it activates each stale session's pane, types `/reload-plugins` into a pane whose
-composer is **empty**, and confirms the reload by **the newest marker for that pid moving**.
+lever**: it types `/reload-plugins` into each stale session's pane without activating it, gated on
+a composer that is **empty**, and confirms the reload by **the newest marker for that pid moving**.
 ⚠️ Never by the pre-reload version directory's mtime: a reload writes the new entry into the
 *installed* version's directory and leaves the old one alone, so watching the old path can
 never fire and would report every successful reload as unconfirmed. Never by the pane's echo
