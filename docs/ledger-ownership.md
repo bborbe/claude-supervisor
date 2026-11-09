@@ -46,10 +46,26 @@ into a `running` one.
 
 ## Reading the row
 
-`status` is one-directional, as `server/ledger.mjs` and the store both say: a terminal value
-(`done`, `error`) proves the session ended; an empty or absent one proves nothing. Liveness
-still comes from the heartbeat store, never from this field.
+⚠️ **`status` is not liveness, in either direction.** `server/ledger.mjs` says so in as many
+words — 1480 legacy rows still assert `running` for workers long dead, so a reader filtering
+on it resurrects the whole fleet — and the store's own type comment repeats it. Liveness comes
+from the heartbeat store, never from this field.
 
-A headless worker outlives its turn here (the daemon keeps the child and its stdin), which is
-why the daemon re-opens the row with `running` when the next turn is written — a row left at
-`done` would stop the heartbeat poster stamping a worker that is still reachable.
+What the daemon writes is a **per-turn** verdict, not a process verdict:
+
+| Value | What it proves |
+|---|---|
+| `done` / `error` | the last turn closed — **not** that the worker left |
+| `running` | a turn was written and has not closed yet |
+
+A headless worker outlives its turn here: the daemon keeps the child, its stdin and its
+reachability, so a worker between turns reads `done` and is still perfectly reachable. That is
+why the daemon re-opens the row with `running` (clearing `ended_at` and `result`) when the next
+turn is written — and why a row left at `done` is not evidence that anything ended.
+
+⚠️ **`ended_at` is the field a reader is most likely to over-read.** On the Node side it is
+load-bearing in the opposite direction from what its name suggests: `server/a2a-spawn.mjs`
+skips any record carrying it and `server/supervisor.mjs` treats `!record.ended_at` as
+still-live, so "a worker with `ended_at` is gone" is the wrong inference for a worker between
+turns. Those paths do not run on this fleet (see above), but a new reader should key on the
+heartbeat store for liveness rather than on this column.
