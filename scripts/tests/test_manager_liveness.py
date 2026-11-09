@@ -841,6 +841,45 @@ class StateResolution(unittest.TestCase):
             "UNARMED", self.first_token("--subject", "Fleet Manager", "--branch", "fleet")
         )
 
+    def test_a_goal_page_under_23_goals_resolves(self):
+        # `private-*` / `seibert-*` vaults keep goals in `24 Goals`; the `24 Tasks` ones in
+        # `23 Goals`. A page in the second folder is proof the subject exists.
+        os.makedirs(os.path.join(self.vault.name, "23 Goals"), exist_ok=True)
+        open(os.path.join(self.vault.name, "23 Goals", "Legacy Goal.md"), "w").close()
+        self.assertEqual("UNARMED", self.first_token("--subject", "Legacy Goal", "--branch", "goal"))
+
+    def test_a_name_collision_across_tiers_does_not_read_wrong_branch(self):
+        # Goal and topic pages are named independently, so an armed TOPIC may share a name
+        # with a never-armed GOAL. The goal probe asked about the goal tier, which has no
+        # record: that is UNARMED, and round-liveness arms it. Reporting WRONG-BRANCH here
+        # would leave the goal's loop unarmed forever.
+        open(os.path.join(self.vault.name, "24 Goals", "Shared Name.md"), "w").close()
+        self.quiet(self.m.arm, "Shared Name", "topic", 900)
+        self.assertEqual(
+            "UNARMED", self.first_token("--subject", "Shared Name", "--branch", "goal")
+        )
+        # Control: the topic probe on the same name reads the armed record.
+        self.assertEqual("OK", self.first_token("--subject", "Shared Name", "--branch", "topic"))
+
+    def test_wrong_branch_names_every_other_branch_carrying_a_record(self):
+        open(os.path.join(self.vault.name, "24 Goals", "Wide Goal.md"), "w").close()
+        self.quiet(self.m.arm, "Wide Goal", "goal", 900)
+        self.quiet(self.m.arm, "Wide Goal", "fleet", 900)
+        rc, out, _ = self.run_cli("--state", "--subject", "Wide Goal", "--branch", "topic")
+        self.assertEqual(0, rc)
+        self.assertTrue(out.startswith("WRONG-BRANCH\t"), out)
+        self.assertIn("record is on branch goal", out)
+        self.assertIn("also fleet", out)
+
+    def test_the_fleet_branch_is_exempt_from_the_wrong_branch_check(self):
+        # The fleet manager has no page by design, so another tier's record must not turn a
+        # fleet probe into WRONG-BRANCH — the documented exemption, which the tier check
+        # must not run ahead of.
+        self.quiet(self.m.arm, self.FULL, "goal", 900)
+        self.assertEqual(
+            "UNARMED", self.first_token("--subject", self.FULL, "--branch", "fleet")
+        )
+
     def test_ok(self):
         self.quiet(self.m.arm, self.FULL, "goal", 900)
         self.assertEqual("OK", self.first_token("--subject", self.FULL, "--branch", "goal"))

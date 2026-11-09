@@ -337,17 +337,28 @@ def state(subject: str, branch, vault: str, now: float) -> int:
         record, and read `UNARMED` for a manager that was armed and `OK` under its full name.
 
     `--branch fleet` skips the page test: the fleet manager manages no page by design.
+
+    ⚠️ **A record on another branch is only a wrong-branch probe when the subject's own page
+    says that branch is its tier.** Goal and topic pages are named independently, so two
+    different subjects routinely share a name — a never-armed goal whose name an armed topic
+    also uses must still read `UNARMED`, not `WRONG-BRANCH`, or `commands/steps/round-liveness.md`
+    never arms it. `page_kind`'s KIND is what decides: no page anywhere is the one case where
+    the other branch's record is the only evidence the subject exists at all.
     """
     branch = branch or detect_branch(subject, vault)
     s = slug(subject, branch)
     st, detail = classify(s, now)
-    if st == "UNARMED":
+    if st == "UNARMED" and branch != "fleet":
+        kind = page_kind(subject, vault)
         elsewhere = [b for b in record_branches(subject) if b != branch]
-        if elsewhere:
-            st, detail = "WRONG-BRANCH", f"record is on branch {elsewhere[0]}" + (
-                f" (also {', '.join(elsewhere[1:])})" if len(elsewhere) > 1 else ""
+        # The subject's own tier, when it has one; with no page, the record itself is the tier.
+        tier = kind or (elsewhere[0] if elsewhere else None)
+        if elsewhere and tier in elsewhere:
+            st, detail = "WRONG-BRANCH", f"record is on branch {tier}" + (
+                f" (also {', '.join(b for b in elsewhere if b != tier)})"
+                if len(elsewhere) > 1 else ""
             )
-        elif branch != "fleet" and page_kind(subject, vault) is None:
+        elif kind is None and not elsewhere:
             root = os.path.abspath(os.path.expanduser(vault))
             print(
                 f"manager-liveness: --state refused: {subject!r} resolves no record under any "
