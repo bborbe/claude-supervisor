@@ -10,7 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- **Fleet keep-alive closes a stood-down manager past its bound.** `/supervisor:stop` keeps
+- feat: **Fleet keep-alive closes a stood-down manager past its bound.** `/supervisor:stop` keeps
   its session by design and nothing closed it, so a stood-down manager held a fleet slot, a
   full context and a keeper-census row for a round that no longer ran.
   `manager-liveness.py --stood-down-past <MINUTES>` selects them — 60 min, 4× the round's own
