@@ -26,6 +26,8 @@ manager session ──MCP──► supervisor server ──query()×N──► w
 
 ## Where a worker runs
 
+⚠️ **`server/supervisor.mjs` is NOT the supervisor tool a session binds — do not fix spawn behaviour there.** The live tool is the Go **`claude-wrapper`** daemon at `http://127.0.0.1:18090/supervisor/mcp`: every `cc-*` launcher loads `~/.claude/mcp-private-personal.json` with `--strict-mcp-config`, and this plugin ships no `.mcp.json`. The JS server survives only for the drill scripts (`channel-drill.py`, `current-call-drill.py`, `ledger-drill.py`). A spawn, model or permission fix belongs in `bborbe/claude-wrapper` — `pkg/roster_mcp.go` (spawn handler, `headlessModel`) and `pkg/spawn_cwd.go` (launcher + model resolution). Measured 2026-11-09: a headless-spawn model fix was written and tested in `server/supervisor.mjs`, then discarded — the live path was the Go daemon. A `PreToolUse` hook on the operator's machine now refuses edits to that file, so the redirect lands before the write.
+
 `spawn_agent` requires `vault` or `cwd` and **refuses when neither is given**. `server/spawn-cwd.mjs` owns that resolution, and it is a pure function — no filesystem, no environment, no clock — so it is unit-testable without a server.
 
 Both halves used to be silent, and the failure is worth keeping in view when editing it. An absent `cwd` became this server's own working directory; an unresolvable launcher became the vault named `personal` and then the bare `claude` binary. Measured 2026-10-03: **27 workers** spawned that way in one batch, every one in the supervisor repo and on Opus instead of the vault's `cc-private-deepseek` — and the response named neither the launcher, nor the vault, nor the model, so a wrong spawn was indistinguishable from a correct one.
@@ -207,7 +209,7 @@ agents/goal-verify.md                  the goal tier's checks + report shape (di
 agents/fleet-drive.md                    the fleet drive leg — revive/blocked split, re-nudge ledger (called by /fleet-drive and by /fleet-loop every round)
 agents/gate-relay-read.md                the manager's gate relay, read leg — pane id in, ≤15-line per-pane summary out; declares no write tool at all
 agents/gate-relay-send.md                the manager's gate relay, send leg — the operator's answer into a tab worker's pane; never drives a selection modal
-server/supervisor.mjs                    the MCP server
+server/supervisor.mjs                    the DEPRECATED MCP server — drill scripts only; the live tool is the Go claude-wrapper daemon
 server/policy.json                       bundled approval rules (see README § The approval policy)
 ```
 
