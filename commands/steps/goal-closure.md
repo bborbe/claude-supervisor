@@ -117,13 +117,14 @@ For the subject, then each page of the tracked set:
    ⚠️ **The verb's own gate differs by tier, and only the task tier's covers checkboxes.**
    `vault-cli task complete` refuses on any open box anywhere on the page, so for a task the
    verb's verdict is the authority and a disagreement means this step's read was stale.
-   `vault-cli goal complete` re-checks **only** its open-task gate and inspects no success
-   criterion, so for a goal **this step's read is the authority** — a disagreement means the
-   page moved between the read and the close, and the close is re-read and reported, never
-   trusted. `vault-cli topic complete` carries no gate at all, so the same holds for a topic.
+   `vault-cli goal complete` re-checks **only** its open-task gate and reads no success
+   criterion at all, so for a goal **this step's read is the authority**: the verb can only
+   disagree by refusing on a linked open task — a surface this step does not measure — and a
+   close it accepts is no evidence that any criterion was checked. `vault-cli topic complete`
+   carries no gate at all, so the same holds there.
    Measured 2026-11-09: on a scratch goal with an open `# Success Criteria` box, `goal complete`
-   printed `✅ Goal completed` and wrote `status: completed`; on a scratch task carrying the
-   same open box, `task complete` exited 1 with `Error: incomplete subtasks`.
+   printed `✅ Goal completed` and wrote `status: completed` (exit 0); on a scratch task
+   carrying the same open box, `task complete` exited 1 with `Error: incomplete subtasks`.
 
 3. **Never pass `--force`.** A close that needs it is a close this step does not make.
 
