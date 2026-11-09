@@ -239,6 +239,28 @@ def metrics_session_ids(path):
     return ids
 
 
+def local_task_dirs(cwd, names=TASK_DIRS):
+    """Candidate task directories at or above `cwd` — the fast half of `task_dirs_for`.
+
+    Split out so a caller can answer the common case (a worker whose cwd is its vault)
+    without paying for the whole-vault scan.
+    """
+    dirs = []
+    if not cwd:
+        return dirs
+    cur = os.path.abspath(cwd)
+    while True:
+        for name in names:
+            candidate = os.path.join(cur, name)
+            if os.path.isdir(candidate) and candidate not in dirs:
+                dirs.append(candidate)
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return dirs
+
+
 def task_dirs_for(cwd, vault_root=None, names=TASK_DIRS):
     """Candidate task directories: the vault above `cwd`, then every known vault.
 
@@ -248,18 +270,7 @@ def task_dirs_for(cwd, vault_root=None, names=TASK_DIRS):
     read-only; neither is a filesystem-wide search. `names` selects the directory set, so
     the goal/topic lookup walks the same two places.
     """
-    dirs = []
-    if cwd:
-        cur = os.path.abspath(cwd)
-        while True:
-            for name in names:
-                candidate = os.path.join(cur, name)
-                if os.path.isdir(candidate) and candidate not in dirs:
-                    dirs.append(candidate)
-            parent = os.path.dirname(cur)
-            if parent == cur:
-                break
-            cur = parent
+    dirs = local_task_dirs(cwd, names)
     root = vault_root or VAULTS_ROOT
     for vault in sorted(glob.glob(os.path.join(root, "*"))):
         for name in names:
@@ -361,27 +372,57 @@ def find_task(session_id, cwd, vault_root=None):
 
     ⚠️ `grep -l` exiting 1 means "no match", which is the honest answer here and not an
     error — an empty stdout is read as "no task claims this session".
+
+    ⚠️ **Two passes, cwd-derived directories first.** `task_dirs_for` lists the vault above
+    the cwd before every other known vault, and the common case — a worker whose cwd IS its
+    vault — is answered by those few directories in well under a second. A single grep over
+    all of them takes longer than the timeout on a loaded host, and the `except` below then
+    reads that as "no task claims this session": a false `task-unresolved` for a session
+    that has an anchor, which is the unreadable-vs-absent collapse this repo forbids
+    everywhere else. Measured 2026-11-09 — 29 directories, 15.0 s timeout exceeded, and the
+    same session flipping between `would close` and `task-unresolved` across runs minutes
+    apart.
     """
     if not session_id:
         return None
     dirs = task_dirs_for(cwd, vault_root)
     if not dirs:
         return None
+    local = local_task_dirs(cwd)
+    rest = [d for d in dirs if d not in local]
+    handed_off = None
+    for batch in (local, rest):
+        if not batch:
+            continue
+        own, handoff = _grep_task(session_id, batch)
+        if own is not None:
+            return own
+        if handed_off is None and handoff is not None:
+            handed_off = handoff
+    return handed_off
+
+
+def _grep_task(session_id, dirs, timeout=15):
+    """`(own, handed_off)` for one grep pass over `dirs`; either may be `None`.
+
+    Split out of `find_task` so the two passes share one matcher and the ownership rule
+    (`claude_session_id` beats a `metrics_sessions` membership) stays in a single place.
+    """
     try:
         found = subprocess.run(
             ["grep", "-rl", "--fixed-strings", session_id, *dirs],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=timeout,
         )
     except Exception:
-        return None
+        return None, None
     handed_off = None
     for path in sorted((found.stdout or "").splitlines()):
         fm = frontmatter(path)
         if (fm.get("claude_session_id") or "").strip() == session_id:
-            return path, fm, False
+            return (path, fm, False), None
         if handed_off is None and session_id in metrics_session_ids(path):
             handed_off = (path, fm, True)
-    return handed_off
+    return None, handed_off
 
 
 def is_future(value, today):
