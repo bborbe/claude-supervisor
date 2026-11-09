@@ -17,6 +17,7 @@ import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -343,6 +344,170 @@ class Liveness(unittest.TestCase):
         self.arm("Manager Layer", 300, age=0)
         self.assertEqual(len(self.m.read_arms("goal--manager-layer")), 4)
         self.assertEqual(int(self.m.observed_interval("goal--manager-layer")), 1000)
+
+    # --- the conditional floor: a LENGTHENED interval is not a lapse -------------
+    #
+    # A manager that lengthens its `ScheduleWakeup` interval keeps the old short gaps
+    # in its 12-arm window, so a limit built from them sits BELOW the interval it just
+    # declared and every healthy tick reads STALE. The floor is conditional on a
+    # RECORDED shorter-interval gap still being in the window, and a completed gap at
+    # the new interval shorter than half of it switches the floor off — otherwise a
+    # subject that declares one interval and ticks at another (measured 2026-11-08 on
+    # `goal--deploy-and-merge-gates-become-standing-allow-rules`, declared 3600, gaps
+    # ~900) would have its lapse detection loosened, the opposite of what this file
+    # exists for.
+
+    # Real `.arms` epochs, read 2026-11-08 from ~/.claude/state/sweep-gate.
+    WEEKLY = [1794093605, 1794094567, 1794095525, 1794096495, 1794097745,
+              1794128286, 1794129254, 1794130333, 1794130564, 1794134105,
+              1794137848, 1794141605]
+    CLAIM = [1793272319, 1793281339, 1793372864, 1793373995, 1793375081,
+             1793376171, 1793377295, 1793378428, 1793379651, 1793442283,
+             1793445014, 1793448709]
+    DEPLOY = [1794121268, 1794122169, 1794123068, 1794124030, 1794124931,
+              1794125769, 1794126669, 1794127695, 1794146792, 1794147727,
+              1794149287, 1794150041]
+
+    def arms(self, epochs, intervals, topic="Manager Layer"):
+        """Write `<slug>.arms`; an interval of None writes a LEGACY single-column line."""
+        s = self.m.slug(topic, "goal")
+        body = "".join(
+            f"{e}\n" if iv is None else f"{e} {iv}\n"
+            for e, iv in zip(epochs, intervals)
+        )
+        with open(self.m.path(s, "arms"), "w") as fh:
+            fh.write(body)
+
+    def limit_at(self, age, interval, topic="Manager Layer"):
+        """Write `<interval>` to `.cadence`, age it by `age`, and read the detail."""
+        with open(self.m.path(self.m.slug(topic, "goal"), "cadence"), "w") as fh:
+            fh.write(f"{interval}\n")
+        self.set_arm_time(topic, time.time() - age)
+        return self.m.classify(self.m.slug(topic, "goal"), time.time())
+
+    def test_a_lengthened_interval_floors_the_limit_from_the_first_tick(self):
+        # SC1(a). 11 arms at 900, then the 12th declares 3600 and ends a 960 s gap
+        # that was armed under 900 — so the window still holds the old cadence.
+        epochs = [1794000000 + 960 * i for i in range(12)]
+        self.arms(epochs, [900] * 11 + [3600])
+        state, detail = self.limit_at(3650, 3600)
+        self.assertEqual(state, "OK", detail)
+        self.assertIn("limit=3780s", detail)  # uncapped code says 1140
+
+    def test_the_floor_holds_on_the_second_tick_after_a_lengthening(self):
+        # One completed gap at the new interval (3650 s) does not disprove it: 3650
+        # is not shorter than 3600/2, so the floor stays until the 900 s gaps age out.
+        epochs = [1794000000 + 960 * i for i in range(12)] + [1794000000 + 960 * 11 + 3650]
+        self.arms(epochs, [900] * 11 + [3600] * 2)
+        state, detail = self.limit_at(3650, 3600)
+        self.assertEqual(state, "OK", detail)
+        self.assertIn("limit=3780s", detail)
+
+    def test_the_real_weekly_subject_reads_ok_on_its_new_cadence(self):
+        # SC1(b). The live history behind the row: ~960 s gaps to 10:32, then ~3600 s.
+        # The annotation is an assumption — these arms predate per-arm recording — but
+        # the 231 s gap at 10:32 is the one that proves the old cadence was still in
+        # the window when the interval changed.
+        self.arms(self.WEEKLY, [900] * 8 + [3600] * 4)
+        state, detail = self.limit_at(3757, 3600)
+        self.assertEqual(state, "OK", detail)
+        self.assertIn("limit=3937s", detail)  # uncapped code says 2877
+
+    def test_arm_keeps_each_lines_own_interval(self):
+        # SC1(c). The rise can only fire if `arm` PRESERVES earlier lines' intervals.
+        # Rebuilding the ring from epoch-only `read_arms()` would leave only the newest
+        # line carrying one, and the floor would never apply to a real subject.
+        clock = [1794000000.0]
+        with mock.patch.object(self.m.time, "time", lambda: clock[0]):
+            for _ in range(11):
+                with redirect_stdout(io.StringIO()):
+                    self.m.arm("Manager Layer", "goal", 900)
+                clock[0] += 960
+            with redirect_stdout(io.StringIO()):
+                self.m.arm("Manager Layer", "goal", 3600)
+        s = self.m.slug("Manager Layer", "goal")
+        with open(self.m.path(s, "arms")) as fh:
+            lines = [ln.split() for ln in fh.read().splitlines() if ln.strip()]
+        self.assertEqual(len(lines), 12)
+        self.assertEqual([ln[1] for ln in lines], ["900"] * 11 + ["3600"])
+        # ... and the floored limit is what a live subject would then read.
+        state, detail = self.limit_at(3650, 3600)
+        self.assertEqual(state, "OK", detail)
+        self.assertIn("limit=3780s", detail)
+
+    def test_a_legacy_line_stays_single_column_when_the_ring_is_rewritten(self):
+        # SC2(c)/SC3. Existing files on this machine are single-column; a rewrite must
+        # not invent an interval for them, and `read_arms` must keep returning epochs.
+        self.arms([1794000000 + 960 * i for i in range(11)], [None] * 11)
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", "goal", 3600)
+        s = self.m.slug("Manager Layer", "goal")
+        with open(self.m.path(s, "arms")) as fh:
+            lines = [ln.split() for ln in fh.read().splitlines() if ln.strip()]
+        self.assertEqual([len(ln) for ln in lines], [1] * 11 + [2])
+        self.assertEqual(len(self.m.read_arms(s)), 12)
+
+    def test_a_historic_stop_is_still_bounded(self):
+        # SC2(a). A constant 900 s interval, one 91 525 s stop in the window: the floor
+        # must not apply (no recorded shorter interval), so the cap still bounds it.
+        self.arms(self.CLAIM, [900] * 12)
+        state, detail = self.limit_at(3300, 900)  # just past the 3237 s limit
+        self.assertEqual(state, "STALE", detail)
+        self.assertIn("limit=3237s", detail)
+
+    def test_a_declared_interval_that_never_ticks_at_it_is_not_floored(self):
+        # SC2(b). deploy-and-merge declares 3600 and ticks at ~900. Without a recorded
+        # rise there is no floor, so the limit stays where it is today.
+        self.arms(self.DEPLOY, [3600] * 12)
+        state, detail = self.limit_at(1800, 3600)
+        self.assertEqual(state, "STALE", detail)
+        self.assertIn("limit=1740s", detail)
+
+    def test_the_first_arm_after_deploy_does_not_loosen_a_mixed_file(self):
+        # SC2(d). Every live file becomes a mixed legacy+new file at its first post-
+        # deploy arm. A legacy line carries no interval, so it is neither shorter nor
+        # longer than the declared one — an implementation that treats "unknown" as
+        # "shorter" would floor deploy-and-merge to 3780 and hide its lapse.
+        self.arms(self.DEPLOY + [self.DEPLOY[-1] + 900], [None] * 12 + [3600])
+        state, detail = self.limit_at(1800, 3600)
+        self.assertEqual(state, "STALE", detail)
+        self.assertIn("limit=1740s", detail)
+
+    def test_a_rise_then_a_shorter_actual_cadence_is_not_floored(self):
+        # SC2(e). A real rise, but the manager keeps ticking at 900. The first completed
+        # 900 s gap armed under 3600 disproves the new interval, so the floor holds for
+        # exactly one tick rather than for eleven.
+        epochs = [1794000000 + 900 * i for i in range(12)]
+        self.arms(epochs, [900] * 6 + [3600] * 6)
+        state, detail = self.limit_at(1800, 3600)
+        self.assertEqual(state, "STALE", detail)
+        self.assertIn("limit=1080s", detail)
+
+    def test_an_interval_decrease_is_not_a_rise(self):
+        # SC2(f). 3600 -> 900. No recorded interval is BELOW the declared one, so a
+        # rule written with `!=` instead of `<` would floor here and loosen the limit.
+        epochs = [1794000000 + 3600 * i for i in range(6)]
+        epochs += [epochs[-1] + 960 * (i + 1) for i in range(6)]
+        self.arms(epochs, [3600] * 6 + [900] * 6)
+        _, detail = self.limit_at(1800, 900)
+        self.assertIn("limit=2580s", detail)
+
+    def test_the_floor_survives_a_gap_above_half_the_new_interval(self):
+        # SC2(g). The accepted residue: gaps between I/2 and I do not disprove the new
+        # interval, so the floor holds until the short gaps age out. Pinned as
+        # deliberate rather than accidental.
+        epochs = [1794000000 + 900 * i for i in range(6)]
+        epochs += [epochs[-1] + 1900 * (i + 1) for i in range(6)]
+        self.arms(epochs, [900] * 6 + [3600] * 6)
+        _, detail = self.limit_at(1800, 3600)
+        self.assertIn("limit=3780s", detail)
+
+    def test_read_arms_returns_epochs_from_a_mixed_file(self):
+        # SC3. The epoch reader is what `observed_gaps` and `manager-receipt.py` use;
+        # an interval column must never be read as an epoch.
+        self.arms([1794000000, 1794000960, 1794001920], [900, None, 3600])
+        self.assertEqual(self.m.read_arms("goal--manager-layer"),
+                         [1794000000.0, 1794000960.0, 1794001920.0])
 
     def test_unreadable_cadence_is_flagged(self):
         with open(self.m.path("broken", "cadence"), "w") as fh:
