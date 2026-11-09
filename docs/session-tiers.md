@@ -144,8 +144,8 @@ that touches it points here and carries only its own commands, flags and thresho
 `commands/steps/keepalive.md`, `agents/topic-drive.md`, `agents/goal-drive.md`,
 `commands/topic-drive.md`, `commands/topic-loop.md`, `commands/open.md`,
 `docs/fleet-surface.md` § Which manager owns a subject, `scripts/topic-spawn.py`, and the
-docstrings of `scripts/fleet-keepalive.py`, `scripts/topic-keepalive.py`,
-`scripts/worker-keepalive.py` and `scripts/owner.py`.
+docstrings of `scripts/fleet-keepalive.py`, `scripts/topic-keepalive.py` and
+`scripts/worker-keepalive.py`.
 
 **Keeping a session alive is one act at every level: when the session dies or its loop lapses,
 its keeper resumes the same `claude_session_id`.** It never opens a second session on that
@@ -175,23 +175,11 @@ is **not** an owner: the session may still run, but nothing runs the round that 
 workers alive. The session is read with `scripts/session-liveness.py --check`, the loop with
 `scripts/manager-liveness.py --state`.
 
-⚠️ **`scripts/owner.py` is this definition's one implementation, and every keeper and filter
-resolves ownership through it.** `worker-keepalive.py`, `topic-keepalive.py`,
-`gate-owner-filter.py` and `session-scope.py` each used to combine the two signals themselves,
-and they disagreed: `worker-keepalive.py` read the session alone, so a manager stood down with
-`/supervisor:stop` (session `LIVE`, loop `STOPPED`) still counted as an owner there, its worker
-was deferred to a goal round that had stopped, and nothing kept it. The resolver returns one of
-three words — `owner`, `not-owner`, `cannot-tell` — and a caller chooses its ACTION from those,
-never a second ownership verdict from the raw facts:
-
-- **`owner`** — session `LIVE` **and** loop `OK` or `STALE`.
-- **`not-owner`** — loop `STOPPED` (a deliberate stand-down, whatever the session reads),
-  session `ABSENT`, or no session recorded on the page. This is the only answer that licenses a
-  caller to hand the subject to another keeper.
-- **`cannot-tell`** — an unreadable probe, **and** the loop states that mean "deliberately not
-  running": `SLEEPING` (date-gated), `UNARMED` (nothing ever armed it) and `INVALID` (a record
-  that cannot be read). Never read as `not-owner`: handing a subject on during a failed read is
-  how a second writer lands on a live one.
+⚠️ **The code does not fully implement this yet.** `scripts/worker-keepalive.py`'s
+`goal_manager_live()` defers to a goal manager whose session is live without reading its loop,
+so a manager stood down with `/supervisor:stop` still counts as an owner there and its workers
+are kept by no one. This section is the target the keepers converge on, not a description of
+every keeper today.
 
 ### Adopt or close
 

@@ -423,9 +423,21 @@ def of_subject(vault: str, subject: str, branch: str = "goal", directory: str = 
         verdict, reason = verdict_of(NONE, loop)
         return Ownership(verdict, reason, NONE, loop, "",
                          detail or f"no page for {subject} under {branch}")
-    with open(path, encoding="utf-8") as fh:
-        fm = frontmatter(fh.read())
-    return of_page(fm, subject, branch)
+    # ⚠️ **A page that exists but cannot be READ is a failed probe, not a crash.** `page_path`
+    # only proves a directory entry matched; the read that follows can still fail on
+    # permissions, a symlink to nowhere, or a page that is not UTF-8. Letting that raise would
+    # turn a caller's whole tick into a traceback — and a traceback is what a keep-alive reads
+    # as `cannot-tell` at best and as an abort at worst, so the answer this module owes is the
+    # verdict, never an exception.
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except (OSError, UnicodeDecodeError) as err:
+        loop, detail = loop_state(subject, branch)
+        verdict, reason = verdict_of(NONE, loop)
+        return Ownership(verdict, reason, NONE, loop, "",
+                         detail or f"{path} is unreadable ({err})")
+    return of_page(frontmatter(text), subject, branch)
 
 
 def main(argv: list[str]) -> int:
