@@ -249,6 +249,34 @@ session failing any limb is some other state and belongs to its own branch.
    `phase: todo` is not approved and is reported, never opened.
 3. **Live worker idle with open boxes** → one `SendMessage` to its owning manager naming the
    worker and its next open box. Never drive another manager's worker directly.
+
+   ⚠️ **A `SendMessage` alone does not wake an idle TAB session** — it waits in the inbox for a
+   turn that never comes (16 of 16 no-ops, 2026-11-08). So after the message, **wake the
+   session item 3 already names**, through its pane:
+
+   - **Target.** The owning manager (`parent`) when that manager is live and is a tab session.
+     The worker itself **only** when no live manager owns it, and that is measured as exactly
+     one of `worker:no-manager` (no `parent`), `worker:manager-paneless` (the parent is live but
+     `pane-wake.py` reports `skip:no-pane` for it), or `worker:manager-absent` (the parent is not
+     in the live session list). Record which. ⚠️ If most rows in a run fall through to the
+     worker, that is a broken manager resolution, not the design working — say so in the report.
+   - **Dry run first, every time:**
+     ```bash
+     python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/pane-wake.py" --session '<target-id>'
+     ```
+     It prints the pid→tty→pane join and the guard verdict and **types nothing**. Only a
+     `wake` / `wake:suggestion` row proceeds. Every `skip:*` is reported as the row's reason,
+     never retried by another route.
+   - **Then send, for that target only:**
+     ```bash
+     python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/pane-wake.py" --session '<target-id>' --send --message '<one line naming the worker and its next open box>'
+     ```
+     `delivered` (composer cleared **and** the pane shows a spinner) is the only success.
+     `unverified` and `failed:*` are reported as such, never as a nudge.
+   - **What it refuses by itself:** this session's own pane, the `Fleet Manager`, any
+     `Fleet Pusher…` session, a session with an open gate, and every pane the guard does not
+     clear (spinner, selection modal, `❯ 1.` option row, a `👤 You:` ask, typed text, a machine
+     wait, an unclassifiable read). Never work around a refusal with a raw `wezterm cli send-text`.
 4. **Owning manager loop `STOPPED` / `UNARMED`** → this is a fleet finding, not a nudge.
    `STOPPED` is a deliberate marker, so **do not re-arm it unilaterally** — raise it as an
    OPERATOR row ("loop stopped deliberately; re-arm?"). `UNARMED` with a live session and an

@@ -54,6 +54,10 @@ file reaches you, it is a caller bug — say so and render no row for it.
    6. **The cadence verdicts**, as `<goal> → OK | STALE | STOPPED | SLEEPING | UNARMED | INVALID | WRONG-BRANCH`, from the
       caller's `manager-liveness.py --state --subject <goal> --branch goal`.
    7. **`today`** — ISO `YYYY-MM-DD`, for the deferred overlay on goal rows.
+   8. **The payload path** — where to write the rendered table. Your one write goes there and
+      nowhere else. ⚠️ **A caller that passes none has left your only granted write without a
+      destination** — name that as the missing input in your report rather than choosing a
+      path of your own, because a path you invented is one no gate reads.
 
    ⚠️ **A missing input is named, never defaulted.** An absent verdict renders the cell
    `UNVERIFIED` and says which input was missing; a defaulted one reads exactly like a taken

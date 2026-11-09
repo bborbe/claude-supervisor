@@ -30,9 +30,20 @@ goal`, `goal--<slug>.json`). `docs/subject-resolution.md` states the other half 
 when either of these holds:
 
   * `branch == "topic"` — no keep-alive reaches a topic manager at all;
-  * `branch == "goal"` and **no live topic manager** declares the goal.
+  * `branch == "goal"` and **no live topic manager** declares the goal, **and** the fleet
+    round's topic-less goal leg does not keep it (`fleet_keeps`).
 
-A goal manager under a live topic manager is **covered** and yields no card.
+A goal manager under a live topic manager is **covered** and yields no card. So is a goal no
+topic declares at all, once it sits at `status: in_progress` + `phase: execution` with a
+recorded id: `commands/steps/keepalive.md` § Restart a lapsed goal manager whose goal no
+topic declares restarts it every fleet round, and a card would duplicate that action.
+
+⚠️ **Coverage is read from the predicate, not from a run of the leg — a deliberate trade.** In
+a round whose keep-alive leg was debt-gated or refused, a kept goal's lapsed manager gets
+neither a restart nor a card that round. The same holds for a declared goal under a live
+topic manager, whose own round may be debt-gated too. The leg records its skip in the
+digest's `LEGS` section (`keep-alive: not run — <reason>`), which is where that round's gap
+is visible; a card per manager would duplicate the restart on every round the leg does run.
 
 ⚠️ **`branch == "fleet"` is counted and reported but never carded, and that is not a gap.**
 Nothing sits above a fleet manager, so it is uncovered in the keep-alive sense — but the
@@ -288,6 +299,55 @@ def declares(text: str, goal: str) -> bool:
     return False
 
 
+def topic_declares(vault: str, goal_name: str, topics_dir: str | None = None) -> bool:
+    """Does ANY topic page list this goal in its `## Goals` section — live manager or not?
+
+    Distinct from `topic_manager_live`: that asks whether a topic's keep-alive is running
+    *right now*; this asks which tier owns the goal at all. A goal a topic declares belongs to
+    that topic's round even while the topic manager is down — the fleet leg restarts the topic
+    manager, which then restarts the goal manager. Taking the goal too would be a second keeper.
+    """
+    directory = os.path.join(vault, topics_dir or TOPICS_DIR)
+    for entry in _listdir(directory):
+        if entry.endswith(".md") and declares(_read_page(os.path.join(directory, entry)), goal_name):
+            return True
+    return False
+
+
+#: The goal state the fleet keep-alive leg keeps. One home: `scripts/topicless-goal-keepalive.py`
+#: selects with `fleet_keeps`, and `evaluate` below treats the same set as covered.
+FLEET_KEPT_STATUS = "in_progress"
+FLEET_KEPT_PHASE = "execution"
+
+
+def fleet_keeps(vault: str, goal_name: str, goals_dir: str | None = None,
+                topics_dir: str | None = None) -> bool:
+    """Is this goal's manager kept by the fleet round's topic-less goal leg?
+
+    True for a goal page at `status: in_progress` + `phase: execution`, carrying a
+    `claude_session_id`, that no topic page declares (`commands/steps/keepalive.md`
+    § Restart a lapsed goal manager whose goal no topic declares).
+
+    ⚠️ **The phase filter is load-bearing, and `topic-keepalive.py` does not apply it.** That
+    script reads liveness and cadence only, so it answers `resume` for an ABSENT manager on a
+    `phase: todo` or `status: backlog` goal. Measured 2026-11-08 on private-personal: 8 of 29
+    topic-less goals read `resume`, and 5 of those sat outside `execution` — a personal
+    backlog goal among them. No manager loop runs on a non-execution subject
+    (`docs/subject-resolution.md` § The phase precondition), so resuming one only buys a
+    session that refuses and stands down.
+    """
+    path = os.path.join(vault, goals_dir or GOALS_DIR, goal_name + ".md")
+    if not os.path.isfile(path):
+        return False
+    h = helpers()
+    front = h.frontmatter(_read_page(path))
+    if h.scalar(front, "status") != FLEET_KEPT_STATUS or h.scalar(front, "phase") != FLEET_KEPT_PHASE:
+        return False
+    if not _page_session_id(front):
+        return False
+    return not topic_declares(vault, goal_name, topics_dir)
+
+
 def session_state(sid: str) -> str:
     """The instrument's verdict for this session id, memoized — one probe per id per run.
 
@@ -421,6 +481,11 @@ def evaluate(vault: str, branch: str, base: str) -> dict:
 
     if branch == "goal" and topic_manager_live(vault, name):
         row["reason"] = "covered — a live topic manager's keep-alive restarts it"
+        return row
+
+    if branch == "goal" and fleet_keeps(vault, name):
+        row["reason"] = ("covered — no topic declares this execution goal, so the fleet round's "
+                         "keep-alive leg restarts it")
         return row
 
     row["card"] = True

@@ -33,15 +33,10 @@ The first line of stdout is the verdict, one token:
   cannot-tell     the probe could not decide; report, never act
   crash-loop      the resume cap is spent; stop restarting and escalate once
 
-⚠️ **`open` and `open-unflagged` are one case split in two, and `resume` is not one of
-them.** An absent session id means no session was ever created, so the row is an
-**open** — which rule 4 makes the operator's act. A recorded id whose session has died is a
-**resume**, which continues a subject that already exists. Collapsing the first into the
-second is how an unflagged goal manager gets opened by a round that was told not to.
-
-⚠️ **Never a fresh spawn while a recorded id exists.** A second manager on one goal is the
-double-writer failure `commands/open.md` § Step 2C exists to prevent. The resume is the
-only route, and `restart` resumes in place.
+⚠️ **`open` / `open-unflagged` (no recorded id) and `resume` (recorded id, session dead)
+must never collapse** — the first is an open, the second a keep-alive resume. Why that
+distinction, and why a recorded id is only ever resumed in place, is
+`docs/session-tiers.md` § Keep-alive.
 
 ⚠️ **The cap counts only resumes that took.** A resume is recorded once
 `session-liveness.py --check` shows the resumed id live; a resume that never landed must
@@ -106,11 +101,66 @@ def base_slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
 
 
+def resume_path(vault: str, subject: str, branch: str = "goal") -> str:
+    """Where a subject's resume stamps live. Pure — creates nothing.
+
+    `manager-receipt.py` reads it to prove an `executed` resume outcome, so it must be the
+    same path this script writes; `MANAGER_RESUMES_STATE_DIR` relocates the store for tests.
+
+    ⚠️ **`realpath`, so one vault is one store.** A vault reachable both through a symlink and
+    by its real path has two spellings; keyed on the spelling, a probe and a `--record-resume`
+    given the two names would write and read different files — an honest resume would read
+    unproven and the crash-loop count would split in two.
+    """
+    name = os.path.basename(os.path.realpath(os.path.expanduser(vault)).rstrip(os.sep)) or "vault"
+    root = os.environ.get("MANAGER_RESUMES_STATE_DIR") or "~/.claude/state/manager-resumes"
+    return os.path.join(os.path.expanduser(root), name, f"{branch}--{base_slug(subject)}.json")
+
+
 def state_path(vault: str, subject: str, branch: str = "goal") -> str:
-    name = os.path.basename(vault.rstrip(os.sep)) or "vault"
-    directory = os.path.expanduser(os.path.join("~/.claude/state/manager-resumes", name))
-    os.makedirs(directory, exist_ok=True)
-    return os.path.join(directory, f"{branch}--{base_slug(subject)}.json")
+    p = resume_path(vault, subject, branch)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    return p
+
+
+_RECEIPT_MOD = None
+
+
+def receipt_module():
+    """`manager-receipt.py`, imported — the round's receipt is its file, not this one's."""
+    global _RECEIPT_MOD
+    if _RECEIPT_MOD is None:
+        import importlib.util
+        p = os.path.join(REPO, "scripts", "manager-receipt.py")
+        spec = importlib.util.spec_from_file_location("manager_receipt", p)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _RECEIPT_MOD = mod
+    return _RECEIPT_MOD
+
+
+def record_on_receipt(topic: str, goal: str, vault: str, verdict: str, sid: str) -> None:
+    """Put an owed verdict on the topic round's receipt; never let that change the verdict.
+
+    ⚠️ **A failed write warns, it does not fail the probe.** The verdict is what the round
+    acts on; turning a receipt fault into `cannot-tell` would stop a resume to protect the
+    record of it. The warning goes to stderr so the round sees it, and `--check` still
+    reports nothing owed for a verdict it never received — the honest bound, named.
+    """
+    try:
+        rm = receipt_module()
+        with open(os.devnull, "w") as sink:
+            saved, sys.stdout = sys.stdout, sink
+            try:
+                rc = rm.record_verdict(topic, goal, vault, verdict, sid)
+            finally:
+                sys.stdout = saved
+    except Exception as e:  # noqa: BLE001 — any fault here must not cost the verdict
+        print(f"receipt: could not record {verdict} for {goal}: {e}", file=sys.stderr)
+        return
+    if rc != 0:
+        print(f"receipt: {verdict} for {goal} not recorded on {topic!r} (exit {rc})",
+              file=sys.stderr)
 
 
 def load_resumes(path: str) -> list[float]:
@@ -127,11 +177,36 @@ def recent(stamps: list[float], now: float) -> list[float]:
     return [s for s in stamps if now - s < RESUME_WINDOW]
 
 
-def record(path: str, stamps: list[float], now: float) -> None:
+def load_sessions(path: str) -> list[tuple[float, str]]:
+    """`[(stamp, session id), …]` — which id each recorded resume confirmed LIVE.
+
+    Kept beside `resumes`, never inside it: `resumes` is the crash-loop cap's input and stays
+    a bare list of floats, so every reader of the cap is unchanged. `manager-receipt.py`
+    reads this list to prove an `executed` resume was the VERDICT's session, not merely any
+    live id handed to `--record-resume`.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    rows = doc.get("sessions") if isinstance(doc, dict) else None
+    out = []
+    for row in rows if isinstance(rows, list) else []:
+        if (isinstance(row, list) and len(row) == 2 and isinstance(row[0], (int, float))
+                and isinstance(row[1], str)):
+            out.append((float(row[0]), row[1]))
+    return out
+
+
+def record(path: str, stamps: list[float], now: float, sid: str = "") -> None:
     keep = recent(stamps, now) + [now]
+    sessions = [[t, s] for t, s in load_sessions(path) if now - t < RESUME_WINDOW]
+    if sid:
+        sessions.append([now, sid])
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump({"resumes": keep}, fh)
+        json.dump({"resumes": keep, "sessions": sessions}, fh)
     os.replace(tmp, path)
 
 
@@ -257,8 +332,15 @@ def main(argv: list[str]) -> int:
                                   "`24 Goals` / `23 Topics`; read it from `vault-cli config list`)")
     ap.add_argument("--record-resume", metavar="SESSION_ID",
                     help="record a resume that the liveness instrument confirmed LIVE")
+    ap.add_argument("--receipt", metavar="TOPIC",
+                    help="the topic round's receipt subject: a `resume` / `restart` verdict "
+                         "is also recorded there as owed (`manager-receipt.py "
+                         "--record-verdict`), so `--check` flags it until the round records "
+                         "an outcome")
     ap.add_argument("--now", type=float, help="epoch seconds (tests only)")
     a = ap.parse_args(argv)
+    if a.receipt and a.branch != "goal":
+        ap.error("--receipt records a goal manager's verdict; it needs --branch goal")
 
     now = a.now if a.now is not None else time.time()
     vault = os.path.abspath(os.path.expanduser(a.vault))
@@ -271,7 +353,7 @@ def main(argv: list[str]) -> int:
             print("cannot-tell")
             print(f"resume {a.record_resume} is not LIVE; the cap is not armed against a retry")
             return 1
-        record(path, load_resumes(path), now)
+        record(path, load_resumes(path), now, a.record_resume)
         print("recorded")
         return 0
 
@@ -345,6 +427,8 @@ def main(argv: list[str]) -> int:
         if loop in ("STALE", "INVALID"):
             print("restart")
             print(f"/supervisor:restart {sid}  (cadence {loop})")
+            if a.receipt:
+                record_on_receipt(a.receipt, a.subject, vault, "restart", sid)
         else:
             print("jump")
             print(f"session {sid} is live and its loop is {loop}")
@@ -359,6 +443,8 @@ def main(argv: list[str]) -> int:
     print("resume")
     print(f'session {sid} is ABSENT (cadence {loop}); resume with '
           f'/supervisor:open {opener} "{a.subject}" — attempt {spent + 1} of {RESUME_CAP}')
+    if a.receipt:
+        record_on_receipt(a.receipt, a.subject, vault, "resume", sid)
     return 0
 
 

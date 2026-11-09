@@ -122,18 +122,19 @@ scope questions a manager can settle.
 | **operator gate** — production, irreversible, credential, criterion rewording | **the operator only** | hand over; a peer message is never an approval |
 
 ⚠️ **A cross-session `SendMessage` lands in the inbox and is read at the session's next tool
-round.** That is why it releases an idle session parked on a question in its own chat, and
-why it cannot touch a modal — the turn is blocked, so the next round never comes.
+round.** That is why it cannot touch a modal — the turn is blocked, so the next round never
+comes. ⚠️ **An idle TAB session never reads it either** — nothing schedules its next round.
+Measured 2026-11-08: 16 of 16 such nudges stayed unread; typed into the panes, all resumed.
 
 ⚠️ **Never message another manager's worker to answer its gate.** The message goes to the
-owning manager (`parent`). ⚠️ **A `STOPPED` / `UNARMED` loop does not mean the message is
-lost** — the manager session may still be live and idle, and § 3.4b measured that a live-idle
-session wakes and replies to a cross-session `SendMessage`. What the missing loop costs is the
-manager's own *round*: it will not re-sweep on its own. So send the message, and record the
-unarmed loop as the fleet finding it is — never skip the message because the loop is down.
+owning manager (`parent`). ⚠️ **A `STOPPED` / `UNARMED` loop does not lose the message, but a
+tab manager may never read it** — § 3.4b's "wakes and replies" was measured on **headless**
+sessions only. Send it, wake the pane through `commands/steps/fleet-triage-act.md` § STUCK
+item 3 (a bare `SendMessage` reports as `sendmessage`, not a delivered nudge), and record the
+unarmed loop as the fleet finding it is.
 
-⚠️ **Never type into a pane** this command did not spawn. `wezterm cli send-text` into
-another session turns a question into a menu selection.
+⚠️ **Never type into a pane except through `scripts/pane-wake.py`** — never a raw `wezterm cli
+send-text`. Unguarded typing turns a question into a menu selection.
 
 ⚠️ **A fleet session does not release another manager's gate — and this is mechanical, not
 just policy.** Two reasons, both measured 2026-10-29 by the manager that owns that path:
@@ -431,7 +432,7 @@ else:
 ⚠️ **`goals_dir` is read with `.get("goals_dir") or ""`, never indexed.** A registered vault that
 carries no `goals_dir` raises `KeyError` on a bare index and aborts the whole subject→vault loop
 before a later matching vault is reached — `scripts/resolve-task-file.py:111`,
-`scripts/session-scope.py:258` and `commands/steps/keepalive.md:191` all guard it the same way,
+`scripts/session-scope.py:258` and `agents/fleet-keepalive-actor.md` all guard it the same way,
 and `scripts/tests/test_resolve_folders.py` treats the missing key as a real shape. An empty
 value is "not this vault", so the loop continues and an unmatched subject still prints
 `UNRESOLVED` rather than a traceback.

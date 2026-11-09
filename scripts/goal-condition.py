@@ -33,8 +33,9 @@ the emitted disk probe embeds it and a placeholder there cannot resolve.
 Exit codes: 0 emitted · 1 no form fits the cap · 2 the task could not be resolved or
 read · 3 the task carries no Success Criteria (refused — a condition with nothing to
 prove is armed and then satisfied by the disk probe alone) · 4 the row cannot carry a
-goal (`mode: headless`, or a `docker` / `k8s` target — neither has a pane to send the
-work command into) · 6 bad usage.
+goal (`mode: headless` — the spawn path's `send_agent_message` returns an address rather
+than delivering, so the work command has no sender — or a `docker` / `k8s` target, which
+has no pane to send it into) · 6 bad usage.
 
 The emitted text **includes the `/goal ` prefix**, so stdout is the spawn prompt
 verbatim: a caller that had to remember to prepend it would eventually not.
@@ -269,8 +270,10 @@ def main():
     mode = frontmatter_value(text, "mode")
     if mode == "headless":
         print(
-            "goal-condition: mode: headless — a headless worker has no pane, so the work "
-            "command could never be sent and the row would idle under an armed goal",
+            "goal-condition: mode: headless — the spawn path sends the work command with "
+            "send_agent_message, which for a headless worker returns its registry name for the "
+            "caller to send rather than delivering it, so nothing on that path would send it and "
+            "the row would idle under an armed goal",
             file=sys.stderr,
         )
         return 4
