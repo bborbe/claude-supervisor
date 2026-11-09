@@ -56,6 +56,8 @@ import json
 import os
 import re
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -149,17 +151,37 @@ def _insert_picked_row(lines, name, why):
     if heading is None:
         return lines, None
     if not rows:
-        # A heading with no data rows yet: land after the `| --- |` separator when there
-        # is one, else immediately under the heading.
+        # A heading with no data rows yet. Real notes put a BLANK line between the
+        # heading and the table header (verified on the live 2026-W44 shape), so blanks
+        # are skipped FIRST: skipping only `|` lines from `heading + 1` exits on that
+        # blank and inserts the row ABOVE the header, outside the table.
         at = heading + 1
+        while at < len(lines) and not lines[at].strip():
+            at += 1
         while at < len(lines) and lines[at].lstrip().startswith("|"):
             at += 1
-        number = 1
+        number = int(PICKED_RE.match(lines[heading]).group(1)) + 1
         return lines[:at] + [f"| {number} | 📌 {name} | {why} |"] + lines[at:], number
     number = max(int(ROW_RE.match(lines[i]).group(1)) for i in rows) + 1
     row = f"| {number} | 📌 {name} | {why} |"
     at = rows[-1] + 1
     return lines[:at] + [row] + lines[at:], number
+
+
+def _picked_item_names(lines):
+    """The item cell of every `## ✅ Picked` row, leading emoji stripped.
+
+    Scoped to the table and compared whole: a substring scan over every numbered row
+    in the note reports "already present" when one task's name is a prefix of another's.
+    """
+    _, rows = _picked_table(lines)
+    names = []
+    for i in rows:
+        cells = lines[i].split("|")
+        if len(cells) < 3:
+            continue
+        names.append(re.sub(r"^\S+\s+", "", cells[2].strip()).strip())
+    return names
 
 
 def _bump_picked_count(lines, number):
@@ -183,7 +205,7 @@ def add_to_plan(vault, tasks_dir, name, day, why_text=""):
 
     lines = text.splitlines()
     already_block = any(name in row["names"] for row in nf.parse_weekly(text))
-    already_row = any(name in line for line in lines if ROW_RE.match(line))
+    already_row = name in _picked_item_names(lines)
     if already_block and already_row:
         return {"weekly": str(weekly), "block": None, "row": None}, ["already present"]
 
@@ -274,6 +296,21 @@ def append_consumed(path, entry):
 # ------------------------------------------------------------------- the consume
 
 
+def fetch_history(store, timeout, limit):
+    """Proposal cards only — the store narrows server-side on `dedup_key_prefix`.
+
+    The unfiltered history read is ~19k items / ~16 MB and was measured at 41 % of the
+    store's allocation (`manager-attention-watch.py` added the same prefix for the same
+    reason). This caller runs on every fleet tick, so it narrows to its own key space
+    instead of pulling the whole board each time.
+    """
+    query = ("?limit=%d&dedup_key_prefix=%s"
+             % (limit, urllib.parse.quote(PROPOSAL_PREFIX, safe="")))
+    with urllib.request.urlopen(
+            f"{store}/api/1.0/attention/history{query}", timeout=timeout) as resp:
+        return lookup.items_of(json.loads(resp.read().decode("utf-8")))
+
+
 def split_payload(payload):
     """The row name out of `<name> — <why> — <file>:<line>`.
 
@@ -329,20 +366,29 @@ def consume_items(items, vault, tasks_dir, dismissed_dir, consumed_dir, now):
             continue
 
         if answer == ADD:
-            detail, extra = add_to_plan(vault, tasks_dir, name, now.date(), why_text)
-            notes.extend(extra)
             if kind == "alert":
-                # An alert's name is a raw `prometheus-alerts.sh` line, so the `### N.`
-                # block written above can never resolve to a page: `plan_candidates`
-                # drops it with `no page in tasks/goals/topics`, the row never enters
-                # `planned_keys`, and it re-proposes while still firing. The durable
-                # dismissal is the only record that stops that, so an `add` on an alert
-                # row writes it too — otherwise the operator's answer is a silent no-op.
+                # An alert's name is a raw `prometheus-alerts.sh` line, so it resolves to
+                # no page: a `### N.` block for it is inert noise in the operator's plan,
+                # and `plan_candidates` drops it anyway. The durable record is the only
+                # load-bearing artifact, so an `add` on an alert writes that and nothing
+                # else rather than littering the weekly note.
                 write_dismissal(dismissed_dir, card_key, name, kind, item_id, now)
                 notes.append(
-                    "alert row: its plan block cannot resolve to a page — "
-                    "also recorded as dismissed so it stops re-proposing"
+                    "alert row: no plan block (it can never resolve to a page) — "
+                    "recorded as dismissed so it stops re-proposing"
                 )
+                detail = {"weekly": None, "block": None, "row": None}
+            else:
+                try:
+                    detail, extra = add_to_plan(
+                        vault, tasks_dir, name, now.date(), why_text)
+                except Refused as exc:
+                    # One unaddable card must not starve the rest of the tick: a
+                    # `leave it out` answer needs nothing from the weekly note, and a
+                    # fresh-week note legitimately carries no `### N.` blocks yet.
+                    notes.append(f"{card_key}: refused — {exc}")
+                    continue
+                notes.extend(extra)
             entry = {
                 "at": now.isoformat(), "card_key": card_key, "item_id": item_id,
                 "name": name, "kind": kind, "action": "added", **detail,
@@ -387,10 +433,17 @@ def render(consumed, notes, open_cards, pending):
         for entry in consumed:
             card = entry["item_id"][:8]
             if entry["action"] == "added":
-                where = (
-                    f"block {entry['block']}, picked row {entry['row']}"
-                    if entry.get("block") else "already present"
-                )
+                block, row = entry.get("block"), entry.get("row")
+                # Guard on BOTH: the live 2026-W46 shape has `### N.` blocks and no
+                # Picked table, so `block` alone printed "picked row None" to the operator.
+                if block and row:
+                    where = f"block {block}, picked row {row}"
+                elif block:
+                    where = f"block {block}"
+                elif row:
+                    where = f"picked row {row}"
+                else:
+                    where = "recorded"
                 lines.append(
                     f'next-focus consume: added "{entry["name"]}" ({where}) — card {card}'
                 )
@@ -441,7 +494,7 @@ def main(argv=None):
         return 2
 
     try:
-        items = lookup.fetch_history(args.store, args.timeout, args.limit)
+        items = fetch_history(args.store, args.timeout, args.limit)
     except Exception as exc:  # noqa: BLE001 — a store read failure is a refusal
         print(f"next-focus-answer: REFUSED — store unreadable: "
               f"{exc.__class__.__name__}: {exc}", file=sys.stderr)

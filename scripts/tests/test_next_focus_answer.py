@@ -224,6 +224,63 @@ class ConsumeTests(unittest.TestCase):
         )
         self.assertTrue(any("alert row" in note for note in notes))
 
+    def test_an_empty_picked_table_gets_its_row_after_the_header(self):
+        """Real notes put a BLANK line between the heading and the header.
+
+        Skipping only `|` lines from `heading + 1` exits on that blank and inserts the
+        row above the header, outside the table — and the misplaced row then matches
+        `ROW_RE`, so every later add compounds it.
+        """
+        self.weekly.write_text(
+            "# Weekly\n\n## ✅ Picked (0)\n\n"
+            "| # | Item | Why |\n| --- | --- | --- |\n\n"
+            "# Tasks\n\n### 1. 🔧 E\n\n**Task:** [[E]]\n\n",
+            encoding="utf-8",
+        )
+        self.run_consume([self.card("add it to the plan")])
+        text = self.weekly.read_text(encoding="utf-8")
+
+        header = text.index("| # | Item | Why |")
+        separator = text.index("| --- | --- | --- |")
+        row = text.index(f"| 1 | 📌 {TASK_NAME} |")
+        self.assertGreater(row, separator, "the row landed above the table header")
+        self.assertGreater(separator, header)
+        self.assertIn("## ✅ Picked (1)", text)
+
+    def test_a_prefix_name_does_not_count_as_an_existing_row(self):
+        """The row check is scoped to the table's item cell and compared whole."""
+        self.weekly.write_text(
+            weekly_text().replace(
+                "| 1 | 🔧 Something else | P1, added earlier |",
+                "| 1 | 🔧 My Task Extended | P1, added earlier |"),
+            encoding="utf-8",
+        )
+        consumed, _ = self.run_consume([self.card("add it to the plan")])
+
+        self.assertIsNotNone(consumed[0]["row"], "a prefix name suppressed the new row")
+        self.assertIn(f"| 2 | 📌 {TASK_NAME} |", self.weekly.read_text(encoding="utf-8"))
+
+    def test_an_alert_add_leaves_the_weekly_note_alone(self):
+        """An alert's block can never resolve to a page — writing one is pure noise."""
+        before = self.weekly.read_text(encoding="utf-8")
+        alert = self.card(
+            "add it to the plan",
+            payload=("prod alert firing — alert firing, in no current plan — "
+                     "prometheus-alerts.sh:1"),
+            key="next-focus:vault:alert:prod-alert-firing-12345678",
+        )
+        self.run_consume([alert])
+
+        self.assertEqual(before, self.weekly.read_text(encoding="utf-8"))
+        self.assertTrue(any(self.dismissed.glob("*.json")))
+
+    def test_render_never_prints_a_none_field(self):
+        rendered = answer.render(
+            [{"action": "added", "name": "X", "item_id": "a" * 32,
+              "block": 5, "row": None}], [], 0, 0)
+        self.assertIn("block 5", rendered)
+        self.assertNotIn("None", rendered)
+
     def test_notes_render_on_an_empty_round(self):
         """A round that could not look must not read like a round that found nothing."""
         rendered = answer.render([], ["k: unhandled answer 'x' — not consumed"], 2, 1)
@@ -282,15 +339,22 @@ class ConsumeTests(unittest.TestCase):
 
     # ------------------------------------------------------------- refusals
 
-    def test_missing_weekly_note_is_refused_not_quiet(self):
+    def test_one_unaddable_card_does_not_starve_the_others(self):
+        """A `leave it out` needs nothing from the weekly note, so it must still apply."""
         self.weekly.unlink()
-        with self.assertRaises(answer.Refused):
-            self.run_consume([self.card("add it to the plan")])
+        leave = self.card("leave it out", item_id="d" * 32,
+                          key="next-focus:vault:task:other-task-abcdef12")
+        consumed, notes = self.run_consume([self.card("add it to the plan"), leave])
 
-    def test_empty_weekly_note_refuses_rather_than_guessing_a_number(self):
+        self.assertEqual([entry["action"] for entry in consumed], ["dismissed"])
+        self.assertTrue(any("refused" in note for note in notes))
+        self.assertTrue(any(self.dismissed.glob("*.json")), "the dismissal was skipped")
+
+    def test_a_note_with_no_blocks_refuses_that_card_and_says_so(self):
         self.weekly.write_text("# Weekly\n\nno blocks here\n", encoding="utf-8")
-        with self.assertRaises(answer.Refused):
-            self.run_consume([self.card("add it to the plan")])
+        consumed, notes = self.run_consume([self.card("add it to the plan")])
+        self.assertEqual(consumed, [])
+        self.assertTrue(any("refused" in note for note in notes))
 
 
 if __name__ == "__main__":
