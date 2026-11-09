@@ -72,6 +72,10 @@ PLAN_DIR = "60 Periodic Notes"
 CAP = 5
 PROPOSAL_CAP = 3
 TERMINAL = {"completed", "aborted"}
+# Where `next-focus-answer.py` records a `leave it out` answer. Reading this directory is
+# a READ, so it costs nothing of this script's read-only contract — the consumer is its
+# only writer. One file per card key, because the store's suppression is per key.
+DISMISSED_DIR = os.path.expanduser("~/.claude/state/next-focus-dismissed")
 
 FM_LINE = re.compile(r"^([a-z_]+):\s*(.*)$")
 # A block-style list entry under a key: `  - [[Some Task]]`. Column-0 keys never match
@@ -492,7 +496,32 @@ def due_today(board, tasks_dir, day, now=None):
     return out
 
 
-def proposed(vault, board, tasks_dir, planned_keys, alerts_state, alerts_lines):
+def load_dismissals(state_dir=None):
+    """`(records, notes)` — the durable `leave it out` answers.
+
+    A missing directory is a FACT (`[]`, no note): nothing has been declined yet. An
+    unreadable record is neither a dismissal nor an empty set — it is reported, so a
+    corrupt state file cannot silently re-propose a row the operator already refused.
+    """
+    d = Path(state_dir or DISMISSED_DIR)
+    if not d.is_dir():
+        return [], []
+    records, notes = [], []
+    for path in sorted(d.glob("*.json")):
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            notes.append(f"dismissal {path.name}: unreadable ({exc.__class__.__name__})")
+            continue
+        if not isinstance(rec, dict) or not rec.get("card_key"):
+            notes.append(f"dismissal {path.name}: no card_key")
+            continue
+        records.append(rec)
+    return records, notes
+
+
+def proposed(vault, board, tasks_dir, planned_keys, alerts_state, alerts_lines,
+             dismissed_keys=frozenset()):
     """Important items in NO current plan — at most PROPOSAL_CAP, one card each.
 
     `planned_keys` is a set of `(kind, name)`, not bare names: a planned GOAL called X
@@ -547,8 +576,17 @@ def proposed(vault, board, tasks_dir, planned_keys, alerts_state, alerts_lines):
                 {"period": "unplanned", "file": str(path), "line": 1},
                 f"blocked on {fm['blocked_by']}, in no current plan",
             ))
+    # `rows` is built above; this pass keys and filters it into a NEW list. Mutating in
+    # place and `continue`-ing would skip the payload but leave the row in the result —
+    # which is what a dismissed row did before this was a filtered copy.
+    kept = []
     for row in rows:
         row["card_key"] = card_key(vault, row["kind"], row["name"])
+        # A `leave it out` answer is durable. Dropping the row HERE — before the payload
+        # is built and before the cap is applied — is what stops the same card returning
+        # every round, and it keeps a dismissed row out of the three proposal slots.
+        if row["card_key"] in dismissed_keys:
+            continue
         # Shell-quoted HERE, because the round pastes this into a `bash` command line.
         # `name` is a raw line of prometheus-alerts.sh stdout for an alert row, and a
         # task file's stem for a task/goal row — the latter is chosen by any worker that
@@ -558,19 +596,24 @@ def proposed(vault, board, tasks_dir, planned_keys, alerts_state, alerts_lines):
             f'{row["name"]} — {row["why"]} — '
             f'{row["source"]["file"]}:{row["source"]["line"]}'
         )
-    return rows
+        kept.append(row)
+    return kept
 
 
 # ---------------------------------------------------------------------- main
 
 
 def build(vault, tasks_dir, day, live=None, target=None, plugin=None, alerts_script=None,
-          now=None):
+          now=None, dismissed_state_dir=None):
     board = Board(vault, tasks_dir)
     notes = []
 
     live, target, capacity_source = read_capacity(live, target, plugin)
     alerts_state, alerts_lines = read_alerts(vault, alerts_script)
+
+    dismissals, dismiss_notes = load_dismissals(dismissed_state_dir)
+    notes.extend(dismiss_notes)
+    dismissed_keys = {rec["card_key"] for rec in dismissals}
 
     today = due_today(board, Path(vault) / tasks_dir, day, now=now)
     if today is None:
@@ -598,6 +641,7 @@ def build(vault, tasks_dir, day, live=None, target=None, plugin=None, alerts_scr
     proposed_rows = proposed(
         vault, board, Path(vault) / tasks_dir,
         {(row["kind"], row["name"]) for row in ordered}, alerts_state, alerts_lines,
+        dismissed_keys=dismissed_keys,
     )
     proposed_overflow = proposed_rows[PROPOSAL_CAP:]
 
@@ -614,6 +658,10 @@ def build(vault, tasks_dir, day, live=None, target=None, plugin=None, alerts_scr
         "overflow": [r["name"] for r in overflow],
         "proposed": proposed_rows[:PROPOSAL_CAP],
         "proposed_overflow": [r["name"] for r in proposed_overflow],
+        # The dismissals themselves, not only their effect: SC2's probe reads a POSITIVE
+        # marker here, because absence from `proposed` is also what a rank demotion or the
+        # 3-per-round cap produces.
+        "dismissed": dismissals,
         "notes": list(dict.fromkeys(notes)),
     }
     # The block rides in the JSON too: a round that must post proposal cards needs the
@@ -679,6 +727,8 @@ def main(argv=None):
     ap.add_argument("--plugin", default=os.environ.get("CLAUDE_PLUGIN_ROOT") or str(Path(__file__).resolve().parent.parent))
     ap.add_argument("--alerts-script", default=None,
                     help="alert script to run; default is <vault>/.claude/scripts/prometheus-alerts.sh")
+    ap.add_argument("--state-dir", default=None,
+                    help=f"dismissal state dir; default {DISMISSED_DIR}")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -694,7 +744,8 @@ def main(argv=None):
 
     try:
         result = build(args.vault, args.tasks_dir, day, args.live, args.target,
-                       args.plugin, args.alerts_script, now=moment)
+                       args.plugin, args.alerts_script, now=moment,
+                       dismissed_state_dir=args.state_dir)
     except Exception as exc:  # noqa: BLE001 — deliberate: the tick must always render
         # Any non-zero exit is a REFUSAL the round must render, so an unexpected bug
         # has to reach that contract. Unguarded, it exited 1 with a bare traceback —
