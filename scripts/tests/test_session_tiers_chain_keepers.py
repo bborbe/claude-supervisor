@@ -257,6 +257,21 @@ class ChainTableTest(unittest.TestCase):
         bare = [tier(row) for row in self.rows if not is_keeperless(row) and not row_artifacts(row)]
         self.assertFalse(bare, f"keeper rows naming no artifact: {bare}")
 
+    def test_the_table_satisfies_the_keeper_contract(self):
+        """The whole contract over the real table, as one verdict.
+
+        The per-row tests above cover artifact existence and the sub-agent decision
+        individually, and between them they miss one case: a *different* row losing its
+        keeper. A row whose Mechanism cell is blanked contributes no artifact to miss,
+        is excluded from the "names at least one artifact" check by `is_keeperless`, and
+        `test_the_subagent_row_is_keeperless_by_decision` only ever inspects the
+        sub-agent row — so all of them stay green while a tier has no keeper, which is
+        the exact failure this file exists to catch. This is the only assertion that
+        runs `keeper_problems` against the parsed rows rather than a mutated copy.
+        """
+        problems = keeper_problems(self.rows)
+        self.assertFalse(problems, "\n".join(problems))
+
     def test_a_dead_non_first_artifact_is_named(self):
         """SC2's red case: rename the SECOND artifact of a three-artifact row, leaving the
         first valid. A first-token-only check stays green and is caught here."""
