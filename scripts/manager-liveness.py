@@ -13,19 +13,38 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
 
 
 
-  --arm   --subject T --branch B --interval S
+  --arm   --subject T --branch B --interval S [--resume]
                                   <slug>.cadence = "<S>\\n" and an epoch appended to
-                                    <slug>.arms; clears <slug>.stopped and
-                                    <slug>.sleeping. Run by the
+                                    <slug>.arms; clears <slug>.sleeping and CONSUMES
+                                    <slug>.reset. Run by the
                                     manager at EVERY re-arm, so the cadence file's mtime
                                     marks the last re-arm that actually happened and
                                     <slug>.arms is the history the limit is measured
                                     against. The interval is recorded, never assumed:
                                     managers change it at runtime (a 20-min idle tick
                                     was set 2026-09-22), so a fixed limit false-positives.
-  --stop  --subject T --branch B   <slug>.stopped. Run by `/supervisor:stop`, so a
-                                    deliberately stood-down manager is not reported
-                                    as a lapse. The next --arm clears it.
+                                    ⚠️ **It NEVER clears <slug>.stopped.** An arm is a
+                                    READING — every round takes one — so an arm that
+                                    cleared the marker made measuring a stand-down the act
+                                    that erased it: measured 2026-11-07, a manager stood
+                                    down at 12:13 took its 12:51 round's reading, the
+                                    marker vanished, the Fleet Manager read STALE and
+                                    restarted a session that had deliberately stopped.
+                                    Only --resume resumes.
+  --arm --resume                    ALSO clears <slug>.stopped. This is the one verb that
+                                    resumes a stood-down subject, and the two loop-start
+                                    arms (`commands/goal-loop.md` step 3,
+                                    `commands/topic-loop.md` step 3) pass it, so the
+                                    documented `Restart: /supervisor:goal-loop "<subject>"`
+                                    still comes back. A plain --arm (a round's liveness
+                                    reading) must never pass it.
+  --stop  --subject T --branch B   <slug>.stopped + <slug>.reset. Run by `/supervisor:stop`,
+                                    so a deliberately stood-down manager is not reported
+                                    as a lapse. `.reset` is the epoch an arm consumes to
+                                    start a NEW cadence sample: the outage gap is not
+                                    cadence and cannot be filtered at read time, which is
+                                    why the reset is its own file rather than something
+                                    inferred from the marker the arm must now preserve.
   --sleep --subject T --branch B --until ISO
                                   <slug>.sleeping = the ISO instant. A date-gated
                                     subject whose remaining work is all future
@@ -284,7 +303,12 @@ def observed_period(s: str):
     return min(percentile(gaps, 0.90), PERIOD_CAP * median(gaps))
 
 
-LEGACY_EXTS = ("cadence", "arms", "stopped")
+# ⚠️ `stopped` is NOT here, and its absence is the fix this list is part of. Migration
+# used to DELETE a pre-split stand-down, so the first `--arm` after the upgrade erased a
+# deliberate stop through the legacy path even once `arm()` stopped touching the marker —
+# the same defect one surface out. A legacy `.stopped` is MIGRATED (renamed to its
+# prefixed twin, see `migrate_legacy`) and never removed.
+LEGACY_EXTS = ("cadence", "arms", "reset")
 GOALS_DIR = "24 Goals"
 DEFAULT_TOPICS_DIR = "23 Topics"
 # The page folders `--state` accepts as proof a subject exists. `private-personal` /
@@ -432,7 +456,7 @@ def detect_branch(subject: str, vault: str = ".") -> str:
     return "goal"
 
 
-def migrate_legacy(subject: str) -> None:
+def migrate_legacy(subject: str, s: str = None) -> None:
     """Retire a pre-split unprefixed record once its prefixed twin is written.
 
     ⚠️ Without this, `--check` keeps reading the flat `<base>.cadence` the old
@@ -440,6 +464,12 @@ def migrate_legacy(subject: str) -> None:
     into a false STALE — measured 2026-10-20: **55** unprefixed records against **0**
     prefixed ones, so the first `--check` after the split would have reported every
     live manager as lapsed.
+
+    ⚠️ **A legacy `.stopped` is RENAMED, never removed.** Deleting it was the same
+    defect the arm path fixes, one surface out: a manager stood down before the split
+    would have had its marker destroyed by the first arm after the upgrade, and read
+    STALE for a stop that was still in force. The rename keeps the stand-down, retires
+    the unprefixed file, and leaves it clearable by `--arm --resume` like any other.
     """
     base = base_slug(subject)
     removed = []
@@ -453,6 +483,17 @@ def migrate_legacy(subject: str) -> None:
                 pass
     if removed:
         print(f"migrated legacy {base} ({', '.join(removed)})", file=sys.stderr)
+    legacy_stop = path(base, "stopped")
+    if s and os.path.exists(legacy_stop):
+        prefixed_stop = path(s, "stopped")
+        try:
+            if os.path.exists(prefixed_stop):
+                os.remove(legacy_stop)
+            else:
+                os.rename(legacy_stop, prefixed_stop)
+            print(f"migrated legacy {base}.stopped -> {s}.stopped", file=sys.stderr)
+        except OSError:
+            pass
 
 
 def read_notified() -> dict:
@@ -637,40 +678,68 @@ def sleep(subject: str, branch: str, until: str) -> int:
         print(f"manager-liveness: --until is not an ISO 8601 instant: {until}", file=sys.stderr)
         return 2
     write_atomic(path(s, "sleeping"), until + "\n")
-    migrate_legacy(subject)
+    migrate_legacy(subject, s)
     print(f"sleeping {s} until {until}")
     return 0
 
 
-def arm(subject: str, branch: str, interval: int) -> int:
+def arm(subject: str, branch: str, interval: int, resume: bool = False) -> int:
+    """Record a re-arm. **Never** resumes a stood-down subject unless `resume` is set.
+
+    ⚠️ **The arm does not touch `<slug>.stopped`, and that is the whole point.** An arm
+    runs at EVERY round — it is the liveness reading, not a decision about the subject —
+    so an arm that cleared the marker made taking a measurement destroy the evidence
+    that the subject had deliberately stopped. Measured 2026-11-07: stood down at 12:13,
+    read at 12:51, marker gone, the Fleet Manager read STALE and restarted the session at
+    13:14. Only `--resume` — the explicit "this subject is being restarted" verb, passed
+    by the two loop-start arms — clears it.
+    """
     s = slug(subject, branch)
     write_atomic(path(s, "cadence"), f"{interval}\n")
-    # A re-arm after a stand-down starts a NEW cadence sample. The outage gap is not
-    # cadence, and it cannot be filtered at read time: the marker that records when
-    # the stop happened is deleted a few lines below, so by the time `check` runs
-    # there is nothing left to compare the gap against. Drop the stale history here.
-    prior = [] if os.path.exists(path(s, "stopped")) else read_arms(s)
+    # A re-arm after a stand-down starts a NEW cadence sample: the outage gap is not
+    # cadence. That cannot be inferred from the marker any more — the arm preserves it —
+    # so `--stop` leaves a separate `.reset` epoch and this is the one arm that consumes
+    # it. Consumed, not merely read: the SECOND arm after a stop must keep its history,
+    # or `observed_period` would never return and every subject would sit on its
+    # reported interval for ever.
+    reset_path, _ = resolve(s, "reset")
+    has_reset = os.path.exists(reset_path)
+    prior = [] if has_reset else read_arms(s)
     arms = (prior + [time.time()])[-ARMS_KEEP:]
     write_atomic(path(s, "arms"), "".join(f"{v:.0f}\n" for v in arms))
-    try:
-        os.remove(path(s, "stopped"))
-    except FileNotFoundError:
-        pass
+    # BEFORE the reset is consumed, so a pre-split `.reset` is migrated (and reported)
+    # rather than silently deleted by the consumption a line below.
+    migrate_legacy(subject, s)
+    if has_reset:
+        try:
+            os.remove(reset_path)
+        except OSError:
+            pass
+    if resume:
+        stop_path, _ = resolve(s, "stopped")
+        try:
+            os.remove(stop_path)
+        except FileNotFoundError:
+            pass
     # An arm ENDS a sleep: the manager woke up (or a human woke it), so the marker that
     # suppressed the STALE report must not outlive the state it described.
     try:
         os.remove(path(s, "sleeping"))
     except FileNotFoundError:
         pass
-    migrate_legacy(subject)
-    print(f"armed {s} interval={interval}s")
+    print(f"armed {s} interval={interval}s" + (" resumed" if resume else ""))
     return 0
 
 
 def stop(subject: str, branch: str) -> int:
     s = slug(subject, branch)
     write_atomic(path(s, "stopped"), time.strftime("%Y-%m-%dT%H:%M:%S%z") + "\n")
-    migrate_legacy(subject)
+    # The epoch an arm consumes to start a fresh cadence sample. Written here rather
+    # than derived from the marker's mtime because the marker now OUTLIVES the arm, so
+    # "when did this subject stop" and "has the history been reset" are two different
+    # questions and the second must be answered once, not once per arm.
+    write_atomic(path(s, "reset"), f"{time.time():.0f}\n")
+    migrate_legacy(subject, s)
     print(f"stopped {s}")
     return 0
 
@@ -840,6 +909,12 @@ def main() -> int:
         default=".",
         help="vault ROOT: auto-detects --branch, and --state's page test for a subject with no record",
     )
+    ap.add_argument(
+        "--resume",
+        action="store_true",
+        help="with --arm: ALSO clear a stand-down marker. The one verb that resumes a "
+             "stood-down subject; a round's ordinary liveness arm must never pass it",
+    )
     ap.add_argument("--interval", type=int, help="the ScheduleWakeup delay just armed, seconds")
     ap.add_argument(
         "--until",
@@ -869,7 +944,11 @@ def main() -> int:
     if a.arm:
         if not a.interval or a.interval <= 0:
             ap.error("--arm needs --interval > 0")
-        return arm(a.subject, a.branch, a.interval)
+        return arm(a.subject, a.branch, a.interval, resume=a.resume)
+    if a.resume:
+        # Resuming is an ARM, never a stop: the flag clears a marker, so silently
+        # ignoring it on `--stop` would leave the operator believing they had resumed.
+        ap.error("--resume only applies with --arm")
     if a.sleep:
         if not a.until:
             ap.error("--sleep needs --until <ISO 8601 instant>")

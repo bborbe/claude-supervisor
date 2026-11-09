@@ -288,7 +288,7 @@ session failing any limb is some other state and belongs to its own branch.
    stood down on purpose.
 
    ⚠️ **Never run `manager-liveness.py --arm` from here.** `--arm` is documented as *"run by the
-   manager at EVERY re-arm"*: it writes the cadence record and clears `.stopped`, so calling it
+   manager at EVERY re-arm"*: it writes the cadence record, so calling it
    from the triage session **fakes an arm on a manager that never armed itself** — the record
    then reads armed while nothing ticks, and the next sweep reports a healthy loop that does not
    exist. It also cannot be made correct from here: `--arm` takes `--branch <fleet|goal|topic>`

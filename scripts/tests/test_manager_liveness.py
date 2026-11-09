@@ -97,12 +97,40 @@ class Liveness(unittest.TestCase):
             self.m.stop("Manager Layer", "goal")
         self.assertEqual(self.check(), (0, ""))
 
-    def test_rearm_clears_stop_marker(self):
+    def test_rearm_preserves_stop_marker(self):
+        # ⚠️ THE DEFECT THIS FILE EXISTS TO PIN. An arm is a READING — every round takes
+        # one — so an arm that cleared the marker made measuring a stand-down the act
+        # that erased it. Measured 2026-11-07: stood down 12:13, read 12:51, marker gone,
+        # the Fleet Manager read STALE and restarted the session at 13:14.
         with redirect_stdout(io.StringIO()):
             self.m.stop("Manager Layer", "goal")
         self.arm("Manager Layer", 300, age=5000)
+        self.assertTrue(
+            os.path.exists(self.m.path("goal--manager-layer", "stopped")),
+            "an arm must never clear a deliberate stand-down",
+        )
+        self.assertEqual(self.m.classify("goal--manager-layer", time.time())[0], "STOPPED")
+        # And the state verb agrees: the reading still says the subject is stood down.
+        self.assertEqual(self.check()[0], 0)
+
+    def test_resume_clears_the_stop_marker(self):
+        with redirect_stdout(io.StringIO()):
+            self.m.stop("Manager Layer", "goal")
+            self.m.arm("Manager Layer", "goal", 300, resume=True)
         self.assertFalse(os.path.exists(self.m.path("goal--manager-layer", "stopped")))
-        self.assertEqual(self.check()[0], 10)
+        self.assertEqual(self.m.classify("goal--manager-layer", time.time())[0], "OK")
+
+    def test_resume_is_the_only_thing_that_clears_the_marker(self):
+        # Two plain arms and then a resume: the marker survives the first two, so a
+        # stood-down manager cannot be un-stood-down by taking readings.
+        with redirect_stdout(io.StringIO()):
+            self.m.stop("Manager Layer", "goal")
+            self.m.arm("Manager Layer", "goal", 300)
+            self.m.arm("Manager Layer", "goal", 300)
+        self.assertTrue(os.path.exists(self.m.path("goal--manager-layer", "stopped")))
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", "goal", 300, resume=True)
+        self.assertFalse(os.path.exists(self.m.path("goal--manager-layer", "stopped")))
 
     def deliver(self, s):
         """Ack a lapse the way the sender does after the transport returns success."""
@@ -329,14 +357,57 @@ class Liveness(unittest.TestCase):
 
     def test_rearm_after_a_stand_down_resets_the_history(self):
         # The outage gap must never count as cadence. It cannot be filtered at read
-        # time — `arm` deletes the marker that records when the stop happened — so a
-        # restart starts a fresh sample instead.
+        # time — the stop is not a gap the reader can see — so `--stop` leaves a
+        # `.reset` epoch and the first arm consumes it to start a fresh sample. The
+        # MARKER is a separate fact and survives, which is why the reset needed its
+        # own file rather than being inferred from it.
         self.plant_arms("Manager Layer", [11000, 10000, 9000, 8000])
         with redirect_stdout(io.StringIO()):
             self.m.stop("Manager Layer", "goal")
             self.m.arm("Manager Layer", "goal", 300)
         self.assertEqual(len(self.m.read_arms("goal--manager-layer")), 1)
         self.assertIsNone(self.m.observed_interval("goal--manager-layer"))
+        # The stand-down itself is still on disk: resetting the sample must not resume.
+        self.assertTrue(os.path.exists(self.m.path("goal--manager-layer", "stopped")))
+
+    def test_the_reset_is_consumed_so_the_next_arm_keeps_its_history(self):
+        # One-shot, not sticky. A `.reset` that survived would make every arm drop the
+        # history, `observed_gaps` would never return, and every subject would sit on
+        # its reported interval for ever — the frozen-period failure the reset exists to
+        # avoid, reached from the other side.
+        self.plant_arms("Manager Layer", [11000, 10000, 9000, 8000])
+        with redirect_stdout(io.StringIO()):
+            self.m.stop("Manager Layer", "goal")
+            self.m.arm("Manager Layer", "goal", 300)
+        self.assertFalse(os.path.exists(self.m.path("goal--manager-layer", "reset")))
+        self.arm("Manager Layer", 300, age=0)
+        self.assertEqual(len(self.m.read_arms("goal--manager-layer")), 2)
+
+    def test_observed_period_returns_after_four_further_arms(self):
+        # The criterion's own probe: stop, arm, then four more arms — `observed_gaps`
+        # must come back, or the adaptive stale limit never returns and every subject is
+        # measured against a value its manager declared, not the one it runs at.
+        self.plant_arms("Manager Layer", [11000, 10000, 9000, 8000])
+        with redirect_stdout(io.StringIO()):
+            self.m.stop("Manager Layer", "goal")
+            self.m.arm("Manager Layer", "goal", 300)
+        self.assertIsNone(self.m.observed_gaps("goal--manager-layer"))
+        # A controllable clock: four real arms in one test would all land in the same
+        # second, so the gaps would be zero and the assertion would pass without ever
+        # exercising the period arithmetic.
+        clock = [1_700_000_000.0]
+        real = self.m.time.time
+        self.m.time.time = lambda: clock[0]
+        try:
+            for _ in range(4):
+                clock[0] += 900
+                with redirect_stdout(io.StringIO()):
+                    self.m.arm("Manager Layer", "goal", 300)
+        finally:
+            self.m.time.time = real
+        self.assertEqual(len(self.m.read_arms("goal--manager-layer")), 5)
+        self.assertIsNotNone(self.m.observed_gaps("goal--manager-layer"))
+        self.assertEqual(int(self.m.observed_period("goal--manager-layer")), 900)
 
     def test_history_survives_ordinary_rearms(self):
         self.plant_arms("Manager Layer", [3000, 2000, 1000])
@@ -661,6 +732,66 @@ class LegacyRecordMigration(unittest.TestCase):
             rc = self.m.check()
         self.assertEqual(0, rc, out.getvalue())
         self.assertEqual("", out.getvalue())
+
+    def test_a_legacy_stand_down_survives_an_arm(self):
+        # ⚠️ The same defect one surface out. `migrate_legacy` used to DELETE the flat
+        # `.stopped`, so the first arm after the upgrade erased a pre-split stand-down —
+        # an arm that must never resume anything, doing exactly that through migration.
+        # It is renamed onto the prefixed path instead: the marker lives, the flat file
+        # is retired, and `--arm --resume` can still clear it.
+        open(self.m.path("old-subject", "stopped"), "w").write("2026-10-19T22:37:09+0200\n")
+        open(self.m.path("old-subject", "cadence"), "w").write("300\n")
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.m.arm("Old Subject", "goal", 60)
+        self.assertFalse(os.path.exists(self.m.path("old-subject", "stopped")))
+        self.assertTrue(os.path.exists(self.m.path("goal--old-subject", "stopped")))
+        self.assertEqual(
+            self.m.classify("goal--old-subject", time.time())[0], "STOPPED"
+        )
+
+    def test_resume_clears_a_migrated_legacy_stand_down(self):
+        open(self.m.path("old-subject", "stopped"), "w").write("2026-10-19T22:37:09+0200\n")
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.m.arm("Old Subject", "goal", 60, resume=True)
+        self.assertFalse(os.path.exists(self.m.path("goal--old-subject", "stopped")))
+        self.assertEqual(self.m.classify("goal--old-subject", time.time())[0], "OK")
+
+    def test_the_pre_split_probe_still_migrates_and_reads_stopped(self):
+        # The criterion's own probe, end to end through the CLI: plant the pre-split
+        # shape (cadence, arms, reset, stopped), arm, then read the subject back.
+        for ext, body in (
+            ("cadence", "300\n"),
+            ("arms", "1700000000\n1700000900\n1700001800\n1700002700\n"),
+            ("reset", "1700002800\n"),
+            ("stopped", "2026-11-07T12:13:00+0100\n"),
+        ):
+            with open(self.m.path("probe-subject", ext), "w") as fh:
+                fh.write(body)
+        out, err, old = io.StringIO(), io.StringIO(), sys.argv
+        sys.argv = ["manager-liveness.py", "--arm", "--subject", "Probe Subject",
+                    "--branch", "goal", "--interval", "900"]
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        self.assertEqual(0, rc)
+        self.assertIn(
+            "migrated legacy probe-subject (cadence, arms, reset)", err.getvalue()
+        )
+        for ext in ("cadence", "arms", "reset", "stopped"):
+            self.assertFalse(
+                os.path.exists(self.m.path("probe-subject", ext)),
+                f"the unprefixed {ext} must be retired",
+            )
+        stated = io.StringIO()
+        with redirect_stdout(stated):
+            self.m.state("Probe Subject", "goal", self.tmp.name, time.time())
+        self.assertTrue(stated.getvalue().startswith("STOPPED\t"), stated.getvalue())
+        checked = io.StringIO()
+        with redirect_stdout(checked):
+            self.m.check()
+        self.assertNotIn("STALE goal--probe-subject", checked.getvalue())
 
     def test_a_flat_record_with_no_twin_still_reports_stale(self):
         # The control: the guard must not swallow a genuinely dead manager.

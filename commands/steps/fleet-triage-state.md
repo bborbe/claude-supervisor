@@ -479,9 +479,9 @@ transcript written minutes earlier, pane rendering. **Any lapsed / absent / unar
 a single probe is a hypothesis.** Corroborate it against a registry pid, a transcript mtime or
 pane text before it reaches a report or an action.
 
-⚠️ **Never re-arm a manager to make a table look green.** Arming clears the STOPPED marker, so
-the "restore" reads successful while rounds run against a subject that is closed or empty. The
-manager cannot make an empty goal stay armed; adding work is what changes it.
+⚠️ **Never re-arm a manager to make a table look green.** A plain arm leaves the STOPPED marker
+standing, so the "restore" changes nothing — and `--resume` would clear a stand-down, reading
+green while rounds run against a closed subject. Adding work changes it.
 
 ⚠️ **Never recommend OPENING a manager.** The only subject this command opens is one that is
 **flagged and not running** — `flag: true` on the subject page and no loop armed. That is the
