@@ -76,6 +76,16 @@ const CLAUDE_HOME_REFUSAL =
 const CONFIG_DIR = join(CONFIG_HOME, 'claude-supervisor')
 const STATE_DIR = join(STATE_HOME, 'claude-supervisor')
 
+// Where the operator-local attention hook keeps its per-session state. Read here rather than
+// in `answer-marker.mjs` because this repo keeps the whole configuration surface enumerable
+// in one place — a module reading `process.env` directly is a surface nothing can list, and
+// `config.test.mjs` fails the build on it.
+//
+// ⚠️ The default is NOT under STATE_DIR: the reader is `~/.claude/hooks/attention-log.py`,
+// which resolves `ATTENTION_STATE_DIR` or `~/.claude/state/attention`. A writer pointed
+// anywhere else is a silent no-op on both sides — the marker lands and no hook ever reads it.
+const ATTENTION_STATE_DIR = ENV.ATTENTION_STATE_DIR || join(homedir(), '.claude', 'state', 'attention')
+
 // `off` is a value, not an absence: an unset var means "use the default path", while
 // `off` means "no file log at all". Reading them as one thing turns off into default.
 const PERMISSION_LOG =
@@ -211,6 +221,9 @@ export const config = Object.freeze({
   // edit must not dirty a git tree, and `git pull` must not be able to clobber it.
   configDir: CONFIG_DIR,
   stateDir: STATE_DIR,
+  // Where the operator-local attention hook reads its per-session markers. Distinct from
+  // `stateDir` on purpose — see the resolution above.
+  attentionStateDir: ATTENTION_STATE_DIR,
   claudeHome: CLAUDE_HOME,
 
   // Non-null means this server must NOT start — see the resolution above for the defect it

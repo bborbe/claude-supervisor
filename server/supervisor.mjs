@@ -22,6 +22,7 @@ import { HEARTBEAT_INTERVAL_MS, a2aStamp, clearStamp, heartbeatDir, selfStampRef
 import { invalidateCountCache, workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
 import { startAttentionPoll, storeDecisionRecord, timeoutDecisionRecord } from './attention-poll.mjs'
+import { writeAnswerMarker } from './answer-marker.mjs'
 import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
@@ -808,6 +809,27 @@ async function answerWrapperPark(requestId, behavior) {
     }
     if (agent.status === 'blocked-on-permission') agent.status = 'running'
     log(`permission ${requestId} ${wanted.toUpperCase()} by manager (wrapper-backed worker ${agent.id})`)
+    // Record WHO answered, where the worker's own attention hook can stamp its close line.
+    // Without it a question a manager settled is indistinguishable, in the local event log,
+    // from one the operator answered — which is what makes "worker questions that no manager
+    // answered" uncountable.
+    //
+    // ⚠️ Keyed on `agent.sessionId`, NOT `agent.id`. `agent.id` is the in-process roster
+    // label (`agent_<n>`), while the attention state dir is keyed by the Claude session id
+    // (`<session>.events.jsonl`, and the `<sid>.posted.json` the ask arm writes from its own
+    // `CLAUDE_CODE_SESSION_ID`). A marker written under `agent_<n>` is one no hook reads.
+    //
+    // Gated on the tool: a `permission` verdict is already attributed by the
+    // `permissions.jsonl` row the policy hook writes, and a marker left by one would be read
+    // at that worker's NEXT question close — a misattribution, not a saving.
+    if (session.question?.tool_name === 'AskUserQuestion') {
+      writeAnswerMarker({
+        stateDir: config.attentionStateDir,
+        sessionId: agent.sessionId,
+        answererSession: parentSessionId({ dir: config.sessionsDir }) ?? '',
+        answererKind: 'manager',
+      })
+    }
     return { answered: requestId, behavior: wanted, agent_id: agent.id, via: 'wrapper' }
   }
   return { not_found: true }
@@ -3955,7 +3977,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       // Record the manager's verdict too: a key the manager allows over and over
       // is the raw material for the next policy rule.
-      const logDecision = (behavior) =>
+      const logDecision = (behavior) => {
         logPermission({
           ts: new Date().toISOString(),
           agent: record.agentId,
@@ -3972,6 +3994,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           request_id: args.request_id,
           latency_ms: Date.now() - Date.parse(record.requestedAt),
         })
+        // ⚠️ The marker is NOT written here. This branch is unreachable for the fleet: it
+        // needs `pending.get(args.request_id)`, and `pending` is populated only inside
+        // `makeCanUseTool`, which has had no call site since the wrapper migration
+        // (572fbe6e). Every headless worker is wrapper-backed, so `answer_permission` takes
+        // the `answerWrapperPark` branch and returns above. The write lives there instead.
+      }
 
       if (args.behavior === 'allow') {
         logDecision('allow')
