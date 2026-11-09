@@ -1,4 +1,18 @@
 #!/usr/bin/env node
+// ⚠️ DEPRECATED AS THE LIVE MCP SURFACE — do not fix spawn behaviour here.
+//
+// The `supervisor` tool a session actually binds is the Go claude-wrapper daemon at
+// http://127.0.0.1:18090/supervisor/mcp. Every cc-* launcher loads
+// ~/.claude/mcp-private-personal.json with --strict-mcp-config, and this plugin ships no
+// .mcp.json of its own, so nothing on the operator's machine starts this file: it is
+// reachable only from the drill scripts and from scripts/mcp-start.py, the plugin's own
+// launcher for a deployment that DOES wire an .mcp.json.
+//
+// A spawn, model or permission fix belongs in bborbe/claude-wrapper:
+// `pkg/roster_mcp.go` (spawn handler) and `pkg/spawn_cwd.go` (launcher + model resolution).
+// Measured 2026-11-09: a headless model fix was written here, tested, and discarded —
+// the live path was the Go daemon. A PreToolUse hook on this machine now refuses edits to
+// this file, so a session that tries gets the redirect before writing.
 // supervisor.mjs — MCP server that spawns Claude sessions and lets the calling
 // manager session answer THEIR permission prompts.
 //
