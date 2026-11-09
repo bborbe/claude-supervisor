@@ -1,5 +1,15 @@
 // The headless worker's message loop, extracted so it can be tested.
 //
+// ⚠️ **NODE-ONLY PATH — the terminal ledger patch below is DEAD on the current fleet.**
+// The session ledger's terminal verdict belongs to the process that holds the child's
+// stdin, and on every Mac here that is the Go daemon `bborbe/claude-wrapper`
+// (`http://127.0.0.1:18090/supervisor/mcp`, which is what each vault's MCP entry names):
+// `pgrep -f supervisor.mjs` returns nothing. This loop is retained as the reference
+// semantics the Go port was measured against, and would still be correct for a
+// Node-hosted deployment — but nothing may add a SECOND writer for a Go-spawned worker,
+// because whichever PATCH landed last would silently become the row's verdict. See
+// `docs/ledger-ownership.md`.
+//
 // Why this is its own module: the loop's whole job is a timing guarantee — when a
 // worker's `status` and its ledger's terminal patch become terminal — and timing
 // guarantees are exactly what a live reproduction cannot establish reliably. The
