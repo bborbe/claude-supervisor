@@ -94,9 +94,9 @@ SESSIONS_DIR = os.path.expanduser(
     os.environ.get("SUPERVISOR_SESSIONS_DIR") or "~/.claude/sessions"
 )
 
-# A vault's task directory, newest naming first. `private-starcitizen` and
-# `private-family` use `24 Tasks`; the numbered vaults use `25 Tasks`.
-TASK_DIRS = ("25 Tasks", "24 Tasks")
+# A vault's task directory is whatever its `vault-cli` config declares (`tasks_dir`);
+# there is no built-in list. The goal and topic directories below are still fixed names,
+# because those lookups pass an explicit tuple rather than reading the config.
 
 # A vault's goal and topic directories — where a goal or topic manager's anchor lives.
 # `private-personal` / `seibert-*` use `24 Goals`, the `24 Tasks` vaults use `23 Goals`;
@@ -114,6 +114,46 @@ PAGE_TERMINAL = {"completed", "aborted"}
 VAULTS_ROOT = os.path.expanduser(
     os.environ.get("SUPERVISOR_VAULTS_ROOT") or "~/Documents/Obsidian"
 )
+
+#: `vault-cli config list --output json`, read once per process: {realpath(vault): tasks_dir}.
+#: A `tasks_dir` of `None` means the vault declares no task directory and contributes none.
+_VAULT_CONFIG = None
+
+
+def _vault_config():
+    """`{realpath(vault path): tasks_dir}` from the vault config.
+
+    Read once per process: `find_task` and `find_pages` call the directory helpers several
+    times per run, and shelling out per call would re-create the slow-lookup failure the
+    `find_task` docstring records. The source is `vault-cli config list --output json`, or
+    `SUPERVISOR_VAULT_CONFIG` (a JSON file with the same shape) when set — the override a
+    drill or a test needs, for the same reason the registry and the vault root carry one.
+    A failed or unreadable config yields `{}` — every vault then contributes nothing,
+    which is the fail-closed direction.
+    """
+    global _VAULT_CONFIG
+    if _VAULT_CONFIG is not None:
+        return _VAULT_CONFIG
+    config = {}
+    override = os.environ.get("SUPERVISOR_VAULT_CONFIG")
+    try:
+        if override:
+            with open(override, encoding="utf-8") as handle:
+                entries = json.load(handle)
+        else:
+            proc = subprocess.run(
+                ["vault-cli", "config", "list", "--output", "json"],
+                capture_output=True, text=True, timeout=10,
+            )
+            entries = json.loads(proc.stdout or "[]") if proc.returncode == 0 else []
+        for entry in entries:
+            path = entry.get("path")
+            if path:
+                config[os.path.realpath(path)] = entry.get("tasks_dir")
+    except Exception:
+        config = {}
+    _VAULT_CONFIG = config
+    return config
 
 # The terminal statuses. A deferred row is the other accepted end state: the operator has
 # said "not now", which is a decision rather than an absence of one.
@@ -239,21 +279,31 @@ def metrics_session_ids(path):
     return ids
 
 
-def local_task_dirs(cwd, names=TASK_DIRS):
-    """Candidate task directories at or above `cwd` — the fast half of `task_dirs_for`.
+def local_task_dirs(cwd, names=None):
+    """Candidate directories at or above `cwd` — the fast half of `task_dirs_for`.
 
     Split out so a caller can answer the common case (a worker whose cwd is its vault)
-    without paying for the whole-vault scan.
+    without paying for the whole-vault scan. With `names` given (the goal/topic lookup)
+    each ancestor is probed for those directory names; with `names=None` (the task lookup)
+    each ancestor that is a configured vault contributes its declared `tasks_dir`.
     """
     dirs = []
     if not cwd:
         return dirs
-    cur = os.path.abspath(cwd)
+    config = None if names is not None else _vault_config()
+    cur = os.path.realpath(cwd)
     while True:
-        for name in names:
-            candidate = os.path.join(cur, name)
-            if os.path.isdir(candidate) and candidate not in dirs:
-                dirs.append(candidate)
+        if names is not None:
+            for name in names:
+                candidate = os.path.join(cur, name)
+                if os.path.isdir(candidate) and candidate not in dirs:
+                    dirs.append(candidate)
+        else:
+            tasks_dir = config.get(os.path.realpath(cur))
+            if tasks_dir:
+                candidate = os.path.join(cur, tasks_dir)
+                if os.path.isdir(candidate) and candidate not in dirs:
+                    dirs.append(candidate)
         parent = os.path.dirname(cur)
         if parent == cur:
             break
@@ -261,23 +311,70 @@ def local_task_dirs(cwd, names=TASK_DIRS):
     return dirs
 
 
-def task_dirs_for(cwd, vault_root=None, names=TASK_DIRS):
-    """Candidate task directories: the vault above `cwd`, then every known vault.
+def task_dirs_for(cwd, vault_root=None, names=None):
+    """Candidate directories: the vault above `cwd`, then every configured vault.
 
     The walk-up answers the common case — a worker whose cwd is its vault. The vault scan
     answers the repo-worktree case: a worker editing `claude-supervisor` has a repo cwd,
-    and its task lives in whichever Obsidian vault filed it. Both are bounded and
-    read-only; neither is a filesystem-wide search. `names` selects the directory set, so
-    the goal/topic lookup walks the same two places.
+    and its task lives in whichever vault filed it. Both are bounded and read-only;
+    neither is a filesystem-wide search.
+
+    With `names` given (the goal/topic lookup) every directory under `vault_root` is
+    probed for those names. With `names=None` (the task lookup) each configured vault
+    contributes its declared `tasks_dir`, wherever it lives — not only under `vault_root`
+    — so a vault outside `~/Documents/Obsidian` is searched too.
     """
     dirs = local_task_dirs(cwd, names)
-    root = vault_root or VAULTS_ROOT
-    for vault in sorted(glob.glob(os.path.join(root, "*"))):
-        for name in names:
-            candidate = os.path.join(vault, name)
-            if os.path.isdir(candidate) and candidate not in dirs:
-                dirs.append(candidate)
+    if names is not None:
+        root = vault_root or VAULTS_ROOT
+        for vault in sorted(glob.glob(os.path.join(root, "*"))):
+            for name in names:
+                candidate = os.path.join(vault, name)
+                if os.path.isdir(candidate) and candidate not in dirs:
+                    dirs.append(candidate)
+        return dirs
+    for vault_path, tasks_dir in sorted(_vault_config().items()):
+        if not tasks_dir:
+            continue
+        candidate = os.path.join(vault_path, tasks_dir)
+        if os.path.isdir(candidate) and candidate not in dirs:
+            dirs.append(candidate)
     return dirs
+
+
+def _vault_for_cwd(cwd):
+    """The configured vault whose path is `cwd` or one of its ancestors, else `None`."""
+    if not cwd:
+        return None
+    config = _vault_config()
+    cur = os.path.realpath(cwd)
+    while True:
+        if cur in config:
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return None
+        cur = parent
+
+
+def resolution_refusal(session_id, cwd, vault_root=None):
+    """`(refusal, detail)` for a session that resolved to no task — naming the cause.
+
+    Two causes share the `task-unresolved` token, and a reader must be able to tell them
+    apart: the id appears in no page among the directories searched, or the session's own
+    vault is not among those directories (its `tasks_dir` is unset, so it contributed
+    nothing). The first sends the reader to the page; the second sends them to the config.
+    """
+    dirs = task_dirs_for(cwd, vault_root)
+    own_vault = _vault_for_cwd(cwd)
+    if own_vault and not any(
+        d == own_vault or d.startswith(own_vault + os.sep) for d in dirs
+    ):
+        return (
+            "task-unresolved",
+            f"searched {', '.join(dirs)}; {own_vault} not among them",
+        )
+    return ("task-unresolved", f"no page carries {session_id}")
 
 
 def find_pages(session_id, cwd, vault_root=None):
@@ -674,7 +771,11 @@ def main():
                 elif task is None and handed:
                     pages = handed[:1]
                 else:
-                    bad = task_verdict(task, defer_date.as_now())
+                    bad = (
+                        resolution_refusal(sid, cwd, VAULTS_ROOT)
+                        if task is None
+                        else task_verdict(task, defer_date.as_now())
+                    )
     if bad is not None:
         return refuse(*bad)
 
