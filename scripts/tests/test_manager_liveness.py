@@ -404,14 +404,23 @@ class Liveness(unittest.TestCase):
         self.assertIn("limit=3780s", detail)
 
     def test_the_real_weekly_subject_reads_ok_on_its_new_cadence(self):
-        # SC1(b). The live history behind the row: ~960 s gaps to 10:32, then ~3600 s.
-        # The annotation is an assumption — these arms predate per-arm recording — but
-        # the 231 s gap at 10:32 is the one that proves the old cadence was still in
-        # the window when the interval changed.
-        self.arms(self.WEEKLY, [900] * 8 + [3600] * 4)
+        # SC1(b). The live history behind the row, written EXACTLY as it is on disk —
+        # a legacy single-column ring. Annotating the intervals here would test a file
+        # the format never produced, and the floor would look like it worked on the
+        # motivating subject when the real one still read STALE.
+        self.arms(self.WEEKLY, [None] * 12)
         state, detail = self.limit_at(3757, 3600)
         self.assertEqual(state, "OK", detail)
         self.assertIn("limit=3937s", detail)  # uncapped code says 2877
+
+    def test_a_legacy_window_is_floored_by_its_gap_quantile(self):
+        # The same history, one arm later: the ring is now 11 legacy lines plus one
+        # recorded 3600, so the RECORDED rise test still sees nothing shorter. The
+        # gap-quantile limb is what keeps the floor on — p75 3642 s against 3600.
+        self.arms(self.WEEKLY, [None] * 11 + [3600])
+        state, detail = self.limit_at(3757, 3600)
+        self.assertEqual(state, "OK", detail)
+        self.assertIn("limit=3937s", detail)
 
     def test_arm_keeps_each_lines_own_interval(self):
         # SC1(c). The rise can only fire if `arm` PRESERVES earlier lines' intervals.
@@ -456,12 +465,15 @@ class Liveness(unittest.TestCase):
         self.assertIn("limit=3237s", detail)
 
     def test_a_declared_interval_that_never_ticks_at_it_is_not_floored(self):
-        # SC2(b). deploy-and-merge declares 3600 and ticks at ~900. Without a recorded
-        # rise there is no floor, so the limit stays where it is today.
-        self.arms(self.DEPLOY, [3600] * 12)
-        state, detail = self.limit_at(1800, 3600)
-        self.assertEqual(state, "STALE", detail)
-        self.assertIn("limit=1740s", detail)
+        # SC2(b). deploy-and-merge declares 3600 and ticks at ~900. Neither rise limb
+        # fires — no recorded interval below 3600, and its p75 is 994 s against the
+        # 1800 s threshold — so the limit stays where it is today.
+        for label, intervals in (("recorded", [3600] * 12), ("legacy", [None] * 12)):
+            with self.subTest(window=label):
+                self.arms(self.DEPLOY, intervals)
+                state, detail = self.limit_at(1800, 3600)
+                self.assertEqual(state, "STALE", detail)
+                self.assertIn("limit=1740s", detail)
 
     def test_the_first_arm_after_deploy_does_not_loosen_a_mixed_file(self):
         # SC2(d). Every live file becomes a mixed legacy+new file at its first post-
@@ -500,6 +512,17 @@ class Liveness(unittest.TestCase):
         epochs += [epochs[-1] + 1900 * (i + 1) for i in range(6)]
         self.arms(epochs, [900] * 6 + [3600] * 6)
         _, detail = self.limit_at(1800, 3600)
+        self.assertIn("limit=3780s", detail)
+
+    def test_the_floor_lifts_a_limit_that_sits_just_below_the_declared_interval(self):
+        # The only subject the fleet census moved (2026-11-09): it declares 3600 and
+        # ticks at ~3540, so today's limit of 3768 s sits 12 s BELOW its own declared
+        # interval — the same defect in miniature. The floor lifts it to exactly 3780.
+        # Pinned because a rise this small is easy to mistake for a regression.
+        epochs = [1792747773, 1792750092, 1792751053, 1792752013, 1792752565,
+                  1792756151, 1792759690, 1792763232, 1792766768]
+        self.arms(epochs + [1792766768 + 3600], [None] * 10)
+        _, detail = self.limit_at(1000, 3600)
         self.assertIn("limit=3780s", detail)
 
     def test_read_arms_returns_epochs_from_a_mixed_file(self):

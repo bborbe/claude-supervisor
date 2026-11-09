@@ -325,15 +325,29 @@ def period_floor_applies(spans, declared: int) -> bool:
     `spans` is (gap seconds, interval recorded on the arm that started it). The floor
     needs both a RISE and the absence of a DISPROOF:
 
-      - **Rise** — some gap was armed under a recorded interval SHORTER than the one
-        declared now. A legacy line carries no interval and is neither shorter nor
-        longer, which is what stops the first arm after a deploy from flooring a
-        subject that never lengthened anything.
+      - **Rise, recorded** — some gap was armed under a recorded interval SHORTER than
+        the one declared now. This is the precise case and it catches a transition on
+        its first tick, when only one arm carries the new interval.
+      - **Rise, by gap** — the window's p75 gap already reaches half the declared
+        interval. A LEGACY window carries no interval at all, so the recorded test
+        cannot see anything in it: every one of the 118 `.arms` files on this machine
+        is single-column today, and without this limb the floor could not fire on the
+        subject that motivated it. The p75 is what separates the two shapes — on the
+        measured histories the right-skewed subject's p75 is 3642 s against a declared
+        3600, while `goal--deploy-and-merge-gates` (declared 3600, really ticking at
+        ~900) has a p75 of 994 s, and one historic stop cannot lift a p75 the way it
+        lifts a max.
       - **Disproof** — a completed gap armed under the declared interval that came in
         under half of it. That proves the manager does not actually tick at the
         interval it declares, so the floor would only hide a lapse.
+
+    A manager ticking steadily at the interval it declares is unaffected either way:
+    its p75 is about `declared`, so the floored period and the uncapped one agree.
     """
-    if not any(iv is not None and iv < declared for _, iv in spans):
+    recorded_rise = any(iv is not None and iv < declared for _, iv in spans)
+    gaps = sorted(gap for gap, _ in spans)
+    gap_rise = percentile(gaps, 0.75) >= declared / 2
+    if not (recorded_rise or gap_rise):
         return False
     return not any(iv == declared and gap < declared / 2 for gap, iv in spans)
 
