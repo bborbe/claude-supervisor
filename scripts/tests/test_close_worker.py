@@ -271,9 +271,11 @@ class TestCliRefusals(unittest.TestCase):
         self.vaults = os.path.join(self.tmp, "vaults")
         self.tasks = os.path.join(self.vaults, "somevault", "25 Tasks")
         self.attention = os.path.join(self.tmp, "attention")
+        self.projects = os.path.join(self.tmp, "projects")
         os.makedirs(self.sessions)
         os.makedirs(self.tasks)
         os.makedirs(self.attention)
+        os.makedirs(self.projects)
         os.makedirs(self.repo)
         subprocess.run(["git", "init", "-q", self.repo], check=True)
         with open(os.path.join(self.repo, "a.txt"), "w", encoding="utf-8") as handle:
@@ -309,6 +311,7 @@ class TestCliRefusals(unittest.TestCase):
         env["SUPERVISOR_SESSION_HOLDS"] = holds or os.path.join(self.tmp, "no-holds.json")
         env["ATTENTION_STATE_DIR"] = self.attention
         env["ATTENTION_STORE_URL"] = self.store_url
+        env["PROJECTS_DIR"] = self.projects
         env.pop("ATTENTION_STORE_TOKEN", None)
         return subprocess.run(
             [sys.executable, SCRIPT, SID, *extra],
@@ -353,16 +356,17 @@ class TestCliRefusals(unittest.TestCase):
         return child
 
     def _transcript(self, closer):
-        """A real transcript under the projects dir — `who-needs-me.py` hardcodes that path.
+        """A transcript private to this test — `who-needs-me.py` reads `PROJECTS_DIR`.
 
-        `_read_last_assistant_text` resolves `~/.claude/projects/*/<sid>.jsonl` and takes no
-        override, so a temp directory cannot stand in for it. The file is named with the
-        fixture session id — a UUID no live session can hold — and removed in cleanup.
+        The override is what makes it private, and it is load-bearing: every gate-held case
+        writes the same fixture session id, and `transcript_path()` resolves it as
+        `next(iter(glob(PROJECTS_DIR/*/<sid>.jsonl)))` — an arbitrary pick among matches,
+        memoized. Written into the real `~/.claude/projects`, a transcript collides with any
+        concurrent run's and with any earlier run's whose cleanup never ran (SIGKILL, a
+        timeout), and the gate check then reads the wrong closer. Measured 2026-11-09:
+        38/50 failures with one such leftover present, 0/50 without it.
         """
-        root = os.path.expanduser("~/.claude/projects")
-        if not os.path.isdir(root) or not os.access(root, os.W_OK):
-            self.skipTest("~/.claude/projects is not writable")
-        proj = tempfile.mkdtemp(prefix="close-worker-test-", dir=root)
+        proj = tempfile.mkdtemp(prefix="close-worker-test-", dir=self.projects)
         self.addCleanup(shutil.rmtree, proj, True)
         with open(os.path.join(proj, f"{SID}.jsonl"), "w", encoding="utf-8") as handle:
             handle.write(json.dumps({
