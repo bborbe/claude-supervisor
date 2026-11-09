@@ -385,6 +385,15 @@ export const config = Object.freeze({
   // write on events, the timer stamps every 30 s.
   heartbeatStateDir: ENV.SUPERVISOR_HEARTBEAT_STATE_DIR || join(STATE_DIR, 'heartbeat-state'),
 
+  // Where a session's ANSWER-REACH records live: proof that this session's answering commands
+  // actually reached their routes, which `scripts/answer-path-check.py` reads instead of
+  // trusting an armed loop. A SIBLING of the two above, for the same reason — a reach is not a
+  // heartbeat (no timer refreshes it) and not a permission decision (nothing was decided), so
+  // folding it into either store would make one reader misread the other's rows.
+  // ⚠️ `SUPERVISOR_ANSWER_REACH_DIR` is also the fixture knob the probe's own controls set,
+  // exactly as `SUPERVISOR_WORKER_MANAGER_DIR` is for the registration.
+  reachDir: ENV.SUPERVISOR_ANSWER_REACH_DIR || join(STATE_DIR, 'answer-reach'),
+
   // This server's OWN session id — the one Claude Code started it under. Used to stamp a
   // heartbeat for the session the server is running inside, which the per-worker stamps
   // above cannot cover: they are keyed on workers this server spawned, and an interactive

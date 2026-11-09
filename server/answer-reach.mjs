@@ -1,0 +1,126 @@
+// answer-reach.mjs — did this session's answering commands actually REACH their routes?
+//
+// `scripts/answer-path-check.py` used to decide that a spawner could serve a headless
+// worker's parks by reading only whether the spawner's manager loop was armed. An armed loop
+// is not an answer channel: measured 2026-11-09, spawner `0110c4a3` read `{"ok": true}` at
+// exit 0 while its 27 workers' parks were released 56 times by the attention store and
+// **never once by it**. The worker is opened against a spawner that will strand every park,
+// and the failure is silent and 15 minutes delayed.
+//
+// So the probe reads a second fact: a **reach** — evidence that this session's answering
+// command actually arrived at the route and was refused there harmlessly. Two legs, because
+// a manager can answer on two routes and they are gated differently:
+//
+//   · `mcp`     — the `answer_permission` MCP tool. Its handler already consults the wrapper
+//                 and then replies with `foreignParkMessage` for an id nobody holds; that
+//                 reply IS the reach, and it settles nothing.
+//   · `wrapper` — a Bash `curl` POST to `/api/1.0/sessions/<sid>/answer`. The permission
+//                 classifier gates the COMMAND, so a denied command never reaches the
+//                 wrapper and produces no status at all — which is exactly the origin case.
+//                 `scripts/answer-reach.py` writes this leg only on a 409/404.
+//
+// ⚠️ **One file per (session, leg), never one file per session.** The two legs are written by
+// two different processes — the server and a shell command — and a single `<session>.json`
+// would be a lost-update race: whichever wrote second would silently erase the other's leg,
+// and the probe would then refuse a manager that had in fact reached both routes. The cost is
+// a suffix on the filename; the alternative is a false refusal.
+//
+// ⚠️ **A reach is not a delivery.** It says the command shape reached the route and was
+// refused there, not that a real answer was allowed — a permission rule can treat a sentinel
+// `request_id` differently from a live one. The real-delivery half of the criterion reads
+// `permissions.jsonl` and the session ledger instead; see the task file.
+//
+// ⚠️ **The two legs are keyed on two different resolutions of "this session", and they can
+// disagree.** The `mcp` leg uses `parentSessionId()` — the nearest registered ancestor of the
+// server process — because that is what the spawn gate itself uses, so the record and the
+// gate cannot disagree. The `wrapper` leg uses the manager's own `$CLAUDE_CODE_SESSION_ID`,
+// because a shell command has nothing else to go on. Measured 2026-09-22 across 42 live
+// servers those two agreed in 41. ⚠️ **The disagreement fails CLOSED**: the probe reads one id
+// and finds at most one leg, so a manager in the 1-in-42 case is refused rather than wrongly
+// certified. That is the right direction, but it is why the two legs are reported separately
+// in the probe's `detail` — a reader has to be able to see which one is missing.
+//
+// ⚠️ **This is not a second counter of the loop's liveness.** `manager-liveness.py` answers
+// "is this subject's manager loop alive?" from the marker it writes at every re-arm. This
+// answers a different question — "did an answer command reach a route?" — and the probe
+// requires BOTH, additively: a session whose loop reads STOPPED, STALE or UNARMED is refused
+// even when both legs are fresh. Writing a reach is also not a heartbeat: nothing refreshes
+// it on a timer, so it ages out on its own.
+
+import { mkdir, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+
+/** The two answer routes a manager can take. Order is the probe's report order. */
+export const LEGS = ['mcp', 'wrapper']
+
+/**
+ * The file a (session, leg) reach lives in. Exported so the probe's tests and any reader
+ * resolve the same name rather than re-deriving the suffix.
+ *
+ * ⚠️ The id is joined into a path, so it must be a bare filename — `recordReach` refuses
+ * anything else. The Python sibling (`scripts/answer-reach.py`) carries the same guard, and
+ * the two must not disagree about which ids are writable: a reader that accepted `../x` while
+ * the writer refused it would produce a permanent `absent` leg nobody could explain.
+ */
+export function reachPath(dir, sessionId, leg) {
+  return join(dir, `${sessionId}.${leg}.json`)
+}
+
+/** True when the id is safe to join into a path — one filename, no traversal. */
+export function isBareSessionId(sessionId) {
+  return (
+    typeof sessionId === 'string' &&
+    sessionId !== '' &&
+    sessionId !== '.' &&
+    sessionId !== '..' &&
+    !sessionId.includes('/') &&
+    !sessionId.includes('\\') &&
+    !sessionId.includes('\x00')
+  )
+}
+
+/**
+ * Write one reach record. Returns `{ written, reason }` and never throws: every caller is on
+ * a path that must answer a request, and a state-write failure must not turn a refusal
+ * message into a crash.
+ *
+ * ⚠️ A null `sessionId` writes nothing, and that is correct rather than a bug to work around.
+ * `parentSessionId()` returns null when no ancestor of this server is a registered session
+ * (`server/ledger.mjs`), and the spawn gate already refuses a null session id because it
+ * cannot name the session. A reach keyed on a null id could never be read back, so fabricating
+ * one would only manufacture evidence for a check that has already refused.
+ *
+ * ⚠️ **Threat model: a reach is evidence, not proof.** These are plain files under the user's
+ * own state directory with no signature and no ownership check, so any process running as the
+ * same user can write both legs and certify itself. That is the correct bar for what this
+ * answers — "did this manager do the work?" — and it is deliberately not a security boundary:
+ * the thing it gates is a spawn decision this same user could already make by hand. Say it
+ * here so nobody later reads a green probe as proof that a session could deliver.
+ */
+export async function recordReach({
+  dir,
+  sessionId,
+  leg,
+  outcome,
+  now = () => new Date(),
+  write = writeFile,
+  mkdirp = mkdir,
+}) {
+  if (typeof sessionId !== 'string' || !sessionId) {
+    return { written: false, reason: 'no session id — a reach keyed on nothing could never be read back' }
+  }
+  if (!isBareSessionId(sessionId)) {
+    return { written: false, reason: `session id ${JSON.stringify(sessionId)} is not a bare filename — refusing to join it into a path` }
+  }
+  if (!LEGS.includes(leg)) {
+    return { written: false, reason: `unknown leg ${JSON.stringify(leg)} — expected one of ${LEGS.join(', ')}` }
+  }
+  const record = { session_id: sessionId, leg, ts: now().toISOString(), outcome: outcome ?? null }
+  try {
+    await mkdirp(dir, { recursive: true })
+    await write(reachPath(dir, sessionId, leg), `${JSON.stringify(record)}\n`, 'utf8')
+  } catch (err) {
+    return { written: false, reason: `could not write ${leg} reach: ${err.message}` }
+  }
+  return { written: true, record }
+}
