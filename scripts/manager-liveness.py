@@ -66,6 +66,16 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
                                     that history exists. The p90 absorbs an ordinary
                                     slow tick; the cap stops one historic stop from
                                     inflating the limit for ever.
+                                    A CONDITIONAL FLOOR applies while the window still
+                                    holds a gap armed under a shorter interval: the
+                                    period is then floored at the declared one, so a
+                                    manager that LENGTHENS its interval is not reported
+                                    on its first healthy tick at the new cadence. It
+                                    switches off once a completed gap at the declared
+                                    interval comes in under half of it — the DISPROOF
+                                    that the manager really ticks at a shorter cadence
+                                    (goal--deploy-and-merge-gates declares 3600 and
+                                    ticks at ~900; a bare floor would hide its lapse).
                                     A re-arm after a stand-down resets the history,
                                     so an outage gap never counts as cadence.
                                     Prints one line per subject that TURNED stale (or
@@ -85,6 +95,23 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
                                     ack. One lapse still notifies once, not on every
                                     poll — "once" now means once *delivered*, not once
                                     *detected*.
+  --stood-down-past MINUTES        every subject whose <slug>.stopped marker is older
+                                    than MINUTES, as `<age-seconds>\t<slug>`, oldest
+                                    first. The selection half of the stood-down-manager
+                                    close: `--stop` writes that marker and `--arm`
+                                    clears it, so the path and the timestamp format
+                                    have one owner and a caller never re-derives them.
+                                    ⚠️ The marker outlives the session it describes —
+                                    measured 2026-11-09: 83 markers, 41 on pages still
+                                    holding a `claude_session_id`, only 2 of them LIVE —
+                                    so the caller must still join this to session
+                                    liveness and to the page before acting.
+                                    ⚠️ SLEEPING cannot appear: a sleep writes
+                                    <slug>.sleeping, so a date-gated manager is excluded
+                                    structurally rather than by a filter a caller must
+                                    remember. Exit 0 whenever the scan completed (an
+                                    empty list is a real answer); exit 2 when the state
+                                    dir cannot be read, never 0 on a failed scan.
   --delivered SLUG                 ACK a lapse: move SLUG from the owed set to the
                                     delivered set. Called by the sender after the
                                     transport returns success. Carries the CROSSING
@@ -238,13 +265,56 @@ def write_atomic(p: str, text: str) -> None:
     os.replace(tmp, p)
 
 
-def read_arms(s: str) -> list:
+def parse_arm_lines(text: str) -> list:
+    """(epoch, declared interval or None) per line of a `<slug>.arms` ring.
+
+    Two formats are on disk and both keep working: the original single column, and
+    `<epoch> <interval>` written since per-arm recording. A line carrying no interval
+    is LEGACY and reads as None rather than a guess — a guessed value would either
+    floor a subject that never lengthened its interval or hide a real lapse.
+    """
+    out = []
+    for line in text.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        try:
+            epoch = float(parts[0])
+        except ValueError:
+            continue
+        interval = None
+        if len(parts) > 1:
+            try:
+                interval = int(float(parts[1]))
+            except ValueError:
+                interval = None
+        out.append((epoch, interval))
+    return out
+
+
+def read_arm_pairs(s: str) -> list:
+    """(epoch, interval-or-None) pairs from the subject's `<slug>.arms` ring."""
     p, _ = resolve(s, "arms")
     try:
         with open(p, encoding="utf-8") as fh:
-            return [float(x) for x in fh.read().split()]
-    except (OSError, ValueError):
+            return parse_arm_lines(fh.read())
+    except OSError:
         return []
+
+
+def read_arms(s: str) -> list:
+    """Epochs only — the shape `observed_gaps` and `manager-receipt.py` consume."""
+    return [epoch for epoch, _ in read_arm_pairs(s)]
+
+
+def declared_interval(s: str):
+    """The interval the manager last reported to `--arm`, or None when unreadable."""
+    p, _ = resolve(s, "cadence")
+    try:
+        with open(p, encoding="utf-8") as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return None
 
 
 def observed_gaps(s: str):
@@ -285,6 +355,39 @@ def percentile(xs, p: float):
     return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
 
 
+def period_floor_applies(spans, declared: int) -> bool:
+    """Whether the CONDITIONAL FLOOR applies to this window — see `observed_period`.
+
+    `spans` is (gap seconds, interval recorded on the arm that started it). The floor
+    needs both a RISE and the absence of a DISPROOF:
+
+      - **Rise, recorded** — some gap was armed under a recorded interval SHORTER than
+        the one declared now. This is the precise case and it catches a transition on
+        its first tick, when only one arm carries the new interval.
+      - **Rise, by gap** — the window's p75 gap already reaches half the declared
+        interval. A LEGACY window carries no interval at all, so the recorded test
+        cannot see anything in it: every one of the 118 `.arms` files on this machine
+        is single-column today, and without this limb the floor could not fire on the
+        subject that motivated it. The p75 is what separates the two shapes — on the
+        measured histories the right-skewed subject's p75 is 3642 s against a declared
+        3600, while `goal--deploy-and-merge-gates` (declared 3600, really ticking at
+        ~900) has a p75 of 994 s, and one historic stop cannot lift a p75 the way it
+        lifts a max.
+      - **Disproof** — a completed gap armed under the declared interval that came in
+        under half of it. That proves the manager does not actually tick at the
+        interval it declares, so the floor would only hide a lapse.
+
+    A manager ticking steadily at the interval it declares is unaffected either way:
+    its p75 is about `declared`, so the floored period and the uncapped one agree.
+    """
+    recorded_rise = any(iv is not None and iv < declared for _, iv in spans)
+    gaps = sorted(gap for gap, _ in spans)
+    gap_rise = percentile(gaps, 0.75) >= declared / 2
+    if not (recorded_rise or gap_rise):
+        return False
+    return not any(iv == declared and gap < declared / 2 for gap, iv in spans)
+
+
 def observed_period(s: str):
     """The p90 arm-to-arm gap, capped at PERIOD_CAP x the median; None without history.
 
@@ -296,11 +399,34 @@ def observed_period(s: str):
     The UNCAPPED p90 is the other failure: one historic stop stays in the retained
     window, so a subject that once sat down for hours would keep a limit ~13x its own
     median for ever. The cap bounds that while leaving the p90 to absorb jitter.
+
+    The CONDITIONAL FLOOR covers the third failure. A manager that LENGTHENS its
+    interval (900 s -> 3600 s) keeps the old short gaps in its 12-arm window, so the
+    cap is taken from a cadence it no longer runs and the limit lands BELOW the
+    interval it just declared — every healthy tick then reads STALE until the window
+    rolls. While `period_floor_applies()` holds, the period is floored at the declared
+    interval and the cap base is `max(median, declared)`.
+
+    It is conditional, and both conditions are load-bearing. Without the rise test the
+    floor would lift `goal--deploy-and-merge-gates-become-standing-allow-rules` — which
+    declares 3600 and really ticks at ~900 — from a 1740 s limit to 3780 s and hide its
+    lapse for an hour. Without the DISPROOF test a rise followed by a manager that
+    keeps ticking at the old cadence would stay floored for the eleven ticks it takes
+    the old gaps to age out. Together they bound the floor to the transition itself.
     """
-    gaps = observed_gaps(s)
-    if gaps is None:
+    pairs = read_arm_pairs(s)[-ARMS_KEEP:]
+    if len(pairs) < 4:
         return None
-    return min(percentile(gaps, 0.90), PERIOD_CAP * median(gaps))
+    spans = [(b[0] - a[0], a[1]) for a, b in zip(pairs, pairs[1:])]
+    if len(spans) < 3:
+        return None
+    gaps = sorted(gap for gap, _ in spans)
+    p90 = percentile(gaps, 0.90)
+    med = median(gaps)
+    declared = declared_interval(s)
+    if declared and period_floor_applies(spans, declared):
+        return max(declared, min(p90, PERIOD_CAP * max(med, declared)))
+    return min(p90, PERIOD_CAP * med)
 
 
 # ⚠️ `stopped` is NOT here, and its absence is the fix this list is part of. Migration
@@ -702,11 +828,19 @@ def arm(subject: str, branch: str, interval: int, resume: bool = False) -> int:
     # it. Consumed, not merely read: the SECOND arm after a stop must keep its history,
     # or `observed_period` would never return and every subject would sit on its
     # reported interval for ever.
+    # The ring is rebuilt from (epoch, interval) PAIRS, never from `read_arms()`: that
+    # returns epochs only, so rebuilding from it would strip every earlier line's
+    # interval and the conditional floor in `observed_period()` could never fire on a
+    # live subject. A legacy line keeps its single-column shape — inventing an interval
+    # for it would floor a subject that never lengthened anything.
     reset_path, _ = resolve(s, "reset")
     has_reset = os.path.exists(reset_path)
-    prior = [] if has_reset else read_arms(s)
-    arms = (prior + [time.time()])[-ARMS_KEEP:]
-    write_atomic(path(s, "arms"), "".join(f"{v:.0f}\n" for v in arms))
+    prior = [] if has_reset else read_arm_pairs(s)
+    arms = (prior + [(time.time(), interval)])[-ARMS_KEEP:]
+    write_atomic(path(s, "arms"), "".join(
+        f"{epoch:.0f}\n" if iv is None else f"{epoch:.0f} {iv}\n"
+        for epoch, iv in arms
+    ))
     # BEFORE the reset is consumed, so a pre-split `.reset` is migrated (and reported)
     # rather than silently deleted by the consumption a line below.
     migrate_legacy(subject, s)
@@ -741,6 +875,59 @@ def stop(subject: str, branch: str) -> int:
     write_atomic(path(s, "reset"), f"{time.time():.0f}\n")
     migrate_legacy(subject, s)
     print(f"stopped {s}")
+    return 0
+
+
+def stood_down_past(minutes: float, now: float | None = None) -> int:
+    """Every subject whose stand-down is older than MINUTES: `<age-seconds>\\t<slug>`.
+
+    The selection half of the stood-down-manager close. `--stop` writes the marker and
+    `--arm` clears it, so this script already owns both the path and the timestamp
+    format; a caller that globbed the state dir itself would re-derive both, and drift
+    the moment either changed.
+
+    ⚠️ **The marker's existence is not the population.** Measured 2026-11-09: 83
+    `<slug>.stopped` markers in the state dir, 41 of them on pages still carrying a
+    `claude_session_id`, and only **2** whose session the registry read LIVE — the
+    marker outlives the session it describes. This verb answers "how long has this
+    subject read STOPPED", which is the half the close leg needs; the caller must still
+    join it to session liveness and to the page before acting.
+
+    ⚠️ **`SLEEPING` never appears here, and that is the point.** A sleep writes
+    `<slug>.sleeping`, not `<slug>.stopped`, so a date-gated manager cannot be selected
+    however long it waits — the exclusion is structural, not a filter a caller must
+    remember to apply.
+
+    Order: oldest first, so a leg that acts on a prefix acts on the longest-standing
+    stand-downs. Exit 0 whenever the scan completed — an empty list is a real answer.
+    Exit 2 when the state dir cannot be read; never 0 on a failed scan.
+    """
+    now = time.time() if now is None else now
+    bound = minutes * 60
+    try:
+        names = os.listdir(STATE_DIR)
+    except OSError as e:
+        print(f"state dir unreadable: {e}", file=sys.stderr)
+        return 2
+    rows = []
+    for name in names:
+        if not name.endswith(".stopped"):
+            continue
+        s = name[: -len(".stopped")]
+        try:
+            with open(os.path.join(STATE_DIR, name), encoding="utf-8") as fh:
+                text = fh.read().strip()
+            when = datetime.strptime(text, "%Y-%m-%dT%H:%M:%S%z").timestamp()
+        except (OSError, ValueError):
+            # An unreadable marker is not a close candidate: report it, never guess an age.
+            print(f"unreadable stopped marker: {name}", file=sys.stderr)
+            continue
+        age = now - when
+        if age > bound:
+            rows.append((age, s))
+    rows.sort(reverse=True)
+    for age, s in rows:
+        print(f"{int(age)}\t{s}")
     return 0
 
 
@@ -869,6 +1056,16 @@ def main() -> int:
     mode.add_argument("--stop", action="store_true", help="mark a deliberate stand-down")
     mode.add_argument("--check", action="store_true", help="report subjects that turned stale")
     mode.add_argument(
+        "--stood-down-past",
+        metavar="MINUTES",
+        type=float,
+        help="every subject whose <slug>.stopped marker is older than MINUTES -> "
+             "`<age-seconds>\\t<slug>`, oldest first. The selection half of the "
+             "stood-down-manager close; a sleep writes .sleeping, so SLEEPING is "
+             "excluded structurally. Exit 0 whenever the scan completed, 2 when the "
+             "state dir cannot be read",
+    )
+    mode.add_argument(
         "--sleep",
         action="store_true",
         help="record a sleep until --until (a date-gated subject, waiting on its own clock)",
@@ -926,6 +1123,10 @@ def main() -> int:
         print("--topic is deprecated; use --subject", file=sys.stderr)
     elif a.topic_alias and a.subject and a.topic_alias != a.subject:
         ap.error("--topic and --subject disagree")
+    if a.stood_down_past is not None:
+        if a.stood_down_past <= 0:
+            ap.error("--stood-down-past needs MINUTES > 0")
+        return stood_down_past(a.stood_down_past)
     if a.check:
         return check()
     if a.delivered:
