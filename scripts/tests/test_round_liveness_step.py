@@ -2,7 +2,8 @@
 """Tests for the shipped `case "$STATE"` block in commands/steps/round-liveness.md.
 
 That block decides, every round, whether a manager arms its liveness record. An arm is not
-read-only: `--arm` clears `.stopped` and `.sleeping` and rewrites the cadence history. So the
+read-only: `--arm` clears `.sleeping` and rewrites the cadence history (it no longer clears
+`.stopped` — a round's reading must never resume a stand-down). So the
 block arms on an allow-list and must never arm on a misread of the subject:
 
   * an EMPTY `STATE` — `manager-liveness.py --state` refused an unresolvable subject (exit 3,
