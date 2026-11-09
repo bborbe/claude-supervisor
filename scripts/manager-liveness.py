@@ -266,12 +266,18 @@ def write_atomic(p: str, text: str) -> None:
 
 
 def parse_arm_lines(text: str) -> list:
-    """(epoch, declared interval or None) per line of a `<slug>.arms` ring.
+    """(epoch, declared interval or None, is_tail) per line of a `<slug>.arms` ring.
 
-    Two formats are on disk and both keep working: the original single column, and
-    `<epoch> <interval>` written since per-arm recording. A line carrying no interval
-    is LEGACY and reads as None rather than a guess — a guessed value would either
-    floor a subject that never lengthened its interval or hide a real lapse.
+    Three formats are on disk and all keep working: the original single column, the
+    `<epoch> <interval>` written since per-arm recording, and `<epoch> <interval> tail`
+    written by the round's closing beat. A line carrying no interval is LEGACY and
+    reads as None rather than a guess — a guessed value would either floor a subject
+    that never lengthened its interval or hide a real lapse.
+
+    `is_tail` is what lets `observed_period` measure ROUND-to-round. A tail beat is the
+    same round's closing write, so the gap ending on one is intra-round and must stay
+    out of the period. The two cannot be told apart by gap size — a tail sits wherever
+    the round happened to end — so the marker is the only honest discriminator.
     """
     out = []
     for line in text.splitlines():
@@ -288,7 +294,7 @@ def parse_arm_lines(text: str) -> list:
                 interval = int(float(parts[1]))
             except ValueError:
                 interval = None
-        out.append((epoch, interval))
+        out.append((epoch, interval, len(parts) > 2 and parts[2] == "tail"))
     return out
 
 
@@ -304,7 +310,7 @@ def read_arm_pairs(s: str) -> list:
 
 def read_arms(s: str) -> list:
     """Epochs only — the shape `observed_gaps` and `manager-receipt.py` consume."""
-    return [epoch for epoch, _ in read_arm_pairs(s)]
+    return [epoch for epoch, _, _ in read_arm_pairs(s)]
 
 
 def declared_interval(s: str):
@@ -389,7 +395,10 @@ def period_floor_applies(spans, declared: int) -> bool:
 
 
 def observed_period(s: str):
-    """The p90 arm-to-arm gap, capped at PERIOD_CAP x the median; None without history.
+    """The p90 ROUND-to-round gap, capped at PERIOD_CAP x the median; None without history.
+
+    Head beats only: a tail beat is the same round's closing write, and counting it
+    would make the population bimodal (see the filter below).
 
     The MEDIAN alone is what a healthy tick costs, so a limit built from it fires on
     every ordinary slow tick: measured 2026-10-20 over the retained `.arms` history,
@@ -414,9 +423,23 @@ def observed_period(s: str):
     keeps ticking at the old cadence would stay floored for the eleven ticks it takes
     the old gaps to age out. Together they bound the floor to the transition itself.
     """
-    pairs = read_arm_pairs(s)[-ARMS_KEEP:]
-    if len(pairs) < 4:
+    # ROUND-to-round, never beat-to-beat. Since the tail step a round writes a head
+    # beat and a closing tail beat, so the full population alternates `D` and `I-D`.
+    # The MEDIAN then collapses to the smaller of the two, which puts the 2.5x cap
+    # BELOW the round-to-round gap it has to cover. Measured on a 900 s interval with
+    # 120 s rounds: median 120, cap 300, p90 780 -> period 300, limit 480, against a
+    # 900 s gap — a false STALE on every quiet round, which is exactly the defect the
+    # tail beat exists to remove. A tail beat is the SAME round's closing write, so
+    # its gap is intra-round and stays out of the population entirely.
+    #
+    # A ring with too few heads returns None rather than falling back to the mixed
+    # population: None means "no observed cadence", and every caller then uses the
+    # DECLARED interval plus SLACK — the safe direction, and the honest answer for a
+    # ring that has not yet accumulated four complete rounds.
+    heads = [(e, iv) for e, iv, tail in read_arm_pairs(s)[-ARMS_KEEP:] if not tail]
+    if len(heads) < 4:
         return None
+    pairs = heads
     spans = [(b[0] - a[0], a[1]) for a, b in zip(pairs, pairs[1:])]
     if len(spans) < 3:
         return None
@@ -818,7 +841,8 @@ def sleep(subject: str, branch: str, until: str) -> int:
     return 0
 
 
-def arm(subject: str, branch: str, interval: int, resume: bool = False) -> int:
+def arm(subject: str, branch: str, interval: int, resume: bool = False,
+        beat: str = "head") -> int:
     """Record a re-arm. **Never** resumes a stood-down subject unless `resume` is set.
 
     ⚠️ **The arm does not touch `<slug>.stopped`, and that is the whole point.** An arm
@@ -845,10 +869,14 @@ def arm(subject: str, branch: str, interval: int, resume: bool = False) -> int:
     reset_path, _ = resolve(s, "reset")
     has_reset = os.path.exists(reset_path)
     prior = [] if has_reset else read_arm_pairs(s)
-    arms = (prior + [(time.time(), interval)])[-ARMS_KEEP:]
+    arms = (prior + [(time.time(), interval, beat)])[-ARMS_KEEP:]
+    # A tail marker survives the rebuild — dropping it would silently turn every tail
+    # beat into a head on the next arm, which is the period corruption this marker
+    # exists to prevent. A legacy line (no interval) keeps its single-column shape.
     write_atomic(path(s, "arms"), "".join(
-        f"{epoch:.0f}\n" if iv is None else f"{epoch:.0f} {iv}\n"
-        for epoch, iv in arms
+        f"{epoch:.0f}\n" if iv is None else
+        (f"{epoch:.0f} {iv}\n" if b != "tail" else f"{epoch:.0f} {iv} tail\n")
+        for epoch, iv, b in arms
     ))
     # BEFORE the reset is consumed, so a pre-split `.reset` is migrated (and reported)
     # rather than silently deleted by the consumption a line below.
@@ -1145,6 +1173,14 @@ def main() -> int:
         help="with --arm: ALSO clear a stand-down marker. The one verb that resumes a "
              "stood-down subject; a round's ordinary liveness arm must never pass it",
     )
+    ap.add_argument(
+        "--beat",
+        choices=("head", "tail"),
+        default="head",
+        help="with --arm: `head` (the default, the round's opening write) or `tail` "
+             "(the round's closing write). Only the period reads the marker: a tail "
+             "beat's gap is intra-round and is excluded from observed_period()",
+    )
     ap.add_argument("--interval", type=int, help="the ScheduleWakeup delay just armed, seconds")
     ap.add_argument(
         "--until",
@@ -1178,7 +1214,7 @@ def main() -> int:
     if a.arm:
         if not a.interval or a.interval <= 0:
             ap.error("--arm needs --interval > 0")
-        return arm(a.subject, a.branch, a.interval, resume=a.resume)
+        return arm(a.subject, a.branch, a.interval, resume=a.resume, beat=a.beat)
     if a.resume:
         # Resuming is an ARM, never a stop: the flag clears a marker, so silently
         # ignoring it on `--stop` would leave the operator believing they had resumed.
