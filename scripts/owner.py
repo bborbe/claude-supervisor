@@ -48,6 +48,7 @@ failed probe and never treats it as fine).
   loop INVALID                   cannot-tell  loop-invalid         a record exists and cannot be read
   loop UNREADABLE                cannot-tell  loop-unreadable      the loop probe itself failed
   loop UNARMED                   cannot-tell  loop-unarmed          nothing has ever armed it
+  loop WRONG-BRANCH              cannot-tell  loop-wrong-branch     the record lives on another tier
   session LIVE, loop OK/STALE    owner        live-armed           the definition
   session LIVE, loop not read    cannot-tell  loop-unread          a caller that named no subject
 ```
@@ -229,6 +230,11 @@ def verdict_of(session: str, loop: str) -> tuple:
         return CANNOT_TELL, "loop-unreadable"
     if loop == "UNARMED":
         return CANNOT_TELL, "loop-unarmed"
+    #    A record on ANOTHER tier is the same shape: the probe named the wrong branch, so this
+    #    subject's own loop is unknown. Its own reason, because a reader acting on "unreadable"
+    #    would go looking for a broken probe instead of a wrong `--branch`.
+    if loop == "WRONG-BRANCH":
+        return CANNOT_TELL, "loop-wrong-branch"
     # 9. THE DEFINITION.
     if session == "LIVE" and loop in ("OK", "STALE"):
         return OWNER, "live-armed"

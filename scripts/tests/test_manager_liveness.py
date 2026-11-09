@@ -861,6 +861,19 @@ class StateResolution(unittest.TestCase):
         # Control: the topic probe on the same name reads the armed record.
         self.assertEqual("OK", self.first_token("--subject", "Shared Name", "--branch", "topic"))
 
+    def test_a_page_on_the_probed_branch_wins_over_a_same_named_page_elsewhere(self):
+        # Both tiers hold a page under one name: a goal (armed, with a record) and a topic
+        # (never armed). Probing the TOPIC must read UNARMED -- the goal is a different
+        # subject that shares the name. A goal-first page test that reports WRONG-BRANCH here
+        # leaves the topic's loop unarmed forever.
+        open(os.path.join(self.vault.name, "24 Goals", "Twin Name.md"), "w").close()
+        os.makedirs(os.path.join(self.vault.name, "23 Topics"), exist_ok=True)
+        open(os.path.join(self.vault.name, "23 Topics", "Twin Name.md"), "w").close()
+        self.quiet(self.m.arm, "Twin Name", "goal", 900)
+        self.assertEqual("UNARMED", self.first_token("--subject", "Twin Name", "--branch", "topic"))
+        # Control: the goal probe still reads its own armed record.
+        self.assertEqual("OK", self.first_token("--subject", "Twin Name", "--branch", "goal"))
+
     def test_wrong_branch_names_every_other_branch_carrying_a_record(self):
         open(os.path.join(self.vault.name, "24 Goals", "Wide Goal.md"), "w").close()
         self.quiet(self.m.arm, "Wide Goal", "goal", 900)

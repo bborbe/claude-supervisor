@@ -62,7 +62,8 @@ class VerdictTableTest(unittest.TestCase):
         for loop, reason in (("SLEEPING", "loop-sleeping"),
                              ("UNARMED", "loop-unarmed"),
                              ("INVALID", "loop-invalid"),
-                             ("UNREADABLE", "loop-unreadable")):
+                             ("UNREADABLE", "loop-unreadable"),
+                             ("WRONG-BRANCH", "loop-wrong-branch")):
             self.assertEqual(("cannot-tell", reason),
                              self.o.verdict_of("LIVE", loop), loop)
 
@@ -475,6 +476,37 @@ class CadenceTest(unittest.TestCase):
         self.assertEqual(1, len(self.kwargs))
         self.assertIn("timeout", self.kwargs[0])
         self.assertEqual(self.k.PROBE_TIMEOUT, self.kwargs[0]["timeout"])
+
+    def test_the_vault_is_forwarded_to_the_probe(self):
+        """⚠️ `--state` answers `UNARMED` only once the subject's page resolves under `--vault`.
+
+        Without the flag the page test runs against THIS process's cwd, so a goal whose page
+        lives in another vault is refused as an unresolvable name instead of read as a
+        never-armed loop — the collapse this task exists to remove.
+        """
+        seen = self._capture_argv()
+        self.k.loop_state("A Goal", "goal", "/tmp/some-vault")
+        self.assertIn("--vault", seen[0])
+        self.assertEqual("/tmp/some-vault", seen[0][seen[0].index("--vault") + 1])
+
+    def test_no_vault_flag_when_the_caller_has_none(self):
+        seen = self._capture_argv()
+        self.k.loop_state("A Goal")
+        self.assertNotIn("--vault", seen[0])
+
+    def _capture_argv(self):
+        seen = []
+
+        class R:
+            returncode = 0
+            stdout, stderr = "UNARMED\tslug\tno cadence file under either name\n", ""
+
+        def run(argv, *a, **kw):
+            seen.append(list(argv))
+            return R()
+
+        self.k.subprocess = self._namespace(run)
+        return seen
 
     def test_an_unrunnable_cadence_probe_does_not_raise(self):
         # Without the guard a missing interpreter aborts the whole tick with a traceback.

@@ -305,21 +305,35 @@ def record_branches(subject: str) -> list:
     ]
 
 
-def page_kind(subject: str, vault: str):
-    """`goal` / `topic` when `<vault>/<page dir>/<subject>.md` exists (exact name, any case), else None.
+def page_kinds(subject: str, vault: str) -> set:
+    """EVERY tier with a `<vault>/<page dir>/<subject>.md` (exact name, any case).
 
     Exact basename, never a substring — `docs/subject-resolution.md` § The page test: a
     topic's member goals are named after it, so a wildcard resolves one label in both
     folders. Case-insensitive for the same reason that doc uses `-iname`.
+
+    ⚠️ **A SET, not the first match.** Goal and topic pages are named independently, so one
+    name routinely has a page in both folders — and the tier question below is "does THIS
+    subject exist on the branch I probed", which a goal-first first-match cannot answer.
     """
     root = os.path.abspath(os.path.expanduser(vault))
     want = subject.lower() + ".md"
+    found = set()
     for kind, folder in PAGE_DIRS:
         try:
             if any(e.lower() == want for e in os.listdir(os.path.join(root, folder))):
-                return kind
+                found.add(kind)
         except OSError:
             continue
+    return found
+
+
+def page_kind(subject: str, vault: str):
+    """The first tier `page_kinds` reports, in `PAGE_DIRS` order — or None."""
+    kinds = page_kinds(subject, vault)
+    for kind, _ in PAGE_DIRS:
+        if kind in kinds:
+            return kind
     return None
 
 
@@ -349,16 +363,21 @@ def state(subject: str, branch, vault: str, now: float) -> int:
     s = slug(subject, branch)
     st, detail = classify(s, now)
     if st == "UNARMED" and branch != "fleet":
-        kind = page_kind(subject, vault)
+        kinds = page_kinds(subject, vault)
         elsewhere = [b for b in record_branches(subject) if b != branch]
-        # The subject's own tier, when it has one; with no page, the record itself is the tier.
-        tier = kind or (elsewhere[0] if elsewhere else None)
+        # ⚠️ **A page ON THE PROBED BRANCH settles it: the subject exists here and was never
+        # armed.** Another tier holding a same-named page AND a record is a DIFFERENT subject
+        # that happens to share the name — reporting WRONG-BRANCH for it would leave this
+        # one's loop unarmed forever, which is the failure the tier check exists to prevent.
+        if branch in kinds:
+            elsewhere = []
+        tier = (sorted(kinds - {branch}) or elsewhere or [None])[0]
         if elsewhere and tier in elsewhere:
             st, detail = "WRONG-BRANCH", f"record is on branch {tier}" + (
                 f" (also {', '.join(b for b in elsewhere if b != tier)})"
                 if len(elsewhere) > 1 else ""
             )
-        elif kind is None and not elsewhere:
+        elif not kinds and not elsewhere:
             root = os.path.abspath(os.path.expanduser(vault))
             print(
                 f"manager-liveness: --state refused: {subject!r} resolves no record under any "
