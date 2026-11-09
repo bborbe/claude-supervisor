@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.261.0
 
 - feat: **Fleet keep-alive closes a stood-down manager past its bound.** `/supervisor:stop` keeps
   its session by design and nothing closed it, so a stood-down manager held a fleet slot, a
