@@ -396,8 +396,14 @@ def page_path(vault: str, subject: str, branch: str = "goal", directory: str = "
 
     ⚠️ **Exact basename, as `docs/subject-resolution.md` requires:** two subjects may differ only
     in punctuation, and a prefix match would read one goal's manager as another's.
+
+    ⚠️ **`fleet` has no subject page, and returns none.** The fleet manager manages no page
+    (`scripts/fleet-register.py`), so falling back to the goal folders for that branch would
+    resolve a GOAL page as if it were the fleet's subject.
     """
-    roots = [directory] if directory else list(SUBJECT_DIRS.get(branch, ("24 Goals",)))
+    if branch not in SUBJECT_DIRS:
+        return ""
+    roots = [directory] if directory else list(SUBJECT_DIRS[branch])
     for root in roots:
         base = os.path.join(vault, root)
         try:
