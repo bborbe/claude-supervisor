@@ -53,7 +53,7 @@ them — it prints the count it was told to, not the one it measured.
 
 ## Router
 
-Read a step file only when its **When** holds; re-read it if its text is not in context (e.g. after a compaction).
+Read a step file only when its **When** holds; re-read it if its text is not in context (e.g. after a compaction) **or its content changed** — `steps/rules.md` § Re-read the router.
 
 | # | Step | When | File |
 |---|---|---|---|
@@ -82,7 +82,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 19 | Round tail | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/fleet-round-tail.md` |
 | 20 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
 
-⚠️ **The table is read more than once per round, and the later reads are the ones that get skipped.** Re-read it once the sweep hand-back exists, and again before the output shape renders, honouring every row whose `When` has newly become decidable **and that has not run this round**. Never re-run a leg — **each `every tick` row is once-per-round**, and a second sweep or drive leg duplicates sends. Full rule and measured case: `steps/rules.md` § Re-read the router.
+⚠️ **The table is read more than once per round, and the later reads are the ones that get skipped.** Re-read it once the sweep hand-back exists, and again before the output shape renders, honouring every row whose `When` has newly become decidable **and that has not run this round**. Never re-run a leg — **each `every tick` row is once-per-round**, and a second sweep or drive leg duplicates sends.
 
 ## INLINE — the hard rules
 
