@@ -219,17 +219,27 @@ SESSION_BOUND = (
 # (`times out ~18:40`) is NOT a clock observable — it dies with the watcher — so a bare
 # HH:MM never counts; only a `defer_date`, an ISO date, or an ISO datetime does.
 #
-# ⚠️ The datetime arm ends in a lookahead, never `\b`. A `Z` suffix is a WORD character,
-# so `\b` after the final digit can never match `2026-11-09T15:30Z` — the identical
-# digit/word-character boundary bug the date-only arm carried, one form over.
-# `(?![\w-])` rejects a trailing word run (`2026-11-09T15`, `2026-11-09T15:30abc`,
-# `2026-11-09123`) while permitting `Z`, an offset, and end-of-token.
+# ⚠️ Two boundary rules, each bought with a measured regression:
 #
-# The arm is a SHAPE-subset of `defer-date.py`'s `parse_defer_date`, not a range subset:
-# `2026-11-09T99:99` matches here and the parser calls it invalid. That looseness is
-# pre-existing on the date-only arm (`2026-13-45` already matched) and is deliberately
-# NOT tightened — a narrowing would newly block closers that pass today, and a
-# range-invalid clock is the writer's typo, not a reason to block a compliant closer.
+#  1. The terminator is `(?!\w)`, never `\b`. A `Z` suffix is a WORD character, so `\b`
+#     after the final digit can never match `2026-11-09T15:30Z`. `(?!\w)` also rejects
+#     every trailing word run (`2026-11-09T15`, `2026-11-09T15:30abc`, `2026-11-09123`).
+#  2. It must NOT include `-`. `\b` matched between `9` and `-`, so `(?![\w-])` newly
+#     blocked `2026-11-09-15:30` — which `datetime.fromisoformat` accepts, with `-` as
+#     the separator — and `2026-11-09-rollout`. A narrowing that blocks a compliant
+#     closer is the exact false positive this class exists to remove.
+#
+# The separators are `[Tt ]` and the suffix `[Zz]`, because `parse_defer_date` accepts
+# both cases: it rewrites a lowercase `z` to `+00:00`, and `fromisoformat` takes any
+# single separator character. Hours may stand alone (`2026-11-09T15`), which the parser
+# also accepts.
+#
+# The arm remains a SHAPE-subset of `defer-date.py`'s `parse_defer_date`, not a range
+# subset: `2026-11-09T99:99` matches here and the parser calls it invalid. That
+# looseness is pre-existing on the date-only arm (`2026-13-45` already matched) and is
+# deliberately NOT tightened — a narrowing would newly block closers that pass today,
+# and a range-invalid clock is the writer's typo, not a reason to block a compliant
+# closer.
 DURABLE = (
     ("file", re.compile(
         r"(?:^|[\s`(\"'])(?:~|\.{0,2})/[\w.-]+|\b[\w-]+\.(?:md|jsonl?|log|ya?ml|txt|out|csv)\b"
@@ -237,8 +247,8 @@ DURABLE = (
     ("card-id", re.compile(r"\b[0-9a-f]{32}\b", re.IGNORECASE)),
     ("clock", re.compile(
         r"\bdefer_date\b|\b\d{4}-\d{2}-\d{2}"
-        r"(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?"
-        r"(?![\w-])")),
+        r"(?:[Tt ]\d{2}(?::\d{2}(?::\d{2}(?:\.\d+)?)?)?(?:[Zz]|[+-]\d{2}:?\d{2})?)?"
+        r"(?!\w)")),
     ("external-probe", re.compile(
         r"\bPR\b|#\d+\b|\bCI\b|\bgh\s|\bkubectl\w*\b|https?://|\bpods?\b|\bcontainer\b"
         r"|\brelease\b|\btag\s+v\d|\bworkflow\b|\bdeploy(?:ment)?\b", re.IGNORECASE)),
