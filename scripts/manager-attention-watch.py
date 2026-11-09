@@ -675,6 +675,13 @@ def read_recent_tail(path, window_s, chunk=400_000, max_bytes=8_000_000):
     Returns the decoded text, or None when it cannot be read. A transcript with no
     parseable timestamp yields whatever one chunk held — the caller's count is then
     simply not fired, which is the fail-safe direction.
+
+    ⚠️ **Each chunk boundary splits one record in half**, because the join inserts a
+    newline where the file had none. Both halves fail to parse and are skipped, so
+    the cost is one unreadable record per chunk rather than a miscounted one — but a
+    caller must not read a boundary-adjacent record as absent. With a 400 KB chunk
+    that is at most `max_bytes / chunk` records, and only the abort records that
+    happen to straddle a boundary are lost.
     """
     try:
         size = os.path.getsize(path)
