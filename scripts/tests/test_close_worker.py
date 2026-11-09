@@ -813,7 +813,7 @@ class TestTabKill(unittest.TestCase):
         rc, runner, out = self._kill(_FakeJump(after), "238")
         self.assertEqual(rc, 1, out)
         self.assertEqual(runner.calls, [], "a reassigned id must never be killed")
-        self.assertIn("changed during the guards", out)
+        self.assertIn("changed before the kill", out)
         self.assertIn("pane 238 → 301", out)
 
     def test_pane_gone_refuses(self):

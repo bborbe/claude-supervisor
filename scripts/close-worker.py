@@ -450,13 +450,17 @@ def pane_for_session(jump, session_id):
 def tab_kill(jump, session_id, pane, runner=None):
     """Re-resolve the pane, then kill it. `0` on a close, `1` on a refusal.
 
-    ⚠️ **Re-resolve immediately before the kill.** `pane` was resolved before the guards,
-    which run a `git status`, a transcript read and a `grep` over every vault's task dirs.
-    A pane id is a lease, not an identifier: it is freed when its pane closes and reassigned
-    after a WezTerm mux restart, so the id can belong to a different session by the time
-    `kill-pane` runs. `kill-pane` refuses a *dead* pane; it does not refuse a *live* pane
-    that now belongs to someone else. Re-resolving narrows the window to the kill itself —
-    a different id, or none, means the lease expired and nothing may be signalled.
+    ⚠️ **Re-resolve immediately before the kill.** `pane` comes from a `wezterm cli list`
+    read taken inside `pane_for_session`, and `kill-pane` is a separate `wezterm`
+    invocation — it re-resolves the id in a new process. A pane id is a lease, not an
+    identifier: it is freed when its pane closes and reassigned after a WezTerm mux
+    restart, so an id that was correct for that read can belong to a different session by
+    the time the kill runs. The window is short — the guards run *before* the resolution
+    (see the note above the `pane = None` line), so it is the resolution itself plus a few
+    prints, not the guards — but it is not zero. `kill-pane` refuses a *dead* pane; it
+    does not refuse a *live* pane that now belongs to someone else. Re-resolving closes
+    the window: a different id, or none, means the lease expired and nothing may be
+    signalled.
 
     `runner` is a seam for the test only; production passes `subprocess.run`.
     """
@@ -468,7 +472,7 @@ def tab_kill(jump, session_id, pane, runner=None):
             else "a different pane holds it"
         )
         print(
-            f"❌ error: the pane for {session_id} changed during the guards "
+            f"❌ error: the pane for {session_id} changed before the kill "
             f"(pane {pane} → {fresh_pane}, {why}); nothing was signalled"
         )
         return 1
@@ -673,8 +677,9 @@ def main():
         # the guards, which take tens of seconds — a `git status`, a transcript read and a
         # `grep` over every vault's task dirs. A session that exits in that window can have
         # its pid recycled onto an unrelated process, and SIGTERM would land there. One file
-        # read narrows the window to the signal itself. The tab path below needs the same
-        # re-check and has one: it re-resolves the pane and refuses a changed id.
+        # read narrows the window to the signal itself. The tab path below resolves its pane
+        # *after* the guards, so its window is narrower — but `kill-pane` is a separate
+        # wezterm call that re-resolves the id, so it re-resolves too and refuses a change.
         try:
             with open(path, encoding="utf-8") as handle:
                 fresh = json.load(handle)
