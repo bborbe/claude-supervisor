@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.260.3
 
 - fix: **the task lookup answers from the worker's own vault before scanning every vault, so a loaded host no longer reports `task-unresolved` for a session that has an anchor.** `find_task` ran one `grep -rl` over every candidate task directory — 29 of them on this machine — with a 15 s timeout, and `except Exception: return None` turned a timeout into the same answer as "no page carries this session id". Measured 2026-11-09 on the idle headless population: the full scan exceeded 15.0 s, and the *same* session flipped between `would close` and `task-unresolved` across runs minutes apart; re-running the enumeration after the fix moved the eligible set from a flaky 10–12 to **20**. The scan is now two passes — the directories at or above the worker's cwd first (the common case: a worker whose cwd is its vault answers in under a second), every other known vault only when that misses — and `claude_session_id` still beats a `metrics_sessions` membership across both passes, so a handed-off page in the cwd vault cannot outrank the session's own anchor in another. Change set: `scripts/close-worker.py`, `scripts/tests/test_close_worker.py`, `CHANGELOG.md`.
 
