@@ -60,10 +60,14 @@ When: every round, before the pre-dispatch gate
 
 ## A second beat at the tail
 
-`commands/steps/round-tail.md` step 9 re-runs the block above as the tick's **last** write, so a round that outruns `period + SLACK` does not reach its own end already reading `STALE` — the reading that made a live, working manager look lapsed to every session checking `--state` mid-round.
+**Run the block above a SECOND time as the tick's last write.** The head arm is what keeps a by-hand round that stops at the pre-dispatch gate from going unrecorded; this second run is what stops a round that outruns `period + SLACK` from reaching its own end already reading `STALE` — the reading that made a live, working manager look lapsed to every session checking `--state` mid-round.
 
-⚠️ **The `ScheduleWakeup` one-shot rule does not forbid it.** `commands/steps/round-tail.md` step 7 says *"do not re-arm here"*, and that is the **wakeup**. This is the liveness **record**, which the paragraph above already separates (*"two files, two jobs"*); step 7 now says which one it means so the next reader does not read step 9 as a violation.
+⚠️ **After `commands/steps/round-tail.md` step 8's receipt check, never before it.** That check is what proves the round ran its legs; a beat written ahead of it would make a skipped leg invisible.
 
-⚠️ **Same allow-list, same arguments, no `--resume`.** A `SLEEPING` subject is the one that bites: a date-gated manager is *supposed* to have an ageing cadence, so an unconditional arm looks like the ordinary write and silently cancels the sleep the round just armed.
+⚠️ **Same allow-list, same arguments, no `--resume`.** Only `OK` / `STALE` / `UNARMED` / `INVALID` arm; `STOPPED`, `SLEEPING`, `WRONG-BRANCH` and an empty `STATE` do not. A `SLEEPING` subject is the one that bites: a date-gated manager is *supposed* to have an ageing cadence, so an unconditional arm looks like the ordinary write and silently cancels the sleep the round just armed.
+
+⚠️ **It is a liveness RECORD, not the `ScheduleWakeup` arm.** `commands/steps/round-tail.md` step 7 says *"do not re-arm here"*, and that is the **wakeup**, one-shot per call. The paragraph above already separates the two (*"two files, two jobs"*).
+
+⚠️ **Why the instruction lives here rather than in the tail step.** `commands/steps/round-tail.md` carries 30717 bytes against a 30720 body budget, and `commands/goal-drive.md` / `commands/topic-drive.md` sit at their strict 10240 tick cap — so neither a ninth item there nor a router row for a new step file had room without raising a budget or deleting an existing rule. This file is read every round at row 0a, and that is where the second run has to be remembered from.
 
 ⚠️ **What it costs, stated rather than implied.** Two beats per round split each round gap into `D` (head→tail) and `I−D` (tail→next head), so the `.arms` population becomes `[D, I−D, …]` and `observed_period()`'s p90 rises toward `max(D, I−D)`. The staleness limit therefore **grows with the round**: the false `STALE` is removed by re-measuring the cadence, not by shortening the gap. A round longer than the limit still reads `STALE` **during** it — only the post-round reading is fixed. A mid-round beat would shorten the gap instead; that is a different change and is not made here.
