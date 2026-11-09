@@ -874,11 +874,16 @@ def rearm_shape(artifact: str, started: float, now: float) -> bool:
     `manager-liveness.py:345` at the first arm after a stand-down, would pass an
     existence test and prove nothing about THIS round. The newest epoch must fall inside
     it — the same rule `watcher_shape` applies to its own log.
+
+    ⚠️ Parsed through `manager-liveness.parse_arm_lines`, never `fh.read().split()`.
+    Each line carries `<epoch> <interval>` now, and a flat split puts the interval on
+    the epoch list — where a small number lands inside a narrow window and reports an
+    arm that never happened. This file asks only *when*, so it wants the epochs.
     """
     try:
         with open(artifact, encoding="utf-8") as fh:
-            vals = [float(x) for x in fh.read().split()]
-    except (OSError, ValueError):
+            vals = [epoch for epoch, _ in liveness().parse_arm_lines(fh.read())]
+    except OSError:
         return False
     # The ring stores WHOLE seconds, so both bounds are floored to that resolution: an arm
     # stamped in the same wall-clock second as `round_started_at` can round *below* it, and

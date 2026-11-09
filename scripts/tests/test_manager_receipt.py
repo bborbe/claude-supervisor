@@ -1786,5 +1786,49 @@ class KeepAliveVerdicts(unittest.TestCase):
                 self.assertEqual(self.check(), (0, ""))
 
 
+class RearmShapeReadsEpochsOnly(unittest.TestCase):
+    """SC3 — `rearm_shape` reads epochs, never the interval column.
+
+    `manager-liveness.py --arm` writes `<epoch> <interval>` per line now, because the
+    conditional floor that keeps a lengthened interval from reading STALE needs the
+    interval each gap was armed under. `rearm_shape` only asks whether an arm landed
+    inside the round window, so it must go through the shared epoch reader: the old
+    `fh.read().split()` put the interval on the epoch list, and any small interval
+    falls inside a narrow window and reports an arm that never happened.
+
+    The shape that discriminates: `started=0, now=4000` against a line carrying a real
+    wall-clock epoch — the interval 3600 sits inside `[0, 4001]`, the epoch does not.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.live = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name, self.live.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        self.live.cleanup()
+        os.environ.pop("MANAGER_RECEIPT_STATE_DIR", None)
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def arms(self, text):
+        p = os.path.join(self.live.name, "fleet--fleet-manager.arms")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return p
+
+    def test_an_interval_is_not_read_as_an_epoch(self):
+        p = self.arms("1794141605 3600\n")
+        self.assertFalse(self.m.rearm_shape(p, 0, 4000))
+
+    def test_a_real_in_window_arm_is_still_found(self):
+        p = self.arms("1794141605 3600\n")
+        self.assertTrue(self.m.rearm_shape(p, 1794141600, 1794141700))
+
+    def test_a_legacy_single_column_ring_still_reads(self):
+        p = self.arms("1794141605\n")
+        self.assertTrue(self.m.rearm_shape(p, 1794141600, 1794141700))
+
+
 if __name__ == "__main__":
     unittest.main()
