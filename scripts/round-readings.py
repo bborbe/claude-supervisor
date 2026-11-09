@@ -612,19 +612,24 @@ def denial_still_blocks(sid, rec, attention_dir, now, projects_dir=None):
     return later_success(sid, tool, ts, projects_dir or PROJECTS_DIR) is not True
 
 
-def permission_channel_sid(session_ids, projects_dir):
+def permission_channel_sid(session_ids, projects_dir, now=None):
     """The first session id whose permission channel is dead, or None.
 
-    A row carries every id it ever ran under, so all of them are read: a stale id
-    with a clean channel must not mask a live one whose writes are aborting.
+    A row carries every id it ever ran under, so all of them are read — but only
+    those whose transcript is still FRESH (`PERM_CHANNEL_STALE_S`). ⚠️ **Without that
+    bound the carrier is a permanent false positive:** the channel window is anchored
+    on the transcript's own last stamp, so an id from a session that died with its
+    last 15 minutes full of aborts keeps matching forever, and pins a healthy live row
+    to `permission-channel`. Measured on this change's first review, 2026-11-09.
 
     ⚠️ **The RULE is not restated here.** `manager-attention-watch.py` owns the
-    window, the threshold and the reason string; this function only supplies the
-    wider read that rule needs and reports the id. A second copy would be a second
-    place for the window to drift — and the drift would be silent, because too short
-    a window reads as "no aborts" rather than as an error.
+    window, the threshold, the staleness bound and the reason string; this function
+    only supplies the wider read that rule needs and reports the id. A second copy
+    would be a second place for the window to drift — and the drift would be silent,
+    because too short a window reads as "no aborts" rather than as an error.
     """
     watch = _load("manager-attention-watch")
+    now = time.time() if now is None else now
     for sid in session_ids or []:
         if not sid or os.path.basename(sid) != sid:
             continue
@@ -637,6 +642,8 @@ def permission_channel_sid(session_ids, projects_dir):
             continue
         try:
             path = max(hits, key=os.path.getmtime)
+            if now - os.path.getmtime(path) > watch.PERM_CHANNEL_STALE_S:
+                continue
         except OSError:
             continue
         wide = watch.read_recent_tail(path, watch.PERM_CHANNEL_WINDOW_S)
@@ -688,7 +695,7 @@ def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=Non
         if denial_still_blocks(sid, rec, attention_dir, now, projects_dir):
             tool = rec.get("tool") or "a tool"
             return "denied", f"{tool} denied — {rec.get('reason') or 'no reason recorded'}"
-    dead = permission_channel_sid(session_ids, projects_dir or PROJECTS_DIR)
+    dead = permission_channel_sid(session_ids, projects_dir or PROJECTS_DIR, now)
     if dead:
         return "permission-channel", f"{dead[:8]} — permission channel aborting (Stream closed)"
     if feed == "gated":

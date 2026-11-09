@@ -253,6 +253,24 @@ PERM_FAILURE_MARK = "permission request failed"
 PERM_CHANNEL_WINDOW_S = 15 * 60
 PERM_CHANNEL_MIN = 3
 
+# How old a transcript may be before a caller stops reading it for the channel
+# cause. ⚠️ **This guards the ROUND's carrier, not the watcher's.**
+# `round-readings.py` walks every id a row ever ran under — `claude_session_id`
+# plus each `metrics_sessions` entry — and an id from a session that died months
+# ago keeps a transcript whose last 15 minutes of life ended in aborts. Measured
+# on the first review of this change: without this bound such an id pins a healthy
+# LIVE row to `permission-channel` forever, because the window is anchored on the
+# transcript's own last stamp and a frozen transcript's window never moves.
+#
+# ⚠️ The watcher deliberately does NOT apply it. `probe()` reads the tracked task's
+# own `claude_session_id`, and a session that is genuinely gone is settled by
+# `is_gated`'s `unregistered` branch BEFORE the stuck limb — so there is no stale
+# id for this bound to filter there. Applying it would instead create a blind spot
+# on the one shape this cause exists for: a session whose channel is dead cannot
+# act, so its transcript goes quiet, and a staleness bound would un-mark it exactly
+# while it is failing.
+PERM_CHANNEL_STALE_S = 2 * PERM_CHANNEL_WINDOW_S
+
 # The state line a worker writes when it gives up. Matched as a line PREFIX, not a
 # substring: the e4fd1919 transcript also *quotes* the phrase while discussing it.
 BLOCKED_PREFIX = "🔴 BLOCKED"
