@@ -208,8 +208,16 @@ session liveness, hands the page over, proves the handover through `close-worker
 2026-11-09, 83 `.stopped` markers against 2 whose session was still `LIVE` — so the liveness
 join, not the marker, is what makes a row a close candidate. ⚠️ **Closing a stood-down topic
 manager is the first step of a chain, not a single-step fix**: the topic page becomes
-`fleet round` but its goals stay unkept until the leg's § 1 opens a fresh manager and it arms
-(`scripts/keeper-census.py:361-397`).
+`fleet round` but its goals stay unkept, because a goal whose declaring topic has no live
+armed manager reads `"declaring topic(s) have no live armed manager"`
+(`scripts/keeper-census.py:396-397`).
+
+⚠️ **And the chain does not close by itself.** The handover clears the page's
+`claude_session_id`, and the keep-alive leg's § 1 population is *every topic page carrying a
+session id* (`agents/fleet-keepalive-actor.md:149`) — so a page this leg has handed over drops
+out of that population and § 1 will not open a replacement manager for it. Re-opening is a
+**separate gap, not a consequence of this close**, and a round must not report the goals kept
+after a close on the assumption that it follows.
 
 ### Three invariants
 

@@ -433,10 +433,16 @@ reported verbatim.
 
 ⚠️ **Closing a stood-down topic manager does not make its goals fleet-kept.** Read
 `keeper-census.py:361-397`: the topic page itself becomes `fleet round`, but every goal that
-topic declares still reads `unkept` — `"declaring topic(s) have no live armed manager"` —
-until § 1 opens a fresh topic manager and it arms. The close is the *first* step of that
-chain, not a single-step fix, and a round that reports the goals kept immediately after the
-close has reported something the census does not say.
+topic declares still reads `unkept` — `"declaring topic(s) have no live armed manager"`. The
+close is the *first* step of a chain, not a single-step fix.
+
+⚠️ **And this leg does not close that chain, so do not report it as closed.** The handover
+above clears the page's `claude_session_id`, and § 1's population is *every topic page
+carrying a session id* (`:149`) — so the page this procedure just handed over is no longer in
+§ 1's population, and § 1 will not open a replacement manager for it. Re-opening is a
+**separate gap**, not a consequence of the close. Report the close, the topic's keeper move and
+the goals still unkept; a round that renders them kept has reported something the census does
+not say.
 
 ## 5. Record why a half did not run — and never leave the sweep's seed standing
 
