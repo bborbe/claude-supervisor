@@ -56,7 +56,6 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -147,8 +146,16 @@ def _picked_table(lines):
 def _insert_picked_row(lines, name, why):
     """`(lines, number)` — append a row, numbered from the table itself."""
     heading, rows = _picked_table(lines)
-    if heading is None or not rows:
+    if heading is None:
         return lines, None
+    if not rows:
+        # A heading with no data rows yet: land after the `| --- |` separator when there
+        # is one, else immediately under the heading.
+        at = heading + 1
+        while at < len(lines) and lines[at].lstrip().startswith("|"):
+            at += 1
+        number = 1
+        return lines[:at] + [f"| {number} | 📌 {name} | {why} |"] + lines[at:], number
     number = max(int(ROW_RE.match(lines[i]).group(1)) for i in rows) + 1
     row = f"| {number} | 📌 {name} | {why} |"
     at = rows[-1] + 1
@@ -324,6 +331,18 @@ def consume_items(items, vault, tasks_dir, dismissed_dir, consumed_dir, now):
         if answer == ADD:
             detail, extra = add_to_plan(vault, tasks_dir, name, now.date(), why_text)
             notes.extend(extra)
+            if kind == "alert":
+                # An alert's name is a raw `prometheus-alerts.sh` line, so the `### N.`
+                # block written above can never resolve to a page: `plan_candidates`
+                # drops it with `no page in tasks/goals/topics`, the row never enters
+                # `planned_keys`, and it re-proposes while still firing. The durable
+                # dismissal is the only record that stops that, so an `add` on an alert
+                # row writes it too — otherwise the operator's answer is a silent no-op.
+                write_dismissal(dismissed_dir, card_key, name, kind, item_id, now)
+                notes.append(
+                    "alert row: its plan block cannot resolve to a page — "
+                    "also recorded as dismissed so it stops re-proposing"
+                )
             entry = {
                 "at": now.isoformat(), "card_key": card_key, "item_id": item_id,
                 "name": name, "kind": kind, "action": "added", **detail,

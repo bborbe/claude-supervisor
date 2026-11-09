@@ -188,6 +188,42 @@ class ConsumeTests(unittest.TestCase):
         self.assertNotIn("## ✅ Picked (6)", text)
         self.assertNotIn("| 6 |", text)
 
+    def json_read(self):
+        out = subprocess.run(
+            [sys.executable, str(NEXT_FOCUS), "--vault", str(self.vault),
+             "--now", "2026-11-09", "--live", "0", "--target", "1",
+             "--state-dir", str(self.dismissed), "--json"],
+            capture_output=True, text=True, check=True,
+        )
+        return json.loads(out.stdout)
+
+    def test_add_removes_the_row_from_proposed(self):
+        """The measured case: an added row must leave `proposed`, not merely gain a row."""
+        self.assertIn(TASK_NAME, [row["name"] for row in self.json_read()["proposed"]])
+        self.run_consume([self.card("add it to the plan")])
+        self.assertNotIn(TASK_NAME, [row["name"] for row in self.json_read()["proposed"]])
+
+    def test_an_alert_add_also_records_a_dismissal(self):
+        """An alert name can never resolve to a page, so its plan block alone is inert.
+
+        `plan_candidates` drops a name with no page behind it, so the row would stay
+        unplanned and re-propose while the alert still fires — the operator's answer
+        would be a silent no-op.
+        """
+        alert = self.card(
+            "add it to the plan",
+            payload=("prod alert firing — alert firing, in no current plan — "
+                     "prometheus-alerts.sh:1"),
+            key="next-focus:vault:alert:prod-alert-firing-12345678",
+        )
+        consumed, notes = self.run_consume([alert])
+        self.assertEqual(consumed[0]["action"], "added")
+        self.assertTrue(
+            any(self.dismissed.glob("*.json")),
+            "an alert `add` left no durable record — it will re-propose",
+        )
+        self.assertTrue(any("alert row" in note for note in notes))
+
     def test_notes_render_on_an_empty_round(self):
         """A round that could not look must not read like a round that found nothing."""
         rendered = answer.render([], ["k: unhandled answer 'x' — not consumed"], 2, 1)
