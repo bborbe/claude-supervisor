@@ -70,9 +70,13 @@ export const ZERO_TURN_GRACE_MS = 120_000
 export function armZeroTurnGrace({ agent, recheck, graceMs = ZERO_TURN_GRACE_MS, setTimer = setTimeout }) {
   const armedFor = agent.result
   const handle = setTimer(() => {
-    if (agent.result !== armedFor || agent.status !== 'running') return
+    // Only a REPLACED result cancels the keep: a newer result ran its own decision. A settled
+    // status must not cancel it — a worker that settled `error: zero-turn` still holds a wrapper
+    // child nobody will ever stream again, and this timer is the only reaper it has.
+    if (agent.result !== armedFor) return
     return recheck(agent, { zeroTurnGraceExpired: true })
   }, graceMs)
   handle?.unref?.()
   return handle
 }
+

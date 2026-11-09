@@ -60,7 +60,9 @@ const isZeroTurn = (result, agent) => Boolean(result) && !result.is_error && res
 const markZeroTurn = (agent) => {
   agent.status = 'error'
   agent.error = ZERO_TURN_ERROR
-  agent.result = { ...agent.result, zero_turn: true }
+  // Mutated, never replaced: the supervisor's bounded keep holds this exact object, and swapping
+  // it here made that timer a no-op — so the wrapper child was never reaped once the loop settled.
+  agent.result.zero_turn = true
 }
 
 export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_HEARTBEAT, onTurnComplete = null }) {

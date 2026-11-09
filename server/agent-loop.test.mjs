@@ -392,3 +392,17 @@ test('a gap error after a zero-turn result keeps the gap reason, never the zero-
   assert.equal(agent.result.zero_turn, undefined)
   assert.equal(ledgerCalls.at(-1)[1].error, String(gap))
 })
+
+test("the zero-turn settle mutates result in place, so the supervisor's keep timer still holds it", async () => {
+  const agent = makeAgent()
+  let captured = null
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-i' }
+    yield { type: 'result', subtype: 'success', is_error: false, result: '', num_turns: 0, permission_denials: [] }
+  }
+  // The hook fires after `agent.result` is assigned — the same object the supervisor's timer holds.
+  await runAgentLoop({ q: stream(), agent, writeLedger: () => ({}), log: () => {}, onTurnComplete: (a) => { captured = a.result } })
+  assert.ok(captured, 'the result object existed before the settle')
+  assert.equal(agent.result, captured)
+  assert.equal(captured.zero_turn, true)
+})

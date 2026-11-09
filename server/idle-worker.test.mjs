@@ -143,17 +143,22 @@ test('the zero-turn grace timer re-runs the full idle decision with the grace ex
   assert.deepEqual(calls[0][1], { zeroTurnGraceExpired: true })
 })
 
-test('the zero-turn grace timer is a no-op once a newer result arrived or the worker settled', async () => {
+test('the zero-turn grace timer still fires after the worker settled — it is that path\'s only reaper', async () => {
+  const t = fakeTimer()
+  const calls = []
+  const settled = { id: 'a', status: 'error', result: { num_turns: 0, zero_turn: true } }
+  armZeroTurnGrace({ agent: settled, recheck: (...args) => calls.push(args), setTimer: t.setTimer })
+  await t.fn()
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0][1], { zeroTurnGraceExpired: true })
+})
+
+test('the zero-turn grace timer is a no-op once a newer result replaced the one it was armed for', async () => {
   const t1 = fakeTimer()
   const calls = []
   const replaced = { id: 'a', status: 'running', result: { num_turns: 0 } }
   armZeroTurnGrace({ agent: replaced, recheck: () => calls.push('r'), setTimer: t1.setTimer })
   replaced.result = { num_turns: 3 }
   await t1.fn()
-  const t2 = fakeTimer()
-  const settled = { id: 'b', status: 'running', result: { num_turns: 0 } }
-  armZeroTurnGrace({ agent: settled, recheck: () => calls.push('s'), setTimer: t2.setTimer })
-  settled.status = 'error'
-  await t2.fn()
   assert.deepEqual(calls, [])
 })
