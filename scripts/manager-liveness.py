@@ -666,11 +666,15 @@ def iso(epoch: float) -> str:
 
 
 def read_pending() -> dict:
-    """slug -> the lapse owed a report: {detected_at, detail, attempts, last_error}.
+    """slug -> the lapse owed a report: {detected_at, detail, attempts, last_error, emits}.
 
     ⚠️ `detected_at` is the CROSSING time, and it is what the sender puts in the report
     and what `--delivered` moves into `notified`. A poll timestamp would differ between
     the failed attempt and the retry, so the same lapse would look like two.
+
+    ⚠️ `emits` counts how many times this crossing has been PRINTED, so the first
+    emission can be told apart from a retry of it. It is not `attempts`, which counts
+    failed DELIVERIES — a poll that prints and succeeds still increments `emits`.
     """
     try:
         with open(os.path.join(STATE_DIR, PENDING), encoding="utf-8") as fh:
@@ -691,11 +695,16 @@ def read_pending() -> dict:
             attempts = int(v.get("attempts", 0) or 0)
         except (TypeError, ValueError):
             attempts = 0
+        try:
+            emits = int(v.get("emits", 0) or 0)
+        except (TypeError, ValueError):
+            emits = 0
         out[str(k)] = {
             "detected_at": detected,
             "detail": str(v.get("detail", "")),
             "attempts": attempts,
             "last_error": v.get("last_error"),
+            "emits": emits,
             # Producer identity, carried through every rewrite: a normalising reader
             # that dropped these would make the record indistinguishable from one
             # written by hand, which is the property they exist to give it.
@@ -987,6 +996,29 @@ def classify(s: str, now: float) -> tuple:
     return ("STALE" if age > limit else "OK"), detail
 
 
+def emit_lapse(state: str, subject: str, detail: str, entry: dict) -> None:
+    """Print ONE emission of an owed lapse, marking a retry of an earlier one.
+
+    ⚠️ The FIRST emission of a crossing is the firing; every later one is a RETRY of
+    that same firing and carries `retry=1`. Both are printed and both exit 10 — the
+    sender must keep retrying — but a consumer counting FIRINGS now gets one per
+    episode instead of one per poll, which is the whole difference between a failure
+    rate and a poll count.
+
+    ⚠️ `retry=1` is a TRAILING token, never a prefix. The sender matches
+    `^(STALE|INVALID|RECOVERED-PENDING) ` on line start and reads the subject from
+    field 2 (`manager-liveness-notify-tick.sh:61-62`); a `RETRY STALE …` spelling
+    would satisfy every test here and silently drop every retry from delivery.
+
+    One home for both call sites: the STALE branch and the RECOVERED-PENDING branch
+    print the same line shape, and a marker added to only one of them would leave the
+    other inflating the count it exists to fix.
+    """
+    entry["emits"] = int(entry.get("emits", 0)) + 1
+    retry = " retry=1" if entry["emits"] > 1 else ""
+    print(f"{state} {subject} {detail} crossing={iso(entry['detected_at'])}{retry}")
+
+
 def check(now: float = None) -> int:
     now = time.time() if now is None else now
     try:
@@ -1025,18 +1057,19 @@ def check(now: float = None) -> int:
                     "detail": detail,
                     "attempts": 0,
                     "last_error": None,
+                    "emits": 0,
                 }
             if s in pending:
                 # ⚠️ Re-emitted on EVERY poll until a delivery is acked. This is the
                 # retry: the transport is a network call that fails routinely, and a
                 # single failed send used to mark the lapse reported for ever.
-                print(f"{state} {s} {detail} crossing={iso(pending[s]['detected_at'])}")
+                emit_lapse(state, s, detail, pending[s])
                 turned_stale = True
         elif s in pending:
             # The manager came back before anyone was told. The lapse still happened and
             # the operator is still owed the report, so it stays owed — but saying STALE
             # would be a lie, so it is named for what it is.
-            print(f"RECOVERED-PENDING {s} {detail} crossing={iso(pending[s]['detected_at'])}")
+            emit_lapse("RECOVERED-PENDING", s, detail, pending[s])
             turned_stale = True
         elif s in notified:
             print(f"RECOVERED {s} {state} {detail}")
