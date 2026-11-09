@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.264.3
 
 - docs: **the two remaining places that still promised the removed focus theft now say what the code does.** `README.md`'s `send_agent_message` row claimed a tab worker is "typed into its pane and submitted — it **steals focus**", and `docs/fleet-surface.md` claimed the `--reload` lever "activates each stale session's pane" — both stale after #741 removed the activation, and the README is the user-facing surface. Neither the tool nor the lever takes focus now; the README says so and the lever's sentence keeps its readiness gate (`composer is **empty**`) without the activation clause.
 
