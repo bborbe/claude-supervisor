@@ -396,8 +396,13 @@ double-quoted `--state` call below safe — it is the sink this gate exists to p
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py" \
-  --state --subject "<subject>" --branch <fleet|goal|topic>
+  --state --subject "<subject>" --branch <fleet|goal|topic> --vault "<vault-root>"
 ```
+
+⚠️ **`--vault` is not optional here.** `--state` answers `UNARMED` only once the subject's page
+resolves under `--vault`; without it the page test runs against the process cwd, so a manager
+whose page lives in another vault is refused as an unresolvable name (exit 3) instead of read as
+a never-armed loop. `--branch fleet` is exempt — the fleet manager has no page by design.
 
 ⚠️ **`--state` cannot tell an auto-quiet stand-down from a deliberate `/supervisor:stop`** — both
 read `STOPPED` with a marker. The distinguishing read is `manager-quiet.py`, which prints

@@ -168,6 +168,12 @@ def helpers():
 #: store — two different readings in one run, silently.
 _STATE_DIR_OVERRIDE: str | None = None
 
+#: The `--vault` this run was given, forwarded to the child probe. `--state` answers `UNARMED`
+#: only once the subject's page resolves under `--vault`; without it the page test runs against
+#: this process's cwd, so a subject whose page lives in the named vault reads as a refused,
+#: unresolvable name instead of a never-armed loop.
+_VAULT: str | None = None
+
 _MEMO: dict = {}
 
 #: `(branch, name) -> the --state detail` (`age=…s limit=…s period=…`). A side channel
@@ -420,9 +426,12 @@ def cadence_state(name: str, branch: str) -> str:
             env = None
             if _STATE_DIR_OVERRIDE:
                 env = {**os.environ, "MANAGER_LIVENESS_STATE_DIR": _STATE_DIR_OVERRIDE}
+            argv = [sys.executable, os.path.join(REPO, "scripts", "manager-liveness.py"),
+                    "--state", "--subject", name, "--branch", branch]
+            if _VAULT:
+                argv += ["--vault", _VAULT]
             done = subprocess.run(
-                [sys.executable, os.path.join(REPO, "scripts", "manager-liveness.py"),
-                 "--state", "--subject", name, "--branch", branch],
+                argv,
                 capture_output=True, text=True, timeout=PROBE_TIMEOUT, env=env,
             )
         except (OSError, subprocess.SubprocessError):
@@ -533,7 +542,8 @@ def main(argv: list[str]) -> int:
     a = ap.parse_args(argv)
 
     vault = os.path.abspath(os.path.expanduser(a.vault))
-    global _STATE_DIR_OVERRIDE
+    global _STATE_DIR_OVERRIDE, _VAULT
+    _VAULT = vault
     _STATE_DIR_OVERRIDE = os.path.abspath(os.path.expanduser(a.state_dir))
     a.state_dir = _STATE_DIR_OVERRIDE  # the parent's read must use the same path as the child
     _MEMO.clear()  # the memo is per RUN, so a second call in one process starts clean

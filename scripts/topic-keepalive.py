@@ -278,7 +278,7 @@ PROBE_FAILED = "UNREADABLE"
 CADENCE_STATES = ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID", "WRONG-BRANCH")
 
 
-def cadence_state_detail(subject: str, branch: str = "goal") -> tuple:
+def cadence_state_detail(subject: str, branch: str = "goal", vault: str = "") -> tuple:
     """`(state, detail)` from ONE probe, or `(PROBE_FAILED, "")` when it could not answer.
 
     ⚠️ **Bounded and guarded exactly like `session_verdict`, because the tick runs both.**
@@ -292,10 +292,17 @@ def cadence_state_detail(subject: str, branch: str = "goal") -> tuple:
     sleep it carries the instant. A caller that reported `SLEEPING` without it left the
     operator with a label and no date, which is the thing the state exists to name.
     """
+    argv = [sys.executable, os.path.join(REPO, "scripts", "manager-liveness.py"),
+            "--state", "--subject", subject, "--branch", branch]
+    # ⚠️ `--vault` is passed, and it is what makes `UNARMED` mean what this file says it does.
+    # `--state` answers `UNARMED` only once the subject's page resolves under `--vault`; without
+    # it the page test runs against THIS process's cwd, so a goal whose page lives in another
+    # vault reads as a refused, unresolvable name instead of a never-armed loop.
+    if vault:
+        argv += ["--vault", vault]
     try:
         probe = subprocess.run(
-            [sys.executable, os.path.join(REPO, "scripts", "manager-liveness.py"),
-             "--state", "--subject", subject, "--branch", branch],
+            argv,
             capture_output=True, text=True, timeout=PROBE_TIMEOUT,
         )
     except (OSError, subprocess.SubprocessError):
@@ -316,9 +323,9 @@ def cadence_state_detail(subject: str, branch: str = "goal") -> tuple:
     return state, detail
 
 
-def cadence(subject: str, branch: str = "goal") -> str:
+def cadence(subject: str, branch: str = "goal", vault: str = "") -> str:
     """The loop's state alone — `cadence_state_detail`'s first field."""
-    return cadence_state_detail(subject, branch)[0]
+    return cadence_state_detail(subject, branch, vault)[0]
 
 
 def main(argv: list[str]) -> int:
@@ -376,7 +383,7 @@ def main(argv: list[str]) -> int:
     # retired-key fallback was removed once both vaults were migrated.
     sid = scalar(fm, "claude_session_id")
 
-    loop, loop_detail = cadence_state_detail(a.subject, a.branch)
+    loop, loop_detail = cadence_state_detail(a.subject, a.branch, a.vault)
 
     if loop == "STOPPED":
         print("leave")
