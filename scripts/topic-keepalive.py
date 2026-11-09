@@ -8,7 +8,7 @@ Two independent signals are read every time, because neither answers the other's
      `AMBIGUOUS` (3) / `MALFORMED` (4). Only `ABSENT` licenses a resume: `UNKNOWN` and
      `AMBIGUOUS` are **cannot tell**, never dead.
   2. **Is its loop armed?** `manager-liveness.py --state --subject <goal> --branch goal`
-     → `OK` / `STALE` / `STOPPED` / `SLEEPING` / `UNARMED` / `INVALID` / `WRONG-BRANCH`. This is the signal
+     → `OK` / `STALE` / `STOPPED` / `SLEEPING` / `UNARMED` / `INVALID`. This is the signal
      a liveness probe structurally cannot give — a manager process can be alive with its
      loop unarmed after a missed re-arm. `STOPPED` is a deliberate stand-down and
      `SLEEPING` is a date-gated wait; both are left alone.
@@ -50,18 +50,63 @@ so a manager restart survives it and the autocommit daemon is never in the loop.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
-import subprocess
 import sys
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
 DIRS = {"goal": "24 Goals", "topic": "23 Topics"}
 RESUME_CAP = 3
 RESUME_WINDOW = 30 * 60  # seconds
-PROBE_TIMEOUT = 30  # seconds, on BOTH probes below; a hung liveness probe must not wedge the tick
+
+_OWNER = None
+
+
+def _owner():
+    """Import `scripts/owner.py` — the ONE ownership definition, and both liveness probes.
+
+    ⚠️ **This file used to carry both probes AND the rule that combines them.** Both live in
+    `owner.py` now; `main()` collects the two facts through the wrappers below and asks
+    `owner.verdict_of()` for the verdict, so the definition has exactly one implementation.
+    What stays here is the ACTION ladder — resume, restart, leave, open — which is this tier's
+    job and nobody else's.
+    """
+    global _OWNER
+    if _OWNER is None:
+        spec = importlib.util.spec_from_file_location(
+            "owner", os.path.join(HERE, "owner.py"))
+        _OWNER = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_OWNER)
+    return _OWNER
+
+
+def session_verdict(sid: str) -> str:
+    """`LIVE` / `ABSENT` / `UNKNOWN` / `AMBIGUOUS` / `MALFORMED` — `owner.py`'s probe.
+
+    Kept as a module-level name because `worker-keepalive.py` and the suites reach it here; the
+    implementation is the resolver's, so the two tiers cannot drift apart.
+    """
+    return _owner().session_verdict(sid)
+
+
+def cadence_state_detail(subject: str, branch: str = "goal", vault: str = "") -> tuple:
+    """`(state, detail)` from ONE `manager-liveness.py --state` probe — `owner.py`'s probe.
+
+    ⚠️ **`vault` is passed through, and it is what makes `UNARMED` mean what this file says.**
+    `--state` answers `UNARMED` only once the subject's page resolves under `--vault`; without
+    it the page test runs against THIS process's cwd, so a goal whose page lives in another
+    vault reads as a refused, unresolvable name instead of a never-armed loop.
+    """
+    return _owner().loop_state(subject, branch, vault)
+
+
+def cadence(subject: str, branch: str = "goal", vault: str = "") -> str:
+    """The loop's state alone — `cadence_state_detail`'s first field."""
+    return cadence_state_detail(subject, branch, vault)[0]
 
 
 def frontmatter(text: str) -> str:
@@ -210,124 +255,6 @@ def record(path: str, stamps: list[float], now: float, sid: str = "") -> None:
     os.replace(tmp, path)
 
 
-#: `scripts/session-liveness.py`'s documented contract is the EXIT CODE, not the text:
-#: `LIVE` (0) / `ABSENT` (1) / `UNKNOWN` (2) / `AMBIGUOUS` (3) / `MALFORMED` (4). Only `LIVE`
-#: prints to stdout — every other verdict goes to stderr — so parsing stdout collapsed them
-#: all to `UNKNOWN`.
-VERDICT_BY_EXIT = {0: "LIVE", 1: "ABSENT", 2: "UNKNOWN", 3: "AMBIGUOUS", 4: "MALFORMED"}
-
-#: `ABSENT` is believed only when the instrument also says so in words.
-#: ⚠️ **Exit 1 is ABSENT's code and every Python traceback's code.** The exit-code read is
-#: right, but on its own it turned a crashed instrument — an uncaught exception, a broken
-#: install — into a confident `ABSENT`, and `ABSENT` is the ONE verdict that authorises a
-#: resume. So a broken probe would resume a manager that is already running: the
-#: double-writer this file exists to prevent, arriving through the one door the stdout scan
-#: never had. `session-liveness.py`'s `--check` path prints `ABSENT — <message>` to stderr on
-#: every genuine ABSENT, so the word corroborates the code before either is acted on.
-#: Matched per LINE and on a word boundary, so `ABSENTEE` and a prose mention do not count.
-_ABSENT_WORD = re.compile(r"ABSENT\b")
-
-
-def _absent_corroborated(stderr: str) -> bool:
-    return any(_ABSENT_WORD.match(line) for line in (stderr or "").splitlines())
-
-
-def session_verdict(sid: str) -> str:
-    """`LIVE` / `ABSENT` / `UNKNOWN` / `AMBIGUOUS` / `MALFORMED`, from the instrument.
-
-    ⚠️ **Read the exit code, never the text.** This function used to scan `stdout` for the
-    verdict word, which made `ABSENT` unreachable: the instrument prints `ABSENT` to **stderr**
-    and exits 1, so every non-`LIVE` answer fell through to `UNKNOWN`. `ABSENT` is the only
-    verdict that licenses a resume, so the entire keep-alive — the goal tier that had shipped
-    for months, the topic tier and the worker tier — could never resume anything. Measured
-    2026-10-30 on a killed manager: stdout `''`, stderr `'ABSENT — <id>'`, rc 1.
-
-    An exit code outside the documented set is `UNKNOWN` — cannot-tell is never death.
-    ⚠️ **An unrunnable or hung probe is `UNKNOWN` too.** Without the guard a missing
-    interpreter or a stuck child raises out of this function and aborts the whole tick with a
-    traceback, instead of answering `cannot-tell` for the one subject being read. Same shape as
-    `scripts/crashed-managers.py`'s `session_state()`.
-    ⚠️ **`ABSENT` additionally needs the instrument's own word on stderr** — see
-    `_ABSENT_WORD`. Exit 1 alone is a traceback as readily as a death, and only `ABSENT`
-    licenses a resume, so an uncorroborated exit 1 is `UNKNOWN`.
-    """
-    try:
-        probe = subprocess.run(
-            [sys.executable, os.path.join(REPO, "scripts", "session-liveness.py"), "--check", sid],
-            capture_output=True, text=True, timeout=PROBE_TIMEOUT,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return "UNKNOWN"
-    verdict = VERDICT_BY_EXIT.get(probe.returncode, "UNKNOWN")
-    if verdict == "ABSENT" and not _absent_corroborated(getattr(probe, "stderr", "")):
-        return "UNKNOWN"
-    return verdict
-
-
-#: `cadence()`'s answer when the probe could not run at all. NOT one of `manager-liveness.py`'s
-#: five states, because it is not a statement about the subject: `INVALID` means the record
-#: exists and cannot be read, which `main` treats as a lapsed loop and restarts a LIVE session
-#: for. A crashed or timed-out child is a fact about the INSTRUMENT, so it gets its own word
-#: and reads as `jump` — the same reasoning `scripts/crashed-managers.py` records for its own
-#: `PROBE_FAILED`, and the same reason `session_verdict` answers `UNKNOWN` rather than `ABSENT`.
-PROBE_FAILED = "UNREADABLE"
-#: Every word `manager-liveness.py --state` can print. `WRONG-BRANCH` — the record lives on
-#: another tier — is never restart-worthy: it reads as `jump` for a live session, like
-#: `UNARMED`, because the loop it names is not this probe's loop at all. An unresolvable
-#: subject is not a word here: `--state` refuses it with exit 3, which lands on `PROBE_FAILED`.
-CADENCE_STATES = ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID", "WRONG-BRANCH")
-
-
-def cadence_state_detail(subject: str, branch: str = "goal", vault: str = "") -> tuple:
-    """`(state, detail)` from ONE probe, or `(PROBE_FAILED, "")` when it could not answer.
-
-    ⚠️ **Bounded and guarded exactly like `session_verdict`, because the tick runs both.**
-    `PROBE_TIMEOUT`'s claim is that a hung liveness probe cannot wedge the tick; while this
-    probe had no `timeout=`, half that claim was false and a stuck `manager-liveness.py`
-    blocked the keep-alive forever — worse than the abort the guard prevents, because no
-    verdict is ever printed at all.
-
-    ⚠️ **The detail is returned, not dropped.** `--state` prints `<STATE>\\t<slug>\\t<detail>`
-    and the detail is the only place a reader learns WHAT a state is waiting for — for a
-    sleep it carries the instant. A caller that reported `SLEEPING` without it left the
-    operator with a label and no date, which is the thing the state exists to name.
-    """
-    argv = [sys.executable, os.path.join(REPO, "scripts", "manager-liveness.py"),
-            "--state", "--subject", subject, "--branch", branch]
-    # ⚠️ `--vault` is passed, and it is what makes `UNARMED` mean what this file says it does.
-    # `--state` answers `UNARMED` only once the subject's page resolves under `--vault`; without
-    # it the page test runs against THIS process's cwd, so a goal whose page lives in another
-    # vault reads as a refused, unresolvable name instead of a never-armed loop.
-    if vault:
-        argv += ["--vault", vault]
-    try:
-        probe = subprocess.run(
-            argv,
-            capture_output=True, text=True, timeout=PROBE_TIMEOUT,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return PROBE_FAILED, ""
-    # `--state` exits 0 for every state it can answer, so a non-zero exit is the child dying.
-    if probe.returncode != 0:
-        return PROBE_FAILED, ""
-    first = (probe.stdout.splitlines() or [""])[0]
-    fields = first.split("\t")
-    state = fields[0].strip()
-    detail = fields[2].strip() if len(fields) > 2 else ""
-    # ⚠️ An unrecognised word is the INSTRUMENT's answer, not the subject's, so it reads as
-    # `PROBE_FAILED` — never `INVALID`, which `main` restarts a LIVE session on. Mapping it to
-    # `INVALID` is how a new state the probe learns (`WRONG-BRANCH`, 2026-11-08) would have
-    # restarted a healthy manager on a word this file had never seen.
-    if state not in CADENCE_STATES:
-        return PROBE_FAILED, detail
-    return state, detail
-
-
-def cadence(subject: str, branch: str = "goal", vault: str = "") -> str:
-    """The loop's state alone — `cadence_state_detail`'s first field."""
-    return cadence_state_detail(subject, branch, vault)[0]
-
-
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--vault", required=True, help="the vault ROOT path")
@@ -379,18 +306,24 @@ def main(argv: list[str]) -> int:
         return 1
     with open(goal_page, encoding="utf-8") as fh:
         fm = frontmatter(fh.read())
-    # `claude_session_id` is the only field a goal page records its manager in; the
-    # retired-key fallback was removed once both vaults were migrated.
+
+    # THE OWNERSHIP READ. `claude_session_id` names WHICH session serves this subject — never
+    # whether it still owns it. The verdict comes from `scripts/owner.py`, which is the single
+    # implementation of `docs/session-tiers.md` § Keep-alive; this file no longer combines the
+    # two signals itself. The probes stay reachable here (the wrappers above) because
+    # `worker-keepalive.py` and the suites patch them at this module.
     sid = scalar(fm, "claude_session_id")
-
     loop, loop_detail = cadence_state_detail(a.subject, a.branch, a.vault)
+    live = session_verdict(sid) if sid else _owner().NONE
+    verdict, reason = _owner().verdict_of(live, loop)
+    o = _owner().Ownership(verdict, reason, live, loop, sid, loop_detail)
 
-    if loop == "STOPPED":
+    if o.reason == "loop-stopped":
         print("leave")
         print("cadence STOPPED — a deliberate stand-down is not a lapse")
         return 0
 
-    if loop == "SLEEPING":
+    if o.reason == "loop-sleeping":
         # A date-gated subject is not re-arming until its named instant, by design. Left
         # alone here, and NOT a lapse: restarting it would spend a full-context round to
         # rediscover that nothing is due yet. ⚠️ The fallback wake needs no branch of its
@@ -424,13 +357,18 @@ def main(argv: list[str]) -> int:
                   f"moves without one")
         return 0
 
-    live = session_verdict(sid)
-    if live in ("UNKNOWN", "AMBIGUOUS", "MALFORMED"):
+    if o.reason == "session-undecidable":
         print("cannot-tell")
-        print(f"session {sid} → {live}; an undecidable probe is never death")
+        print(f"session {sid} → {o.session}; an undecidable probe is never death")
         return 1
 
-    if live == "LIVE":
+    if o.session == "LIVE":
+        # ⚠️ `STALE` restarts even though the resolver calls it an OWNER, and that is not a
+        # contradiction: ownership answers "does it hold the subject", the action answers "is
+        # its loop still running". A lapsed loop is resumed in place; an `INVALID` record is
+        # repaired the same way. `UNARMED`/`UNREADABLE` are `cannot-tell` and jump instead —
+        # a session that never armed needs `/supervisor:goal-loop`, and restarting it would
+        # kill a healthy manager on no evidence.
         if loop in ("STALE", "INVALID"):
             print("restart")
             print(f"/supervisor:restart {sid}  (cadence {loop})")

@@ -57,6 +57,35 @@ ME = "92de43c3-bd91-409d-a33e-824a61e5706a"
 PEER = "64b4a415-906d-457f-81f9-48a842007b88"
 GATED = "33333333-3333-4333-8333-333333333333"
 
+
+class OwnerStub:
+    """`scripts/owner.py` with its probes removed — the filter must never read this machine.
+
+    The real resolver spawns `session-liveness.py` and `manager-liveness.py`, so an unstubbed
+    filter run answers from whatever happens to be armed on the machine running the suite. A
+    test whose verdict depends on that asserts nothing, and it drifts the moment a real session
+    id collides with a fixture's.
+    """
+
+    NOT_OWNER = "not-owner"
+    OWNER = "owner"
+    CANNOT_TELL = "cannot-tell"
+
+    def __init__(self, verdict="owner", reason="live-armed"):
+        self.verdict, self.reason = verdict, reason
+        self.asked = []
+
+    def of_session(self, sid, subject="", branch="goal"):
+        self.asked.append(sid)
+        verdict, reason = self.verdict, self.reason
+        return type("Ownership", (), {
+            "verdict": verdict,
+            "reason": reason,
+            "session": "LIVE",
+            "loop": "OK" if verdict == "owner" else "STOPPED",
+            "describe": lambda self: "session LIVE, loop OK",
+        })()
+
 # A one-row feed carrying pane 372, in `who-needs-me.py`'s own render. `--pane` filters
 # the feed rather than manufacturing a gate, so every test that names a pane supplies
 # one -- and supplying it explicitly is also what keeps the suite off the live store,
@@ -1952,6 +1981,14 @@ class ScopeCli(unittest.TestCase):
     SELF = "49b471f1-a8a6-48b0-b2b2-14b9cb2437e3"
     BASE = os.path.join(_HERE, "fixtures", "gate-owner-foreign-goal")
 
+    def setUp(self):
+        self._orig_owner = gf._OWNER
+        gf._OWNER = OwnerStub()
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        gf._OWNER = self._orig_owner
+
     def run_filter(self, *argv):
         """`(rc, stdout, stderr)` from `main()` with `argv`, ledger stubbed."""
         with open(os.path.join(self.BASE, "feed.txt"), encoding="utf-8") as handle:
@@ -1973,8 +2010,16 @@ class ScopeCli(unittest.TestCase):
         ]
 
     def test_the_importlib_seam_reaches_the_real_session_scope(self):
-        """A rename of the module, or a changed `load` signature, fails here."""
+        """A rename of the module, or a changed `load` signature, fails here.
+
+        ⚠️ The ownership input is stubbed on the REAL session-scope module too: this test
+        drives `load()` directly rather than through the filter, so the filter's own stub
+        never applies and the read would answer from whatever is armed on this machine.
+        """
         scope_mod = gf._session_scope()
+        original = scope_mod._OWNER
+        scope_mod._OWNER = OwnerStub()
+        self.addCleanup(setattr, scope_mod, "_OWNER", original)
         scope = scope_mod.load(self.SELF, [os.path.join(self.BASE, "vault")])
         self.assertTrue(scope.resolved, scope.reason)
         # The fixture's own task — the CONTROL pane's page — must land in the own set, or
@@ -1992,6 +2037,26 @@ class ScopeCli(unittest.TestCase):
         self.assertIn("excluded(owner-unknown): 2", err)
         self.assertIn("emit: 1", err)
         self.assertIn("exclude foreign-goal:", out)
+
+    def test_a_stopped_manager_filters_nothing(self):
+        """THE BOUNDARY: a stood-down manager's watcher must not exclude other goals' gates.
+
+        A manager that ran `/supervisor:stop` keeps its session, so its attention watcher keeps
+        running — while the round that would make it a manager is exactly what stopped. With
+        the scope applied it would keep hiding gates that belong to goals it no longer serves,
+        so the ownership verdict comes first and a `not-owner` answer drops the scope entirely.
+        """
+        gf._OWNER = OwnerStub("not-owner", "loop-stopped")
+        rc, out, err = self.run_filter(
+            "--self", self.SELF,
+            "--scope-vault", os.path.join(self.BASE, "vault"),
+            *self.common(),
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("SCOPE  unresolved:", err)
+        self.assertIn("is not an owner (loop-stopped", err)
+        self.assertIn("emit: 6", err)
+        self.assertIn("excluded(foreign-goal): 0", err)
 
     def test_no_scope_emits_every_row(self):
         """The flag disables the read entirely — the pre-scope behaviour, pinned."""
@@ -2033,6 +2098,9 @@ class ForeignGoalFixture(unittest.TestCase):
         spec.loader.exec_module(cls.replay)
         cls.scoped = cls.replay.run(scope=True)
         cls.unscoped = cls.replay.run(scope=False)
+        # THE NEGATIVE CONTROL for the ownership gate: the same session, the same page stamp,
+        # the same vault — only the loop marker differs. It must exclude nothing.
+        cls.stopped = cls.replay.run(scope=True, stopped=True)
 
     def rows(self, result="json"):
         return json.loads(self.scoped[result].stdout)
@@ -2043,6 +2111,31 @@ class ForeignGoalFixture(unittest.TestCase):
     def test_the_five_foreign_panes_leave_the_feed(self):
         self.assertEqual(self.scoped["feed"].stdout.split(), [self.replay.CONTROL],
                          self.scoped["feed"].stdout)
+
+    def test_a_stopped_manager_excludes_nothing(self):
+        """THE BOUNDARY, through the real code path rather than a stubbed verdict.
+
+        The fixture's `--self` keeps its session and its page stamp; only the loop marker
+        differs (`stopped=True` writes `.stopped` instead of an armed cadence). A manager that
+        ran `/supervisor:stop` is not an owner, so its scope must not hide another goal's gates
+        — the resolver says `not-owner` and the filter falls back to excluding nothing.
+
+        ⚠️ **This is what makes the armed case above load-bearing.** Without it, the fixture
+        would pass identically if the ownership gate were deleted, and the three exclusions it
+        asserts would be attributing work to a manager whose round has stopped.
+        """
+        out, err = self.stopped["json"].stdout, self.stopped["json"].stderr
+        self.assertIn("SCOPE  unresolved:", err)
+        self.assertIn("is not an owner (loop-stopped", err)
+        # All six rows survive, and none is excluded as foreign: the control emits, the five
+        # foreign panes are back in the feed as ordinary unowned rows.
+        self.assertEqual(len(json.loads(out)), 6, out)
+        self.assertIn("excluded(foreign-goal): 0", self.stopped["feed"].stderr)
+        self.assertEqual(
+            sorted(self.stopped["feed"].stdout.split()),
+            sorted(list(self.replay.FOREIGN) + [self.replay.CONTROL]),
+            self.stopped["feed"].stdout,
+        )
 
     def test_the_own_worker_control_still_emits(self):
         """Without this the fixture would pass on a filter that excludes everything."""
