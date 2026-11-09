@@ -88,6 +88,11 @@ EXPECTED = {
     # originally required `gh` and `pr ready` to be adjacent — so the mandated form fell
     # through as `not-allow-listed` while the bare form was released.
     "37-gh-pr-ready-with-repo-flag.jsonl": 2,
+    # ⚠️ A full ISO datetime is a legal clock (CLAUDE.md § Async State Closer names
+    # "a clock (`defer_date` / timestamp)"), and the trailing `\b` after `\d{2}` cannot
+    # match between `9` and `T` — both word characters — so this closer was blocked.
+    # The watcher stays in the slot, so only the datetime keeps it clean.
+    "38-ends-iso-datetime.jsonl": 0,
 }
 
 ENDS_POSITIVE = {
@@ -426,7 +431,8 @@ class CloserGateLintTest(unittest.TestCase):
         # The operator's "observable only" scope: the watcher may stay in the slot.
         for name in ("31-ends-file-path.jsonl", "32-ends-card-id.jsonl",
                      "33-ends-defer-date.jsonl", "34-ends-external-probe.jsonl",
-                     "35-ends-monitor-in-path.jsonl", "36-ends-pr-watch-compliant.jsonl"):
+                     "35-ends-monitor-in-path.jsonl", "36-ends-pr-watch-compliant.jsonl",
+                     "38-ends-iso-datetime.jsonl"):
             with self.subTest(fixture=name):
                 code, text, record = self.mod.evaluate(self.payload(name), environ={})
                 self.assertEqual(0, code)
@@ -438,6 +444,28 @@ class CloserGateLintTest(unittest.TestCase):
         # ⚠️ `times out ~18:40` dies with the watcher; only defer_date / an ISO date count.
         self.assertEqual("background-sub-agent", self.mod.session_bound_class(
             "⏰ Ends:   chunk 7a done (background agent a1, times out ~18:40)"))
+
+    def test_an_iso_datetime_is_a_clock_observable(self):
+        # ⚠️ The trailing `\b` after `\d{2}` cannot match between `9` and `T` — both are
+        # word characters — so `2026-11-09T15:30:00+01:00`, which CLAUDE.md § Async State
+        # Closer names as a legal clock ("a clock (`defer_date` / timestamp)"), did not
+        # match and the closer was blocked. Two-sided on purpose: the datetime arm is
+        # optional, so the date-only and `defer_date` forms must keep matching.
+        for body in (
+            "⏰ Ends:   2026-11-09T15:30:00+01:00 (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09 15:30 (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09 (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   defer_date 2026-11-09 (CronCreate j4f2 as early wake)",
+        ):
+            with self.subTest(body=body):
+                self.assertIsNone(self.mod.session_bound_class(body))
+        # The other half, and the guard against a permissive fix: `2026-11-9` is not a
+        # date `defer-date.py`'s `parse_defer_date` accepts, so the clock class must NOT
+        # bless it and the session-bound watcher still blocks. This keeps the class a
+        # subset of the parser — the lint must never release a clock every fail-closed
+        # reader rejects as invalid.
+        self.assertEqual("cron-create", self.mod.session_bound_class(
+            "⏰ Ends:   2026-11-9 (CronCreate j4f2 as early wake)"))
 
     def test_lowercase_monitor_in_a_path_is_not_the_monitor_class(self):
         self.assertIsNone(self.mod.session_bound_class(

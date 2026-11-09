@@ -217,13 +217,16 @@ SESSION_BOUND = (
 
 # Anything a keeper can read after the session is gone. ⚠️ A watcher's own timeout
 # (`times out ~18:40`) is NOT a clock observable — it dies with the watcher — so a bare
-# HH:MM never counts; only a `defer_date` or an ISO date does.
+# HH:MM never counts; only a `defer_date`, an ISO date, or an ISO datetime does. The
+# datetime arm is optional and shape-bounded so it stays a SUBSET of what
+# `defer-date.py`'s `parse_defer_date` accepts — the lint must never bless a clock every
+# fail-closed reader would reject as invalid.
 DURABLE = (
     ("file", re.compile(
         r"(?:^|[\s`(\"'])(?:~|\.{0,2})/[\w.-]+|\b[\w-]+\.(?:md|jsonl?|log|ya?ml|txt|out|csv)\b"
         r"|\b(?:files?|mtime)\b", re.IGNORECASE)),
     ("card-id", re.compile(r"\b[0-9a-f]{32}\b", re.IGNORECASE)),
-    ("clock", re.compile(r"\bdefer_date\b|\b\d{4}-\d{2}-\d{2}\b")),
+    ("clock", re.compile(r"\bdefer_date\b|\b\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2})?\b")),
     ("external-probe", re.compile(
         r"\bPR\b|#\d+\b|\bCI\b|\bgh\s|\bkubectl\w*\b|https?://|\bpods?\b|\bcontainer\b"
         r"|\brelease\b|\btag\s+v\d|\bworkflow\b|\bdeploy(?:ment)?\b", re.IGNORECASE)),
