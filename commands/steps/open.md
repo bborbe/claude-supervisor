@@ -8,6 +8,11 @@ user-invocable: false
 
 When: every tick — after Readings
 
+⚠️ **Row 16b runs immediately after this one** — `commands/steps/manager-reap.md` reaps a
+manager whose goal or topic subject is terminal. It is a sibling row rather than a section
+here because it acts on a different population (manager sessions, not worker rows) and owns
+its own script; the pairing is the round's, not this step's.
+
 ⚠️ **This leg acts, and a read-only execution is not a run of it.** It opens each selected row; a
 run that only prints the block has measured nothing — `opened=0` because the leg was told to print
 it is a failure, not a quiet round. It is one of the round's acting legs, so the round's delegate

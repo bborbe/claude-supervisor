@@ -28,6 +28,17 @@ write is not a contract.
 Usage:
   reap-line.py --task "<task name>" --session "<full session id>" --liveness <verdict>
                [--now <ISO-8601>] [--plugin-root <dir>]
+  reap-line.py --subject "<page title>" --subject-kind goal|topic
+               --subject-status <status> --session "<full session id>"
+               --liveness <verdict> [--now <ISO-8601>] [--plugin-root <dir>]
+
+⚠️ **The two forms are one script, and the second is not a variant spelling of the first.**
+A task reap is decided from three disk facts on the task file; a manager reap is decided
+from a page that carries no task file at all, and its line names the subject's status, the
+recorded `manager_session_id` and the liveness verdict — the three reads it was decided
+from (`scripts/subject-reap.py` is the caller that produces them). Sharing the file keeps
+the deliverable/moot vocabulary and the non-authorising evidence rule in ONE place; a
+second script would be a second copy of the rule that decides whether a message may be sent.
 
 `--liveness` is the caller's own verdict, taken this run — the caller owns it and
 this script never re-derives it. `scripts/session-liveness.py` is the instrument,
@@ -93,6 +104,17 @@ REAP_EVIDENCE = (
     "/vault-cli:sync-progress + /vault-cli:session-close"
 )
 
+# The manager-subject reap's evidence, and the reason it is a SECOND constant rather than a
+# reuse of `REAP_EVIDENCE`. A manager has no task file: its subject is a goal or topic page,
+# and the page's own terminality is the whole disk fact. Naming the task close verbs here
+# would hand a manager two commands that cannot run on a goal page — `session-close` reads a
+# task anchor the manager does not have, so the message would read as actionable and be not.
+SUBJECT_EVIDENCE = (
+    "your subject is terminal on disk — non-authorising, the operator has not "
+    "answered; close yourself with /supervisor:close, or /exit when no task is "
+    "anchored"
+)
+
 # The plugin root, resolved the way `close-line.py` resolves its re-check command:
 # an absolute expanduser path rather than an inherited `${CLAUDE_PLUGIN_ROOT}`,
 # so the line is runnable by a reader whose shell does not carry the variable.
@@ -148,12 +170,53 @@ def reap_line(task, session, liveness, now=None, root=None):
     )
 
 
+def subject_reap_line(subject, kind, status, session, liveness, now=None, root=None):
+    """The same hand-over for a MANAGER whose SUBJECT is terminal.
+
+    ⚠️ **The three reads ride the line, and that is the point of it.** A manager reap is
+    decided from a page rather than a task, so a reader who cannot see the subject's
+    `status`, the recorded `manager_session_id` and the liveness verdict has no way to
+    check the decision — the task form gets that for free because the task path is the
+    evidence. Same non-authorising contract, same `SendMessage`-only deliverable rule,
+    same moot render for every other verdict.
+
+    `kind` is `goal` or `topic`; `status` is the page's terminal value, quoted verbatim.
+    """
+    if liveness not in DELIVERABLE:
+        return MOOT
+    return (
+        f"✅ REAP: {subject} [{sid8(session)}] — subject {kind} status: {status} "
+        f"· manager_session_id: {session} · liveness: LIVE · verified {stamp(now)} "
+        f"· SendMessage {session}: {SUBJECT_EVIDENCE} "
+        f"· re-check: {recheck_command(session, root)}"
+    )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Emit the reap hand-over, or the moot verdict when the "
                     "recipient is not live."
     )
-    parser.add_argument("--task", required=True, help="the task name, verbatim")
+    # ⚠️ **`--task` and `--subject` are one required choice, not two optional flags.** The
+    # evidence differs per form (a task's disk facts vs a subject page's), so a caller that
+    # passed neither would get the task line with an empty name — a plausible-looking reap
+    # for no subject at all. `required=True` on the group makes that a usage error.
+    what = parser.add_mutually_exclusive_group(required=True)
+    what.add_argument("--task", help="the task name, verbatim")
+    what.add_argument(
+        "--subject",
+        help="the goal or topic page title, verbatim — the manager-subject form; "
+             "requires --subject-kind and --subject-status",
+    )
+    parser.add_argument(
+        "--subject-kind",
+        choices=("goal", "topic"),
+        help="with --subject: which page kind carries the terminal status",
+    )
+    parser.add_argument(
+        "--subject-status",
+        help="with --subject: the page's terminal status, verbatim (completed/aborted)",
+    )
     parser.add_argument("--session", required=True, help="the FULL session id")
     parser.add_argument(
         "--liveness",
@@ -174,7 +237,14 @@ def main(argv=None):
             print(f"reap-line: --now is not ISO-8601: {args.now}", file=sys.stderr)
             return 2
 
-    print(reap_line(args.task, args.session, args.liveness, now, args.plugin_root))
+    if args.subject is not None:
+        if not args.subject_kind or not args.subject_status:
+            parser.error("--subject needs --subject-kind and --subject-status")
+        print(subject_reap_line(
+            args.subject, args.subject_kind, args.subject_status,
+            args.session, args.liveness, now, args.plugin_root))
+    else:
+        print(reap_line(args.task, args.session, args.liveness, now, args.plugin_root))
     # Both renders are normal outcomes; only a usage error is non-zero. The line
     # is the gate — see the module docstring.
     return 0
