@@ -270,6 +270,38 @@ class TestFindTask(unittest.TestCase):
         self.assertIsNotNone(found)
         self.assertEqual(found[0], path)
 
+    def test_a_novel_tasks_dir_resolves_without_a_code_change(self):
+        """The config names the directory; the script carries no name list.
+
+        The other fixtures use `25 Tasks`, which the old hardcoded `TASK_DIRS` also
+        matched — so they would pass against the broken implementation. This one uses a
+        name no code mentions, which is the only shape that proves the config is read.
+        """
+        novel = os.path.join(self.vaults, "novelvault", "Task Queue")
+        os.makedirs(novel)
+        path = os.path.join(novel, "a.md")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(f"---\nclaude_session_id: {SID}\nstatus: completed\n---\n")
+        self._config({"somevault": "25 Tasks", "novelvault": "Task Queue"})
+        found = cw.find_task(SID, self.tmp, self.vaults)
+        self.assertIsNotNone(found)
+        self.assertEqual(found[0], path)
+
+    def test_a_vault_with_no_tasks_dir_contributes_nothing(self):
+        """`tasks_dir: null` contributes no directory and is named as the excluded vault."""
+        self._config({"somevault": None})
+        self.assertEqual(cw.task_dirs_for(self.tmp, self.vaults), [])
+        refusal = cw.resolution_refusal(SID, os.path.join(self.vaults, "somevault"))
+        self.assertEqual(refusal[0], "task-unresolved")
+        self.assertIn("not among them", refusal[1])
+
+    def test_a_random_uuid_reports_the_no_page_cause(self):
+        """The two `task-unresolved` causes are distinguishable in the message."""
+        self._config({"somevault": "25 Tasks"})
+        refusal = cw.resolution_refusal(OTHER, self.tmp, self.vaults)
+        self.assertEqual(refusal[0], "task-unresolved")
+        self.assertEqual(refusal[1], f"no page carries {OTHER}")
+
 
 class _StubStore:
     """A local attention store: open list, per-item reads and delivery reports.
