@@ -35,10 +35,17 @@ that script's header — do not restate them here and do not re-implement the pr
 
 ⚠️ **One reap line per candidate, and `SUMMARY reap=<n>` is the round's reading.** Paste
 every `✅ REAP:` line into the payload's `REAPS` block **verbatim**, one row each as
-`TO: <subject> [<sid8>] | <line>`, and send each with `SendMessage` to the **full session id
-the line names** — a manager's roster name is its subject title, which need not be the page
-title, so the id is the address and the title is the label. A summary line is a failure, not
-a rendering choice.
+`TO: <exact roster name> | <line>`, and send each with `SendMessage` to that **roster
+name**.
+
+⚠️ **The script resolves the roster name; never compose one.** `SendMessage` takes the
+exact name the live roster reports, and a manager's name is not derivable from its page —
+the page title, the subject title and the session name are three different strings and only
+the last is deliverable. `subject-reap.py` therefore reads `session-liveness.py --list
+--json` once and puts the name in the line's `SendMessage <name>:` slot. ⚠️ **A line whose
+slot still holds a session id is UNaddressable** — the roster read failed, so report the
+row as unaddressable and send nothing; a name guessed from the page is a reap that lands
+nowhere while reading as delivered. A summary line is a failure, not a rendering choice.
 
 ## 2. The reap is evidence, never an act
 

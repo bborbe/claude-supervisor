@@ -170,7 +170,8 @@ def reap_line(task, session, liveness, now=None, root=None):
     )
 
 
-def subject_reap_line(subject, kind, status, session, liveness, now=None, root=None):
+def subject_reap_line(subject, kind, status, session, liveness, now=None, root=None,
+                      roster=None):
     """The same hand-over for a MANAGER whose SUBJECT is terminal.
 
     ⚠️ **The three reads ride the line, and that is the point of it.** A manager reap is
@@ -181,13 +182,21 @@ def subject_reap_line(subject, kind, status, session, liveness, now=None, root=N
     same moot render for every other verdict.
 
     `kind` is `goal` or `topic`; `status` is the page's terminal value, quoted verbatim.
+
+    ⚠️ **`roster` is the ADDRESS, and it is a different string from the session id.**
+    `SendMessage` takes the exact roster name the live roster reports for that id — the page
+    title, the subject title and the session name are three different strings, and only the
+    last one is deliverable. When the caller has no roster name the line falls back to the
+    id, which is the recipient's IDENTITY rather than an address; a caller must report that
+    row as unaddressable rather than guess a name from the page.
     """
     if liveness not in DELIVERABLE:
         return MOOT
+    recipient = roster or session
     return (
         f"✅ REAP: {subject} [{sid8(session)}] — subject {kind} status: {status} "
         f"· manager_session_id: {session} · liveness: LIVE · verified {stamp(now)} "
-        f"· SendMessage {session}: {SUBJECT_EVIDENCE} "
+        f"· SendMessage {recipient}: {SUBJECT_EVIDENCE} "
         f"· re-check: {recheck_command(session, root)}"
     )
 

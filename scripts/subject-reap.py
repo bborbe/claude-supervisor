@@ -112,6 +112,10 @@ VERDICT_WORD = {
 # are reported — never acted on, and never silently dropped either.
 SILENT_CODES = (ABSENT, MALFORMED)
 
+#: Seconds one liveness probe may take. One probe per terminal page, serially, so this is
+#: the per-page bound on the leg's whole run; a timeout reads as `unknown`, never a verdict.
+PROBE_TIMEOUT = 30
+
 
 def _load(name, filename):
     """Import a sibling script as a module — never a copy of its rules."""
@@ -142,6 +146,12 @@ def roots_from_args(raw_roots):
                       if os.path.isdir(os.path.join(path, d))), None)
         topics = next((os.path.join(path, d) for d in pm.TOPIC_DIRS
                        if os.path.isdir(os.path.join(path, d))), None)
+        if goals is None and topics is None:
+            # ⚠️ **A root with neither directory would scan nothing and report `terminal=0`** —
+            # a clean-looking round for a vault that has no subjects at all, which is
+            # indistinguishable from a healthy one. Refuse instead.
+            print(f"UNKNOWN — no goals or topics directory under: {path}", file=sys.stderr)
+            return None
         out.append({
             "name": os.path.basename(path),
             "goals_dir": goals,
@@ -158,19 +168,19 @@ def page_rows(directory):
     "a suppressed leg and a leg that found nothing must never print the same" failure.
     A vault with no such directory at all is legitimate and returns `[]`.
     """
-    rows = []
+    rows, unreadable = [], []
     if not directory:
-        return rows
+        return rows, unreadable
     # ⚠️ **A configured-but-absent directory is EMPTY, not unreadable.** `vaults()` takes
     # `goals_dir` straight from the vault config without checking it exists, so a stale
     # config entry would otherwise refuse the whole round every tick. An EXISTING directory
     # that cannot be listed is still `None` — "absent" and "I could not look" stay distinct.
     if not os.path.exists(directory):
-        return rows
+        return rows, unreadable
     try:
         names = sorted(os.listdir(directory))
     except OSError:
-        return None
+        return None, None
     for filename in names:
         if not filename.endswith(".md"):
             continue
@@ -178,11 +188,15 @@ def page_rows(directory):
         try:
             with open(path, encoding="utf-8") as handle:
                 block = pm.frontmatter(handle.read())
-        except OSError:
+        except (OSError, UnicodeDecodeError) as error:
+            # ⚠️ **Never a silent drop.** An unreadable page could be a terminal subject
+            # carrying a live manager, so skipping it would suppress exactly the reap this
+            # leg exists for. It is reported as `unknown` — never acted on, never hidden.
+            unreadable.append((filename[:-3], path, str(error)))
             continue
         if block:
             rows.append((filename[:-3], block, path))
-    return rows
+    return rows, unreadable
 
 
 def manager_id(block):
@@ -203,9 +217,15 @@ def subjects(roots):
     out = []
     for vault in roots:
         for kind, key in (("goal", "goals_dir"), ("topic", "topics_dir")):
-            rows = page_rows(vault.get(key))
+            rows, unreadable = page_rows(vault.get(key))
             if rows is None:
                 return None
+            for name, path, error in unreadable:
+                out.append({
+                    "vault": vault["name"], "kind": kind, "subject": name,
+                    "path": path, "status": "", "session": None, "field": None,
+                    "verdict": "unknown", "reason": "page unreadable: %s" % error,
+                })
             for name, block, path in rows:
                 status = (pm.field(block, "status") or "").strip().strip('"').strip("'").lower()
                 if status not in TERMINAL_STATUSES:
@@ -231,15 +251,52 @@ def probe(session_id, endpoint=None, registry_dir=None):
     if registry_dir:
         cmd += ["--dir", registry_dir]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-    except OSError:
+        # ⚠️ **Bounded.** One probe per terminal page, run serially, so a store that stops
+        # answering would otherwise hang the whole round on the first subject. A timeout is
+        # "could not tell" (unknown), never a verdict about the session.
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=PROBE_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
         return None
     return proc.returncode
 
 
-def classify(subject, endpoint=None, registry_dir=None):
+def roster(endpoint=None, registry_dir=None):
+    """`{session id: roster name}` from `session-liveness.py --list --json`, or None.
+
+    ⚠️ **This is what makes the reap ADDRESSABLE.** `SendMessage` takes the exact roster
+    name, not the session id, and a manager's name is not derivable from its subject page —
+    the page title, the subject title and the session name are three different strings.
+    One read per run, bounded like the probe; `None` means "could not read the roster", and
+    a row then keeps its id, which the caller must report as unaddressable rather than
+    guess a name from.
+    """
+    cmd = [sys.executable, SESSION_LIVENESS, "--list", "--json"]
+    if endpoint:
+        cmd += ["--endpoint", endpoint]
+    if registry_dir:
+        cmd += ["--dir", registry_dir]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=PROBE_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        records = json.loads(proc.stdout)
+    except ValueError:
+        return None
+    if not isinstance(records, list):
+        return None
+    return {(r.get("sessionId") or "").lower(): (r.get("name") or "")
+            for r in records if isinstance(r, dict)}
+
+
+def classify(subject, endpoint=None, registry_dir=None, names=None):
     """The row's verdict: `reap`, `silent` or `unknown`, with the reason it was decided from."""
     row = dict(subject)
+    if row.get("verdict"):
+        # A row the scan already decided — an unreadable page. Never probed, never re-judged.
+        return row
     if not row["session"]:
         row.update(verdict="silent", reason="no manager_session_id recorded")
         return row
@@ -251,6 +308,8 @@ def classify(subject, endpoint=None, registry_dir=None):
     row["liveness"] = word
     if code == LIVE:
         row.update(verdict="reap", reason="liveness: %s" % word)
+        if names is not None:
+            row["roster"] = names.get(row["session"].lower()) or None
     elif code in SILENT_CODES:
         row.update(verdict="silent", reason="liveness: %s" % word)
     else:
@@ -258,9 +317,14 @@ def classify(subject, endpoint=None, registry_dir=None):
     return row
 
 
-def card_key(subject):
-    """The dedup key for the reap card — one per subject, so a later round re-posts nothing."""
-    return "manager-subject-reap:%s" % subject
+def card_key(vault, subject):
+    """The dedup key for the reap card — one per (vault, subject), so a later round re-posts nothing.
+
+    ⚠️ **The vault is part of the key.** Goal and topic titles are not namespaced across
+    vaults, so a key on the title alone would make two same-titled subjects in different
+    vaults collide — and the second reap would be suppressed by the first one's card.
+    """
+    return "manager-subject-reap:%s:%s" % (vault, subject)
 
 
 def post_card(row, producer_kind=None, producer_id=None, timeout=30):
@@ -275,7 +339,7 @@ def post_card(row, producer_kind=None, producer_id=None, timeout=30):
     """
     cmd = [
         sys.executable, ATTENTION_ASK, "post",
-        "--dedup-key", card_key(row["subject"]),
+        "--dedup-key", card_key(row["vault"], row["subject"]),
         "--mechanism", "ack",
         "--payload",
         'Reaped the manager of "%s": subject %s is %s and its manager session %s was '
@@ -318,7 +382,8 @@ def render(rows):
         tally[row["verdict"]] += 1
         if row["verdict"] == "reap":
             lines.append(reap.subject_reap_line(
-                row["subject"], row["kind"], row["status"], row["session"], "live"))
+                row["subject"], row["kind"], row["status"], row["session"], "live",
+                roster=row.get("roster")))
     for row in rows:
         if row["verdict"] == "reap":
             lines.append("REAP | %s | %s | %s | %s | %s" % (
@@ -360,7 +425,8 @@ def main(argv=None):
               "unknown, never empty", file=sys.stderr)
         return 2
 
-    rows = [classify(subject, args.endpoint, args.registry_dir) for subject in scanned]
+    names = roster(args.endpoint, args.registry_dir)
+    rows = [classify(subject, args.endpoint, args.registry_dir, names) for subject in scanned]
 
     if args.post_cards:
         for row in rows:
@@ -377,8 +443,10 @@ def main(argv=None):
                     "verdict": row["verdict"], "reason": row["reason"],
                     "liveness": row.get("liveness"),
                     "card": row.get("card"),
+                    "roster": row.get("roster"),
                     "line": (reap.subject_reap_line(
-                        row["subject"], row["kind"], row["status"], row["session"], "live")
+                        row["subject"], row["kind"], row["status"], row["session"], "live",
+                        roster=row.get("roster"))
                         if row["verdict"] == "reap" else None),
                 }
                 for row in rows

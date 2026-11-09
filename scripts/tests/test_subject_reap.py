@@ -23,6 +23,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 
 import ast
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -182,10 +183,13 @@ class ReapTest(unittest.TestCase):
 
     # --- SC4: one ack card per reaped subject, and none for the silent rows -----------
 
-    def test_card_key_is_one_per_subject(self):
+    def test_card_key_is_one_per_subject_and_vault(self):
         # The key, not the post: a stable key is what makes a second round re-post nothing.
-        self.assertEqual(M.card_key("A Goal"), "manager-subject-reap:A Goal")
-        self.assertNotEqual(M.card_key("A Goal"), M.card_key("B Goal"))
+        self.assertEqual(M.card_key("v", "A Goal"), "manager-subject-reap:v:A Goal")
+        self.assertNotEqual(M.card_key("v", "A Goal"), M.card_key("v", "B Goal"))
+        # Titles are not namespaced across vaults, so the vault must be in the key — a
+        # title-only key would let one vault's card suppress the other's reap.
+        self.assertNotEqual(M.card_key("v1", "A Goal"), M.card_key("v2", "A Goal"))
 
     # --- exit codes: an unreadable root is REFUSED, never a clean scan ----------------
 
@@ -197,7 +201,57 @@ class ReapTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("UNKNOWN", result.stderr)
 
+    def test_root_with_no_goals_or_topics_dir_is_refused(self):
+        # A root with neither directory would scan nothing and report `terminal=0` — a
+        # clean-looking round for a vault that has no subjects at all.
+        bare = tempfile.mkdtemp(prefix="subject-reap-bare-")
+        result = subprocess.run(
+            [sys.executable, _SCRIPT, "--vault-root", bare],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no goals or topics directory", result.stderr)
+
+    def test_undecodable_page_is_reported_not_dropped(self):
+        # An unreadable page could be a terminal subject carrying a live manager; skipping
+        # it silently would suppress exactly the reap this leg exists for.
+        with open(os.path.join(self.vault.goals, "Broken.md"), "wb") as handle:
+            handle.write(b"---\nstatus: completed\n\xff\xfe not utf-8\n---\n")
+        with endpoint_fixture.FixtureEndpoint(rows=[endpoint_fixture.row(LIVE_ID)]) as fx:
+            result = run(self.vault, fx.url, self.registry)
+        self.assertIn("UNKNOWN |", result.stdout)
+        self.assertIn("page unreadable", result.stdout)
+        self.assertNotIn("✅ REAP:", result.stdout)
+
+    def test_json_emits_the_same_computation(self):
+        self.vault.goal("Live Manager", status="completed", manager_session_id=LIVE_ID)
+        self.vault.goal("No Manager", status="completed")
+        with endpoint_fixture.FixtureEndpoint(rows=[endpoint_fixture.row(LIVE_ID)]) as fx:
+            result = run(self.vault, fx.url, self.registry, "--json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual(payload["reap"], 1)
+        by_name = {row["subject"]: row for row in payload["rows"]}
+        self.assertEqual(by_name["Live Manager"]["verdict"], "reap")
+        self.assertEqual(by_name["Live Manager"]["liveness"], "LIVE")
+        self.assertIn("✅ REAP:", by_name["Live Manager"]["line"])
+        self.assertEqual(by_name["No Manager"]["verdict"], "silent")
+        self.assertIsNone(by_name["No Manager"]["line"])
+
     # --- SC3: the leg kills nothing and writes no session state ----------------------
+
+    def test_line_addresses_the_roster_name_not_the_id(self):
+        # `SendMessage` takes the roster name; the session id is the identity, not an
+        # address. A line still carrying the id is UNaddressable and the step says so.
+        named = M.reap.subject_reap_line(
+            "A Goal", "goal", "completed", LIVE_ID, "live", roster="fleet--a-topic")
+        self.assertIn("SendMessage fleet--a-topic:", named)
+        self.assertNotIn("SendMessage %s" % LIVE_ID, named)
+        # The id still rides the line as the identity and the re-check subject.
+        self.assertIn(LIVE_ID, named)
+        unnamed = M.reap.subject_reap_line("A Goal", "goal", "completed", LIVE_ID, "live")
+        self.assertIn("SendMessage %s" % LIVE_ID, unnamed)
 
     def test_no_kill_and_no_state_write(self):
         # Parsed, not grepped: the module docstring states the rule in prose ("there is no
