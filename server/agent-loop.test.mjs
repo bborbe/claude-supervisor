@@ -22,7 +22,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { runAgentLoop } from './agent-loop.mjs'
+import { runAgentLoop, ZERO_TURN_ERROR } from './agent-loop.mjs'
 import { StreamExhaustedError, StreamGapError, StreamLaggedError } from './wrapper-stream.mjs'
 
 // Builds a synthetic message stream and a driver that records the agent's `status`
@@ -311,7 +311,6 @@ test('a throwing turn-complete hook does not settle the worker as error', async 
 // `<task-notification>` for orphaned background agents settled with a `result` carrying
 // `num_turns: 0` and an empty result, and the worker read `done` though no turn ran.
 test('a stream whose last result has num_turns 0 settles error, never done', async () => {
-  const { ZERO_TURN_ERROR } = await import('./agent-loop.mjs')
   const agent = makeAgent()
   const ledgerCalls = []
   async function* stream() {
@@ -351,10 +350,45 @@ test('a zero-turn result followed by a stream throw is not read as a completed t
   }
   const ledgerCalls = []
   await runAgentLoop({ q: stream(), agent, writeLedger: (...a) => { ledgerCalls.push(a); return {} }, log: () => {} })
-  const { ZERO_TURN_ERROR } = await import('./agent-loop.mjs')
   assert.equal(agent.status, 'error')
   assert.equal(agent.error, ZERO_TURN_ERROR)
   assert.equal(agent.result.zero_turn, true)
   assert.equal(ledgerCalls.at(-1)[1].status, 'error')
   assert.equal(ledgerCalls.at(-1)[1].error, ZERO_TURN_ERROR)
+})
+
+// The latch: a real turn followed by a late synthetic zero-turn result is NOT a zero-turn run.
+test('a zero-turn result arriving after a real turn does not report the prompt as unexecuted', async () => {
+  const agent = makeAgent()
+  const ledgerCalls = []
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-l' }
+    yield { type: 'assistant', message: { content: 'working' } }
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'did it', num_turns: 4, permission_denials: [] }
+    yield { type: 'user', message: { content: '<task-notification>late</task-notification>' } }
+    yield { type: 'result', subtype: 'success', is_error: false, result: '', num_turns: 0, permission_denials: [] }
+  }
+  await runAgentLoop({ q: stream(), agent, writeLedger: (...a) => { ledgerCalls.push(a); return {} }, log: () => {} })
+  assert.equal(agent.status, 'done')
+  assert.equal(agent.error, undefined)
+  assert.equal(agent.result.zero_turn, undefined)
+  assert.equal(ledgerCalls.at(-1)[1].status, 'done')
+})
+
+test('a gap error after a zero-turn result keeps the gap reason, never the zero-turn marker', async () => {
+  const agent = makeAgent()
+  const gap = new Error('stream lagged')
+  gap.gap = true
+  gap.name = 'StreamGapError'
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-g' }
+    yield { type: 'result', subtype: 'success', is_error: false, result: '', num_turns: 0, permission_denials: [] }
+    throw gap
+  }
+  const ledgerCalls = []
+  await runAgentLoop({ q: stream(), agent, writeLedger: (...a) => { ledgerCalls.push(a); return {} }, log: () => {} })
+  assert.equal(agent.status, 'error')
+  assert.equal(agent.error, String(gap))
+  assert.equal(agent.result.zero_turn, undefined)
+  assert.equal(ledgerCalls.at(-1)[1].error, String(gap))
 })

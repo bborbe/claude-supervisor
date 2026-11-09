@@ -19,7 +19,11 @@
  * @param {object}  args
  * @param {object|null|undefined} args.session the wrapper's session record, or null when unreadable
  * @param {Array|null|undefined}  args.cards   the session's open attention cards, or null when the store was unreadable
- * @param {object|null}           [args.lastResult] the worker's most recent captured `result`, if any
+ * @param {object|null}           [args.lastResult] the worker's most recent captured `result`, if any.
+ *   A zero-turn one keeps the session (reason `zero-turn-result`) because a resumed CLI can settle
+ *   its own synthetic `<task-notification>` before the queued prompt runs.
+ * @param {boolean}               [args.zeroTurnGraceExpired] the caller's grace window for that
+ *   keep has elapsed; a still-idle, unparked, cardless session is then ended like any other.
  * @returns {{end: boolean, reason: string}}
  */
 export function shouldEndIdleWorker({ session, cards, lastResult = null, zeroTurnGraceExpired = false } = {}) {

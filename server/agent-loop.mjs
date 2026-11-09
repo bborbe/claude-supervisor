@@ -54,7 +54,8 @@ const NO_HEARTBEAT = { start() {}, stop() {} }
 // The reason a zero-turn worker settles `error`. Exported so tests match the same literal.
 export const ZERO_TURN_ERROR = 'zero-turn: the session produced a result with num_turns 0 — no model turn ran, the prompt was not executed'
 
-const isZeroTurn = (result) => !result.is_error && result.num_turns === 0
+// Zero-turn means NO turn ran in this stream — never merely "the last result has num_turns 0".
+const isZeroTurn = (result, agent) => Boolean(result) && !result.is_error && result.num_turns === 0 && !agent.sawTurn
 
 const markZeroTurn = (agent) => {
   agent.status = 'error'
@@ -82,6 +83,15 @@ export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_
       // while its transcript was still growing (measured 2026-09-22). The payload is
       // overwritten per result, so the value left after the loop is the last one —
       // which is what the ledger's terminal patch must carry.
+      // ⚠️ Latch that a model turn RAN, before the terminal settle reads the last result. A
+      // synthetic `<task-notification>` result can land AFTER the real turn's result (orphaned
+      // background agents finish at different times), and `agent.result` keeps only the last one —
+      // so "the last result has num_turns 0" is not the same fact as "no turn ran". Reading it as
+      // one would report a worker that did the work as `zero-turn: the prompt was not executed`,
+      // inviting exactly the duplicate re-run this module's header warns about.
+      if (message.type === 'assistant' || (message.type === 'result' && (message.num_turns ?? 0) > 0)) {
+        agent.sawTurn = true
+      }
       if (message.type === 'result') {
         agent.result = {
           subtype: message.subtype,
@@ -122,7 +132,7 @@ export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_
       // way while the caller's prompt is still queued behind it (measured 2026-11-05, agent_12 /
       // agent_13). Reporting it `done` let a manager record a resume that did nothing as one that
       // acted. It settles `error` with a named reason instead, so `status` alone tells them apart.
-      if (isZeroTurn(agent.result)) markZeroTurn(agent)
+      if (isZeroTurn(agent.result, agent)) markZeroTurn(agent)
       else agent.status = agent.result.is_error ? 'error' : 'done'
       writeLedger(agent, {
         status: agent.status,
@@ -159,12 +169,12 @@ export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_
     // name. Every gap class in `wrapper-stream.mjs` carries `gap = true`, so this one test
     // covers all of them, present and future.
     const terminal = { ended_at: new Date().toISOString() }
-    const turnClosed = agent.result && !isZeroTurn(agent.result) && !agent.result.is_error && error?.gap !== true
+    const turnClosed = agent.result && !isZeroTurn(agent.result, agent) && !agent.result.is_error && error?.gap !== true
     if (turnClosed) {
       agent.status = 'done'
       writeLedger(agent, { ...terminal, status: 'done', result: agent.result })
       log(`agent ${agent.id} stream ended after a completed turn: ${error}`)
-    } else if (agent.result && isZeroTurn(agent.result) && error?.gap !== true) {
+    } else if (agent.result && isZeroTurn(agent.result, agent) && error?.gap !== true) {
       // The stream died after a zero-turn result with no gap: the same empty run as the clean
       // path above, so it carries the same contract (`error: zero-turn: …`, `result.zero_turn`).
       markZeroTurn(agent)
