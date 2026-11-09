@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.264.2
 
 - docs: **which implementation owns a session-ledger row's terminal verdict is now written down.** `docs/ledger-ownership.md` states the rule — the process that holds the child's stdin is the only writer of that child's `status` / `result` / `ended_at` — names the live implementation (the Go daemon `bborbe/claude-wrapper`, which every vault's MCP entry points at), lists the four writes it makes across a row's life, and marks the Node terminal patch in `server/agent-loop.mjs` as the **Node-only path, dead on this fleet**: `pgrep -f supervisor.mjs` returns nothing and the daemon owns the port those configs name. The loop is retained as the reference semantics the Go port was measured against and is still correct for a Node-hosted deployment, but nothing may add a second writer for a Go-spawned worker — whichever PATCH landed last would silently become the row's verdict, including turning a finished worker back into a `running` one. The file's own header carries the same warning, so a reader of the patch cannot miss it.
 
