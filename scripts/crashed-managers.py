@@ -106,7 +106,10 @@ PROBE_TIMEOUT = 30
 POST_TIMEOUT = 60
 
 # The states `manager-liveness.py --state` can answer, plus this file's own probe failure.
-CADENCE_STATES = ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID")
+# `WRONG-BRANCH` (the record lives on another tier) is named rather than folded into the probe
+# failure; neither is `STALE`, so neither cards. An unresolvable subject is not a word: `--state`
+# refuses it with exit 3, which reads as PROBE_FAILED below.
+CADENCE_STATES = ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID", "WRONG-BRANCH")
 PROBE_FAILED = "UNREADABLE"
 
 # `session-liveness.py --check`'s documented exit codes. The instrument's contract, not a
@@ -333,7 +336,9 @@ def topic_manager_live(vault: str, goal_name: str) -> bool:
         # nothing — and treating it as coverage would suppress a real goal-manager crash. The
         # topic's own cadence is the only thing that says the loop is actually running.
         topic_stem = entry[: -len(".md")]
-        if cadence_state(topic_stem, "topic") in ("STOPPED", "STALE", "UNARMED", PROBE_FAILED):
+        if cadence_state(topic_stem, "topic") in (
+            "STOPPED", "STALE", "UNARMED", "WRONG-BRANCH", PROBE_FAILED
+        ):
             continue
         return True
     return False

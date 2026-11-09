@@ -51,7 +51,7 @@ file reaches you, it is a caller bug — say so and render no row for it.
       **You must not read the clock yourself.**
    5. **The manager verdicts**, as `<goal> → LIVE | ABSENT | UNKNOWN`, from the caller's
       `session-liveness.py --check` over each goal page's `claude_session_id`, for every goal the topic declares.
-   6. **The cadence verdicts**, as `<goal> → OK | STALE | STOPPED | SLEEPING | INVALID`, from the
+   6. **The cadence verdicts**, as `<goal> → OK | STALE | STOPPED | SLEEPING | UNARMED | INVALID | WRONG-BRANCH`, from the
       caller's `manager-liveness.py --state --subject <goal> --branch goal`.
    7. **`today`** — ISO `YYYY-MM-DD`, for the deferred overlay on goal rows.
 

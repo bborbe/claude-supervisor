@@ -413,10 +413,17 @@ class StateVerb(unittest.TestCase):
     def test_state_exits_zero_for_every_state(self):
         # The state IS the answer. A non-zero exit would make a stood-down
         # manager read as a failure to anything wrapping the call, which is the
-        # opposite of what STOPPED means.
-        for topic in ("Nothing Here",):
-            rc, _ = self.state("--state", "--subject", topic, "--branch", "goal")
-            self.assertEqual(rc, 0, topic)
+        # opposite of what STOPPED means. A never-armed subject is a state only once
+        # its page resolves — without one it is the unresolvable-name refusal
+        # (`StateResolution`), which is not a state.
+        with tempfile.TemporaryDirectory() as vault:
+            os.makedirs(os.path.join(vault, "24 Goals"))
+            open(os.path.join(vault, "24 Goals", "Nothing Here.md"), "w").close()
+            rc, out = self.state(
+                "--state", "--subject", "Nothing Here", "--branch", "goal", "--vault", vault
+            )
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith("UNARMED\t"), out)
 
     def test_state_requires_a_subject(self):
         with self.assertRaises(SystemExit):
@@ -738,3 +745,129 @@ class UnarmedAndLegacy(unittest.TestCase):
             rc = self.m.check()
         self.assertEqual(self.m.EXIT_STALE, rc)
         self.assertIn("STALE scanned-legacy", out.getvalue())
+
+
+class StateResolution(unittest.TestCase):
+    """`--state` tells every answer apart by its first token — and refuses an unknown name.
+
+    Measured 2026-11-07: a cadence table named five managers `UNARMED`. Four were `OK` under
+    their full names and one was `STOPPED` on the goal branch. Two causes read identically
+    as `UNARMED`: an abbreviated label (its slug finds no record) and a probe on the wrong
+    branch. Acting on `UNARMED` arms a loop, so both now answer something else. Each test
+    runs in its own `MANAGER_LIVENESS_STATE_DIR` and asserts the first token only.
+    """
+
+    FULL = "Several Clusters and the Mac Write One Vault"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.vault = tempfile.TemporaryDirectory()
+        self.addCleanup(self.vault.cleanup)
+        self.m = load(self.tmp.name)
+        self.addCleanup(lambda: os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None))
+        for folder, name in (("24 Goals", self.FULL), ("23 Topics", "A Topic")):
+            os.makedirs(os.path.join(self.vault.name, folder), exist_ok=True)
+            open(os.path.join(self.vault.name, folder, name + ".md"), "w").close()
+
+    def run_cli(self, *argv):
+        out, err, old = io.StringIO(), io.StringIO(), sys.argv
+        sys.argv = ["manager-liveness.py", *argv, "--vault", self.vault.name]
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        return rc, out.getvalue(), err.getvalue()
+
+    def first_token(self, *argv):
+        rc, out, _ = self.run_cli("--state", *argv)
+        self.assertEqual(0, rc, out)
+        return out.split("\t", 1)[0]
+
+    def quiet(self, fn, *args):
+        with redirect_stdout(io.StringIO()):
+            fn(*args)
+
+    def age(self, subject, branch, seconds):
+        p = self.m.path(self.m.slug(subject, branch), "cadence")
+        t = time.time() - seconds
+        os.utime(p, (t, t))
+
+    # --- one fixture per state -------------------------------------------------
+
+    def test_page_resolves_and_no_record_anywhere_is_unarmed(self):
+        self.assertEqual("UNARMED", self.first_token("--subject", self.FULL, "--branch", "goal"))
+
+    def test_a_topic_page_also_resolves_the_subject(self):
+        self.assertEqual("UNARMED", self.first_token("--subject", "a topic", "--branch", "topic"))
+
+    def test_record_on_goal_probed_on_topic_is_wrong_branch(self):
+        self.quiet(self.m.arm, self.FULL, "goal", 900)
+        self.quiet(self.m.stop, self.FULL, "goal")
+        rc, out, _ = self.run_cli("--state", "--subject", self.FULL, "--branch", "topic")
+        self.assertEqual(0, rc)
+        self.assertTrue(out.startswith("WRONG-BRANCH\t"), out)
+        self.assertIn("record is on branch goal", out)
+        # Control on the same record: the right branch still reads the real state.
+        self.assertEqual("STOPPED", self.first_token("--subject", self.FULL, "--branch", "goal"))
+
+    def test_wrong_branch_wins_even_without_a_page(self):
+        # The record proves the subject exists; the page test is never reached.
+        self.quiet(self.m.arm, "Pageless Goal", "goal", 900)
+        self.assertEqual(
+            "WRONG-BRANCH", self.first_token("--subject", "Pageless Goal", "--branch", "topic")
+        )
+
+    def test_unresolvable_name_is_refused_not_unarmed(self):
+        self.quiet(self.m.arm, self.FULL, "goal", 900)
+        rc, out, err = self.run_cli("--state", "--subject", "Several Clusters")
+        self.assertEqual(self.m.EXIT_UNRESOLVED, rc)
+        self.assertNotEqual(0, rc)
+        self.assertEqual("", out, "a refusal prints no state for a reader to parse")
+        self.assertIn("'Several Clusters'", err)
+        # Control on the same run: the full name answers.
+        rc, out, _ = self.run_cli("--state", "--subject", self.FULL)
+        self.assertEqual(0, rc)
+        self.assertTrue(out.startswith("OK\t"), out)
+
+    def test_unresolvable_name_is_refused_with_an_explicit_branch_too(self):
+        rc, out, _ = self.run_cli("--state", "--subject", "Several Clusters", "--branch", "goal")
+        self.assertEqual(self.m.EXIT_UNRESOLVED, rc)
+        self.assertEqual("", out)
+
+    def test_the_fleet_branch_has_no_page_and_still_reads_unarmed(self):
+        self.assertEqual(
+            "UNARMED", self.first_token("--subject", "Fleet Manager", "--branch", "fleet")
+        )
+
+    def test_ok(self):
+        self.quiet(self.m.arm, self.FULL, "goal", 900)
+        self.assertEqual("OK", self.first_token("--subject", self.FULL, "--branch", "goal"))
+
+    def test_stale(self):
+        self.quiet(self.m.arm, self.FULL, "goal", 300)
+        self.age(self.FULL, "goal", 100000)
+        self.assertEqual("STALE", self.first_token("--subject", self.FULL, "--branch", "goal"))
+
+    def test_stopped(self):
+        self.quiet(self.m.arm, self.FULL, "goal", 900)
+        self.quiet(self.m.stop, self.FULL, "goal")
+        self.assertEqual("STOPPED", self.first_token("--subject", self.FULL, "--branch", "goal"))
+
+    # --- SC4 regression guard: classify() measures the OBSERVED period ---------
+
+    def test_requested_interval_is_not_the_limit(self):
+        # `.cadence` says 900 s; the manager really re-arms every ~1244 s because each round
+        # waits on its sweep and drive legs. Age 1300 s is inside one observed period +
+        # SLACK (1424 s) and outside the requested 900 + SLACK (1080 s): a reader that used
+        # the requested value would say STALE between two healthy rounds.
+        s = self.m.slug(self.FULL, "goal")
+        now = time.time()
+        self.m.write_atomic(self.m.path(s, "cadence"), "900\n")
+        arms = [now - 1300 - 1244 * k for k in range(5, -1, -1)]
+        self.m.write_atomic(self.m.path(s, "arms"), "".join(f"{v:.0f}\n" for v in arms))
+        os.utime(self.m.path(s, "cadence"), (now - 1300, now - 1300))
+        state, detail = self.m.classify(s, now)
+        self.assertEqual("OK", state, detail)
+        self.assertIn("(observed)", detail)

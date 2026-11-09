@@ -458,6 +458,8 @@ never an auto-quiet verdict**: report the manager as unread and leave the loop a
 | `STOPPED` with a marker and a **live, non-terminal** subject carrying runnable work | a deliberate `/supervisor:stop` | **operator row** — only they release it |
 | `UNARMED`, or `STALE` beyond one full observed period **and** the subject has runnable work | a genuine lapse | **drive it** — tell the manager to re-arm in its own pane |
 | `STALE` inside one observed period | round duration exceeded the declared interval | **no** — see the calibration note below |
+| `WRONG-BRANCH` | the record is on the tier its detail names | **no** — re-probe on that branch; never drive a re-arm |
+| exit **3**, empty stdout | no record, no page: an abbreviated or mistyped name | **no** — report it unresolved; never `UNARMED` (2026-11-07: 5 such names hid 4 `OK` + 1 `STOPPED`) |
 | `INVALID` | a record **exists and cannot be read** — the manager's state is unknown, a probe failure, not a fact about the fleet | **no** — report the manager as unread and leave the loop alone. ⚠️ **Never read `INVALID` as a lapse** — the script says the two "must never be collapsed" (`scripts/manager-liveness.py:366-374`), because `UNARMED` means *no manager ever armed this subject* while `INVALID` means *we could not tell* |
 
 ⚠️ **`STALE` is arithmetic, not a death verdict.** The constant has one home —

@@ -87,7 +87,8 @@ cross-session state for every later tick.
    - `claude_session_id`, probed with `session-liveness.py --check <id>` →
      `LIVE` / `ABSENT` / `UNKNOWN`;
    - the loop cadence — `manager-liveness.py --state --subject "<goal>" --branch goal` →
-     `OK` / `STALE` / `STOPPED` / `INVALID`.
+     `OK` / `STALE` / `STOPPED` / `SLEEPING` / `UNARMED` / `INVALID` / `WRONG-BRANCH`; a non-zero
+     exit (exit 3: the name resolves no page and no record) renders `UNVERIFIED`, never `UNARMED`.
 
    ⚠️ **`UNKNOWN` is not `ABSENT`** — an unreadable source cannot prove a session dead, so
    the row renders `UNVERIFIED`, never `dead`. ⚠️ **`--branch goal` is not optional** — the

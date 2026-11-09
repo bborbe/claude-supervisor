@@ -8,7 +8,7 @@ Two independent signals are read every time, because neither answers the other's
      `AMBIGUOUS` (3) / `MALFORMED` (4). Only `ABSENT` licenses a resume: `UNKNOWN` and
      `AMBIGUOUS` are **cannot tell**, never dead.
   2. **Is its loop armed?** `manager-liveness.py --state --subject <goal> --branch goal`
-     → `OK` / `STALE` / `STOPPED` / `SLEEPING` / `UNARMED` / `INVALID`. This is the signal
+     → `OK` / `STALE` / `STOPPED` / `SLEEPING` / `UNARMED` / `INVALID` / `WRONG-BRANCH`. This is the signal
      a liveness probe structurally cannot give — a manager process can be alive with its
      loop unarmed after a missed re-arm. `STOPPED` is a deliberate stand-down and
      `SLEEPING` is a date-gated wait; both are left alone.
@@ -196,6 +196,11 @@ def session_verdict(sid: str) -> str:
 #: and reads as `jump` — the same reasoning `scripts/crashed-managers.py` records for its own
 #: `PROBE_FAILED`, and the same reason `session_verdict` answers `UNKNOWN` rather than `ABSENT`.
 PROBE_FAILED = "UNREADABLE"
+#: Every word `manager-liveness.py --state` can print. `WRONG-BRANCH` — the record lives on
+#: another tier — is never restart-worthy: it reads as `jump` for a live session, like
+#: `UNARMED`, because the loop it names is not this probe's loop at all. An unresolvable
+#: subject is not a word here: `--state` refuses it with exit 3, which lands on `PROBE_FAILED`.
+CADENCE_STATES = ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID", "WRONG-BRANCH")
 
 
 def cadence_state_detail(subject: str, branch: str = "goal") -> tuple:
@@ -227,8 +232,12 @@ def cadence_state_detail(subject: str, branch: str = "goal") -> tuple:
     fields = first.split("\t")
     state = fields[0].strip()
     detail = fields[2].strip() if len(fields) > 2 else ""
-    if state not in ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID"):
-        return "INVALID", detail
+    # ⚠️ An unrecognised word is the INSTRUMENT's answer, not the subject's, so it reads as
+    # `PROBE_FAILED` — never `INVALID`, which `main` restarts a LIVE session on. Mapping it to
+    # `INVALID` is how a new state the probe learns (`WRONG-BRANCH`, 2026-11-08) would have
+    # restarted a healthy manager on a word this file had never seen.
+    if state not in CADENCE_STATES:
+        return PROBE_FAILED, detail
     return state, detail
 
 

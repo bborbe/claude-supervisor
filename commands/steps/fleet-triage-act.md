@@ -254,7 +254,10 @@ session failing any limb is some other state and belongs to its own branch.
    OPERATOR row ("loop stopped deliberately; re-arm?"). `UNARMED` with a live session and an
    open subject is a lapse, and the drive is **one `SendMessage` to that manager telling it to
    re-arm in its own pane** — `commands/steps/fleet-triage-state.md` § 3.6 carries the same row
-   and the same mechanism, and this step must not invent a second one.
+   and the same mechanism, and this step must not invent a second one. ⚠️ **`WRONG-BRANCH` and a
+   `--state` refusal (exit 3, empty stdout) are never this row** — both are misreads of the
+   subject, not a missing loop, and a re-arm sent on one lands on a manager that is running or
+   stood down on purpose.
 
    ⚠️ **Never run `manager-liveness.py --arm` from here.** `--arm` is documented as *"run by the
    manager at EVERY re-arm"*: it writes the cadence record and clears `.stopped`, so calling it

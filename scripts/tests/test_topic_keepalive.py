@@ -94,6 +94,13 @@ class KeepAliveTest(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertEqual("resume", out[0])
 
+    def test_a_live_session_on_the_wrong_branch_jumps_never_restarts(self):
+        # `WRONG-BRANCH` says the record lives on another tier — not that this loop lapsed.
+        self.page()
+        rc, out = self.run_keepalive(live="LIVE", cadence="WRONG-BRANCH")
+        self.assertEqual(0, rc)
+        self.assertEqual("jump", out[0])
+
     def test_unknown_is_cannot_tell_and_never_resumes(self):
         # The measured direction: a fabricated id answers UNKNOWN, and UNKNOWN must
         # never be read as death — a second manager on a live one is the double writer.
@@ -575,16 +582,22 @@ class CadenceTest(unittest.TestCase):
         self.assertEqual(self.k.PROBE_FAILED, self.k.cadence("A Goal"))
 
     def test_every_documented_state_still_maps(self):
-        for state in ("OK", "STALE", "STOPPED", "UNARMED", "INVALID"):
+        for state in ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID", "WRONG-BRANCH"):
             with self.subTest(state=state):
                 self._stub(stdout=f"{state}\tslug\tdetail\n")
                 self.assertEqual(state, self.k.cadence("A Goal"))
 
-    def test_an_unrecognised_state_is_invalid(self):
-        # The pre-existing fallback, unchanged: a well-formed exit with unparseable text is
-        # `manager-liveness.py`'s own INVALID, not a probe failure.
+    def test_an_unrecognised_state_is_a_probe_failure_not_invalid(self):
+        # ⚠️ Changed 2026-11-08: an unrecognised word used to map to INVALID, and `main`
+        # restarts a LIVE session on INVALID — so the probe learning a new word would have
+        # restarted healthy managers. A word this file does not know is about the probe.
         self._stub(stdout="BANANA\tslug\tdetail\n")
-        self.assertEqual("INVALID", self.k.cadence("A Goal"))
+        self.assertEqual(self.k.PROBE_FAILED, self.k.cadence("A Goal"))
+
+    def test_an_unresolvable_subject_refusal_is_a_probe_failure(self):
+        # `--state` exits 3 with empty stdout for a name with no record and no page.
+        self._stub(rc=3, stdout="", stderr="manager-liveness: --state refused: 'A Goal' …\n")
+        self.assertEqual(self.k.PROBE_FAILED, self.k.cadence("A Goal"))
 
     def test_the_sleeping_detail_is_returned_with_its_state(self):
         """A sleep is only actionable if the line names the instant, not just the state."""

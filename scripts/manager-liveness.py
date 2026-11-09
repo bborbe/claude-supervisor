@@ -88,9 +88,23 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
                                     to it by construction. A reader that must tell a
                                     stood-down manager from a lapsed one asks about the
                                     subject directly, which is what this verb is for.
-                                    Exits 0 whatever the state: the state IS the answer,
+                                    Exits 0 for every state: the state IS the answer,
                                     and a non-zero exit would make a stood-down manager
                                     read as a failure to every `if` that wraps it.
+                                    `WRONG-BRANCH` is a seventh state: no record on the
+                                    probed branch but one on another, detail `record is
+                                    on branch <b>` -- a probe that names the wrong tier,
+                                    not a subject nothing armed.
+                                    ⚠️ **Exits 3 with nothing on stdout** when the subject
+                                    resolves neither a record under any branch nor a page
+                                    under --vault (`24 Goals/` / `23 Goals/` / `23 Topics/`,
+                                    exact name, any case): an abbreviated or mistyped name,
+                                    which is not a fact about the fleet and must never read
+                                    as `UNARMED` -- acting on that arms a live loop or
+                                    reverses a stand-down (measured 2026-11-07: five arm
+                                    instructions to managers that needed none). `--branch
+                                    fleet` is exempt: the fleet manager has no page by
+                                    design, so a missing fleet record is still `UNARMED`.
                                     ⚠️ `UNARMED` means NO record exists under either the
                                     prefixed or the pre-split name -- a subject nothing has
                                     ever armed, which is a fact about the fleet. `INVALID`
@@ -139,6 +153,9 @@ SLACK = 180  # seconds: the tick's own runtime plus ordinary jitter before a re-
 PERIOD_CAP = 2.5  # the p90 period estimate never exceeds this multiple of the median
 ARMS_KEEP = 12  # re-arm epochs retained per topic — enough for a stable percentile
 EXIT_STALE = 10
+# `--state` for a subject that resolves no record under any branch and no page: a refusal,
+# distinct from argparse's 2 so a caller can tell "unresolvable name" from "bad flags".
+EXIT_UNRESOLVED = 3
 
 
 def base_slug(subject: str) -> str:
@@ -270,6 +287,78 @@ def observed_period(s: str):
 LEGACY_EXTS = ("cadence", "arms", "stopped")
 GOALS_DIR = "24 Goals"
 DEFAULT_TOPICS_DIR = "23 Topics"
+# The page folders `--state` accepts as proof a subject exists. `private-personal` /
+# `seibert-*` keep goals in `24 Goals`, the `24 Tasks` vaults in `23 Goals` — the same pair
+# `scripts/close-worker.py` resolves.
+PAGE_DIRS = (("goal", "24 Goals"), ("goal", "23 Goals"), ("topic", DEFAULT_TOPICS_DIR))
+# What counts as "a record exists on this branch" — the files `--arm` / `--stop` /
+# `--sleep` write. `.arms` alone is history, never written without a `.cadence`.
+RECORD_EXTS = ("cadence", "stopped", "sleeping")
+
+
+def record_branches(subject: str) -> list:
+    """Every branch holding a prefixed record for `subject`, in BRANCHES order."""
+    base = base_slug(subject)
+    return [
+        b for b in BRANCHES
+        if any(os.path.exists(path(f"{b}--{base}", ext)) for ext in RECORD_EXTS)
+    ]
+
+
+def page_kind(subject: str, vault: str):
+    """`goal` / `topic` when `<vault>/<page dir>/<subject>.md` exists (exact name, any case), else None.
+
+    Exact basename, never a substring — `docs/subject-resolution.md` § The page test: a
+    topic's member goals are named after it, so a wildcard resolves one label in both
+    folders. Case-insensitive for the same reason that doc uses `-iname`.
+    """
+    root = os.path.abspath(os.path.expanduser(vault))
+    want = subject.lower() + ".md"
+    for kind, folder in PAGE_DIRS:
+        try:
+            if any(e.lower() == want for e in os.listdir(os.path.join(root, folder))):
+                return kind
+        except OSError:
+            continue
+    return None
+
+
+def state(subject: str, branch, vault: str, now: float) -> int:
+    """`--state`: print `<STATE>\\t<slug>\\t<detail>` and exit 0, or refuse with EXIT_UNRESOLVED.
+
+    `UNARMED` is a claim about a SUBJECT — "nothing ever armed it" — so it is printed only
+    once the subject is known to exist. Two answers used to collapse into it:
+
+      * **A record on another branch** → `WRONG-BRANCH`. Measured 2026-11-07: a goal-armed,
+        stood-down subject probed with `--branch topic` read `UNARMED`, while `--branch goal`
+        read `STOPPED`. The record was right; the probe named the wrong tier.
+      * **No record anywhere and no page** → a refusal on stderr, exit 3, nothing on stdout.
+        An abbreviated label (`"No Session Sits Idle"`) slugs to a different base, finds no
+        record, and read `UNARMED` for a manager that was armed and `OK` under its full name.
+
+    `--branch fleet` skips the page test: the fleet manager manages no page by design.
+    """
+    branch = branch or detect_branch(subject, vault)
+    s = slug(subject, branch)
+    st, detail = classify(s, now)
+    if st == "UNARMED":
+        elsewhere = [b for b in record_branches(subject) if b != branch]
+        if elsewhere:
+            st, detail = "WRONG-BRANCH", f"record is on branch {elsewhere[0]}" + (
+                f" (also {', '.join(elsewhere[1:])})" if len(elsewhere) > 1 else ""
+            )
+        elif branch != "fleet" and page_kind(subject, vault) is None:
+            root = os.path.abspath(os.path.expanduser(vault))
+            print(
+                f"manager-liveness: --state refused: {subject!r} resolves no record under any "
+                f"branch and no page under {root} ('24 Goals/', '23 Goals/', '23 Topics/') — an "
+                "abbreviated or mistyped subject is not an unarmed one; pass the full page name "
+                "and --vault <vault root>",
+                file=sys.stderr,
+            )
+            return EXIT_UNRESOLVED
+    print(f"{st}\t{s}\t{detail}")
+    return 0
 
 
 def detect_branch(subject: str, vault: str = ".") -> str:
@@ -688,7 +777,8 @@ def main() -> int:
     mode.add_argument(
         "--state",
         action="store_true",
-        help="print ONE subject's state: OK / STALE / STOPPED / SLEEPING / UNARMED / INVALID",
+        help="print ONE subject's state: OK / STALE / STOPPED / SLEEPING / UNARMED / INVALID / "
+             "WRONG-BRANCH; exits 3 (stdout empty) for a subject with no record and no page",
     )
     mode.add_argument(
         "--delivered",
@@ -715,7 +805,11 @@ def main() -> int:
         choices=BRANCHES,
         help="goal | topic | fleet — auto-detected when omitted (existing record, then the vault's pages)",
     )
-    ap.add_argument("--vault", default=".", help="vault ROOT, used only to auto-detect --branch")
+    ap.add_argument(
+        "--vault",
+        default=".",
+        help="vault ROOT: auto-detects --branch, and --state's page test for a subject with no record",
+    )
     ap.add_argument("--interval", type=int, help="the ScheduleWakeup delay just armed, seconds")
     ap.add_argument(
         "--until",
@@ -738,11 +832,7 @@ def main() -> int:
     if a.state:
         if not a.subject:
             ap.error("--state requires --subject (or the deprecated --topic)")
-        a.branch = a.branch or detect_branch(a.subject, a.vault)
-        s = slug(a.subject, a.branch)
-        state, detail = classify(s, time.time())
-        print(f"{state}\t{s}\t{detail}")
-        return 0
+        return state(a.subject, a.branch, a.vault, time.time())
     if not a.subject:
         ap.error("--subject (or the deprecated --topic) is required with --arm/--stop/--sleep")
     a.branch = a.branch or detect_branch(a.subject, a.vault)
