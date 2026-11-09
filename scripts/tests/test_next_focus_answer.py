@@ -153,6 +153,25 @@ class ConsumeTests(unittest.TestCase):
         consumed, _ = self.run_consume([self.card("add it to the plan")])
         self.assertEqual(consumed, [], "the same card was consumed twice")
 
+    def test_leave_after_add_leaves_the_plan_row_intact(self):
+        """SC3's path: a dismissal must not undo a plan entry already written.
+
+        Both keyings get this wrong — a title-keyed dismissal deletes the row it
+        matches, and a card-keyed one that rewrites the note can drop it by accident.
+        """
+        self.run_consume([self.card("add it to the plan")])
+        before = self.weekly.read_text(encoding="utf-8")
+        self.assertIn(f"| 2 | 📌 {TASK_NAME} |", before)
+
+        later = self.card("leave it out", item_id="c" * 32)
+        later["dedup_key"] = "next-focus:vault:task:my-task-99999999"
+        consumed, _ = self.run_consume([later])
+
+        self.assertEqual(consumed[0]["action"], "dismissed")
+        after = self.weekly.read_text(encoding="utf-8")
+        self.assertEqual(before, after, "the dismissal rewrote the weekly note")
+        self.assertEqual(after.count(f"| 2 | 📌 {TASK_NAME} |"), 1)
+
     # -------------------------------------------------------------- leave path
 
     def test_leave_writes_a_dismissal_that_the_reader_reports(self):
