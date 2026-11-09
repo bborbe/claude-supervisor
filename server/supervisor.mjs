@@ -4,8 +4,9 @@
 // The `supervisor` tool a session actually binds is the Go claude-wrapper daemon at
 // http://127.0.0.1:18090/supervisor/mcp. Every cc-* launcher loads
 // ~/.claude/mcp-private-personal.json with --strict-mcp-config, and this plugin ships no
-// .mcp.json of its own, so this file is reachable only from the drill scripts
-// (channel-drill.py, current-call-drill.py, ledger-drill.py).
+// .mcp.json of its own, so nothing on the operator's machine starts this file: it is
+// reachable only from the drill scripts and from scripts/mcp-start.py, the plugin's own
+// launcher for a deployment that DOES wire an .mcp.json.
 //
 // A spawn, model or permission fix belongs in bborbe/claude-wrapper:
 // `pkg/roster_mcp.go` (spawn handler) and `pkg/spawn_cwd.go` (launcher + model resolution).
