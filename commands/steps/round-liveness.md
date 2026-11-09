@@ -57,3 +57,13 @@ When: every round, before the pre-dispatch gate
   ⚠️ **`SUPERVISOR_WRAPPER_URL` must be an ORIGIN, with no path.** `server/config.mjs` resolves it to `url.origin`, so a value carrying a path would have the server call `/api/1.0/...` while this curl posts to `<path>/api/1.0/...` — a route-level `404`, which the recorder accepts as a valid reach and which would therefore certify a route that was never reached.
 
   ⚠️ **`409` or `404` are the only statuses the recorder accepts**, and the only ones that mean the request arrived and was refused harmlessly. Any other status writes nothing and says why: a `5xx`, an unreachable wrapper, or a command the classifier denied all leave this session with **no** wrapper reach. **Do not retry a refused curl into a passing status** — the refusal is the finding.
+
+## A second beat at the tail
+
+`commands/steps/round-tail.md` step 9 re-runs the block above as the tick's **last** write, so a round that outruns `period + SLACK` does not reach its own end already reading `STALE` — the reading that made a live, working manager look lapsed to every session checking `--state` mid-round.
+
+⚠️ **The `ScheduleWakeup` one-shot rule does not forbid it.** `commands/steps/round-tail.md` step 7 says *"do not re-arm here"*, and that is the **wakeup**. This is the liveness **record**, which the paragraph above already separates (*"two files, two jobs"*); step 7 now says which one it means so the next reader does not read step 9 as a violation.
+
+⚠️ **Same allow-list, same arguments, no `--resume`.** A `SLEEPING` subject is the one that bites: a date-gated manager is *supposed* to have an ageing cadence, so an unconditional arm looks like the ordinary write and silently cancels the sleep the round just armed.
+
+⚠️ **What it costs, stated rather than implied.** Two beats per round split each round gap into `D` (head→tail) and `I−D` (tail→next head), so the `.arms` population becomes `[D, I−D, …]` and `observed_period()`'s p90 rises toward `max(D, I−D)`. The staleness limit therefore **grows with the round**: the false `STALE` is removed by re-measuring the cadence, not by shortening the gap. A round longer than the limit still reads `STALE` **during** it — only the post-round reading is fixed. A mid-round beat would shorten the gap instead; that is a different change and is not made here.
