@@ -219,6 +219,46 @@ class TestFindTask(unittest.TestCase):
         found = cw.find_task(SID, nested, os.path.join(self.tmp, "elsewhere"))
         self.assertIsNotNone(found)
 
+    def test_the_cwd_vault_answers_before_the_vault_scan(self):
+        """The first pass must be the cwd-derived directories, not every known vault.
+
+        One grep over all of them exceeds its timeout on a loaded host, and `find_task`
+        then reads that as "no task claims this session" — a false `task-unresolved` for a
+        session that has an anchor. Measured 2026-11-09: 29 directories, 15.0 s timeout
+        exceeded, the same session flipping between `would close` and `task-unresolved`.
+        """
+        nested = os.path.join(self.vaults, "somevault", "deep")
+        os.makedirs(nested)
+        self._write("a.md", f"---\nclaude_session_id: {SID}\nstatus: completed\n---\n")
+        calls = []
+        real = cw._grep_task
+
+        def spy(session_id, dirs, timeout=15):
+            calls.append(list(dirs))
+            return real(session_id, dirs, timeout)
+
+        cw._grep_task = spy
+        try:
+            found = cw.find_task(SID, nested, self.vaults)
+        finally:
+            cw._grep_task = real
+        self.assertIsNotNone(found)
+        self.assertEqual(len(calls), 1, "the cwd vault answered; no full scan should run")
+        self.assertEqual(calls[0], [self.tasks])
+
+    def test_a_task_in_another_vault_is_still_found(self):
+        """The repo-worktree case: a cwd with no task dir must still reach the vault scan."""
+        nested = os.path.join(self.vaults, "somevault", "deep")
+        os.makedirs(nested)
+        other = os.path.join(self.vaults, "othervault", "25 Tasks")
+        os.makedirs(other)
+        path = os.path.join(other, "b.md")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(f"---\nclaude_session_id: {SID}\nstatus: completed\n---\n")
+        found = cw.find_task(SID, nested, self.vaults)
+        self.assertIsNotNone(found)
+        self.assertEqual(found[0], path)
+
 
 class _StubStore:
     """A local attention store: open list, per-item reads and delivery reports.
