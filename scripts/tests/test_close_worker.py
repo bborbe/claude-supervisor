@@ -16,7 +16,9 @@ tests pin the three properties that make that claim true:
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -311,9 +313,11 @@ class TestCliRefusals(unittest.TestCase):
         self.vaults = os.path.join(self.tmp, "vaults")
         self.tasks = os.path.join(self.vaults, "somevault", "25 Tasks")
         self.attention = os.path.join(self.tmp, "attention")
+        self.projects = os.path.join(self.tmp, "projects")
         os.makedirs(self.sessions)
         os.makedirs(self.tasks)
         os.makedirs(self.attention)
+        os.makedirs(self.projects)
         os.makedirs(self.repo)
         subprocess.run(["git", "init", "-q", self.repo], check=True)
         with open(os.path.join(self.repo, "a.txt"), "w", encoding="utf-8") as handle:
@@ -349,6 +353,7 @@ class TestCliRefusals(unittest.TestCase):
         env["SUPERVISOR_SESSION_HOLDS"] = holds or os.path.join(self.tmp, "no-holds.json")
         env["ATTENTION_STATE_DIR"] = self.attention
         env["ATTENTION_STORE_URL"] = self.store_url
+        env["PROJECTS_DIR"] = self.projects
         env.pop("ATTENTION_STORE_TOKEN", None)
         return subprocess.run(
             [sys.executable, SCRIPT, SID, *extra],
@@ -393,16 +398,17 @@ class TestCliRefusals(unittest.TestCase):
         return child
 
     def _transcript(self, closer):
-        """A real transcript under the projects dir — `who-needs-me.py` hardcodes that path.
+        """A transcript private to this test — `who-needs-me.py` reads `PROJECTS_DIR`.
 
-        `_read_last_assistant_text` resolves `~/.claude/projects/*/<sid>.jsonl` and takes no
-        override, so a temp directory cannot stand in for it. The file is named with the
-        fixture session id — a UUID no live session can hold — and removed in cleanup.
+        The override is what makes it private, and it is load-bearing: every gate-held case
+        writes the same fixture session id, and `transcript_path()` resolves it as
+        `next(iter(glob(PROJECTS_DIR/*/<sid>.jsonl)))` — an arbitrary pick among matches,
+        memoized. Written into the shared user-level projects dir, a transcript collides with
+        any concurrent run's and with any earlier run's whose cleanup never ran (SIGKILL, a
+        timeout), and the gate check then reads the wrong closer. Measured 2026-11-09:
+        38/50 failures with one such leftover present, 0/50 without it.
         """
-        root = os.path.expanduser("~/.claude/projects")
-        if not os.path.isdir(root) or not os.access(root, os.W_OK):
-            self.skipTest("~/.claude/projects is not writable")
-        proj = tempfile.mkdtemp(prefix="close-worker-test-", dir=root)
+        proj = tempfile.mkdtemp(prefix="close-worker-test-", dir=self.projects)
         self.addCleanup(shutil.rmtree, proj, True)
         with open(os.path.join(proj, f"{SID}.jsonl"), "w", encoding="utf-8") as handle:
             handle.write(json.dumps({
@@ -790,6 +796,91 @@ class TestFindPages(unittest.TestCase):
         _, _, error = self._find()
         self.assertIsNotNone(error)
         self.assertIn("goal lookup failed", error)
+
+
+class _FakeJump:
+    """A `jump.py` stand-in whose WezTerm listing changes between calls.
+
+    `pane_for_session` is exercised for real — only the transport is faked — so the
+    successive-listing race is driven without a `sleep` or a live mux.
+    """
+
+    def __init__(self, *listings):
+        self._listings = list(listings)
+        self.list_calls = 0
+
+    def wezterm_panes(self):
+        index = min(self.list_calls, len(self._listings) - 1)
+        self.list_calls += 1
+        return self._listings[index]
+
+    def pane_sessions(self, pmap):
+        return {pane: p["session"] for pane, p in pmap.items() if p.get("session")}
+
+
+def _pane(pane_id, session):
+    return {"pane_id": pane_id, "tty_name": f"/dev/ttys{pane_id}", "session": session}
+
+
+class _Kill:
+    """Records every `wezterm` invocation, so a refusal can prove none happened."""
+
+    def __init__(self, returncode=0, stderr=""):
+        self.calls = []
+        self.returncode = returncode
+        self.stderr = stderr
+
+    def __call__(self, argv, **_kwargs):
+        self.calls.append(argv)
+        return self
+
+
+class TestTabKill(unittest.TestCase):
+    """A pane id is a lease: the tab arm must re-resolve it before it kills."""
+
+    def _kill(self, jump, pane):
+        out = io.StringIO()
+        runner = _Kill()
+        with contextlib.redirect_stdout(out):
+            rc = cw.tab_kill(jump, SID, pane, runner=runner)
+        return rc, runner, out.getvalue()
+
+    def test_unchanged_pane_is_killed(self):
+        """`tab_kill` re-resolves; the same id means the lease still holds."""
+        rc, runner, out = self._kill(_FakeJump({"238": _pane(238, SID)}), "238")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(runner.calls, [["wezterm", "cli", "kill-pane", "--pane-id", "238"]])
+
+    def test_reassigned_pane_id_refuses_and_never_kills(self):
+        """The race: the session moved to 301 and 238 now belongs to someone else."""
+        after = {"238": _pane(238, OTHER), "301": _pane(301, SID)}
+        rc, runner, out = self._kill(_FakeJump(after), "238")
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(runner.calls, [], "a reassigned id must never be killed")
+        self.assertIn("changed before the kill", out)
+        self.assertIn("pane 238 → 301", out)
+
+    def test_pane_gone_refuses(self):
+        after = {"238": _pane(238, OTHER)}
+        rc, runner, out = self._kill(_FakeJump(after), "238")
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(runner.calls, [])
+        self.assertIn("no single live pane maps to it", out)
+
+    def test_unreadable_listing_refuses(self):
+        """A failed `wezterm cli list` is not an empty answer — it is not a clearance."""
+        rc, runner, out = self._kill(_FakeJump(None), "238")
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(runner.calls, [])
+        self.assertIn("wezterm cli list unavailable", out)
+
+    def test_wezterm_refusal_is_an_error(self):
+        runner = _Kill(returncode=1, stderr="no such pane")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cw.tab_kill(_FakeJump({"238": _pane(238, SID)}), SID, "238", runner=runner)
+        self.assertEqual(rc, 1)
+        self.assertIn("wezterm refused to close pane 238", out.getvalue())
 
 
 if __name__ == "__main__":

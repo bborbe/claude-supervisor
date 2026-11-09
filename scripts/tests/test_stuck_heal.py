@@ -47,6 +47,13 @@ class HealDecideTest(unittest.TestCase):
         for deaths in (0, 1, 2):
             self.assertEqual(heal.decide("parked-gate", deaths), "report-only")
 
+    def test_a_dead_permission_channel_takes_the_same_ladder(self):
+        # The windowed reading of the same death, not a park: a resume is what
+        # restored the channel on b6e447e4, and reporting it instead would leave the
+        # session that owns a live repair unable to run it.
+        self.assertEqual(heal.decide("permission-channel", 0), "resume-headless")
+        self.assertEqual(heal.decide("permission-channel", 1), "reopen-interactive")
+
     def test_an_unknown_kind_is_reported_not_guessed(self):
         self.assertEqual(heal.decide("something-new", 0), "report-only")
 

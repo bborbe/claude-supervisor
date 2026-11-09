@@ -86,8 +86,11 @@ cross-session state for every later tick.
    - the `# Success Criteria` tally — `n` ticked of `m` total;
    - `claude_session_id`, probed with `session-liveness.py --check <id>` →
      `LIVE` / `ABSENT` / `UNKNOWN`;
-   - the loop cadence — `manager-liveness.py --state --subject "<goal>" --branch goal` →
-     `OK` / `STALE` / `STOPPED` / `INVALID`.
+   - the loop cadence — `manager-liveness.py --state --subject "<goal>" --branch goal --vault "<vault-root>"` →
+     `OK` / `STALE` / `STOPPED` / `SLEEPING` / `UNARMED` / `INVALID` / `WRONG-BRANCH`; a non-zero
+     exit (exit 3: the name resolves no page and no record) renders `UNVERIFIED`, never `UNARMED`.
+     ⚠️ **`--vault` is not optional** — without it the page test runs against the process cwd, and a
+     goal whose page lives in another vault is refused instead of read as a never-armed loop.
 
    ⚠️ **`UNKNOWN` is not `ABSENT`** — an unreadable source cannot prove a session dead, so
    the row renders `UNVERIFIED`, never `dead`. ⚠️ **`--branch goal` is not optional** — the
