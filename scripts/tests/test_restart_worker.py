@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -328,6 +329,85 @@ class ResolveLauncher(unittest.TestCase):
         self.page("25 Tasks", "T", "claude_session_id: s1\nlauncher: cc-private-claude")
         path, source = rw.resolve_launcher("s1", self.vault, self.fb)
         self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "task"))
+
+    def test_a_human_row_takes_the_claude_sibling_over_the_worker_default(self):
+        """Operator ruling 2026-11-06 / matrix Rule 4: a human row is not a delegate."""
+        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"))
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "claude-sibling"))
+
+    def test_the_human_sibling_sits_ahead_of_a_configured_manager_launcher(self):
+        """Both private-personal and seibert-brogrammers point `manager_launcher` at `-deepseek`;
+        taking it first would leave the human row on the worker model while reporting success."""
+        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"),
+                       manager_launcher=os.path.join(self.scripts, "cc-private-glm"))
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "claude-sibling"))
+
+    def test_the_human_rule_falls_through_to_the_manager_default_without_a_sibling(self):
+        os.remove(os.path.join(self.scripts, "cc-private-claude"))
+        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"),
+                       manager_launcher="cc-private-glm")
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-glm"), "manager-default"))
+
+    def test_the_human_rule_ends_on_the_vault_claude_script_never_the_worker_default(self):
+        """Matrix Rule 4's last rung. A vault with a `worker_launcher` but no `-claude`
+        sibling and no `manager_launcher` must still open the row on `claude_script` —
+        returning the worker default here puts a human row on `-deepseek`."""
+        os.remove(os.path.join(self.scripts, "cc-private-claude"))
+        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"))
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private"), "vault"))
+
+    def test_two_pages_claiming_one_session_are_refused(self):
+        """First-match would resume under a subject chosen by page ordering."""
+        os.makedirs(os.path.join(self.vault, "23 Topics"))
+        self.page("24 Goals", "G", "claude_session_id: m1")
+        self.page("23 Topics", "Fleet", "claude_session_id: m1")
+        role, subject, error = rw.resume_role("m1", self.vault, self.fb)
+        self.assertIsNone(subject)
+        self.assertIn("2 pages claim session m1", error)
+
+    def test_a_human_rows_own_launcher_still_wins(self):
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human\nlauncher: cc-private-glm")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-glm"), "task"))
+
+    def test_an_agent_row_is_unaffected_by_the_human_rule(self):
+        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"))
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: agent")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-deepseek"), "worker-default"))
+
+    def test_claimant_role_reports_the_bound_task_and_nothing_else(self):
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
+        self.assertEqual(rw._role_field(os.path.join(self.vault, "25 Tasks", "T.md")), "human")
+        self.assertEqual(rw._role_field(os.path.join(self.vault, "25 Tasks", "absent.md")), "")
+
+    def test_resume_role_reads_a_manager_from_its_goal_page(self):
+        """The registry is deleted when a session exits, and a manager only reaches the
+        resume path once it has exited — so the page field, not the registry, is the source."""
+        self.page("24 Goals", "G", "claude_session_id: m1")
+        self.assertEqual(rw.resume_role("m1", self.vault, self.fb), ("manager", ("goal", "G"), None))
+
+    def test_resume_role_reads_a_manager_from_its_topic_page(self):
+        os.makedirs(os.path.join(self.vault, "23 Topics"))
+        self.page("23 Topics", "Fleet", "claude_session_id: m1")
+        self.assertEqual(rw.resume_role("m1", self.vault, self.fb), ("manager", ("topic", "Fleet"), None))
+
+    def test_resume_role_reads_a_human_from_the_claimant_task(self):
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
+        self.assertEqual(rw.resume_role("s1", self.vault, self.fb), ("human", None, None))
+
+    def test_resume_role_defaults_to_agent(self):
+        self.page("25 Tasks", "T", "claude_session_id: s1")
+        self.assertEqual(rw.resume_role("s1", self.vault, self.fb), ("agent", None, None))
+        self.assertEqual(rw.resume_role("nobody", self.vault, self.fb), ("agent", None, None))
 
     def test_unsafe_configured_worker_launcher_is_none(self):
         self.configure(worker_launcher="cc;rm -rf")
@@ -664,8 +744,13 @@ class Cli(unittest.TestCase):
         os.makedirs(self.reg)
         self.load = os.path.join(self.dir, "loadpath")
         os.makedirs(os.path.join(self.load, "9.9.9"))
+        # No role map: the Hold-window source is off for the store/CLI tests, so they
+        # never shell out to a real WezTerm and stay host-independent. The window is
+        # exercised on its own in HoldWindow below.
+        os.environ["SUPERVISOR_ROLE_MAP"] = os.path.join(self.dir, "no-role-map.json")
 
     def tearDown(self):
+        os.environ.pop("SUPERVISOR_ROLE_MAP", None)
         self.tmp.cleanup()
 
     def write(self, pid, rec):
@@ -897,6 +982,213 @@ SID_HELD = "aaaaaaaa-1111-2222-3333-444444444444"
 SID_NEAR_MISS = "aaaaaaab-1111-2222-3333-444444444444"
 
 
+class AbsentMode(unittest.TestCase):
+    """`--absent`: resume a session whose process is GONE — no registry entry, nothing to kill.
+
+    The normal path refuses `unknown-session-id` when no registry entry carries the id, and a
+    dead session's `~/.claude/sessions/<pid>.json` is deleted on death, so it could never
+    bring back a Fleet Manager that died (measured 2026-11-06: three deaths in one day). The
+    absent mode inverts the precondition — the id must be ABSENT — sources `cwd` and launcher
+    from the manager registration that outlives death, and never signals anything.
+
+    Both directions are asserted: a too-loose build (resumes a live session) and a too-tight
+    one (refuses a genuinely dead one) fail in opposite directions.
+    """
+
+    SID = "eeee0000-0000-0000-0000-000000000005"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+        self.reg = os.path.join(self.dir, "sessions")
+        self.mgr = os.path.join(self.dir, "worker-manager")
+        self.vault = os.path.join(self.dir, "vault")
+        self.bin = os.path.join(self.dir, "bin")
+        for d in (self.reg, self.mgr, self.vault, self.bin):
+            os.makedirs(d)
+        # Three DISTINCT launchers, so the test can tell the manager-default rule from the
+        # `claude_script` fallback as well as from the worker launcher.
+        self.launcher = os.path.join(self.dir, "cc-manager")
+        self.vault_script = os.path.join(self.dir, "cc-vault")
+        for path in (self.launcher, self.vault_script):
+            with open(path, "w") as fh:
+                fh.write("#!/bin/sh\n")
+            os.chmod(path, 0o755)
+        self.cfg = os.path.join(self.dir, "vaults.json")
+        with open(self.cfg, "w") as fh:
+            json.dump([{"name": "v1", "path": self.vault, "claude_script": self.vault_script,
+                        "manager_launcher": self.launcher, "worker_launcher": "/no/worker"}], fh)
+        self.exits = os.path.join(self.dir, "session-exit")
+        os.makedirs(self.exits)
+        self.holds = os.path.join(self.dir, "holds.json")
+        with open(self.holds, "w") as fh:
+            fh.write('{"version": 1, "holds": {}}')
+        # A fake `wezterm` that records its argv and prints a pane id, so a non-dry run is
+        # observable without opening a tab.
+        self.spawned = os.path.join(self.dir, "spawned.txt")
+        fake = os.path.join(self.bin, "wezterm")
+        with open(fake, "w") as fh:
+            fh.write(f'#!/bin/sh\nprintf "%s\\n" "$@" > "{self.spawned}"\necho 999\n')
+        os.chmod(fake, 0o755)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def register(self, **over):
+        rec = {"subject": "Fleet Manager", "branch": "fleet", "vault": "v1",
+               "resolved_at": "2026-11-06T09:00:00+00:00"}
+        rec.update(over)
+        with open(os.path.join(self.mgr, f"{self.SID}.json"), "w") as fh:
+            json.dump(rec, fh)
+
+    def run_absent(self, *extra, dry=True, path=None, wezterm=None):
+        env = dict(os.environ)
+        env.pop("SUPERVISOR_LAUNCHER", None)
+        env.pop("SUPERVISOR_WEZTERM", None)
+        env["SUPERVISOR_VAULT_CONFIG"] = self.cfg
+        env["SUPERVISOR_WORKER_MANAGER_DIR"] = self.mgr
+        env["SUPERVISOR_SESSION_HOLDS"] = self.holds
+        # Never the real store: the in-flight scan reads it and the resume lock writes to it.
+        env["SUPERVISOR_SESSION_EXIT_DIR"] = self.exits
+        env["PATH"] = path if path is not None else self.bin + os.pathsep + env.get("PATH", "")
+        if wezterm is not None:
+            env["SUPERVISOR_WEZTERM"] = wezterm
+        argv = [sys.executable, SCRIPT, self.SID, "--absent", "--sessions-dir", self.reg]
+        if dry:
+            argv.append("--dry-run")
+        out = subprocess.run(argv + list(extra), capture_output=True, text=True, env=env)
+        return out.returncode, out.stdout.strip().splitlines()
+
+    def test_a_dead_registered_manager_resumes_into_its_vault_on_its_manager_launcher(self):
+        self.register()
+        code, lines = self.run_absent()
+        self.assertEqual(code, 0, lines)
+        text = "\n".join(lines)
+        self.assertIn(f"launcher: {self.launcher}", text)
+        self.assertIn(f"would resume into {self.vault}", text)
+        self.assertNotIn("/no/worker", text, "the fleet manager took the worker launcher")
+
+    def test_a_live_session_is_refused_not_absent(self):
+        """The too-loose direction: a registry entry means the process may be alive."""
+        self.register()
+        with open(os.path.join(self.reg, "4242.json"), "w") as fh:
+            json.dump(entry(self.SID), fh)
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "not-absent", lines)
+
+    def test_an_unreadable_registry_cannot_prove_absence(self):
+        self.register()
+        os.rmdir(self.reg)
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "not-absent", lines)
+
+    def test_no_registration_means_no_resume(self):
+        """Without the registration there is no vault, so no cwd and no launcher."""
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "unknown-session-id", lines)
+
+    def test_a_held_session_is_never_resumed(self):
+        self.register()
+        with open(self.holds, "w") as fh:
+            fh.write('{"version": 1, "holds": {"%s": {"reason": "operator"}}}' % self.SID)
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "held-session", lines)
+
+    def test_an_unknown_vault_is_an_error_before_any_spawn(self):
+        self.register(vault="nope")
+        code, lines = self.run_absent(dry=False)
+        self.assertEqual(code, 1, lines)
+        self.assertFalse(os.path.exists(self.spawned), "spawned with no resolvable cwd")
+
+    def test_a_real_resume_spawns_once_and_signals_nothing(self):
+        self.register()
+        code, lines = self.run_absent(dry=False)
+        self.assertEqual(code, 0, lines)
+        with open(self.spawned) as fh:
+            argv = fh.read()
+        self.assertIn("spawn", argv)
+        self.assertIn(self.vault, argv)
+        self.assertIn(f"--resume {self.SID}", argv)
+        self.assertNotIn("killing-pid", "\n".join(lines))
+        self.assertIn("re-arm", "\n".join(lines).lower())
+
+    def test_it_resumes_under_the_launchd_path_where_wezterm_is_not_on_path(self):
+        """M1, the bug the suite missed: the keeper's plist PATH is system dirs only.
+
+        A bare `wezterm` is FileNotFoundError there, so every answered resume would have
+        failed. `wezterm` must be resolved by absolute path, not looked up on PATH.
+        """
+        self.register()
+        code, lines = self.run_absent(dry=False, path="/usr/bin:/bin:/usr/sbin:/sbin",
+                                      wezterm=os.path.join(self.bin, "wezterm"))
+        self.assertEqual(code, 0, lines)
+        self.assertTrue(os.path.exists(self.spawned), "nothing was spawned under the launchd PATH")
+
+    def test_no_wezterm_anywhere_is_an_error_before_any_spawn(self):
+        self.register()
+        code, lines = self.run_absent(dry=False, wezterm="/no/such/wezterm")
+        self.assertEqual(code, 1, lines)
+        self.assertIn("no wezterm", "\n".join(lines))
+        self.assertFalse(os.path.exists(self.spawned))
+
+    def test_a_half_written_registry_entry_is_never_proof_of_absence(self):
+        self.register()
+        with open(os.path.join(self.reg, "777.json"), "w") as fh:
+            fh.write('{"sessionId": "' + self.SID[:10])  # truncated mid-write
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "not-absent", lines)
+
+    def test_a_registry_file_that_is_valid_json_but_not_an_object_refuses_not_crashes(self):
+        self.register()
+        with open(os.path.join(self.reg, "778.json"), "w") as fh:
+            fh.write('["not", "an", "object"]')
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "not-absent", lines)
+
+    def _pane_line(self, kind, age):
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - age))
+        with open(os.path.join(self.exits, "pane-51.log"), "a") as fh:
+            fh.write(f"{stamp}\tkind={kind}\tpane=51\tsession={self.SID}\tpid=9\trc=-\t"
+                     f"signal=-\tsender=-\twriter=observer\n")
+
+    def test_a_pane_already_running_the_session_is_refused(self):
+        """A resume through another path heartbeats before it registers — two copies otherwise."""
+        self.register()
+        self._pane_line("heartbeat", age=20)
+        code, lines = self.run_absent()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "not-absent", lines)
+
+    def test_an_old_pane_record_does_not_block_a_resume(self):
+        self.register()
+        self._pane_line("heartbeat", age=3600)
+        code, lines = self.run_absent()
+        self.assertEqual(code, 0, lines)
+
+    def test_a_pane_that_ended_does_not_block_a_resume(self):
+        self.register()
+        self._pane_line("heartbeat", age=40)
+        self._pane_line("signalled kill", age=30)
+        code, lines = self.run_absent()
+        self.assertEqual(code, 0, lines)
+
+    def test_a_second_resume_inside_the_window_is_refused(self):
+        self.register()
+        first, lines = self.run_absent(dry=False)
+        self.assertEqual(first, 0, lines)
+        os.remove(self.spawned)
+        second, lines = self.run_absent(dry=False)
+        self.assertEqual(second, 1, lines)
+        self.assertEqual(lines[0], "not-absent", lines)
+        self.assertFalse(os.path.exists(self.spawned), "a second copy was spawned")
+
+
 class HeldSession(Cli):
     """A held session is refused with `held-session` -- an EIGHTH refusal.
 
@@ -966,6 +1258,90 @@ class HeldSession(Cli):
             handle.write("{not json")
         _code, lines = self.run_cli(SID_HELD)
         self.assertNotEqual(lines[0] if lines else "", "held-session", lines)
+
+
+SID_WINDOW = "cccccccc-1111-2222-3333-444444444444"
+
+
+class HoldWindow(Cli):
+    """The Hold WINDOW -- a pane parked in the role map's Hold window is refused.
+
+    The second source of heldness, and the one where a failed read must REFUSE: a
+    restart KILLS a process, so a broken transport read as "not held" is the
+    direction that restarts a session the operator parked. `docs/pane-reads.md`
+    prescribes *refuse non-zero, naming the transport* for a caller that already
+    exits non-zero -- which this one does on every refusal.
+
+    Both directions are asserted by name. The whole path is real -- a fixture role
+    map, a fixture registry and a fake `wezterm` on PATH -- so the test never
+    depends on the host having WezTerm.
+    """
+
+    NAME = "⚙ held worker"
+    PANE = 874
+    HOLD_WINDOW = 11
+    AGENT_WINDOW = 9
+
+    def setUp(self):
+        super().setUp()
+        self.role_map = os.path.join(self.dir, "role-map.json")
+        with open(self.role_map, "w", encoding="utf-8") as handle:
+            json.dump({"Hold": {"window_id": self.HOLD_WINDOW}}, handle)
+        os.environ["SUPERVISOR_ROLE_MAP"] = self.role_map
+        # registry_names() reads SESSIONS_DIR, so point it at the fixture registry and
+        # seed the session's name -- the join the pane title carries.
+        os.environ["SUPERVISOR_SESSIONS_DIR"] = self.reg
+        self.bin = os.path.join(self.dir, "bin")
+        os.makedirs(self.bin)
+        self.write_wezterm(self.HOLD_WINDOW)
+        self.write(4242, entry(SID_WINDOW, name=self.NAME))
+
+    def tearDown(self):
+        os.environ.pop("SUPERVISOR_SESSIONS_DIR", None)
+        super().tearDown()
+
+    def write_wezterm(self, window, fail=False):
+        path = os.path.join(self.bin, "wezterm")
+        with open(path, "w", encoding="utf-8") as handle:
+            if fail:
+                handle.write("#!/bin/sh\nexit 1\n")
+            else:
+                listing = json.dumps(
+                    [{"pane_id": self.PANE, "window_id": window,
+                      "title": "✳ " + self.NAME}]
+                )
+                handle.write("#!/bin/sh\ncat <<'JSON'\n" + listing + "\nJSON\n")
+        os.chmod(path, 0o755)
+
+    def run_hold(self):
+        env = dict(os.environ)
+        env["PATH"] = self.bin + os.pathsep + env.get("PATH", "")
+        env["SUPERVISOR_LOAD_PATH"] = self.load
+        env["SUPERVISOR_LAUNCHER"] = os.path.join(self.dir, "loadpath")
+        out = subprocess.run(
+            [sys.executable, SCRIPT, SID_WINDOW, "--sessions-dir", self.reg, "--dry-run"],
+            capture_output=True, text=True, env=env,
+        )
+        return out.returncode, out.stdout.strip().splitlines()
+
+    def test_a_session_in_the_hold_window_is_refused(self):
+        """Too-tight: a Hold-window pane refuses the restart with no store entry."""
+        code, lines = self.run_hold()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "held-session", lines)
+
+    def test_a_session_outside_the_hold_window_is_not_refused_for_a_hold(self):
+        """Too-loose: the SAME session, pane in another window, is not held."""
+        self.write_wezterm(self.AGENT_WINDOW)
+        code, lines = self.run_hold()
+        self.assertNotEqual(lines[0] if lines else "", "held-session", lines)
+
+    def test_an_unreadable_pane_list_refuses_naming_the_transport(self):
+        """The chosen response for THIS caller: refuse, never read as not held."""
+        self.write_wezterm(self.HOLD_WINDOW, fail=True)
+        code, lines = self.run_hold()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "hold-unreadable", lines)
 
 
 if __name__ == "__main__":

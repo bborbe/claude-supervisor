@@ -51,8 +51,7 @@ import { config } from './config.mjs'
 // test with a synthetic stream and no filesystem.
 const NO_HEARTBEAT = { start() {}, stop() {} }
 
-// The reason a zero-turn worker settles `error`, exported so a manager-side check and the tests
-// match the same literal.
+// The reason a zero-turn worker settles `error`. Exported so tests match the same literal.
 export const ZERO_TURN_ERROR = 'zero-turn: the session produced a result with num_turns 0 — no model turn ran, the prompt was not executed'
 
 const isZeroTurn = (result) => !result.is_error && result.num_turns === 0
@@ -152,12 +151,25 @@ export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_
     // presence does not prove the turn closed; the absence of this error is what does. Settling it
     // `done` would resurrect the exact "a lag looks like a finished worker" defect the adapter was
     // built to prevent, which is a worse failure than the `error` it replaces.
+    // ⚠️ **Ask the error whether it is a gap; never keep a list of names.** A name set has to
+    // be updated by hand for every new gap class, and forgetting one fails silently in the
+    // dangerous direction: a `result` captured before the gap makes `turnClosed` true and the
+    // worker settles `done` on a transcript with a hole. That is exactly what happened when
+    // the reconnect-exhaustion paths were added — they throw classes the old set did not
+    // name. Every gap class in `wrapper-stream.mjs` carries `gap = true`, so this one test
+    // covers all of them, present and future.
     const terminal = { ended_at: new Date().toISOString() }
-    const turnClosed = agent.result && !isZeroTurn(agent.result) && !agent.result.is_error && error?.name !== 'StreamLaggedError'
+    const turnClosed = agent.result && !isZeroTurn(agent.result) && !agent.result.is_error && error?.gap !== true
     if (turnClosed) {
       agent.status = 'done'
       writeLedger(agent, { ...terminal, status: 'done', result: agent.result })
       log(`agent ${agent.id} stream ended after a completed turn: ${error}`)
+    } else if (agent.result && isZeroTurn(agent.result) && error?.gap !== true) {
+      // The stream died after a zero-turn result with no gap: the same empty run as the clean
+      // path above, so it carries the same contract (`error: zero-turn: …`, `result.zero_turn`).
+      markZeroTurn(agent)
+      writeLedger(agent, { ...terminal, status: 'error', error: agent.error, result: agent.result })
+      log(`agent ${agent.id} stream ended after a zero-turn result: ${error}`)
     } else {
       agent.status = 'error'
       agent.error = String(error)

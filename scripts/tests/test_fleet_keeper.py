@@ -11,6 +11,7 @@ cannot tell a slow round from a dead loop. These tests pin the replacement:
   SC3  an ABSENT fleet manager is reported      SC6  the heartbeat survives a failed tick
 """
 
+import ast
 import importlib.util
 import io
 import json
@@ -39,7 +40,8 @@ MIN = 60
 
 class KeeperBase(unittest.TestCase):
     PATCHED = ("STATE_DIR", "HEARTBEAT", "KEEPER_LOG", "LAPSE", "EPISODES", "REGISTER_DIR",
-               "verdict", "liveness", "notify", "stand_down")
+               "verdict", "liveness", "notify", "stand_down",
+               "answer_of", "death_corroborated", "resume_absent_session")
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -69,6 +71,11 @@ class KeeperBase(unittest.TestCase):
         fk.notify = lambda key, payload, options, context="": (
             self.cards.append(key) or f"item-{len(self.cards)}"
         )
+        # Every ABSENT tick now asks the board for an answer. Unpatched, a test would poll the
+        # LIVE attention store with a fixture card id — and a resume could never be ruled out.
+        fk.answer_of = lambda item: (None, None)
+        fk.death_corroborated = lambda sid, now: (False, "not corroborated in a test", False)
+        fk.resume_absent_session = lambda sid: self.fail("resume reached from an unpatched test")
         self.register_fleet()
 
     def register_fleet(self, sid=SID):
@@ -240,13 +247,370 @@ class NoKillPathTest(unittest.TestCase):
         src = re.sub(r'"""[\s\S]*?"""', "", src)
         return "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
 
+    #: The one function allowed to hold a resume, by operator decision 2026-11-06 (card
+    #: `7653b7b6…`, "add a resume option to the keeper's card, gated on your answer").
+    EXECUTOR = "resume_absent_session"
+    CALLER = "act_on_answer"
+
+    @staticmethod
+    def strip(src):
+        """Docstrings and full-line comments removed, so prose can neither pass nor fail."""
+        src = re.sub(r'"""[\s\S]*?"""', "", src)
+        return "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
+
+    def parsed(self):
+        """`(source, tree, executor node)` — extracted by `ast`, never by a regex.
+
+        A regex body ("from `def X` to the next `def`") swallows any module-level code placed
+        after the function, which would let a kill shape or a second call escape both pins.
+        """
+        src = (_SCRIPTS / "fleet-keeper.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == self.EXECUTOR]
+        self.assertEqual(1, len(nodes), "the answered-resume executor is missing or duplicated")
+        return src, tree, nodes[0]
+
     def test_the_keeper_source_has_no_kill_or_resume_path(self):
-        self.assertEqual([], self.KILL_SHAPES.findall(self.code_only("fleet-keeper.py")))
+        """Narrowed 2026-11-06, NOT deleted: outside the one executor, nothing may match.
+
+        The 2026-11-01 ruling (card efc771fb) removed every kill/resume/spawn path after the
+        keeper killed a healthy manager. The operator's 2026-11-06 answer admits exactly one
+        resume, gated on their answer, so the pin now holds everywhere but that function.
+        """
+        src, _tree, node = self.parsed()
+        rest = src.replace(ast.get_source_segment(src, node), "")
+        self.assertEqual([], self.KILL_SHAPES.findall(self.strip(rest)))
+
+    def test_the_executor_can_only_resume_an_absent_session_never_kill(self):
+        """Every KILL_SHAPE but the one script it must call stays forbidden inside it."""
+        src, _tree, node = self.parsed()
+        body = self.strip(ast.get_source_segment(src, node))
+        self.assertEqual(["restart-worker"], sorted(set(self.KILL_SHAPES.findall(body))))
+        for forbidden in (r"--reason", r"\bkill\b", r"signal"):
+            self.assertIsNone(re.search(forbidden, body), f"{forbidden} in the executor")
+
+    def test_the_executor_runs_exactly_the_absent_argv(self):
+        """`"--absent"` merely appearing in the body (a message string) is not enough."""
+        _src, _tree, node = self.parsed()
+        runs = [c for c in ast.walk(node) if isinstance(c, ast.Call)
+                and ast.unparse(c.func) == "subprocess.run"]
+        self.assertEqual(1, len(runs), "the executor must make exactly one subprocess call")
+        argv = runs[0].args[0]
+        self.assertIsInstance(argv, ast.List)
+        self.assertEqual(["sys.executable", "script", "sid", "'--absent'"],
+                         [ast.unparse(e) for e in argv.elts])
+        # ...and `script` must BE restart-worker.py: checking the name alone would pass
+        # `script = os.path.join(HERE, "close-worker.py")`.
+        assigns = [a for a in ast.walk(node) if isinstance(a, ast.Assign)
+                   and any(isinstance(t, ast.Name) and t.id == "script" for t in a.targets)]
+        self.assertEqual(1, len(assigns))
+        self.assertEqual("os.path.join(HERE, 'restart-worker.py')", ast.unparse(assigns[0].value))
+
+    def test_the_executor_is_reachable_only_from_the_answer_gate(self):
+        """Any reference — a call, an alias, a `getattr` string — outside the gate fails."""
+        _src, tree, _node = self.parsed()
+        holders = []
+        for top in tree.body:
+            if isinstance(top, ast.FunctionDef) and top.name == self.EXECUTOR:
+                continue
+            for n in ast.walk(top):
+                named = (isinstance(n, ast.Name) and n.id == self.EXECUTOR) or \
+                        (isinstance(n, ast.Constant) and n.value == self.EXECUTOR) or \
+                        (isinstance(n, ast.Attribute) and n.attr == self.EXECUTOR)
+                if named:
+                    holders.append(getattr(top, "name", type(top).__name__))
+        self.assertEqual([self.CALLER], holders)
 
     def test_positive_control_the_pattern_fires_on_stripped_real_kill_code(self):
         """Runs through the SAME stripping as the check above, so a stripper that deleted code
         would make this fail rather than let the real check pass blind."""
         self.assertTrue(self.KILL_SHAPES.search(self.code_only("restart-worker.py")))
+
+
+class AnsweredResumeTest(KeeperBase):
+    """The resume runs ONLY on the operator's `resume it` answer to a `dead` card.
+
+    Operator decision 2026-11-06 (card `7653b7b6…`). The goal manager's four conditions:
+    the resume exists only behind that answer; the old pin is narrowed, not deleted;
+    `acknowledge` is not resolution; and death is corroborated before anything runs —
+    `session-liveness.py` ABSENT published for live sessions three times in one day.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._saved_exec = {k: getattr(fk, k) for k in
+                            ("answer_of", "death_corroborated", "resume_absent_session")}
+        self.addCleanup(lambda: [setattr(fk, k, v) for k, v in self._saved_exec.items()])
+        self.answer = None
+        self.answered_at = None
+        self.corroborated = (True, "registry empty, transcript quiet 900s", False)
+        self.resumes = []
+        self.options = {}
+        fk.answer_of = lambda item: (self.answer, self.answered_at)
+        fk.death_corroborated = lambda sid, now: self.corroborated
+        fk.resume_absent_session = lambda sid: (self.resumes.append(sid) or (True, "pane 9"))
+
+        def notify(key, payload, options, context=""):
+            self.cards.append(key)
+            self.options[key] = list(options)
+            return f"item-{len(self.cards)}"
+        fk.notify = notify
+        self.live = "ABSENT"
+
+    def absent_cards(self):
+        return [k for k in self.cards if "-absent-" in k]
+
+    def test_the_dead_card_offers_resume(self):
+        self.tick(T0)
+        key = self.absent_cards()[0]
+        self.assertIn(fk.RESUME_OPTION, self.options[key])
+        self.assertIn("acknowledge", self.options[key])
+
+    def test_no_answer_resumes_nothing(self):
+        self.tick(T0)
+        self.tick(T0 + MIN)
+        self.assertEqual([], self.resumes)
+
+    def test_acknowledge_is_not_resolution_and_resumes_nothing(self):
+        self.answer = "acknowledge"
+        self.tick(T0)
+        self.tick(T0 + MIN)
+        self.assertEqual([], self.resumes)
+
+    def test_an_uncorroborated_death_is_never_resumed(self):
+        """The ABSENT trap: the strong limb (no registry entry) must hold, or nothing runs."""
+        self.answer = fk.RESUME_OPTION
+        self.corroborated = (False, "a registry entry still carries the session", False)
+        self.tick(T0)
+        self.tick(T0 + MIN)
+        self.assertEqual([], self.resumes)
+
+    def test_a_resume_answer_on_a_corroborated_death_resumes_exactly_once(self):
+        self.answer = fk.RESUME_OPTION
+        self.tick(T0)
+        self.tick(T0 + MIN)
+        self.tick(T0 + 2 * MIN)
+        self.assertEqual([SID], self.resumes, "an answer must never become a loop")
+
+    def test_a_live_but_lapsed_manager_is_never_offered_a_resume(self):
+        """The lapse card's target is alive: resuming it would mean a kill."""
+        self.live = "LIVE"
+        self.answer = fk.RESUME_OPTION
+        self.stale_run(T0, 45)
+        lapse = [k for k in self.cards if k.startswith("fleet-keeper-lapse-")]
+        self.assertTrue(lapse, self.cards)
+        self.assertNotIn(fk.RESUME_OPTION, self.options[lapse[0]])
+        self.assertEqual([], self.resumes)
+
+    # ---- M4: an answer that fails corroboration must not stay armed --------------
+
+    def test_a_live_session_consumes_the_answer_and_it_never_fires_later(self):
+        """The registry says ALIVE. Even if the reads agree an hour later, nothing runs."""
+        self.answer = fk.RESUME_OPTION
+        self.corroborated = (False, "registry entry still carries the session — it is alive", False)
+        self.tick(T0)
+        self.corroborated = (True, "now dead", False)
+        self.tick(T0 + 60 * MIN)
+        self.assertEqual([], self.resumes, "a consumed answer fired later — the reads became the trigger")
+        self.assertTrue(any(k.startswith("fleet-keeper-resume-dropped-") for k in self.cards))
+
+    def test_a_too_fresh_transcript_may_be_waited_out_within_the_bound(self):
+        self.answer = fk.RESUME_OPTION
+        self.corroborated = (False, "transcript written 30s ago", True)
+        self.tick(T0)
+        self.corroborated = (True, "quiet now", False)
+        self.tick(T0 + 10 * MIN)
+        self.assertEqual([SID], self.resumes)
+
+    def test_a_wait_that_outlasts_the_bound_is_dropped_unrun(self):
+        self.answer = fk.RESUME_OPTION
+        self.corroborated = (False, "transcript written 30s ago", True)
+        self.tick(T0)
+        self.tick(T0 + fk.RESUME_DEFER_MAX + MIN)
+        self.corroborated = (True, "quiet now", False)
+        self.tick(T0 + fk.RESUME_DEFER_MAX + 2 * MIN)
+        self.assertEqual([], self.resumes)
+        self.assertTrue(any(k.startswith("fleet-keeper-resume-dropped-") for k in self.cards))
+
+    def test_an_hours_old_answer_gets_no_fresh_window(self):
+        """The bound runs from the STORE's answer time, not from when the keeper first saw it."""
+        self.answer = fk.RESUME_OPTION
+        self.answered_at = T0 - 2 * 3600  # answered while the keeper was down
+        self.corroborated = (False, "transcript written 30s ago", True)
+        self.tick(T0)
+        self.corroborated = (True, "quiet now", False)
+        self.tick(T0 + 5 * MIN)
+        self.assertEqual([], self.resumes, "an hours-old answer was handed a fresh 30-min window")
+        self.assertTrue(any(k.startswith("fleet-keeper-resume-dropped-") for k in self.cards))
+
+    def test_an_unwritable_record_does_not_repost_the_held_card(self):
+        self.answer = fk.RESUME_OPTION
+        self.corroborated = (False, "transcript written 30s ago", True)
+        real = fk._save_episodes
+        self.addCleanup(setattr, fk, "_save_episodes", real)
+        fk._save_episodes = lambda rec: False
+        for m in range(4):
+            self.tick(T0 + m * MIN)
+        self.assertEqual([], [k for k in self.cards if k.startswith("fleet-keeper-resume-held-")])
+        self.assertEqual([], self.resumes)
+
+    def test_the_held_notice_is_posted_once_not_every_tick(self):
+        """A launchd producer cannot rely on the store's dedup — every tick is a new process."""
+        self.answer = fk.RESUME_OPTION
+        self.corroborated = (False, "transcript written 30s ago", True)
+        for m in range(5):
+            self.tick(T0 + m * MIN)
+        held = [k for k in self.cards if k.startswith("fleet-keeper-resume-held-")]
+        self.assertEqual(1, len(held), self.cards)
+
+    # ---- #10: the marker is written BEFORE the resume, so a crash cannot repeat it -----
+
+    def test_a_resume_that_crashes_is_never_run_again(self):
+        self.answer = fk.RESUME_OPTION
+
+        def boom(sid):
+            self.resumes.append(sid)
+            raise RuntimeError("died mid-resume")
+        fk.resume_absent_session = boom
+        with self.assertRaises(RuntimeError):
+            self.tick(T0)
+        fk.resume_absent_session = lambda sid: (self.resumes.append(sid) or (True, "pane 9"))
+        self.tick(T0 + MIN)
+        self.assertEqual([SID], self.resumes, "the marker was written after the run, not before")
+
+    def test_an_unpersistable_marker_refuses_to_resume(self):
+        self.answer = fk.RESUME_OPTION
+        fk._save_episodes_real = fk._save_episodes
+        self.addCleanup(setattr, fk, "_save_episodes", fk._save_episodes_real)
+        fk._save_episodes = lambda rec: False
+        self.tick(T0)
+        self.assertEqual([], self.resumes)
+
+
+class DeathCorroboratedTest(unittest.TestCase):
+    """M2: the REAL corroboration, never a stub — replacing its body must turn this red."""
+
+    SID = "ffff0000-0000-0000-0000-000000000006"
+    NOW = 1_800_000_000.0
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = pathlib.Path(self.tmp.name)
+        self.reg, self.proj = root / "sessions", root / "projects"
+        self.reg.mkdir()
+        (self.proj / "-vault").mkdir(parents=True)
+        saved = (fk.SESSIONS_DIR, fk.PROJECTS_DIR)
+        self.addCleanup(lambda: (setattr(fk, "SESSIONS_DIR", saved[0]),
+                                 setattr(fk, "PROJECTS_DIR", saved[1])))
+        fk.SESSIONS_DIR, fk.PROJECTS_DIR = str(self.reg), str(self.proj)
+
+    def transcript(self, age):
+        path = self.proj / "-vault" / f"{self.SID}.jsonl"
+        path.write_text("{}\n", encoding="utf-8")
+        os.utime(path, (self.NOW - age, self.NOW - age))
+
+    def test_dead_and_quiet_is_corroborated(self):
+        self.transcript(age=900)
+        ok, _why, _retry = fk.death_corroborated(self.SID, self.NOW)
+        self.assertTrue(ok)
+
+    def test_a_registry_entry_means_alive_and_is_final(self):
+        self.transcript(age=900)
+        (self.reg / "42.json").write_text(json.dumps({"sessionId": self.SID}), encoding="utf-8")
+        ok, _why, retry = fk.death_corroborated(self.SID, self.NOW)
+        self.assertFalse(ok)
+        self.assertFalse(retry, "a live session must consume the answer, never defer it")
+
+    def test_a_half_written_registry_entry_is_not_absence(self):
+        self.transcript(age=900)
+        (self.reg / "42.json").write_text('{"sessionId": "' + self.SID[:9], encoding="utf-8")
+        ok, _why, retry = fk.death_corroborated(self.SID, self.NOW)
+        self.assertFalse(ok)
+        self.assertTrue(retry)
+
+    def test_a_fresh_transcript_is_not_yet_corroborated(self):
+        self.transcript(age=30)
+        ok, _why, retry = fk.death_corroborated(self.SID, self.NOW)
+        self.assertFalse(ok)
+        self.assertTrue(retry)
+
+    def test_no_transcript_cannot_be_measured_and_is_final(self):
+        ok, _why, retry = fk.death_corroborated(self.SID, self.NOW)
+        self.assertFalse(ok)
+        self.assertFalse(retry)
+
+
+class AnswerOfTest(unittest.TestCase):
+    """M2: only the exact single option `resume it` may read as a resume answer."""
+
+    def answer(self, stdout):
+        done = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
+        with mock.patch.object(fk.subprocess, "run", return_value=done):
+            return fk.answer_of("item-1")[0]
+
+    def test_the_exact_option_reads_as_resume(self):
+        self.assertEqual(fk.RESUME_OPTION, self.answer("ANSWERED: option: resume it\nANSWERED_BY: board\n"))
+
+    def test_nothing_else_reads_as_resume(self):
+        for stdout in ("OPEN\n", "DECLINED\n", "ANSWERED: skip\n",
+                       "ANSWERED: option: resume it, acknowledge\n",
+                       "ANSWERED: text: resume it\n", "NOT_OPERATOR_ANSWERED: resume it\n",
+                       "ANSWERED: option: acknowledge\n", ""):
+            self.assertNotEqual(fk.RESUME_OPTION, self.answer(stdout), stdout)
+
+    def test_the_store_answer_time_is_read(self):
+        done = subprocess.CompletedProcess([], 0, stdout=(
+            "ANSWERED: option: resume it\nANSWERED_BY: board\n"
+            "ANSWERED_AT: 2026-11-06T15:07:54.588302Z\n"), stderr="")
+        with mock.patch.object(fk.subprocess, "run", return_value=done) as run:
+            option, answered = fk.answer_of("item-1")
+        self.assertEqual(fk.RESUME_OPTION, option)
+        self.assertAlmostEqual(1793977674.588302, answered, places=3)
+        self.assertIn("--answered-at", run.call_args.args[0])
+
+    def test_every_rfc3339nano_fraction_length_parses(self):
+        """Go's RFC3339Nano drops trailing zeros: 0–9 fraction digits all occur in production.
+
+        The 6-digit case above passes on `fromisoformat` everywhere; the launchd Python (3.9)
+        rejects 4- and 9-digit fractions, which is exactly what this pins.
+        """
+        whole = 1793977674.0
+        for stamp, expect in (
+            ("2026-11-06T15:07:54Z", whole),
+            ("2026-11-06T15:07:54.5Z", whole + 0.5),
+            ("2026-11-06T15:07:54.5883Z", whole + 0.5883),
+            ("2026-11-06T15:07:54.123456789Z", whole + 0.123456),
+            ("2026-11-06T16:07:54.25+01:00", whole + 0.25),
+        ):
+            self.assertAlmostEqual(expect, fk.parse_rfc3339(stamp), places=5, msg=stamp)
+
+    def test_garbage_is_none_not_a_crash(self):
+        for stamp in ("", "yesterday", "2026-11-06", "2026-11-06T15:07:54.5"):
+            self.assertIsNone(fk.parse_rfc3339(stamp), stamp)
+
+    def test_an_unrunnable_poll_is_no_answer(self):
+        with mock.patch.object(fk.subprocess, "run", side_effect=OSError("gone")):
+            self.assertEqual((None, None), fk.answer_of("item-1"))
+
+
+class ResumeOutcomeTest(unittest.TestCase):
+    """#6: a crash or a timeout in restart-worker is reported honestly, never swallowed."""
+
+    def run_with(self, **kw):
+        with mock.patch.object(fk.subprocess, "run", **kw):
+            return fk.resume_absent_session("s")
+
+    def test_a_traceback_with_empty_stdout_is_reported_not_raised(self):
+        done = subprocess.CompletedProcess([], 1, stdout="", stderr="Traceback ...\nKeyError: 'x'\n")
+        ok, detail = self.run_with(return_value=done)
+        self.assertFalse(ok)
+        self.assertIn("KeyError", detail)
+
+    def test_a_timeout_is_an_unknown_outcome_not_nothing_happened(self):
+        ok, detail = self.run_with(side_effect=subprocess.TimeoutExpired("x", 120))
+        self.assertFalse(ok)
+        self.assertIn("UNKNOWN", detail)
 
 
 class VerdictTest(unittest.TestCase):

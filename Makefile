@@ -84,6 +84,12 @@ check-gate-class-order:
 check-open-approve-ordering:
 	@python3 scripts/check-open-approve-ordering.py
 
+check-open-role-defaults:
+	@python3 scripts/check-open-role-defaults.py
+
+check-open-resume-mode:
+	@python3 scripts/check-open-resume-mode.py
+
 check-step-when:
 	@python3 scripts/check-step-when.py
 
@@ -111,10 +117,20 @@ check-drive-audit-budget:
 check-drive-unverifiable-paste:
 	@python3 scripts/check-drive-unverifiable-paste.py
 
+# The round's delegate rule sends everything that is not the sweep to a sub-agent, and rows 5b
+# and 5c are exactly that — yet they are the only two rows that ACT. Without the carve-out the
+# round delegates them read-only and prints a count it was told to print — measured 2026-11-01, a
+# round instructed its sub-agent to print `opened=0` and resumed none of the 8 rows it read `resume`.
+check-acting-legs:
+	@python3 scripts/check-acting-legs.py
+
+check-own-parks-routing:
+	@python3 scripts/check-own-parks-routing.py
+
 check: check-manager-allowlist check-open-manager-resolution
 	@for f in server/*.mjs scripts/*.mjs; do case "$$f" in *.test.mjs) continue ;; esac; node --check "$$f" || exit 1; done; echo "  server + scripts modules parse"
 	@python3 -c "import json;[json.load(open(f)) for f in ['.claude-plugin/plugin.json','.claude-plugin/marketplace.json','server/package.json','server/policy.json','server/manager-allowlist.json']]" && echo "  manifests parse"
-	@test -f .mcp.json && test -f README.md && echo "  plugin files present"
+	@test ! -e .mcp.json && test -f README.md && echo "  plugin files present"
 
 # Two artifacts, one policy: `server/manager-allowlist.json` is what the server matches against,
 # `docs/permission-allowlist.md` is what a human reads. Without this check they drift silently and
@@ -165,6 +181,6 @@ test: check check-server-deps
 # a reader following the wrong directory gets no feedback that they did. `server/package.json`'s
 # own `start` script is `bun install --no-summary && node supervisor.mjs`, so `bun install`
 # inside `server/` works too.
-precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-target check-open-manager-resolution check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-ledger-writes check-drive-audit-budget check-drive-unverifiable-paste test
+precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-target check-open-manager-resolution check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-open-role-defaults check-open-resume-mode check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-ledger-writes check-drive-audit-budget check-drive-unverifiable-paste check-acting-legs check-own-parks-routing test
 
-.PHONY: default hooks check-versions check-changelog check-changelog-size check-changelog-unreleased-fold changelog-archive check-spawn-mode check-spawn-target check-open-manager-resolution check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-audit-budget check-drive-unverifiable-paste check-manager-allowlist check check-server-deps test precommit
+.PHONY: default hooks check-versions check-changelog check-changelog-size check-changelog-unreleased-fold changelog-archive check-spawn-mode check-spawn-target check-open-manager-resolution check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-open-role-defaults check-open-resume-mode check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-audit-budget check-drive-unverifiable-paste check-acting-legs check-own-parks-routing check-manager-allowlist check check-server-deps test precommit

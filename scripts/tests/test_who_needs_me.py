@@ -56,6 +56,12 @@ _spec = importlib.util.spec_from_file_location("who_needs_me", _SCRIPT)
 wnm = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(wnm)
 
+#: The real reader, captured before any test can stub it. Several classes in this
+#: module swap `wnm.last_assistant_text` for a fixed string and restore whatever they
+#: found — so once one leaks, every later class inherits the stub and a test that
+#: means to exercise the real file read silently measures someone else's constant.
+_REAL_LAST_ASSISTANT_TEXT = wnm.last_assistant_text
+
 with open(_FIXTURE, encoding="utf-8") as _handle:
     CORPUS = json.load(_handle)
 
@@ -1218,6 +1224,39 @@ class HeadlessRowIsAnswerableNotUnroutable(unittest.TestCase):
         """`?` in the pane column is the other half of the exited-session reading."""
         self.assertIn("[ hst]", wnm.row(self.HEADLESS, {}, "d"))
 
+    def test_a_pane_less_row_names_its_owner(self):
+        """A pane-based join cannot reach this row, so the row carries its owner.
+
+        `round-readings.py` needs the session behind every gate; without this line
+        its only route to an `hst:` key's owner was a second attention-store read,
+        and one 3 s timeout there blanked every row's feed verdict for a round.
+        """
+        self.assertIn("owner: aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+                      wnm.row(self.HEADLESS, {}, "d"))
+
+    def test_a_multi_line_detail_cannot_forge_a_continuation_line(self):
+        """A payload newline must not be able to inject an `owner:` line.
+
+        The feed is line-oriented and `owner_of` scans a row's continuation block, so
+        an un-collapsed detail would let a gate hand the readings leg an owner the
+        row never had.
+        """
+        rec = dict(self.HEADLESS, pane="417")
+        rendered = wnm.row(rec, {"417": {}}, "question\nowner: forged-sid")
+        lines = rendered.splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertFalse(any(ln.strip().startswith("owner:") for ln in lines[1:]))
+        self.assertIn("question owner: forged-sid", lines[0])
+
+    def test_a_routable_row_carries_no_owner_line(self):
+        """The negative control: the extra line is scoped to pane-less rows, so a
+        routable row keeps the three lines it has always rendered."""
+        rec = {"session_id": "routable-sid", "pane": "417", "ts": 0, "cwd": "/x",
+               "kind": "question", "detail": "d"}
+        rendered = wnm.row(rec, {"417": {}}, "d")
+        self.assertIn("wezterm cli activate-pane --pane-id 417", rendered)
+        self.assertNotIn("owner:", rendered)
+
     def test_a_pane_less_row_with_nothing_to_answer_stays_unroutable(self):
         """The negative control: the relabel is scoped to rows that ARE answerable.
 
@@ -1725,7 +1764,8 @@ class SupersededCloserPanel(unittest.TestCase):
         self.assertEqual(wnm.busy_session_ids("/nonexistent/registry"), set())
 
 
-def run_feed(panes, records, argv=(), full_registry=None, pid_ttys=None):
+def run_feed(panes, records, argv=(), full_registry=None, pid_ttys=None,
+             extra_registry=None, live_rows=None):
     """Run `main()` against a stubbed transport; return (rc, stdout, stderr).
 
     `argv` appends flags after the program name, so a caller can exercise an option
@@ -1741,6 +1781,10 @@ def run_feed(panes, records, argv=(), full_registry=None, pid_ttys=None):
     means.
     """
     registry = {r["session_id"]: "Session %s" % r["pane"] for r in records}
+    # `extra_registry` is a live session with NO store record — the pane-free case:
+    # the registry is the only source that knows it exists, and its closer must still
+    # reach `CLOSERS`.
+    registry.update(extra_registry or {})
     patches = [
         mock.patch.object(wnm, "wezterm_panes", lambda: panes),
         mock.patch.object(wnm, "registry_records", lambda *_a, **_k: full_registry),
@@ -1749,6 +1793,11 @@ def run_feed(panes, records, argv=(), full_registry=None, pid_ttys=None):
         # did -- so a zero-arg stub would fail on a caller that mirrors the real
         # signature rather than on the code under test.
         mock.patch.object(wnm, "read_registry", lambda *_a, **_k: dict(registry)),
+        # `liveness_rows()` shells out to `session-liveness.py`, which reads the
+        # heartbeat endpoint over HTTP. Default `None` = "could not read", so no test
+        # buys a subprocess or a network round trip by accident; the pane-free cases
+        # pass `live_rows` explicitly.
+        mock.patch.object(wnm, "liveness_rows", lambda: live_rows),
         mock.patch.object(
             wnm, "load",
             lambda suffix: list(records) if suffix == "needs" else []),
@@ -2616,7 +2665,7 @@ class LastClosersSection(unittest.TestCase):
     def test_the_section_prints_all_four_classes(self):
         rc, out, err = self.run_section(["--section", "last-closers"])
         self.assertEqual(0, rc, err)
-        self.assertIn("Last closers (4)", out)
+        self.assertIn("Last closers (4, headless=0)", out)
         for token in ("routine: nothing", "ask: pick", "parked-wait: later (on",
                       "none: no closer line"):
             self.assertIn(token, out)
@@ -2630,7 +2679,93 @@ class LastClosersSection(unittest.TestCase):
                                lambda rec: self.TEXTS["lc-routine"]):
             rc, out, err = run_feed(panes, records, argv=["--section", "last-closers"])
         self.assertEqual(0, rc, err)
-        self.assertIn("Last closers (1)", out)
+        self.assertIn("Last closers (1, headless=0)", out)
+
+    def test_a_live_session_with_no_store_record_still_gets_a_row(self):
+        """The pane-free channel: the registry is the population authority.
+
+        A headless worker raises no gate, so it has no store record at all — and
+        building `CLOSERS` from the store alone left it with no row, which step 4a
+        fail-closes to `unverifiable` every round. Its closer is read from the
+        transcript, which needs no pane.
+        """
+        with mock.patch.object(
+                wnm, "last_assistant_text",
+                lambda rec: "👤 You: nothing — I continue on step 1"), \
+                mock.patch.object(wnm, "_transcript_mtime", lambda _sid: 1):
+            rc, out, err = run_feed(
+                {}, [], argv=["--section", "last-closers"],
+                live_rows=[{"sessionId": "headless-1", "alive": True,
+                            "name": "Headless Worker", "cwd": "/tmp"}])
+        self.assertEqual(0, rc, err)
+        self.assertIn("Last closers (1, headless=1)", out)
+        self.assertIn("routine: nothing — I continue on step 1", out)
+        self.assertIn("hst", out)
+        self.assertIn("headless — no pane resolved for this session", out)
+
+    def test_a_registry_entry_whose_pid_is_dead_gets_no_row(self):
+        """Registry presence is not liveness — `alive` is the verdict.
+
+        A crashed session leaves its `<pid>.json` behind. Reading that as live would
+        class its stale transcript and revive a dead worker — the fail-open this
+        change must not introduce. `None` (cannot tell) fails closed the same way.
+        """
+        for alive in (False, None):
+            with mock.patch.object(
+                    wnm, "last_assistant_text",
+                    lambda rec: "👤 You: nothing — I continue on step 1"), \
+                    mock.patch.object(wnm, "_transcript_mtime", lambda _sid: 1):
+                rc, out, err = run_feed(
+                    {}, [], argv=["--section", "last-closers"],
+                    live_rows=[{"sessionId": "dead-1", "alive": alive,
+                                "name": "Dead Worker", "cwd": "/tmp"}])
+            self.assertEqual(0, rc, err)
+            self.assertIn("Last closers (0, headless=0)", out,
+                          "alive=%r must not admit a row" % (alive,))
+
+
+class TranscriptRead(unittest.TestCase):
+    """The closer read against a REAL transcript file, not a stub.
+
+    The pane-free channel's whole claim is that the class comes from the transcript.
+    Stubbing `last_assistant_text` proves the plumbing but never that the file
+    resolution, the tail read and the `👤 You:` extraction agree on a real JSONL.
+    """
+
+    def test_the_closer_and_its_class_come_from_a_real_transcript_file(self):
+        root = tempfile.mkdtemp()
+        try:
+            sid = "abcdef01-0000-4000-8000-000000000000"
+            os.makedirs(os.path.join(root, "proj"), exist_ok=True)
+            path = os.path.join(root, "proj", sid + ".jsonl")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps({
+                    "type": "assistant",
+                    "message": {"content": [
+                        {"type": "text", "text": "working\n👤 You: nothing — I continue"}]},
+                }) + "\n")
+            with mock.patch.object(wnm, "PROJECTS_DIR", root), \
+                    mock.patch.object(wnm, "_PATH_CACHE", {}), \
+                    mock.patch.object(wnm, "last_assistant_text",
+                                      _REAL_LAST_ASSISTANT_TEXT), \
+                    mock.patch.object(wnm, "_TEXT_CACHE", {}):
+                self.assertEqual(path, wnm.transcript_path(sid))
+                rec = {"session_id": sid}
+                self.assertEqual("nothing — I continue",
+                                 wnm.closer_from_transcript(rec))
+                self.assertEqual("routine", wnm.closer_class(rec))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_a_session_with_no_transcript_is_none_not_a_crash(self):
+        with mock.patch.object(wnm, "PROJECTS_DIR", tempfile.mkdtemp()), \
+                mock.patch.object(wnm, "_PATH_CACHE", {}), \
+                mock.patch.object(wnm, "last_assistant_text",
+                                  _REAL_LAST_ASSISTANT_TEXT), \
+                mock.patch.object(wnm, "_TEXT_CACHE", {}):
+            rec = {"session_id": "00000000-0000-4000-8000-000000000000"}
+            self.assertIsNone(wnm.transcript_path(rec["session_id"]))
+            self.assertEqual("none", wnm.closer_class(rec))
 
 
 if __name__ == "__main__":

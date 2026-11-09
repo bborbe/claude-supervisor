@@ -78,17 +78,21 @@ with no producer can never be polled back by anyone, so it would be a question
 asked into a void.
 
 `--closer` is the one declaration that is OPTIONAL at the CLI — but REQUIRED
-whenever the closer repeats the card's ask, which is the common case for a
-manager relaying a worker's gate. It names the `👤 You:` line
-this card answers, and it exists because a session that posts a card and then
-ends its turn with the same ask on that line put ONE ask on the board twice: the
-deliberate card declares a `dedup_key` slug while the hook's echo derives
-sha256(sid:kind:detail), and those two keys can never collide. Passing it writes
-<sid>.posted.json, which the hook's `Stop` branch and the feed's `reclassify_idle`
-both read to decline the echo. Omitted, nothing is recorded and the echo is
-raised exactly as before — so omitting it is correct only when the closer asks
-something *else*. A closer that repeats the card's ask must pass it, or the
-board carries one question twice.
+whenever the closer repeats a card THIS session posted itself. It names the
+`👤 You:` line this card answers, and it exists because a session that posts a
+card and then ends its turn with the same ask on that line put ONE ask on the
+board twice: the deliberate card declares a `dedup_key` slug while the hook's
+echo derives sha256(sid:kind:detail), and those two keys can never collide.
+Passing it writes <sid>.posted.json, which the hook's `Stop` branch and the
+feed's `reclassify_idle` both read to decline the echo. Omitted, nothing is
+recorded and the echo is raised exactly as before — so omitting it is correct
+only when the closer asks something *else* or mints nothing.
+
+⚠️ It holds ONE record per session, so a round that posts two cards overwrites
+the first closer. And it does not apply to a relayed gate at all: the closer
+there must be verb-free, so there is no ask for the record to match — whether or
+not this session posted the card. See `commands/steps/needs-input.md`, the relay
+bullet.
 
 Run: python3 attention-ask.py post --dedup-key KEY --payload "..." [--option L]... [--closer "..."]
      python3 attention-ask.py post-batch --dedup-key KEY --task "..." [--task "..."]...
@@ -552,6 +556,60 @@ def manager_guard():
         return None
 
 
+_SESSION_ROLE = None
+
+
+def session_role():
+    """The declared-role resolver, loaded ONCE and reused.
+
+    ⚠️ Lazily loaded but memoized, **including a failure** — the `False`
+    sentinel stops a retry storm. Re-execing the module on every post would also
+    rebuild `session-role.py`'s own role cache from empty, turning its
+    one-call-per-session promise into a file read + compile + HTTP call per card.
+
+    A card must still post when the resolver is missing, so a load failure is a
+    warning and the declared `--producer-kind` stands — the pre-change behaviour,
+    which is the safe direction.
+    """
+    global _SESSION_ROLE
+    if _SESSION_ROLE is None:
+        try:
+            mod = _load("session_role", "session-role.py")
+            _SESSION_ROLE = mod if hasattr(mod, "resolve_producer_kind") else False
+        except Exception as err:
+            _warn(f"session-role unavailable ({err}) — producer_kind stays as declared")
+            _SESSION_ROLE = False
+    return _SESSION_ROLE or None
+
+
+def producer_kind_for(producer_id, declared):
+    """The kind to post: the declared value, or the session's ledger role.
+
+    ⚠️ Keyed on `producer_id` — the session the item is ABOUT — never on the
+    invoking process. `manager-attention-watch.py` posts on behalf of a parked
+    worker: the caller is a manager, the `producer_id` is the worker, and the
+    card must read `session`. Reading `$CLAUDE_CODE_SESSION_ID` here instead
+    would relabel exactly the cards this resolver exists to get right.
+
+    The TLS context and auth headers are forwarded so an HTTPS or authenticated
+    store resolves the same way every other call in this file does; without them
+    the resolver would silently answer `session` for every session there.
+    """
+    mod = session_role()
+    if mod is None:
+        return declared
+    try:
+        return mod.resolve_producer_kind(
+            producer_id,
+            declared,
+            ssl_context=_ssl_context(),
+            headers=_headers(),
+        )
+    except Exception as err:
+        _warn(f"producer_kind resolution failed ({err}) — using {declared!r}")
+        return declared
+
+
 def is_manager_session(guard, producer_id):
     """True when `producer_id` is a manager arm, by the guard's own rule.
 
@@ -939,7 +997,9 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out,
     try:
         item = post_question(
             producer_id=producer_id,
-            producer_kind=args.producer_kind,
+            # Resolved from the card's `producer_id`, not the caller — see
+            # `producer_kind_for`. An explicit non-`session` flag still wins.
+            producer_kind=producer_kind_for(producer_id, args.producer_kind),
             liveness_ref=liveness_ref,
             dedup_key=args.dedup_key,
             interrupt_class=args.interrupt_class,
@@ -1063,7 +1123,7 @@ def cmd_post_batch(args, out=sys.stdout):
     return _post_and_report(args, *producer, payload, [], out)
 
 
-def cmd_poll(item_id, out=sys.stdout):
+def cmd_poll(item_id, out=sys.stdout, answered_at=False):
     if not is_store_item_id(item_id):
         # ⚠️ Refused here rather than at the store's 404, and that placement is
         # the whole point: a short id and an unknown full id both printed
@@ -1158,6 +1218,12 @@ def cmd_poll(item_id, out=sys.stdout):
         print(f"ANSWERED: {content}", file=out)
         if answered_by:
             print(f"ANSWERED_BY: {answered_by}", file=out)
+        # Opt-in, so every existing consumer's output is byte-identical. The fleet keeper
+        # bounds how long an answered resume may wait from when the OPERATOR answered, not
+        # from when the keeper first noticed — a keeper asleep for hours must not hand an
+        # hours-old answer a fresh window.
+        if answered_at and item.get("answered_at"):
+            print(f"ANSWERED_AT: {item.get('answered_at')}", file=out)
         return 0
     # ⚠️ Two terminals of their own, from 2026-10-20. Both are answers the
     # operator GAVE, so neither is `NOT_OPERATOR_ANSWERED`, and neither is
@@ -1275,6 +1341,9 @@ def main(argv=None):
 
     poll = sub.add_parser("poll")
     poll.add_argument("item_id")
+    poll.add_argument("--answered-at", action="store_true",
+                      help="also print `ANSWERED_AT: <rfc3339>` for an answered item (opt-in; "
+                           "the default output is unchanged)")
 
     args = parser.parse_args(argv)
     try:
@@ -1282,7 +1351,7 @@ def main(argv=None):
             return cmd_post(args)
         if args.cmd == "post-batch":
             return cmd_post_batch(args)
-        return cmd_poll(args.item_id)
+        return cmd_poll(args.item_id, answered_at=args.answered_at)
     except urllib.error.HTTPError as err:
         # Each command handles its own HTTP errors, so reaching here means the
         # failure predates the item lookup — which is why no item is named: this

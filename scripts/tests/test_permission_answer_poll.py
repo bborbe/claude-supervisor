@@ -29,6 +29,11 @@ from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from unittest import mock
 
+# Side effect only: pins `SUPERVISOR_WORKER_MODE` for the run, so a suite that runs inside a
+# headless supervised worker does not inherit `headless` and take `main()`'s early exit in the
+# cases that expect the polling path.
+import worker_mode_isolation  # noqa: E402,F401
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 PATH = os.path.join(HERE, "..", "permission-answer-poll.py")
 
@@ -350,6 +355,9 @@ class RunTest(unittest.TestCase):
 
     def run_main(self, argv, stdin="", store=None, sleep=None):
         self.m.get_json = store or (lambda conn, url: (True, []))
+        # Never let a test POST to a real store; capture the attempt record instead.
+        self.posts = []
+        self.m.post_json = lambda conn, url, body: (self.posts.append((url, body)) or (True, {}))
         if sleep:
             self.m.time.sleep = sleep
         out, err = io.StringIO(), io.StringIO()
@@ -399,6 +407,38 @@ class RunTest(unittest.TestCase):
         rc, out, _ = self.run_main(["--timeout", "2", "--interval", "0.05"], stdin=hook, store=store)
         self.assertEqual(rc, 0)
         self.assertEqual(json.loads(out)["hookSpecificOutput"]["decision"], {"behavior": "allow"})
+        # The hook is the tab worker's carrier: it records what it delivered, so
+        # attention-answer.py can read `delivered` back instead of `never_attempted`.
+        self.assertEqual(len(self.posts), 1)
+        url, body = self.posts[0]
+        self.assertTrue(url.endswith("/api/1.0/attention/p1/attempt"))
+        self.assertEqual(body, {"carrier": "supervisor:permission-answer-poll", "outcome": "delivered"})
+
+    def test_attempt_record_failure_keeps_the_decision(self):
+        self.feed("permission")
+        hook = json.dumps({"session_id": "S", "tool_name": "Write", "tool_input": {"file_path": "/tmp/w.txt"}})
+        live = card("p1", payload="Write: /tmp/w.txt", created=time.time() + 1)
+
+        def store(conn, url):
+            if url.endswith("/attention"):
+                return True, [live]
+            return True, {"state": "answered", "decision": "allow", "resolved_by": "manager"}
+
+        self.m.get_json = store
+        out, err = io.StringIO(), io.StringIO()
+        self.m.post_json = lambda conn, url, body: (False, "store returned HTTP 500")
+        with mock.patch.object(sys, "argv", ["poll", "--timeout", "2", "--interval", "0.05"]), \
+             mock.patch.object(sys, "stdin", io.StringIO(hook)), \
+             redirect_stdout(out), redirect_stderr(err):
+            rc = self.m.main()
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out.getvalue())["hookSpecificOutput"]["decision"], {"behavior": "allow"})
+        self.assertIn("delivery attempt record failed", err.getvalue())
+
+    def test_no_attempt_is_recorded_when_nothing_was_emitted(self):
+        self.feed("permission")
+        self.run_main(["--session-id", "S", "--timeout", "0.3", "--interval", "0.05"])
+        self.assertEqual(self.posts, [])
 
     def test_gate_not_yet_in_feed_is_waited_for(self):
         # attention-log.py writes the feed item in parallel; appearing late is normal.

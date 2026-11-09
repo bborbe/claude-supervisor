@@ -49,8 +49,11 @@ nothing new, while opening one decides who supervises. Four rules follow:
    subject, so the restart decides nothing new. ⚠️ **The fleet tier is the one exception: its
    lapse is REPORTED, never restarted** (operator decision 2026-11-01). `scripts/fleet-keepalive.py`
    detects a lapsed fleet round, and `scripts/fleet-keeper.py` posts one attention card once it
-   has read `stale` continuously for 40 minutes. The keeper holds no kill, resume or spawn path
-   at all. **Why the exception:** a restart-on-stale keeper killed a healthy Fleet Manager,
+   has read `stale` continuously for 40 minutes. The keeper holds no kill path and starts nothing
+   on its own judgement. **The one exception is answer-gated** (operator decision 2026-11-06): the
+   card for a *dead* fleet manager offers `resume it`, and only that answer — after the death is
+   corroborated — runs `restart-worker.py --absent` once; a lapsed (live) manager is never offered
+   it. See `scripts/fleet-keeper.py`'s docstring. **Why the exception:** a restart-on-stale keeper killed a healthy Fleet Manager,
    because the trigger cannot tell a dead loop from a slow round. Measured healthy arm→digest
    ran median 18 min, p90 38 min and max 51 min, against an 18-minute `stale` threshold, so about
    half of healthy rounds cross it. No settle window fixes that: one under ~40 min kills healthy
@@ -73,6 +76,16 @@ nothing new, while opening one decides who supervises. Four rules follow:
 ⚠️ **Rule 4 binds every tier.** The fleet tier removed its manager-proposal row on 2026-10-29
 (`commands/fleet-drive.md`: *"No manager-proposal row — the round does not propose managers for
 unmanaged goals"*). No other tier restores that behaviour under another name.
+
+⚠️ **The fleet tier does open a flagged manager, and that is rule 2, not rule 4.** The
+flagged-open leg (`commands/steps/flagged-open.md` § Step 5c.1) runs
+`scripts/flagged-subjects.py` and opens every flagged goal and topic that has no live manager
+through `/supervisor:open --goal` / `--topic`, up to the free manager slots. Two states are
+declined rather than opened and are not the cap's doing: `phase: todo` (the operator's
+approval inbox, reported `WAITING`) and a subject already carrying an open
+`fleet-propose-manager` / `fleet-approve-manager` card (reported `CARDED`). Proposing is
+what rule 4 forbids — asking the operator *which* unmanaged goal deserves a manager; opening
+a page the operator already flagged decides nothing and executes their mark.
 
 ⚠️ **The fleet keeper obeys rule 4 trivially: it opens nothing and resumes nothing.** There is
 exactly one fleet manager, and a second would be a double writer over every subject. The
@@ -123,6 +136,68 @@ tool would create a second, unaudited route to a session — the exact failure
 `commands/open.md` § Step 2C exists to prevent. `commands/topic-spawn.md` is the tier's own
 front door and it delegates.
 
+## Keep-alive
+
+**This section is the single home of the keep-alive contract:** which tier keeps which session
+alive, what counts as an owner, and what happens to a session nobody keeps. Every other file
+that touches it points here and carries only its own commands, flags and thresholds —
+`commands/steps/keepalive.md`, `agents/topic-drive.md`, `agents/goal-drive.md`,
+`commands/topic-drive.md`, `commands/topic-loop.md`, `commands/open.md`,
+`docs/fleet-surface.md` § Which manager owns a subject, `scripts/topic-spawn.py`, and the
+docstrings of `scripts/fleet-keepalive.py`, `scripts/topic-keepalive.py` and
+`scripts/worker-keepalive.py`.
+
+**Keeping a session alive is one act at every level: when the session dies or its loop lapses,
+its keeper resumes the same `claude_session_id`.** It never opens a second session on that
+subject — two sessions on one subject are a double writer.
+
+### The chain
+
+| Level | Opened by | Kept alive by | Mechanism | Guard |
+|---|---|---|---|---|
+| **Fleet manager** | the operator | **the operator** | `scripts/fleet-keepalive.py` reads the digest, never the heartbeat; `scripts/fleet-keeper.py` posts one card after 40 min `stale`, and resumes only on the operator's `resume it` answer | report-only — rule 1's one exception (§ The four tiers) |
+| **Topic manager** | the fleet manager, on the operator's initiative | the **fleet round** | `commands/steps/keepalive.md` § Restart a lapsed topic manager → `scripts/topic-keepalive.py --branch topic`, for every topic page carrying a `claude_session_id` | 3 resumes in 30 min → `crash-loop`, escalate once |
+| **Goal manager** — goal declared by a topic | its topic manager, only when the goal is flagged | its **topic manager's round** | `agents/topic-drive.md` step 1 → `scripts/topic-keepalive.py --branch goal`, one call per declared goal per tick | same cap; `STOPPED` and `SLEEPING` are left alone; `UNARMED` reads `jump` |
+| **Goal manager** — goal in no topic | the fleet manager, only when the goal is flagged | the **fleet round** | `commands/steps/keepalive-topicless-goals.md` (the actor's § 1b) → `scripts/topicless-goal-keepalive.py`, which asks `scripts/topic-keepalive.py --branch goal` for every `in_progress` + `execution` goal with a `claude_session_id` that no topic declares | same cap; a topic-declared goal is never selected — its topic round owns it |
+| **Worker** — task with a goal | its goal manager, or the fleet manager when no manager owns the goal | its **goal manager's round** while that manager is an owner (below); otherwise the **fleet round** | `agents/goal-drive.md` auto-resume gate; the fallback is `scripts/worker-keepalive.py` from `commands/steps/keepalive.md` § Resume a worker whose session died | `last_auto_resume` cap on the goal tier, `worker--<slug>` cap on the fleet tier; `worker-keepalive.py` returns `jump` for a row the goal tier owns, so the two never resume one row |
+| **Worker** — task with no goal | the fleet manager, or the topic manager listing the task | the **fleet round** | `scripts/worker-keepalive.py` from `commands/steps/keepalive.md` § Resume a worker whose session died | `worker--<slug>` cap; a task with no recorded id is reported, never opened |
+| **Background sub-agent** | its worker | **no keeper, by decision 2026-11-08** | — | it dies with its parent session, so a worker never parks a wait on one |
+
+Infrastructure outside the session tree is owned by **launchd** (the `claude-wrapper` daemon,
+the attention watcher, the model-free gate loop) and cluster work by its **controller**. Those
+are kept alive; they are just not kept by a session.
+
+### Owner
+
+**Owner:** a manager owns a subject only when its session reads `LIVE` and its loop reads `OK` or `STALE`.
+A loop reading `STOPPED`, `SLEEPING`, `UNARMED` or `INVALID`, or a probe that cannot answer,
+is **not** an owner: the session may still run, but nothing runs the round that would keep its
+workers alive. The session is read with `scripts/session-liveness.py --check`, the loop with
+`scripts/manager-liveness.py --state`.
+
+⚠️ **The code does not fully implement this yet.** `scripts/worker-keepalive.py`'s
+`goal_manager_live()` defers to a goal manager whose session is live without reading its loop,
+so a manager stood down with `/supervisor:stop` still counts as an owner there and its workers
+are kept by no one. This section is the target the keepers converge on, not a description of
+every keeper today.
+
+### Adopt or close
+
+**A session no tier keeps is adopted or closed.** The tier above takes it on as a keeper, or
+it is closed; it never stays live and unkept. A worker whose task is terminal or deferred is
+reaped by its goal round or by `scripts/close-worker.py`; a manager whose subject is terminal,
+or that was stood down while its session lives, is closed so its workers fall to the fleet.
+
+### Three invariants
+
+- **Restart is not open.** A restart resumes a session that already has a subject and a
+  recorded id, so it decides nothing new and runs automatically; an open creates supervision
+  and is the operator's act. The rulings are § The four tiers, rules 1 and 4.
+- **The flag gates an open, never a restart.** An unflagged goal whose manager died is still
+  resumed (rule 2).
+- **The per-topic N gates a start, never a resume.** `scripts/topic-spawn.py` refuses a new
+  goal manager at `running >= N`; no keep-alive verdict reads N.
+
 ## Command → tier
 
 Each command maps to exactly one tier. "Never run from" states the same boundary from the
@@ -135,6 +210,7 @@ other side.
 | `/supervisor:fleet-drive` | fleet manager | worker; topic manager (use `topic-drive`); goal manager (use `goal-drive`) |
 | `/supervisor:fleet-workers` | fleet manager | worker |
 | `/supervisor:fleet-verify` | fleet manager | worker; topic manager (use `topic-verify`); goal manager (use `goal-verify`) |
+| `/supervisor:fleet-triage` | **Fleet Pusher** — a dedicated session the operator opens and names `Fleet Pusher`, doing nothing but this. One pass over every live session: classify, close, drive (including the guarded pane wake), card. Ends green only on all five of zero stuck, zero uncarded, zero finished-but-open, zero no-loop, and every live session accounted for | **Fleet Manager** (it must stay shallow, and a fleet-wide pass with its pane reads fills the manager's context until it can no longer do its own job); worker; topic manager (use `topic-drive` — it serves one subject); goal manager (use `goal-drive` — same) |
 | `/supervisor:topic-loop` | topic manager | worker; goal manager — arming it collapses the two roles silently |
 | `/supervisor:topic-status` | topic manager | worker; goal manager |
 | `/supervisor:topic-drive` | topic manager | worker; goal manager |

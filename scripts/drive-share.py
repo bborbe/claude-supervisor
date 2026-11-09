@@ -66,6 +66,7 @@ DIGEST_CLASSES = (
     "unclassified",
     "held",
     "stood-down",
+    "sleeping",
     "lapsed",
     "done",
     "blocked",

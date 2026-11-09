@@ -22,14 +22,7 @@
  * @param {object|null}           [args.lastResult] the worker's most recent captured `result`, if any
  * @returns {{end: boolean, reason: string}}
  */
-export function shouldEndIdleWorker({ session, cards, lastResult = null } = {}) {
-  // ⚠️ A `result` carrying `num_turns: 0` closed NO turn this server sent. On resume the CLI
-  // injects its own `<task-notification>` for background agents the previous process orphaned,
-  // ahead of the caller's prompt; that synthetic input settles with a zero-turn `result`, which
-  // the wrapper counts against `pending_turns` (pkg/supervisor.go `case "result"`), so the record
-  // reads idle with nothing pending while the real prompt still sits in the CLI's queue.
-  // Ending here killed that prompt — measured 2026-11-05, agent_12 / agent_13.
-  if (lastResult && !lastResult.is_error && lastResult.num_turns === 0) return { end: false, reason: 'zero-turn-result' }
+export function shouldEndIdleWorker({ session, cards, lastResult = null, zeroTurnGraceExpired = false } = {}) {
   if (!session || typeof session !== 'object') return { end: false, reason: 'unreadable-wrapper' }
   // ⚠️ `undefined` is not "no turn in flight" — it is a record this build does not understand.
   // Without this branch an older wrapper that omits either field would make every worker a
@@ -43,5 +36,39 @@ export function shouldEndIdleWorker({ session, cards, lastResult = null } = {}) 
   if (session.question) return { end: false, reason: 'parked-question' }
   if (cards === null || cards === undefined) return { end: false, reason: 'unreadable-cards' }
   if (cards.length > 0) return { end: false, reason: 'open-card' }
+  // ⚠️ Checked LAST, so every more specific keep reason above still wins. A `result` carrying
+  // `num_turns: 0` closed NO turn this server sent: on resume the CLI injects its own
+  // `<task-notification>` for background agents the previous process orphaned, ahead of the
+  // caller's prompt; that synthetic input settles with a zero-turn `result`, which the wrapper
+  // counts against `pending_turns` (claude-wrapper `pkg/supervisor.go` `case "result"`), so the
+  // record reads idle with nothing pending while the real prompt still sits in the CLI's queue.
+  // Ending here killed that prompt — measured 2026-11-05, agent_12 / agent_13. The keep is
+  // bounded: once the caller's grace window has expired and the session is STILL idle with
+  // nothing pending, it really did nothing and is ended like any other idle worker.
+  if (isZeroTurnResult(lastResult) && !zeroTurnGraceExpired) return { end: false, reason: 'zero-turn-result' }
   return { end: true, reason: 'idle-with-nothing-pending' }
+}
+
+const isZeroTurnResult = (result) => Boolean(result) && !result.is_error && result.num_turns === 0
+
+// How long a session whose last result ran zero turns is kept for a queued prompt to start.
+export const ZERO_TURN_GRACE_MS = 120_000
+
+/**
+ * Arm the bounded keep for a zero-turn result: after `graceMs`, re-run the FULL idle decision
+ * (`recheck`, which re-reads the wrapper and the attention store) with the grace marked expired.
+ * The timer never stops a session by itself — a turn in flight, a parked question or an open
+ * card found by the re-check still keeps the worker. It is a no-op when a newer result has
+ * replaced the one it was armed for (that result ran its own decision) or the worker settled.
+ *
+ * @returns the timer handle
+ */
+export function armZeroTurnGrace({ agent, recheck, graceMs = ZERO_TURN_GRACE_MS, setTimer = setTimeout }) {
+  const armedFor = agent.result
+  const handle = setTimer(() => {
+    if (agent.result !== armedFor || agent.status !== 'running') return
+    return recheck(agent, { zeroTurnGraceExpired: true })
+  }, graceMs)
+  handle?.unref?.()
+  return handle
 }

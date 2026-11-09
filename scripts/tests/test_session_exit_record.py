@@ -10,8 +10,9 @@ The load-bearing properties are the ones a death would expose:
 - a record path is derived from the pane id and nothing else, and a pane id that could
   escape the store is refused rather than joined into a filename;
 - appending never truncates, so the trap and the observer cannot lose each other's line;
-- the observer records a disappearance as `unknown-end` — an inference, never
-  `signalled kill` — and stays silent when the parent already reported an end;
+- the observer names a signal only from a kernel-delivered wait status (`kqueue`
+  `NOTE_EXITSTATUS`); a pid already gone when it starts is an `unknown-end` inference,
+  never `signalled kill`; and it stays silent when the parent already reported an end;
 - an absent record reads as *nothing*, not as an error — absence is the state this tool
   exists to make visible.
 
@@ -22,9 +23,13 @@ import datetime
 import importlib.util
 import json
 import os
+import select
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -285,13 +290,58 @@ class Observer(StoreTestCase):
         self.assertEqual(len(lines), 1)
         self.assertIn("kind=unknown-end", lines[0])
 
-    def test_the_observer_never_claims_a_signal(self):
-        """A signal is a fact only the parent's `waitpid` holds; the observer infers."""
+    def test_a_pid_gone_before_the_watch_never_claims_a_signal(self):
+        """No wait status was delivered, so absence alone is an inference, not a signal."""
         self._run("observe", "--pane", "2156", "--pid", str(self._gone_pid()), "--foreground")
         line = self._lines()[0]
         self.assertNotIn("signalled kill", line)
         self.assertIn("rc=unavailable", line)
         self.assertIn("signal=unavailable", line)
+
+    @staticmethod
+    def _skip_without_kqueue():
+        if not hasattr(select, "kqueue"):
+            raise unittest.SkipTest("kqueue exit-status watch is macOS/BSD only")
+
+    def _observe_then_kill(self, sig):
+        """A live target in its own group, an observer that is NOT its parent, a group kill.
+
+        The pane-243 shape (2026-11-06): a group kill takes the trap's shell down with the
+        child, so the observer is the only writer left.
+        """
+        self._skip_without_kqueue()
+        target = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
+        observer = subprocess.Popen(
+            [sys.executable, _SCRIPT, "observe", "--pane", "2156", "--pid", str(target.pid),
+             "--interval", "5", "--foreground"],
+            env=dict(os.environ),
+        )
+        log = os.path.join(self.dir, "pane-2156.log")
+        deadline = time.time() + 5
+        while not os.path.exists(log) and time.time() < deadline:
+            time.sleep(0.05)
+        if not os.path.exists(log):
+            target.kill()
+            observer.kill()
+            self.fail("observer wrote no heartbeat within 5 s — watch never armed")
+        os.killpg(target.pid, sig)
+        target.wait()
+        observer.wait(timeout=10)
+        return [line for line in self._lines() if "kind=heartbeat" not in line]
+
+    def test_a_group_kill_of_a_live_pid_records_the_signal(self):
+        """`kqueue` `NOTE_EXITSTATUS` hands a non-parent the wait status, with no privilege."""
+        ends = self._observe_then_kill(signal.SIGTERM)
+        self.assertEqual(len(ends), 1, ends)
+        self.assertIn("kind=signalled kill", ends[0])
+        self.assertIn("rc=143", ends[0])
+        self.assertIn("signal=SIGTERM", ends[0])
+        self.assertIn("writer=observer", ends[0])
+
+    def test_a_group_sigkill_is_named(self):
+        ends = self._observe_then_kill(signal.SIGKILL)
+        self.assertIn("signal=SIGKILL", ends[0])
+        self.assertIn("rc=137", ends[0])
 
     def test_the_observers_end_carries_an_unavailable_sender(self):
         self._run("observe", "--pane", "2156", "--pid", str(self._gone_pid()), "--foreground")
@@ -360,6 +410,257 @@ class Observer(StoreTestCase):
         result = self._run("observe", "--pane", "2156", "--pid", "0", "--foreground")
         self.assertEqual(result.returncode, 2)
         self.assertEqual(os.listdir(self.dir), [])
+
+
+#: A stand-in for `claude`: writes its own registry record, keyed on its own pid exactly as
+#: Claude Code writes `~/.claude/sessions/<pid>.json`, then lives until killed.
+_FAKE_CLAUDE = (
+    "import json, os, sys, time\n"
+    "d, sid = sys.argv[1], os.environ['FAKE_SESSION_ID']\n"
+    "with open(os.path.join(d, f'{os.getpid()}.json'), 'w') as h:\n"
+    "    json.dump({'pid': os.getpid(), 'sessionId': sid, 'kind': 'interactive',\n"
+    "               'entrypoint': 'cli'}, h)\n"
+    "time.sleep(60)\n"
+)
+
+
+class ObserverBindsSession(StoreTestCase):
+    """A fresh spawn does not know its session id; the observer must learn it while it can.
+
+    Measured 2026-11-06: the 06:44 and 08:50 deaths carry `session=-`, and the registry that
+    could have named them (`~/.claude/sessions/<pid>.json`) is deleted when the process dies.
+    So the identity has to be copied into the append-only log while the session is alive.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.sessions = tempfile.mkdtemp()
+        self._saved_sessions = os.environ.get("SUPERVISOR_SESSIONS_DIR")
+        os.environ["SUPERVISOR_SESSIONS_DIR"] = self.sessions
+        self.procs = []
+
+    def tearDown(self):
+        # Kill each pane's whole group: `proc.kill()` reaches only the outer shell and would
+        # leave the inner bash and the fake claude running for up to a minute.
+        for proc in self.procs:
+            if proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    proc.kill()
+            proc.wait()
+        shutil.rmtree(self.sessions, ignore_errors=True)
+        if self._saved_sessions is None:
+            os.environ.pop("SUPERVISOR_SESSIONS_DIR", None)
+        else:
+            os.environ["SUPERVISOR_SESSIONS_DIR"] = self._saved_sessions
+        super().tearDown()
+
+    def _pane(self, sid):
+        """shell → bash → claude: the supervisor-spawn shape, where claude is a GRANDCHILD.
+
+        Pane 344 (2026-11-06) is this shape. The Fleet Manager's claude is a direct child, so
+        a binding that read children only would resolve on one and silently miss the other.
+        """
+        # Its own directory: a path through `self.sessions/..` stops resolving once tearDown
+        # removes `self.sessions`.
+        scratch = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, scratch, True)
+        fake = os.path.join(scratch, "fake-claude.py")
+        with open(fake, "w", encoding="utf-8") as handle:
+            handle.write(_FAKE_CLAUDE)
+        # shell → bash → python: the inner bash is a real intermediate process because the
+        # trailing `; wait` stops it from exec-ing its last command.
+        # The id travels in the environment: argv would be word-split by the inner shell,
+        # and the malformed-id case carries a tab.
+        shell = subprocess.Popen(
+            ["/bin/bash", "-c", '/bin/bash -c "$0 $1 $2; wait"; wait',
+             sys.executable, fake, self.sessions],
+            env={**os.environ, "FAKE_SESSION_ID": sid},
+            start_new_session=True,
+        )
+        self.procs.append(shell)
+        deadline = time.time() + 5
+        while len(os.listdir(self.sessions)) == 0 and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(os.listdir(self.sessions), "fake claude never wrote its registry record")
+        return shell
+
+    def _observe(self, shell, *extra):
+        observer = subprocess.Popen(
+            [sys.executable, _SCRIPT, "observe", "--pane", "2156", "--pid", str(shell.pid),
+             "--interval", "1", "--foreground", *extra],
+            env=dict(os.environ),
+        )
+        self.procs.append(observer)
+        return observer
+
+    def _wait_for(self, needle, timeout=5):
+        log = os.path.join(self.dir, "pane-2156.log")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if os.path.exists(log) and needle in open(log, encoding="utf-8").read():
+                return
+            time.sleep(0.05)
+        self.fail(f"{needle!r} never appeared in the record")
+
+    def test_a_heartbeat_carries_the_session_of_a_grandchild(self):
+        shell = self._pane("aaaa1111-2222-3333-4444-555566667777")
+        self._observe(shell)
+        self._wait_for("session=aaaa1111-2222-3333-4444-555566667777")
+        line = next(ln for ln in self._lines() if "aaaa1111" in ln)
+        self.assertIn("kind=heartbeat", line)
+
+    def test_the_end_line_keeps_the_session_after_the_registry_is_gone(self):
+        """The registry dies with the process; the record must not."""
+        Observer._skip_without_kqueue()
+        shell = self._pane("bbbb1111-2222-3333-4444-555566667777")
+        observer = self._observe(shell)
+        self._wait_for("session=bbbb1111-2222-3333-4444-555566667777")
+        for name in os.listdir(self.sessions):  # Claude deletes its record on exit
+            os.remove(os.path.join(self.sessions, name))
+        # Wait out at least one heartbeat that ran with nothing to resolve. Without this the
+        # kill lands first, no lookup ever misses, and dropping the carry (`or session`)
+        # would still pass.
+        before = sum("kind=heartbeat" in ln for ln in self._lines())
+        deadline = time.time() + 5
+        while sum("kind=heartbeat" in ln for ln in self._lines()) < before + 2:
+            self.assertLess(time.time(), deadline, "no heartbeat after the registry was gone")
+            time.sleep(0.1)
+        self.assertIn("session=bbbb1111", self._lines()[-1], "the carry dropped the id")
+        os.killpg(shell.pid, signal.SIGHUP)
+        shell.wait()
+        observer.wait(timeout=10)
+        ends = [ln for ln in self._lines() if "kind=heartbeat" not in ln]
+        self.assertEqual(len(ends), 1, ends)
+        self.assertIn("signal=SIGHUP", ends[0])
+        self.assertIn("session=bbbb1111-2222-3333-4444-555566667777", ends[0])
+
+    def test_an_explicit_session_stands_when_no_descendant_has_a_record(self):
+        shell = subprocess.Popen(["/bin/sleep", "30"], start_new_session=True)
+        self.procs.append(shell)
+        self._observe(shell, "--session", "cccc1111-2222-3333-4444-555566667777")
+        self._wait_for("session=cccc1111-2222-3333-4444-555566667777")
+
+    def test_a_malformed_session_id_is_never_written(self):
+        """The record is tab-separated; a hostile id must not be able to forge a field."""
+        shell = self._pane("evil\tkind=exited")
+        self._observe(shell)
+        self._wait_for("kind=heartbeat")
+        time.sleep(0.5)
+        for line in self._lines():
+            self.assertNotIn("evil", line)
+            self.assertEqual(line.count("\t"), 8, line)
+
+
+class SessionOfTree(unittest.TestCase):
+    """`session_of` over a constructed process table — the shapes real processes cannot fake.
+
+    A fixture process cannot be named `claude` on this platform (a shebang script reports its
+    interpreter, a framework Python reports `Python`), so the stop-at-claude rule is pinned
+    against a table rather than a live tree.
+    """
+
+    SHELL, CLAUDE, BUN, WORKER = 100, 200, 300, 400
+
+    def setUp(self):
+        self.sessions = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.sessions, True)
+        self._saved = os.environ.get("SUPERVISOR_SESSIONS_DIR")
+        os.environ["SUPERVISOR_SESSIONS_DIR"] = self.sessions
+        self.addCleanup(self._restore)
+        self._real_table = sx._process_table
+        self.addCleanup(setattr, sx, "_process_table", self._real_table)
+
+    def _restore(self):
+        if self._saved is None:
+            os.environ.pop("SUPERVISOR_SESSIONS_DIR", None)
+        else:
+            os.environ["SUPERVISOR_SESSIONS_DIR"] = self._saved
+
+    def _table(self, rows):
+        sx._process_table = lambda: dict(rows)
+
+    def _record(self, pid, sid, entrypoint="cli"):
+        with open(os.path.join(self.sessions, f"{pid}.json"), "w", encoding="utf-8") as fh:
+            json.dump({"pid": pid, "sessionId": sid, "kind": "interactive",
+                       "entrypoint": entrypoint}, fh)
+
+    def _manager_tree(self):
+        """shell → claude → bun → claude: a manager whose supervisor server spawned a worker.
+
+        Measured 2026-11-06 on the live table — each manager runs its own supervisor server
+        (`claude → bun → node supervisor.mjs`), and headless workers start below it.
+        """
+        self._table({
+            self.SHELL: (1, "bash"),
+            self.CLAUDE: (self.SHELL, "claude"),
+            self.BUN: (self.CLAUDE, "bun"),
+            self.WORKER: (self.BUN, "claude"),
+        })
+
+    def test_the_panes_own_claude_is_chosen(self):
+        self._manager_tree()
+        self._record(self.CLAUDE, "aaaa0000-0000-0000-0000-000000000001")
+        self._record(self.WORKER, "bbbb0000-0000-0000-0000-000000000002")
+        self.assertEqual(sx.session_of(self.SHELL), "aaaa0000-0000-0000-0000-000000000001")
+
+    def test_an_unreadable_pane_claude_never_lends_a_workers_id(self):
+        """The Must-Fix: the pane's record missing or mid-rewrite must not reach the worker.
+
+        Even a worker record that passes the `entrypoint` filter is never reached, because
+        the descent stops at the first `claude`.
+        """
+        self._manager_tree()
+        self._record(self.WORKER, "bbbb0000-0000-0000-0000-000000000002", entrypoint="cli")
+        self.assertEqual(sx.session_of(self.SHELL), "")
+
+    def test_a_headless_worker_record_is_never_chosen(self):
+        """`kind` cannot tell them apart (all 29 live records said `interactive`); `entrypoint` can."""
+        self._table({self.SHELL: (1, "bash"), self.WORKER: (self.SHELL, "node")})
+        self._record(self.WORKER, "bbbb0000-0000-0000-0000-000000000002", entrypoint="sdk-cli")
+        self.assertEqual(sx.session_of(self.SHELL), "")
+
+    def test_an_id_with_a_trailing_newline_is_refused(self):
+        """`$` matches before a final newline; such an id would split one record line in two."""
+        self._table({self.SHELL: (1, "bash"), self.CLAUDE: (self.SHELL, "claude")})
+        self._record(self.CLAUDE, "aaaa0000-0000-0000-0000-000000000001\n")
+        self.assertEqual(sx.session_of(self.SHELL), "")
+
+    def test_an_unreadable_table_answers_nothing_rather_than_raising(self):
+        sx._process_table = lambda: None
+        self.assertEqual(sx.session_of(self.SHELL), "")
+
+    def test_an_empty_table_answers_nothing(self):
+        sx._process_table = lambda: {}
+        self.assertEqual(sx.session_of(self.SHELL), "")
+
+
+class TrapEndCarriesSession(StoreTestCase):
+    """The trap writes its end after `claude` exited, so it cannot read the registry.
+
+    It passes `--session ""`; `append` must recover the id from this pid's heartbeats, or
+    every normal exit and trap-caught signal still reads `session=-`.
+    """
+
+    SID = "dddd0000-0000-0000-0000-000000000004"
+
+    def test_a_trap_end_reads_the_id_back_from_the_heartbeats(self):
+        self._run("append", "--pane", "2156", "--kind", "spawn", "--pid", "777", "--now", "t0")
+        self._run("append", "--pane", "2156", "--kind", "heartbeat", "--pid", "777",
+                  "--session", self.SID, "--writer", "observer", "--now", "t1")
+        self._run("append", "--pane", "2156", "--pid", "777", "--rc", "0", "--now", "t2")
+        end = self._lines()[-1]
+        self.assertIn("kind=exited", end)
+        self.assertIn(f"session={self.SID}", end)
+
+    def test_an_earlier_run_never_lends_its_session(self):
+        """A reused pane id holds many runs; only lines after this pid's own spawn count."""
+        self._run("append", "--pane", "2156", "--kind", "heartbeat", "--pid", "777",
+                  "--session", self.SID, "--writer", "observer", "--now", "t0")
+        self._run("append", "--pane", "2156", "--kind", "spawn", "--pid", "777", "--now", "t1")
+        self._run("append", "--pane", "2156", "--pid", "777", "--rc", "0", "--now", "t2")
+        self.assertIn("session=-", self._lines()[-1])
 
 
 class PaneFromEnvironment(StoreTestCase):

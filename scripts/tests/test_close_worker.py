@@ -218,6 +218,49 @@ class TestFindTask(unittest.TestCase):
         self.assertIsNotNone(found)
 
 
+class _StubStore:
+    """A local attention store: open list, per-item reads and delivery reports.
+
+    ⚠️ Every CLI test points at one of these — without it a headless gate check would
+    read the operator's live store and the verdict would depend on the machine.
+    """
+
+    def __init__(self, case):
+        import http.server
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                path = self.path.split("?", 1)[0]
+                prefix = "/api/1.0/attention"
+                body = None
+                if path == prefix:
+                    body = case.store_open
+                elif path.endswith("/attempt"):
+                    body = case.store_attempts.get(path[len(prefix) + 1:-len("/attempt")])
+                elif path.startswith(prefix + "/"):
+                    body = case.store_items.get(path[len(prefix) + 1:])
+                if body is None:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                data = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(data)
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
 class TestCliRefusals(unittest.TestCase):
     """The exit code and first-line token are the caller's contract."""
 
@@ -241,6 +284,12 @@ class TestCliRefusals(unittest.TestCase):
              "commit", "-qm", "init"],
             check=True,
         )
+        self.store_open = []
+        self.store_items = {}
+        self.store_attempts = {}
+        self.store = _StubStore(self)
+        self.addCleanup(self.store.close)
+        self.store_url = self.store.url
 
     def _registry(self, **over):
         rec = entry(SID, cwd=self.repo)
@@ -259,6 +308,8 @@ class TestCliRefusals(unittest.TestCase):
         env["SUPERVISOR_VAULTS_ROOT"] = self.vaults
         env["SUPERVISOR_SESSION_HOLDS"] = holds or os.path.join(self.tmp, "no-holds.json")
         env["ATTENTION_STATE_DIR"] = self.attention
+        env["ATTENTION_STORE_URL"] = self.store_url
+        env.pop("ATTENTION_STORE_TOKEN", None)
         return subprocess.run(
             [sys.executable, SCRIPT, SID, *extra],
             capture_output=True, text=True, env=env, timeout=60,
@@ -337,11 +388,63 @@ class TestCliRefusals(unittest.TestCase):
         self.assertIsNone(child.poll(), "a refusal must send no signal")
 
     def test_sdk_cli_refuses_on_gate(self):
-        """The gate check is not skipped just because the target has no pane."""
+        """The gate check is not skipped just because the target has no pane.
+
+        Its own mirrored card is open, so the board can still answer it.
+        """
         child = self._spawn_child()
         self._registry(entrypoint="sdk-cli", pid=child.pid)
         self._task(**{"claude_session_id": SID, "status": "completed"})
         self._transcript("approve: rm -rf /tmp/nothing")
+        self.store_open.append({"item_id": "f" * 32, "producer_id": SID, "state": "open"})
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "gate-held")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_sdk_cli_refuses_on_a_named_open_card(self):
+        child = self._spawn_child()
+        self._registry(entrypoint="sdk-cli", pid=child.pid)
+        self._task(**{"claude_session_id": SID, "status": "completed"})
+        card = "a" * 32
+        self.store_items[card] = {"item_id": card, "state": "open"}
+        self._transcript(f"review: card {card} — reply `ok`")
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "gate-held")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_sdk_cli_closes_on_a_gate_no_channel_can_answer(self):
+        """No pane, no open card of its own, the named card closed unanswered."""
+        child = self._spawn_child()
+        self._registry(entrypoint="sdk-cli", pid=child.pid)
+        self._task(**{"claude_session_id": SID, "status": "completed"})
+        card = "b" * 32
+        self.store_items[card] = {"item_id": card, "state": "closed"}
+        self._transcript(f"review: dismiss card {card} — reply `dismissed`")
+        done = self._run()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("closed", done.stdout)
+        self.assertEqual(child.wait(timeout=10), -signal.SIGTERM)
+
+    def test_sdk_cli_answered_but_never_delivered_is_unanswerable(self):
+        """`ANSWERED` in the store is not a release until a delivery is recorded."""
+        child = self._spawn_child()
+        self._registry(entrypoint="sdk-cli", pid=child.pid)
+        self._task(**{"claude_session_id": SID, "status": "completed"})
+        card = "c" * 32
+        self.store_items[card] = {"item_id": card, "state": "answered",
+                                  "answered_at": "2026-11-05T20:00:00Z"}
+        self.store_attempts[card] = {"item_id": card, "status": "never_attempted"}
+        self._transcript(f"approve: card {card} — allow")
+        done = self._run("--dry-run")
+        self.assertNotEqual(done.stdout.splitlines()[0], "gate-held", done.stdout)
+        self.assertIsNone(child.poll(), "a dry run must send no signal")
+
+    def test_sdk_cli_store_down_fails_closed(self):
+        child = self._spawn_child()
+        self._registry(entrypoint="sdk-cli", pid=child.pid)
+        self._task(**{"claude_session_id": SID, "status": "completed"})
+        self._transcript("review: dismiss card " + "d" * 32)
+        self.store_url = "http://127.0.0.1:9"
         done = self._run()
         self.assertEqual(done.stdout.splitlines()[0], "gate-held")
         self.assertIsNone(child.poll(), "a refusal must send no signal")

@@ -42,11 +42,13 @@
       ⚠️ The PATH is not decoration: launchd gives a job no login shell, so it never reads
       ~/.zshrc, and anything not on this list is simply not found.
 
-      System directories ONLY, on purpose. The report-only keeper calls nothing but its sibling
-      Python scripts (through `sys.executable`) and `ps` (in /bin). The restart-era keeper needed
-      `vault-cli` and `wezterm` to resume a session; it has no resume path now, so neither is
-      needed. User-writable directories (~/.local/bin, ~/Documents/workspaces/go/bin) would sit
-      ahead of /usr/bin and let anything dropped there shadow a system tool.
+      System directories ONLY, on purpose. The keeper calls its sibling Python scripts (through
+      `sys.executable`) and `ps` (in /bin). Its one resume — answer-gated, operator decision
+      2026-11-06 — runs `restart-worker.py --absent`, which needs `vault-cli` and `wezterm`; both
+      are resolved by ABSOLUTE path inside that script (`find_vault_cli`, `find_wezterm`), never
+      from this PATH, so neither is added here. User-writable directories (~/.local/bin,
+      ~/Documents/workspaces/go/bin) would sit ahead of /usr/bin and let anything dropped there
+      shadow a system tool.
 
       Measured 2026-11-01, the cost of getting this list wrong: with `vault-cli` missing, the
       restart-era keeper refused every tick for 715 ticks; with `wezterm` missing, it killed the

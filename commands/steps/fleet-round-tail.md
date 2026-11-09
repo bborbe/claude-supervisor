@@ -22,6 +22,24 @@ It prints `INCOMPLETE ROUND — skipped: <step> — <why>` for every field that 
 
 ⚠️ **The line is positive on purpose.** The rounds measured on 2026-10-31 that skipped their digest had *already* dropped `Snapshot written` from their render, so an absence-based signal would have passed on exactly the rounds this exists to catch. Only a string that cannot exist at the pre-change revision discriminates — which is why the sentinel comes from the script rather than from a sentence a model is asked to remember.
 
+## The acting legs' verdict — the check item 14 names and nothing called
+
+`commands/steps/output-shape.md` item 14 names `scripts/fleet-legs.py --check` as *"the mechanical guard"* for the acting legs. Nothing invoked it — no router row, no leg, no tail — so the guard was correct and its verdict never reached a render, and a round whose legs never spoke still printed the sweep's seed `not run — no reading recorded this round` as if it were a reading.
+
+Measured 2026-11-07 on `~/.claude/state/fleet-handback/2026-11-06T23-46Z.digest`: its `LEGS` section still held the sweep's seed, carried no `unactioned:` line, and `--check` exited **1** naming all three keys. A correct verdict nobody read.
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --check --digest "<this round's digest>" 2>&1
+```
+
+⚠️ **Run it here and carry the exit code to the `Legs` render at row 20.** This section owns the call and the branch; `commands/steps/output-shape.md` item 14 owns what each exit code renders and every format string — read it there and never restate it here.
+
+⚠️ **Branch on the exit code, never on the output — and capture stderr.** Every `--check` message is written to stderr while only `legs ok: …` goes to stdout, so a read that captures stdout alone hands item 14 an empty `<reason>`.
+
+⚠️ **Run it before the output-shape row**, for the same reason the receipt check runs here: a verdict discovered after the render cannot reach the block the operator reads. Like that check it is a report, not a brake — it never blocks the arm.
+
+⚠️ **What it does not catch.** A hand-typed count passes, and so does a leg-authored `not run — <reason>` written without the leg running; of the lines that are present, only the sweep's seed reads as unspoken. Nor can it tell this round's digest from a stale one — a round that passes a previous round's path, whose keys are all recorded, reads green while its own legs never spoke. The check proves a digest *carries a reading*, never that the reading is this round's or true.
+
 ## The debt — what makes the verdict outlive its round
 
 The sentinel reports on the round that printed it, and it dies with that round: `--start` clears `fields`, so one round later nothing records that a step was skipped. Measured 2026-10-31: **five of twelve** post-deploy rounds armed and never wrote a digest. One printed the line (11:50); four never ran this check at all (10:42, 11:00, 13:11, 13:27); and the 13:27 round rendered a whole-round closer ending `⏰ Next: the 13:43 fleet round` with no digest behind it. The evidence was gone by the next round in every case.

@@ -100,7 +100,7 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
    | Signal | Reading |
    |---|---|
    | session carries an **operator hold** | **held** — render `⏸️ HELD — <reason> · <age>`; never `stalled`, never `parked`, never a nudge |
-   | manager subject reads **`STOPPED`** / **`STALE`** via `manager-liveness.py --state` | **`STOPPED` → `stood-down`** — a *correct* self-stand-down, never nudged · **`STALE` → `lapsed`** — no `<slug>.stopped` marker |
+   | manager subject reads **`STOPPED`** / **`SLEEPING`** / **`STALE`** via `manager-liveness.py --state` | **`STOPPED` → `stood-down`** — a *correct* self-stand-down, never nudged · **`SLEEPING` → `sleeping`** — a date-gated subject waiting on its own `defer_date`, never nudged and never restarted · **`STALE` → `lapsed`** — no `.stopped` or `.sleeping` marker |
    | status changed since last sweep | progressing |
    | session carries an **open permission / AskUserQuestion gate** | **waiting-on-human** — render `⌛ waiting-on-human`; never `stalled` |
    | `idle` **and** all boxes `[x]` / task complete | **finished — reap candidate** |
@@ -140,13 +140,13 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 
 **Payload** — write the fenced render below to `~/.claude/state/fleet-handback/<round timestamp>.digest`, verbatim and byte-for-byte. ⚠️ **Write it through `python3`, and nothing else** — this agent holds no `mkdir`, no `mv` and no `Write` tool, so an instruction to create a directory or move a temp file over is one you cannot execute. Make the parent and the file in a single call, and **write it atomically**: `pathlib.Path(...).expanduser()` → `.parent.mkdir(parents=True, exist_ok=True)` → write the render to `<path>.tmp` → `os.replace("<path>.tmp", "<path>")`. ⚠️ **The atomic write is not decoration.** A partial `.digest` left by a crash mid-write is read as rows by Steps 3, 5, 11 and 14, and a truncated digest is indistinguishable from a small fleet — the same silent-short-read the snapshot's own ordering rule guards against. That is the only file you write besides the snapshot, and step 9's persist rule is unchanged.
 
-⚠️ **Prune as you write.** The store is keyed by round, so it grows one file per leg per round — roughly 96 a day at the 15-minute default, and nothing else in this repo prunes it. After writing, delete every `*.digest` and `*.drive` in `~/.claude/state/fleet-handback/` beyond the newest 100 of each kind. The bound is stated rather than assumed because an unbounded store under `~/.claude/state/` is a slow operational failure, not a tidy-up — and it is deliberately generous enough to cover a day of rounds plus the after-measure.
+⚠️ **Prune as you write.** The store is keyed by round, so it grows one file per leg per round — roughly 96 a day at the 15-minute default, and nothing else in this repo prunes it. After writing, delete every `*.digest`, `*.drive`, `*.keepalive`, `*.flagged-open` and `*.open*` in `~/.claude/state/fleet-handback/` beyond the newest 100 of each kind. The bound is stated because an unbounded store under `~/.claude/state/` is a slow operational failure, not a tidy-up — and it covers a day of rounds plus the after-measure.
 
 The caller forwards this path verbatim to `agents/fleet-drive.md`, which reads it — the digest does **not** ride the hand-back.
 
 ⚠️ **Sanitize the timestamp into the filename, and treat this clause as its single home.** Replace every character outside `[0-9A-Za-z._-]` with `-`, so a caller passing `2026-10-11T18:09:40Z` yields `2026-10-11T18-09-40Z.digest`. The round timestamp's format is the caller's and is not fixed anywhere, so the sanitization is what keeps the path printable and re-readable — and it is what keeps this file's name aligned with the drive leg's, which applies the same rule by pointing here rather than copying it. The caller never recomputes the path; it forwards your `payload=` value verbatim.
 
-Return **≤ 40 lines** in the payload, exactly these sections, each printed as `(none)` rather than dropped:
+Return **≤ 43 lines** in the payload, exactly these sections, each printed as `(none)` rather than dropped — the cap is 40 plus the `LEGS` block as seeded here (header + two `not run` lines = three):
 
 ```
 DIGEST <round timestamp> · <N> sessions · snapshot written: <swept_at from fleet-snapshot.py>
@@ -155,7 +155,7 @@ CLASSIFICATION  <total> classified · <class>=<n> · <class>=<n> …    — or: 
 BLOCKED (feed, raised — not verified open)
   <name> · pane <id> · <link> · <gate text, ≤80 chars>
 CLOSERS (last-turn closer and class)
-  <name> · pane <id> · <link> · <class> · <closer text, ≤80 chars>  ← CLASSIFICATION only, joined by pane id
+  <name> · pane <id|hst> · <link|—> · <class> · <closer text, ≤80 chars>  ← live sessions, joined by id
 ORPHAN CANDIDATES (park filter + 7d bound applied)  — or: UNKNOWN (check failed)
   <task> · claimed by <session id 8> · file age <h>
 REAP CANDIDATES (3 disk facts read this run)
@@ -168,10 +168,15 @@ CONTEXT ≥70% (idle, not in tool)
   <name> · <pct>
 LEDGER (open)
   <id> · <kind> · <what> · <state> · <age>          — or: (none) / UNKNOWN (read failed)
+LEGS
+  keep-alive: not run — no reading recorded this round
+  flagged-open: not run — no reading recorded this round
 NOTES   runbook/command disagreements, unreadable inputs
 ```
 
-⚠️ **The `<link>` column is what removes the manager's per-row pane read** — it is the rendered one-line link from step 7b, and it is the field `agents/fleet-drive.md` copies onto its `ESCALATION` rows. Carry it on **every** row that has a resolvable pane: `BLOCKED`, `CLOSERS`, and a non-progressing `CLASSIFICATION` row — `parked`, `parked-on-watcher`, `waiting-on-human` or `finished — reap candidate`, which is the same four step 7b attempts the lookup for. Emit `—` only where step 7b's lookup genuinely failed, and quote that failure in NOTES. **The link is inline on an existing row, so it costs characters, not lines** — the ≤ 40-line cap still holds; keep the link and trim the row's prose if a section runs long.
+⚠️ **The `LEGS` section is seeded here and owned by `commands/steps/output-shape.md` item 14 — never restate its formats.** Rows 5b/5c run *after* this digest is written, so no reading exists; a fabricated `0` would be indistinguishable from a leg that ran and found nothing. Write the two `not run` lines verbatim; each leg replaces its own via `scripts/fleet-legs.py`. ⚠️ **Never write a count here** — this leg does not measure those populations.
+
+⚠️ **The `<link>` column is what removes the manager's per-row pane read** — it is the rendered one-line link from step 7b, and it is the field `agents/fleet-drive.md` copies onto its `ESCALATION` rows. Carry it on **every** row that has a resolvable pane: `BLOCKED`, `CLOSERS`, and a non-progressing `CLASSIFICATION` row — `parked`, `parked-on-watcher`, `waiting-on-human` or `finished — reap candidate`, which is the same four step 7b attempts the lookup for. Emit `—` only where step 7b's lookup genuinely failed, and quote that failure in NOTES. **The link is inline on an existing row, so it costs characters, not lines** — the ≤ 43-line cap still holds; keep the link and trim the row's prose if a section runs long.
 
 ⚠️ **The `CLASSIFICATION` line is arithmetic, not prose — pin it, and make it reconcile with its own rows.** Render a stated total followed by one `<class>=<n>` term per class, and **the terms must sum to that total**. `progressing` is a class like every other and belongs in the sum even though it renders no row. For every class that *does* render rows beneath, `<n>` must equal **the number of rows of that class actually printed** — a header reading `parked=9` above 7 parked rows is the defect this pins, and it has been measured twice: v0.39.1's `idle=22 (21 parked, 1 finished, 2 unclassified)`, where 21+1+2 = 24 ≠ 22, and v0.46.0's `parked 9` against 7 listed rows. If the counts cannot be made to agree with the rows, print `UNKNOWN (counts do not reconcile)` in place of the numbers rather than a figure that contradicts the section below it — a header that reads as a measurement while disagreeing with its own rows is worse than one that admits the failure, and the same discipline already governs a starved pass, which prints `UNKNOWN (pass not run)` and never a count.
 

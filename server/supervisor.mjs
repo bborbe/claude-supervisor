@@ -19,13 +19,15 @@ import { config } from './config.mjs'
 import { runAgentLoop } from './agent-loop.mjs'
 import { answerWrappedSession, listWrappedSessions, pendingQuestionOf, readWrappedSession, sendWrappedSession, spawnWrappedSession, stopWrappedSession, streamWrappedSession } from './wrapper-stream.mjs'
 import { HEARTBEAT_INTERVAL_MS, a2aStamp, clearStamp, heartbeatDir, selfStampRefusal, stampRecord, startSelfStamp } from './heartbeat.mjs'
-import { workerSessions } from './worker-sessions.mjs'
+import { invalidateCountCache, workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
 import { startAttentionPoll, storeDecisionRecord, timeoutDecisionRecord } from './attention-poll.mjs'
 import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
+import { WRAPPER_POLICY_INTERVAL_MS, createWrapperPolicyPoller } from './wrapper-policy.mjs'
 import { confinedCandidate, loadManagerAllowlist, matchManagerEntry } from './manager-allowlist.mjs'
+import { permissionTier } from './permission-tier.mjs'
 import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
@@ -33,7 +35,7 @@ import { fileURLToPath } from 'node:url'
 import { A2A_DEFAULT_CLUSTER, a2aTargetsForClusters, a2aSpawnArgumentRefusal, a2aTurnPatch, a2aWorkerRecord, clusterAllowlistRefusal, clusterOfTarget, collectWorkerTurn, configuredA2AClusters, createWorkerOnController, fetchWorkerCard, isA2ATarget, ledgerModeForStatus, listWorkersOnController, openWorkerTurn, pendingPushRegistration, pollA2A, pushDiagnosticPatch, readPushCallbackFromWorker, reapExistingWorkerForTask, registerPushCallbackOnWorker, resolveA2AControllerTarget, stopWorkerOnController } from './a2a-spawn.mjs'
 import { createA2APushRegistry } from './a2a-push-registry.mjs'
 import { RATE_STATE_FILE, reserveSlot, resolveMaxStarts } from './start-rate.mjs'
-import { parseLauncherModel, resolveManagerLauncher, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
+import { applyHumanLauncherRule, parseLauncherModel, resolveManagerLauncher, resolveTaskLauncher, resolveWorkerTarget } from './spawn-cwd.mjs'
 import { readTaskLaunchers } from './task-launcher.mjs'
 import { CLUSTER_ANSWER_MAX, classifyClusterAnswer, newSessionId, resolveClusterTarget, startClusterSession } from './cluster-spawn.mjs'
 import { resolveMessageChannel } from './message-channel.mjs'
@@ -49,7 +51,7 @@ import { buildRecord, ledgerWriteRoute, mergeRecord, parentSessionId, stoppedPat
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 import { resumeRefusal } from './resume-guard.mjs'
 import { resumeAdmission } from './context-guard.mjs'
-import { shouldEndIdleWorker } from './idle-worker.mjs'
+import { armZeroTurnGrace, shouldEndIdleWorker, ZERO_TURN_GRACE_MS } from './idle-worker.mjs'
 import { fetchAttentionItems, fetchOpenCards, openCardsOf } from './open-cards.mjs'
 import { foreignParkRefusal } from './park-refusal.mjs'
 import { answerPathRefusal } from './answer-path.mjs'
@@ -596,6 +598,10 @@ const publicPerm = (p) => ({
   // The manager-allowlist entry covering this prompt, so the answering manager can see WHY it
   // is allowed to answer before it does — rather than re-deriving a match from the command text.
   allowlist_entry: p.allowlistEntry?.prefix ?? null,
+  // allowlist | manager | operator, from scripts/permission-tier.py. `operator` is never a
+  // manager's to answer; how a manager decides a `manager`-tier prompt is the doc's to state.
+  permission_tier: p.permissionTier?.tier ?? 'operator',
+  permission_tier_reason: p.permissionTier?.reason ?? null,
   requested_at: p.requestedAt,
 })
 
@@ -687,6 +693,13 @@ function makeCanUseTool(agent) {
         allowlistEntry: managerAllowlistEntry(toolName, inputKey(input), agent.cwd),
         settle,
       }
+      // The tier is computed at park time for the same reason as the entry: the answer record
+      // should carry what the server decided, not what the answering manager claims. A confined
+      // entry only matched above when its runner config was verified clean, so that verdict is
+      // what the classifier is told.
+      record.permissionTier = permissionTier(toolName, input, {
+        runnerConfigClean: record.allowlistEntry?.confine === 'clean-runner-config',
+      })
       // Fail safe: an unanswered prompt must not park a worker forever.
       // ⚠️ The timeout writes a record BEFORE it settles, and that ordering is the point:
       // this path used to settle with no `permissions.jsonl` row at all, so a timeout and a
@@ -1181,17 +1194,21 @@ function launcherMcpConfigFile(claudeCmd) {
 //
 // ⚠️ A summary ("policy unavailable") is not enough: a reader has to know WHICH parts went
 // quiet, because they differ in consequence. The 15-minute deny changes behaviour most — a
-// prompt that used to die now parks indefinitely — and `decide()` is the one whose absence
-// turns every policy-allowed prompt into a human wait. Named individually so an operator
-// reading a spawn response can decide what to depend on, and so an answered park in a
-// wrapper-backed run is attributable to the wrapper's hook rather than to a policy tier
-// that never ran.
+// prompt that used to die now parks indefinitely. Named individually so an operator
+// reading a spawn response can decide what to depend on.
+//
+// `decide()` is no longer on the list: `wrapper-policy.mjs` polls the wrapper's parks and
+// answers what the policy allows or denies, so a policy-allowed prompt no longer waits for a
+// human. Its decisions carry `via: 'wrapper'` in `permissions.jsonl`, which is what keeps an
+// answered park attributable — `decided_by: 'policy'` was the policy, anything else was not.
 function wrapperPolicyGap({ shipping }) {
   return {
     // Why: the wrapper spends the child's single --permission-prompt-tool on its own MCP
     // tool, and the supervisor sees the child only as an event stream.
     reason: 'wrapper owns the permission hook',
-    not_run: ['decide()', 'manager allowlist', 'carried decision', '15-minute deny'],
+    not_run: ['manager allowlist', 'carried decision', '15-minute deny'],
+    // How the policy tier reaches the wrapper path instead of the hook it cannot register.
+    policy_via: `wrapper poll every ${WRAPPER_POLICY_INTERVAL_MS} ms`,
     // The shipping tier is a SEPARATE loss, not a restatement: permission_mode survives,
     // the flag-tier `settings` object does not, so a wrapper-backed shipping worker hits
     // the permission channel for the edits and git verbs its flag tier was meant to skip.
@@ -1400,6 +1417,9 @@ async function concurrentLimitError({ operatorNamed = false } = {}) {
     staleAgeMs: counted.stale?.ageMs ?? null,
     operatorNamed,
     configFile: config.configFile,
+    // The split rides on the same count pass, so the refusal's breakdown cannot describe a
+    // different instant than the number beside it.
+    populations: counted.populations ?? null,
   })
 }
 
@@ -2514,6 +2534,20 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
       ...read,
     })
   }
+  if (!config.claudeCmd) {
+    // A `role: human` row is the operator's own session, not a delegate (operator ruling
+    // 2026-11-06, card 25c99a35): it opens on the vault's Claude launcher, never the
+    // `-deepseek` worker default. Only the task's own `launcher:` still wins over that.
+    // ⚠️ `roleResolution` comes from the caller's `role` argument only — the task file's `role:`
+    // is not read here, so `/supervisor:open` must pass it (commands/open.md § 3.0).
+    taskLauncher = applyHumanLauncherRule({
+      role: roleResolution.role,
+      resolved: taskLauncher,
+      vaultLauncher: workerTarget.launcher,
+      managerDefault: workerTarget.managerLauncher,
+      exists: existsSync,
+    })
+  }
   // ONE check, after every branch. The manager branch could not fail before `managerDefault`
   // existed, so it carried no check; it can now (an unsafe configured `manager_launcher`), and
   // an unchecked `{ error }` here makes `workerLauncher` `undefined` — the tab path then execs
@@ -2906,13 +2940,14 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // `POST /api/1.0/sessions/{id}/answer` releases the park from any manager.
   //
   // ⚠️ **What the seam costs, named rather than implied.** The wrapper spends the child's
-  // single `--permission-prompt-tool` on its own MCP tool, so this server never sees a
-  // prompt and none of its policy machinery can run. `wrapperPolicyGap` carries that on the
-  // agent record AND the spawn response, because a reader who has to infer which parts went
-  // quiet will infer wrong in the direction that matters — the 15-minute deny changes
-  // behaviour most. Naming it also keeps a later verification honest: an answered park in a
-  // wrapper-backed run was answered by the wrapper's hook, never by `decide()`, so it is not
-  // evidence that the policy tier works.
+  // single `--permission-prompt-tool` on its own MCP tool, so this server's hook never sees a
+  // prompt. `decide()` reaches these workers anyway, by polling the wrapper's parks
+  // (`wrapper-policy.mjs`); the rest of the policy machinery does not. `wrapperPolicyGap`
+  // carries what is still missing on the agent record AND the spawn response, because a
+  // reader who has to infer which parts went quiet will infer wrong in the direction that
+  // matters — the 15-minute deny changes behaviour most. A policy-answered park is the one
+  // with a `decided_by: 'policy'`, `via: 'wrapper'` row in `permissions.jsonl`; any other
+  // answered park was answered by a manager, and is no evidence that the policy tier works.
   // ⚠️ A refused SUPERVISOR_WRAPPER_URL is refused HERE, not at import. `config.mjs` returns
   // the refusal rather than throwing so one mistyped variable cannot make the module
   // unimportable and take the whole server down at load; the cost is that the refusal has to
@@ -3006,9 +3041,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // `question` is waiting on a manager; a worker with an open attention card is waiting on a
   // person. Neither is finished, and stopping either would orphan exactly the card this whole
   // task exists to protect.
-  // How long a session whose last result ran zero turns is kept for a queued prompt to start.
-  const ZERO_TURN_GRACE_MS = 120_000
-  const endWorkerIfIdle = async (current) => {
+  const endWorkerIfIdle = async (current, { zeroTurnGraceExpired = false } = {}) => {
     let session
     try {
       session = await readWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id })
@@ -3019,28 +3052,13 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // Decide everything except the card check first, so an incomplete wrapper record is reported
     // before we spend an attention-store round trip on it — and is reported at all, because a
     // silent keep would let the idle-worker leak survive the fix that exists to remove it.
-    const pre = shouldEndIdleWorker({ session, cards: [], lastResult: current.result })
+    const pre = shouldEndIdleWorker({ session, cards: [], lastResult: current.result, zeroTurnGraceExpired })
     if (pre.reason === 'wrapper-record-incomplete') {
       log(`WARNING: the wrapper's record for ${current.id} carries no state/pending_turns — the idle-worker end-of-life is a no-op for it until it does`)
       return
     }
-    if (!pre.end) {
-      if (pre.reason === 'zero-turn-result') {
-        // Bounded keep: give a queued prompt the grace window to start. If no newer result has
-        // replaced this one by then, the session really did nothing — stop it, so the stream ends
-        // and the loop settles `error: zero-turn` instead of leaking a process that reads `running`.
-        const zeroTurnResult = current.result
-        log(`WARNING: agent ${current.id}: zero-turn result — keeping the session ${ZERO_TURN_GRACE_MS} ms so a queued prompt can still run`)
-        setTimeout(() => {
-          if (current.result !== zeroTurnResult || current.status !== 'running') return
-          log(`WARNING: agent ${current.id}: still zero-turn after ${ZERO_TURN_GRACE_MS} ms — stopping the session`)
-          stopWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id }).catch((error) => {
-            log(`WARNING: could not stop zero-turn ${current.id}: ${error.message}`)
-          })
-        }, ZERO_TURN_GRACE_MS).unref?.()
-      }
-      return
-    }
+    // `zero-turn-result` is decided only after the card check, so it proceeds to it.
+    if (!pre.end && pre.reason !== 'zero-turn-result') return
     // ⚠️ **A deliberately-absent store is NOT an unreadable one.** With
     // `SUPERVISOR_ATTENTION_STORE=off`, `config.attentionStoreUrl` is null and `fetchOpenCards`
     // returns null without issuing a request — which the predicate would read as
@@ -3051,7 +3069,14 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     const cards = config.attentionStoreUrl
       ? await fetchOpenCards({ storeUrl: config.attentionStoreUrl, sessionId: current.sessionId })
       : []
-    const verdict = shouldEndIdleWorker({ session, cards, lastResult: current.result })
+    const verdict = shouldEndIdleWorker({ session, cards, lastResult: current.result, zeroTurnGraceExpired })
+    if (verdict.reason === 'zero-turn-result') {
+      // Bounded keep: the timer re-runs THIS whole decision with the grace expired, so it can
+      // only end a session that is still idle, unparked and cardless — never a live turn.
+      log(`WARNING: agent ${current.id}: zero-turn result — keeping the session ${ZERO_TURN_GRACE_MS} ms so a queued prompt can still run`)
+      armZeroTurnGrace({ agent: current, recheck: endWorkerIfIdle })
+      return
+    }
     if (!verdict.end) {
       // The two keeps that explain a worker which is never reaped are logged; `not-idle` and
       // `turn-in-flight` are the ordinary mid-turn path and would log on every result.
@@ -3093,7 +3118,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // inferring it from the absence of an error.
     policy: agent.policyPath,
     shipping: agent.shipping === true,
-    // ⚠️ Reported, never omitted. A caller that needs `decide()` or the 15-minute deny must
+    // ⚠️ Reported, never omitted. A caller that needs the manager allowlist or the 15-minute deny must
     // be able to refuse to depend on them HERE, rather than discover their absence when a
     // prompt parks forever. Named field by field — see wrapperPolicyGap.
     policy_gap: wrapperPolicyGap({ shipping: agent.shipping }),
@@ -3450,8 +3475,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (typeof args.prompt !== 'string' || !args.prompt.trim()) {
         return reply({ error: 'prompt is required' })
       }
-      return reply(
-        await spawnAgent({
+      // ⚠️ A SUCCESSFUL SPAWN INVALIDATES THE COUNT CACHE, and it is done here rather than inside
+      // `spawnAgent` so one call covers every path — tab, headless, cluster and resume alike.
+      // Without it the cache can hold a number that predates this spawn, and the next spawn whose
+      // live read fails would decide on that pre-spawn number; a burst during a store outage would
+      // then be invisible to the very ceiling that bounds it. See `invalidateCountCache`.
+      const spawned = await spawnAgent({
           prompt: args.prompt,
           cwd: args.cwd,
           label: args.label,
@@ -3497,8 +3526,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // in 6 (measured 2026-09-20), and not crossing this boundary is the whole point
           // of resolving a role instead. See window-id.mjs and role-map.mjs.
           windowId: windowIdArgument(args.window_id),
-        }),
-      )
+      })
+      if (!spawned.error) await invalidateCountCache()
+      return reply(spawned)
 
     case 'send_agent_message': {
       // ⚠️ The request-time roster, for the same reason `list_agents` reads it: the worker a
@@ -3981,6 +4011,23 @@ const clusterTimer = setInterval(async () => {
   }
 }, HEARTBEAT_INTERVAL_MS)
 clusterTimer.unref?.()
+
+// The policy tier for wrapper-backed headless workers — see wrapper-policy.mjs for why it is a
+// supervisor-side poll rather than a hook. One roster read per tick for the whole fleet, and
+// none at all while this server holds no wrapper-backed worker.
+const wrapperPolicy = createWrapperPolicyPoller({
+  agents: () => agents.values(),
+  listSessions: () => listWrappedSessions({ baseUrl: config.wrapperUrl }),
+  answer: ({ sessionId, requestId, behavior }) =>
+    answerWrappedSession({ baseUrl: config.wrapperUrl, sessionId, requestId, behavior }),
+  decide,
+  logPermission,
+  log,
+})
+const wrapperPolicyTimer = setInterval(() => {
+  wrapperPolicy.run()
+}, WRAPPER_POLICY_INTERVAL_MS)
+wrapperPolicyTimer.unref?.()
 
 // The A2A equivalent of the cluster mirror: list the controller's workers and stamp every ledger
 // session it still runs, so an A2A worker reads live while it runs and dead within one sweep of

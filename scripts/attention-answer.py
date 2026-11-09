@@ -35,8 +35,14 @@ Two classes route an answer, and they route it differently:
               it by SendMessage, to the name on the TARGET line printed here.
   permission  the answer is a verdict, given with --decision allow|deny. The
               spawning supervisor server delivers it by polling the store, so
-              this script prints a DELIVERY line and never a TARGET: there is
-              no session to send to, and printing one would invite a relay.
+              this script never prints a TARGET: there is no session to send
+              to, and printing one would invite a relay. It waits (bounded,
+              ATTENTION_DELIVERY_WAIT, default 35 s) for the store's delivery
+              report and prints one of:
+                ANSWERED + DELIVERY: delivered by <carrier>      exit 0
+                RECORDED + NOT_DELIVERED: failed|held by <c>     exit 3
+                RECORDED + UNCONFIRMED: <why>                    exit 3
+              Exit 3 means the verdict is stored but the asker is still parked.
 
 `ack` items are listed but refused -- they ask nothing, so there is nothing to
 route.
@@ -55,14 +61,65 @@ import argparse
 import glob
 import http.client
 import json
+import math
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
 # Local store; a hung one must cost a clear failure, never a stalled session.
 STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
+
+# How long a permission answer waits for the store's delivery report before it
+# calls the delivery unconfirmed. ⚠️ It must outlast the poller's IDLE interval,
+# not its busy one: `server/attention-poll.mjs` reads every `intervalMs = 2000`
+# while an item is open but every `idleIntervalMs = 30000` when nothing is, so an
+# answer can be picked up up to 30 s after it lands. A shorter bound would report
+# a slow-but-working delivery as unconfirmed.
+DEFAULT_DELIVERY_WAIT_SECONDS = 35.0
+DELIVERY_POLL_SECONDS = 1.0
+
+
+# A ceiling on the override. An unbounded wait is the pre-fix bug on a slower
+# clock: the caller still cannot tell a delivered answer from an undelivered one,
+# it just stops returning. Ten minutes outlasts every poller cadence with margin
+# and still guarantees the command comes back.
+MAX_DELIVERY_WAIT_SECONDS = 600.0
+
+
+def delivery_wait_seconds(environ=None):
+    """The bounded wait, from `ATTENTION_DELIVERY_WAIT` or the default.
+
+    ⚠️ A bare `float()` is not enough. `float("nan")` and `float("inf")` both
+    parse, and `wait_for_delivery` bounds itself with `_clock() >= deadline` —
+    a `nan` deadline makes that comparison permanently False, so the loop never
+    exits and the command hangs instead of reporting. Non-finite, non-positive
+    and oversized values all fall back to a bound rather than becoming one.
+    """
+    raw = (os.environ if environ is None else environ).get("ATTENTION_DELIVERY_WAIT", "")
+    try:
+        value = float(raw) if raw else DEFAULT_DELIVERY_WAIT_SECONDS
+    except ValueError:
+        return DEFAULT_DELIVERY_WAIT_SECONDS
+    if not math.isfinite(value) or value <= 0:
+        return DEFAULT_DELIVERY_WAIT_SECONDS
+    return min(value, MAX_DELIVERY_WAIT_SECONDS)
+
+
+DELIVERY_WAIT_SECONDS = delivery_wait_seconds()
+# A delivery report status that settles the question. `never_attempted` and
+# `pre_trail_unknown` do not: they mean no carrier has written yet.
+DELIVERY_TERMINAL = ("delivered", "failed", "held")
+# Exit code for "the verdict is in the store but was not observed delivered" --
+# distinct from 1 (store write failed) and 2 (refused before write), because the
+# caller's next move differs: the worker is still parked, and nothing here can
+# release it.
+EXIT_NOT_DELIVERED = 3
+# Indirection so tests can drive the bounded wait without sleeping.
+_sleep = time.sleep
+_clock = time.monotonic
 SESSIONS_DIR = os.environ.get("CLAUDE_SESSIONS_DIR") or os.path.expanduser("~/.claude/sessions")
 DEFAULT_ARM = "supervisor:attention-next"
 PAYLOAD_WIDTH = 160
@@ -113,6 +170,53 @@ def fetch_open():
 def fetch_item(item_id):
     with urllib.request.urlopen(f"{STORE}/api/1.0/attention/{item_id}", timeout=STORE_TIMEOUT) as resp:
         return json.load(resp)
+
+
+def fetch_delivery(item_id, timeout=None):
+    """Return the store's delivery report for `item_id` (`GET …/attempt`)."""
+    with urllib.request.urlopen(
+        f"{STORE}/api/1.0/attention/{item_id}/attempt",
+        timeout=STORE_TIMEOUT if timeout is None else timeout,
+    ) as resp:
+        return json.load(resp)
+
+
+def wait_for_delivery(item_id):
+    """Poll the delivery report until it settles or the bound runs out.
+
+    Returns (status, carrier, reason). `status` is a terminal report status
+    when one was observed; otherwise it is the last non-terminal status read, or
+    None when no well-formed report was ever read -- and `reason` says why.
+
+    ⚠️ An unreadable report is never read as delivered, nor as failed: like
+    `restart-precheck.py`, only a report carrying `status` decides anything.
+
+    ⚠️ Every read is clamped to the budget that is left, so the bound this
+    returns within is the one the caller is told about. A read allowed its full
+    `STORE_TIMEOUT` could push the real elapsed time past `DELIVERY_WAIT_SECONDS`
+    while the UNCONFIRMED line still printed the nominal figure.
+    """
+    deadline = _clock() + DELIVERY_WAIT_SECONDS
+    status, carrier, reason = None, "", "no report read"
+    while True:
+        remaining = deadline - _clock()
+        if remaining <= 0:
+            return status, carrier, reason
+        try:
+            report = fetch_delivery(item_id, timeout=min(STORE_TIMEOUT, remaining))
+        except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as err:
+            status, reason = None, f"delivery report unreadable ({err})"
+        else:
+            if isinstance(report, dict) and "status" in report:
+                status, carrier, reason = report.get("status"), report.get("carrier") or "", ""
+                if status in DELIVERY_TERMINAL:
+                    return status, carrier, reason
+            else:
+                status, reason = None, "delivery report unreadable (no status field)"
+        remaining = deadline - _clock()
+        if remaining <= 0:
+            return status, carrier, reason
+        _sleep(min(DELIVERY_POLL_SECONDS, remaining))
 
 
 def resolved_session_id(environ=None):
@@ -277,13 +381,23 @@ def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None,
 
 
 def cmd_answer_permission(item, answered_by, resolved_by, decision, out=sys.stdout):
-    """Answer a permission-class item with a verdict, and name how it is delivered.
+    """Answer a permission-class item with a verdict, and report whether it landed.
 
     The delivery is the spawning supervisor server polling the store, so this
-    prints DELIVERY and never TARGET. A TARGET line here would be actively
-    harmful rather than merely useless: the wrapping command branches on it, and
-    a session cannot release another session's parked gate -- a relay is
-    permission laundering even when the action looks small.
+    never prints TARGET. A TARGET line here would be actively harmful rather
+    than merely useless: the wrapping command branches on it, and a session
+    cannot release another session's parked gate -- a relay is permission
+    laundering even when the action looks small.
+
+    ⚠️ The POST is not the delivery, so it is not reported as one. After the
+    write this reads the store's delivery report (written by the poller after
+    it settles, or fails to settle, the park) for a bounded wait, and claims
+    `ANSWERED` only on an observed `delivered`. Anything else -- `failed`,
+    `held`, or no report within the bound -- prints `RECORDED` plus a
+    `NOT_DELIVERED` / `UNCONFIRMED` line and exits EXIT_NOT_DELIVERED: the
+    verdict is in the store, and the worker is still parked. Measured
+    2026-11-05: the pre-fix arm printed `ANSWERED` and exit 0 while the poller
+    refused with `wrapper holds no question for session bdc2f1ed`.
     """
     item_id = item.get("item_id")
     if decision not in DECISIONS:
@@ -305,12 +419,25 @@ def cmd_answer_permission(item, answered_by, resolved_by, decision, out=sys.stdo
         else:
             print(f"FAILED: store returned {err.code} for {item_id}", file=out)
         return 1
-    print(f"ANSWERED: {item_id} at {answered.get('answered_at')} by {answered.get('answered_by')}", file=out)
+    status, carrier, reason = wait_for_delivery(item_id)
+    stamp = f"{item_id} at {answered.get('answered_at')} by {answered.get('answered_by')}"
+    print(f"ANSWERED: {stamp}" if status == "delivered" else
+          f"RECORDED: {stamp} -- verdict stored, NOT observed delivered", file=out)
     print(f"RESOLVED_BY: {resolved_by}" if resolved_by else
           "RESOLVED_BY: unknown -- CLAUDE_CODE_SESSION_ID unset, so this item will read as unresolved", file=out)
     print(f"DECISION: {decision}", file=out)
-    print("DELIVERY: supervisor poll -- no session to send to, so do NOT SendMessage", file=out)
-    return 0
+    by = carrier or "unknown carrier"
+    if status == "delivered":
+        print(f"DELIVERY: delivered by {by} -- do NOT SendMessage", file=out)
+        return 0
+    if status in ("failed", "held"):
+        print(f"NOT_DELIVERED: {status} by {by} -- the asking session is still parked; "
+              f"do NOT SendMessage, and do not report this gate as answered", file=out)
+        return EXIT_NOT_DELIVERED
+    print(f"UNCONFIRMED: {reason or status} after {DELIVERY_WAIT_SECONDS:g}s -- no carrier reported "
+          f"delivery, so the asking session may still be parked; do NOT SendMessage, "
+          f"and do not report this gate as answered", file=out)
+    return EXIT_NOT_DELIVERED
 
 
 def post_attempt(item_id, carrier, outcome):

@@ -16,6 +16,7 @@ import tempfile
 import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -103,16 +104,104 @@ class Liveness(unittest.TestCase):
         self.assertFalse(os.path.exists(self.m.path("goal--manager-layer", "stopped")))
         self.assertEqual(self.check()[0], 10)
 
+    def deliver(self, s):
+        """Ack a lapse the way the sender does after the transport returns success."""
+        with redirect_stdout(io.StringIO()):
+            return self.m.delivered(s)
+
+    def fail_send(self, s, error):
+        """Record a failed delivery attempt the way the sender does."""
+        with redirect_stdout(io.StringIO()):
+            return self.m.failed(s, error)
+
     def test_one_lapse_notifies_once_then_recovers(self):
         self.arm("Manager Layer", 300, age=5000)
-        self.assertEqual(self.check()[0], 10)
-        self.assertEqual(self.check(), (0, ""))  # second poll: no repeat
+        self.assertEqual(self.check()[0], 10)  # detected: now OWED a report
+        self.assertEqual(self.check()[0], 10, "an owed lapse is re-emitted (the retry)")
+        self.deliver("goal--manager-layer")  # the transport carried it
+        self.assertEqual(self.check(), (0, ""))  # second poll after the ack: no repeat
         self.arm("Manager Layer", 300, age=0)
         rc, out = self.check()
         self.assertEqual(rc, 0)
         self.assertTrue(out.startswith("RECOVERED goal--manager-layer OK"), out)
         self.arm("Manager Layer", 300, age=5000)  # a NEW lapse notifies again
         self.assertEqual(self.check()[0], 10)
+
+    def test_a_failed_send_leaves_the_lapse_owed_and_re_emitted(self):
+        # The defect this file's `--check` fixes: 2026-11-07 03:26Z, the detector fired,
+        # the transport timed out, and the next poll was silent for ever because the
+        # entry had been written at DETECTION time. A failed send must not consume it.
+        self.arm("Manager Layer", 300, age=5000)
+        self.assertEqual(self.check()[0], 10)
+        self.fail_send("goal--manager-layer", "prod unreachable — timed out")
+        rc, out = self.check()
+        self.assertEqual(rc, 10, "a failed delivery must be retried on the next poll")
+        self.assertIn("STALE goal--manager-layer", out)
+        entry = self.m.read_pending()["goal--manager-layer"]
+        self.assertEqual(entry["attempts"], 1)
+        self.assertIn("prod unreachable", entry["last_error"])
+
+    def test_the_ack_is_the_only_thing_that_stops_the_re_emission(self):
+        # `notified` is what the sender writes; `pending` is what the detector owes.
+        # Detection alone must not write `notified`, or the lapse is reported to nobody.
+        self.arm("Manager Layer", 300, age=5000)
+        self.assertEqual(self.check()[0], 10)
+        self.assertNotIn("goal--manager-layer", self.m.read_notified())
+        self.assertIn("goal--manager-layer", self.m.read_pending())
+        self.deliver("goal--manager-layer")
+        self.assertIn("goal--manager-layer", self.m.read_notified())
+        self.assertNotIn("goal--manager-layer", self.m.read_pending())
+
+    def test_a_failed_attempt_records_its_producer(self):
+        # The durable record must be showable as written by a real failed send: a
+        # hand-written file reproduces every other field byte for byte.
+        self.arm("Manager Layer", 300, age=5000)
+        self.assertEqual(self.check()[0], 10)
+        with redirect_stdout(io.StringIO()):
+            self.m.failed("goal--manager-layer", "prod unreachable", pid="4242", row_ts="2026-11-07T03:26:09Z")
+        entry = self.m.read_pending()["goal--manager-layer"]
+        self.assertEqual(entry["pid"], "4242")
+        self.assertEqual(entry["row_ts"], "2026-11-07T03:26:09Z")
+        # ... and a later poll's rewrite must not drop them.
+        self.assertEqual(self.check()[0], 10)
+        entry = self.m.read_pending()["goal--manager-layer"]
+        self.assertEqual(entry["pid"], "4242")
+        self.assertEqual(entry["row_ts"], "2026-11-07T03:26:09Z")
+
+    def test_the_ack_records_the_crossing_not_the_ack_time(self):        # The report says when the lapse CROSSED, and that is what dedup compares
+        # against `last_arm`. Storing the ack time would make a manager that re-armed
+        # while the report was owed look already-reported on its next lapse.
+        t0 = time.time()
+        self.arm("Manager Layer", 300, age=5000)
+        self.assertEqual(self.check(t0)[0], 10)
+        crossing = self.m.read_pending()["goal--manager-layer"]["detected_at"]
+        self.assertEqual(crossing, t0)
+        self.deliver("goal--manager-layer")
+        self.assertEqual(self.m.read_notified()["goal--manager-layer"], t0)
+
+    def test_a_recovered_pending_lapse_is_still_reported(self):
+        # The manager came back before anyone was told. The lapse still happened, so it
+        # is still owed — but printing STALE would be a lie about the current state.
+        self.arm("Manager Layer", 300, age=5000)
+        self.assertEqual(self.check()[0], 10)
+        self.arm("Manager Layer", 300, age=0)  # recovered, still undelivered
+        rc, out = self.check()
+        self.assertEqual(rc, 10, "a recovery does not cancel an unreported lapse")
+        self.assertTrue(out.startswith("RECOVERED-PENDING goal--manager-layer"), out)
+        self.deliver("goal--manager-layer")
+        rc, out = self.check()
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("STALE", out)
+
+    def test_a_re_arm_supersedes_a_stale_pending_entry(self):
+        # A pending entry older than the subject's last arm describes a lapse it has
+        # already come back from; the newer crossing must replace it, not stack behind.
+        t0 = time.time()
+        self.arm("Manager Layer", 300, age=5000)
+        self.assertEqual(self.check(t0)[0], 10)
+        self.set_arm_time("Manager Layer", t0 + 100)
+        self.assertEqual(self.check(t0 + 100 + 2000)[0], 10)
+        self.assertEqual(self.m.read_pending()["goal--manager-layer"]["detected_at"], t0 + 2100)
 
     def test_a_lapse_after_a_rearm_notifies_again(self):
         # The production shape, 2026-10-20: the manager re-armed and lapsed again
@@ -160,10 +249,12 @@ class Liveness(unittest.TestCase):
         t0 = time.time()
         self.arm("Alpha", 300, age=5000)
         self.arm("Beta", 300, age=5000)
-        self.assertEqual(self.check(t0)[0], 10)  # both notified
+        self.assertEqual(self.check(t0)[0], 10)  # both owed
+        self.deliver("goal--alpha")
+        self.deliver("goal--beta")  # both delivered
         self.set_arm_time("Alpha", t0 + 100)  # Alpha recovers
         rc, out = self.check(t0 + 200)
-        self.assertEqual(rc, 0, out)  # Beta is still notified, so nothing new
+        self.assertEqual(rc, 0, out)  # Beta is still reported, so nothing new
         self.assertNotIn("STALE", out)
         self.assertIn("RECOVERED goal--alpha", out)
 
@@ -341,6 +432,87 @@ class StateVerb(unittest.TestCase):
         with redirect_stdout(out):
             self.m.check()
         self.assertNotIn("STOPPED", out.getvalue())
+
+
+class SleepState(unittest.TestCase):
+    """SLEEPING — a date-gated subject that is deliberately not re-arming.
+
+    A subject whose remaining work is all future `defer_date`s does not arm until that
+    instant, so its cadence file ages past the stale limit BY DESIGN. Without this state
+    the fleet reads that as a lapse and restarts it — the defect measured 2026-11-07.
+    """
+
+    SUBJECT = "Several Clusters"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name)
+        self.s = self.m.slug(self.SUBJECT, "goal")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def arm(self, age):
+        with redirect_stdout(io.StringIO()):
+            self.m.arm(self.SUBJECT, "goal", 300)
+        p = self.m.path(self.s, "cadence")
+        t = time.time() - age
+        os.utime(p, (t, t))
+
+    def sleep(self, delta_seconds):
+        until = (datetime.now(timezone.utc) + timedelta(seconds=delta_seconds)).isoformat()
+        with redirect_stdout(io.StringIO()):
+            rc = self.m.sleep(self.SUBJECT, "goal", until)
+        return rc
+
+    def test_a_future_sleep_reads_sleeping_not_stale(self):
+        self.arm(age=5000)
+        self.sleep(3600)
+        state, detail = self.m.classify(self.s, time.time())
+        self.assertEqual(state, "SLEEPING")
+        self.assertIn("remaining", detail)
+
+    def test_a_sleeping_subject_does_not_notify_as_a_lapse(self):
+        self.arm(age=5000)
+        self.sleep(3600)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.m.check()
+        self.assertEqual((rc, out.getvalue()), (0, ""))
+
+    def test_a_passed_sleep_still_reads_stale(self):
+        """The negative control: a manager that failed to wake must not be hidden."""
+        self.arm(age=5000)
+        self.sleep(-60)
+        self.assertEqual(self.m.classify(self.s, time.time())[0], "STALE")
+
+    def test_an_arm_clears_the_sleep_marker(self):
+        self.sleep(3600)
+        self.arm(age=0)
+        self.assertFalse(os.path.exists(self.m.path(self.s, "sleeping")))
+
+    def test_stopped_beats_sleeping(self):
+        """A deliberate stand-down is the stronger statement; it must not be masked."""
+        self.sleep(3600)
+        with redirect_stdout(io.StringIO()):
+            self.m.stop(self.SUBJECT, "goal")
+        self.assertEqual(self.m.classify(self.s, time.time())[0], "STOPPED")
+
+    def test_an_unreadable_sleep_marker_reads_as_absent(self):
+        """Fail toward ARMED: a corrupt marker must not suppress a real STALE."""
+        self.arm(age=5000)
+        with open(self.m.path(self.s, "sleeping"), "w", encoding="utf-8") as fh:
+            fh.write("someday\n")
+        self.assertEqual(self.m.classify(self.s, time.time())[0], "STALE")
+
+    def test_sleep_refuses_a_bad_until_and_writes_nothing(self):
+        err = io.StringIO()
+        with redirect_stderr(err), redirect_stdout(io.StringIO()):
+            rc = self.m.sleep(self.SUBJECT, "goal", "tomorrow-ish")
+        self.assertEqual(rc, 2)
+        self.assertFalse(os.path.exists(self.m.path(self.s, "sleeping")))
+        self.assertIn("ISO 8601", err.getvalue())
 
 
 class StoodDownVersusLapsed(unittest.TestCase):

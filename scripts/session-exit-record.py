@@ -24,10 +24,14 @@ that survives the death it is describing, and no single writer covers every end:
    how `137` becomes visible at all). Does NOT survive a signal delivered to the whole
    process group, because the shell dies with the child.
 2. **A detached observer** (`observe`) — `os.setsid()` puts it in its own session and
-   process group, so `kill -9 -<pane pgid>` cannot reach it. It polls the pane's pid,
-   writes a `heartbeat` line every interval, and on the pid's disappearance writes
-   `unknown-end`. Its report is an *inference*, so it never claims `signalled kill` — a
-   signal is a fact only the parent's `waitpid` can report.
+   process group, so `kill -9 -<pane pgid>` cannot reach it. It arms a `kqueue`
+   `EVFILT_PROC` watch with `NOTE_EXITSTATUS` on the pane's pid, writes a `heartbeat` line
+   every interval, and when the pid exits writes the kernel's own wait status — `exited` or
+   `signalled kill` with the named signal. That status is the same fact the parent's
+   `waitpid` reads, delivered by the kernel to a same-user non-parent with no privilege, so
+   it covers the group kill the trap cannot. Only where no watch can be armed (no `kqueue`,
+   or the pid already gone at start) does it fall back to polling and the `unknown-end`
+   inference.
 
 ⚠️ **The heartbeat lives in the observer, not in a third pane-side loop.** An earlier
 design put a 30-second heartbeat in the pane shell as a separate writer. It was dropped:
@@ -37,18 +41,24 @@ process and a second timer. The heartbeat's purpose is unchanged — under a gro
 record's last line is stamped at most one interval before the death, which attributes the
 death to a window — but one process now produces both the liveness and the end line.
 
-⚠️ **Exit status is parent-only, and that is the whole point of dropping `exec`.** With
-`exec "<launcher>"` the pane's shell *becomes* Claude, so no process is left to `waitpid`
-and `137` is unobservable by construction. The spawn recipe therefore runs the launcher as
-a child and traps `EXIT`. A record naming `137` is necessarily written *after* the kill,
-by that parent — which is why the observer can never claim `signalled kill`, only
-`unknown-end`.
+⚠️ **Why `exec` is dropped.** With `exec "<launcher>"` the pane's shell *becomes* Claude,
+so no parent is left to `waitpid` and the trap cannot run. The spawn recipe therefore runs
+the launcher as a child and traps `EXIT`. The observer watches the shell's pid (`$$`), and
+reads its wait status through `kqueue` rather than `waitpid` — which is why it may now
+claim `signalled kill`, but only from a status the kernel delivered, never from the pid's
+mere absence (2026-11-06: pane 243's group kill left `signal=unavailable` under polling).
 
 **Keyed on the pane, not the session.** The pane is the process container that dies, and a
 resumed session gets a new pane (it is a new process in a new container), so two panes are
 two ends and must not overwrite each other. The session id rides as a *field* because for
-a fresh manager spawn it is not known at spawn time — the pane id is the join key, and the
-session registry maps pane → session for the rest.
+a fresh manager spawn it is not known at spawn time — the spawn line says `session=-`. The
+observer fills it in: it reads the id from the pane's `claude` registry record on every
+heartbeat (`session_of`) and carries it onto any end line it writes. The trap's end line is
+written after `claude` exited, so the trap passes `--session ""`; `append` then reads the id
+back from this pid's heartbeats (`last_session`). Both end writers therefore name the session,
+provided at least one heartbeat resolved it. That is load-bearing, because the registry
+(`~/.claude/sessions/<pid>.json`) is deleted when the process dies, so a join deferred to read
+time has nothing left to read.
 
 Storage: `~/.claude/state/session-exit/pane-<pane_id>.log`, one tab-separated line per
 event. Override the directory with `SUPERVISOR_SESSION_EXIT_DIR`.
@@ -101,6 +111,7 @@ import datetime
 import json
 import os
 import re
+import select
 import subprocess
 import sys
 import time
@@ -293,6 +304,206 @@ def alive(pid):
     return True
 
 
+#: `NOTE_EXITSTATUS` from `<sys/event.h>`. Python's `select` module does not export it.
+#: With it, a `NOTE_EXIT` event's `data` carries the target's wait status.
+_NOTE_EXITSTATUS = 0x04000000
+
+
+def _exit_watch(pid):
+    """A kqueue armed on `pid`'s exit, or `None` where the platform or the pid refuses one.
+
+    `EVFILT_PROC` with `NOTE_EXITSTATUS` hands the wait status to *any* process run by the
+    same user, not only the parent, and needs no privilege. This is how the observer, a
+    non-parent in its own session, can name the signal from a process-group kill that took
+    the trap's shell down with the child. Measured 2026-11-06: a `killpg(SIGTERM)` on a target
+    reparented to launchd reported `signaled True sig 15` to a non-parent watcher.
+    """
+    kqueue = getattr(select, "kqueue", None)
+    if kqueue is None:
+        return None
+    try:
+        kq = kqueue()
+        kq.control(
+            [
+                select.kevent(
+                    pid,
+                    filter=select.KQ_FILTER_PROC,
+                    flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                    fflags=select.KQ_NOTE_EXIT | _NOTE_EXITSTATUS,
+                )
+            ],
+            0,
+        )
+    except OSError:
+        return None
+    return kq
+
+
+def _wait_exit(kq, timeout):
+    """The pid's wait status if it exited within `timeout` seconds, else `None`."""
+    events = kq.control(None, 1, timeout)
+    if not events:
+        return None
+    if events[0].flags & select.KQ_EV_ERROR:
+        raise OSError(events[0].data, "kqueue exit watch failed")
+    return events[0].data
+
+
+def _rc_of(status):
+    """A wait status in the shell's `$?` form: `128+n` for a signal, else the exit code."""
+    if os.WIFSIGNALED(status):
+        return 128 + os.WTERMSIG(status)
+    return os.WEXITSTATUS(status)
+
+
+#: Where Claude Code writes `<pid>.json` for each live session. The same override the rest of
+#: the plugin's registry readers honour, so one fixture tree drives them all.
+SESSIONS_DIR_ENV = "SUPERVISOR_SESSIONS_DIR"
+
+#: How far below the watched pid to look. The Fleet Manager's `claude` is a direct child of
+#: its pane shell; a supervisor-spawned pane's is a grandchild (shell → bash → claude, pane
+#: 344 on 2026-11-06). Four levels covers both with room for a launcher wrapper.
+_DESCENT_DEPTH = 4
+
+#: A session id is written into a tab-separated record, so only an id that cannot forge a
+#: field is accepted — every real one is a UUID. Checked with `fullmatch`: `$` also matches
+#: before a trailing newline, and an id ending in one would split a record line in two.
+_SESSION_ID = re.compile(r"[0-9A-Za-z-]{1,64}")
+
+#: The registry `entrypoint` of a session that owns a pane. Headless workers a manager's
+#: supervisor server starts below its own `claude` write `sdk-cli`, and `kind` cannot tell
+#: them apart — measured 2026-11-06, every one of 29 live records said `kind: interactive`.
+_PANE_ENTRYPOINT = "cli"
+
+#: The process name that ends the descent. Everything below the pane's own `claude` belongs
+#: to that session — its tools, its MCP servers, the workers its supervisor server spawns.
+_CLAUDE_COMM = "claude"
+
+
+def _process_table():
+    """`{pid: (ppid, command basename)}` from one `ps` snapshot.
+
+    One snapshot per heartbeat rather than one `pgrep` per level: the walk then sees a single
+    consistent tree, and a process that exits mid-walk cannot make two levels disagree.
+
+    ⚠️ **`None` when the query failed, `{}` only when `ps` answered with no rows** — the
+    three-state contract `scripts/transport-read-check.py` enforces on every transport read.
+    A failed `ps` collapsed into `{}` would read as "this pane has no processes", which is the
+    broken-as-empty defect that check exists to catch.
+    """
+    try:
+        proc = subprocess.run(
+            ["ps", "-Ao", "pid=,ppid=,comm="],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    out = proc.stdout or ""
+    table = {}
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isascii() and parts[0].isdigit() \
+                and parts[1].isascii() and parts[1].isdigit():
+            table[int(parts[0])] = (int(parts[1]), os.path.basename(parts[2].strip()))
+    return table
+
+
+def _registry_session(directory, pid):
+    """The `sessionId` of a pane-owning record `<directory>/<pid>.json`, or `""`.
+
+    `""` for an absent, unreadable or half-written file, a non-pane `entrypoint`, or an id
+    that fails `_SESSION_ID`.
+    """
+    try:
+        with open(os.path.join(directory, f"{pid}.json"), encoding="utf-8") as handle:
+            rec = json.load(handle)
+    except (OSError, ValueError, RecursionError):
+        return ""
+    if not isinstance(rec, dict) or rec.get("entrypoint") != _PANE_ENTRYPOINT:
+        return ""
+    sid = rec.get("sessionId")
+    return sid if isinstance(sid, str) and _SESSION_ID.fullmatch(sid) else ""
+
+
+def session_of(pid):
+    """The session id of the pane's own `claude` at or below `pid`, or `""`.
+
+    A fresh spawn does not know its own session id, so the spawn line carries `session=-`;
+    Claude Code writes it to `~/.claude/sessions/<claude pid>.json` moments later and deletes
+    that file when the process ends. The observer is the one writer alive for the pane's
+    whole life, so it reads the id while it exists and stamps it into every line it writes —
+    after which the append-only record keeps the identity the registry discards. Measured
+    2026-11-06: the Fleet Manager died three times that day and every record says
+    `session=-`, so nothing on disk could name it afterwards.
+
+    Breadth-first, bounded by `_DESCENT_DEPTH`, and **the descent stops at the first
+    `claude`**. Without that stop, a pane `claude` whose record is momentarily unreadable
+    (missing, or caught mid-rewrite) would let the walk continue into the headless workers
+    its supervisor server spawns, and stamp a worker's id onto the manager's pane. A
+    `claude` with no usable record therefore answers `""`, and the caller keeps the id it
+    already holds. Records are also filtered on `entrypoint == "cli"`, so a worker can never
+    be chosen even if it were reached.
+
+    Re-read on every call, so a `/clear` — a new session id inside the same process — is
+    followed rather than frozen at the first value.
+    """
+    directory = os.path.expanduser(os.environ.get(SESSIONS_DIR_ENV) or "~/.claude/sessions")
+    found = _registry_session(directory, pid)
+    if found:
+        return found
+    table = _process_table()
+    if table is None:
+        return ""  # the tree could not be read; the caller keeps the id it already holds
+    children = {}
+    for child, (parent, _) in table.items():
+        children.setdefault(parent, []).append(child)
+    frontier, seen = [pid], {pid}
+    for _ in range(_DESCENT_DEPTH):
+        nxt = []
+        for parent in frontier:
+            for child in sorted(children.get(parent, ())):
+                if child in seen:
+                    continue
+                seen.add(child)
+                found = _registry_session(directory, child)
+                if found:
+                    return found
+                if table[child][1] == _CLAUDE_COMM:
+                    return ""  # the pane's claude, unreadable right now: never look below it
+                nxt.append(child)
+        if not nxt:
+            return ""
+        frontier = nxt
+    return ""
+
+
+def last_session(path, pid):
+    """The newest session id the record holds for `pid` in its current run, or `""`.
+
+    The trap writes the end line after `claude` has exited, when its registry record is
+    already gone — so `append` reads the id back from the observer's heartbeats instead.
+    Only lines after this pid's own `spawn` count, so a reused pane id never lends an
+    earlier run's session.
+    """
+    found = ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if parse_field(line, "pid") != str(pid):
+                    continue
+                if parse_field(line, "kind") == KIND_SPAWN:
+                    found = ""
+                    continue
+                sid = parse_field(line, "session")
+                if sid and sid != "-" and _SESSION_ID.fullmatch(sid):
+                    found = sid
+    except OSError:
+        return ""
+    return found
+
+
 def _daemonize():
     """Detach into a new session, so a process-group kill cannot reach this process.
 
@@ -355,11 +566,20 @@ def cmd_append(args):
         kind, signal = args.kind, (args.signal or "-")
     else:
         kind, signal = classify(args.rc)
+    session = args.session
+    if not session and args.pid and kind != KIND_SPAWN:
+        # The trap's end line is written after `claude` exited and its registry record was
+        # deleted, so the trap passes `--session ""`. The observer's heartbeats for this pid
+        # still hold the id; without this, every trap-written end reads `session=-`.
+        try:
+            session = last_session(path, args.pid)
+        except Exception:  # noqa: BLE001 — an extra, never worth losing the end line over
+            session = ""
     line = format_line(
         now,
         kind,
         pane,
-        args.session,
+        session,
         args.pid,
         args.rc,
         signal,
@@ -372,10 +592,17 @@ def cmd_append(args):
 
 
 def cmd_observe(args):
-    """Poll a pane's pid and record its disappearance. The out-of-group writer.
+    """Watch a pane's pid and record its end. The out-of-group writer.
 
-    Writes a `heartbeat` line every `--interval` seconds and one `unknown-end` line when the
-    pid is gone. Stays silent when the record already carries an end line, so the parent's
+    Arms a `kqueue` exit watch first (see `_exit_watch`): the end line then carries the
+    kernel's wait status — `rc`, `signal` and kind — exactly as the trap would. Without a
+    watch it falls back to polling, and the disappearance is an `unknown-end` inference.
+
+    Writes a `heartbeat` line every `--interval` seconds and one end line when the pid is gone
+    — the kernel's status where a watch is armed, `unknown-end` otherwise. Every line carries
+    the session id `session_of` last resolved, falling back to `--session`, so the end line
+    names the session even though its registry record is already deleted by then. Stays
+    silent when the record already carries an end line, so the parent's
     report always wins over this process's inference — the trap runs before the shell exits,
     so by the time this process sees the pid gone, any line the trap was going to write is
     already on disk.
@@ -398,9 +625,33 @@ def cmd_observe(args):
         return 2
     if not args.foreground and not _daemonize():
         return 0
+    kq = _exit_watch(args.pid)
     heartbeats = 0
+    status = None
+    # The last id seen, carried past the registry's deletion: the end line is written after
+    # the process is gone, when `session_of` can no longer answer.
+    session = args.session
     while True:
-        if not alive(args.pid):
+        if status is not None:
+            if not has_end(path, args.pid):
+                rc = _rc_of(status)
+                kind, signal = classify(rc)
+                append_line(
+                    path,
+                    format_line(
+                        now_utc(),
+                        kind,
+                        pane,
+                        session,
+                        args.pid,
+                        rc,
+                        signal,
+                        sender_for(kind),
+                        WRITER_OBSERVER,
+                    ),
+                )
+            return 0
+        if kq is None and not alive(args.pid):
             if not has_end(path, args.pid):
                 append_line(
                     path,
@@ -408,7 +659,7 @@ def cmd_observe(args):
                         now_utc(),
                         KIND_UNKNOWN,
                         pane,
-                        args.session,
+                        session,
                         args.pid,
                         "unavailable",
                         "unavailable",
@@ -417,13 +668,17 @@ def cmd_observe(args):
                     ),
                 )
             return 0
+        try:
+            session = session_of(args.pid) or session
+        except Exception:  # noqa: BLE001 — this process is the only writer left after a
+            pass  # group kill; an unexpected lookup error must not cost the end line
         append_line(
             path,
             format_line(
                 now_utc(),
                 KIND_HEARTBEAT,
                 pane,
-                args.session,
+                session,
                 args.pid,
                 "-",
                 "-",
@@ -434,7 +689,15 @@ def cmd_observe(args):
         heartbeats += 1
         if args.ticks and heartbeats >= args.ticks:
             return 0
-        time.sleep(args.interval)
+        if kq is None:
+            time.sleep(args.interval)
+        else:
+            try:
+                status = _wait_exit(kq, args.interval)
+            except OSError:
+                # An error event is no wait status: fall back to polling's inference
+                # rather than record an `rc` the kernel never reported.
+                kq = None
 
 
 def cmd_path(args):

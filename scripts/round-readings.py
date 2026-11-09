@@ -37,6 +37,16 @@ each resolve to the third value — never to `clear`, `none` or `quiet`. Folding
 read into a negative is the silent direction that makes a blocked worker read as a
 working one, which is the defect this file exists to remove.
 
+**A failure degrades per row, never to a whole-family blank.** The feed family is
+`read` / `partial` / `unread`: `partial` keeps every positively-gated row `gated` and
+marks only the rows that could own an unattributed gate `unread`. The document carries
+`feed_counts`, counted from the rows themselves, so `gated + clear + unread` equals the
+row count by construction, and a `probes` list naming every failed probe with its error
+— a transient store fault and a genuinely gate-free fleet must be distinguishable
+without re-running anything. Measured 2026-11-08 05:06:29Z: a single failed store read
+rendered `gated=0 · clear=0 · unread=11` for 11 rows while the feed itself was
+answering; a re-run 39 s later read `gated=1 · clear=10 · unread=0`.
+
 **Reuse, never re-derive.** Id sets come from `session-ids.py`, liveness from
 `session-liveness.py`, the registry and transcript age from `who-needs-me.py`, the
 pane→session join from `gate-owner-filter.py`, and the tracked model from
@@ -252,96 +262,203 @@ def liveness(session_ids, endpoint, registry_dir):
     return "UNKNOWN"
 
 
-def feed_panes(endpoint):
-    """`(set_of_panes, state)` from the feed's `Needs you` section.
+def feed_panes(endpoint=None):
+    """The feed read as one dict: `panes`, `owners`, `orphan_owners`, `state`, `error`.
 
     `--all` is part of the call, not a preference: the section caps at 20 rows and
     withholds the rest, so a capped read turns a gated row past the cap into a false
     `clear` — the defect this verdict exists to remove.
+
+    ⚠️ **One retry, then the failure is NAMED — never rendered as a verdict about
+    the rows.** `who-needs-me.py` globs every session's event log and reads the
+    store and transcripts; under load it can exceed the 60 s bound and exit
+    non-zero, and one such miss blanked the whole feed family for a round
+    (measured 2026-11-08 05:06:29Z: `gated=0 · clear=0 · unread=11` for 11 rows,
+    while a direct `who-needs-me.py --section needs-you` in the same minute
+    returned `Needs you (25)`, exit 0; a re-run 39 s later read
+    `gated=1 · clear=10 · unread=0`). A transient that clears in under a minute is
+    exactly what a single retry absorbs; after it, the failure is reported as
+    `error` and every row is honestly `unread` because no feed read succeeded.
+
+    ⚠️ **A fallback render is retried too.** When `who-needs-me.py` answers exit 0
+    from the event log (`STORE_FALLBACK_NOTE`), that read cannot certify a row
+    clear — so one retry is worth its cost, and a store that recovered within the
+    round then produces a complete read instead of a `partial` one. A second
+    fallback is returned as `partial`, named.
     """
     cmd = [sys.executable, os.path.join(HERE, "who-needs-me.py"),
            "--section", "needs-you", "--all"]
-    try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        return set(), "unread"
-    if out.returncode != 0:
-        return set(), "unread"
-    return parse_feed(out.stdout)
+    env = None
+    if endpoint:
+        # `--endpoint` is documented as the store URL the caller injects; the
+        # subprocess reads it from the environment, so pass it through here rather
+        # than leaving the flag a no-op.
+        env = dict(os.environ, ATTENTION_STORE_URL=endpoint)
+    fallback_note = _load("who-needs-me").STORE_FALLBACK_NOTE
+    last = "no attempt ran"
+    fallback = None
+    for attempt in range(2):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                                 env=env)
+        except (OSError, subprocess.SubprocessError) as exc:
+            last = f"{type(exc).__name__}: {exc}"
+            continue
+        if out.returncode != 0:
+            tail = (out.stderr or out.stdout or "").strip().splitlines()
+            last = f"exit {out.returncode}: {tail[-1] if tail else 'no output'}"
+            continue
+        if attempt == 0 and fallback_note in out.stdout:
+            fallback = parse_feed(out.stdout)
+            continue
+        return parse_feed(out.stdout)
+    if fallback is not None:
+        return fallback
+    return {
+        "panes": set(),
+        "owners": {},
+        "orphan_owners": [],
+        "state": "unread",
+        "error": f"who-needs-me.py --section needs-you --all failed twice: {last}",
+    }
 
 
 def parse_feed(text):
-    """`(set_of_keys, state)` from the feed's rendered rows.
+    """The feed's rendered rows as `panes`, `owners`, `orphan_owners`, `state`, `error`.
 
     Keys are digit panes and `hst:<store item id>` keys, exactly as
-    `gate-owner-filter.feed_rows` reads them. A row marker that yields no key — a
-    `[   ?]` row, or a `[ hst]` row with no `answer:` line — is a gate whose owner
-    cannot be named, so the read is `unread`: dropping it would let its worker read
-    `clear`, which is the defect this verdict exists to remove.
+    `gate-owner-filter.feed_rows` reads them. A pane-less row also carries the
+    session that owns it (`owner_of`), so a gate is attributable without a second
+    store read.
+
+    A row marker that yields NEITHER a key nor an owner is a gate nobody can
+    attribute. That sets `state: partial` — never `read`, because a `clear` from a
+    read that saw an unattributable gate would let that gate's worker read clear.
+    `partial` is still not a whole-family blank: the rows that ARE gated keep their
+    verdict, and only the rows that could own the unattributed gate read `unread`.
     """
     lines = text.splitlines()
     filt = _load("gate-owner-filter")
-    keys = {pane for pane, _ in filt.feed_rows(lines)}
-    state = "read"
+    panes = {pane for pane, _ in filt.feed_rows(lines)}
+    owners, orphan_owners = {}, []
+    unkeyed = 0
     for index, line in enumerate(lines):
         m = ROW_RE.match(line)
         if not m:
             continue
         token = m.group(1)
-        if token == "?" or (token == "hst" and filt.headless_key(lines, index) is None):
-            state = "unread"
-    return keys, state
+        owner = filt.owner_of(lines, index)
+        if token == "?":
+            # A pane-less row with nothing to answer is still a gate; it just has
+            # no key. Its owner line makes it attributable all the same.
+            if owner:
+                orphan_owners.append(owner)
+            else:
+                unkeyed += 1
+            continue
+        if token == "hst":
+            key = filt.headless_key(lines, index)
+            if key is None:
+                if owner:
+                    orphan_owners.append(owner)
+                else:
+                    unkeyed += 1
+                continue
+            if owner:
+                owners[key] = owner
+    state = "read" if unkeyed == 0 else "partial"
+    error = None
+    if unkeyed:
+        error = (f"{unkeyed} feed row(s) name neither a key nor an owner — their "
+                 "gates cannot be attributed to a tracked row")
+    # `who-needs-me.py` falls back to the event log when the store does not answer,
+    # and on that branch it renders `Needs you (0)` for a fleet that may hold open
+    # store-only items. Reading that as a complete, gate-free feed is the fail-open
+    # direction — the mirror of the fail-closed defect above: a fallback read cannot
+    # certify any row `clear`, so the family is `partial` and the probe is named.
+    if _load("who-needs-me").STORE_FALLBACK_NOTE in text:
+        state = "partial"
+        error = error or (
+            "who-needs-me.py read the event log because the attention store was "
+            "unreachable — a fallback read cannot certify a row clear")
+    return {"panes": panes, "owners": owners, "orphan_owners": orphan_owners,
+            "state": state, "error": error}
 
 
 def feed_verdict(session_ids, gated_sessions, state):
-    """`gated` | `clear` | `unread` — `clear` only from a read that actually ran."""
-    if state != "read":
-        return "unread"
-    if not session_ids:
-        return "clear"
-    return "gated" if any(s in gated_sessions for s in session_ids) else "clear"
+    """`gated` | `clear` | `unread` — `clear` only from a read that actually ran.
 
-
-def gated_sessions_from_panes(panes, attention_dir, store_endpoint=None):
-    """`(set_of_session_ids, state)` for the feed's keys.
-
-    Digit panes join through the events log, `hst:<id>` keys through the attention
-    store — the hops `gate-owner-filter.py`'s `session_for_pane` / `headless_items`
-    already perform, reused here rather than re-derived.
-
-    A failed log read, or an `hst:` key the store does not resolve to a session, is
-    `unread`, never an empty set: `headless_items` returns `[]` both for an
-    unreachable store and for no match, so an unresolved key is the only signal a
-    store read failed, and it must not read as `clear`.
+    `gated` wins over every state: a row positively identified in the feed is
+    gated whatever happened to the rest of the read. `partial` is a read that ran
+    but could not attribute every gate it saw, so a row that is not positively
+    gated cannot be certified clear — it may own the unattributed gate. That is
+    what makes the failure per-row: the gated rows keep their verdict and only
+    the rest fall to `unread`.
     """
+    if any(s in gated_sessions for s in session_ids):
+        return "gated"
+    if state == "read":
+        return "clear"
+    return "unread"
+
+
+def gated_sessions_from_panes(feed, attention_dir, store_endpoint=None):
+    """`(gated_session_ids, state, error)` for the feed's rows.
+
+    Digit panes join through the events log. `hst:<id>` keys join through the
+    owner the row itself declares (`owner_of`); only a feed that carries no owner
+    line (an older build) falls back to the attention store, and that fallback is
+    the checked read, so a store failure is NAMED rather than rendered as a
+    per-row verdict.
+
+    A failed log read is `unread` for the whole family — no digit pane can be
+    resolved — and it is named. An `hst:` key that resolves to no session leaves
+    the read `partial`: the keys that did resolve keep their rows gated.
+    """
+    panes = set(feed.get("panes") or ())
+    owners = dict(feed.get("owners") or {})
+    out = set(feed.get("orphan_owners") or ())
+    state = feed.get("state") or "read"
+    # `error` here names only a failure THIS join hit. The feed read's own error
+    # rides on `feed["error"]` and is reported by the caller, so echoing it here
+    # would name the same failing probe twice.
+    error = None
     if not panes:
-        return set(), "read"
+        return out, state, error
     filt = _load("gate-owner-filter")
-    hst = [p for p in panes if filt.is_headless_key(p)]
     digit = [p for p in panes if not filt.is_headless_key(p)]
-    out, state = set(), "read"
+    hst = [p for p in panes if filt.is_headless_key(p)]
     if digit:
         try:
             items = filt.log_items(attention_dir)
-        except Exception:
-            return set(), "unread"
+        except Exception as exc:
+            return out, "unread", f"event-log read failed: {type(exc).__name__}: {exc}"
         for pane in digit:
             sid = filt.session_for_pane(pane, items)
             if sid:
                 out.add(sid)
-    if hst:
+    unresolved = [key for key in hst if not owners.get(key)]
+    for key in hst:
+        sid = owners.get(key)
+        if sid:
+            out.add(sid)
+    if unresolved:
         try:
-            records = filt.headless_items(hst, store_endpoint)
-        except Exception:
-            records = []
-        owners = {r["pane"]: r.get("session_id") for r in records}
-        for key in hst:
-            sid = owners.get(key)
+            records, store_error = filt.headless_items_checked(unresolved, store_endpoint)
+        except Exception as exc:
+            records, store_error = [], f"attention store read failed: {type(exc).__name__}: {exc}"
+        if store_error:
+            return out, "partial", store_error
+        found = {r["pane"]: r.get("session_id") for r in records}
+        for key in unresolved:
+            sid = found.get(key)
             if sid:
                 out.add(sid)
             else:
-                state = "unread"
-    return out, state
+                state = "partial"
+                error = error or (f"{key} resolves to no session in the attention "
+                                  "store")
+    return out, state, error
 
 
 # --------------------------------------------------------------------------- #
@@ -558,10 +675,23 @@ def read_tracked(path):
         return []
 
 
+# `read` < `partial` < `unread`: the worse of two probe states wins, so one failed
+# probe is never washed out by a sibling that succeeded.
+_STATE_RANK = {"read": 0, "partial": 1, "unread": 2}
+
+
+def worst_state(*states):
+    return max(states, key=lambda s: _STATE_RANK.get(s, 2))
+
+
 def compute(subject, tracked_path, vault, interval, now=None,
             endpoint=None, registry_dir=None, attention_dir=None,
-            sessions_dir=None, projects_dir=None):
-    """Build the readings document. Pure over its injected paths."""
+            sessions_dir=None, projects_dir=None, feed=None):
+    """Build the readings document. Pure over its injected paths.
+
+    `feed` injects the feed read (tests do); when None it is taken from
+    `feed_panes`, which runs `who-needs-me.py`.
+    """
     now = time.time() if now is None else now
     attention_dir = attention_dir or ATTENTION_DIR
     wnm = _load("who-needs-me")
@@ -575,10 +705,20 @@ def compute(subject, tracked_path, vault, interval, now=None,
         rows = [{"name": n, "mtime": None, "session": None, "sessions": []} for n in members]
 
     registry = wnm.registry_records(sessions_dir)
-    panes, feed_state = feed_panes(endpoint)
-    gated, join_state = gated_sessions_from_panes(panes, attention_dir)
-    if join_state != "read":
-        feed_state = "unread"
+    feed = feed_panes(endpoint) if feed is None else feed
+    gated, join_state, join_error = gated_sessions_from_panes(
+        feed, attention_dir, endpoint)
+    feed_state = worst_state(feed.get("state") or "unread", join_state)
+    # The failing probes, named. A `clear` that came from a read nobody can point
+    # at is indistinguishable from a genuinely gate-free fleet, and that is the
+    # distinction the document must carry.
+    probes = []
+    if feed.get("error"):
+        probes.append({"probe": "who-needs-me.py --section needs-you --all",
+                       "error": feed["error"]})
+    if join_error:
+        probes.append({"probe": "gate-owner-filter.py feed join",
+                       "error": join_error})
 
     out_rows = {}
     for row in rows:
@@ -619,6 +759,13 @@ def compute(subject, tracked_path, vault, interval, now=None,
             "stuck": "unread", "stuck_reason": "no task file resolved for this name",
         }
 
+    # Counted from the rows themselves, not accumulated beside them, so the
+    # document cannot carry a total that disagrees with its own table:
+    # `gated + clear + unread == len(rows)` is structural, not asserted.
+    feed_counts = {"gated": 0, "clear": 0, "unread": 0}
+    for rec in out_rows.values():
+        feed_counts[rec["feed"]] += 1
+
     return {
         "subject": subject,
         "recorded_at": now,
@@ -633,6 +780,14 @@ def compute(subject, tracked_path, vault, interval, now=None,
         # up reconciling two sources on every round.
         "park_threshold_seconds": 2 * interval,
         "feed_state": feed_state,
+        # The feed family's own tally, taken from the rows above: it sums to the
+        # row count by construction, so a reader can check the invariant without
+        # re-counting.
+        "feed_counts": feed_counts,
+        # Every probe that failed this round, with its own error. Empty on a clean
+        # read; a transient store fault and a genuinely gate-free fleet are then
+        # distinguishable without re-running anything.
+        "probes": probes,
         "rows": out_rows,
     }
 

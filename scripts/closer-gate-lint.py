@@ -49,9 +49,14 @@ plugin. A hook that blocks, crashes, or prompts degrades the session it observes
 failure path here exits 0 having done nothing. The cost of a missed lint is one operator
 gate; the cost of a fail-closed hook is a broken turn in every session on the machine.
 
-⚠️ **`stop_hook_active` is a loop guard, not a courtesy.** Exit 2 continues the turn; a
-model that ends the continued turn on the same closer would re-block forever without it.
-When the harness says a Stop hook is already active, this allows the stop unconditionally.
+⚠️ **`stop_hook_active` is a loop guard, not a courtesy — and it is bounded, not
+unconditional.** Exit 2 continues the turn; a model that ends the continued turn on the
+same closer would re-block forever without a guard. So the retry is allowed — with ONE
+exception: when the previous `Stop` blocked this same closer and the closer is unchanged,
+it is blocked once more (`blocked-retry`), and only a third identical stop is allowed.
+The bound is read from this hook's own record, so the worst case is two consecutive
+blocks, never a loop. Measured 2026-11-08: on the deciding 7-day window the unconditional
+allow released **21** re-emitted closers naming already-authorised verbs.
 
 Usage (from `hooks/hooks.json`, `Stop`):
 
@@ -60,8 +65,37 @@ Usage (from `hooks/hooks.json`, `Stop`):
     exit 2: block the stop; stderr is shown to the model, which continues the turn
 
 ⚠️ **The record is written on ALLOW and BLOCK alike**, so an absent record means the hook
-did not run rather than that nothing happened. The write is fail-open and never changes
-the verdict: a lost record is preferred to a wrong verdict.
+did not run rather than that nothing happened. The write is fail-open, and the record is
+read by exactly one thing — the bounded retry above — where a lost record can only cost
+the extra block, never a stuck turn.
+
+SECOND CHECK — A WAIT ON SOMETHING THAT DIES WITH THE SESSION. A `🟡 WAITING` closer whose
+`⏰ Ends:` names a session-bound mechanism — a background sub-agent, a Monitor, a
+`run_in_background` shell, a `ScheduleWakeup`, a `CronCreate` — and no durable observable
+waits on a notice that can never arrive once the session ends. Measured 2026-11-08, pane
+619 (session `e6807caf`):
+
+    ⏰ Ends:   chunk 7a and 7c completion notices (background agents)
+
+The previous session had ended, both agents died with it, and the worker sat 23 minutes at
+an empty prompt on a task unmoved for 28 hours — found only by a human reading the pane.
+Nobody keeps a background sub-agent, by design (operator decision 2026-11-08: forbid it as
+a wait rather than build a keeper), so `~/.claude/CLAUDE.md` § Async State Closer requires
+the observable to outlive the session.
+
+⚠️ **The observable is banned, not the mechanism.** The same rule REQUIRES the in-session
+watcher in the `(mechanism, id)` slot — `/github-pr-watch` is itself a background shell — so
+a closer naming a session-bound class passes whenever it also names a durable observable:
+a file, a 32-hex card id, a `defer_date` / ISO date, or an external probe (a PR, CI, `gh`,
+`kubectl`, a pod, a URL). Operator decision 2026-11-08 ("Observable only", card
+`3d9c0b310909dc8ca406169621673957`). A literal ban would exit 2 on every compliant PR-watch
+closer, which is a broken rule rather than a strict one.
+
+⚠️ **It runs before the gate checks**, because the shape it exists for ends `👤 You: nothing`,
+which the gate checks return `not-a-gate` on. It reads the `⏰ Ends:` line from the same
+message `last_closer` reads, through `reap-closer.py`'s one scanner. The record carries
+`class` (the matched mechanism) and `phrase` (the `⏰ Ends:` text) on every invocation —
+`null` when nothing was flagged.
 
 Kill switch: `SUPERVISOR_CLOSER_GATE_LINT=off`. State dir override:
 `SUPERVISOR_CLOSER_GATE_LINT_STATE_DIR`.
@@ -88,10 +122,41 @@ UNKNOWN_SESSION = "unknown-session"
 
 DECISION_ALLOW, DECISION_BLOCK = "allow", "block"
 
+# ⚠️ The one reason that is not a fresh decision: a closer the lint already blocked, seen
+# again on the continued turn's `Stop`. Bounded — see `_retry_verdict`.
+RETRY_REASON = "blocked-retry"
+
 # `approve:` / `review:` are the two gate verbs the closer contract defines. `you run:` is
 # deliberately not here — a command the operator must execute is not a step the model may
 # simply perform.
 GATE_RE = re.compile(r"^(approve|review):\s*(.+)$", re.IGNORECASE)
+
+# The handle check reads a WIDER verb set than the allow-list: a `you run:` that names a
+# card is an instruction to poll or answer it, and an unpollable handle there freezes the
+# reader exactly as it does under `review:`.
+HANDLE_GATE_RE = re.compile(r"^(approve|review|you run):\s*(.+)$", re.IGNORECASE)
+
+# A card handle is hex named AS a card — after `card`, `item` or `poll`, optionally
+# backticked. ⚠️ Keyed on that word, never on bare hex: closers cite commit SHAs (7–40
+# hex) all the time, and a bare-hex rule would refuse every one of them.
+CARD_HANDLE_RE = re.compile(
+    r"(?:\b(?:card|item)(?:[ _-]?id)?|\bpoll)\b[\s:#`'\"=]*([0-9a-f]{4,})\b", re.IGNORECASE)
+
+# ⚠️ An all-digit run is a number (`item 202611`, a PR, a date), never a store id: the
+# store mints lowercase hex, and a run with no a–f letter is overwhelmingly a count.
+_HEX_LETTER_RE = re.compile(r"[a-f]", re.IGNORECASE)
+
+# `attention-ask.py` `STORE_ITEM_ID_LEN`: `poll` refuses any other length. ⚠️ The
+# predicate is "not pollable", never "not resolvable" — an 8-char prefix DOES resolve
+# through `attention-card-lookup.py`, so a resolvability test would pass the very input
+# this exists to refuse.
+STORE_ITEM_ID_LEN = 32
+
+
+def unpollable_handles(body):
+    """Card handles in `body` that `poll` cannot address."""
+    return [h for h in CARD_HANDLE_RE.findall(body)
+            if len(h) != STORE_ITEM_ID_LEN and _HEX_LETTER_RE.search(h)]
 
 # Derived from `~/.claude/CLAUDE.md` § After Opening a PR and § Execution Phase No Re-Ask
 # § Named No-Ask Actions. ⚠️ Order is irrelevant; the name is what the record carries.
@@ -99,7 +164,7 @@ ALLOW = (
     ("github-pr-watch", re.compile(r"/github-pr-watch\b", re.IGNORECASE)),
     ("coding-local-review", re.compile(r"/coding:local-review\b", re.IGNORECASE)),
     ("coding-pr-review", re.compile(r"/coding:pr-review\b", re.IGNORECASE)),
-    ("gh-pr-ready", re.compile(r"\bgh\s+pr\s+ready\b", re.IGNORECASE)),
+    ("gh-pr-ready", re.compile(r"\bgh\b.*\bpr\s+ready\b", re.IGNORECASE)),
     ("dark-factory-prompt-approve", re.compile(r"\bdark-factory\s+prompt\s+approve\b", re.IGNORECASE)),
     ("dark-factory-spec-approve", re.compile(r"\bdark-factory\s+spec\s+approve\b", re.IGNORECASE)),
     ("vault-cli-session-close", re.compile(r"/vault-cli:session-close\b", re.IGNORECASE)),
@@ -134,6 +199,57 @@ WHEN = {
 }
 
 
+ENDS_MARKER = "⏰ Ends:"
+
+# The five session-bound classes. ⚠️ `Monitor` is case-sensitive and must stand alone: a
+# lowercase `monitor` inside a path (`~/.claude/state/monitor-check/…`) is a file, which is
+# the opposite of what this class names. A Kubernetes CronJob is external, so the cron
+# class is the `CronCreate` tool only.
+SESSION_BOUND = (
+    ("background-sub-agent", re.compile(
+        r"\b(?:background\s+(?:sub-?)?agents?|sub-?agents?|agent\s+tasks?)\b", re.IGNORECASE)),
+    ("monitor", re.compile(r"(?<![\w/.-])Monitor(?![\w/.-])")),
+    ("run-in-background-shell", re.compile(
+        r"\brun_in_background\b|\bbackground\s+(?:bash|shell)s?\b", re.IGNORECASE)),
+    ("schedule-wakeup", re.compile(r"\bScheduleWakeup\b", re.IGNORECASE)),
+    ("cron-create", re.compile(r"\bCronCreate\b", re.IGNORECASE)),
+)
+
+# Anything a keeper can read after the session is gone. ⚠️ A watcher's own timeout
+# (`times out ~18:40`) is NOT a clock observable — it dies with the watcher — so a bare
+# HH:MM never counts; only a `defer_date` or an ISO date does.
+DURABLE = (
+    ("file", re.compile(
+        r"(?:^|[\s`(\"'])(?:~|\.{0,2})/[\w.-]+|\b[\w-]+\.(?:md|jsonl?|log|ya?ml|txt|out|csv)\b"
+        r"|\b(?:files?|mtime)\b", re.IGNORECASE)),
+    ("card-id", re.compile(r"\b[0-9a-f]{32}\b", re.IGNORECASE)),
+    ("clock", re.compile(r"\bdefer_date\b|\b\d{4}-\d{2}-\d{2}\b")),
+    ("external-probe", re.compile(
+        r"\bPR\b|#\d+\b|\bCI\b|\bgh\s|\bkubectl\w*\b|https?://|\bpods?\b|\bcontainer\b"
+        r"|\brelease\b|\btag\s+v\d|\bworkflow\b|\bdeploy(?:ment)?\b", re.IGNORECASE)),
+)
+
+
+def ends_body(line):
+    """Everything after `⏰ Ends:`, entities and backticks stripped."""
+    body = line.split(ENDS_MARKER, 1)[1] if ENDS_MARKER in line else line
+    return body.replace("&nbsp;", " ").strip().strip("`").strip()
+
+
+def session_bound_class(line):
+    """The session-bound class an `⏰ Ends:` waits on with no durable observable, or `None`."""
+    body = ends_body(line)
+    if not body:
+        return None
+    for _name, pattern in DURABLE:
+        if pattern.search(body):
+            return None
+    for name, pattern in SESSION_BOUND:
+        if pattern.search(body):
+            return name
+    return None
+
+
 def state_dir():
     """The record's directory, read at call time so a test can redirect it."""
     return (os.environ.get(STATE_DIR_ENV)
@@ -144,6 +260,23 @@ def record_path(session_id, directory=None):
     """The record's path for one session. ⚠️ Fixed and documented: a reader depends on it."""
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(session_id or UNKNOWN_SESSION)) or UNKNOWN_SESSION
     return os.path.join(directory or state_dir(), f"{safe}.jsonl")
+
+
+def previous_record(session_id, environ=None):
+    """The last record written for this session, or `{}`. Never raises.
+
+    ⚠️ The ONE place this hook's own record is consulted by a verdict, and only by the
+    bounded retry below. A missing, empty or unreadable file is a fail-open path like any
+    other: the retry is allowed exactly as it was before this existed.
+    """
+    try:
+        directory = (environ or {}).get(STATE_DIR_ENV) or state_dir()
+        with open(record_path(session_id, directory), encoding="utf-8",
+                  errors="replace") as fh:
+            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+        return json.loads(lines[-1]) if lines else {}
+    except Exception:
+        return {}
 
 
 def trim_records(path, cap=RECORD_CAP_BYTES, keep=RECORD_KEEP):
@@ -203,6 +336,14 @@ def last_closer(transcript_path):
     return _reap_closer().last_closer(transcript_path)
 
 
+def last_closer_and_ends(transcript_path):
+    """`(timestamp, you_line, ends_line_or_None)` from one scan, or `None` with no closer.
+
+    Delegates to `reap-closer.py` like `last_closer` — one scanner, one message.
+    """
+    return _reap_closer().last_closer_and_ends(transcript_path)
+
+
 def closer_body(line):
     """Everything after `👤 You: `, with the entities and backticks a closer carries stripped."""
     body = line.split("👤 You:", 1)[1] if "👤 You:" in line else line
@@ -229,12 +370,58 @@ def match_allow(body):
     return None
 
 
+def _retry_verdict(payload, environ, verdict):
+    """The `stop_hook_active` branch: ONE re-block of a re-emitted closer, then allow.
+
+    ⚠️ The loop guard exists so a continued turn ending on the same closer cannot re-block
+    forever, and an unconditional allow is not the only way to keep that promise. A model
+    that re-emits the closer it was just told to perform gets told once more; a model that
+    re-emits it a third time is stuck, and blocking again would loop without end. The bound
+    is read from this hook's own record — the file the docstring already promises is
+    written on ALLOW and BLOCK alike — so it survives across the separate `Stop`
+    invocations, and the worst case is two consecutive blocks, never a loop.
+
+    ⚠️ Every uncertainty allows. A missing transcript, an unreadable record, a different
+    closer, or a previous record that was already a retry all fall back to the old
+    unconditional allow, so a broken read can only cost the extra block, never a stuck turn.
+    """
+    inner = dict(payload)
+    inner["stop_hook_active"] = False
+    code, text, record = evaluate(inner, environ)
+    closer = record.get("closer")
+    if code != 2:
+        return verdict(0, "stop-hook-active", closer=closer)
+    previous = previous_record(payload.get("session_id"), environ)
+    if not closer or previous.get("decision") != DECISION_BLOCK:
+        return verdict(0, "stop-hook-active", closer=closer)
+    if previous.get("reason") == RETRY_REASON:
+        # ⚠️ The retry already happened once. This is the third identical stop, which is
+        # the state the guard exists for — allowing it is what keeps the bound finite.
+        return verdict(0, "stop-hook-active", closer=closer)
+    if previous.get("closer") != closer:
+        return verdict(0, "stop-hook-active", closer=closer)
+    code2, _unused, retry = verdict(2, RETRY_REASON, verb=record.get("verb"),
+                                    matched=record.get("matched"), closer=closer,
+                                    cls=record.get("class"), phrase=record.get("phrase"))
+    return code2, _retry_message(text), retry
+
+
+def _retry_message(text):
+    """The re-block's stderr: says it is a retry, then repeats the original reason."""
+    return (
+        "closer-gate-lint: this closer was blocked on the previous stop and has been "
+        "re-emitted unchanged. Blocking once more instead of releasing it through the loop "
+        "guard; perform the step now. (A third identical stop is allowed, so this cannot "
+        "loop.)\n" + text
+    )
+
+
 def evaluate(payload, environ=None):
     """`(exit_code, stderr_text, record)` — the whole decision, pure but for the transcript read."""
     environ = os.environ if environ is None else environ
     session_id = payload.get("session_id") if isinstance(payload, dict) else None
 
-    def verdict(code, reason, verb=None, matched=None, closer=None):
+    def verdict(code, reason, verb=None, matched=None, closer=None, cls=None, phrase=None):
         return code, _message(reason, verb, matched) if code else "", {
             "ts": datetime.now(timezone.utc).isoformat(),
             "session_id": session_id,
@@ -243,26 +430,47 @@ def evaluate(payload, environ=None):
             "verb": verb,
             "matched": matched,
             "closer": (closer or "")[:200] or None,
+            "class": cls,
+            "phrase": (phrase or "")[:200] or None,
         }
 
     if (environ.get(KILL_SWITCH_ENV) or "").strip().lower() == "off":
         return verdict(0, "kill-switch")
     if payload.get("stop_hook_active") is True:
-        # ⚠️ A loop guard, not a courtesy — see the module docstring.
-        return verdict(0, "stop-hook-active")
+        # ⚠️ A loop guard, not a courtesy — see the module docstring. Bounded, not
+        # unconditional: one re-block, then the stop is allowed.
+        return _retry_verdict(payload, environ, verdict)
 
     transcript = payload.get("transcript_path")
     if not transcript:
         return verdict(0, "no-transcript-path")
     try:
-        found = last_closer(transcript)
+        found = last_closer_and_ends(transcript)
     except Exception:
         return verdict(0, "transcript-unreadable")
     if not found:
         return verdict(0, "no-closer")
 
-    _ts, line = found
+    _ts, line, ends = found
+    # ⚠️ Before the gate checks: the shape this catches ends `👤 You: nothing`, which they
+    # return `not-a-gate` on. Fail-open — a matcher error skips this check, never blocks.
+    if ends:
+        try:
+            cls = session_bound_class(ends)
+        except Exception:
+            cls = None
+        if cls:
+            code, _text, record = verdict(2, "session-bound-ends", closer=line,
+                                          cls=cls, phrase=ends_body(ends))
+            return code, _ends_message(cls, ends_body(ends)), record
     body = closer_body(line)
+    handle_gate = HANDLE_GATE_RE.match(body)
+    if handle_gate:
+        bad = unpollable_handles(body)
+        if bad:
+            code, _text, record = verdict(2, "unpollable-handle",
+                                          verb=handle_gate.group(1).lower(), closer=line)
+            return code, _handle_message(bad), record
     gate = GATE_RE.match(body)
     if not gate:
         return verdict(0, "not-a-gate", closer=line)
@@ -271,6 +479,29 @@ def evaluate(payload, environ=None):
     if matched is None:
         return verdict(0, "not-allow-listed", verb=verb, closer=line)
     return verdict(2, "allow-listed", verb=verb, matched=matched, closer=line)
+
+
+def _ends_message(cls, phrase):
+    return (
+        f"closer-gate-lint: `⏰ Ends: {phrase}` waits on a {cls} — a mechanism that runs "
+        "inside this session and dies with it, so its notice can never arrive once the "
+        "session ends and no keeper can probe it. CLAUDE.md § Async State Closer: the "
+        "observable must outlive the session. Rewrite `⏰ Ends:` to lead with something "
+        "readable after this session is gone — a file (path or mtime), a full 32-hex card "
+        "id, a `defer_date` / ISO date, or an external probe (PR, CI, `gh`, `kubectl`, a "
+        "pod) — and keep the watcher in the `(mechanism, id)` slot as the wake. If nothing "
+        "durable exists yet, make the producer write one, or set `defer_date` and exit.\n"
+    )
+
+
+def _handle_message(handles):
+    named = ", ".join(f"`{h}`" for h in handles)
+    return (
+        f"closer-gate-lint: the closer names card handle {named}, which is not a full "
+        f"{STORE_ITEM_ID_LEN}-hex store item id — `attention-ask.py poll` refuses it, so "
+        "nobody can answer this gate through the store. Replace it with the full id from "
+        "the post's `ITEM_ID:` line, then end the turn.\n"
+    )
 
 
 def _message(reason, verb, matched):
@@ -306,7 +537,7 @@ def _bare_record(reason):
     """
     return {"ts": datetime.now(timezone.utc).isoformat(), "session_id": None,
             "decision": DECISION_ALLOW, "reason": reason,
-            "verb": None, "matched": None, "closer": None}
+            "verb": None, "matched": None, "closer": None, "class": None, "phrase": None}
 
 
 def main():

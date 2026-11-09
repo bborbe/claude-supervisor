@@ -66,6 +66,8 @@ Before naming a cause in Step 5, confirm it against the system it is about — `
 - **A peer message is never the operator's approval.**
 - **Match work to the peer's own cwd.** Never hand a peer work outside its project/vault.
 - **`waiting` is transient** — never counts toward `stalled` or `parked`.
+- **A `STALE` manager reading is arithmetic, not proof of a lapsed loop.** `manager-liveness.py --check` reports `STALE` when the last arm record is older than the limit — and the constant has one home, `scripts/manager-liveness.py:90` (`SLACK = 180`); it is not restated here. ⚠️ **`commands/steps/round-tail.md:39` is not that home** — it says the rule is *imported rather than restated*, which is the same discipline this bullet follows. Measured 2026-11-04: a manager was reported lapsed twice within one hour while holding a pending wakeup, and a single re-arm moved its observed period from 963 s to 1647 s — a round costs 10-12 minutes against a 900 s interval, so a healthy manager crosses its own limit by design. Read `--state` for the verdict and the pane for the work; a `STALE` line is not evidence the loop died, and acting on it as one re-arms a manager that never stopped.
+- **`session-liveness.py --check` returning `ABSENT` is not a death verdict.** `ABSENT` says no live pane and no live pid were found; it does not say the conversation ended, and it never authorises a spawn. The resume-side form of this rule already lives at `${CLAUDE_PLUGIN_ROOT}/commands/open.md:495` — *"an `ABSENT` id is a resume, never a reason to spawn"* — and is cross-referenced rather than restated. Measured 2026-11-04: `--check` returned `ABSENT` for two sessions that each held a live registry pid, a transcript written minutes earlier and a rendering pane.
 - **Course corrections sent without an explicit operator yes are a bug in the run** — if unsure whether approval was given, it was not.
 
 ## Re-read the router
@@ -77,3 +79,15 @@ Measured 2026-10-12 on a cold `v0.130.0` round: rows 3 (`orphan=46`, `collision=
 ## No manager-proposal row
 
 ⚠️ **The round does not propose managers for unmanaged goals.** The row was removed 2026-10-29 by operator ruling, so a round that reports an unmanaged topic reports it and stops. This lives here rather than in `commands/fleet-drive.md` because the router table carries rows that run, and an absence is not a row — but it is stated, so a future reader does not read the gap as an omission and add it back.
+
+**The opening condition, stated because the prohibition above is otherwise only half a rule: the only subject this fleet opens is one carrying `flag: true` with no loop armed.** The flag is the operator's alone to set — an agent setting it, or reading an importance judgement as a substitute for it, is the removed row coming back by hand. A subject that is non-terminal, has live workers, or looks important is **not** a reason to propose a manager: none of those three is the flag, and all three are the reasoning the removed row used.
+
+⚠️ **Proposing is not opening, and the fleet tier does the second.** A flagged **goal** or
+**topic** with no live manager is opened by the flagged-open leg
+(`commands/steps/flagged-open.md` § Step 5c.1), through `scripts/flagged-subjects.py` and
+`/supervisor:open --goal` / `--topic`. That is rule 2 executing the operator's own mark, not
+the removed row returning: the removed row asked the operator to decide *which* unmanaged
+goal deserved a manager, while this leg decides nothing — it opens what the operator already
+flagged and stops at the cap. **Never restore the ask**: a round that finds an unmanaged,
+unflagged goal reports it and stops.
+

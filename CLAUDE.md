@@ -139,7 +139,7 @@ Every worker blocker — a permission prompt, a question, a stall — is a recor
 ```
 .claude-plugin/marketplace.json          marketplace manifest
 .claude-plugin/plugin.json               plugin manifest
-.mcp.json                                starts the server (${CLAUDE_PLUGIN_ROOT}/server)
+(no .mcp.json)                           deliberately absent — the plugin declares no MCP server; sessions reach `supervisor` over the daemon's HTTP endpoint (`make check` fails if the file reappears)
 skills/supervising-workers/SKILL.md
 skills/open-items/SKILL.md               the operator-asks ledger — rules + /supervisor:open-items (script stays at scripts/open-items.py)
 commands/{goal-spawn,fleet-workers,goal-answer,goal-drain}.md
@@ -147,6 +147,7 @@ commands/{jump,who-needs-me}.md                  find and reach a session
 commands/attention-next.md + scripts/attention-answer.py  answer an attention item, route it to the asker
 commands/{fleet-loop,fleet-status}.md            fleet surface — many sessions; the loop's arm and its read-only snapshot
 commands/fleet-drive.md                          fleet surface — the loop's round, dispatched on every wakeup and runnable by hand
+commands/fleet-triage.md + commands/steps/fleet-triage-*.md  one pass over every live session — classify, close, drive, card; the deliverable is all five green conditions: zero stuck, zero uncarded, zero finished-but-open, zero no-loop, and every live session accounted for
 commands/{topic-loop,topic-status}.md    one TOPIC — the loop's arm and its read-only goal snapshot
 commands/topic-drive.md                  one TOPIC — the loop's round: keep goal managers alive, start only goals the operator flagged
 commands/topic-spawn.md                  one TOPIC — start ONE goal manager; holds no spawn tool, delegates to /supervisor:open --goal
@@ -163,6 +164,7 @@ commands/worker-restart.md                       DEPRECATED alias for commands/r
 commands/close.md                                close ONE finished session — eight guards, never a resume
 scripts/restart-precheck.py                      its read-only pre-kill probe: worktree, transcript, cause of death
 scripts/restart-worker.py                        the kill+resume leg — seven refusals, never a broad `kill`
+scripts/resolve-launcher.py                      the resume's launcher + chip, resolved by code — a thin CLI over `restart-worker.py`'s `resolve_launcher`, called by `commands/open.md` § 3.1
 scripts/close-worker.py                          the close leg — reuses restart-worker/restart-precheck/jump, adds the task gate
 commands/open.md                                 resolve a name → jump / resume / spawn (manager-only)
 commands/ready.md                                ready ONE named task to the bar, then open it (cross-tier)
@@ -176,6 +178,7 @@ docs/session-tiers.md                            session tiers + command → tie
 docs/subject-resolution.md                      the four-source subject chain the eight manager commands share
 scripts/topic-spawn.py                           the topic tier's spawn gate — goal-not-in-scope / goal-not-startable / manager-cap, the § 1 ranking, and the worker refusal
 scripts/topic-keepalive.py                       the topic tier's keep-alive — resume-not-respawn, 3 resumes per goal per 30 min, crash-loop line
+scripts/topicless-goal-keepalive.py              the fleet tier's keep-alive for goal managers no topic declares — selects in_progress+execution goals, asks topic-keepalive.py per goal, never acts
 docs/voice-asks.md                               a voiced question is also a board card — rule + detector (canonical)
 docs/orphan-recovery.md                          stop + recreate a remote worker whose container or pod is gone (canonical)
 scripts/voice-ask-pairing.py                     flags question `say`s with no `attention-ask.py post` within 60 s

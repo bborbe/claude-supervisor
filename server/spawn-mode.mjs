@@ -461,6 +461,7 @@ export function concurrentLimitRefusal({
   staleAgeMs = null,
   operatorNamed = false,
   configFile,
+  populations = null,
 }) {
   if (limits.error) return limits.error
   // `null` is unlimited — the soft key's off switch, which disables the pair.
@@ -473,6 +474,15 @@ export function concurrentLimitRefusal({
   // never synthesised: no cache means no fallback, and the refusal below stands.
   const stale = liveCount === null && Number.isInteger(staleCount)
   const count = liveCount === null ? (stale ? staleCount : null) : liveCount
+  // ⚠️ **The number the caps act on is printed WITH what it is made of.** A refusal that says
+  // only "32 live" cannot be acted on: 32 tabs and 32 headless workers are different problems,
+  // and the operator reading a fleet-full card is deciding which to close. The split comes from
+  // the same count pass, so it cannot describe a different instant than the number beside it.
+  const splitNote = populations
+    ? ` The fleet splits: ${populations.managers} managers (not counted against this cap),` +
+      ` ${populations.interactive} interactive, ${populations.headless} headless,` +
+      ` ${populations.cluster} cluster, ${populations.a2a} a2a (${populations.total} workers).`
+    : ''
   const staleNote = stale
     ? ` This decision uses the last successful count, ${Math.round((staleAgeMs ?? 0) / 1000)} s old` +
       ` — the live read failed: ${countError || 'cause unknown'}.`
@@ -508,6 +518,7 @@ export function concurrentLimitRefusal({
       `(source: ${limits.hardSource}), so nothing opens — not even an operator-named task. The soft ` +
       `cap is ${limits.limit} (source: ${limits.source}). Raise spawn.maxConcurrentHard in ` +
       `${configFile} to open past ${limits.hardLimit}, or set spawn.maxConcurrent to 0 for unlimited.` +
+      splitNote +
       staleNote
     )
   }
@@ -519,6 +530,7 @@ export function concurrentLimitRefusal({
       `held-on-limit; it is picked up next sweep. An OPERATOR-NAMED task may still open here — this one was ` +
       `not named, so it is refused. Raise spawn.maxConcurrent in ${configFile}, or ` +
       `set it to 0 for unlimited.` +
+      splitNote +
       staleNote
     )
   }

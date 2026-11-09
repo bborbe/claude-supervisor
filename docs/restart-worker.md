@@ -183,6 +183,43 @@ jq -r '.permissions.allow[]' ~/.claude/settings.json | grep -E 'Bash\([^)]*p?kil
   cause-of-death classification; the two scripts share the registry read but not the
   refusal vocabulary — the seven tokens above stay exactly seven.
 
+## `--absent`: resuming a session whose process is gone
+
+The normal path cannot bring back a dead session: it refuses `unknown-session-id` when no
+registry entry carries the id, and a dead session's `~/.claude/sessions/<pid>.json` is deleted
+with it. `--absent` is a separate entry that inverts that precondition and **holds no kill
+path at all** — it never reaches `os.kill`, so it cannot signal a live process. ⚠️ That is not
+the same as being harmless: it CAN start a second copy of a live conversation, which is the real
+hazard. So it also refuses while any registry entry is unparseable, while a pane record names
+the session within the last 10 min with no end after it (a resume through another path
+heartbeats before it registers), and while another `--absent` of the same session holds its
+lock. Its only caller is `scripts/fleet-keeper.py`, and only behind the operator's `resume it`
+answer on a dead-Fleet-Manager card.
+
+`wezterm` is resolved by absolute path (`SUPERVISOR_WEZTERM`, then `PATH`, then known install
+locations), never looked up on `PATH` alone: the keeper runs under launchd with a system-only
+`PATH`, where a bare `wezterm` is not found.
+
+It sources what the registry used to carry from the manager registration
+(`~/.claude/state/worker-manager/<sid>.json`, written by `fleet-register.py`), which outlives
+death: the vault gives the `cwd`, and the launcher is resolved with an explicit
+`(branch, subject)` manager subject, so a fleet manager takes the vault's `manager_launcher`.
+⚠️ Not `manager_subject()`: it knows only topic and goal, so a fleet manager resolved through
+it falls to the **worker** launcher rule — still the case on the normal path, recorded as a
+known gap.
+
+Its refusals — first-line token, exit 1, all before the spawn — are its own vocabulary and
+leave the seven above unchanged:
+
+| Token | Fires when |
+|---|---|
+| `not-absent` | a registry entry carries the id, or the registry cannot be read — the process may be alive |
+| `held-session` | an operator hold, exactly as on the normal path |
+| `unknown-session-id` | no manager registration, so no vault to resume into |
+
+An unresolvable vault or launcher is an `❌ error:` operational failure, never a refusal, and
+fires before anything is spawned.
+
 ## Which launcher the resume runs
 
 The resume runs the **worker's own launcher**, never the caller's. A launcher script exports
@@ -211,9 +248,26 @@ script takes the manager rule instead — the subject page's `manager_launcher:`
 configured `manager_launcher` (`manager-default`), then the `-claude` sibling (`claude-sibling`)
 for a vault-cli too old to emit the key.
 
+⚠️ **A `role: human` task takes the Claude launcher**, mirroring `applyHumanLauncherRule` in
+`server/spawn-cwd.mjs` (operator ruling 2026-11-06, matrix Rule 4): the `-claude` sibling
+(`claude-sibling`), then the configured `manager_launcher` (`manager-default`), then the
+vault's `claude_script` (`vault`) — never the worker default. The sibling comes **first on
+purpose** — `private-personal` and `seibert-brogrammers` both point `manager_launcher` at a
+`-deepseek` script, so taking the configured value first would leave a human row on the
+worker model while the rule reported success. A task's own `launcher:` still wins, over both
+rules.
+
 ## The one deliberate copy
 
 The resume recipe (`wezterm cli spawn … --resume <session-id>`, with the four
 `CLAUDE_CODE_*` variables unset) is copied from `commands/open.md` Step 3.1. A markdown
-command is not executable, so the two are kept in lockstep by hand — and that is precisely
-why the orchestrator command must call this script instead of carrying its own copy.
+command is not executable, so the two are kept in lockstep by hand.
+
+⚠️ **The LAUNCHER is no longer part of that copy, and must never become part of it again.**
+`commands/open.md` § 3.1 used to state the precedence in prose — *"apply the rule yourself"* —
+so whichever session ran the resume picked the value and nothing checked the result. Measured
+2026-11-07: two `role: agent` rows with no `launcher:` were resumed as
+`cc-private-claude --resume … /color cyan` because the manager session that resumed them ran on
+Opus. The call site now runs `scripts/resolve-launcher.py`, which prints
+`<launcher>\t<source>\t<role>\t<chip>` from `resolve_launcher` — so the resume and the restart
+share one rule and one answer, and the chip follows the ROLE rather than the caller.
