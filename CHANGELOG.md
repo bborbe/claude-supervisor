@@ -8,6 +8,18 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- **Fleet keep-alive closes a stood-down manager past its bound.** `/supervisor:stop` keeps
+  its session by design and nothing closed it, so a stood-down manager held a fleet slot, a
+  full context and a keeper-census row for a round that no longer ran.
+  `manager-liveness.py --stood-down-past <MINUTES>` selects them — 60 min, 4× the round's own
+  15 min cadence — and the keep-alive leg then joins each row to session liveness, hands the
+  page over, proves the handover through `close-worker.py`'s own verdict, and closes. A
+  refusal is reported as refused, never as closed. Measured 2026-11-09: two live stood-down
+  managers at 9.3 h and 15.0 h, against 83 markers of which only those 2 were LIVE — the
+  marker outlives the session it describes, which is why the join is load-bearing.
+
 ## v0.260.6
 
 - fix: **the closer gate's `clock` durable-observable class accepts a full ISO datetime, and `reap-closer.py`'s dead `last_ends()` export is gone.** The class compiled as `\bdefer_date\b|\b\d{4}-\d{2}-\d{2}\b`, and a trailing `\b` cannot match between two word characters — it failed at both ends of the datetime, between `9` and `T` and between the final digit and a `Z` suffix — so `⏰ Ends: 2026-11-09T15:30:00+01:00`, which `~/.claude/CLAUDE.md` § Async State Closer names as a legal clock ("a clock (`defer_date` / timestamp)"), matched nothing and the closer was blocked: a false positive in the blocking direction, and the only way past it was to weaken the closer. The datetime arm is now optional and shape-bounded — `\d{4}-\d{2}-\d{2}(?:[Tt ]\d{2}(?::\d{2}(?::\d{2}(?:\.\d+)?)?)?(?:[Zz]|[+-]\d{2}:?\d{2})?)?` — and ends in `(?!\w)` rather than `\b`, so `2026-11-09T15:30Z`, `2026-11-09T15:30:00z`, `2026-11-09t15:30:00`, `2026-11-09T15` and `2026-11-09-15:30` clear while `2026-11-9` and `2026-11-09123` still block. ⚠️ The terminator must NOT include `-`: `\b` matched between `9` and `-`, so a `(?![\w-])` spelling newly blocked `2026-11-09-15:30` and `2026-11-09-rollout`, both of which the pre-PR regex cleared — a narrowing that blocks a compliant closer is the very false positive this class exists to remove. The arm remains a shape-subset, not a range subset, of `parse_defer_date` (`2026-11-09T99:99` matches here and the parser calls it invalid) — pre-existing on the date-only arm and deliberately not tightened, since narrowing would newly block closers that pass today. `test_an_iso_datetime_is_a_clock_observable` pins every form above plus the two blocking ones, and `test_a_representative_sample_of_parser_accepted_clocks_clears_the_clock_class` runs a sample of parser-accepted shapes through the class — a sample, not parity, because `fromisoformat` accepts an unbounded family of separators and fraction precisions. `last_ends()` had no caller (`closer-gate-lint.py` reads only `last_closer_and_ends()`) and is deleted, so a shipped plugin artifact carries no untested export for a future caller to depend on. Measured two-sided against `dda0690f`: the new fixture exits 2 there and 0 here. Change set: `scripts/closer-gate-lint.py`, `scripts/reap-closer.py`, `scripts/tests/test_closer_gate_lint.py`, `scripts/tests/fixtures/closer-gate-lint/38-ends-iso-datetime.jsonl`, `CHANGELOG.md`.
