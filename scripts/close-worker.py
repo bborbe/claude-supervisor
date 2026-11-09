@@ -447,6 +447,44 @@ def pane_for_session(jump, session_id):
     return (matches[0] if len(matches) == 1 else None), pmap
 
 
+def tab_kill(jump, session_id, pane, runner=None):
+    """Re-resolve the pane, then kill it. `0` on a close, `1` on a refusal.
+
+    ⚠️ **Re-resolve immediately before the kill.** `pane` was resolved before the guards,
+    which run a `git status`, a transcript read and a `grep` over every vault's task dirs.
+    A pane id is a lease, not an identifier: it is freed when its pane closes and reassigned
+    after a WezTerm mux restart, so the id can belong to a different session by the time
+    `kill-pane` runs. `kill-pane` refuses a *dead* pane; it does not refuse a *live* pane
+    that now belongs to someone else. Re-resolving narrows the window to the kill itself —
+    a different id, or none, means the lease expired and nothing may be signalled.
+
+    `runner` is a seam for the test only; production passes `subprocess.run`.
+    """
+    fresh_pane, fresh_pmap = pane_for_session(jump, session_id)
+    if fresh_pane != pane:
+        why = (
+            "wezterm cli list unavailable" if fresh_pmap is None
+            else "no single live pane maps to it" if fresh_pane is None
+            else "a different pane holds it"
+        )
+        print(
+            f"❌ error: the pane for {session_id} changed during the guards "
+            f"(pane {pane} → {fresh_pane}, {why}); nothing was signalled"
+        )
+        return 1
+    killed = (runner or subprocess.run)(
+        ["wezterm", "cli", "kill-pane", "--pane-id", str(pane)],
+        capture_output=True, text=True, timeout=10,
+    )
+    if killed.returncode != 0:
+        print(
+            f"❌ error: wezterm refused to close pane {pane} "
+            f"(exit {killed.returncode}): {(killed.stderr or '').strip()}"
+        )
+        return 1
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Close one finished session's pane — registry-guarded.",
@@ -635,8 +673,8 @@ def main():
         # the guards, which take tens of seconds — a `git status`, a transcript read and a
         # `grep` over every vault's task dirs. A session that exits in that window can have
         # its pid recycled onto an unrelated process, and SIGTERM would land there. One file
-        # read narrows the window to the signal itself. The tab path needs no equivalent:
-        # `wezterm kill-pane` is id-based and refuses a dead pane.
+        # read narrows the window to the signal itself. The tab path below needs the same
+        # re-check and has one: it re-resolves the pane and refuses a changed id.
         try:
             with open(path, encoding="utf-8") as handle:
                 fresh = json.load(handle)
@@ -662,16 +700,9 @@ def main():
         # else: it exited during the guards. Fall through — the wait proves it gone and the
         # stale-entry cleanup applies, which is the same outcome a delivered signal produces.
     else:
-        killed = subprocess.run(
-            ["wezterm", "cli", "kill-pane", "--pane-id", str(pane)],
-            capture_output=True, text=True, timeout=10,
-        )
-        if killed.returncode != 0:
-            print(
-                f"❌ error: wezterm refused to close pane {pane} "
-                f"(exit {killed.returncode}): {(killed.stderr or '').strip()}"
-            )
-            return 1
+        rc = tab_kill(jump, sid, pane)
+        if rc != 0:
+            return rc
 
     # The registry entry is Claude Code's, not ours, and it deletes it on exit. Wait for
     # that rather than racing it; only a provably dead pid whose entry lingers is removed

@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **the tab arm of `close-worker.py` re-resolves the pane before `kill-pane`, and refuses a pane whose id changed during the guards.** The headless arm already re-read its registry entry immediately before signalling, because a pid can be recycled onto an unrelated process while the guards run (a `git status`, a transcript read, a vault-wide `grep`). The tab arm had no equivalent, and its justifying comment claimed none was needed because "`wezterm kill-pane` is id-based and refuses a dead pane" — true of a *dead* pane, false of a *live* pane that now holds a reused id. Pane ids are leases: `~/.claude/state/session-exit/pane-525.log` carries two spawns under the same id six days apart, and a WezTerm mux restart renumbers both namespaces at once (measured 2026-09-18: 238 → 33, 241 → 31, 257 → 36). The arm now calls `tab_kill()`, which re-runs `pane_for_session()` immediately before the kill and refuses on any change — a different id, no id, or an unreadable `wezterm cli list` — printing `❌ error: the pane for <sid> changed during the guards (pane A → B, <why>); nothing was signalled`. Change set: `scripts/close-worker.py`, `scripts/tests/test_close_worker.py`, `CHANGELOG.md`.
+
 ## v0.258.1
 
 - fix: a headless worker whose last `result` carries `num_turns: 0` now settles `status: error` with `error: zero-turn: …` and `result.zero_turn: true` instead of `done`, (on the stream-throw path too), and the idle-worker end-of-life keeps an otherwise-idle session on a zero-turn `result` for a 120 s grace window, then re-runs its full decision (wrapper state, parked question, open cards) and ends it only if still idle — on resume the CLI's own `<task-notification>` for orphaned background agents settled as that zero-turn result ahead of the caller's queued prompt, the wrapper counted it against `pending_turns`, and the supervisor stopped the session before the prompt ran
