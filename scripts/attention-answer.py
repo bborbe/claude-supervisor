@@ -72,6 +72,62 @@ STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("
 # Local store; a hung one must cost a clear failure, never a stalled session.
 STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
 
+# Where the worker's own attention hook looks for the record of WHO answered it.
+#
+# ⚠️ This is the WRITER half of a two-repo change: `~/.claude/hooks/attention-log.py` reads
+# `<session>.answer.json` from this directory and stamps `answerer_session` / `answerer_kind`
+# onto the close line. Written alone it is a file nobody reads; the hook alone is a reader
+# whose file never exists. They ship as a pair.
+#
+# The resolution mirrors the hook exactly (`ATTENTION_STATE_DIR`, then the default) — a
+# writer pointed at a different directory than the reader is a silent no-op on both sides.
+ATTENTION_STATE_DIR = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser(
+    "~/.claude/state/attention")
+
+# The kinds the hook accepts. Anything else is ignored there, so an unknown value here would
+# be a write that can never be read.
+ANSWERER_KINDS = ("manager", "operator", "other")
+
+
+def write_answer_marker(producer_id, answerer_session, answerer_kind):
+    """Record who answered `producer_id`'s item, for its own hook to stamp on close.
+
+    Best-effort by design and never raises: this is a measurement side-channel, and failing
+    to record WHO answered must never stop the answer being delivered. The caller has already
+    written the answer to the store; trading a missing attribution for a failed command would
+    be the wrong way round.
+
+    Returns True when the marker landed. A false return is not an error — the answer stands.
+    """
+    if answerer_kind not in ANSWERER_KINDS:
+        return False
+    if not isinstance(producer_id, str) or not producer_id:
+        return False
+    path = os.path.join(ATTENTION_STATE_DIR, f"{producer_id}.answer.json")
+    # pid-suffixed temp + replace, the same reason `<sid>.posted.json` does it: a fixed `.tmp`
+    # lets two concurrent writers interleave, and a crash between write and replace orphans it.
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        os.makedirs(ATTENTION_STATE_DIR, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({
+                "answerer_session": answerer_session or "",
+                "answerer_kind": answerer_kind,
+                # EPOCH SECONDS, not milliseconds: the hook parses with `float()` and
+                # compares against `time.time()`. Milliseconds read as ~50 000 years ahead,
+                # which the hook rejects as future-dated — silently.
+                "ts": time.time(),
+            }, f)
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
 # How long a permission answer waits for the store's delivery report before it
 # calls the delivery unconfirmed. ⚠️ It must outlast the poller's IDLE interval,
 # not its busy one: `server/attention-poll.mjs` reads every `intervalMs = 2000`
@@ -376,6 +432,16 @@ def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None,
     print(f"ANSWERED: {item_id} at {answered.get('answered_at')} by {answered.get('answered_by')}", file=out)
     print(f"RESOLVED_BY: {resolved_by}" if resolved_by else
           "RESOLVED_BY: unknown -- CLAUDE_CODE_SESSION_ID unset, so this item will read as unresolved", file=out)
+    # Tell the asking session's own hook WHO answered, so its close line carries the party
+    # rather than only the event that cleared the gate. Written AFTER the store accepted the
+    # answer, never before: a marker for an answer that failed to land would attribute a
+    # question nobody answered.
+    #
+    # `manager` is the honest kind for this arm — it is a session answering on a manager's
+    # behalf, and `resolved_by` is that session's own id. An arm stripped of
+    # `CLAUDE_CODE_SESSION_ID` still writes the marker with `""`, which the hook reads as
+    # "answered, unnamed" rather than as "nothing known" — the distinction a later count needs.
+    write_answer_marker(item.get("producer_id", ""), resolved_by, "manager")
     print(target_line(item.get("producer_id", ""), registry), file=out)
     return 0
 

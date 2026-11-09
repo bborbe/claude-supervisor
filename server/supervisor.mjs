@@ -22,6 +22,7 @@ import { HEARTBEAT_INTERVAL_MS, a2aStamp, clearStamp, heartbeatDir, selfStampRef
 import { invalidateCountCache, workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
 import { startAttentionPoll, storeDecisionRecord, timeoutDecisionRecord } from './attention-poll.mjs'
+import { writeAnswerMarker } from './answer-marker.mjs'
 import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
@@ -3955,7 +3956,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       // Record the manager's verdict too: a key the manager allows over and over
       // is the raw material for the next policy rule.
-      const logDecision = (behavior) =>
+      const logDecision = (behavior) => {
         logPermission({
           ts: new Date().toISOString(),
           agent: record.agentId,
@@ -3972,6 +3973,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           request_id: args.request_id,
           latency_ms: Date.now() - Date.parse(record.requestedAt),
         })
+        // Record WHO answered, where the worker's own attention hook can stamp its close
+        // line. Without it a question settled here is indistinguishable, in the local event
+        // log, from one the operator answered — which is what makes "worker questions that no
+        // manager answered" uncountable.
+        //
+        // Scoped to a question: a permission verdict is already attributed by the
+        // `permissions.jsonl` row above, and that log carries the deciding party, so writing
+        // a marker for it would add a second attribution with no reader.
+        //
+        // `parentSessionId` is the server's own session — the manager that called
+        // `answer_permission` — resolved the same way the spawn gate resolves it, so the two
+        // cannot disagree about who this is. A null (unresolvable) writes "", which the hook
+        // reads as "manager, unnamed" rather than dropping the record.
+        if (record.toolName === 'AskUserQuestion') {
+          writeAnswerMarker({
+            stateDir: config.attentionStateDir,
+            sessionId: record.agentId,
+            answererSession: parentSessionId({ dir: config.sessionsDir }) ?? '',
+            answererKind: 'manager',
+          })
+        }
+      }
 
       if (args.behavior === 'allow') {
         logDecision('allow')
