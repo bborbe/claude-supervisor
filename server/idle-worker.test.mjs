@@ -11,7 +11,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { shouldEndIdleWorker } from './idle-worker.mjs'
+import { armZeroTurnGrace, shouldEndIdleWorker } from './idle-worker.mjs'
 
 const idleSession = { state: 'idle', pending_turns: 0, question: null }
 
@@ -88,4 +88,77 @@ test('an unreadable attention store keeps the worker', () => {
     assert.equal(verdict.end, false)
     assert.equal(verdict.reason, 'unreadable-cards')
   }
+})
+
+test('a zero-turn last result keeps the worker even when the wrapper reads idle with nothing pending', () => {
+  const session = { state: 'idle', pending_turns: 0 }
+  assert.deepEqual(
+    shouldEndIdleWorker({ session, cards: [], lastResult: { num_turns: 0 } }),
+    { end: false, reason: 'zero-turn-result' },
+  )
+  assert.equal(shouldEndIdleWorker({ session, cards: [], lastResult: { num_turns: 3 } }).end, true)
+})
+
+test('an error result with num_turns 0 is not kept — a CLI that failed before its first turn still ends', () => {
+  const session = { state: 'idle', pending_turns: 0 }
+  assert.equal(shouldEndIdleWorker({ session, cards: [], lastResult: { num_turns: 0, is_error: true } }).end, true)
+})
+
+test('a zero-turn result never masks a more specific keep reason', () => {
+  const zero = { num_turns: 0 }
+  assert.equal(shouldEndIdleWorker({ session: { state: 'running', pending_turns: 1 }, cards: [], lastResult: zero }).reason, 'not-idle')
+  assert.equal(shouldEndIdleWorker({ session: { state: 'idle', pending_turns: 1 }, cards: [], lastResult: zero }).reason, 'turn-in-flight')
+  assert.equal(shouldEndIdleWorker({ session: { state: 'idle', pending_turns: 0, question: { id: 'q' } }, cards: [], lastResult: zero }).reason, 'parked-question')
+  assert.equal(shouldEndIdleWorker({ session: { state: 'idle', pending_turns: 0 }, cards: [{ id: 'c' }], lastResult: zero }).reason, 'open-card')
+  assert.equal(shouldEndIdleWorker({ session: { state: 'idle' }, cards: [], lastResult: zero }).reason, 'wrapper-record-incomplete')
+})
+
+test('once the zero-turn grace has expired, a still-idle session is ended', () => {
+  const session = { state: 'idle', pending_turns: 0 }
+  assert.deepEqual(
+    shouldEndIdleWorker({ session, cards: [], lastResult: { num_turns: 0 }, zeroTurnGraceExpired: true }),
+    { end: true, reason: 'idle-with-nothing-pending' },
+  )
+  // ...but grace expiry never overrides a live keep reason.
+  assert.equal(shouldEndIdleWorker({ session: { state: 'running', pending_turns: 1 }, cards: [], lastResult: { num_turns: 0 }, zeroTurnGraceExpired: true }).end, false)
+})
+
+// Drives the timer with a captured callback instead of a real clock.
+function fakeTimer() {
+  const t = { fn: null, ms: null }
+  t.setTimer = (fn, ms) => { t.fn = fn; t.ms = ms; return {} }
+  return t
+}
+
+test('the zero-turn grace timer re-runs the full idle decision with the grace expired', async () => {
+  const agent = { id: 'a', status: 'running', result: { num_turns: 0 } }
+  const calls = []
+  const t = fakeTimer()
+  armZeroTurnGrace({ agent, recheck: (...args) => calls.push(args), graceMs: 5, setTimer: t.setTimer })
+  assert.equal(t.ms, 5)
+  assert.equal(calls.length, 0)
+  await t.fn()
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0][0], agent)
+  assert.deepEqual(calls[0][1], { zeroTurnGraceExpired: true })
+})
+
+test('the zero-turn grace timer still fires after the worker settled — it is that path\'s only reaper', async () => {
+  const t = fakeTimer()
+  const calls = []
+  const settled = { id: 'a', status: 'error', result: { num_turns: 0, zero_turn: true } }
+  armZeroTurnGrace({ agent: settled, recheck: (...args) => calls.push(args), setTimer: t.setTimer })
+  await t.fn()
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0][1], { zeroTurnGraceExpired: true })
+})
+
+test('the zero-turn grace timer is a no-op once a newer result replaced the one it was armed for', async () => {
+  const t1 = fakeTimer()
+  const calls = []
+  const replaced = { id: 'a', status: 'running', result: { num_turns: 0 } }
+  armZeroTurnGrace({ agent: replaced, recheck: () => calls.push('r'), setTimer: t1.setTimer })
+  replaced.result = { num_turns: 3 }
+  await t1.fn()
+  assert.deepEqual(calls, [])
 })
