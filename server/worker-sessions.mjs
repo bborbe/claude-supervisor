@@ -9,7 +9,18 @@
 //   (a) present in the **spawn ledger**, which the **session-ledger endpoint** answers — what makes it a
 //       session this supervisor opened, rather than a manager or one of the operator's own;
 //       and
-//   (b) **live**, which the **session-heartbeat endpoint** answers.
+//   (b) **live**, which is answered by **two channels, unioned**: the **session-heartbeat
+//       endpoint** (a row with `live: true` **and** a non-empty `state`), or the **identity
+//       registry**'s pid check for a local session that holds no heartbeat.
+//
+// ⚠️ **Both halves of (b) are load-bearing, and each fixes a different error direction.**
+// Without the registry, a headless local worker (`claude --print --input-format stream-json …`)
+// is invisible: it writes a ledger record and holds a live pid but never stamps a heartbeat, so
+// its row reads `live: false` — measured 2026-11-07, 44 live sessions counted as 10, all 22 of
+// the difference this shape. Without the `state` requirement, the store's **ghost** rows are
+// counted: a placeholder the store keeps stamping after its session exited (`b3d743ea`,
+// `source: a2a`, `state: ""`), which made the cap read 51 against 49 real processes. A counter
+// that fixes one direction only trades an under-count for an over-count.
 //
 // ⚠️ **The liveness source is the endpoint, and the join survived the move.** Until 2026-10-09
 // this read two channels — the registry (`~/.claude/sessions/<pid>.json`, pid-keyed and
@@ -46,6 +57,7 @@ import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { config } from './config.mjs'
+import { pidIsAlive, readRegistry } from './liveness.mjs'
 import { liveFromHeartbeat, readHeartbeat } from './session-heartbeat.mjs'
 import { ledgerBySessionId, readSessionLedger } from './session-ledger.mjs'
 
@@ -164,12 +176,33 @@ export async function readLedger({ endpoint, fetchImpl, onFailure } = {}) {
 // heartbeat, `cluster` for a mirrored cluster session. It is no longer the registry's own
 // `status`, because the registry is no longer on this path. Descriptive only — nothing decides
 // on it.
+// ⚠️ **The half the endpoint cannot answer.** A headless local worker
+// (`claude --print --input-format stream-json …`) writes a ledger record and holds a live pid,
+// but it never stamps a heartbeat — so its row reads `live: false` and the endpoint's live set
+// excludes it. Measured 2026-11-07 on the shell twin: 44 live sessions, 10 counted, and all 22
+// of the difference resolved in the ledger with `role: agent`, `mode: headless` and an alive
+// pid. The registry is the only channel that answers for them, so it is unioned into the live
+// map here — one home, so the count and the population split cannot drift.
+//
+// An unreadable registry adds nothing rather than failing the count: the endpoint already
+// answered, and a missing second channel is not an unknown first one.
+function unionRegistry(live, registry) {
+  for (const entry of (registry ?? readRegistry()) ?? []) {
+    if (!entry || typeof entry.sessionId !== 'string' || !entry.sessionId) continue
+    if (live.has(entry.sessionId)) continue
+    if (!pidIsAlive(entry.pid)) continue
+    live.set(entry.sessionId, 'registry')
+  }
+  return live
+}
+
 export async function workerSessions({
   endpoint,
   fetchImpl,
   now = Date.now,
   onFailure,
   stateDir,
+  registry,
 } = {}) {
   // ⚠️ `ledgerDir` left the signature with the file read, and a caller still passing it is
   // harmless rather than broken — an extra key on a destructured parameter is ignored. It is
@@ -203,7 +236,15 @@ export async function workerSessions({
   }
   const live = liveFromHeartbeat(rows)
 
+  unionRegistry(live, registry)
+
   const workers = []
+  let managers = 0
+  // ⚠️ **Four worker modes, not two.** The ledger carries `interactive`, `headless`, `cluster`
+  // and `a2a`; a binary headless-vs-else classifier reported live cluster and a2a workers as
+  // "interactive" — exactly the conflation this split exists to prevent. Measured 2026-11-08 on
+  // this host's ledger: 3203 interactive, 1113 headless, 46 cluster, 133 a2a.
+  const modes = { interactive: 0, headless: 0, cluster: 0, a2a: 0 }
   for (const [sessionId, record] of Object.entries(ledger)) {
     if (!live.has(sessionId)) continue
     // Auto-resumes are excluded — they answer to the auto-resume gate's own 30-min crash-loop
@@ -226,11 +267,50 @@ export async function workerSessions({
     // field existed, and those are workers and managers alike, so treating absence as "manager"
     // would drop every pre-field worker out of the count this cap exists to enforce. The same
     // rule, and the same reason, is in `scripts/gate-owner-filter.py`'s `is_manager`.
-    if (record.role === 'manager') continue
+    if (record.role === 'manager') {
+      managers += 1
+      continue
+    }
+    const mode = record.mode || 'interactive'
+    if (Object.prototype.hasOwnProperty.call(modes, mode)) modes[mode] += 1
+    else modes.interactive += 1
     workers.push({ sessionId, status: live.get(sessionId), label: record.label })
   }
   // Record the count for the next failed read. Best-effort: a cache that cannot be written must
   // not fail a count that succeeded.
   await writeCountCache(workers.length, { stateDir, now })
-  return { workers, error: null, stale: null }
+  // The split rides along on the same pass: the cap gate's refusal prints what the number is
+  // made of, and reading the stores a second time to answer that would be a second measurement
+  // of a fleet that has already moved.
+  // ⚠️ **`total` is the cap's unit, so managers are NOT in it.** The refusal prints this split
+  // beside `liveCount`, which excludes managers; a total that included them would put two
+  // irreconcilable numbers in one sentence. Managers are reported as context.
+  const workersByMode = modes.interactive + modes.headless + modes.cluster + modes.a2a
+  const populations = {
+    managers,
+    interactive: modes.interactive,
+    headless: modes.headless,
+    cluster: modes.cluster,
+    a2a: modes.a2a,
+    total: workersByMode,
+  }
+  return { workers, populations, error: null, stale: null }
+}
+
+// The three populations the caps act on — managers, interactive workers, headless workers —
+// and their total. **A thin wrapper over `workerSessions`, not a second classifier.** Measured
+// 2026-11-08, the review found three copies of these rules and two of them already disagreed on
+// manager+auto-resume records; delegating is what keeps one home.
+//
+// ⚠️ **The manager population comes from the LEDGER, not from `fleet-board.py`.** The board is
+// the doc's named manager source, but measured 2026-11-08 it emitted `{header, rows}` of
+// display strings — no per-session `role` — and did not complete inside 90 s twice on this
+// host. The ledger carries `role` and is already read here. A manager started by hand writes
+// no record at all, so it is absent from this count: a stated gap, not a silent one.
+//
+// ⚠️ **`total` is interactive + headless, NOT including managers** — the cap's unit, so the
+// refusal's split reconciles with the count printed beside it.
+export async function workerPopulations(opts = {}) {
+  const { populations, error } = await workerSessions(opts)
+  return { populations, error }
 }

@@ -31,7 +31,10 @@ this module cannot resolve.
 
   1. `claude_session_id:` on a **goal** page — the goal manager's own session. Its scope is
      that goal's `# Tasks` list. This is how an operator-opened manager is identified at all:
-     it was never spawned, so the spawn ledger has no record of it.
+     it was never spawned, so the spawn ledger has no record of it. ⚠️ **The stamp names a
+     candidate, never an owner:** `scripts/owner.py` decides whether that session still owns
+     the goal (session `LIVE` **and** loop `OK`/`STALE`), and a `not-owner` verdict leaves the
+     scope unresolved rather than half-built — see `load()`.
   2. `claude_session_id:` on a **task** page — the task's owning session.
   3. `- session_id:` entries under `metrics_sessions:` on a task page — every session that
      WORKED that task. ⚠️ Not optional: one of the five measured cases (`0eacc5e4`, pane 260)
@@ -90,12 +93,36 @@ conservative residual `gate-owner-filter.py` already documents for its event-log
 `spawn-ledger.py`.
 """
 import glob
+import importlib.util
 import json
 import os
 import re
 import subprocess
 import sys
 from dataclasses import dataclass
+
+SCRIPTS = os.path.dirname(os.path.abspath(__file__))
+
+_OWNER = None
+
+
+def _owner():
+    """Import `scripts/owner.py` — the ONE ownership definition (`docs/session-tiers.md` § Keep-alive).
+
+    Loaded lazily and cached, so a run that never needs an ownership verdict never pays for it.
+    ⚠️ **This module does not re-derive ownership from a stamp plus a liveness probe.** That was
+    the defect: a page's `claude_session_id` was taken as ownership of the session's work with
+    the loop never read, so a manager stood down with `/supervisor:stop` kept its scope and its
+    watcher kept filtering as though it were a manager.
+    """
+    global _OWNER
+    if _OWNER is None:
+        spec = importlib.util.spec_from_file_location(
+            "owner", os.path.join(SCRIPTS, "owner.py"))
+        _OWNER = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_OWNER)
+    return _OWNER
+
 
 #: Vault folder names that hold tasks and goals. Both generations are listed so a vault left
 #: on the pre-2026-09-13 names (`24 Tasks` / `23 Goals`) still resolves, exactly as
@@ -397,10 +424,17 @@ def _walk(task_dirs, goal_dirs):
     return tasks, goals
 
 
-def load(self_id, vault_paths=None):
+def load(self_id, vault_paths=None, ownership=None):
     """Build the `Scope` for `self_id`, or one whose `reason` says why it could not.
 
     Never raises, and never returns a scope that would exclude on a failed read.
+
+    ⚠️ **`ownership` is this module's ownership input, and it is resolved by `scripts/owner.py`
+    — never here.** A goal page's `claude_session_id` names WHICH session serves that goal; it
+    does not say whether that session still owns it. Only a `not-owner` verdict (a deliberate
+    stand-down, or a session that is gone) drops the stamp, and it drops it into the unresolved
+    branch — which excludes NOTHING, the fail-open direction. A `cannot-tell` verdict keeps the
+    scope exactly as it was, for the same reason.
     """
     # ⚠️ Checked BEFORE the walk. A `--pane` diagnostic with no `--self` cannot be scoped,
     # and the walk is ~7 s over 35 000 pages — paying it to learn a fact already known is the
@@ -462,7 +496,17 @@ def load(self_id, vault_paths=None):
 
     own_titles, self_goals, why = set(), [], ""
     if self_id in managers:
-        self_goals = sorted(set(managers[self_id]))
+        stamped = sorted(set(managers[self_id]))
+        # THE OWNERSHIP READ — one per `load()`, never per page, and only for the asking
+        # session (a task page's stamp names a worker, which is not a manager at all).
+        o = ownership if ownership is not None else _owner().of_session(self_id)
+        if o.verdict == _owner().NOT_OWNER:
+            why = (
+                f"session {self_id[:8]} is stamped as the manager of "
+                f"{', '.join(stamped)} but is not an owner ({o.reason})"
+            )
+        else:
+            self_goals = stamped
     else:
         entries = sessions.get(self_id) or []
         titles = {entry.title for entry in entries}

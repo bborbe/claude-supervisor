@@ -63,6 +63,10 @@ class WorkerSessionsTest(unittest.TestCase):
         shutil.copy(SCRIPT, self.bin)
         shutil.copy(SCRIPTS / "session-liveness.py", self.bin)
         shutil.copy(SCRIPTS / "spawn-ledger.py", self.bin)
+        # The counter unions the identity registry in — the only channel that answers for a
+        # headless local worker holding no heartbeat. Without it here, every case would run
+        # against a counter that could not import its second liveness channel.
+        shutil.copy(SCRIPTS / "session-identity.py", self.bin)
         # ⚠️ The count cache is a real file under `$XDG_STATE_HOME/claude-supervisor`. A suite that
         # used the machine's state dir would read whatever the last real count left there and
         # write into it — so every case gets its own.
@@ -367,6 +371,96 @@ class WorkerSessionsTest(unittest.TestCase):
             result = self.run_script("--count")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "0")
+
+    def test_a_ghost_row_is_not_a_live_session(self):
+        """⚠️ THE OVER-COUNT CASE, measured 2026-11-07. The store kept stamping `b3d743ea`
+        (`source: a2a`, `location: pod`) with `state: ""` after its session closed, and the
+        row survived the close — so the cap read 51 against 49 real processes. A `live: true`
+        row that carries no `state` is a placeholder, not a session: every real stamp reports
+        what it is doing. The ledger record alone must not make it a worker."""
+        sid = "ffffffff-0000-0000-0000-000000000020"
+        ledger = [self.ledger_entry(sid, "exited, row still stamped")]
+        with FixtureEndpoint(rows=[row(sid, state="")], ledger_rows=ledger) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
+        self.assertEqual(result.stdout.strip(), "0", result.stderr)
+
+    def test_a_ghost_row_does_not_hide_a_real_worker(self):
+        """The control for the ghost exclusion: a store carrying one ghost and one real
+        worker must read 1. Without this, the case above passes on a counter that returns 0
+        for everything."""
+        ghost = "ffffffff-0000-0000-0000-000000000021"
+        real = "ffffffff-0000-0000-0000-000000000022"
+        ledger = [self.ledger_entry(ghost, "ghost"), self.ledger_entry(real, "real")]
+        with FixtureEndpoint(rows=[row(ghost, state=""), row(real)], ledger_rows=ledger) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--count")
+        self.assertEqual(result.stdout.strip(), "1", result.stderr)
+
+
+    def test_populations_split_the_fleet_by_role_and_mode(self):
+        """The three populations the caps are meant to act on: a manager, an interactive
+        worker, a headless worker, and an auto-resume that belongs to none of them."""
+        manager = "ffffffff-0000-0000-0000-000000000030"
+        interactive = "ffffffff-0000-0000-0000-000000000031"
+        headless = "ffffffff-0000-0000-0000-000000000032"
+        resumed = "ffffffff-0000-0000-0000-000000000033"
+        ledger = [
+            self.ledger_entry(manager, "topic manager", role="manager", mode="interactive"),
+            self.ledger_entry(interactive, "tab worker", mode="interactive"),
+            self.ledger_entry(headless, "headless worker", mode="headless"),
+            self.ledger_entry(
+                resumed, "auto-resumed", mode="headless", resumed_from="aaaaaaaa-0000-0000-0000-000000000009"
+            ),
+        ]
+        rows = [row(s) for s in (manager, interactive, headless, resumed)]
+        with FixtureEndpoint(rows=rows, ledger_rows=ledger) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--populations")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.split("\n")[:6],
+            ["managers: 1", "interactive: 1", "headless: 1", "cluster: 0", "a2a: 0", "total: 2"],
+        )
+
+    def test_a_pre_mode_record_reads_as_interactive(self):
+        """`mode` decides the split, and an absent one reads as interactive — the same rule
+        `role` follows. Defaulting a pre-field record to headless would move the whole
+        pre-`mode` population into the wrong column."""
+        sid = "ffffffff-0000-0000-0000-000000000034"
+        ledger = [self.ledger_entry(sid, "pre-field worker", role="", mode="")]
+        with FixtureEndpoint(rows=[row(sid)], ledger_rows=ledger) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--populations")
+        self.assertIn("interactive: 1", result.stdout, result.stderr)
+        self.assertIn("headless: 0", result.stdout, result.stderr)
+
+    def test_a_manager_that_is_an_auto_resume_is_not_a_manager(self):
+        """⚠️ THE READER-DIVERGENCE CASE. `resumed_from` is checked BEFORE `role`, so a record
+        that is both is dropped from every population rather than counted as a manager. The JS
+        twin and `live_workers` use the same order; measured 2026-11-08, the two readers had
+        opposite orders and disagreed on exactly this record."""
+        sid = "ffffffff-0000-0000-0000-000000000036"
+        ledger = [
+            self.ledger_entry(
+                sid, "resumed manager", role="manager", mode="interactive",
+                resumed_from="aaaaaaaa-0000-0000-0000-000000000009",
+            )
+        ]
+        with FixtureEndpoint(rows=[row(sid)], ledger_rows=ledger) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--populations")
+        self.assertIn("managers: 0", result.stdout, result.stderr)
+        self.assertIn("total: 0", result.stdout, result.stderr)
+
+    def test_populations_exclude_a_ghost_row(self):
+        """The ghost rule applies to the populations too, not only to `--count`."""
+        sid = "ffffffff-0000-0000-0000-000000000035"
+        ledger = [self.ledger_entry(sid, "exited", mode="headless")]
+        with FixtureEndpoint(rows=[row(sid, state="")], ledger_rows=ledger) as ep:
+            self.endpoint = ep.url
+            result = self.run_script("--populations")
+        self.assertIn("total: 0", result.stdout, result.stderr)
 
 
 if __name__ == "__main__":

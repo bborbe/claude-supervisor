@@ -76,6 +76,19 @@ SITE_LIST = {
     # `session-liveness.py` holds no `subprocess` call at all.
     ("session-identity.py", "_ps_starts"),
     ("stop-probe.py", "gate_processes"),
+    # added 2026-11-08 — `reap-idle-headless.py`'s watcher probe: `pgrep -P` plus a
+    # `ps -o args=` per child, asking whether a backgrounded command is still running.
+    # It carries the three-state contract for a sharper reason than most: `None` means
+    # the tree could not be read and the verb REFUSES, `[]` means read-and-empty and the
+    # close may proceed, and a list means a watcher would die with the process. Collapsing
+    # `None` into `[]` would reap a worker whose watcher was merely unobservable.
+    ("reap-idle-headless.py", "watchers"),
+    # the same file's pid-identity read: `ps -o lstart=` taken before and after the guards.
+    # `None` means the start time could not be read and the caller REFUSES — an identity
+    # that was never established is never signalled, so there is no fallback path; a string
+    # means it was read. Never collapsed into "no process", which would make a recycled pid
+    # indistinguishable from a live one.
+    ("reap-idle-headless.py", "process_start"),
     # added 2026-10-07 — `plugin-version-census.py`, the fleet reading of which plugin
     # version each live session serves. Its two READS keep the three-state contract and are
     # driven below: `wezterm_panes` (the pane map the jump target is joined through) and
@@ -152,6 +165,10 @@ SITE_LIST = {
     # collapsing one into an empty result — so it is enumerated for the mechanism/list
     # agreement and, like `close-worker.py`'s `main`, deliberately not driven.
     ("spawn-goal.py", "pane_text"), ("spawn-goal.py", "send"),
+    # added 2026-11-08 — the fleet-triage pane wake's two viewport reads (#692). `None` on a
+    # failed `get-text`: the guard maps it to `error:unreadable` and the wake skips the pane,
+    # so a failed read can never read as an empty, wakeable composer.
+    ("pane-wake-guard.py", "read_pane"), ("pane-wake.py", "read_pane"),
     # added 2026-10-22 — `manager-attention-watch.py`'s pane-title read, the join that
     # gives a re-registered park card its jump target. It returns `None` for a failed
     # query, never `""`: a `wezterm cli list` that never answered cannot prove a pane is
@@ -237,6 +254,8 @@ POPULATED = {
     ("mmf", "pane_lines"): "context\nEnter to select",
     ("sg", "pane_text"): "  ⎿  Goal set: Task \"t\" is finished.",
     ("ser", "_process_table"): "101 1 claude",
+    ("pwg", "read_pane"): "\u276f\u00a0",
+    ("pw", "read_pane"): "\u276f\u00a0",
 }
 
 
@@ -317,6 +336,9 @@ def main():
             ("mmf", "manager-menu-footer.py"),
             ("sg", "spawn-goal.py"),
             ("ser", "session-exit-record.py"),
+            ("rih", "reap-idle-headless.py"),
+            ("pwg", "pane-wake-guard.py"),
+            ("pw", "pane-wake.py"),
         )
     }
 
@@ -360,6 +382,14 @@ def main():
         ("sg", "pane_text", (1,)),
         # added 2026-11-06 — the observer's process-tree read, driven like `pvc._pid_ttys`.
         ("ser", "_process_table", ()),
+        # added 2026-11-08 — the reap verb's two transport reads, DRIVEN and not merely
+        # listed. An enumeration entry nothing reaches is a false green for exactly the
+        # read it claims to protect (the `mmf` pair above was found that way), and here
+        # the property is load-bearing: `watchers` returning `[]` for an unreadable tree
+        # would reap a worker whose background watcher was merely unobservable.
+        ("rih", "watchers", (1,)), ("rih", "process_start", (1,)),
+        # added 2026-11-08 — the pane wake's viewport reads, driven like `sg.pane_text`.
+        ("pwg", "read_pane", (1,)), ("pw", "read_pane", (1,)),
     ]
     if args.capture:
         print(f"== three-state captures — {os.path.abspath(args.tree)}")

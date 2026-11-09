@@ -239,6 +239,28 @@ def metrics_session_ids(path):
     return ids
 
 
+def local_task_dirs(cwd, names=TASK_DIRS):
+    """Candidate task directories at or above `cwd` — the fast half of `task_dirs_for`.
+
+    Split out so a caller can answer the common case (a worker whose cwd is its vault)
+    without paying for the whole-vault scan.
+    """
+    dirs = []
+    if not cwd:
+        return dirs
+    cur = os.path.abspath(cwd)
+    while True:
+        for name in names:
+            candidate = os.path.join(cur, name)
+            if os.path.isdir(candidate) and candidate not in dirs:
+                dirs.append(candidate)
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return dirs
+
+
 def task_dirs_for(cwd, vault_root=None, names=TASK_DIRS):
     """Candidate task directories: the vault above `cwd`, then every known vault.
 
@@ -248,18 +270,7 @@ def task_dirs_for(cwd, vault_root=None, names=TASK_DIRS):
     read-only; neither is a filesystem-wide search. `names` selects the directory set, so
     the goal/topic lookup walks the same two places.
     """
-    dirs = []
-    if cwd:
-        cur = os.path.abspath(cwd)
-        while True:
-            for name in names:
-                candidate = os.path.join(cur, name)
-                if os.path.isdir(candidate) and candidate not in dirs:
-                    dirs.append(candidate)
-            parent = os.path.dirname(cur)
-            if parent == cur:
-                break
-            cur = parent
+    dirs = local_task_dirs(cwd, names)
     root = vault_root or VAULTS_ROOT
     for vault in sorted(glob.glob(os.path.join(root, "*"))):
         for name in names:
@@ -361,27 +372,57 @@ def find_task(session_id, cwd, vault_root=None):
 
     ⚠️ `grep -l` exiting 1 means "no match", which is the honest answer here and not an
     error — an empty stdout is read as "no task claims this session".
+
+    ⚠️ **Two passes, cwd-derived directories first.** `task_dirs_for` lists the vault above
+    the cwd before every other known vault, and the common case — a worker whose cwd IS its
+    vault — is answered by those few directories in well under a second. A single grep over
+    all of them takes longer than the timeout on a loaded host, and the `except` below then
+    reads that as "no task claims this session": a false `task-unresolved` for a session
+    that has an anchor, which is the unreadable-vs-absent collapse this repo forbids
+    everywhere else. Measured 2026-11-09 — 29 directories, 15.0 s timeout exceeded, and the
+    same session flipping between `would close` and `task-unresolved` across runs minutes
+    apart.
     """
     if not session_id:
         return None
     dirs = task_dirs_for(cwd, vault_root)
     if not dirs:
         return None
+    local = local_task_dirs(cwd)
+    rest = [d for d in dirs if d not in local]
+    handed_off = None
+    for batch in (local, rest):
+        if not batch:
+            continue
+        own, handoff = _grep_task(session_id, batch)
+        if own is not None:
+            return own
+        if handed_off is None and handoff is not None:
+            handed_off = handoff
+    return handed_off
+
+
+def _grep_task(session_id, dirs, timeout=15):
+    """`(own, handed_off)` for one grep pass over `dirs`; either may be `None`.
+
+    Split out of `find_task` so the two passes share one matcher and the ownership rule
+    (`claude_session_id` beats a `metrics_sessions` membership) stays in a single place.
+    """
     try:
         found = subprocess.run(
             ["grep", "-rl", "--fixed-strings", session_id, *dirs],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=timeout,
         )
     except Exception:
-        return None
+        return None, None
     handed_off = None
     for path in sorted((found.stdout or "").splitlines()):
         fm = frontmatter(path)
         if (fm.get("claude_session_id") or "").strip() == session_id:
-            return path, fm, False
+            return (path, fm, False), None
         if handed_off is None and session_id in metrics_session_ids(path):
             handed_off = (path, fm, True)
-    return handed_off
+    return None, handed_off
 
 
 def is_future(value, today):
@@ -445,6 +486,48 @@ def pane_for_session(jump, session_id):
         return None, pmap
     matches = [pane for pane, sid in by_pane.items() if sid == session_id]
     return (matches[0] if len(matches) == 1 else None), pmap
+
+
+def tab_kill(jump, session_id, pane, runner=None):
+    """Re-resolve the pane, then kill it. `0` on a close, `1` on a refusal.
+
+    ⚠️ **Re-resolve immediately before the kill.** `pane` comes from a `wezterm cli list`
+    read taken inside `pane_for_session`, and `kill-pane` is a separate `wezterm`
+    invocation — it re-resolves the id in a new process. A pane id is a lease, not an
+    identifier: it is freed when its pane closes and reassigned after a WezTerm mux
+    restart, so an id that was correct for that read can belong to a different session by
+    the time the kill runs. The window is short — the guards run *before* the resolution
+    (see the note above the `pane = None` line), so it is the resolution itself plus a few
+    prints, not the guards — but it is not zero. `kill-pane` refuses a *dead* pane; it
+    does not refuse a *live* pane that now belongs to someone else. Re-resolving closes
+    the window: a different id, or none, means the lease expired and nothing may be
+    signalled.
+
+    `runner` is a seam for the test only; production passes `subprocess.run`.
+    """
+    fresh_pane, fresh_pmap = pane_for_session(jump, session_id)
+    if fresh_pane != pane:
+        why = (
+            "wezterm cli list unavailable" if fresh_pmap is None
+            else "no single live pane maps to it" if fresh_pane is None
+            else "a different pane holds it"
+        )
+        print(
+            f"❌ error: the pane for {session_id} changed before the kill "
+            f"(pane {pane} → {fresh_pane}, {why}); nothing was signalled"
+        )
+        return 1
+    killed = (runner or subprocess.run)(
+        ["wezterm", "cli", "kill-pane", "--pane-id", str(pane)],
+        capture_output=True, text=True, timeout=10,
+    )
+    if killed.returncode != 0:
+        print(
+            f"❌ error: wezterm refused to close pane {pane} "
+            f"(exit {killed.returncode}): {(killed.stderr or '').strip()}"
+        )
+        return 1
+    return 0
 
 
 def main():
@@ -635,8 +718,9 @@ def main():
         # the guards, which take tens of seconds — a `git status`, a transcript read and a
         # `grep` over every vault's task dirs. A session that exits in that window can have
         # its pid recycled onto an unrelated process, and SIGTERM would land there. One file
-        # read narrows the window to the signal itself. The tab path needs no equivalent:
-        # `wezterm kill-pane` is id-based and refuses a dead pane.
+        # read narrows the window to the signal itself. The tab path below resolves its pane
+        # *after* the guards, so its window is narrower — but `kill-pane` is a separate
+        # wezterm call that re-resolves the id, so it re-resolves too and refuses a change.
         try:
             with open(path, encoding="utf-8") as handle:
                 fresh = json.load(handle)
@@ -662,16 +746,9 @@ def main():
         # else: it exited during the guards. Fall through — the wait proves it gone and the
         # stale-entry cleanup applies, which is the same outcome a delivered signal produces.
     else:
-        killed = subprocess.run(
-            ["wezterm", "cli", "kill-pane", "--pane-id", str(pane)],
-            capture_output=True, text=True, timeout=10,
-        )
-        if killed.returncode != 0:
-            print(
-                f"❌ error: wezterm refused to close pane {pane} "
-                f"(exit {killed.returncode}): {(killed.stderr or '').strip()}"
-            )
-            return 1
+        rc = tab_kill(jump, sid, pane)
+        if rc != 0:
+            return rc
 
     # The registry entry is Claude Code's, not ours, and it deletes it on exit. Wait for
     # that rather than racing it; only a provably dead pid whose entry lingers is removed

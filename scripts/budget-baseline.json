@@ -3,13 +3,13 @@
   "_budget_bytes": 30720,
   "files": {
     "agents/fleet-drive.md": 30505,
-    "agents/fleet-sweep-reader.md": 41638,
+    "agents/fleet-sweep-reader.md": 41628,
     "agents/goal-drive.md": 140817,
     "agents/goal-sweep-reader.md": 167634,
-    "commands/fleet-loop.md": 4402,
+    "commands/fleet-loop.md": 4903,
     "commands/goal-drive.md": 10105,
-    "commands/goal-status.md": 46913,
-    "commands/open.md": 79230,
+    "commands/goal-status.md": 47051,
+    "commands/open.md": 83880,
     "commands/worker-drive.md": 49817
   }
 }

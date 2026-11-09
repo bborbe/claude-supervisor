@@ -47,7 +47,7 @@ Rationale: runbook § Fleet-Manager Command — Rationale and Measured History.
 ⚠️ **Delegate; keep this session for the round.** `Task` is available — anything not the sweep
 goes to a sub-agent, or the round stalls (2026-10-30: 2h30m, 100 rows unmanaged).
 
-⚠️ **Carve-out: 5b, 5c and 5d are acting legs.** They run here, or in a sub-agent granted
+⚠️ **Carve-out: 5b, 5c, 5d and 16 are acting legs.** They run here, or in a sub-agent granted
 write tools (`Bash`, `Edit`, `Write`, `mcp__supervisor__*`); a read-only delegate is not a run of
 them — it prints the count it was told to, not the one it measured.
 
@@ -75,7 +75,7 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 12 | Covered-subject invariant | a covered subject's manager is live | `${CLAUDE_PLUGIN_ROOT}/commands/steps/covered-subject-invariant.md` |
 | 13 | Attention watchers | every tick — arm ONE `Monitor` over the feed, re-arm on expiry/death: `python3 $P/gate-owner-filter.py --feed --self "<this-session-id>" --interval 60` and `python3 $P/answered-watch.py`, never append `2>&1` (stderr = heartbeat) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/attention-watcher.md` |
 | 14 | Auto-compaction | the hand-back reports `context70` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/auto-compaction.md` |
-| 15 | Readings | every tick — take all five readings (commands in the step) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |
+| 15 | Readings | every tick — take all six readings (commands in the step) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |
 | 16 | Open leg | every tick — after Readings | `${CLAUDE_PLUGIN_ROOT}/commands/steps/open.md` |
 | 17 | Voice + notification | every tick — run the `{"gates": []}` prune on every round, and publish only the gates the operator must decide (§ Gate triage classes C, D, E) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/voice-notify.md` |
 | 18 | Persist | the snapshot path is missing or the write failed — run: `python3 $P/fleet-snapshot.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |

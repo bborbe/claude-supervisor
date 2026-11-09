@@ -35,8 +35,15 @@ PATH = "/api/1.0/session-heartbeat"
 LEDGER_PATH = "/api/1.0/session-ledger"
 
 
-def row(session_id, live=True, source="mcp-timer", state="", age_seconds=1):
-    """One heartbeat row in the store's shape."""
+def row(session_id, live=True, source="mcp-timer", state="idle", age_seconds=1):
+    """One heartbeat row in the store's shape.
+
+    ⚠️ **`state` defaults to `"idle"`, not `""`, because every real stamp carries one.** The
+    counter treats a `live: true` row with no `state` as a ghost — a placeholder the store
+    keeps serving after its session exited (measured 2026-11-07: `b3d743ea` and `a1026e2f`,
+    both counted, cap read 51 against 49 processes). A fixture that defaulted to `""` would
+    model a row the store never writes and make every positive case a ghost.
+    """
     return {
         "session_id": session_id,
         "task": "",

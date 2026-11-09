@@ -17,6 +17,7 @@ import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -97,12 +98,40 @@ class Liveness(unittest.TestCase):
             self.m.stop("Manager Layer", "goal")
         self.assertEqual(self.check(), (0, ""))
 
-    def test_rearm_clears_stop_marker(self):
+    def test_rearm_preserves_stop_marker(self):
+        # ⚠️ THE DEFECT THIS FILE EXISTS TO PIN. An arm is a READING — every round takes
+        # one — so an arm that cleared the marker made measuring a stand-down the act
+        # that erased it. Measured 2026-11-07: stood down 12:13, read 12:51, marker gone,
+        # the Fleet Manager read STALE and restarted the session at 13:14.
         with redirect_stdout(io.StringIO()):
             self.m.stop("Manager Layer", "goal")
         self.arm("Manager Layer", 300, age=5000)
+        self.assertTrue(
+            os.path.exists(self.m.path("goal--manager-layer", "stopped")),
+            "an arm must never clear a deliberate stand-down",
+        )
+        self.assertEqual(self.m.classify("goal--manager-layer", time.time())[0], "STOPPED")
+        # And the state verb agrees: the reading still says the subject is stood down.
+        self.assertEqual(self.check()[0], 0)
+
+    def test_resume_clears_the_stop_marker(self):
+        with redirect_stdout(io.StringIO()):
+            self.m.stop("Manager Layer", "goal")
+            self.m.arm("Manager Layer", "goal", 300, resume=True)
         self.assertFalse(os.path.exists(self.m.path("goal--manager-layer", "stopped")))
-        self.assertEqual(self.check()[0], 10)
+        self.assertEqual(self.m.classify("goal--manager-layer", time.time())[0], "OK")
+
+    def test_resume_is_the_only_thing_that_clears_the_marker(self):
+        # Two plain arms and then a resume: the marker survives the first two, so a
+        # stood-down manager cannot be un-stood-down by taking readings.
+        with redirect_stdout(io.StringIO()):
+            self.m.stop("Manager Layer", "goal")
+            self.m.arm("Manager Layer", "goal", 300)
+            self.m.arm("Manager Layer", "goal", 300)
+        self.assertTrue(os.path.exists(self.m.path("goal--manager-layer", "stopped")))
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", "goal", 300, resume=True)
+        self.assertFalse(os.path.exists(self.m.path("goal--manager-layer", "stopped")))
 
     def deliver(self, s):
         """Ack a lapse the way the sender does after the transport returns success."""
@@ -151,6 +180,55 @@ class Liveness(unittest.TestCase):
         self.deliver("goal--manager-layer")
         self.assertIn("goal--manager-layer", self.m.read_notified())
         self.assertNotIn("goal--manager-layer", self.m.read_pending())
+
+    def test_the_first_emission_is_a_firing_and_later_ones_are_marked_retries(self):
+        # One crossing, many polls. The emitted STREAM must say which line is which, or
+        # a consumer counting rows reports the failure rate once per poll — measured
+        # 2026-11-08: 165 firings for ONE `fleet--fleet` crossing.
+        self.arm("Manager Layer", 300, age=5000)
+        rc, first = self.check()
+        self.assertEqual(rc, 10)
+        self.assertIn("STALE goal--manager-layer", first)
+        self.assertNotIn("retry=1", first, "the first emission IS the firing")
+        rc, second = self.check()
+        self.assertEqual(rc, 10, "the retry must still exit 10 or delivery stops")
+        self.assertIn("STALE goal--manager-layer", second)
+        self.assertIn("retry=1", second, "the second emission is a retry of the first")
+        # Same crossing both times: one episode, two emitted lines.
+        self.assertEqual(
+            first.split("crossing=")[1].split()[0],
+            second.split("crossing=")[1].split()[0],
+        )
+
+    def test_the_sender_still_parses_a_retry_line(self):
+        # The only consumer lives outside this repo (`manager-liveness-notify-tick.sh`,
+        # tracked in bborbe/claude) and parses positionally: `grep -E '^(STALE|INVALID|
+        # RECOVERED-PENDING) '` then `awk '{print $2}'`. A prefix marker such as
+        # `RETRY STALE …` would satisfy the retry test above and silently drop every
+        # retry from delivery, so the shape is asserted, not assumed.
+        self.arm("Manager Layer", 300, age=5000)
+        self.check()
+        _, retry_line = self.check()
+        fields = retry_line.split()
+        self.assertIn(fields[0], ("STALE", "INVALID", "RECOVERED-PENDING"))
+        self.assertEqual(fields[1], "goal--manager-layer")
+
+    def test_a_second_crossing_after_the_ack_is_a_new_firing(self):
+        # Deduping an episode must not suppress a LATER one: the new crossing opens its
+        # own `emits` counter and prints without the retry marker. The manager has to
+        # come back and lapse again — backdating the cadence after the ack leaves
+        # `notified` newer than `last_arm` and no new lapse would ever open.
+        self.arm("Manager Layer", 300, age=5000)
+        self.check()  # first crossing
+        self.check()  # a retry of it
+        self.deliver("goal--manager-layer")
+        self.arm("Manager Layer", 300, age=0)  # the manager came back
+        self.check()  # RECOVERED, which clears `notified`
+        self.arm("Manager Layer", 300, age=5000)  # and then lapsed again
+        rc, out = self.check()
+        self.assertEqual(rc, 10)
+        self.assertIn("STALE goal--manager-layer", out)
+        self.assertNotIn("retry=1", out, "a new crossing is a new firing, not a retry")
 
     def test_a_failed_attempt_records_its_producer(self):
         # The durable record must be showable as written by a real failed send: a
@@ -329,20 +407,250 @@ class Liveness(unittest.TestCase):
 
     def test_rearm_after_a_stand_down_resets_the_history(self):
         # The outage gap must never count as cadence. It cannot be filtered at read
-        # time — `arm` deletes the marker that records when the stop happened — so a
-        # restart starts a fresh sample instead.
+        # time — the stop is not a gap the reader can see — so `--stop` leaves a
+        # `.reset` epoch and the first arm consumes it to start a fresh sample. The
+        # MARKER is a separate fact and survives, which is why the reset needed its
+        # own file rather than being inferred from it.
         self.plant_arms("Manager Layer", [11000, 10000, 9000, 8000])
         with redirect_stdout(io.StringIO()):
             self.m.stop("Manager Layer", "goal")
             self.m.arm("Manager Layer", "goal", 300)
         self.assertEqual(len(self.m.read_arms("goal--manager-layer")), 1)
         self.assertIsNone(self.m.observed_interval("goal--manager-layer"))
+        # The stand-down itself is still on disk: resetting the sample must not resume.
+        self.assertTrue(os.path.exists(self.m.path("goal--manager-layer", "stopped")))
+
+    def test_the_reset_is_consumed_so_the_next_arm_keeps_its_history(self):
+        # One-shot, not sticky. A `.reset` that survived would make every arm drop the
+        # history, `observed_gaps` would never return, and every subject would sit on
+        # its reported interval for ever — the frozen-period failure the reset exists to
+        # avoid, reached from the other side.
+        self.plant_arms("Manager Layer", [11000, 10000, 9000, 8000])
+        with redirect_stdout(io.StringIO()):
+            self.m.stop("Manager Layer", "goal")
+            self.m.arm("Manager Layer", "goal", 300)
+        self.assertFalse(os.path.exists(self.m.path("goal--manager-layer", "reset")))
+        self.arm("Manager Layer", 300, age=0)
+        self.assertEqual(len(self.m.read_arms("goal--manager-layer")), 2)
+
+    def test_observed_period_returns_after_four_further_arms(self):
+        # The criterion's own probe: stop, arm, then four more arms — `observed_gaps`
+        # must come back, or the adaptive stale limit never returns and every subject is
+        # measured against a value its manager declared, not the one it runs at.
+        self.plant_arms("Manager Layer", [11000, 10000, 9000, 8000])
+        with redirect_stdout(io.StringIO()):
+            self.m.stop("Manager Layer", "goal")
+            self.m.arm("Manager Layer", "goal", 300)
+        self.assertIsNone(self.m.observed_gaps("goal--manager-layer"))
+        # A controllable clock: four real arms in one test would all land in the same
+        # second, so the gaps would be zero and the assertion would pass without ever
+        # exercising the period arithmetic.
+        clock = [1_700_000_000.0]
+        real = self.m.time.time
+        self.m.time.time = lambda: clock[0]
+        try:
+            for _ in range(4):
+                clock[0] += 900
+                with redirect_stdout(io.StringIO()):
+                    self.m.arm("Manager Layer", "goal", 300)
+        finally:
+            self.m.time.time = real
+        self.assertEqual(len(self.m.read_arms("goal--manager-layer")), 5)
+        self.assertIsNotNone(self.m.observed_gaps("goal--manager-layer"))
+        self.assertEqual(int(self.m.observed_period("goal--manager-layer")), 900)
 
     def test_history_survives_ordinary_rearms(self):
         self.plant_arms("Manager Layer", [3000, 2000, 1000])
         self.arm("Manager Layer", 300, age=0)
         self.assertEqual(len(self.m.read_arms("goal--manager-layer")), 4)
         self.assertEqual(int(self.m.observed_interval("goal--manager-layer")), 1000)
+
+    # --- the conditional floor: a LENGTHENED interval is not a lapse -------------
+    #
+    # A manager that lengthens its `ScheduleWakeup` interval keeps the old short gaps
+    # in its 12-arm window, so a limit built from them sits BELOW the interval it just
+    # declared and every healthy tick reads STALE. The floor is conditional on a
+    # RECORDED shorter-interval gap still being in the window, and a completed gap at
+    # the new interval shorter than half of it switches the floor off — otherwise a
+    # subject that declares one interval and ticks at another (measured 2026-11-08 on
+    # `goal--deploy-and-merge-gates-become-standing-allow-rules`, declared 3600, gaps
+    # ~900) would have its lapse detection loosened, the opposite of what this file
+    # exists for.
+
+    # Real `.arms` epochs, read 2026-11-08 from the machine's sweep-gate state dir.
+    WEEKLY = [1794093605, 1794094567, 1794095525, 1794096495, 1794097745,
+              1794128286, 1794129254, 1794130333, 1794130564, 1794134105,
+              1794137848, 1794141605]
+    CLAIM = [1793272319, 1793281339, 1793372864, 1793373995, 1793375081,
+             1793376171, 1793377295, 1793378428, 1793379651, 1793442283,
+             1793445014, 1793448709]
+    DEPLOY = [1794121268, 1794122169, 1794123068, 1794124030, 1794124931,
+              1794125769, 1794126669, 1794127695, 1794146792, 1794147727,
+              1794149287, 1794150041]
+
+    def arms(self, epochs, intervals, topic="Manager Layer"):
+        """Write `<slug>.arms`; an interval of None writes a LEGACY single-column line."""
+        s = self.m.slug(topic, "goal")
+        body = "".join(
+            f"{e}\n" if iv is None else f"{e} {iv}\n"
+            for e, iv in zip(epochs, intervals)
+        )
+        with open(self.m.path(s, "arms"), "w") as fh:
+            fh.write(body)
+
+    def limit_at(self, age, interval, topic="Manager Layer"):
+        """Write `<interval>` to `.cadence`, age it by `age`, and read the detail."""
+        with open(self.m.path(self.m.slug(topic, "goal"), "cadence"), "w") as fh:
+            fh.write(f"{interval}\n")
+        self.set_arm_time(topic, time.time() - age)
+        return self.m.classify(self.m.slug(topic, "goal"), time.time())
+
+    def test_a_lengthened_interval_floors_the_limit_from_the_first_tick(self):
+        # SC1(a). 11 arms at 900, then the 12th declares 3600 and ends a 960 s gap
+        # that was armed under 900 — so the window still holds the old cadence.
+        epochs = [1794000000 + 960 * i for i in range(12)]
+        self.arms(epochs, [900] * 11 + [3600])
+        state, detail = self.limit_at(3650, 3600)
+        self.assertEqual(state, "OK", detail)
+        self.assertIn("limit=3780s", detail)  # uncapped code says 1140
+
+    def test_the_floor_holds_on_the_second_tick_after_a_lengthening(self):
+        # One completed gap at the new interval (3650 s) does not disprove it: 3650
+        # is not shorter than 3600/2, so the floor stays until the 900 s gaps age out.
+        epochs = [1794000000 + 960 * i for i in range(12)] + [1794000000 + 960 * 11 + 3650]
+        self.arms(epochs, [900] * 11 + [3600] * 2)
+        state, detail = self.limit_at(3650, 3600)
+        self.assertEqual(state, "OK", detail)
+        self.assertIn("limit=3780s", detail)
+
+    def test_the_real_weekly_subject_reads_ok_on_its_new_cadence(self):
+        # SC1(b). The live history behind the row, written EXACTLY as it is on disk —
+        # a legacy single-column ring. Annotating the intervals here would test a file
+        # the format never produced, and the floor would look like it worked on the
+        # motivating subject when the real one still read STALE.
+        self.arms(self.WEEKLY, [None] * 12)
+        state, detail = self.limit_at(3757, 3600)
+        self.assertEqual(state, "OK", detail)
+        self.assertIn("limit=3937s", detail)  # uncapped code says 2877
+
+    def test_a_legacy_window_is_floored_by_its_gap_quantile(self):
+        # The same history, one arm later: the ring is now 11 legacy lines plus one
+        # recorded 3600, so the RECORDED rise test still sees nothing shorter. The
+        # gap-quantile limb is what keeps the floor on — p75 3642 s against 3600.
+        self.arms(self.WEEKLY, [None] * 11 + [3600])
+        state, detail = self.limit_at(3757, 3600)
+        self.assertEqual(state, "OK", detail)
+        self.assertIn("limit=3937s", detail)
+
+    def test_arm_keeps_each_lines_own_interval(self):
+        # SC1(c). The rise can only fire if `arm` PRESERVES earlier lines' intervals.
+        # Rebuilding the ring from epoch-only `read_arms()` would leave only the newest
+        # line carrying one, and the floor would never apply to a real subject.
+        clock = [1794000000.0]
+        with mock.patch.object(self.m.time, "time", lambda: clock[0]):
+            for _ in range(11):
+                with redirect_stdout(io.StringIO()):
+                    self.m.arm("Manager Layer", "goal", 900)
+                clock[0] += 960
+            with redirect_stdout(io.StringIO()):
+                self.m.arm("Manager Layer", "goal", 3600)
+        s = self.m.slug("Manager Layer", "goal")
+        with open(self.m.path(s, "arms")) as fh:
+            lines = [ln.split() for ln in fh.read().splitlines() if ln.strip()]
+        self.assertEqual(len(lines), 12)
+        self.assertEqual([ln[1] for ln in lines], ["900"] * 11 + ["3600"])
+        # ... and the floored limit is what a live subject would then read.
+        state, detail = self.limit_at(3650, 3600)
+        self.assertEqual(state, "OK", detail)
+        self.assertIn("limit=3780s", detail)
+
+    def test_a_legacy_line_stays_single_column_when_the_ring_is_rewritten(self):
+        # SC2(c)/SC3. Existing files on this machine are single-column; a rewrite must
+        # not invent an interval for them, and `read_arms` must keep returning epochs.
+        self.arms([1794000000 + 960 * i for i in range(11)], [None] * 11)
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", "goal", 3600)
+        s = self.m.slug("Manager Layer", "goal")
+        with open(self.m.path(s, "arms")) as fh:
+            lines = [ln.split() for ln in fh.read().splitlines() if ln.strip()]
+        self.assertEqual([len(ln) for ln in lines], [1] * 11 + [2])
+        self.assertEqual(len(self.m.read_arms(s)), 12)
+
+    def test_a_historic_stop_is_still_bounded(self):
+        # SC2(a). A constant 900 s interval, one 91 525 s stop in the window: the floor
+        # must not apply (no recorded shorter interval), so the cap still bounds it.
+        self.arms(self.CLAIM, [900] * 12)
+        state, detail = self.limit_at(3300, 900)  # just past the 3237 s limit
+        self.assertEqual(state, "STALE", detail)
+        self.assertIn("limit=3237s", detail)
+
+    def test_a_declared_interval_that_never_ticks_at_it_is_not_floored(self):
+        # SC2(b). deploy-and-merge declares 3600 and ticks at ~900. Neither rise limb
+        # fires — no recorded interval below 3600, and its p75 is 994 s against the
+        # 1800 s threshold — so the limit stays where it is today.
+        for label, intervals in (("recorded", [3600] * 12), ("legacy", [None] * 12)):
+            with self.subTest(window=label):
+                self.arms(self.DEPLOY, intervals)
+                state, detail = self.limit_at(1800, 3600)
+                self.assertEqual(state, "STALE", detail)
+                self.assertIn("limit=1740s", detail)
+
+    def test_the_first_arm_after_deploy_does_not_loosen_a_mixed_file(self):
+        # SC2(d). Every live file becomes a mixed legacy+new file at its first post-
+        # deploy arm. A legacy line carries no interval, so it is neither shorter nor
+        # longer than the declared one — an implementation that treats "unknown" as
+        # "shorter" would floor deploy-and-merge to 3780 and hide its lapse.
+        self.arms(self.DEPLOY + [self.DEPLOY[-1] + 900], [None] * 12 + [3600])
+        state, detail = self.limit_at(1800, 3600)
+        self.assertEqual(state, "STALE", detail)
+        self.assertIn("limit=1740s", detail)
+
+    def test_a_rise_then_a_shorter_actual_cadence_is_not_floored(self):
+        # SC2(e). A real rise, but the manager keeps ticking at 900. The first completed
+        # 900 s gap armed under 3600 disproves the new interval, so the floor holds for
+        # exactly one tick rather than for eleven.
+        epochs = [1794000000 + 900 * i for i in range(12)]
+        self.arms(epochs, [900] * 6 + [3600] * 6)
+        state, detail = self.limit_at(1800, 3600)
+        self.assertEqual(state, "STALE", detail)
+        self.assertIn("limit=1080s", detail)
+
+    def test_an_interval_decrease_is_not_a_rise(self):
+        # SC2(f). 3600 -> 900. No recorded interval is BELOW the declared one, so a
+        # rule written with `!=` instead of `<` would floor here and loosen the limit.
+        epochs = [1794000000 + 3600 * i for i in range(6)]
+        epochs += [epochs[-1] + 960 * (i + 1) for i in range(6)]
+        self.arms(epochs, [3600] * 6 + [900] * 6)
+        _, detail = self.limit_at(1800, 900)
+        self.assertIn("limit=2580s", detail)
+
+    def test_the_floor_survives_a_gap_above_half_the_new_interval(self):
+        # SC2(g). The accepted residue: gaps between I/2 and I do not disprove the new
+        # interval, so the floor holds until the short gaps age out. Pinned as
+        # deliberate rather than accidental.
+        epochs = [1794000000 + 900 * i for i in range(6)]
+        epochs += [epochs[-1] + 1900 * (i + 1) for i in range(6)]
+        self.arms(epochs, [900] * 6 + [3600] * 6)
+        _, detail = self.limit_at(1800, 3600)
+        self.assertIn("limit=3780s", detail)
+
+    def test_the_floor_lifts_a_limit_that_sits_just_below_the_declared_interval(self):
+        # The only subject the fleet census moved (2026-11-09): it declares 3600 and
+        # ticks at ~3540, so today's limit of 3768 s sits 12 s BELOW its own declared
+        # interval — the same defect in miniature. The floor lifts it to exactly 3780.
+        # Pinned because a rise this small is easy to mistake for a regression.
+        epochs = [1792747773, 1792750092, 1792751053, 1792752013, 1792752565,
+                  1792756151, 1792759690, 1792763232, 1792766768]
+        self.arms(epochs + [1792766768 + 3600], [None] * 10)
+        _, detail = self.limit_at(1000, 3600)
+        self.assertIn("limit=3780s", detail)
+
+    def test_read_arms_returns_epochs_from_a_mixed_file(self):
+        # SC3. The epoch reader is what `observed_gaps` and `manager-receipt.py` use;
+        # an interval column must never be read as an epoch.
+        self.arms([1794000000, 1794000960, 1794001920], [900, None, 3600])
+        self.assertEqual(self.m.read_arms("goal--manager-layer"),
+                         [1794000000.0, 1794000960.0, 1794001920.0])
 
     def test_unreadable_cadence_is_flagged(self):
         with open(self.m.path("broken", "cadence"), "w") as fh:
@@ -413,10 +721,17 @@ class StateVerb(unittest.TestCase):
     def test_state_exits_zero_for_every_state(self):
         # The state IS the answer. A non-zero exit would make a stood-down
         # manager read as a failure to anything wrapping the call, which is the
-        # opposite of what STOPPED means.
-        for topic in ("Nothing Here",):
-            rc, _ = self.state("--state", "--subject", topic, "--branch", "goal")
-            self.assertEqual(rc, 0, topic)
+        # opposite of what STOPPED means. A never-armed subject is a state only once
+        # its page resolves — without one it is the unresolvable-name refusal
+        # (`StateResolution`), which is not a state.
+        with tempfile.TemporaryDirectory() as vault:
+            os.makedirs(os.path.join(vault, "24 Goals"))
+            open(os.path.join(vault, "24 Goals", "Nothing Here.md"), "w").close()
+            rc, out = self.state(
+                "--state", "--subject", "Nothing Here", "--branch", "goal", "--vault", vault
+            )
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.startswith("UNARMED\t"), out)
 
     def test_state_requires_a_subject(self):
         with self.assertRaises(SystemExit):
@@ -655,6 +970,66 @@ class LegacyRecordMigration(unittest.TestCase):
         self.assertEqual(0, rc, out.getvalue())
         self.assertEqual("", out.getvalue())
 
+    def test_a_legacy_stand_down_survives_an_arm(self):
+        # ⚠️ The same defect one surface out. `migrate_legacy` used to DELETE the flat
+        # `.stopped`, so the first arm after the upgrade erased a pre-split stand-down —
+        # an arm that must never resume anything, doing exactly that through migration.
+        # It is renamed onto the prefixed path instead: the marker lives, the flat file
+        # is retired, and `--arm --resume` can still clear it.
+        open(self.m.path("old-subject", "stopped"), "w").write("2026-10-19T22:37:09+0200\n")
+        open(self.m.path("old-subject", "cadence"), "w").write("300\n")
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.m.arm("Old Subject", "goal", 60)
+        self.assertFalse(os.path.exists(self.m.path("old-subject", "stopped")))
+        self.assertTrue(os.path.exists(self.m.path("goal--old-subject", "stopped")))
+        self.assertEqual(
+            self.m.classify("goal--old-subject", time.time())[0], "STOPPED"
+        )
+
+    def test_resume_clears_a_migrated_legacy_stand_down(self):
+        open(self.m.path("old-subject", "stopped"), "w").write("2026-10-19T22:37:09+0200\n")
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.m.arm("Old Subject", "goal", 60, resume=True)
+        self.assertFalse(os.path.exists(self.m.path("goal--old-subject", "stopped")))
+        self.assertEqual(self.m.classify("goal--old-subject", time.time())[0], "OK")
+
+    def test_the_pre_split_probe_still_migrates_and_reads_stopped(self):
+        # The criterion's own probe, end to end through the CLI: plant the pre-split
+        # shape (cadence, arms, reset, stopped), arm, then read the subject back.
+        for ext, body in (
+            ("cadence", "300\n"),
+            ("arms", "1700000000\n1700000900\n1700001800\n1700002700\n"),
+            ("reset", "1700002800\n"),
+            ("stopped", "2026-11-07T12:13:00+0100\n"),
+        ):
+            with open(self.m.path("probe-subject", ext), "w") as fh:
+                fh.write(body)
+        out, err, old = io.StringIO(), io.StringIO(), sys.argv
+        sys.argv = ["manager-liveness.py", "--arm", "--subject", "Probe Subject",
+                    "--branch", "goal", "--interval", "900"]
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        self.assertEqual(0, rc)
+        self.assertIn(
+            "migrated legacy probe-subject (cadence, arms, reset)", err.getvalue()
+        )
+        for ext in ("cadence", "arms", "reset", "stopped"):
+            self.assertFalse(
+                os.path.exists(self.m.path("probe-subject", ext)),
+                f"the unprefixed {ext} must be retired",
+            )
+        stated = io.StringIO()
+        with redirect_stdout(stated):
+            self.m.state("Probe Subject", "goal", self.tmp.name, time.time())
+        self.assertTrue(stated.getvalue().startswith("STOPPED\t"), stated.getvalue())
+        checked = io.StringIO()
+        with redirect_stdout(checked):
+            self.m.check()
+        self.assertNotIn("STALE goal--probe-subject", checked.getvalue())
+
     def test_a_flat_record_with_no_twin_still_reports_stale(self):
         # The control: the guard must not swallow a genuinely dead manager.
         flat = self.m.path("dead-subject", "cadence")
@@ -738,3 +1113,260 @@ class UnarmedAndLegacy(unittest.TestCase):
             rc = self.m.check()
         self.assertEqual(self.m.EXIT_STALE, rc)
         self.assertIn("STALE scanned-legacy", out.getvalue())
+
+
+class StateResolution(unittest.TestCase):
+    """`--state` tells every answer apart by its first token — and refuses an unknown name.
+
+    Measured 2026-11-07: a cadence table named five managers `UNARMED`. Four were `OK` under
+    their full names and one was `STOPPED` on the goal branch. Two causes read identically
+    as `UNARMED`: an abbreviated label (its slug finds no record) and a probe on the wrong
+    branch. Acting on `UNARMED` arms a loop, so both now answer something else. Each test
+    runs in its own `MANAGER_LIVENESS_STATE_DIR` and asserts the first token only.
+    """
+
+    FULL = "Several Clusters and the Mac Write One Vault"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.vault = tempfile.TemporaryDirectory()
+        self.addCleanup(self.vault.cleanup)
+        self.m = load(self.tmp.name)
+        self.addCleanup(lambda: os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None))
+        for folder, name in (("24 Goals", self.FULL), ("23 Topics", "A Topic")):
+            os.makedirs(os.path.join(self.vault.name, folder), exist_ok=True)
+            open(os.path.join(self.vault.name, folder, name + ".md"), "w").close()
+
+    def run_cli(self, *argv):
+        out, err, old = io.StringIO(), io.StringIO(), sys.argv
+        sys.argv = ["manager-liveness.py", *argv, "--vault", self.vault.name]
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        return rc, out.getvalue(), err.getvalue()
+
+    def first_token(self, *argv):
+        rc, out, _ = self.run_cli("--state", *argv)
+        self.assertEqual(0, rc, out)
+        return out.split("\t", 1)[0]
+
+    def quiet(self, fn, *args):
+        with redirect_stdout(io.StringIO()):
+            fn(*args)
+
+    def age(self, subject, branch, seconds):
+        p = self.m.path(self.m.slug(subject, branch), "cadence")
+        t = time.time() - seconds
+        os.utime(p, (t, t))
+
+    # --- one fixture per state -------------------------------------------------
+
+    def test_page_resolves_and_no_record_anywhere_is_unarmed(self):
+        self.assertEqual("UNARMED", self.first_token("--subject", self.FULL, "--branch", "goal"))
+
+    def test_a_topic_page_also_resolves_the_subject(self):
+        self.assertEqual("UNARMED", self.first_token("--subject", "a topic", "--branch", "topic"))
+
+    def test_record_on_goal_probed_on_topic_is_wrong_branch(self):
+        self.quiet(self.m.arm, self.FULL, "goal", 900)
+        self.quiet(self.m.stop, self.FULL, "goal")
+        rc, out, _ = self.run_cli("--state", "--subject", self.FULL, "--branch", "topic")
+        self.assertEqual(0, rc)
+        self.assertTrue(out.startswith("WRONG-BRANCH\t"), out)
+        self.assertIn("record is on branch goal", out)
+        # Control on the same record: the right branch still reads the real state.
+        self.assertEqual("STOPPED", self.first_token("--subject", self.FULL, "--branch", "goal"))
+
+    def test_wrong_branch_wins_even_without_a_page(self):
+        # The record proves the subject exists; the page test is never reached.
+        self.quiet(self.m.arm, "Pageless Goal", "goal", 900)
+        self.assertEqual(
+            "WRONG-BRANCH", self.first_token("--subject", "Pageless Goal", "--branch", "topic")
+        )
+
+    def test_unresolvable_name_is_refused_not_unarmed(self):
+        self.quiet(self.m.arm, self.FULL, "goal", 900)
+        rc, out, err = self.run_cli("--state", "--subject", "Several Clusters")
+        self.assertEqual(self.m.EXIT_UNRESOLVED, rc)
+        self.assertNotEqual(0, rc)
+        self.assertEqual("", out, "a refusal prints no state for a reader to parse")
+        self.assertIn("'Several Clusters'", err)
+        # Control on the same run: the full name answers.
+        rc, out, _ = self.run_cli("--state", "--subject", self.FULL)
+        self.assertEqual(0, rc)
+        self.assertTrue(out.startswith("OK\t"), out)
+
+    def test_unresolvable_name_is_refused_with_an_explicit_branch_too(self):
+        rc, out, _ = self.run_cli("--state", "--subject", "Several Clusters", "--branch", "goal")
+        self.assertEqual(self.m.EXIT_UNRESOLVED, rc)
+        self.assertEqual("", out)
+
+    def test_the_fleet_branch_has_no_page_and_still_reads_unarmed(self):
+        self.assertEqual(
+            "UNARMED", self.first_token("--subject", "Fleet Manager", "--branch", "fleet")
+        )
+
+    def test_a_goal_page_under_23_goals_resolves(self):
+        # `private-*` / `seibert-*` vaults keep goals in `24 Goals`; the `24 Tasks` ones in
+        # `23 Goals`. A page in the second folder is proof the subject exists.
+        os.makedirs(os.path.join(self.vault.name, "23 Goals"), exist_ok=True)
+        open(os.path.join(self.vault.name, "23 Goals", "Legacy Goal.md"), "w").close()
+        self.assertEqual("UNARMED", self.first_token("--subject", "Legacy Goal", "--branch", "goal"))
+
+    def test_a_name_collision_across_tiers_does_not_read_wrong_branch(self):
+        # Goal and topic pages are named independently, so an armed TOPIC may share a name
+        # with a never-armed GOAL. The goal probe asked about the goal tier, which has no
+        # record: that is UNARMED, and round-liveness arms it. Reporting WRONG-BRANCH here
+        # would leave the goal's loop unarmed forever.
+        open(os.path.join(self.vault.name, "24 Goals", "Shared Name.md"), "w").close()
+        self.quiet(self.m.arm, "Shared Name", "topic", 900)
+        self.assertEqual(
+            "UNARMED", self.first_token("--subject", "Shared Name", "--branch", "goal")
+        )
+        # Control: the topic probe on the same name reads the armed record.
+        self.assertEqual("OK", self.first_token("--subject", "Shared Name", "--branch", "topic"))
+
+    def test_a_page_on_the_probed_branch_wins_over_a_same_named_page_elsewhere(self):
+        # Both tiers hold a page under one name: a goal (armed, with a record) and a topic
+        # (never armed). Probing the TOPIC must read UNARMED -- the goal is a different
+        # subject that shares the name. A goal-first page test that reports WRONG-BRANCH here
+        # leaves the topic's loop unarmed forever.
+        open(os.path.join(self.vault.name, "24 Goals", "Twin Name.md"), "w").close()
+        os.makedirs(os.path.join(self.vault.name, "23 Topics"), exist_ok=True)
+        open(os.path.join(self.vault.name, "23 Topics", "Twin Name.md"), "w").close()
+        self.quiet(self.m.arm, "Twin Name", "goal", 900)
+        self.assertEqual("UNARMED", self.first_token("--subject", "Twin Name", "--branch", "topic"))
+        # Control: the goal probe still reads its own armed record.
+        self.assertEqual("OK", self.first_token("--subject", "Twin Name", "--branch", "goal"))
+
+    def test_wrong_branch_names_every_other_branch_carrying_a_record(self):
+        open(os.path.join(self.vault.name, "24 Goals", "Wide Goal.md"), "w").close()
+        self.quiet(self.m.arm, "Wide Goal", "goal", 900)
+        self.quiet(self.m.arm, "Wide Goal", "fleet", 900)
+        rc, out, _ = self.run_cli("--state", "--subject", "Wide Goal", "--branch", "topic")
+        self.assertEqual(0, rc)
+        self.assertTrue(out.startswith("WRONG-BRANCH\t"), out)
+        self.assertIn("record is on branch goal", out)
+        self.assertIn("also fleet", out)
+
+    def test_the_fleet_branch_is_exempt_from_the_wrong_branch_check(self):
+        # The fleet manager has no page by design, so another tier's record must not turn a
+        # fleet probe into WRONG-BRANCH — the documented exemption, which the tier check
+        # must not run ahead of.
+        self.quiet(self.m.arm, self.FULL, "goal", 900)
+        self.assertEqual(
+            "UNARMED", self.first_token("--subject", self.FULL, "--branch", "fleet")
+        )
+
+    def test_ok(self):
+        self.quiet(self.m.arm, self.FULL, "goal", 900)
+        self.assertEqual("OK", self.first_token("--subject", self.FULL, "--branch", "goal"))
+
+    def test_stale(self):
+        self.quiet(self.m.arm, self.FULL, "goal", 300)
+        self.age(self.FULL, "goal", 100000)
+        self.assertEqual("STALE", self.first_token("--subject", self.FULL, "--branch", "goal"))
+
+    def test_stopped(self):
+        self.quiet(self.m.arm, self.FULL, "goal", 900)
+        self.quiet(self.m.stop, self.FULL, "goal")
+        self.assertEqual("STOPPED", self.first_token("--subject", self.FULL, "--branch", "goal"))
+
+    # --- SC4 regression guard: classify() measures the OBSERVED period ---------
+
+    def test_requested_interval_is_not_the_limit(self):
+        # `.cadence` says 900 s; the manager really re-arms every ~1244 s because each round
+        # waits on its sweep and drive legs. Age 1300 s is inside one observed period +
+        # SLACK (1424 s) and outside the requested 900 + SLACK (1080 s): a reader that used
+        # the requested value would say STALE between two healthy rounds.
+        s = self.m.slug(self.FULL, "goal")
+        now = time.time()
+        self.m.write_atomic(self.m.path(s, "cadence"), "900\n")
+        arms = [now - 1300 - 1244 * k for k in range(5, -1, -1)]
+        self.m.write_atomic(self.m.path(s, "arms"), "".join(f"{v:.0f}\n" for v in arms))
+        os.utime(self.m.path(s, "cadence"), (now - 1300, now - 1300))
+        state, detail = self.m.classify(s, now)
+        self.assertEqual("OK", state, detail)
+        self.assertIn("(observed)", detail)
+
+
+class StoodDownPast(unittest.TestCase):
+    """--stood-down-past: the selection half of the stood-down-manager close.
+
+    The load-bearing properties: the bound is on the marker's own timestamp, not on any
+    file mtime; a SLEEPING subject is excluded structurally because a sleep writes
+    `.sleeping` and never `.stopped`; and an empty or unreadable state dir is reported,
+    never rendered as "nothing stood down".
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def marker(self, slug, age_seconds):
+        when = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+        self.m.write_atomic(
+            self.m.path(slug, "stopped"), when.strftime("%Y-%m-%dT%H:%M:%S%z") + "\n"
+        )
+
+    def run_verb(self, minutes):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.m.stood_down_past(minutes)
+        return rc, [ln for ln in out.getvalue().splitlines() if ln]
+
+    def test_selects_only_past_bound(self):
+        self.marker("goal--old", 3 * 3600)
+        self.marker("goal--fresh", 10 * 60)
+        rc, rows = self.run_verb(60)
+        self.assertEqual(0, rc)
+        self.assertEqual(["goal--old"], [r.split("\t")[1] for r in rows])
+
+    def test_oldest_first(self):
+        self.marker("goal--newer", 2 * 3600)
+        self.marker("goal--oldest", 9 * 3600)
+        rc, rows = self.run_verb(60)
+        self.assertEqual(0, rc)
+        self.assertEqual(["goal--oldest", "goal--newer"], [r.split("\t")[1] for r in rows])
+        self.assertGreater(int(rows[0].split("\t")[0]), int(rows[1].split("\t")[0]))
+
+    def test_sleeping_is_never_selected(self):
+        # A date-gated wait writes .sleeping and never .stopped, however long it lasts.
+        self.m.write_atomic(self.m.path("goal--asleep", "sleeping"), "2099-01-01T00:00:00+0000\n")
+        self.marker("goal--stopped", 5 * 3600)
+        rc, rows = self.run_verb(60)
+        self.assertEqual(0, rc)
+        self.assertEqual(["goal--stopped"], [r.split("\t")[1] for r in rows])
+
+    def test_bound_is_inclusive_of_nothing_and_empty_is_a_real_answer(self):
+        self.marker("goal--old", 3 * 3600)
+        rc, rows = self.run_verb(100000)
+        self.assertEqual(0, rc)
+        self.assertEqual([], rows)
+
+    def test_unreadable_marker_is_reported_not_guessed(self):
+        self.marker("goal--good", 3 * 3600)
+        self.m.write_atomic(self.m.path("goal--junk", "stopped"), "not a timestamp\n")
+        err = io.StringIO()
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = self.m.stood_down_past(60)
+        self.assertEqual(0, rc)
+        self.assertEqual(["goal--good"], [r.split("\t")[1] for r in out.getvalue().splitlines() if r])
+        self.assertIn("unreadable stopped marker", err.getvalue())
+
+    def test_unreadable_state_dir_exits_two(self):
+        with tempfile.TemporaryDirectory() as gone:
+            m = load(os.path.join(gone, "does-not-exist"))
+            err = io.StringIO()
+            with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                rc = m.stood_down_past(60)
+        self.assertEqual(2, rc)
+        self.assertIn("state dir unreadable", err.getvalue())
