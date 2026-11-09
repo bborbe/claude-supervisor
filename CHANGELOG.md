@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.264.4
 
 - docs: **`server/supervisor.mjs` is marked DEPRECATED as the live MCP surface, because it is not the supervisor tool any session binds.** The live tool is the Go `claude-wrapper` daemon at `http://127.0.0.1:18090/supervisor/mcp` — every `cc-*` launcher loads `~/.claude/mcp-private-personal.json` with `--strict-mcp-config`, and this plugin ships no `.mcp.json` of its own. Nothing on the operator's machine starts the JS server: it is reachable only from the drill scripts and from `scripts/mcp-start.py`, the plugin's own launcher for a deployment that wires an `.mcp.json`. Measured 2026-11-09: a headless-spawn model fix was written, tested and then discarded here, because the live path was `bborbe/claude-wrapper` `pkg/roster_mcp.go`. A banner now sits at the top of the file, `CLAUDE.md` § Where a worker runs names the real surface, and the Layout table no longer calls it "the MCP server". ⚠️ A prose banner is not a control — the operator's machine also carries a `PreToolUse` deny hook on this path, and that hook is what actually stops the edit.
 ## v0.264.3
