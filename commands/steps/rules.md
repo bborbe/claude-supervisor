@@ -76,7 +76,23 @@ Before naming a cause in Step 5, confirm it against the system it is about — `
 
 Measured 2026-10-12 on a cold `v0.130.0` round: rows 3 (`orphan=46`, `collision=1`), 8 (`ledger=16`) and 11 (`blocked=3`) each held, none was read, and the mandatory `📋 Open with the operator` render was omitted.
 
-⚠️ **"Not in context" is not the only stale case — a body you still hold can be out of date.** After `/reload-plugins` the session keeps the body it read at session start: the paths were pinned to the version directory current then, the disk has moved since, and the rule above sees a body that *is* in context and re-reads nothing. So before executing a step you already hold: run `shasum -a 256 <step file>`, compare it with the hash recorded for that path, and re-read the file when they differ. Record at read time with `mkdir -p ~/.claude/state/step-body-hashes && shasum -a 256 <step file> >> ~/.claude/state/step-body-hashes/<session-id>.txt` — one target, the same in every router. ⚠️ **A missing record is a stale verdict, not a skip.** The case this rule exists for is a body read before it did, so there is nothing to compare against — re-read the file and record the current hash, once. Reading "no record" as "unchanged" reproduces the defect exactly, in the one round that matters most. **When the compare fires, print one line naming the step, `read under <hash>` and `now <hash>`, then re-read** — a refresh nobody can see in the round's own output is indistinguishable from no refresh at all.
+⚠️ **"Not in context" is not the only stale case — a body you still hold can be out of date.** After `/reload-plugins` the session keeps the body it read at session start: the paths were pinned to the version directory current then, the disk has moved since, and the rule above sees a body that *is* in context and re-reads nothing. So before executing a step you already hold, compare the file's current `shasum -a 256` against the hash recorded for it, and re-read when they differ.
+
+⚠️ **Key the record on the step's path *inside the plugin*, never its absolute path.** `${CLAUDE_PLUGIN_ROOT}` resolves under `~/.claude/plugins/cache/…/<version>/` (`docs/fleet-surface.md` § the probe and the lever), so an absolute path changes at every release — keying on it forces a blanket re-read at each bump, which is the version trigger this section rejects. The key is `<rel>`: the step file's path relative to the plugin root, e.g. `commands/steps/keepalive.md`.
+
+⚠️ **The session id is `$CLAUDE_CODE_SESSION_ID`, and the ledger holds ONE line per step.** An append-only file grows without bound and leaves several hashes per step with no stated winner; rewrite the entry instead:
+
+```bash
+L=~/.claude/state/step-body-hashes/$CLAUDE_CODE_SESSION_ID.txt
+mkdir -p "$(dirname "$L")"
+grep -v "  <rel>$" "$L" 2>/dev/null > "$L.new"
+shasum -a 256 "<file>" | awk -v k="<rel>" '{print $1 "  " k}' >> "$L.new"
+mv "$L.new" "$L"
+```
+
+Compare with `grep "  <rel>$" "$L" | awk '{print $1}'`. One target, the same in every router.
+
+⚠️ **A missing record is a stale verdict, not a skip.** The case this rule exists for is a body read before it did, so there is nothing to compare against — re-read the file and record it, once. Reading "no record" as "unchanged" reproduces the defect exactly, in the one round that matters most. **When the compare fires, print one line naming the step, `read under <hash>` and `now <hash>`, then re-read** — a refresh nobody can see in the round's own output is indistinguishable from no refresh at all.
 
 ⚠️ **The measure is the file's content, never the plugin version.** Measured 2026-11-08 20:48: four rounds ran against `0.251.3` step files while five releases shipped, and all four step files the round reads were byte-identical — what moved was the version segment in every path. A version trigger fires on every release (a blanket re-read by another name) while still missing a step file edited in place. Measured 2026-11-05: six rounds on `0.240.0` skipped the keepalive leg for 80 minutes, because the Fleet Manager still held the `0.238.5` body, which carries no park-nudge procedure.
 
