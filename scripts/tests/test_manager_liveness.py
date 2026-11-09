@@ -181,6 +181,55 @@ class Liveness(unittest.TestCase):
         self.assertIn("goal--manager-layer", self.m.read_notified())
         self.assertNotIn("goal--manager-layer", self.m.read_pending())
 
+    def test_the_first_emission_is_a_firing_and_later_ones_are_marked_retries(self):
+        # One crossing, many polls. The emitted STREAM must say which line is which, or
+        # a consumer counting rows reports the failure rate once per poll — measured
+        # 2026-11-08: 165 firings for ONE `fleet--fleet` crossing.
+        self.arm("Manager Layer", 300, age=5000)
+        rc, first = self.check()
+        self.assertEqual(rc, 10)
+        self.assertIn("STALE goal--manager-layer", first)
+        self.assertNotIn("retry=1", first, "the first emission IS the firing")
+        rc, second = self.check()
+        self.assertEqual(rc, 10, "the retry must still exit 10 or delivery stops")
+        self.assertIn("STALE goal--manager-layer", second)
+        self.assertIn("retry=1", second, "the second emission is a retry of the first")
+        # Same crossing both times: one episode, two emitted lines.
+        self.assertEqual(
+            first.split("crossing=")[1].split()[0],
+            second.split("crossing=")[1].split()[0],
+        )
+
+    def test_the_sender_still_parses_a_retry_line(self):
+        # The only consumer lives outside this repo (`manager-liveness-notify-tick.sh`,
+        # tracked in bborbe/claude) and parses positionally: `grep -E '^(STALE|INVALID|
+        # RECOVERED-PENDING) '` then `awk '{print $2}'`. A prefix marker such as
+        # `RETRY STALE …` would satisfy the retry test above and silently drop every
+        # retry from delivery, so the shape is asserted, not assumed.
+        self.arm("Manager Layer", 300, age=5000)
+        self.check()
+        _, retry_line = self.check()
+        fields = retry_line.split()
+        self.assertIn(fields[0], ("STALE", "INVALID", "RECOVERED-PENDING"))
+        self.assertEqual(fields[1], "goal--manager-layer")
+
+    def test_a_second_crossing_after_the_ack_is_a_new_firing(self):
+        # Deduping an episode must not suppress a LATER one: the new crossing opens its
+        # own `emits` counter and prints without the retry marker. The manager has to
+        # come back and lapse again — backdating the cadence after the ack leaves
+        # `notified` newer than `last_arm` and no new lapse would ever open.
+        self.arm("Manager Layer", 300, age=5000)
+        self.check()  # first crossing
+        self.check()  # a retry of it
+        self.deliver("goal--manager-layer")
+        self.arm("Manager Layer", 300, age=0)  # the manager came back
+        self.check()  # RECOVERED, which clears `notified`
+        self.arm("Manager Layer", 300, age=5000)  # and then lapsed again
+        rc, out = self.check()
+        self.assertEqual(rc, 10)
+        self.assertIn("STALE goal--manager-layer", out)
+        self.assertNotIn("retry=1", out, "a new crossing is a new firing, not a retry")
+
     def test_a_failed_attempt_records_its_producer(self):
         # The durable record must be showable as written by a real failed send: a
         # hand-written file reproduces every other field byte for byte.
