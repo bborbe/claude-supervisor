@@ -983,21 +983,42 @@ def is_headless_key(pane):
     return str(pane).startswith(HEADLESS_PREFIX)
 
 
-def headless_items(keys, endpoint=None):
-    """Synthetic event-log records for the `hst:<id>` keys, read from the store.
+# What one store read says about one `hst:<id>` key. Three values, because the old
+# two-valued read ("a record, or none") collapsed two different facts into one.
+STORE_OPEN = "open"          # the item is on the store's open list
+STORE_NOT_OPEN = "not-open"  # a GOOD read, and the item is not on it: closed, answered or pruned
+STORE_UNREAD = "unread"      # the read itself failed — nothing is known about the item
 
-    The second read of the attention store this route costs, made only when the
-    feed carried a headless row. Each record carries `pane: hst:<id>` so the
-    pane-keyed hops (`session_for_pane`, `gate_fingerprint`) resolve it unchanged:
-    `session_id` from the store's `producer_id`, the text from its `payload`.
+# The two fixed wake-line tokens a headless row can carry instead of a session id. They
+# differ in BOTH halves (`session=` vs `store=`, `unattributed` vs `unreachable`), so
+# `grep -F` separates them and neither is a substring of the other.
+UNATTRIBUTED_TOKEN = "session=unattributed"
+STORE_FAILED_TOKEN = "store=unreachable"
 
-    ⚠️ **An unreachable store fails OPEN** — no record, so the session reads
-    `unowned` and the gate EMITS. Silence is the failure this route removes; a
-    store read that failed must not reintroduce it.
+
+def read_headless(keys, endpoint=None):
+    """-> (records, states) for the `hst:<id>` keys, from ONE read of the store's open list.
+
+    `records` are synthetic event-log records for the keys the open list carries, each with
+    `pane: hst:<id>` so the pane-keyed hops (`session_for_pane`, `gate_fingerprint`) resolve
+    it unchanged: `session_id` from the store's `producer_id`, the text from its `payload`.
+    `states` maps every headless key to `STORE_OPEN`, `STORE_NOT_OPEN` or `STORE_UNREAD`.
+
+    ⚠️ **`GET /api/1.0/attention` returns OPEN items only** (`attention-card-lookup.py`), so
+    a key absent from a successful read is a card that is no longer open — closed, answered
+    or pruned — and is not a gate. The previous reader returned "no record" for that AND
+    for a read that raised, so both rendered `session=unresolved` and both woke the
+    manager. Measured 2026-11-05 to 11-07: 3 of 3, then 7 of 10, then 18 of 18 wake rows
+    on one goal manager's arm were dead or foreign, and the arm was stopped.
+
+    ⚠️ **An unreachable or unparseable store is `STORE_UNREAD`, never `STORE_NOT_OPEN`.**
+    Reading a failed read as "every card closed" would drop every headless gate — the
+    fleet-wide silence every hop in this file fails open to avoid. A body that is not a
+    list is a failed read for the same reason.
     """
-    wanted = {str(k)[len(HEADLESS_PREFIX):] for k in keys if is_headless_key(k)}
+    wanted = [str(k) for k in keys if is_headless_key(k)]
     if not wanted:
-        return []
+        return [], {}
     import urllib.request
 
     base = (endpoint or os.environ.get("ATTENTION_STORE_URL") or "http://localhost:18080").rstrip("/")
@@ -1005,13 +1026,15 @@ def headless_items(keys, endpoint=None):
         with urllib.request.urlopen(base + "/api/1.0/attention", timeout=3) as resp:
             data = json.loads(resp.read().decode("utf-8") or "[]")
     except (OSError, ValueError):
-        return []
+        data = None
     if not isinstance(data, list):
-        return []
-    out, now = [], time.time()
+        return [], {key: STORE_UNREAD for key in wanted}
+    ids = {key[len(HEADLESS_PREFIX):] for key in wanted}
+    out, now, seen = [], time.time(), set()
     for item in data:
-        if not isinstance(item, dict) or item.get("item_id") not in wanted:
+        if not isinstance(item, dict) or item.get("item_id") not in ids:
             continue
+        seen.add(item["item_id"])
         out.append(
             {
                 "pane": HEADLESS_PREFIX + item["item_id"],
@@ -1020,7 +1043,21 @@ def headless_items(keys, endpoint=None):
                 "ts": now,
             }
         )
-    return out
+    states = {
+        key: STORE_OPEN if key[len(HEADLESS_PREFIX):] in seen else STORE_NOT_OPEN
+        for key in wanted
+    }
+    return out, states
+
+
+def headless_items(keys, endpoint=None):
+    """The records half of `read_headless` — the contract `round-readings.py` reads.
+
+    ⚠️ **Kept unchanged for that caller**, which treats `[]` as "unread" on purpose. This
+    module's own paths call `read_headless` instead, because only the states half can tell
+    a closed card from a failed read.
+    """
+    return read_headless(keys, endpoint)[0]
 
 
 def panes_from_feed(stream):
@@ -1077,13 +1114,27 @@ def producer_exit(producer, returncode):
     return 1
 
 
-def evaluate_panes(panes, ledger, live, items, self_id, claims, scope=None):
-    """One row per `(pane, replayed)` pair."""
+NOT_OPEN_REASON = "not-open"
+
+
+def evaluate_panes(panes, ledger, live, items, self_id, claims, scope=None, store_states=None):
+    """One row per `(pane, replayed)` pair.
+
+    `store_states` is `read_headless`'s states half. A headless key the store read
+    successfully and did NOT find open is dropped as `not-open` before any ownership hop:
+    a closed or answered card is not a gate, whoever owned it. A key the store could not
+    read keeps its ownership verdict and carries `store: unread`, so `render` can say so —
+    that is the fail-open branch, and it must stay visibly distinct from a live gate.
+    """
+    store_states = store_states or {}
     rows = []
     for pane, replayed in panes:
         call, reason, session_id, spawner = evaluate(
             pane, ledger, live, items, self_id, claims, scope
         )
+        state = store_states.get(pane)
+        if state == STORE_NOT_OPEN:
+            call, reason = DROP, NOT_OPEN_REASON
         rows.append(
             {
                 "pane": pane,
@@ -1092,9 +1143,33 @@ def evaluate_panes(panes, ledger, live, items, self_id, claims, scope=None):
                 "reason": reason,
                 "session_id": session_id,
                 "spawner": spawner,
+                "store": state,
             }
         )
     return rows
+
+
+def headless_suffix(row):
+    """The wake-line tail for one row: exactly one of three tokens on a headless key.
+
+    | tail                      | means                                 | manager's action           |
+    |---------------------------|---------------------------------------|----------------------------|
+    | `session=<id>`            | open gate, owner resolved             | route to that session      |
+    | `session=unattributed`    | open gate, no `producer_id` on record | candidate to confirm; never foreign |
+    | `store=unreachable`       | the store read failed (fail-open)     | the store is down — check the store |
+
+    A closed or answered card never reaches here: `evaluate_panes` dropped it as `not-open`.
+
+    ⚠️ **`session=unresolved` is retired, and it was the defect.** It covered both the
+    failed read and a card the read found closed, so the line could not say which.
+    """
+    if not is_headless_key(row["pane"]):
+        return ""
+    if row.get("store") == STORE_UNREAD:
+        return f"  {STORE_FAILED_TOKEN}"
+    if row.get("session_id"):
+        return f"  session={row['session_id']}"
+    return f"  {UNATTRIBUTED_TOKEN}"
 
 
 def render(rows, args, new_panes=None):
@@ -1149,12 +1224,7 @@ def render(rows, args, new_panes=None):
             # A headless key names the store item but no pane to jump to, so the
             # wake line also names the session it belongs to — the one handle the
             # manager can act on. A pane row renders exactly as before.
-            who = (
-                f"  session={r['session_id'] or 'unresolved'}"
-                if is_headless_key(r["pane"])
-                else ""
-            )
-            print(f"{r['pane']}{who}{'  ' + REPLAY_MARK if r['replayed'] else ''}")
+            print(f"{r['pane']}{headless_suffix(r)}{'  ' + REPLAY_MARK if r['replayed'] else ''}")
         return
 
     for r in rows:
@@ -1186,6 +1256,7 @@ def counts_line(rows):
     dropped_peer = [r for r in dropped if r["reason"] == "peer-manager"]
     dropped_own = [r for r in dropped if r["reason"] == "peer-manager-own"]
     dropped_claimed = [r for r in dropped if r["reason"] == "claimed"]
+    dropped_not_open = [r for r in dropped if r["reason"] == NOT_OPEN_REASON]
     excluded = [r for r in rows if r["verdict"] == EXCLUDE]
     excluded_goal = [r for r in excluded if r["reason"].startswith("foreign-goal:")]
     excluded_unknown = [r for r in excluded if r["reason"] == "owner-unknown"]
@@ -1195,6 +1266,7 @@ def counts_line(rows):
         f"dropped(peer-manager): {len(dropped_peer)}  "
         f"dropped(peer-manager-own): {len(dropped_own)}  "
         f"dropped(claimed): {len(dropped_claimed)}  "
+        f"dropped(not-open): {len(dropped_not_open)}  "
         f"excluded(foreign-goal): {len(excluded_goal)}  "
         f"excluded(owner-unknown): {len(excluded_unknown)}  "
         f"excluded(role-human): {len(excluded_human)}"
@@ -1211,8 +1283,8 @@ def one_shot(panes, args, ledger, live, items, claims, missing=(), scope=None):
     feed. Naming it separates "the feed does not carry it" from "the feed was never
     consulted" — the defect this flag carried.
     """
-    items = items + headless_items([pane for pane, _ in panes], args.endpoint)
-    rows = evaluate_panes(panes, ledger, live, items, args.self_id, claims, scope)
+    records, states = read_headless([pane for pane, _ in panes], args.endpoint)
+    rows = evaluate_panes(panes, ledger, live, items + records, args.self_id, claims, scope, states)
     render(rows, args)
     if args.explain:
         for pane in missing:
@@ -1335,7 +1407,8 @@ def poll(args, items, scope=None):
         feed = feed_rows(lines)
         # Headless rows resolve through the store, re-read per poll: a headless gate is
         # new by definition, so the arm-time `items` snapshot never carries it.
-        poll_items = items + headless_items([pane for pane, _ in feed], args.endpoint)
+        records, states = read_headless([pane for pane, _ in feed], args.endpoint)
+        poll_items = items + records
         rows = evaluate_panes(
             feed,
             load_ledger(args.endpoint),
@@ -1344,6 +1417,7 @@ def poll(args, items, scope=None):
             args.self_id,
             load_claims(args.claims_file),
             scope,
+            states,
         )
         kept = [r["pane"] for r in rows if r["verdict"] == EMIT]
 
