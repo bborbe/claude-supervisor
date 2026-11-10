@@ -26,6 +26,9 @@ absence clause needs:
     QUOTED `flag: "true"` is admitted by `select()` and refused by the batch, because
     `is_flagged()` strips quotes where the batch's task predicate reads a YAML string.
     `test_a_quoted_flag_diverges_from_the_batch` pins that last one in both directions.
+    A fourth is DELIBERATE too: `select()`'s `prior_wait()` guard (`waiting-external`,
+    `waiting-operator`) is unattended-round-only, so the batch opens such a row when the
+    operator names it — `PriorWaitTest` pins the round's side.
 
 Run: python3 -m unittest discover -s scripts/tests -v
 """
@@ -35,6 +38,7 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 
@@ -86,9 +90,20 @@ class OpenQueueTest(unittest.TestCase):
     def setUp(self):
         self._dir = tempfile.TemporaryDirectory()
         self.tasks = self._dir.name
+        # Never read the operator's live attention logs from a test.
+        self._att = tempfile.TemporaryDirectory()
+        self._saved_att = getattr(oq, "ATTENTION_DIR", None)
+        oq.ATTENTION_DIR = self._att.name
 
     def tearDown(self):
+        oq.ATTENTION_DIR = self._saved_att
+        self._att.cleanup()
         self._dir.cleanup()
+
+    def events(self, sid, *records):
+        with open(os.path.join(self._att.name, sid + ".events.jsonl"), "a", encoding="utf-8") as h:
+            for rec in records:
+                h.write(json.dumps(rec) + "\n")
 
     def collect(self, names):
         rows, skipped, err = oq.collect(self.tasks, TODAY, approved_json=approved(names))
@@ -582,6 +597,93 @@ class OpenQueueTest(unittest.TestCase):
         _rows, skipped = self.collect(["both"])
 
         self.assertEqual(skipped, [{"name": "both", "reason": "stopped"}])
+
+
+class PriorWaitTest(unittest.TestCase):
+    """A row whose last session ended on a wait a new session cannot clear is skipped,
+    each case beside a control row that must still open."""
+
+    # Borrow the fixtures, not the tests — subclassing would re-run the whole suite.
+    setUp = OpenQueueTest.setUp
+    tearDown = OpenQueueTest.tearDown
+    collect = OpenQueueTest.collect
+    events = OpenQueueTest.events
+
+    SID = "11111111-2222-3333-4444-555555555555"
+    OLD = "99999999-2222-3333-4444-555555555555"
+
+    def row(self, name, sid=None, metrics=None):
+        fm = "status: in_progress\nflag: true\n"
+        if sid:
+            fm += "claude_session_id: %s\n" % sid
+        if metrics:
+            fm += "metrics_sessions:\n" + "".join(
+                "    - session_id: %s\n      started_at: \"x\"\n" % m for m in metrics)
+        task_file(self.tasks, name, fm)
+
+    def assert_only_control_opens(self, skipped_name, reason):
+        rows, skipped = self.collect([skipped_name, "control"])
+        self.assertEqual([r["name"] for r in rows], ["control"])
+        self.assertEqual(skipped, [{"name": skipped_name, "reason": reason}])
+
+    def test_ends_slot_is_waiting_external(self):
+        self.row("parked", sid=self.SID)
+        self.row("control")
+        self.events(self.SID, {"event": "Stop", "kind": "idle", "ts": time.time(),
+                               "detail": "🟡 WAITING\n⏰ Ends:   PR #12 merged (gh, watcher)"})
+        self.assert_only_control_opens("parked", "waiting-external")
+
+    def test_expired_or_session_bound_wait_does_not_block(self):
+        # An `⏰ Ends:` older than declared-wait's max age, and a wake that died with
+        # its session, are not waits a new session would inherit.
+        old_sid, bound_sid = self.OLD, self.SID
+        self.row("expired", sid=old_sid)
+        self.row("bound", sid=bound_sid)
+        self.events(old_sid, {"event": "Stop", "kind": "idle", "ts": time.time() - 7200,
+                              "detail": "⏰ Ends: PR #12 merged (gh, watcher)"})
+        self.events(bound_sid, {"event": "Stop", "kind": "idle", "ts": time.time(),
+                                "detail": "⏰ Ends: auditor returns (Monitor, abc)"})
+        rows, skipped = self.collect(["expired", "bound"])
+        self.assertEqual(sorted(r["name"] for r in rows), ["bound", "expired"])
+        self.assertEqual(skipped, [])
+
+    def test_unanswered_question_is_waiting_operator(self):
+        self.row("asking", sid=self.SID)
+        self.row("control")
+        self.events(self.SID, {"event": "Stop", "kind": "question", "item_id": "a" * 32,
+                               "ts": 10, "detail": "approve: deploy"})
+        self.assert_only_control_opens("asking", "waiting-operator")
+
+    def test_answered_question_no_longer_blocks(self):
+        self.row("answered", sid=self.SID)
+        self.events(self.SID,
+                    {"event": "Stop", "kind": "question", "item_id": "a" * 32, "ts": 10,
+                     "detail": "approve: deploy"},
+                    {"item_id": "a" * 32, "closed_by": "answer", "session_id": self.SID, "ts": 11})
+        rows, skipped = self.collect(["answered"])
+        self.assertEqual([r["name"] for r in rows], ["answered"])
+        self.assertEqual(skipped, [])
+
+    def test_newest_stop_across_the_id_set_wins(self):
+        # An old session parked on a machine; a later one ended routinely -> runnable.
+        self.row("moved-on", sid=self.SID, metrics=[self.OLD])
+        now = time.time()
+        self.events(self.OLD, {"event": "Stop", "kind": "idle", "ts": now - 60,
+                               "detail": "⏰ Ends: CI green (gh run watch)"})
+        self.events(self.SID, {"event": "Stop", "kind": "idle", "ts": now,
+                               "detail": "👤 You: nothing"})
+        rows, _ = self.collect(["moved-on"])
+        self.assertEqual([r["name"] for r in rows], ["moved-on"])
+        # ...and the reverse order is skipped, from a metrics_sessions id alone.
+        self.row("still-waiting", metrics=[self.OLD])
+        rows, skipped = self.collect(["still-waiting"])
+        self.assertEqual(skipped, [{"name": "still-waiting", "reason": "waiting-external"}])
+
+    def test_row_with_no_event_log_is_runnable(self):
+        self.row("fresh", sid=self.SID)
+        rows, skipped = self.collect(["fresh"])
+        self.assertEqual([r["name"] for r in rows], ["fresh"])
+        self.assertEqual(skipped, [])
 
 
 if __name__ == "__main__":

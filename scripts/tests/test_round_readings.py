@@ -236,6 +236,103 @@ class Verdicts(Tmp):
         self.assertEqual(rr.feed_verdict(["x"], {"x"}, "read"), "gated")
 
 
+class TheParkLimb(Tmp):
+    """A `waiting` session is parked, not stuck — asserted on BOTH fields of one row.
+
+    Measured 2026-10-29: a headless worker suspended on a permission gate writes
+    nothing to its transcript, so transcript staleness reads identically to a finished
+    turn. `in_flight()` returned `quiet` for it and `stuck_verdict()` — which took no
+    `in_flight` argument at all — stamped the same row `frozen`, from the same read.
+    """
+
+    def registry(self, sid, status):
+        return {sid: {"status": status}}
+
+    def stale(self, sid):
+        """A transcript older than `LIVE_WINDOW`, i.e. the frozen shape."""
+        return 600.0
+
+    def test_a_waiting_session_reads_parked(self):
+        sid = "eeee5555"
+        verdict, limb = rr.in_flight([sid], self.registry(sid, "waiting"),
+                                     self.attention, time.time(), self.stale)
+        self.assertEqual(verdict, "parked")
+        self.assertIn("waiting", limb)
+
+    def test_a_parked_row_is_not_frozen(self):
+        sid = "ffff6666"
+        row = {"mtime": time.time() - 3600}
+        verdict, _ = rr.stuck_verdict(
+            row, [sid], "LIVE", "clear", 900, time.time(),
+            self.attention, self.projects, in_flight_verdict="parked")
+        self.assertEqual(
+            verdict, "none",
+            "a parked worker's tool call is suspended, so the transcript cannot tell "
+            "a park from a death — and this is the park")
+
+    def test_an_idle_session_with_a_static_transcript_is_still_frozen(self):
+        """The negative control: the park limb must not swallow the real case."""
+        sid = "9999aaaa"
+        row = {"mtime": time.time() - 3600}
+        fl, _ = rr.in_flight([sid], self.registry(sid, "idle"),
+                             self.attention, time.time(), self.stale)
+        self.assertEqual(fl, "quiet")
+        verdict, _ = rr.stuck_verdict(
+            row, [sid], "LIVE", "clear", 900, time.time(),
+            self.attention, self.projects, in_flight_verdict=fl)
+        self.assertEqual(verdict, "frozen")
+
+    def test_a_park_does_not_survive_the_gate_being_released(self):
+        """Once the registry leaves `waiting`, the same row is frozen again."""
+        sid = "8888bbbb"
+        row = {"mtime": time.time() - 3600}
+        fl, _ = rr.in_flight([sid], self.registry(sid, "busy"),
+                             self.attention, time.time(), self.stale)
+        self.assertNotEqual(fl, "parked")
+        verdict, _ = rr.stuck_verdict(
+            row, [sid], "LIVE", "clear", 900, time.time(),
+            self.attention, self.projects, in_flight_verdict=fl)
+        self.assertEqual(verdict, "frozen")
+
+
+    def test_compute_wires_the_park_verdict_through_to_stuck(self):
+        """`compute()` must pass its `in_flight` verdict into `stuck_verdict()`.
+
+        The unit cases above call `stuck_verdict()` directly, so they would all pass
+        on a build that computed `parked` and then dropped it at the call site — the
+        row would read `in_flight: parked` beside `stuck: frozen`, which is exactly
+        the contradiction this change exists to remove.
+        """
+        sid = "7777cccc"
+        sessions = os.path.join(self.dir, "sessions")
+        os.makedirs(sessions, exist_ok=True)
+        with open(os.path.join(sessions, "12345.json"), "w", encoding="utf-8") as fh:
+            json.dump({"sessionId": sid, "status": "waiting", "pid": 12345}, fh)
+
+        predispatch = rr._load("manager-predispatch")
+        orig_resolve = predispatch.resolve_tracked_by_member
+        orig_live = rr.liveness
+        try:
+            predispatch.resolve_tracked_by_member = lambda vault, members: (
+                [{"name": "A task", "mtime": 1_700_000_000 - 3600,
+                  "session": sid, "sessions": [sid]}], list(members))
+            rr.liveness = lambda ids, endpoint, registry_dir: "LIVE"
+            path = os.path.join(self.dir, "tracked.txt")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("A task\n")
+            doc = rr.compute("A subject", path, self.dir, 900, now=1_700_000_000,
+                             attention_dir=self.attention, sessions_dir=sessions,
+                             feed={"panes": set(), "owners": {}, "orphan_owners": [],
+                                   "state": "read", "error": None})
+        finally:
+            predispatch.resolve_tracked_by_member = orig_resolve
+            rr.liveness = orig_live
+
+        row = doc["rows"]["A task"]
+        self.assertEqual(row["in_flight"], "parked")
+        self.assertEqual(row["stuck"], "none")
+
+
 # The feed's pane column is right-aligned to four, so a real row reads `[ 417]`, and a
 # headless gate reads `[ hst]` with its store item id on the `answer:` continuation
 # line. The pre-fix pattern `^\s*\[(\d+)\]` matched 1 of these 3 rows (`[1234]`).
