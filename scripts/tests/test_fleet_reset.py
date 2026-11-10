@@ -68,6 +68,20 @@ def task_page(status, sid=DEFAULT_SID):
     )
 
 
+def task_page_multi(status, primary=None, metrics=()):
+    """A task file whose id set is built explicitly, for the multi-id cases."""
+    body = "---\n" f"status: {status}\n" "page_type: task\n"
+    if primary:
+        body += f"claude_session_id: {primary}\n"
+    if metrics:
+        body += "metrics_sessions:\n"
+        for sid in metrics:
+            body += f"    - session_id: {sid}\n"
+            body += "      started_at: 2026-11-10T10:00:00+01:00\n"
+    body += "---\nTags: [[Task]]\n\n---\n\nBody text that must survive.\n"
+    return body
+
+
 def sha(path):
     with open(path, "rb") as fh:
         return hashlib.sha256(fh.read()).hexdigest()
@@ -124,7 +138,7 @@ class FleetResetTest(unittest.TestCase):
         orig_verdict, orig_alive = fr.session_verdict, fr.identity_alive
         backed = set(alive)
         fr.session_verdict = lambda sid: mapping.get(sid, "UNKNOWN")
-        fr.identity_alive = lambda sid: sid in backed
+        fr.identity_alive = lambda sid, sessions_dir=None: sid in backed
         try:
             yield
         finally:
@@ -284,6 +298,60 @@ class FleetResetTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(sha(paths["in_progress"]), before)
         self.assertIn("0 candidate(s) → 0 stripped", out)
+
+    def test_strip_keeps_a_task_whose_metrics_session_is_live(self):
+        """The strip removes the whole `metrics_sessions` block, and that block can name a
+        different, live session (`server/task-binding.mjs` appends a second worker and
+        leaves `claude_session_id` intact). Gating on the frontmatter id alone unlinks it."""
+        path = os.path.join(self.tasks, "multi.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(task_page_multi("in_progress", primary=DEAD_SID, metrics=[LIVE_SID]))
+        before = sha(path)
+        with self.verdicts({DEAD_SID: "ABSENT", LIVE_SID: "LIVE"}):
+            rc, out = self.run_main([
+                "--root", self.root, "--confirm", "fleet-reset",
+                "--strip-task-links", "--task-dir", self.tasks,
+            ])
+        self.assertEqual(rc, 0)
+        self.assertEqual(sha(path), before)
+        self.assertIn("0 candidate(s) → 0 stripped", out)
+
+    def test_strip_removes_a_metrics_only_task_when_its_id_is_dead(self):
+        """A task carrying no `claude_session_id` but a dead `metrics_sessions` id is still
+        a strip candidate — 64 of 124 such tasks measured in the Brogrammers vault."""
+        path = os.path.join(self.tasks, "metrics-only.md")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(task_page_multi("in_progress", metrics=[DEAD_SID]))
+        with self.verdicts({DEAD_SID: "ABSENT"}):
+            rc, out = self.run_main([
+                "--root", self.root, "--confirm", "fleet-reset",
+                "--strip-task-links", "--task-dir", self.tasks,
+            ])
+        self.assertEqual(rc, 0)
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertNotIn("metrics_sessions", text)
+        self.assertIn("1 candidate(s) → 1 stripped", out)
+
+    # -- the fail-closed machinery itself (never stubbed by `verdicts`) -----
+
+    def test_a_bare_exit_1_is_unknown_not_absent(self):
+        """`1` is both the instrument's ABSENT code and Python's uncaught-exception code,
+        and ABSENT is the one verdict that authorises the destructive unlink."""
+        self.assertEqual(fr._verdict_from(1, ""), "UNKNOWN")
+        self.assertEqual(fr._verdict_from(1, "Traceback (most recent call last):"), "UNKNOWN")
+        self.assertEqual(fr._verdict_from(1, "ABSENT — 4295ddac-ba83"), "ABSENT")
+        self.assertEqual(fr._verdict_from(0, "LIVE 4295ddac"), "LIVE")
+        self.assertEqual(fr._verdict_from(2, "UNKNOWN"), "UNKNOWN")
+
+    def test_an_absent_registry_answers_alive(self):
+        """`glob` on a missing directory returns `[]`, so without the isdir guard an absent
+        registry would read as "nothing is live" and permit the strip."""
+        missing = os.path.join(self.root, "no-such-registry")
+        empty = os.path.join(self.root, "empty-registry")
+        os.makedirs(empty)
+        self.assertTrue(fr.identity_alive(DEAD_SID, missing))
+        self.assertFalse(fr.identity_alive(DEAD_SID, empty))
 
     def test_dry_run_prediction_counts_only_strippable(self):
         self.seed_tasks({"in_progress": LIVE_SID, "next": DEAD_SID})
