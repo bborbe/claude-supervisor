@@ -10,6 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+- fix: **the topic tier can now answer parks, so its `mcp` reach can actually be written.** `commands/topic-loop.md` and `commands/topic-drive.md` granted only `list_agents` and `agent_status` from the supervisor, so the sentinel `answer_permission` call added to `commands/steps/round-liveness.md` would have been refused before reaching the server — the same 0-`mcp`-reach failure this change exists to fix, left unfixed for one of its two tiers. A topic manager may open a worker (`docs/session-tiers.md`), and a worker it opened parks with it, so the grant closes a pre-existing gap as well.
 - fix: **the answer-reach `mcp` leg now has an emitter, so the reach record can actually carry both routes.** `commands/steps/round-liveness.md` and `commands/steps/re-arm.md` said the leg "needs nothing" because the server writes it on `answer_permission`'s foreign-park reply — true of the server, false of the caller: a manager only ever calls with a real park id, which IS in the server's `pending` map, so the settle path runs and the foreign-park arm never does. Measured 2026-11-10: **18 `wrapper` reaches and 0 `mcp` reaches**. Both steps now spell out the sentinel call, which settles nothing and is the only writer of that leg.
 
 ## v0.265.3
