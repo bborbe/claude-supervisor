@@ -182,13 +182,19 @@ class TaskStanddownTest(unittest.TestCase):
         self.assertEqual([], self.writes)
 
     def test_an_unreadable_vault_list_is_cannot_tell(self):
-        """The third state: 'I could not look' must never render as 'no task'."""
+        """The third state: 'I could not look' must never render as 'no task'.
+
+        ⚠️ The vault read now happens **before** resolution, because
+        `close-worker.find_task()` answers `None` for both "no task claims this session"
+        and a failed read — so a resolution attempted on an unreadable config would have
+        rendered `no-task`, the collapse this module forbids.
+        """
         ts.anchored_task = lambda sid, cwd, root: ("/tmp/v/25 Tasks/A Task.md", False, "")
         ts.vaults = lambda: None
         code, out = self.run_main(["--session", "sid-1"])
 
         self.assertEqual(1, code)
-        self.assertEqual("cannot-tell\t/tmp/v/25 Tasks/A Task.md", out[0])
+        self.assertEqual("cannot-tell\t", out[0])
         self.assertEqual([], self.writes)
 
     def test_a_failed_stop_write_is_reported_not_swallowed(self):

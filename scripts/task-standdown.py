@@ -232,6 +232,22 @@ def stamp(args):
     second write a task stopped by name was still reopened and resumed, which is the
     half-merge the by-name PR's own SC3 deferred to this change.
     """
+    # ⚠️ **Read the vault list FIRST, before any resolution.** `close-worker.find_task()`
+    # answers `None` for both "no task claims this session" and a failed read — its
+    # `_vault_config()` returns `{}` on a non-zero exit, a timeout or an OSError — so a
+    # resolution attempted while the config is unreadable renders `no-task`, the collapse
+    # this module's own contract forbids. Checking here is what makes the third state
+    # reachable on the session path at all.
+    known = vaults()
+    if known is None:
+        print("cannot-tell\t")
+        print(
+            "vault-cli config list is unreadable — 'no task claims this session' would be "
+            "indistinguishable from a failed read, so neither is claimed",
+            file=sys.stderr,
+        )
+        return 1
+
     if args.subject.strip():
         path, ambiguous, degraded, reason = by_name(args.subject)
         if ambiguous:
@@ -263,11 +279,6 @@ def stamp(args):
             )
             return 1
 
-    known = vaults()
-    if known is None:
-        print("cannot-tell\t%s" % path)
-        print("vault-cli config list is unreadable", file=sys.stderr)
-        return 1
     vault, reason = write_vault(args.vault, path, known)
     if not vault:
         print("cannot-tell\t%s" % path)
