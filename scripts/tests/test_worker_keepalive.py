@@ -50,6 +50,9 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.vault = pathlib.Path(self.tmp.name) / "vault"
         (self.vault / "25 Tasks").mkdir(parents=True)
         self.k = load()
+        # The crash-loop card is injected, never left to post a real one to the board.
+        self.cards = []
+        self.k.post_card = lambda task, spent: self.cards.append((task, spent))
         self.kp = self.k._keepalive()
         self.state = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(self.state, ignore_errors=True))
@@ -344,13 +347,17 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.assertEqual("resume", out[0])
         self.assertIn("attempt 3 of 3", out[1])
 
-    def test_a_resume_outside_the_window_does_not_count(self):
+    def test_no_progress_cycles_spaced_beyond_the_old_window_still_stop(self):
+        # SC1: the cap is close->resume cycles since the last progress, not a time window.
+        # Three cycles ~40 min apart (beyond the retired 30-min window) with no progress
+        # must still stop the loop, and exactly one card is posted.
         self.page()
         now = 1_800_000_000.0
-        self.seed([now - 3600, now - 3700, now - 3800])
+        self.seed([now - 2400, now - 4800, now - 7200])
         rc, out = self.run_it(live="ABSENT", argv=("--now", str(now)))
-        self.assertEqual(0, rc)
-        self.assertEqual("resume", out[0])
+        self.assertEqual(1, rc)
+        self.assertEqual("crash-loop", out[0])
+        self.assertEqual([("A Task", 3)], self.cards)
 
     def test_a_resume_that_did_not_take_does_not_arm_the_cap(self):
         self.page()
@@ -375,6 +382,40 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.assertEqual("recorded", out.getvalue().splitlines()[0])
         self.assertTrue(os.path.exists(
             self.k.state_path(str(self.vault), "A Task")))
+
+    def test_progress_resets_the_cycle_count(self):
+        # SC2: three resumes are on record, but the task advanced since the last one
+        # (a box ticked / Progress changed). The next record resets the count, so the
+        # following probe resumes instead of refusing.
+        self.page()
+        now = 1_800_000_000.0
+        with open(self.k.state_path(str(self.vault), "A Task"), "w", encoding="utf-8") as fh:
+            json.dump({"resumes": [now - 60, now - 120, now - 180],
+                       "progress": {"open_boxes": 9, "progress_hash": "stale", "head_sha": ""}},
+                      fh)
+        self.kp.session_verdict = lambda sid: "LIVE"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.k.main(["--vault", str(self.vault), "--task", "A Task",
+                              "--record-resume", "sid-1", "--now", str(now)])
+        self.assertEqual(0, rc)
+        rc, out = self.run_it(live="ABSENT", argv=("--now", str(now)))
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out[0])
+        self.assertIn("attempt 2 of 3", out[1])
+
+    def test_progress_before_the_next_resume_is_not_a_crash_loop(self):
+        # A worker that advanced and then died must not be refused for the cycles it ran
+        # before it advanced, even though no --record-resume has happened yet.
+        self.page()
+        now = 1_800_000_000.0
+        with open(self.k.state_path(str(self.vault), "A Task"), "w", encoding="utf-8") as fh:
+            json.dump({"resumes": [now - 60, now - 120, now - 180],
+                       "progress": {"open_boxes": 9, "progress_hash": "stale", "head_sha": ""}},
+                      fh)
+        rc, out = self.run_it(live="ABSENT", argv=("--now", str(now)))
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out[0])
 
 
 if __name__ == "__main__":

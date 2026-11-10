@@ -11,6 +11,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - feat: `fleet-keeper.py`'s lapse card for a live Fleet Manager offers `restart fresh` — on the operator's answer only, once per card, it runs `restart-worker.py <sid> --reason lapse --fresh-prompt /supervisor:fleet-loop`, which stops the stalled manager and starts a NEW session (fresh context) instead of resuming the exhausted one (operator ruling 2026-11-10). `restart-worker.py` gains `--fresh-prompt` (allowlisted). The keeper's no-kill pin is narrowed to exactly this executor and the 2026-11-06 resume.
+- fix: **the worker crash-loop cap counts close→resume cycles, not resumes inside a 30-minute window.** `scripts/worker-keepalive.py` now resets the resume count only on **progress** — an open box ticked, a new `# Progress` entry, or a new commit on the task's `repo:` branch — so a loop that closes and resumes every ~40 minutes with no progress stops at the 4th resume instead of never tripping. It posts ONE attention card on `crash-loop` (`dedup_key` `crash-loop:<slug>`), which the script did not do before. The store gains a `progress` marker beside `resumes`; a legacy `{resumes: [...]}` store reads as no marker, so an existing loop keeps counting until it makes progress. The manager tier (`topic-keepalive.py`) keeps its 30-minute window — the shared helper is untouched. `scripts/tests/test_worker_keepalive.py` covers the no-progress cycles spaced beyond the old window (refused + one card) and the progress reset.
 
 ## v0.271.0
 
