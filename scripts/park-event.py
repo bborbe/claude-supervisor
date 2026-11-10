@@ -157,7 +157,14 @@ def iso(instant: datetime) -> str:
 def read_watch(key: str) -> dict:
     path = watch_path(key)
     if not path.exists():
-        raise WatchMissing(f"no watch for event key {key!r}")
+        # Name the keys that DO exist. `due` and `list` print the slug, so the
+        # commonest miss is a caller holding the wrong identifier — and a bare
+        # "no watch" reads as "nothing is parked" rather than "you passed the
+        # wrong key", which is the one answer that sends them away.
+        known = sorted({r.get("event") or r.get("slug") or "?" for r in all_watches()[0]})
+        raise WatchMissing(
+            f"no watch for event key {key!r} (known: {', '.join(known) or 'none'})"
+        )
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -220,6 +227,31 @@ def all_watches() -> tuple[list[dict], list[str]]:
     return records, corrupt
 
 
+def resolve_event_key(key: str) -> str:
+    """The stored event description for `key`, given as one or as its slug.
+
+    `due` and `list` print the slug first, and a caller copies that token
+    straight back into `--event`. The slug cannot be inverted — `slugify`
+    appends a digest of its whole input — so the way back to the record is a
+    lookup across the store, never a path computation.
+
+    Resolve BEFORE any lock is taken: `lock_path` is `slugify(key).lock`, so a
+    slug and its description would otherwise serialise on two different lock
+    files and the read-modify-write cycles could interleave.
+
+    An unknown key is returned unchanged, because `register` legitimately
+    creates one; `release` refuses it at `read_watch`.
+    """
+    normalised = " ".join(key.strip().split())
+    if watch_path(normalised).exists():
+        return normalised
+    records, _corrupt = all_watches()
+    for record in records:
+        if record.get("slug") == normalised:
+            return record.get("event") or normalised
+    return normalised
+
+
 # --- task write --------------------------------------------------------------
 
 def _set_field(task: str, field: str, value: str, vault: str | None) -> None:
@@ -280,7 +312,7 @@ def cmd_threshold(args: argparse.Namespace) -> int:
 
 
 def cmd_register(args: argparse.Namespace) -> int:
-    key = " ".join(args.event.strip().split())
+    key = resolve_event_key(args.event)
     recheck = parse_instant(args.recheck, "--recheck")
     session = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
 
@@ -422,7 +454,7 @@ def cmd_due(args: argparse.Namespace) -> int:
 
 
 def cmd_release(args: argparse.Namespace) -> int:
-    key = " ".join(args.event.strip().split())
+    key = resolve_event_key(args.event)
     session = args.session.strip()
     with locked(key):
         record = read_watch(key)

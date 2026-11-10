@@ -370,13 +370,32 @@ def scalar(fm: str, key: str) -> str:
     return m.group(1).strip().strip("\"'") if m else ""
 
 
+#: Every spelling of "no id recorded", compared case-insensitively — the same set
+#: `goals-declaration.py` uses for "declares nothing".
+_EMPTY_IDS = frozenset({"", "[]", "null", "~"})
+
+
 def page_session_id(fm: str) -> str:
-    """The manager a goal or topic page records, or `""`.
+    """The manager a goal, topic or task page records, or `""`.
 
     `claude_session_id` is the only field a goal or topic page records its manager in; the
     retired `manager_session_id` fallback was removed once both vaults were migrated.
+
+    ⚠️ **Every spelling of "no id" is `""` here, and this is the only place that decides it.**
+    `scalar()` returns the literal text after the colon, so `claude_session_id: null` arrives
+    as four non-empty characters — and `session-liveness.py`'s `is_session_id` admits any
+    lowercase prefix *by design* (it must accept the 12-char recovery prefix its own
+    `AMBIGUOUS` verdict hands back). The probe therefore answers `ABSENT`, and `ABSENT` is the
+    one verdict that licenses a resume, so a page carrying `null` was resumed as if it named a
+    dead session. Measured 2026-11-08: `worker-keepalive.py` printed `resume` for a row whose
+    id was the string `null`.
+
+    ⚠️ **Folded here, never inside `scalar()`.** `scalar()` reads every key on the page —
+    `status`, `phase`, `defer_date` — and `defer_date: null` must keep reaching
+    `defer-date.py` as the unreadable value that parks a row, not as "no defer".
     """
-    return scalar(fm, "claude_session_id")
+    value = scalar(fm, "claude_session_id").strip()
+    return "" if value.lower() in _EMPTY_IDS else value
 
 
 # ---------------------------------------------------------------------------------------------

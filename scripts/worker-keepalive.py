@@ -158,7 +158,7 @@ def goal_owners(fm: str, vault: str, goals_dir: str) -> list:
             continue
         # `claude_session_id` is the only field a goal page records its manager in; the
         # retired-key fallback was removed once both vaults were migrated.
-        sid = k.scalar(gfm, "claude_session_id")
+        sid = k.session_id(gfm)
         loop, detail = k.cadence_state_detail(subject, "goal")
         live = k.session_verdict(sid) if sid else o.NONE
         verdict, reason = o.verdict_of(live, loop)
@@ -262,7 +262,7 @@ def main(argv: list[str]) -> int:
                   f"worker to the fleet leg")
             return 1
 
-    sid = k.scalar(fm, "claude_session_id")
+    sid = k.session_id(fm)
     if not sid:
         print("cannot-tell")
         print("no claude_session_id recorded — nothing to resume; report the row")
