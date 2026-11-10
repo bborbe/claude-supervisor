@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.267.0
 
 - feat: **`/supervisor:fleet-reset` clears the fleet's remembered state, and — behind a separate opt-in — the task-file links that make a keep-alive leg resume what the reset retired.** The fleet remembered itself in five stores (`~/.claude/sessions/*.json`, `state/worker-manager/*.json`, `state/open-items/*.json`, `state/session-holds.json`, `state/fleet-snapshot.json`) with no verb to clear them, and `/supervisor:reset` cannot be repurposed because its contract is *never deletes*. `scripts/fleet-reset.py` stops every session **before** removing its registry entry (SIGTERM, `--grace`, then SIGKILL; a pid that survives keeps its entry and the run exits 3), clears the five stores under one `flock` with atomic unlinks, and prints each store's `before → after` count. Three gates, each tested in both directions: `--confirm fleet-reset` is the only thing that authorises deletion (no token → exit 2 and nothing changes); `--dry-run` prints the full plan and moves no mtime under any store; and `--strip-task-links` is a SEPARATE flag that removes `claude_session_id` / `metrics_sessions` from non-terminal task files only, so a state-only run leaves every task file byte-identical. This session's own pid and its ancestors are never signalled or unregistered. `scripts/tests/test_fleet_reset.py` covers all of it.
 
