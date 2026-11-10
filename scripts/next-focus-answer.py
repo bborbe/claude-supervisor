@@ -378,6 +378,27 @@ def unquote_payload(payload):
     return parts[0] if len(parts) == 1 else text
 
 
+def _name_from_payload(payload, vault, tasks_dir):
+    """`(name, why_text)` — the row name, resolved against the board itself.
+
+    The payload is `<name> — <why> — <file>:<line>`, but **no fixed split direction
+    works**: `source.file` is `25 Tasks/<name>.md`, so a name containing ` — ` puts the
+    separator in the path as well as the name, and `rsplit` then lands inside the path.
+    (Measured 2026-11-10: 65 files in `25 Tasks/` carry ` — ` in the filename.)
+
+    So the board is the oracle: try the LONGEST leading prefix that resolves to a page,
+    longest first so a name that is a prefix of a longer real name does not win. When
+    nothing resolves, the first segment is returned unchanged and `add_to_plan` refuses
+    it — the caller never gets a silently wrong name.
+    """
+    parts = payload.split(" — ")
+    for i in range(len(parts) - 1, 0, -1):
+        candidate = " — ".join(parts[:i]).strip()
+        if candidate and _page_path(vault, tasks_dir, candidate) is not None:
+            return candidate, (parts[i].strip() if i < len(parts) else "")
+    return parts[0].strip(), (parts[1].strip() if len(parts) > 1 else "")
+
+
 def kind_of_key(card_key):
     parts = card_key.split(":")
     return parts[2] if len(parts) > 2 else ""
@@ -416,15 +437,7 @@ def consume_items(items, vault, tasks_dir, dismissed_dir, consumed_dir, now):
         # Unquote ONCE and derive both fields from it: reading `why_text` off the raw
         # payload left a trailing `'` in the row for any quoted multi-segment payload.
         payload = unquote_payload(card.get("payload", ""))
-        # SPLIT FROM THE RIGHT. A task name may itself contain ` — ` (measured
-        # 2026-11-10: `Brogrammers Assistant Dies Mid-Request — claude process ended on
-        # Every Discord Mention`), so `split(" — ")[0]` truncated a legitimate name —
-        # 4 of the 33 bad live blocks were this shape. The payload is
-        # `<name> — <why> — <file>:<line>`, and `why` never contains the separator, so
-        # `rsplit(…, 2)` takes everything before the last two as the name.
-        segments = payload.rsplit(" — ", 2)
-        name = segments[0].strip()
-        why_text = segments[1] if len(segments) > 1 else ""
+        name, why_text = _name_from_payload(payload, vault, tasks_dir)
         kind = kind_of_key(card_key)
         if not name:
             notes.append(f"{card_key}: card carries no payload name — not consumed")
