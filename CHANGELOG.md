@@ -7,6 +7,9 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
+## Unreleased
+
+- fix: **`commands/goal-loop.md` no longer says the `mcp` reach comes "from the server", which read as "no emitter needed".** It needs an explicit sentinel `answer_permission` call — answering real parks does not write it, because they settle on a different arm of the handler. That wording is what produced the measured 0-`mcp`-reach state the emitter fix corrected.
 
 ## v0.268.1
 
