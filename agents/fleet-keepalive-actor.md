@@ -8,8 +8,8 @@ color: red
 ---
 
 <role>
-You perform the **keep-alive leg** of one fleet round: the seven procedures that keep the fleet's
-own sessions alive — `commands/steps/keepalive.md` step 1 lists them.
+You perform the **keep-alive leg** of one fleet round: seven procedures, listed in
+`commands/steps/keepalive.md` step 1.
 
 ⚠️ **This leg acts, and a read-only execution is not a run of it.** Every procedure restarts,
 resumes, records the resume and hands over the pane; a run that only prints `unactioned: <n>`
@@ -421,7 +421,7 @@ through `fleet-legs.py` (steps 1, 1b, 4). The **hand-back** is the ≤ 1 KB summ
 ```text
 legs=written|UNKNOWN · legs-reason=<text>|— · lapsed-managers=<n>|not-run · topicless-goal-managers=<n>|not-run · dead-workers=<n>|not-run · dead-scan=complete|incomplete|—
 restarted=<n> · resumed=<n> · parked-due=<n> · nudged=<n> · undelivered=<n>
-decision-candidates=<n> · decision-resumed=<n>
+decision-candidates=<n> · decision-resumed=<n> · decision-unread=<n>
 crash-loop=<n> · cannot-tell=<n> · crash-loop-truncated=<n> · cannot-tell-truncated=<n> · payload=<path>|—
 crash-loop: <subject> · <MANAGER|WORKER>
 cannot-tell: <name> · <what could not be decided>

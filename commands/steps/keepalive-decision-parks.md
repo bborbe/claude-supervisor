@@ -43,24 +43,35 @@ wait produces no act on any round.
 
 | Kind | The read | Resume |
 |---|---|---|
-| (a) approval | the row carries `approved_at` — the vault's own record, written only by `vault-cli task approve` | plain continue |
-| (b) answered card | the attention store holds a card for that session id whose record reads answered | **the card's answer as the prompt** |
-| (d) `blocked_by` | every name in `blocked_by` resolves to a task whose status is terminal | plain continue |
+| (a) approval | the row carries `approved_at` — the vault's own record, written only by `vault-cli task approve` | `/supervisor:open --task` |
+| (b) answered card | the session's attention event log `~/.claude/state/attention/<sid>.events.jsonl`, folded as `who-needs-me.py` folds it: an `open` line closed by a later `close` line is an answered card, and `scripts/attention-card-lookup.py` resolves it to its item — **never** `GET /api/1.0/attention`, which returns open items only and so can never show an answered one | **`spawn_agent`, with the answer as the prompt** |
+| (d) `blocked_by` | every name in `blocked_by` resolves to a task whose status is terminal | `/supervisor:open --task` |
 
-⚠️ **Kind (b) cannot resume bare.** An exited worker still holds its unanswered question: a
-resume with an empty prompt, or with "continue", leaves the question unanswered and re-parks the
-worker at the same gate (`docs/fleet-surface.md` § *A headless worker exits at turn end*). The
-answer is the prompt — a resume that restores the process without delivering it produces the
+⚠️ **Kind (b) is the one resume that carries a prompt, and it is the only reason this leg holds
+`spawn_agent`.** An exited worker still holds its unanswered question: resuming it with an empty
+prompt, or with "continue", leaves the question unanswered and re-parks it at the same gate
+(`docs/fleet-surface.md` § *A headless worker exits at turn end*). So kind (b) resumes through the
+fresh-turn channel and **not** through `/supervisor:open`, which takes a task name and no prompt:
+
+```text
+mcp__supervisor__spawn_agent(prompt=<the card's answer, verbatim>, resume=<the session id>,
+                             interactive=false, cwd=<explicit>)
+```
+
+The answer is the prompt — a resume that restores the process without delivering it produces the
 exact loop this half exists to end. ⚠️ **When the card's answer cannot be read, the row is
-`unread`, never "no wait"** — the three-valued rule `round-readings.py` applies, and for the
-same reason: folding a failed read into a negative resumes a worker whose question nobody
-answered, or leaves one waiting on an answer that did land.
+`unread`, never "no wait"** — the three-valued rule `round-readings.py` applies, and for the same
+reason: folding a failed read into a negative resumes a worker whose question nobody answered, or
+leaves one waiting on an answer that did land.
 
-Resume each named task through `/supervisor:open --task "<name>"` — the same act as § 2, never a
-fresh session and never a bare `claude`, which brings a session back on a reduced MCP surface.
+Kinds (a) and (d) resume each named task through `/supervisor:open --task "<name>"` — the same act
+as § 2, never a fresh session and never a bare `claude`, which brings a session back on a reduced
+MCP surface.
 
 ## The hand-back
 
-**Count the rows this half resumed — that is `decision-resumed`**, and the number it *considered*
-goes beside it as `decision-candidates`, so a round that saw rows and resumed none is
-distinguishable from one that saw none. Neither is a digest key.
+**Three counts, and the third exists so an unread answer is never folded into a not-cleared
+wait:** `decision-candidates` is the population this half considered, `decision-resumed` is what it
+resumed, and `decision-unread` is the rows whose wait it could not read. A round that saw rows and
+resumed none is thereby distinguishable from one that saw none, and both are distinguishable from
+one that could not read them. None is a digest key.
