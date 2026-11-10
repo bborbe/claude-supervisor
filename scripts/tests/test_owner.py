@@ -225,6 +225,21 @@ class CliTest(unittest.TestCase):
         o = load()
         self.assertEqual(2, o.main(["--subject", "A Goal"]))
 
+    def test_an_empty_session_flag_refuses_rather_than_falling_back(self):
+        """THE FAIL-OPEN THIS DISPATCH EXISTS TO CLOSE.
+
+        `$CLAUDE_CODE_SESSION_ID` is unset in some spawned children, so `--session ""` reaches
+        the CLI in the field. A truthiness dispatch sent that call to `of_subject()`, whose
+        verdict for a live foreign manager with an armed loop is `owner` — the guard silently
+        became the resolution it replaces, and the marker was written.
+        """
+        o = load()
+        self.assertEqual(2, o.main(["--session", "", "--subject", "A Goal", "--vault", "/tmp"]))
+
+    def test_an_empty_vault_flag_refuses_rather_than_falling_back(self):
+        o = load()
+        self.assertEqual(2, o.main(["--session", "gm-1", "--subject", "A Goal", "--vault", "  "]))
+
 
 class SessionVerdictTest(unittest.TestCase):
     """`session_verdict` must read the instrument's EXIT CODE, not its text.

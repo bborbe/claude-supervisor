@@ -1,11 +1,13 @@
 ---
-description: Stand this session's manager loop down — disarm the model-waking cadence, leave the model-free gate loop running, keep the session (and its asks ledger) alive, and report what was disarmed. The disarm contract is docs/fleet-surface.md § Session end.
+description: Stand a manager loop down — bare, disarm this session's own model-waking cadence; by name, resolve a topic, goal or task, refuse unless this session owns it, and write its stand-down marker. The disarm contract is docs/fleet-surface.md § Session end.
 allowed-tools:
   - Read
   - CronList
   - CronDelete
   - TaskStop
   - Bash(python3:*)
+  - Bash(vault-cli:*)
+  - Bash(find:*)
 argument-hint: "[<topic|goal|task name>] [--task|--goal|--topic] [--vault <name>]"
 ---
 
@@ -14,7 +16,7 @@ Stand a manager loop down. Two forms:
 - **Bare — this session's own loop.** Disarm the model-waking cadence, leave the model-free gate loop running, keep the session (and its asks ledger) alive, and report what was disarmed.
 - **By name — a topic, goal or task.** Resolve the name to its subject page, refuse unless this session owns it, then write that subject's stand-down marker. This is the operator's verb; it is not a close, and it does not touch another session's pane.
 
-The bare form is the default and is unchanged. The by-name form exists because a deliberate stand-down must not require jumping to the subject's own pane (which the fleet forbids anyway: never type into another session's pane except through `pane-wake.py`).
+The bare form is the default and is unchanged. The by-name form exists so a stand-down is **named rather than implied**: the subject is resolved from its page, the caller's ownership is checked against that page, and the marker is written for a subject the caller actually owns. It does **not** widen who may stop what — a session can still stand down only its own subject; what changes is that it can now name it, and that a refusal is a printed verdict rather than a silent no-op.
 
 **The disarm contract — what must be disarmed, which harness surface reaches each driver and which it cannot, and what must be left running — is `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session end. Read it and execute it from there; do not restate it here.** The vault's `Manager Session` runbook § Guardrails item 6 — Session end carries the per-vault operating statement and points back at both. **What this file owns is the procedure and the report** — the knowledge is the contract doc, read directly at step 1; an agent behind this file would only add a hop between it and the doc it points at, and could not reach the drivers anyway, since they are session-scoped and a subagent has its own session.
 
@@ -25,38 +27,49 @@ Run this section only when a name survives argument parsing. A bare call skips i
 
 - **name (optional):** everything that is not a recognised flag. May contain spaces; never word-split it, and quote it when passing to `vault-cli`.
 - **`--task` / `--goal` / `--topic`:** force the type, skipping resolution. Use when a name matches more than one kind.
-- **`--vault <name>`:** target vault. Overrides cwd detection.
+- **`--vault <name>`:** target vault, by name. Overrides cwd detection.
 
-1. **Resolve the vault** — `--vault` → the vault whose `path` contains the cwd → `default_vault` from config. If both arms fail, STOP.
+1. **Resolve the vault twice, because two readers want two shapes.** `vault-cli` takes the vault **name**; `owner.py --vault` takes the vault **root path** (`locate()` joins the subject folder onto it). Resolve the name first (`--vault` → the vault whose `path` contains the cwd → `default_vault` from config), then read its `path` from `vault-cli config list --output json`. If either arm fails, STOP. ⚠️ Passing the **name** to `owner.py` joins `private-personal/24 Goals`, which resolves nowhere — every by-name stop would refuse with a false `not-owned`.
 
 2. **Resolve the type — never guess.** Skip when a type flag was given. Otherwise probe all three and report which matched:
 
    ```bash
-   vault-cli --vault "<vault>" task get "<name>" status  2>/dev/null
-   vault-cli --vault "<vault>" goal get "<name>" status  2>/dev/null
+   vault-cli --vault "<vault-name>" task get "<name>" status  2>/dev/null
+   vault-cli --vault "<vault-name>" goal get "<name>" status  2>/dev/null
    find "<topics_dir>" -maxdepth 1 -iname "<name>.md"
    ```
 
-   Use `find -iname`, never a case-sensitive shell glob. Exactly one match → act on it and say which type matched. More than one → print every match with its type and STOP, telling the operator to re-run with `--task` / `--goal` / `--topic`. None → print the closest candidates and STOP; never create anything from an unmatched name.
+   `<topics_dir>` is the vault's topics folder — `23 Topics` unless `vault-cli config list --output json` says otherwise; read it, never hardcode it. Use `find -iname`, never a case-sensitive shell glob. Exactly one match → act on it and say which type matched. More than one → print every match with its type and STOP, telling the operator to re-run with `--task` / `--goal` / `--topic`. None → print the closest candidates and STOP; never create anything from an unmatched name.
 
 3. **Ownership guard — refuse, never gate.**
 
    ```bash
    python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/owner.py \
-     --session "${CLAUDE_CODE_SESSION_ID}" --subject "<name>" --branch "<goal|topic|task>" --vault "<vault>"
+     --session "${CLAUDE_CODE_SESSION_ID}" --subject "<name>" --branch "<goal|topic|task>" --vault "<vault-root>"
    ```
 
-   The first tab-separated field is the verdict. `owner` → continue. **Anything else — `not-owner` and `cannot-tell` alike — refuses**: print, as the first line,
+   The first tab-separated field is the verdict; the second is the reason. `owner` → continue. **Every other verdict refuses, and each prints its own first line — they must never be collapsed into one another:**
 
    ```
-   not-owned: <name> is not this session's subject
+   not-owned: <name> is not this session's subject        # verdict: not-owner
+   cannot-tell: <name> — <the reason from field 2>        # verdict: cannot-tell
    ```
 
-   then the verdict's own reason, and STOP without writing a marker. ⚠️ `cannot-tell` refuses because an unreadable probe licenses nothing — a stand-down written on an unknown owner is the exact defect this guard exists to prevent.
+   Then STOP without writing a marker. ⚠️ **`cannot-tell` is not `not-owner`** — the page was unreadable, recorded no session, or its folder could not be listed, so nothing was established about ownership. `owner.py` refuses to collapse them and this command must not either: a definite "not yours" printed over an unread page is a claim the probe never made. Both refuse; only one of them is a fact about ownership.
 
 4. **Write the marker** — `manager-liveness.py --stop --subject "<name>" --branch "<resolved branch>"`. It writes `<branch>--<base>.stopped` plus `<branch>--<base>.reset`. ⚠️ `--subject`, never the deprecated `--topic` alias, and always the explicit `--branch`: a branch-less call defaults to `goal` and marks the wrong record. Report it as `✓ stop marker — <path>`.
 
-5. **Print the report** — the same `⏹️ STOP — <subject> (<branch> · <vault>) · session <sid8>` block `<process>` step 3 owns, with the marker line under `Disarmed`. The bare form's driver rows do not apply: this run disarmed no driver of its own.
+5. **Print the report** — the header form `⏹️ STOP — <subject> (<branch> · <vault>) · session <sid8>` that `<process>` step 3 owns, then only the rows this run can actually fill:
+
+   ```
+   ⏹️ STOP — <subject> (<branch> · <vault>) · session <sid8>
+     Disarmed
+       ✓ stop marker — <path>
+     Session alive
+       ● ledger <path> — <n> open of <m>, unchanged by this command
+   ```
+
+   ⚠️ **The bare form's `Left running` rows do not appear here** — `● gate loop`, `● tick file` and `● gate ledger` all come from `stop-probe.py`, which this path never runs; `<error_handling>` forbids printing a slot whose read did not happen, and a fabricated `●` line reads as "checked and clean". ⚠️ **`Restart:` is `/supervisor:goal-loop "<subject>"` for a goal or topic and is omitted for a task** — nothing re-arms a worker, so offering a restart line would name a verb that does not exist for that tier.
 </by_name>
 
 <process>

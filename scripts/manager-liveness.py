@@ -469,7 +469,10 @@ PAGE_DIRS = (
     ("topic", DEFAULT_TOPICS_DIR),
     ("task", "25 Tasks"),
     ("task", "24 Tasks"),
+    ("task", "tasks"),
 )
+# The task folders `detect_branch()` probes. Same pair as `owner.py`'s `SUBJECT_DIRS["task"]`.
+TASK_DIRS = ("25 Tasks", "24 Tasks", "tasks")
 # What counts as "a record exists on this branch" — the files `--arm` / `--stop` /
 # `--sleep` write. `.arms` alone is history, never written without a `.cadence`.
 RECORD_EXTS = ("cadence", "stopped", "sleeping")
@@ -560,7 +563,8 @@ def state(subject: str, branch, vault: str, now: float) -> int:
             root = os.path.abspath(os.path.expanduser(vault))
             print(
                 f"manager-liveness: --state refused: {subject!r} resolves no record under any "
-                f"branch and no page under {root} ('24 Goals/', '23 Goals/', '23 Topics/') — an "
+                f"branch and no page under {root} ('24 Goals/', '23 Goals/', '23 Topics/', "
+                "'25 Tasks/', '24 Tasks/') — an "
                 "abbreviated or mistyped subject is not an unarmed one; pass the full page name "
                 "and --vault <vault root>",
                 file=sys.stderr,
@@ -607,6 +611,15 @@ def detect_branch(subject: str, vault: str = ".") -> str:
             return "topic"
     except OSError:
         pass
+    # A task page is proof the subject exists, and `task` is a tier since `/supervisor:stop`
+    # gained its by-name form. Resolved AFTER goal and topic, so a task and a goal sharing a
+    # title still prefers the goal — the ambiguity that predates this tier.
+    for task_dir in TASK_DIRS:
+        try:
+            if any(e.lower() == subject.lower() + ".md" for e in os.listdir(os.path.join(root, task_dir))):
+                return "task"
+        except OSError:
+            pass
     print(f"branch=goal (defaulted — no page resolved for {subject!r})", file=sys.stderr)
     return "goal"
 
@@ -1166,7 +1179,7 @@ def main() -> int:
     ap.add_argument(
         "--branch",
         choices=BRANCHES,
-        help="goal | topic | fleet — auto-detected when omitted (existing record, then the vault's pages)",
+        help="goal | topic | fleet | task — auto-detected when omitted (existing record, then the vault's pages)",
     )
     ap.add_argument(
         "--vault",
