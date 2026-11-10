@@ -139,10 +139,11 @@ defer_date = _load("defer_date", "defer-date.py")
 #: The row's session-id set (`claude_session_id` + every `metrics_sessions` id) and the
 #: `⏰ Ends:` pattern both have one home each; reuse them rather than re-deriving.
 _predispatch = _load("manager_predispatch", "manager-predispatch.py")
-_readings = _load("round_readings", "round-readings.py")
+#: `⏰ Ends:` liveness (expiry, session-bound vs external) has one owner.
+_declared_wait = _load("declared_wait", "declared-wait.py")
 
 #: Where the Stop hook appends each session's `<sid>.events.jsonl`.
-ATTENTION_DIR = _readings.ATTENTION_DIR
+ATTENTION_DIR = _declared_wait.STATE
 
 APPROVED = os.path.join(HERE, "approved-not-started.py")
 WORKER_SESSIONS = os.path.join(HERE, "worker-sessions.py")
@@ -278,31 +279,34 @@ def _newest_stop(session_id, attention_dir):
     return newest, closed
 
 
-def prior_wait(block, attention_dir):
+def prior_wait(block, attention_dir, now_s=None):
     """`waiting-external` | `waiting-operator` | None — did this row's last session end
     on a wait a new session cannot clear?
 
-    Opening a row whose previous session parked on a machine (`⏰ Ends:` — a PR, CI, a
-    card poll, a clock) or on an unanswered operator question starts a worker that parks
-    on its first turn, holding a slot and no model call. Measured 2026-11-10: of 37 idle
-    headless workers, 17 ended 🟡 WAITING and 15 on an operator ask or block.
+    Opening a row whose previous session parked on a machine or on an unanswered
+    operator question starts a worker that parks on its first turn, holding a slot and
+    no model call. Measured 2026-11-10: of 37 idle headless workers, 17 ended 🟡 WAITING
+    and 15 on an operator ask or block.
 
-    Read from the NEWEST `Stop` across the row's whole session-id set, so an old wait
-    that a later turn moved past does not hold the row forever. A `question` Stop whose
-    item was since closed (answered or cleared) no longer blocks.
+    Read from the session with the NEWEST `Stop` across the row's whole session-id set,
+    so an old wait a later turn moved past does not hold the row forever.
+
+    * `waiting-external` — that session's `⏰ Ends:` is live per `declared-wait.py`
+      (verdict `declared`, not `expired`) AND `external`. A `session-bound` wake
+      (Monitor, ScheduleWakeup, a background shell …) died with the session — this leg
+      only sees rows with no live session — so nothing will fire it, and the row opens.
+    * `waiting-operator` — that Stop is a `question` card whose item was never closed.
     """
-    newest, closed = None, set()
+    newest_sid, newest, closed = None, None, set()
     for sid in _predispatch.session_id_set(block):
         rec, done = _newest_stop(sid, attention_dir)
         closed |= done
         if rec is not None and (newest is None or rec["ts"] > newest["ts"]):
-            newest = rec
+            newest_sid, newest = sid, rec
     if newest is None:
         return None
-    detail = newest.get("detail") or ""
-    if isinstance(detail, list):
-        detail = " ".join(str(x) for x in detail)
-    if _readings.ENDS_RE.search(str(detail)):
+    wait = _declared_wait.wait_record(newest_sid, state_dir=attention_dir, now=now_s)
+    if wait and wait["verdict"] == "declared" and wait["mechanism"] == "external":
         return "waiting-external"
     if newest.get("kind") == "question" and newest.get("item_id") not in closed:
         return "waiting-operator"
@@ -328,7 +332,8 @@ def guards(block, today, attention_dir=None):
         print("open-queue: %s — treating as deferred" % detail, file=sys.stderr)
     if state in ("deferred", "invalid"):
         return "deferred"
-    return prior_wait(block, attention_dir or ATTENTION_DIR)
+    now_s = today.timestamp() if hasattr(today, "timestamp") else None
+    return prior_wait(block, attention_dir or ATTENTION_DIR, now_s)
 
 
 def rank_key(row):

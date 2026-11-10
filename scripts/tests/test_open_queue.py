@@ -35,6 +35,7 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 
@@ -562,9 +563,23 @@ class PriorWaitTest(unittest.TestCase):
     def test_ends_slot_is_waiting_external(self):
         self.row("parked", sid=self.SID)
         self.row("control")
-        self.events(self.SID, {"event": "Stop", "kind": "idle", "ts": 10,
+        self.events(self.SID, {"event": "Stop", "kind": "idle", "ts": time.time(),
                                "detail": "🟡 WAITING\n⏰ Ends:   PR #12 merged (gh, watcher)"})
         self.assert_only_control_opens("parked", "waiting-external")
+
+    def test_expired_or_session_bound_wait_does_not_block(self):
+        # An `⏰ Ends:` older than declared-wait's max age, and a wake that died with
+        # its session, are not waits a new session would inherit.
+        old_sid, bound_sid = self.OLD, self.SID
+        self.row("expired", sid=old_sid)
+        self.row("bound", sid=bound_sid)
+        self.events(old_sid, {"event": "Stop", "kind": "idle", "ts": time.time() - 7200,
+                              "detail": "⏰ Ends: PR #12 merged (gh, watcher)"})
+        self.events(bound_sid, {"event": "Stop", "kind": "idle", "ts": time.time(),
+                                "detail": "⏰ Ends: auditor returns (Monitor, abc)"})
+        rows, skipped = self.collect(["expired", "bound"])
+        self.assertEqual(sorted(r["name"] for r in rows), ["bound", "expired"])
+        self.assertEqual(skipped, [])
 
     def test_unanswered_question_is_waiting_operator(self):
         self.row("asking", sid=self.SID)
@@ -586,9 +601,10 @@ class PriorWaitTest(unittest.TestCase):
     def test_newest_stop_across_the_id_set_wins(self):
         # An old session parked on a machine; a later one ended routinely -> runnable.
         self.row("moved-on", sid=self.SID, metrics=[self.OLD])
-        self.events(self.OLD, {"event": "Stop", "kind": "idle", "ts": 5,
-                               "detail": "⏰ Ends: CI green"})
-        self.events(self.SID, {"event": "Stop", "kind": "idle", "ts": 20,
+        now = time.time()
+        self.events(self.OLD, {"event": "Stop", "kind": "idle", "ts": now - 60,
+                               "detail": "⏰ Ends: CI green (gh run watch)"})
+        self.events(self.SID, {"event": "Stop", "kind": "idle", "ts": now,
                                "detail": "👤 You: nothing"})
         rows, _ = self.collect(["moved-on"])
         self.assertEqual([r["name"] for r in rows], ["moved-on"])
