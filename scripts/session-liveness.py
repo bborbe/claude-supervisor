@@ -587,7 +587,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
     # The exact-match fast path: a full id is one dict lookup, and the prefix scan is skipped.
     exact = next((k for k in by_id if k.lower() == sid), None)
     if exact is not None:
-        return _verdict_for(by_id[exact], sid)
+        return _verdict_for(by_id[exact], sid, registry_dir)
     matches = sorted(sid_ for sid_ in by_id if sid_.lower().startswith(sid))
     if len(matches) > 1:
         # 12 chars, not 8: the caller already passed a prefix long enough to collide, so
@@ -598,7 +598,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
             ", ".join(m[:12] for m in matches),
         ), None
     if len(matches) == 1:
-        return _verdict_for(by_id[matches[0]], sid)
+        return _verdict_for(by_id[matches[0]], sid, registry_dir)
 
     # The list was readable and matched nothing. Confirm against the per-id route before
     # licensing ABSENT — the one verdict a caller acts on by starting a second writer.
