@@ -610,6 +610,35 @@ class PageResolutionTest(unittest.TestCase):
         self.assertEqual("sid-1", self.o.page_session_id("claude_session_id: 'sid-1'\n"))
         self.assertEqual("", self.o.page_session_id("status: in_progress\n"))
 
+    def test_page_session_id_treats_every_spelling_of_none_as_none(self):
+        """Absent, empty and literal `null` are one fact — nothing recorded.
+
+        ⚠️ This is the single fold every consumer reads through, so the `null` shape is
+        pinned here rather than only at the scripts that call it. Measured 2026-11-08:
+        `scalar()` returned the four characters `null`, `session-liveness.py` accepted it as
+        a legal id (it admits any lowercase prefix by design), the probe answered `ABSENT`,
+        and `worker-keepalive.py` printed `resume` for a session that was never named.
+        """
+        for fm in (
+            "status: in_progress\n",
+            "claude_session_id:\n",
+            "claude_session_id: null\n",
+            "claude_session_id: NULL\n",
+            "claude_session_id: ~\n",
+            "claude_session_id: []\n",
+            "claude_session_id: \"null\"\n",
+            "claude_session_id: ''\n",
+        ):
+            with self.subTest(fm=fm):
+                self.assertEqual("", self.o.page_session_id(fm))
+
+    def test_page_session_id_keeps_a_real_id(self):
+        """The negative control: the fold must not swallow an id that only looks odd."""
+        for sid in ("3716bdff-a825-433a-bd73-c96d64970d29", "fa2dc5f3-8dd", "nullify"):
+            with self.subTest(sid=sid):
+                self.assertEqual(
+                    sid, self.o.page_session_id(f"claude_session_id: {sid}\n"))
+
     def test_page_path_matches_the_exact_basename(self):
         self.page("A Goal", "claude_session_id: gm-1\n")
         self.page("A Goal Extra", "claude_session_id: gm-2\n")
