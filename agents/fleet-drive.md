@@ -1,6 +1,6 @@
 ---
 name: fleet-drive
-description: Perform the fleet sweep's drive leg — read the digest render at the `payload=` path the caller passes, split its `parked` rows into revive (observed routine-continue closer, no verified blocker) and blocked (verified blocker), suppress re-nudges through a session-keyed ledger, draft reap-evidence messages for finished rows (before any nudge), write the drafted reaps, nudges and escalation groups to its own payload, and return the ≤ 1 KB drive-verdict hand-back. Dispatched by the fleet round `/supervisor:fleet-drive` on every round (armed by `/supervisor:fleet-loop`, or run by hand). Consumes the classification the sweep already produced; never builds a second one, never sends.
+description: Perform the fleet sweep's drive leg — read the digest render at the `payload=` path the caller passes, split its `parked` rows into revive (observed routine-continue closer, no verified blocker) and blocked (verified blocker), suppress re-nudges through a session-keyed ledger, close a nudged row still idle at the second round, draft reap-evidence messages for finished rows (before any nudge), write the drafted reaps, nudges and escalation groups to its own payload, and return the ≤ 1 KB drive-verdict hand-back. Dispatched by the fleet round `/supervisor:fleet-drive` on every round (armed by `/supervisor:fleet-loop`, or run by hand). Consumes the classification the sweep already produced; never builds a second one, never sends.
 model: sonnet
 tools: Read, Bash, Write, Task
 allowed-tools: Bash(vault-cli:*), Bash(gh:*), Bash(grep:*), Bash(cat:*), Bash(mkdir:*), Bash(mv:*), Bash(date:*), Bash(git:*), Bash(python3:*)
@@ -128,15 +128,28 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
    | **blocked** | a probe found a live blocker | escalate, with the probe and its result |
    | **unverifiable** | a probe could not run, no task resolved, no `CLOSERS` row, or a row classed `parked-wait` / `none` | observation only — except at streak 2 (6b): a resolving pane acts, a pane-less row is observed |
    | **finished** | from step 1, disk facts hold (1b) | reap message drafted |
+   | **closed** | a `revive` row whose previous ledger entry carries `nudge: drafted` and whose bucket, open-box count and blocker state are all unchanged this round, and `close-idle-tab.py` exited 0 (5b) | pane closed — render a `CLOSED` line |
    | **wrote-nothing** | from step 1a — ledger row records `ended_at`, task page not modified since `spawned_at`, past the 15-minute grace window, task `execution` with open boxes | report as a failure; draft no nudge |
 
-6. **Draft nudges** for `revive` only. Read-only context: name the peer's next unchecked subtask, state that nothing was authorised and nothing was done on its behalf, and that this is not a green light past any gate. For a revive, quote the closer and what earned it — the `routine` class, or the table rows it passed. Never a course correction ("stop that", "work on X instead").
+5b. **Close a nudged row still idle — the second round.** Run this **before** drafting any nudge, for every candidate step 5 marked `revive`. Read its previous-round ledger entry (loaded in step 3): when it carries `nudge: drafted` **and** this round's bucket, open-box count and blocker state are all unchanged — the same comparison step 3 suppresses on — the nudge was ignored, and the row is closed instead of nudged again.
+
+   ```bash
+   python3 $P/close-idle-tab.py <full session id>
+   ```
+
+   ⚠️ **The two preconditions are structural, never re-checked here.** A row with an open operator card is `blocked` at step 4a; a declared wait is `parked-on-watcher` / `waiting-on-human` and is never a candidate (step 1). Neither can reach `revive`, so neither can reach this step — and a row you did not assign `revive` this round must never be closed. `close-idle-tab.py` re-runs its own guards anyway (`gate-held`, `dirty-worktree`, `held-session`, `busy-target`, `watcher-alive`, `not-idle-long-enough`); that is defence in depth, not a licence to close outside the verdict.
+
+   - exit 0 → verdict **`closed`**. Render a `CLOSED` line naming the session id, its pane, and that the task stays `in_progress` with its `claude_session_id` kept — the row stays resumable through `/supervisor:open --task`.
+   - refusal → ⚠️ **report the token, never retry, and never fall back to a nudge.** `task-terminal` / `task-unresolved` / `gate-held` / `held-session` → verdict **`blocked`** (escalate, carrying the token); `busy-target` / `dirty-worktree` / `not-idle-long-enough` / `watcher-alive` / `unknown-session-id` / `ambiguous-pid` / `not-tab` → verdict **`unverifiable`** (retry next round).
+   - `nudge: none`, no ledger entry, or any of the three changed → fall through to step 6 and draft the nudge.
+
+6. **Draft nudges** for `revive` only — the rows 5b did not close. Read-only context: name the peer's next unchecked subtask, state that nothing was authorised and nothing was done on its behalf, and that this is not a green light past any gate. For a revive, quote the closer and what earned it — the `routine` class, or the table rows it passed. Never a course correction ("stop that", "work on X instead").
 
    **Thresholds, numerically** — [`fleet-drive-rationale.md`](../docs/fleet-drive-rationale.md) § Thresholds.
 
 6b. **Unverifiable 2 rounds — read the pane, act once.** Write this round's entries to `/tmp/drive-round.json` and run `python3 $P/drive-unverifiable.py handle --entries /tmp/drive-round.json --json-out /tmp/drive-round.json --digest <payload= path>`; paste its `UNVERIFIABLE` block verbatim into the payload's `UNVERIFIABLE` section, nudge lines into `NUDGES`, escalation rows into `ESCALATION`. Step 7 merges the **patched** file. Share + rules: `drive-share.py` docstring. ⚠️ **`observation` = no pane: no card, no cap slot.** ⚠️ **Never omit it** — `(none)` on an empty round.
 
-7. **Persist the ledger** — `python3 $P/drive-ledger.py merge`, with **this round's entries only** on stdin as `{"round": "<ts>", "entries": [...]}`. The script owns the merge, so a round cannot shrink the ledger by omission ([`fleet-drive-rationale.md`](../docs/fleet-drive-rationale.md) § The ledger's one writer). ⚠️ **Never write the ledger yourself** — no `jq`, no `python3 -c`, no `mkdir`/`mv`, and never pass a pre-merged set. `scripts/check-drive-ledger-writes.py` fails the build if any ledger-referencing line across `agents/` and `commands/` **writes** the ledger through an inline interpreter — a read is not an offence. A refused merge (exit 2) wrote **nothing**: report the refusal in the header rather than retrying by hand. One entry per candidate of **every** verdict — revive, blocked, unverifiable, finished, wrote-nothing — because step 3 compares each field against the previous round's value: session id, name, verdict, open-box count, probe + result, `nudge: drafted|none`, suppression reason, **`task_file`** — what step 0 re-reads, and an entry without one cannot be re-probed — and, for a retained row, **`reprobe_verdict`** + **`reprobe_probe`**, copied verbatim from step 0's output. Those two are step 0's dedup key on the next round; an entry written without them reads as a first observation and re-signals. Also `unverifiable_streak` + `unverifiable_round` + `unverifiable_observation`, copied from 6b's patched file — separate field, never an action. A `drafted` entry counts as nudged next round — if the caller's send fails, the next round suppresses rather than nags.
+7. **Persist the ledger** — `python3 $P/drive-ledger.py merge`, with **this round's entries only** on stdin as `{"round": "<ts>", "entries": [...]}`. The script owns the merge, so a round cannot shrink the ledger by omission ([`fleet-drive-rationale.md`](../docs/fleet-drive-rationale.md) § The ledger's one writer). ⚠️ **Never write the ledger yourself** — no `jq`, no `python3 -c`, no `mkdir`/`mv`, and never pass a pre-merged set. `scripts/check-drive-ledger-writes.py` fails the build if any ledger-referencing line across `agents/` and `commands/` **writes** the ledger through an inline interpreter — a read is not an offence. A refused merge (exit 2) wrote **nothing**: report the refusal in the header rather than retrying by hand. One entry per candidate of **every** verdict — revive, blocked, unverifiable, finished, closed, wrote-nothing — because step 3 compares each field against the previous round's value: session id, name, verdict, open-box count, probe + result, `nudge: drafted|none`, suppression reason, **`task_file`** — what step 0 re-reads, and an entry without one cannot be re-probed — and, for a retained row, **`reprobe_verdict`** + **`reprobe_probe`**, copied verbatim from step 0's output. Those two are step 0's dedup key on the next round; an entry written without them reads as a first observation and re-signals. Also `unverifiable_streak` + `unverifiable_round` + `unverifiable_observation`, copied from 6b's patched file — separate field, never an action. A `drafted` entry counts as nudged next round — if the caller's send fails, the next round suppresses rather than nags.
 
 </process>
 
@@ -148,7 +161,7 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 Return exactly this in the payload, each section `(none)` rather than dropped:
 
 ```
-fleet-drive — <N> candidates (<L> retained from the ledger) · <F> finished (reaped) · <W> wrote-nothing · <R> revive (<C> routine continue) · <B> blocked · <U> unverifiable · headless=<H> · channel=pane-free-closer
+fleet-drive — <N> candidates (<L> retained from the ledger) · <F> finished (reaped) · <W> wrote-nothing · <R> revive (<C> routine continue) · <B> blocked · <X> closed · <U> unverifiable · headless=<H> · channel=pane-free-closer
   <name> [<sid8>] · <bucket> · <open boxes> · <verdict>
       probe: <command → result>   |   (revive: the CLOSERS row + the four step-4a rows)
       ledger: <drafted | suppressed: <reason> | excluded>
@@ -168,6 +181,9 @@ ESCALATION — grouped by cause
 UNVERIFIABLE BLOCK — replace with handle's output, verbatim (step 6b)
 REAPS
   TO: <exact roster name> | <evidence message text>
+CLOSED — one line per pane closed by 5b
+  <name> [<sid8>] · pane <id> · task stays in_progress, claude_session_id kept → resumable via /supervisor:open --task
+  (none)
 NUDGES
   TO: <exact roster name> | <message text>
 FREEABLE TABS (a slot the operator can free without a diagnosis)
@@ -202,7 +218,7 @@ the caller prints what you hand it.
 **Hand-back** — obey `${CLAUDE_PLUGIN_ROOT}/docs/handback-contract.md` **for the form**: verdict lines and counts in `key=value` form, **≤ 1 KB**, non-empty, payload off the hand-back. ⚠️ **The contract's payload-path section does not cover this leg** — its table lists the manager store only and its keying rule is the subject slug, while the fleet loop keys on the round. The path rule that applies here is the one in this `<output_format>`. This leg's required set is the **drive verdicts — one line per candidate you decided, carrying the decision**:
 
 ```text
-candidates=<N> · finished=<F> · wrote-nothing=<W> · revive=<R> · blocked=<B> · unverifiable=<U> · headless=<H> · truncated=<n> · payload=<path>
+candidates=<N> · finished=<F> · revive=<R> · blocked=<B> · closed=<X> · wrote-nothing=<W> · unverifiable=<U> · headless=<H> · truncated=<n> · payload=<path>
 <name> [<sid8>] = <verdict>
 ```
 
