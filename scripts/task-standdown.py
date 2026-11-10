@@ -203,9 +203,13 @@ def stamp(args):
     half-merge the by-name PR's own SC3 deferred to this change.
     """
     if args.subject.strip():
-        path, ambiguous, reason = by_name(args.subject)
+        path, ambiguous, degraded, reason = by_name(args.subject)
         if ambiguous:
             print("ambiguous\t")
+            return 1
+        if degraded:
+            print("cannot-tell\t")
+            print(reason, file=sys.stderr)
             return 1
         if not path:
             print("no-task\t")
@@ -271,25 +275,32 @@ def stamp(args):
 
 
 def by_name(subject):
-    """`(path, ambiguous, reason)` for a task resolved by NAME.
+    """`(path, ambiguous, degraded, reason)` for a task resolved by NAME.
 
     Delegates to `resolve-task-file.py`, the repo's own "never guesses" resolver: zero
     hits or more than one inside the tier reached resolves nothing, and the colliding
     paths go to stderr. Shared by the by-name stamp and the `--clear` verb, so the two
     cannot disagree about which page a name means.
+
+    ⚠️ **`degraded` is a returned flag, never inferred from the reason text.** The
+    resolver's degraded reasons read *"vault-cli config list exited 2"*, *"timed out
+    after 10s"*, *"not found on PATH"*, *"returned dict, not a list"* and *"yielded no
+    usable vault"* — none of which contains "unreadable", so an earlier version that
+    sniffed the string rendered `no-task` on a failed read, the exact collapse this
+    module's contract forbids.
     """
     resolve = _load("resolve_task_file", "resolve-task-file.py")
     payload, degraded = resolve.vault_dirs()
     if degraded:
-        return "", [], degraded
+        return "", [], True, degraded
     path, ambiguous = resolve.resolve(subject, payload)
     if ambiguous:
         for candidate in ambiguous:
             print("AMBIGUOUS %s\t%s" % (subject, candidate), file=sys.stderr)
-        return "", ambiguous, "ambiguous name"
+        return "", ambiguous, False, "ambiguous name"
     if not path:
-        return "", [], "no task named %r" % subject
-    return path, [], ""
+        return "", [], False, "no task named %r" % subject
+    return path, [], False, ""
 
 
 def clear(args):
@@ -299,12 +310,16 @@ def clear(args):
         print("cannot-tell\t")
         print("vault-cli config list is unreadable", file=sys.stderr)
         return 1
-    path, ambiguous, reason = by_name(args.subject)
+    path, ambiguous, degraded, reason = by_name(args.subject)
     if ambiguous:
         print("ambiguous\t")
         return 1
+    if degraded:
+        print("cannot-tell\t")
+        print(reason, file=sys.stderr)
+        return 1
     if not path:
-        print("cannot-tell\t" if "unreadable" in reason or "DEGRADED" in reason else "no-task\t")
+        print("no-task\t")
         print(reason, file=sys.stderr)
         return 1
     vault = args.vault or vault_name_for(path, known)

@@ -50,7 +50,7 @@ class TaskStanddownTest(unittest.TestCase):
     def tearDown(self):
         (ts.set_field, ts.remove_field, ts.vaults, ts.anchored_task, ts._load) = self._orig
 
-    def stub_resolve(self, path, ambiguous=()):
+    def stub_resolve(self, path, ambiguous=(), degraded=""):
         """Replace the `resolve-task-file.py` seam.
 
         ⚠️ **Patched on `_load`, not on a loaded module.** `clear()` calls `_load()` on
@@ -61,7 +61,7 @@ class TaskStanddownTest(unittest.TestCase):
         class Resolver:
             @staticmethod
             def vault_dirs():
-                return ([], "")
+                return ([], degraded)
 
             @staticmethod
             def resolve(name, payload):
@@ -221,6 +221,23 @@ class TaskStanddownTest(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertEqual("ambiguous\t", out[0])
         self.assertEqual([], self.removals)
+
+    def test_a_degraded_resolver_is_cannot_tell_not_no_task(self):
+        """⚠️ The collapse the docstring forbids, pinned.
+
+        `resolve-task-file.py`'s degraded reasons read *"vault-cli config list exited 2"*,
+        *"timed out after 10s"*, *"not found on PATH"* — **none** contains "unreadable".
+        An earlier version sniffed the reason text for that word and rendered `no-task` on
+        a failed read, which licenses a caller to conclude the task does not exist. The
+        flag is now typed, so the wording cannot reach the verdict.
+        """
+        for argv in (["--clear", "--subject", "A Task"], ["--subject", "A Task"]):
+            with self.subTest(argv=argv):
+                self.stub_resolve("", degraded="vault-cli config list exited 2")
+                code, out = self.run_main(argv)
+                self.assertEqual(1, code)
+                self.assertEqual("cannot-tell\t", out[0])
+                self.assertEqual([], self.writes)
 
     def test_clear_needs_a_subject(self):
         with self.assertRaises(SystemExit):

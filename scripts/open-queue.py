@@ -145,9 +145,12 @@ FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 # sentinel string, so the key stays a tuple of comparables.
 NO_PRIORITY = 10**6
 
-#: The task tier's deliberate-stop marker — see `is_stopped()`. Shared with
-#: `scripts/task-standdown.py`, which is the only writer, and `scripts/worker-keepalive.py`,
-#: which reads it on the restart path. One key, one truthy set, three readers.
+#: The task tier's deliberate-stop marker — see `is_stopped()`. `scripts/task-standdown.py`
+#: is the only writer; this module and `scripts/worker-keepalive.py` are the readers.
+#: ⚠️ **The truthy set is declared in each of the three rather than imported** — the repo's
+#: scripts are loaded by path, so a cross-module import would couple two files that are
+#: otherwise independent. Keep the three literals identical: a drift would make the
+#: open-queue and the keepalive disagree about whether one row is stopped.
 STOPPED_KEY = "stopped"
 TRUTHY = {"true", "yes", "on"}
 
@@ -271,10 +274,14 @@ def guards(block, today):
         return "unreadable task file"
     if (field(block, "phase") or "").strip() == "todo":
         return "waiting approval"
-    # ⚠️ **Ahead of every other guard, including `blocked_by` and `defer_date`.** A stop is
-    # the operator's own act and outranks a derived state: a row that is both stopped and
-    # deferred must report `stopped`, or the operator sees the row silently reappear the
-    # day the defer expires with nothing recording that they had ended it.
+    # ⚠️ **Ahead of every DERIVED guard — `blocked_by` and `defer_date` — but after the two
+    # that describe the row's own state rather than a derivation.** A stop is the operator's
+    # own act and outranks a computed "not now": a row that is both stopped and deferred
+    # must report `stopped`, or the operator sees it silently reappear the day the defer
+    # expires with nothing recording that they had ended it. It deliberately does NOT
+    # outrank `unreadable task file` or `waiting approval`: an unreadable page is not
+    # evidence of a stop, and a `phase: todo` row is in the operator's approval inbox,
+    # which is the boundary `commands/open.md` Gate 1 owns.
     if is_stopped(block):
         return "stopped"
     if has_blocked_by(block):

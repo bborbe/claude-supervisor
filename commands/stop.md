@@ -101,7 +101,19 @@ Run this section for the **bare** form only.
 
 2b. **Decide the tier, then mark the stand-down.** The marker differs by tier, and choosing the wrong one is the defect this step exists to prevent: a **worker** that writes a subject marker stands down a goal manager's loop it does not own, and a **manager** that writes only a page field is restarted as a lapsed manager.
 
-   **The discriminator — two signals, either one means manager.** The session is a **manager** when `~/.claude/state/worker-manager/<session-id>.json` exists **or** the probe in step 2 found a gate loop for it. Otherwise it is a **worker**. ⚠️ **Both limbs are needed, and neither is the subject the probe printed.** The registration can be missing while the loop is genuinely armed — the case step 2b's fallback exists for — so registration alone would misroute a live manager; and a worker runs no gate loop, so the gate loop alone would leave a registration-bearing manager with an armed loop looking like a worker. Take the probe's own output for the second limb rather than re-deriving it.
+   **The discriminator — registration first, then the worker limb doubles as the probe.** Run these in order and stop at the first verdict that decides:
+
+   1. `~/.claude/state/worker-manager/<session-id>.json` exists → **manager limb**.
+   2. Otherwise run the **worker limb** and read its verdict:
+      - `stopped` → it was a worker, and it is now stamped. Done.
+      - `no-task` → no task page claims this session, so it is not a worker: run the **manager limb**.
+      - `handed-off` or `cannot-tell` → report the verdict and **stop**. Do not fall through to the manager limb: a handed-off task belongs to a successor, and an unreadable read licenses nothing.
+
+   ⚠️ **The worker limb IS the probe — there is no separate dry-run, and there must not be one.** `task-standdown.py --session` writes when it resolves, which is exactly what a worker needs; adding a read-only probe would duplicate the resolution and give the two copies room to disagree. The only case that pays a wasted call is the manager whose registration is missing, and it pays one `no-task`.
+
+   ⚠️ **Do not use the probe's gate-loop line as the second limb, and an earlier version of this step did.** `stop-probe.py` matches every `sweep-gate.py` process **on the machine**, not per session, and its launchd check derives the heartbeat path from the session's *own subject* — which is precisely what is absent when the registration is missing. So on the normal launchd-hosted setup, a manager whose registration is missing reads `heartbeat UNRESOLVED — no subject record` and `gate NONE`, would be classed a **worker**, and its loop would stay armed — the measured `(none recorded)` case the fallback exists for. In the other direction one live detached gate process would class every worker as a manager, and no task would ever be stamped.
+
+   ⚠️ **The fall-through default is the manager limb, not the worker limb.** A worker with no anchored task has nothing to stamp, so reaching the manager limb costs it a `no-task` verdict — while the reverse default silently leaves a manager's loop armed, which is the failure this command exists to prevent. The cost is asymmetric, so it decides the direction.
 
    **Worker limb** — stamp the anchored task, and write **no** state file:
 
@@ -109,7 +121,7 @@ Run this section for the **bare** form only.
    python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/task-standdown.py --session "$CLAUDE_CODE_SESSION_ID"
    ```
 
-   It resolves the task by `claude_session_id` and writes `stopped: true` + `stop_date` on that page. That pair is what stops the row being **reopened** by `open-queue.py` and **resumed** by `worker-keepalive.py`. ⚠️ **Do not run step 2b's subject marker for a worker**, and do not fall back to the subject on a `no-task` verdict: a worker whose task cannot be resolved has nothing to stand down, and the fallback would resolve to its task's **goal**. Report the verdict line, and on `no-task` say so plainly.
+   It resolves the task by `claude_session_id` and writes `stopped: true` + `stop_date` on that page. That pair is what stops the row being **reopened** by `open-queue.py` and **resumed** by `worker-keepalive.py`. ⚠️ **The `no-task` verdict is the discriminator's second signal, not a failure to report and stop on** — it means no task claims this session, so the caller is not a worker and the manager limb runs next. A `stopped` verdict means the worker limb already did the work and the manager limb must **not** run. Report whichever verdict you got.
 
    **Manager limb** — the subject marker, unchanged:
 
