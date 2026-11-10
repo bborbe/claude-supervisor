@@ -378,25 +378,48 @@ def unquote_payload(payload):
     return parts[0] if len(parts) == 1 else text
 
 
-def _name_from_payload(payload, vault, tasks_dir):
-    """`(name, why_text)` — the row name, resolved against the board itself.
+def _name_from_payload(payload, vault, tasks_dir, kind=""):
+    """`(name, why_text)` — the row name, resolved from the payload's own file path.
 
-    The payload is `<name> — <why> — <file>:<line>`, but **no fixed split direction
-    works**: `source.file` is `25 Tasks/<name>.md`, so a name containing ` — ` puts the
-    separator in the path as well as the name, and `rsplit` then lands inside the path.
-    (Measured 2026-11-10: 65 files in `25 Tasks/` carry ` — ` in the filename.)
+    The payload is `<name> — <why> — <file>:<line>`, and **no split direction works**:
+    `source.file` is `25 Tasks/<name>.md`, so a name containing ` — ` puts the separator
+    in the path too (65 files in `25 Tasks/` carry one).
 
-    So the board is the oracle: try the LONGEST leading prefix that resolves to a page,
-    longest first so a name that is a prefix of a longer real name does not win. When
-    nothing resolves, the first segment is returned unchanged and `add_to_plan` refuses
-    it — the caller never gets a silently wrong name.
+    Three oracles, strongest first:
+      1. **The payload's own path.** `due_today`, the P1-task and the blocked-goal rows
+         all build `{"file": str(path)}` with `name = path.stem`, so the stem IS the
+         name — exact, and immune to the separator on both sides. A `plan_candidates`
+         row cites a plan page whose stem never resolves, so it falls through.
+      2. **The longest leading ` — `-joined prefix that resolves to a page** — longest
+         first, because the name is the maximal prefix and a shorter one is a
+         different (wrong) page. The loop stops before the final segment, so a path can
+         never be mistaken for a name.
+      3. **The first segment, unchanged** — `add_to_plan` then refuses it, so a name
+         that resolves to nothing is never written as a wrong row.
     """
     parts = payload.split(" — ")
+    first = parts[0].strip()
+
+    # An alert's name is a raw `prometheus-alerts.sh` line and can never be a page, so
+    # the board oracles below would resolve a fragment of it to some unrelated task.
+    # Its tail IS fixed (`alert firing, in no current plan` / `prometheus-alerts.sh:<n>`),
+    # so splitting from the right is exact here even though it is wrong for tasks.
+    if kind == "alert":
+        tail = payload.rsplit(" — ", 2)
+        return tail[0].strip(), (tail[1].strip() if len(tail) > 1 else "")
+
+    if len(parts) > 1:
+        stem = Path(parts[-1].rsplit(":", 1)[0].strip()).stem
+        if stem and _page_path(vault, tasks_dir, stem) is not None:
+            k = stem.count(" — ") + 1
+            return stem, (parts[k].strip() if k < len(parts) else "")
+
     for i in range(len(parts) - 1, 0, -1):
         candidate = " — ".join(parts[:i]).strip()
         if candidate and _page_path(vault, tasks_dir, candidate) is not None:
-            return candidate, (parts[i].strip() if i < len(parts) else "")
-    return parts[0].strip(), (parts[1].strip() if len(parts) > 1 else "")
+            return candidate, parts[i].strip()
+
+    return first, (parts[1].strip() if len(parts) > 1 else "")
 
 
 def kind_of_key(card_key):
@@ -437,8 +460,8 @@ def consume_items(items, vault, tasks_dir, dismissed_dir, consumed_dir, now):
         # Unquote ONCE and derive both fields from it: reading `why_text` off the raw
         # payload left a trailing `'` in the row for any quoted multi-segment payload.
         payload = unquote_payload(card.get("payload", ""))
-        name, why_text = _name_from_payload(payload, vault, tasks_dir)
         kind = kind_of_key(card_key)
+        name, why_text = _name_from_payload(payload, vault, tasks_dir, kind)
         if not name:
             notes.append(f"{card_key}: card carries no payload name — not consumed")
             continue

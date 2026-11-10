@@ -431,6 +431,48 @@ class ConsumeTests(unittest.TestCase):
         self.assertEqual(notes, [])
         self.assertIn(f"**Task:** [[{name}]]", self.weekly.read_text(encoding="utf-8"))
 
+    def test_the_path_oracle_wins_over_a_longer_page_name(self):
+        """`Foo — bar` may exist; a row genuinely named `Foo` must still resolve to Foo.
+
+        The payload's own path is the exact oracle: `source.file` is the page that
+        produced the row, so its stem is the name however many separators either side
+        carries.
+        """
+        for page_name in ("Foo", "Foo — bar"):
+            (self.vault / "25 Tasks" / f"{page_name}.md").write_text(
+                "---\nstatus: next\n---\n\nbody\n", encoding="utf-8")
+        foo = self.vault / "25 Tasks" / "Foo.md"
+
+        name, why = answer._name_from_payload(
+            f"Foo — bar — baz — {foo}:1", str(self.vault), "25 Tasks", "task")
+
+        self.assertEqual(name, "Foo", "resolved to the longer page")
+        self.assertEqual(why, "bar")
+
+    def test_a_vanished_page_falls_back_and_is_refused(self):
+        """A separator-carrying name whose page is gone must be refused, not guessed."""
+        gone = self.vault / "25 Tasks" / "Gone — name.md"
+        consumed, notes = self.run_consume([
+            self.card("add it to the plan",
+                      payload=f"Gone — name — priority: 1, in no current plan — {gone}:1"),
+        ])
+
+        self.assertEqual(consumed, [])
+        self.assertTrue(any("refusing to write" in note for note in notes))
+        self.assertNotIn("Gone", self.weekly.read_text(encoding="utf-8"))
+
+    def test_an_alert_name_is_taken_verbatim(self):
+        """An alert's name is a raw alert line — never a page, so never oracle-resolved."""
+        (self.vault / "25 Tasks" / "Trading.md").write_text(
+            "---\nstatus: next\n---\n\nbody\n", encoding="utf-8")
+
+        name, _ = answer._name_from_payload(
+            "Trading — High error rate — alert firing, in no current plan — "
+            "prometheus-alerts.sh:1",
+            str(self.vault), "25 Tasks", "alert")
+
+        self.assertEqual(name, "Trading — High error rate")
+
     def test_notes_render_on_an_empty_round(self):
         """A round that could not look must not read like a round that found nothing."""
         rendered = answer.render([], ["k: unhandled answer 'x' — not consumed"], 2, 1)
