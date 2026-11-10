@@ -17,7 +17,7 @@ and the agent renders. So the tier read and the close live in `commands/steps/dr
 a rule telling the agent to run them would execute in no layer. `goal-drive` is different:
 its `allowed-tools` does grant `Bash(python3:*)`, so its reap step owns the read itself.
 
-Five assertions, all required:
+Six assertions, all required:
 
   (a) `scripts/close-worker.py` exists on disk. A prose mention is satisfied by a name
       alone, and a round that shells out to a script that is not there dies at runtime

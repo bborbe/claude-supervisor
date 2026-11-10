@@ -197,7 +197,7 @@ def in_flight(session_ids, registry, attention_dir, now, transcript_age):
                 break  # the carve-out: fall through to limb 2
             return "in-flight", "limb 1 (registry: shell)"
         if status == "waiting":
-            return "quiet", "limb 1 (registry: waiting)"
+            return "parked", "limb 1 (registry: waiting)"
         if status is None:
             unreadable += 1
 
@@ -655,7 +655,7 @@ def permission_channel_sid(session_ids, projects_dir, now=None):
 
 
 def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=None,
-                  projects_dir=None):
+                  projects_dir=None, in_flight_verdict=None):
     """`(verdict, reason)` — denied | permission-channel | frozen | none | unread.
 
     Three carriers, all of which would otherwise render `progressing`:
@@ -672,6 +672,14 @@ def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=Non
     * **frozen** — the task file has not moved for a whole interval while its owner
       is LIVE. That is shorter than the park cell's 2x threshold, and unlike it this
       is a stuck claim rather than a check-in.
+
+    ⚠️ **One veto, not a fourth carrier: `parked`.** The caller's `in_flight` verdict
+    reads `parked` when the session registry says the worker is blocked on input, and
+    transcript staleness is exactly what a suspended tool call produces — so a row the
+    ladder just called `parked` must not also be stamped `frozen`. Without this the row
+    emits `in_flight: parked` beside `stuck: frozen`, which is the contradiction this
+    argument exists to remove. It is read after the `gated` short-circuit (a genuinely
+    gated row is already `none`) and before the mtime check.
 
     `none` is only returned when every carrier was actually examined.
 
@@ -700,6 +708,11 @@ def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=Non
         return "permission-channel", f"{dead[:8]} — permission channel aborting (Stream closed)"
     if feed == "gated":
         # A genuinely gated worker is reported by the park cell, never double-reported.
+        return "none", ""
+    if in_flight_verdict == "parked":
+        # The registry says this worker is blocked on input. A parked worker's tool
+        # call is suspended and writes nothing to the transcript, so the frozen check
+        # below cannot tell a park from a death — and it is the park.
         return "none", ""
     mtime = row.get("mtime")
     if mtime is None:
@@ -800,7 +813,7 @@ def compute(subject, tracked_path, vault, interval, now=None,
         fv = feed_verdict(ids, gated, feed_state)
         ew = external_wait(ids, attention_dir)
         sv, sreason = stuck_verdict(row, ids, live, fv, interval, now, attention_dir,
-                                    projects_dir or PROJECTS_DIR)
+                                    projects_dir or PROJECTS_DIR, in_flight_verdict=fl)
         out_rows[name] = {
             "ids": ids,
             "liveness": live,

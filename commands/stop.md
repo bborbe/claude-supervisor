@@ -59,6 +59,8 @@ Run this section only when a name survives argument parsing. A bare call skips i
 
 4. **Write the marker** — `manager-liveness.py --stop --subject "<name>" --branch "<resolved branch>"`. It writes `<branch>--<base>.stopped` plus `<branch>--<base>.reset`. ⚠️ `--subject`, never the deprecated `--topic` alias, and always the explicit `--branch`: a branch-less call defaults to `goal` and marks the wrong record. Report it as `✓ stop marker — <path>`.
 
+   ⚠️ **When the resolved branch is `task`, also stamp the page** — `task-standdown.py --subject "<name>"`. The `task--<base>.stopped` state file is a **record**, not a consumer: neither `open-queue.py` nor `worker-keepalive.py` reads it, so a task stopped by name and stamped only that way is still reopened by the open leg and resumed by the keepalive. The page field is what both readers gate on. Report the second line as `✓ task marker — <path>`; when it returns **`no-task`, `ambiguous` or `cannot-tell`**, say so and keep the state marker — the stand-down still stands for the by-name path, it is only the task tier that could not be stamped. ⚠️ **`cannot-tell` is a failure verdict, not a success**: it covers an unreadable vault config, a `--vault` that disagrees with the page's own vault, and a failed write, so reporting it as a stamped marker would claim a page field that is not there.
+
 5. **Print the report** — the header form `⏹️ STOP — <subject> (<branch> · <vault>) · session <sid8>` that `<process>` step 3 owns, then only the rows this run can actually fill:
 
    ```
@@ -97,15 +99,39 @@ Run this section for the **bare** form only.
 
    It prints the session id; the subject with its branch and vault; **one line per gate loop found**, each with its pid, uptime and command; the tick file's path, mtime and age; the gate ledger's path, last line and age; and the session ledger's open count. The report below has a slot for every one of those — if a line has no slot, that is this template's defect, not a value to drop. ⚠️ **One line is a directive rather than a fact to report** — the `⚠️ no registration for this session …` hint the probe prints when it resolves no subject. It is step 2b's trigger, not a slot: act on it there, and do not carry it into the report as a value.
 
-2b. **Mark the stand-down as deliberate** — when the probe resolved a subject:
+2b. **Decide the tier, then mark the stand-down.** The marker differs by tier, and choosing the wrong one is the defect this step exists to prevent: a **worker** that writes a subject marker stands down a goal manager's loop it does not own, and a **manager** that writes only a page field is restarted as a lapsed manager.
+
+   **The discriminator — registration first, then the worker limb doubles as the probe.** Run these in order and stop at the first verdict that decides:
+
+   1. `~/.claude/state/worker-manager/<session-id>.json` exists → **manager limb**.
+   2. Otherwise run the **worker limb** and read its verdict:
+      - `stopped` → it was a worker, and it is now stamped. Done.
+      - `no-task` → no task page claims this session, so it is not a worker: run the **manager limb**.
+      - `handed-off` or `cannot-tell` → report the verdict and **stop**. Do not fall through to the manager limb: a handed-off task belongs to a successor, and an unreadable read licenses nothing.
+
+   ⚠️ **The worker limb IS the probe — there is no separate dry-run, and there must not be one.** `task-standdown.py --session` writes when it resolves, which is exactly what a worker needs; adding a read-only probe would duplicate the resolution and give the two copies room to disagree. The only case that pays a wasted call is the manager whose registration is missing, and it pays one `no-task`.
+
+   ⚠️ **Do not use the probe's gate-loop line as the second limb, and an earlier version of this step did.** `stop-probe.py` matches every `sweep-gate.py` process **on the machine**, not per session, and its launchd check derives the heartbeat path from the session's *own subject* — which is precisely what is absent when the registration is missing. So on the normal launchd-hosted setup, a manager whose registration is missing reads `heartbeat UNRESOLVED — no subject record` and `gate NONE`, would be classed a **worker**, and its loop would stay armed — the measured `(none recorded)` case the fallback exists for. In the other direction one live detached gate process would class every worker as a manager, and no task would ever be stamped.
+
+   ⚠️ **The fall-through default is the manager limb, not the worker limb.** A worker with no anchored task has nothing to stamp, so reaching the manager limb costs it a `no-task` verdict — while the reverse default silently leaves a manager's loop armed, which is the failure this command exists to prevent. The cost is asymmetric, so it decides the direction.
+
+   **Worker limb** — stamp the anchored task, and write **no** state file:
 
    ```bash
-   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py --stop --topic "<subject>"
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/task-standdown.py --session "$CLAUDE_CODE_SESSION_ID"
    ```
 
-   It writes `<slug>.stopped` into the liveness state dir, so a deliberate stand-down is not reported as a lapse, plus `<slug>.reset` (the epoch the next arm consumes to start a fresh cadence sample). Only `/supervisor:goal-loop` — whose step 3 arms with `--resume` — clears the marker; a plain `--arm` is a round's *reading* and leaves it standing. Report it as a `✓ stop marker — <path>` line under `Disarmed`.
+   It resolves the task by `claude_session_id` and writes `stopped: true` + `stop_date` on that page. That pair is what stops the row being **reopened** by `open-queue.py` and **resumed** by `worker-keepalive.py`. ⚠️ **The `no-task` verdict is the discriminator's second signal, not a failure to report and stop on** — it means no task claims this session, so the caller is not a worker and the manager limb runs next. A `stopped` verdict means the worker limb already did the work and the manager limb must **not** run. Report whichever verdict you got.
 
-   ⚠️ **When the probe prints `subject  (none recorded)`, fall back to the subject *this session* is managing — never skip the marker.** The probe resolves a subject only from `~/.claude/state/worker-manager/<session-id>.json`, and that registration is written by the manager command's own recording step; when it is missing while the loop is genuinely armed, following the old *"skip and say so; there is no slug to mark"* line left those arms to go stale and be reported as a lapsed manager. Measured 2026-09-30: the probe printed `(none recorded)` while `~/.claude/state/sweep-gate/<slug>.arms` and `.cadence` were both on disk, written by the two `--arm` calls. **The session knows what it armed** — its own subject is in its context, not an inference from a file that may never have been written — so that is the source. Run the marker with it, and name which source it came from:
+   **Manager limb** — the subject marker, unchanged:
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py --stop --subject "<subject>" --branch "<branch>"
+   ```
+
+   It writes `<branch>--<base>.stopped` into the liveness state dir, so a deliberate stand-down is not reported as a lapse, plus `<branch>--<base>.reset` (the epoch the next arm consumes to start a fresh cadence sample). Only `/supervisor:goal-loop` — whose step 3 arms with `--resume` — clears the marker; a plain `--arm` is a round's *reading* and leaves it standing. Report it as a `✓ stop marker — <path>` line under `Disarmed`. ⚠️ `--subject`, never the deprecated `--topic` alias, and always the explicit `--branch`: a branch-less call defaults to `goal` and marks the wrong record.
+
+   ⚠️ **When the probe prints `subject  (none recorded)` and the tier is manager, fall back to the subject *this session* is managing — never skip the marker.** The probe resolves a subject only from `~/.claude/state/worker-manager/<session-id>.json`, and that registration is written by the manager command's own recording step; when it is missing while the loop is genuinely armed, following the old *"skip and say so; there is no slug to mark"* line left those arms to go stale and be reported as a lapsed manager. Measured 2026-09-30: the probe printed `(none recorded)` while `~/.claude/state/sweep-gate/<slug>.arms` and `.cadence` were both on disk, written by the two `--arm` calls. **The session knows what it armed** — its own subject is in its context, not an inference from a file that may never have been written — so that is the source. Run the marker with it, and name which source it came from:
 
    `✓ stop marker — <path>  (subject from this session, not the probe)`
 
@@ -130,7 +156,7 @@ Run this section for the **bare** form only.
 </process>
 
 <constraints>
-- **Write no page, and no state file except the stop marker** — `<process>` step 2b for the bare form, `<by_name>` step 4 for a named subject. `stop` is a disarm, not a bookkeeping act; the marker exists only so a deliberate stop is not reported as a lapse.
+- **Write at most one marker per tier, and the right one for each.** A **worker's** bare stop writes the task page's `stopped: true` + `stop_date` and **no** state file (`<process>` step 2b, worker limb). A **manager's** writes `<branch>--<base>.stopped` + `<branch>--<base>.reset` and no page (`<process>` step 2b, manager limb). The by-name form writes the subject marker, and **additionally** the page field when the subject is a task (`<by_name>` step 4) — the state file is a record no reader consumes. `stop` is a disarm, not a bookkeeping act; each marker exists only so a deliberate stop is not reported as a lapse — and, for the task tier, so the row is neither reopened nor resumed.
 - **The by-name form refuses rather than gates.** There is no operator prompt and no confirmation turn: a session that does not own the subject prints `not-owned:` and stops. A stand-down is cheap to re-run and expensive to misattribute.
 - End the turn with the session's normal closer. This report is not one.
 </constraints>
@@ -140,5 +166,5 @@ Run this section for the **bare** form only.
 - **No gate loop found**: print `⚠️ no gate loop found` in place of the gate-loop line, and say plainly that it may never have been armed. A fact to report, not to repair.
 - **Tick file or gate ledger absent**: print `· tick file — absent` / `· gate ledger — absent` in place of that line, and say which of the two reasons it is — no subject recorded, so no path resolves, or the loop has not written one yet. Neither is a fault in this command.
 - **No session id resolves**: the header prints `session (unknown)` verbatim, and the ledger line names the path it looked for. Say the id could not be resolved rather than leaving the slot empty — an empty slot reads as a value that was not printed, not as one that does not exist.
-- **No subject recorded**: print the session id, then **apply step 2b's fallback** — the subject this session manages — and run the marker with it. ⚠️ **Never read this clause as licence to skip `<slug>.stopped`**: the loop may have been armed before the registration was written, which is exactly the case the fallback exists for, and skipping the marker leaves the arms to go stale and be reported as a lapsed manager. The branch and vault render as `—` with it, since all three come from the same record.
+- **No subject recorded** — **manager limb only.** Print the session id, then **apply step 2b's fallback** — the subject this session manages — and run the marker with it. ⚠️ **Never read this clause as licence to skip `<branch>--<base>.stopped`**: the loop may have been armed before the registration was written, which is exactly the case the fallback exists for, and skipping the marker leaves the arms to go stale and be reported as a lapsed manager. The branch and vault render as `—` with it, since all three come from the same record. ⚠️ **A worker reaches this clause only through `no-task`, and `no-task` is what PUTS it here** — step 2b routes that verdict to the manager limb precisely because it means "no task page claims this session". So this clause and step 2b say the same thing and must never be read as contradicting each other: a `no-task` verdict does not stop the command, it changes its tier. The one verdict that does stop it is `handed-off`/`cannot-tell`, which belongs to step 2b and never arrives here.
 </error_handling>

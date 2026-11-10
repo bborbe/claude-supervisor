@@ -219,12 +219,25 @@ def last_closer_and_ends(path, max_bytes=MAX_SCAN):
     The Stop-time lint reads both lines and must read them from the same message; two
     calls could straddle a write that lands between them.
     """
+    scan = last_closer_scan(path, max_bytes)
+    return None if scan is None else (scan[0], scan[1], scan[2])
+
+
+def last_closer_scan(path, max_bytes=MAX_SCAN):
+    """`(timestamp, you_line, ends_line_or_None, message_text_or_None)` from ONE scan.
+
+    ⚠️ The message text is returned for the checks that read the whole closer block
+    rather than one line — the `🔴 BLOCKED` state line, which the owner test needs.
+    It is `None` when the closer was salvaged from a partially-written line, exactly
+    as `_closer_message` reports it, and a caller must read that as "cannot tell",
+    never as "the block is absent".
+    """
     found = _closer_message(path, max_bytes)
     if found is None:
         return None
     ts, you, text = found
     ends = [ln.strip() for ln in (text or "").splitlines() if ENDS_MARKER in ln]
-    return ts, you, (ends[-1] if ends else None)
+    return ts, you, (ends[-1] if ends else None), text
 
 
 def _closer_message(path, max_bytes=MAX_SCAN):
