@@ -122,18 +122,19 @@ scope questions a manager can settle.
 | **operator gate** — production, irreversible, credential, criterion rewording | **the operator only** | hand over; a peer message is never an approval |
 
 ⚠️ **A cross-session `SendMessage` lands in the inbox and is read at the session's next tool
-round.** That is why it releases an idle session parked on a question in its own chat, and
-why it cannot touch a modal — the turn is blocked, so the next round never comes.
+round.** That is why it cannot touch a modal — the turn is blocked, so the next round never
+comes. ⚠️ **An idle TAB session never reads it either** — nothing schedules its next round.
+Measured 2026-11-08: 16 of 16 such nudges stayed unread; typed into the panes, all resumed.
 
 ⚠️ **Never message another manager's worker to answer its gate.** The message goes to the
-owning manager (`parent`). ⚠️ **A `STOPPED` / `UNARMED` loop does not mean the message is
-lost** — the manager session may still be live and idle, and § 3.4b measured that a live-idle
-session wakes and replies to a cross-session `SendMessage`. What the missing loop costs is the
-manager's own *round*: it will not re-sweep on its own. So send the message, and record the
-unarmed loop as the fleet finding it is — never skip the message because the loop is down.
+owning manager (`parent`). ⚠️ **A `STOPPED` / `UNARMED` loop does not lose the message, but a
+tab manager may never read it** — § 3.4b's "wakes and replies" was measured on **headless**
+sessions only. Send it, wake the pane through `commands/steps/fleet-triage-act.md` § STUCK
+item 3 (a bare `SendMessage` reports as `sendmessage`, not a delivered nudge), and record the
+unarmed loop as the fleet finding it is.
 
-⚠️ **Never type into a pane** this command did not spawn. `wezterm cli send-text` into
-another session turns a question into a menu selection.
+⚠️ **Never type into a pane except through `scripts/pane-wake.py`** — never a raw `wezterm cli
+send-text`. Unguarded typing turns a question into a menu selection.
 
 ⚠️ **A fleet session does not release another manager's gate — and this is mechanical, not
 just policy.** Two reasons, both measured 2026-10-29 by the manager that owns that path:
@@ -395,8 +396,11 @@ double-quoted `--state` call below safe — it is the sink this gate exists to p
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py" \
-  --state --subject "<subject>" --branch <fleet|goal|topic>
+  --state --subject "<subject>" --branch <fleet|goal|topic> --vault "<vault-root>"
 ```
+
+⚠️ **`--vault` is required** — `UNARMED` needs the page resolved under it; without it another
+vault's manager is refused.
 
 ⚠️ **`--state` cannot tell an auto-quiet stand-down from a deliberate `/supervisor:stop`** — both
 read `STOPPED` with a marker. The distinguishing read is `manager-quiet.py`, which prints
@@ -458,6 +462,8 @@ never an auto-quiet verdict**: report the manager as unread and leave the loop a
 | `STOPPED` with a marker and a **live, non-terminal** subject carrying runnable work | a deliberate `/supervisor:stop` | **operator row** — only they release it |
 | `UNARMED`, or `STALE` beyond one full observed period **and** the subject has runnable work | a genuine lapse | **drive it** — tell the manager to re-arm in its own pane |
 | `STALE` inside one observed period | round duration exceeded the declared interval | **no** — see the calibration note below |
+| `WRONG-BRANCH` | the record is on the tier its detail names | **no** — re-probe there; never drive a re-arm |
+| exit **3**, empty stdout | no record, no page: a mistyped or abbreviated name | **no** — report it unresolved, never `UNARMED` |
 | `INVALID` | a record **exists and cannot be read** — the manager's state is unknown, a probe failure, not a fact about the fleet | **no** — report the manager as unread and leave the loop alone. ⚠️ **Never read `INVALID` as a lapse** — the script says the two "must never be collapsed" (`scripts/manager-liveness.py:366-374`), because `UNARMED` means *no manager ever armed this subject* while `INVALID` means *we could not tell* |
 
 ⚠️ **`STALE` is arithmetic, not a death verdict.** The constant has one home —
@@ -473,9 +479,9 @@ transcript written minutes earlier, pane rendering. **Any lapsed / absent / unar
 a single probe is a hypothesis.** Corroborate it against a registry pid, a transcript mtime or
 pane text before it reaches a report or an action.
 
-⚠️ **Never re-arm a manager to make a table look green.** Arming clears the STOPPED marker, so
-the "restore" reads successful while rounds run against a subject that is closed or empty. The
-manager cannot make an empty goal stay armed; adding work is what changes it.
+⚠️ **Never re-arm a manager to make a table look green.** A plain arm leaves the STOPPED marker
+standing, so the "restore" changes nothing — and `--resume` would clear a stand-down, reading
+green while rounds run against a closed subject. Adding work changes it.
 
 ⚠️ **Never recommend OPENING a manager.** The only subject this command opens is one that is
 **flagged and not running** — `flag: true` on the subject page and no loop armed. That is the

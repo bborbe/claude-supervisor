@@ -45,6 +45,7 @@ reconstruct it, so the resolver hands it over rather than leaving the caller to 
 import json
 import os
 import subprocess
+import sys
 
 TIMEOUT_SECONDS = 10
 KEYS = ("topics_dir", "goals_dir", "tasks_dir")
@@ -94,10 +95,10 @@ def configured_vaults() -> tuple[list[dict], int, str]:
     return vaults, len(payload), ""
 
 
-def owning_vault(vaults: list[dict]) -> tuple[dict, str] | str:
-    """The vault whose root is the cwd or its nearest ancestor, or a reason string."""
+def owning_vault(vaults: list[dict], target: str | None = None) -> tuple[dict, str] | str:
+    """The vault whose root is `target` (default: the cwd) or its nearest ancestor, or a reason."""
     try:
-        cwd = os.path.realpath(os.getcwd())
+        cwd = os.path.realpath(os.path.expanduser(target) if target else os.getcwd())
     except OSError as exc:
         return f"the session's cwd could not be read: {exc.strerror or exc}"
 
@@ -124,19 +125,47 @@ def owning_vault(vaults: list[dict]) -> tuple[dict, str] | str:
     return best_vault, best_root
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    # `--vault <path>` resolves a NAMED vault instead of the cwd's. The fleet round runs in
+    # whatever vault its session started in and acts on another, so a cwd match answers for
+    # the wrong vault there. Before this flag its keep-alive snippets took the FIRST config
+    # entry carrying the key, which on the operator's machine is `private-starcitizen`
+    # (`23 Goals`) and `seibert-agent` (`tasks`): measured 2026-11-08, wrong for
+    # private-personal on every round.
+    #
+    # `--require <key,key>` narrows which keys must be configured. A caller that reads only
+    # `tasks_dir` and `goals_dir` must not be refused because the vault has no `topics_dir` —
+    # most vaults have none. An unrequired key that is absent prints as an EMPTY field, and the
+    # caller tests the fields it reads; a configured key that names a missing folder is still
+    # refused, required or not.
+    argv = list(argv or [])
+    usage = "usage: resolve-folders.py [--vault <vault root path> [--require <key>[,<key>...]]]"
+    target = None
+    required = list(KEYS)
+    if argv:
+        if len(argv) not in (2, 4) or argv[0] != "--vault" or not argv[1].strip():
+            return fail(usage)
+        target = argv[1]
+        if len(argv) == 4:
+            required = [k.strip() for k in argv[3].split(",") if k.strip()]
+            if argv[2] != "--require" or not required or any(k not in KEYS for k in required):
+                return fail(usage)
+
     vaults, total, reason = configured_vaults()
     if reason:
         return fail(reason)
 
-    owned = owning_vault(vaults)
+    owned = owning_vault(vaults, target)
     if isinstance(owned, str):
         return fail(owned)
     vault, root = owned
 
     # ⚠️ A non-string value is not a folder name. `topics_dir: ["a"]` coerces to "['a']" and
     # joins to a path that looks real, so the type is checked rather than stringified.
-    bad = [k for k in KEYS if not (isinstance(vault.get(k), str) and vault[k].strip())]
+    def configured(k):
+        return isinstance(vault.get(k), str) and vault[k].strip()
+
+    bad = [k for k in required if not configured(k)]
     if bad:
         name = vault.get("name") or vault["path"]
         return fail(f"vault {name!r} does not configure {', '.join(bad)}")
@@ -147,8 +176,8 @@ def main() -> int:
     if "|" in name:
         return fail(f"vault name {name!r} contains '|', which is the field separator")
 
-    folders = [os.path.join(root, vault[k].strip()) for k in KEYS]
-    absent = [folder for folder in folders if not os.path.isdir(folder)]
+    folders = [os.path.join(root, vault[k].strip()) if configured(k) else "" for k in KEYS]
+    absent = [folder for folder in folders if folder and not os.path.isdir(folder)]
     if absent:
         listed = ", ".join(repr(folder) for folder in absent)
         verb = "it does" if len(absent) == 1 else "they do"
@@ -166,4 +195,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

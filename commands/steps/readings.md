@@ -6,7 +6,7 @@ user-invocable: false
 
 # Readings
 
-When: every tick — take all five readings (commands in the step)
+When: every tick — take all six readings (commands in the step)
 
 ## The saturation reading — the ratio, not tok/s
 
@@ -46,7 +46,7 @@ Every tick prints this line with the marker line:
 
     unarmed goals: 1 unarmed goal · Build Rapid Strategy Development Pipeline (2 sessions)
 
-Read it from `python3 $P/unarmed-goals.py --vault "<vault>" --tasks-dir "<vault>/<tasks-dir>"`. A goal counts when it has **both** a live session — a non-terminal task whose `claude_session_id` or `metrics_sessions` id the registry reports alive — **and** no manager record under either the `goal--…cadence` or the pre-split `…cadence` name. A task carrying neither `goals:` nor `topics:` is listed as a `NO-SUBJECT` row: `docs/subject-resolution.md` forbids deriving a subject from `themes:`, so it is reported rather than dropped.
+Read it from `python3 $P/unarmed-goals.py --vault "<vault>" --tasks-dir "<vault>/<tasks-dir>"`. A goal counts when it has **both** a live session — a non-terminal task whose `claude_session_id` or `metrics_sessions` id the registry reports alive — **and** no manager record under either the `goal--…cadence` or the pre-split `…cadence` name. A task carrying neither `goals:` nor `topics:` is listed as a `NO-SUBJECT` row: `docs/subject-resolution.md` forbids deriving a subject from `themes:`, so it is reported rather than dropped. ⚠️ **A dangling `goals:` link is not an unarmed goal.** The reader passes `--vault` to `manager-liveness.py --state`, which answers `UNARMED` only once the subject's page resolves; a name that resolves no page and no record is refused (exit 3) and drops out of this reading — a typo in a `goals:` field is a page defect, not a manager gap.
 
 ⚠️ **The conjunction is the whole point, in both directions.** A goal with no live session is never reported — 318 goals in the primary vault, a handful with live sessions — and a goal that *has* a record is never reported, even a lapsed or stood-down one. Those are `manager-liveness.py`'s `STALE` / `STOPPED` classes and belong to `docs/sweep-output.md`; folding them into "never armed" is the defect this reading ends.
 
@@ -71,7 +71,7 @@ Read it from `python3 $P/next-focus.py --vault "<vault>" --tasks-dir "25 Tasks"`
 
 ⚠️ **The held line is not an omission.** At or above the target the block reads `Next focus: held — at target (<live>/<target>)`; an unreadable capacity store reads `held — workers unknown`. Both still print. A suppressed round and a round that found nothing must never render the same, and a fleet that cannot count itself is not an idle fleet — `unknown` is a third answer, never `0`.
 
-⚠️ **Proposals are capped and the remainder is named.** **Every** item under `Proposed for this week's plan:` gets its own card — the cap is the number on the `left for the next round (cap <n>)` line that **follows the `Proposed for this week's plan:` rows** (the block also carries a `(cap <n>)` line for the ranked candidates, so take the one after the proposals), never from this page — each with its own stable `card_key` from the script (`proposed[].card_key` in `--json`), posted as **one card each — never a batch**: `python3 $P/attention-ask.py post --producer-kind manager --dedup-key "<that row's card_key>" --payload <that row's payload, verbatim and UNQUOTED> --context "proposed for this week's plan" --option "add it to the plan" --option "leave it out" --recommend "add it to the plan"`. ⚠️ **`payload` arrives already shell-quoted from the script — paste it bare, never inside `"…"`.** The text it carries is an alert row's raw `prometheus-alerts.sh` line, or a task/goal filename any worker can choose, so hand-assembling `"<name> — <why> — <file>:<line>"` lets a `"` break the quoting and a `$(…)` or backtick **execute** in this session's shell. Never rebuild the string at this call site. The rest print `left for the next round (cap <n>): <name>, <name>, … and <n> more` — **named, not a bare count**: the first five are listed and the rest are counted (`and <n> more`), so the operator can see what the cap is holding back rather than only that something is. ⚠️ **A firing prod alert is ranked FIRST and is never in that remainder** — it is the one proposal that is time-critical, and behind the P1 rows it was capped out entirely whenever three or more unplanned P1 tasks existed. 38 open `priority: 1` tasks existed on 2026-10-21, so an unbounded rule would have put 38 cards on the board in one round. ⚠️ **The card is an ASK, never an act** — no plan page is edited, no item added; the operator's answer is read back with `attention-ask.py poll <item-id>`.
+⚠️ **Proposals are capped and the remainder is named.** **Every** item under `Proposed for this week's plan:` gets its own card — the cap is the number on the `left for the next round (cap <n>)` line that **follows the `Proposed for this week's plan:` rows** (the block also carries a `(cap <n>)` line for the ranked candidates, so take the one after the proposals), never from this page — each with its own stable `card_key` from the script (`proposed[].card_key` in `--json`), posted as **one card each — never a batch**: `python3 $P/attention-ask.py post --producer-kind manager --dedup-key "<that row's card_key>" --payload <that row's payload, verbatim and UNQUOTED> --context "proposed for this week's plan" --option "add it to the plan" --option "leave it out" --recommend "add it to the plan"`. ⚠️ **`payload` arrives already shell-quoted from the script — paste it bare, never inside `"…"`.** The text it carries is an alert row's raw `prometheus-alerts.sh` line, or a task/goal filename any worker can choose, so hand-assembling `"<name> — <why> — <file>:<line>"` lets a `"` break the quoting and a `$(…)` or backtick **execute** in this session's shell. Never rebuild the string at this call site. The rest print `left for the next round (cap <n>): <name>, <name>, … and <n> more` — **named, not a bare count**: the first five are listed and the rest are counted (`and <n> more`), so the operator can see what the cap is holding back rather than only that something is. ⚠️ **A firing prod alert is ranked FIRST and is never in that remainder** — it is the one proposal that is time-critical, and behind the P1 rows it was capped out entirely whenever three or more unplanned P1 tasks existed. 38 open `priority: 1` tasks existed on 2026-10-21, so an unbounded rule would have put 38 cards on the board in one round. ⚠️ **The card is an ASK, never an act** — posting it edits no plan page and adds no item. **The answer is consumed by `next-focus-answer.py`, which the round runs once per tick BEFORE this reading**: `python3 $P/next-focus-answer.py --vault "<vault>" --consume`. It applies every answered proposal card not yet consumed — `add it to the plan` writes **both** the `## ✅ Picked` row and the `### N.` block carrying `**Task:** [[<name>]]`, which is the only shape `parse_weekly` reads (measured 2026-10-27: the Picked row alone left the row proposed forever); `leave it out` writes a durable dismissal that `next-focus.py` then skips and reports in `dismissed[]` — and prints one line per consumption, or `next-focus consume: nothing to consume (0 answered card(s) awaiting; <n> open)`. ⚠️ **A refused consume (exit 2) is a REFUSAL, never a quiet round** — render it as `next-focus consume: refused — <reason>`, because a round that could not look and a round that found nothing must not look the same. ⚠️ **The script owns both records and their paths** — never hand-write a Picked row or a `### N.` block at this call site.
 
 ⚠️ **Any non-zero exit is a REFUSAL, never "nothing to do".** An unreadable vault or a bad `--now` exits 2 with the reason on stderr, and an unexpected failure is mapped to the same 2 rather than escaping as a traceback — render it as `Next focus: refused — <that reason>`, per Output shape item 2; an empty plan set exits 0 with `note:` lines. The two must not render the same.
 
@@ -80,3 +80,59 @@ Read it from `python3 $P/next-focus.py --vault "<vault>" --tasks-dir "25 Tasks"`
 ## The service-guard reading
 
 Every tick runs `python3 $P/service-guard.py --apply` and prints its lines. Unlike the four readings above, this one acts: a breach on a terminal owning row reopens it. The contract — config, instrument, the three states, and why it reopens but never restarts — lives in `${CLAUDE_PLUGIN_ROOT}/commands/steps/service-guard.md`.
+
+## The keeper-census reading
+
+Every tick runs `python3 $P/keeper-census.py --vault "<vault>"` and prints its block. It is
+the reading that asserts the fleet's invariant — **every live session has exactly one
+keeper** — against the contract in `docs/session-tiers.md` § Keep-alive, which is the single
+home of the rule set. It reads and never acts: it resumes nothing, closes nothing, adopts
+nothing.
+
+```
+keeper-census: <vault>
+  legs: topic=yes goal=yes worker=yes · live=80 rows=405 · unrecorded=20 · cannot-tell=1
+  RED unkept      goal-mgr   <goal>    — declaring topic(s) have no live armed manager: <topic> [STOPPED]
+      live        topic-mgr  <topic>   keeper: fleet round
+      not-live    worker     <task>    keeper: —
+MISMATCH live session <id> (<name>) — no page records it
+MISMATCH page "<task>" records session <id> — the registry does not hold it
+  card: <item-id>
+keeper-census: unkept=0 double-kept=0 sessions=80
+```
+
+⚠️ **Three answers, not two, and the count line carries only one of them.**
+`unkept` / `double-kept` are the invariant broken by a row **a page records**. A live session
+**no page records** is `unrecorded` — reported, named in the `MISMATCH` block, counted in the
+header, and **never counted red and never carded**: it is outside the session tree, and
+`docs/session-tiers.md` § Adopt or close says nothing about it (an operator-opened ad-hoc tab,
+a drill, a worker that never stamped its page). Counting those as gaps made `unkept=0`
+unreachable and fired the card every episode-day forever. `cannot-tell` is the third: a keeper
+read that failed.
+
+⚠️ **The count line is the block's last line, always** — the `card:` line sits above it, and
+that line is what the goal's own criterion reads.
+
+⚠️ **The exit code is three-way, and only one of them is a finding.** `0` clean; `1` at
+least one red row — the reading's own result, **not** a refusal, so the round carries on and
+prints the block; `2` the registry or the vault could not be read — including a vault with
+no topic, goal or task directory, and any internal error — and the census says so on stderr
+rather than reporting a fleet of zero. Render `2` as
+`keeper census: refused — <reason>`; a refusal and a clean fleet must never print the same.
+
+⚠️ **`cannot-tell` is never counted red.** A row whose keeper could not be read (an
+unreadable loop probe, a page naming a manager page that does not exist) prints that state
+with its reason and is counted in the header — a failed read is not a definite gap.
+
+⚠️ **"Is the keeper running" is read only for manager keepers.** A `fleet round` keeper is the
+round itself, running by construction — re-reading it would turn every fleet-kept row red
+whenever the fleet loop idles.
+
+⚠️ **The script posts its own card — the round posts none.** One card per red *episode*, its
+dedup key carrying the episode's start and day: a second consecutive red round asks nothing, a
+fleet that goes green and red again is asked again, and a fleet still red after 24 h is asked
+again rather than left with an expired card. Do not re-post it, do not add an option to it,
+and do not card individual red rows.
+
+⚠️ **A red row is a report, never a work item for this round** — the task that owns the gap
+fixes it.

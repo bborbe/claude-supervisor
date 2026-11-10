@@ -35,13 +35,85 @@ test('a cluster worker with no session id is refused rather than addressed blind
   assert.match(r.error, /session id/)
 })
 
-test('a headless worker is refused, and the refusal names what DOES reach it', () => {
-  // Not a generic "cannot message this": the caller needs the channel that works, or the
-  // refusal sends them looking for a pane that will never exist.
-  const r = resolveMessageChannel(agent({ status: 'running', paneId: null }))
+// The registry join is injected, so these cases pin the BRANCH rather than a directory read.
+const names = (list) => () => list
+
+test('a headless worker resolves to its registry name — the peer channel is the caller\'s to send', () => {
+  // ⚠️ This is the case that used to be refused with "reach it mid-task with SendMessage",
+  // which the caller could not do: `SendMessage` takes a NAME and the caller holds an ID.
+  // Measured 2026-11-08 — the worker was live and registered as `claude-1f`.
+  const r = resolveMessageChannel(agent({ status: 'running', paneId: null, sessionId: '6d16758d' }), {
+    peerNamesFor: names(['claude-1f']),
+  })
+  assert.deepEqual(r, { channel: 'peer', name: 'claude-1f' })
+})
+
+test('a headless worker with no registry entry is refused, and the refusal says the session exited', () => {
+  // SC5: the fix widens the SUCCESS path only. A session id nothing registers under is a
+  // worker no `SendMessage` can address, and the refusal must say why rather than name a
+  // channel that would fail at the caller.
+  const r = resolveMessageChannel(agent({ status: 'running', paneId: null, sessionId: 'gone' }), {
+    peerNamesFor: names([]),
+  })
   assert.ok(r.error, 'expected a refusal')
-  assert.match(r.error, /headless/)
-  assert.match(r.error, /answer_permission/)
+  assert.match(r.error, /session exited/)
+  assert.doesNotMatch(r.error, /reach it mid-task with SendMessage/)
+})
+
+test('a headless worker registered under two names is refused rather than guessed at', () => {
+  // Picking either would deliver into the wrong conversation, which reads as success.
+  const r = resolveMessageChannel(agent({ status: 'running', paneId: null, sessionId: 'x' }), {
+    peerNamesFor: names(['claude-1f', 'claude-2a']),
+  })
+  assert.match(r.error, /claude-1f/)
+  assert.match(r.error, /claude-2a/)
+  assert.match(r.error, /wrong conversation/)
+})
+
+test('a name another live session also holds is refused, not addressed', () => {
+  // `SendMessage` resolves a NAME to a session, so a shared name reaches whichever the
+  // harness picks — a delivery that reports success while landing in another worker's
+  // conversation. The id's own other entries are not a collision; another session's is.
+  const holders = (list) => () => list
+  const shared = resolveMessageChannel(agent({ status: 'running', paneId: null, sessionId: 'me' }), {
+    peerNamesFor: names(['claude-1f']),
+    peerHoldersFor: holders(['me', 'someone-else']),
+  })
+  assert.match(shared.error, /another live session/)
+  assert.doesNotMatch(JSON.stringify(shared), /"channel":"peer"/)
+
+  const alone = resolveMessageChannel(agent({ status: 'running', paneId: null, sessionId: 'me' }), {
+    peerNamesFor: names(['claude-1f']),
+    peerHoldersFor: holders(['me']),
+  })
+  assert.deepEqual(alone, { channel: 'peer', name: 'claude-1f' })
+})
+
+test('an unreadable registry is retryable, not a claim that the worker is gone', () => {
+  // null is "no information"; folding it into "no entry" would report a live worker as
+  // exited and send the caller looking for a replacement.
+  const r = resolveMessageChannel(agent({ status: 'running', paneId: null, sessionId: 'x' }), {
+    peerNamesFor: names(null),
+  })
+  assert.match(r.error, /could not be read/)
+  assert.doesNotMatch(r.error, /session exited/)
+})
+
+test('every headless refusal names a remedy the caller can actually perform', () => {
+  // SC2: the old text offered `SendMessage` with no address, which fails for the id the
+  // caller holds. Every headless refusal must instead carry a name the caller can pass, or
+  // name the parked-prompt channel — never a bare channel name with nothing to address.
+  const cases = [
+    names([]),
+    names(null),
+    names(['claude-1f', 'claude-2a']),
+  ]
+  for (const peerNamesFor of cases) {
+    const { error } = resolveMessageChannel(agent({ status: 'running', paneId: null, sessionId: 'x' }), { peerNamesFor })
+    assert.ok(error, 'expected a refusal')
+    assert.match(error, /answer_permission|retry|list_agents/, `no performable remedy in: ${error}`)
+    assert.doesNotMatch(error, /reach it mid-task with SendMessage/, `unaddressable channel in: ${error}`)
+  }
 })
 
 test('an interactive row with no pane is refused — the tab is gone, not the worker kind', () => {

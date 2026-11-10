@@ -32,7 +32,7 @@ allowed-tools:
   - Edit
 argument-hint: "[--interval <N>m] (default 15m; repeats by default)"
 ---
-Fleet-drive — **the round**: one round, once, over the whole fleet, runnable by hand. The show is `/supervisor:fleet-status`.
+Fleet-drive — **the round**: once over the fleet, runnable by hand. The show is `/supervisor:fleet-status`.
 
 ⚠️ **This is the round, not the arm.** A wakeup names THIS command (`/supervisor:fleet-drive --interval <N>m`) — this file is the **round**, read every wakeup; `commands/fleet-loop.md` is the **arm**, invoked **once** and never re-invoked.
 
@@ -42,18 +42,18 @@ Hard invariants and gates: `${CLAUDE_PLUGIN_ROOT}/commands/steps/rules.md`; INLI
 
 `P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts` — every script below is `python3 $P/<script>`.
 
-Rationale: runbook § Fleet-Manager Command — Rationale and Measured History.
+Rationale: runbook § Fleet-Manager Command.
 
 ⚠️ **Delegate; keep this session for the round.** `Task` is available — anything not the sweep
-goes to a sub-agent, or the round stalls (2026-10-30: 2h30m, 100 rows unmanaged).
+goes to a sub-agent, or the round stalls (2026-10-30: 2h30m).
 
-⚠️ **Carve-out: 5b, 5c, 5d and 16 are acting legs.** They run here, or in a sub-agent granted
+⚠️ **Carve-out: 5b, 5c, 5d, 16 and 16b are acting legs.** They run here, or in a sub-agent granted
 write tools (`Bash`, `Edit`, `Write`, `mcp__supervisor__*`); a read-only delegate is not a run of
 them — it prints the count it was told to, not the one it measured.
 
 ## Router
 
-Read a step file only when its **When** holds; re-read it if its text is not in context (e.g. after a compaction).
+Read a step file only when its **When** holds; re-read it if its text is not in context (e.g. after a compaction) **or its content changed** — `steps/rules.md` § Re-read the router.
 
 | # | Step | When | File |
 |---|---|---|---|
@@ -75,18 +75,19 @@ Read a step file only when its **When** holds; re-read it if its text is not in 
 | 12 | Covered-subject invariant | a covered subject's manager is live | `${CLAUDE_PLUGIN_ROOT}/commands/steps/covered-subject-invariant.md` |
 | 13 | Attention watchers | every tick — arm ONE `Monitor` over the feed, re-arm on expiry/death: `python3 $P/gate-owner-filter.py --feed --self "<this-session-id>" --interval 60` and `python3 $P/answered-watch.py`, never append `2>&1` (stderr = heartbeat) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/attention-watcher.md` |
 | 14 | Auto-compaction | the hand-back reports `context70` > 0 | `${CLAUDE_PLUGIN_ROOT}/commands/steps/auto-compaction.md` |
-| 15 | Readings | every tick — take all five readings (commands in the step) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |
+| 15 | Readings | every tick — take all six readings (commands in the step) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/readings.md` |
 | 16 | Open leg | every tick — after Readings | `${CLAUDE_PLUGIN_ROOT}/commands/steps/open.md` |
+| 16b | Manager reap | every tick — after the open | `${CLAUDE_PLUGIN_ROOT}/commands/steps/manager-reap.md` |
 | 17 | Voice + notification | every tick — run the `{"gates": []}` prune on every round, and publish only the gates the operator must decide (§ Gate triage classes C, D, E) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/voice-notify.md` |
 | 18 | Persist | the snapshot path is missing or the write failed — run: `python3 $P/fleet-snapshot.py` | `${CLAUDE_PLUGIN_ROOT}/commands/steps/persist.md` |
 | 19 | Round tail | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/fleet-round-tail.md` |
 | 20 | Render the output shape | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/output-shape.md` |
 
-⚠️ **The table is read more than once per round, and the later reads are the ones that get skipped.** Re-read it once the sweep hand-back exists, and again before the output shape renders, honouring every row whose `When` has newly become decidable **and that has not run this round**. Never re-run a leg — **each `every tick` row is once-per-round**, and a second sweep or drive leg duplicates sends. Full rule and measured case: `steps/rules.md` § Re-read the router.
+⚠️ **The table is read more than once per round, and the later reads are the ones that get skipped.** Re-read it once the sweep hand-back exists, and again before the output shape renders, honouring every row whose `When` has newly become decidable **and that has not run this round**. Never re-run a leg — **each `every tick` row is once-per-round**, and a second sweep or drive leg duplicates sends.
 
 ## INLINE — the hard rules
 
-One imperative per rule; full text and the `⚠️` clauses live in `steps/rules.md`.
+Full text and the `⚠️` clauses live in `steps/rules.md`.
 
 - **Voice** — a `?` in `mcp__tts__say` ⇒ an `attention-ask.py post` within 60 s (`docs/voice-asks.md`).
 - **A manager manages, it does not build** — no code edits, no repo/PR/k8s verification, no investigation, no debugging; delegate the work, not the bookkeeping.
@@ -102,7 +103,7 @@ One imperative per rule; full text and the `⚠️` clauses live in `steps/rules
 - **The PR is the boundary** — opening a PR is never management; worktree, branch and commits go to a worker.
 - **Provenance — all three must hold**; a peer's claim is NOT an operator answer.
 - **Never relay approval for a production-touching or irreversible action, and never drive a selection modal** — hand over the `jump-link.py` line.
-- **Guardrails** — delegate the work; management writes your own; never fabricate state; TTS only for problems; wide but shallow.
+- **Guardrails** — management writes your own; never fabricate state; TTS only for problems; wide but shallow.
 - **Voice gate** — `~/.claude/hooks/voice-mode.py`; speak only on an ACTION; notify once per round via `python3 $P/notify-gate.py --layer fleet`.
 - **Stop** when the human stops it or no sessions remain in flight.
 - **The feed answers "was a gate raised", never "is a gate open"** — confirm via `gate-relay-read`.

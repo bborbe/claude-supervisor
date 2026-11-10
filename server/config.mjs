@@ -76,6 +76,16 @@ const CLAUDE_HOME_REFUSAL =
 const CONFIG_DIR = join(CONFIG_HOME, 'claude-supervisor')
 const STATE_DIR = join(STATE_HOME, 'claude-supervisor')
 
+// Where the operator-local attention hook keeps its per-session state. Read here rather than
+// in `answer-marker.mjs` because this repo keeps the whole configuration surface enumerable
+// in one place — a module reading `process.env` directly is a surface nothing can list, and
+// `config.test.mjs` fails the build on it.
+//
+// ⚠️ The default is NOT under STATE_DIR: the reader is `~/.claude/hooks/attention-log.py`,
+// which resolves `ATTENTION_STATE_DIR` or `~/.claude/state/attention`. A writer pointed
+// anywhere else is a silent no-op on both sides — the marker lands and no hook ever reads it.
+const ATTENTION_STATE_DIR = ENV.ATTENTION_STATE_DIR || join(homedir(), '.claude', 'state', 'attention')
+
 // `off` is a value, not an absence: an unset var means "use the default path", while
 // `off` means "no file log at all". Reading them as one thing turns off into default.
 const PERMISSION_LOG =
@@ -211,6 +221,9 @@ export const config = Object.freeze({
   // edit must not dirty a git tree, and `git pull` must not be able to clobber it.
   configDir: CONFIG_DIR,
   stateDir: STATE_DIR,
+  // Where the operator-local attention hook reads its per-session markers. Distinct from
+  // `stateDir` on purpose — see the resolution above.
+  attentionStateDir: ATTENTION_STATE_DIR,
   claudeHome: CLAUDE_HOME,
 
   // Non-null means this server must NOT start — see the resolution above for the defect it
@@ -384,6 +397,15 @@ export const config = Object.freeze({
   // reading Live. The two are written by different processes at different rates: the hooks
   // write on events, the timer stamps every 30 s.
   heartbeatStateDir: ENV.SUPERVISOR_HEARTBEAT_STATE_DIR || join(STATE_DIR, 'heartbeat-state'),
+
+  // Where a session's ANSWER-REACH records live: proof that this session's answering commands
+  // actually reached their routes, which `scripts/answer-path-check.py` reads instead of
+  // trusting an armed loop. A SIBLING of the two above, for the same reason — a reach is not a
+  // heartbeat (no timer refreshes it) and not a permission decision (nothing was decided), so
+  // folding it into either store would make one reader misread the other's rows.
+  // ⚠️ `SUPERVISOR_ANSWER_REACH_DIR` is also the fixture knob the probe's own controls set,
+  // exactly as `SUPERVISOR_WORKER_MANAGER_DIR` is for the registration.
+  reachDir: ENV.SUPERVISOR_ANSWER_REACH_DIR || join(STATE_DIR, 'answer-reach'),
 
   // This server's OWN session id — the one Claude Code started it under. Used to stamp a
   // heartbeat for the session the server is running inside, which the per-worker stamps

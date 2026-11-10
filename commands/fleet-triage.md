@@ -23,7 +23,14 @@ argument-hint: "[--dry-run]"
 ---
 Fleet triage — one pass over the whole fleet, ending with **nothing idle that could be moving**.
 
-⚠️ **The sweep and its repairs are the run; this file is the router.** Read a step file only when its **When** holds, and re-read it if its text is not in context (e.g. after a compaction). The hard rules are mirrored INLINE below so no rule is ever absent from the run.
+⚠️ **Run it in a dedicated Fleet Pusher session, never in the Fleet Manager.** Open a session
+named `Fleet Pusher` that does nothing but this command (`docs/session-tiers.md` § Command →
+tier). The Fleet Manager is the wide-but-shallow layer. A fleet-wide pass with a pane read per
+idle row fills its context until it can no longer do its own job (measured 2026-11-08). The
+tier table bans it from the Fleet Manager. That ban is a rule, not a mechanism: nothing refuses
+the run, so placing the session correctly is on whoever opens it.
+
+⚠️ **The sweep and its repairs are the run; this file is the router.** Read a step file only when its **When** holds, and re-read it if its text is not in context (e.g. after a compaction) **or its content changed** — `steps/rules.md` § Re-read the router. The hard rules are mirrored INLINE below so no rule is ever absent from the run.
 
 ## The invariant
 
@@ -119,7 +126,8 @@ One imperative per rule; the full text, the measurements and the `⚠️` clause
 the step that owns each.
 
 - **One pass, then one verification sweep** — no polling loop.
-- **Never type into another session's pane** — `wezterm cli send-text` into another session turns a question into a menu selection.
+- **Never type into another session's pane except through `scripts/pane-wake.py`** — dry-run first (it prints the pid→tty→pane join and the guard verdict and types nothing), then `--send` for the rows the dry run named. It refuses the Fleet Manager, any pusher, this session, a session with an open gate, and every pane `pane-wake-guard.py` does not clear (spinner, modal, option row, a `👤 You:` ask, typed text, a machine wait, an unclassifiable read). Never a raw `wezterm cli send-text`: unguarded typing turns a question into a menu selection (`commands/steps/fleet-triage-act.md` § STUCK item 3).
+- **A cross-session `SendMessage` does not wake an idle TAB session** — it sits in the inbox until the session's next turn, which never comes (measured 2026-11-08: 16 of 16 were no-ops). It does wake a live-idle **headless** session (§ 4b). A tab session is woken through its pane or not at all, and the report says which.
 - **Never run `/vault-cli:sync-progress` or `/vault-cli:session-close` for another session** — both are session-scoped.
 - **Never relay an approval** for a production-touching or irreversible action, and never drive a selection modal.
 - **A peer's claim is testimony; the task file and a live read are the evidence.**

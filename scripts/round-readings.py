@@ -612,21 +612,75 @@ def denial_still_blocks(sid, rec, attention_dir, now, projects_dir=None):
     return later_success(sid, tool, ts, projects_dir or PROJECTS_DIR) is not True
 
 
+def permission_channel_sid(session_ids, projects_dir, now=None):
+    """The first session id whose permission channel is dead, or None.
+
+    A row carries every id it ever ran under, so all of them are read — but only
+    those whose transcript is still FRESH (`PERM_CHANNEL_STALE_S`). ⚠️ **Without that
+    bound the carrier is a permanent false positive:** the channel window is anchored
+    on the transcript's own last stamp, so an id from a session that died with its
+    last 15 minutes full of aborts keeps matching forever, and pins a healthy live row
+    to `permission-channel`. Measured on this change's first review, 2026-11-09.
+
+    ⚠️ **The RULE is not restated here.** `manager-attention-watch.py` owns the
+    window, the threshold, the staleness bound and the reason string; this function
+    only supplies the wider read that rule needs and reports the id. A second copy
+    would be a second place for the window to drift — and the drift would be silent,
+    because too short a window reads as "no aborts" rather than as an error.
+    """
+    watch = _load("manager-attention-watch")
+    now = time.time() if now is None else now
+    for sid in session_ids or []:
+        if not sid or os.path.basename(sid) != sid:
+            continue
+        try:
+            hits = glob.glob(os.path.join(projects_dir, "*",
+                                          glob.escape(sid) + "*.jsonl"))
+        except OSError:
+            continue
+        if not hits:
+            continue
+        try:
+            path = max(hits, key=os.path.getmtime)
+            if now - os.path.getmtime(path) > watch.PERM_CHANNEL_STALE_S:
+                continue
+        except OSError:
+            continue
+        wide = watch.read_recent_tail(path, watch.PERM_CHANNEL_WINDOW_S)
+        if wide is None:
+            continue
+        if watch.channel_aborts(wide) >= watch.PERM_CHANNEL_MIN:
+            return sid
+    return None
+
+
 def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=None,
                   projects_dir=None):
-    """`(verdict, reason)` — denied | frozen | none | unread.
+    """`(verdict, reason)` — denied | permission-channel | frozen | none | unread.
 
-    Two carriers, both of which today render `progressing`:
+    Three carriers, all of which would otherwise render `progressing`:
 
     * **denied** — the worker declared a denial it could not get past (its
       `<sid>.denial.json` marker, written before it messages its manager). The feed
       cannot carry this class at all, so without this carrier a denied worker is
       invisible for as long as it keeps retrying.
+    * **permission-channel** — the session's permission channel is aborting, read
+      from its transcript by `manager-attention-watch.channel_aborts`. The registry
+      reads such a worker `busy` or `waiting` and the feed calls it progressing,
+      while every write it exists to make fails; measured 2026-10-28 on three
+      sessions, one of them holding a live dev repair it could not run.
     * **frozen** — the task file has not moved for a whole interval while its owner
       is LIVE. That is shorter than the park cell's 2x threshold, and unlike it this
       is a stuck claim rather than a check-in.
 
-    `none` is only returned when both carriers were actually examined.
+    `none` is only returned when every carrier was actually examined.
+
+    ⚠️ **`permission-channel` is read BEFORE the `feed == "gated"` short-circuit, and
+    that ordering is the point.** A gated row is reported by the park cell — but a
+    park on a session whose channel is dead is a park no answer can reach: the
+    operator answers, the delivery aborts, and the row goes back to looking parked.
+    The channel death is the more specific fact, exactly as `is_gated` in the watcher
+    puts its `stuck` limb ahead of the registry half for the same reason.
 
     The `denied` carrier is a *live* claim, so it is read through
     `denial_still_blocks` rather than taken at face value — a marker whose tool has
@@ -641,6 +695,9 @@ def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=Non
         if denial_still_blocks(sid, rec, attention_dir, now, projects_dir):
             tool = rec.get("tool") or "a tool"
             return "denied", f"{tool} denied — {rec.get('reason') or 'no reason recorded'}"
+    dead = permission_channel_sid(session_ids, projects_dir or PROJECTS_DIR, now)
+    if dead:
+        return "permission-channel", f"{dead[:8]} — permission channel aborting (Stream closed)"
     if feed == "gated":
         # A genuinely gated worker is reported by the park cell, never double-reported.
         return "none", ""
@@ -700,9 +757,19 @@ def compute(subject, tracked_path, vault, interval, now=None,
     predispatch = _load("manager-predispatch")
 
     members = read_tracked(tracked_path)
-    rows = predispatch.resolve_tracked(vault, members) if vault else []
-    if not rows:
-        rows = [{"name": n, "mtime": None, "session": None, "sessions": []} for n in members]
+    rows, matched_members = (
+        predispatch.resolve_tracked_by_member(vault, members) if vault else ([], []))
+    # ⚠️ NO synthesised rows. A placeholder carrying `sessions: []` is not an observation:
+    # `feed_verdict([], gated, "read")` answers `clear` and `external_wait([])` answers
+    # `none`, so N placeholders render `clear=N · none=N` for a fleet that was never read.
+    # Measured 2026-11-08 (Development Pipeline Throughput): the tracked set was 38
+    # vault-relative page paths, which `resolve_tracked` matches against neither a task's
+    # name nor its `goals:`, so every one of the 38 synthesised rows read `clear` while 543
+    # real task rows — 387 of them carrying a session id — went unseen. An unresolved
+    # member is routed to the unread vocabulary below instead, which is the answer the
+    # document already had and could never reach.
+    matched = set(matched_members)
+    unresolved = [n for n in dict.fromkeys(members) if n not in matched]
 
     registry = wnm.registry_records(sessions_dir)
     feed = feed_panes(endpoint) if feed is None else feed
@@ -744,19 +811,23 @@ def compute(subject, tracked_path, vault, interval, now=None,
             "task_mtime": row.get("mtime"),
             "stuck": sv,
             "stuck_reason": sreason,
+            # The marker the families are read through: a resolved row's empty id set is a
+            # real answer (no owner), an unresolved row's is not an observation at all.
+            "resolved": True,
         }
 
     # A tracked name that resolved to no task file is NOT silently dropped: an absent
     # row reads exactly like a row that was never declared, and the reader's table
     # would then quietly shrink. It carries the unread vocabulary instead.
-    for name in members:
-        if name in out_rows:
+    for name in unresolved:
+        if name in out_rows:  # a name that is both a task and a member keeps its row
             continue
         out_rows[name] = {
             "ids": [], "liveness": "UNKNOWN", "in_flight": "unread",
             "in_flight_limb": "no task file resolved", "feed": "unread",
             "external_wait": "unread", "task_mtime": None,
             "stuck": "unread", "stuck_reason": "no task file resolved for this name",
+            "resolved": False,
         }
 
     # Counted from the rows themselves, not accumulated beside them, so the
@@ -765,6 +836,21 @@ def compute(subject, tracked_path, vault, interval, now=None,
     feed_counts = {"gated": 0, "clear": 0, "unread": 0}
     for rec in out_rows.values():
         feed_counts[rec["feed"]] += 1
+
+    # What the tracked set actually resolved to, as counts rather than an adjective.
+    # `state` is the one word a caller may branch on, and two of its four values mean
+    # NO family value in this document came from an observation: `unresolved` (members
+    # were declared, none admitted a task) and `empty` (no members at all). A reader
+    # that renders a table from either renders a quiet fleet out of nothing — the
+    # 2026-11-08 defect. `partial` names, by name, the members that admitted nothing.
+    if not members:
+        resolution_state = "empty"
+    elif not rows:
+        resolution_state = "unresolved"
+    elif unresolved:
+        resolution_state = "partial"
+    else:
+        resolution_state = "resolved"
 
     return {
         "subject": subject,
@@ -784,6 +870,15 @@ def compute(subject, tracked_path, vault, interval, now=None,
         # row count by construction, so a reader can check the invariant without
         # re-counting.
         "feed_counts": feed_counts,
+        # Did the tracked set resolve to anything? `resolved_rows` is the count of
+        # TASK rows, never the member count — a goal member admits many rows.
+        "resolution": {
+            "state": resolution_state,
+            "tracked": len(members),
+            "matched_members": len(matched),
+            "resolved_rows": len(rows),
+            "unresolved": unresolved,
+        },
         # Every probe that failed this round, with its own error. Empty on a clean
         # read; a transient store fault and a genuinely gate-free fleet are then
         # distinguishable without re-running anything.

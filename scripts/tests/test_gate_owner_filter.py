@@ -57,6 +57,35 @@ ME = "92de43c3-bd91-409d-a33e-824a61e5706a"
 PEER = "64b4a415-906d-457f-81f9-48a842007b88"
 GATED = "33333333-3333-4333-8333-333333333333"
 
+
+class OwnerStub:
+    """`scripts/owner.py` with its probes removed — the filter must never read this machine.
+
+    The real resolver spawns `session-liveness.py` and `manager-liveness.py`, so an unstubbed
+    filter run answers from whatever happens to be armed on the machine running the suite. A
+    test whose verdict depends on that asserts nothing, and it drifts the moment a real session
+    id collides with a fixture's.
+    """
+
+    NOT_OWNER = "not-owner"
+    OWNER = "owner"
+    CANNOT_TELL = "cannot-tell"
+
+    def __init__(self, verdict="owner", reason="live-armed"):
+        self.verdict, self.reason = verdict, reason
+        self.asked = []
+
+    def of_session(self, sid, subject="", branch="goal"):
+        self.asked.append(sid)
+        verdict, reason = self.verdict, self.reason
+        return type("Ownership", (), {
+            "verdict": verdict,
+            "reason": reason,
+            "session": "LIVE",
+            "loop": "OK" if verdict == "owner" else "STOPPED",
+            "describe": lambda self: "session LIVE, loop OK",
+        })()
+
 # A one-row feed carrying pane 372, in `who-needs-me.py`'s own render. `--pane` filters
 # the feed rather than manufacturing a gate, so every test that names a pane supplies
 # one -- and supplying it explicitly is also what keeps the suite off the live store,
@@ -1952,6 +1981,14 @@ class ScopeCli(unittest.TestCase):
     SELF = "49b471f1-a8a6-48b0-b2b2-14b9cb2437e3"
     BASE = os.path.join(_HERE, "fixtures", "gate-owner-foreign-goal")
 
+    def setUp(self):
+        self._orig_owner = gf._OWNER
+        gf._OWNER = OwnerStub()
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        gf._OWNER = self._orig_owner
+
     def run_filter(self, *argv):
         """`(rc, stdout, stderr)` from `main()` with `argv`, ledger stubbed."""
         with open(os.path.join(self.BASE, "feed.txt"), encoding="utf-8") as handle:
@@ -1973,8 +2010,16 @@ class ScopeCli(unittest.TestCase):
         ]
 
     def test_the_importlib_seam_reaches_the_real_session_scope(self):
-        """A rename of the module, or a changed `load` signature, fails here."""
+        """A rename of the module, or a changed `load` signature, fails here.
+
+        ⚠️ The ownership input is stubbed on the REAL session-scope module too: this test
+        drives `load()` directly rather than through the filter, so the filter's own stub
+        never applies and the read would answer from whatever is armed on this machine.
+        """
         scope_mod = gf._session_scope()
+        original = scope_mod._OWNER
+        scope_mod._OWNER = OwnerStub()
+        self.addCleanup(setattr, scope_mod, "_OWNER", original)
         scope = scope_mod.load(self.SELF, [os.path.join(self.BASE, "vault")])
         self.assertTrue(scope.resolved, scope.reason)
         # The fixture's own task — the CONTROL pane's page — must land in the own set, or
@@ -1992,6 +2037,26 @@ class ScopeCli(unittest.TestCase):
         self.assertIn("excluded(owner-unknown): 2", err)
         self.assertIn("emit: 1", err)
         self.assertIn("exclude foreign-goal:", out)
+
+    def test_a_stopped_manager_filters_nothing(self):
+        """THE BOUNDARY: a stood-down manager's watcher must not exclude other goals' gates.
+
+        A manager that ran `/supervisor:stop` keeps its session, so its attention watcher keeps
+        running — while the round that would make it a manager is exactly what stopped. With
+        the scope applied it would keep hiding gates that belong to goals it no longer serves,
+        so the ownership verdict comes first and a `not-owner` answer drops the scope entirely.
+        """
+        gf._OWNER = OwnerStub("not-owner", "loop-stopped")
+        rc, out, err = self.run_filter(
+            "--self", self.SELF,
+            "--scope-vault", os.path.join(self.BASE, "vault"),
+            *self.common(),
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("SCOPE  unresolved:", err)
+        self.assertIn("is not an owner (loop-stopped", err)
+        self.assertIn("emit: 6", err)
+        self.assertIn("excluded(foreign-goal): 0", err)
 
     def test_no_scope_emits_every_row(self):
         """The flag disables the read entirely — the pre-scope behaviour, pinned."""
@@ -2033,6 +2098,9 @@ class ForeignGoalFixture(unittest.TestCase):
         spec.loader.exec_module(cls.replay)
         cls.scoped = cls.replay.run(scope=True)
         cls.unscoped = cls.replay.run(scope=False)
+        # THE NEGATIVE CONTROL for the ownership gate: the same session, the same page stamp,
+        # the same vault — only the loop marker differs. It must exclude nothing.
+        cls.stopped = cls.replay.run(scope=True, stopped=True)
 
     def rows(self, result="json"):
         return json.loads(self.scoped[result].stdout)
@@ -2043,6 +2111,31 @@ class ForeignGoalFixture(unittest.TestCase):
     def test_the_five_foreign_panes_leave_the_feed(self):
         self.assertEqual(self.scoped["feed"].stdout.split(), [self.replay.CONTROL],
                          self.scoped["feed"].stdout)
+
+    def test_a_stopped_manager_excludes_nothing(self):
+        """THE BOUNDARY, through the real code path rather than a stubbed verdict.
+
+        The fixture's `--self` keeps its session and its page stamp; only the loop marker
+        differs (`stopped=True` writes `.stopped` instead of an armed cadence). A manager that
+        ran `/supervisor:stop` is not an owner, so its scope must not hide another goal's gates
+        — the resolver says `not-owner` and the filter falls back to excluding nothing.
+
+        ⚠️ **This is what makes the armed case above load-bearing.** Without it, the fixture
+        would pass identically if the ownership gate were deleted, and the three exclusions it
+        asserts would be attributing work to a manager whose round has stopped.
+        """
+        out, err = self.stopped["json"].stdout, self.stopped["json"].stderr
+        self.assertIn("SCOPE  unresolved:", err)
+        self.assertIn("is not an owner (loop-stopped", err)
+        # All six rows survive, and none is excluded as foreign: the control emits, the five
+        # foreign panes are back in the feed as ordinary unowned rows.
+        self.assertEqual(len(json.loads(out)), 6, out)
+        self.assertIn("excluded(foreign-goal): 0", self.stopped["feed"].stderr)
+        self.assertEqual(
+            sorted(self.stopped["feed"].stdout.split()),
+            sorted(list(self.replay.FOREIGN) + [self.replay.CONTROL]),
+            self.stopped["feed"].stdout,
+        )
 
     def test_the_own_worker_control_still_emits(self):
         """Without this the fixture would pass on a filter that excludes everything."""
@@ -2143,9 +2236,10 @@ class PanelessHeadlessGateReachesTheKeptSet(unittest.TestCase):
             )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("gates: 2  emit: 2", result.stderr)
+        # The store is unreachable here, so the headless row fails OPEN and says so.
         self.assertEqual(
             result.stdout.splitlines(),
-            ["hst:" + _HST_ITEM + "  session=unresolved", "417"],
+            ["hst:" + _HST_ITEM + "  store=unreachable", "417"],
         )
 
     def test_the_store_resolves_the_session_and_ownership_applies(self):
@@ -2208,11 +2302,15 @@ class PanelessHeadlessGateReachesTheKeptSet(unittest.TestCase):
         again, _ = gf.emit_decisions([key], state, [], 160.0, 3600)
         self.assertEqual(again, set())
 
-    def test_the_wake_line_names_the_session_or_says_unresolved(self):
+    def test_the_wake_line_names_the_session_or_one_of_two_fixed_tokens(self):
         args = mock.Mock(json=False, explain=False, feed=True)
         rows = [
-            {"pane": "hst:a", "replayed": False, "verdict": gf.EMIT, "session_id": GATED},
-            {"pane": "hst:b", "replayed": False, "verdict": gf.EMIT, "session_id": None},
+            {"pane": "hst:a", "replayed": False, "verdict": gf.EMIT, "session_id": GATED,
+             "store": gf.STORE_OPEN},
+            {"pane": "hst:b", "replayed": False, "verdict": gf.EMIT, "session_id": None,
+             "store": gf.STORE_OPEN},
+            {"pane": "hst:c", "replayed": False, "verdict": gf.EMIT, "session_id": None,
+             "store": gf.STORE_UNREAD},
             {"pane": "417", "replayed": False, "verdict": gf.EMIT, "session_id": GATED},
         ]
         out = io.StringIO()
@@ -2220,8 +2318,194 @@ class PanelessHeadlessGateReachesTheKeptSet(unittest.TestCase):
             gf.render(rows, args)
         self.assertEqual(
             out.getvalue().splitlines(),
-            [f"hst:a  session={GATED}", "hst:b  session=unresolved", "417"],
+            [f"hst:a  session={GATED}", "hst:b  session=unattributed",
+             "hst:c  store=unreachable", "417"],
         )
+
+
+# Four `[ hst]` rows, one per store state the filter must tell apart.
+_OPEN_OWNED = "a0000000000000000000000000000001"
+_OPEN_UNATTRIBUTED = "b0000000000000000000000000000002"
+_CLOSED = "c0000000000000000000000000000003"
+_ANSWERED = "d0000000000000000000000000000004"
+_UNATTRIBUTED_TOKEN = "session=unattributed"
+_STORE_FAILED_TOKEN = "store=unreachable"
+
+
+def _hst_row(item_id, label):
+    return (
+        f"  [ hst]     1m  {label}    awaiting-operator · permission: Bash: date\n"
+        "         headless — no pane to jump to; answer with the command below\n"
+        f"         answer: python3 x/attention-answer.py answer {item_id} --decision allow|deny\n"
+    )
+
+
+_FOUR_ROW_FEED = "Needs you (4)\n" + "".join(
+    _hst_row(item, label)
+    for item, label in (
+        (_OPEN_OWNED, "open-owned"),
+        (_OPEN_UNATTRIBUTED, "open-unattributed"),
+        (_CLOSED, "closed-card"),
+        (_ANSWERED, "answered-card"),
+    )
+)
+
+
+class _AttentionStub:
+    """The attention store's OPEN list — `GET /api/1.0/attention` — and nothing else.
+
+    The real route returns open items only (`attention-card-lookup.py`), so the closed and
+    answered cards are modelled the way the store models them: by their ABSENCE from a
+    successful read. Every other route 404s, so the ledger read fails open to `{}`.
+    """
+
+    def __init__(self, rows):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+
+        body = json.dumps(rows).encode("utf-8")
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_a):
+                pass
+
+            def do_GET(self):
+                if self.path.split("?", 1)[0] == "/api/1.0/attention":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    @property
+    def url(self):
+        host, port = self.server.server_address[:2]
+        return "http://%s:%d" % (host, port)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+
+_OPEN_LIST = [
+    {"item_id": _OPEN_OWNED, "producer_id": GATED, "payload": "Bash: date", "state": "open"},
+    {"item_id": _OPEN_UNATTRIBUTED, "producer_id": "", "payload": "Bash: date", "state": "open"},
+]
+
+
+def _run_feed(endpoint):
+    with tempfile.TemporaryDirectory() as tmp:
+        return subprocess.run(
+            [sys.executable, _SCRIPT, "--feed", "--no-scope",
+             "--state-dir", tmp, "--registry-dir", tmp,
+             "--endpoint", endpoint,
+             "--claims-file", os.path.join(tmp, "none.json")],
+            input=_FOUR_ROW_FEED, capture_output=True, text=True,
+        )
+
+
+class ClosedCardsDoNotWakeTheFeed(unittest.TestCase):
+    """A closed or answered card is not a gate; a failed store read still is one.
+
+    ⚠️ The open list is the store's whole answer, so "absent from a GOOD read" and "the
+    read FAILED" were the same empty record, and both rendered `session=unresolved` and
+    woke the manager. Measured 2026-11-05 to 11-07: 3 of 3, then 7 of 10, then 18 of 18
+    wake rows on one goal manager's arm were dead or foreign, and the arm was stopped.
+
+    ⚠️ Row (b) — an OPEN gate whose `producer_id` is empty — is the discriminator. It
+    carried `unresolved` too, so a fix that drops every `unresolved` row drops a live
+    gate and fails `test_the_four_row_fixture_emits_exactly_the_two_open_cards`. The
+    drop must key on the store's state, never on the label.
+    """
+
+    def test_the_four_row_fixture_emits_exactly_the_two_open_cards(self):
+        with _AttentionStub(_OPEN_LIST) as store:
+            result = _run_feed(store.url)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [f"hst:{_OPEN_OWNED}  session={GATED}",
+             f"hst:{_OPEN_UNATTRIBUTED}  {_UNATTRIBUTED_TOKEN}"],
+        )
+        self.assertIn("gates: 4  emit: 2", result.stderr)
+        self.assertIn("dropped(not-open): 2", result.stderr)
+
+    def test_an_unreachable_store_still_emits_all_four_and_says_so(self):
+        result = _run_feed(dead_url())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [f"hst:{item}  {_STORE_FAILED_TOKEN}"
+             for item in (_OPEN_OWNED, _OPEN_UNATTRIBUTED, _CLOSED, _ANSWERED)],
+        )
+        self.assertIn("dropped(not-open): 0", result.stderr)
+
+    def test_the_two_fail_open_tokens_are_separable_by_grep(self):
+        """Proven mechanically over the combined output, never by prose.
+
+        Each fixed token is matched with `grep -F`. The two match sets must both be
+        non-empty and disjoint, no line may still say `unresolved`, and every line matching
+        neither token must carry a resolved session id.
+        """
+        with _AttentionStub(_OPEN_LIST) as store:
+            healthy = _run_feed(store.url).stdout
+        failed = _run_feed(dead_url()).stdout
+        combined = healthy + failed
+        lines = combined.splitlines()
+
+        def grep(token):
+            proc = subprocess.run(["grep", "-F", "--", token], input=combined,
+                                  capture_output=True, text=True)
+            return set(proc.stdout.splitlines())
+
+        unattributed, store_failed = grep(_UNATTRIBUTED_TOKEN), grep(_STORE_FAILED_TOKEN)
+        self.assertEqual(len(unattributed), 1)
+        self.assertEqual(len(store_failed), 4)
+        self.assertEqual(unattributed & store_failed, set())
+        self.assertEqual(grep("unresolved"), set())
+        resolved = [ln for ln in lines if ln not in unattributed | store_failed]
+        self.assertEqual(resolved, [f"hst:{_OPEN_OWNED}  session={GATED}"])
+
+    def test_store_states_names_each_keys_store_state(self):
+        keys = ["hst:" + i for i in (_OPEN_OWNED, _OPEN_UNATTRIBUTED, _CLOSED, _ANSWERED)]
+        with _AttentionStub(_OPEN_LIST) as store:
+            records, error = gf.headless_items_checked(keys + ["417"], store.url)
+            states = gf.store_states(keys, records, error)
+        self.assertIsNone(error)
+        self.assertEqual(states, {
+            "hst:" + _OPEN_OWNED: gf.STORE_OPEN,
+            "hst:" + _OPEN_UNATTRIBUTED: gf.STORE_OPEN,
+            "hst:" + _CLOSED: gf.STORE_NOT_OPEN,
+            "hst:" + _ANSWERED: gf.STORE_NOT_OPEN,
+        })
+        self.assertEqual(sorted(r["pane"] for r in records),
+                         ["hst:" + _OPEN_OWNED, "hst:" + _OPEN_UNATTRIBUTED])
+        records, error = gf.headless_items_checked(keys, dead_url())
+        self.assertEqual(set(gf.store_states(keys, records, error).values()), {gf.STORE_UNREAD})
+
+    def test_a_non_list_body_is_a_failed_read_not_an_empty_store(self):
+        """An empty-looking answer must never read as "every card closed" — that is a silence."""
+        keys = ["hst:" + _CLOSED]
+        with _AttentionStub({"error": "nope"}) as store:
+            records, error = gf.headless_items_checked(keys, store.url)
+        self.assertIsNotNone(error)
+        self.assertEqual(gf.store_states(keys, records, error), {keys[0]: gf.STORE_UNREAD})
+
+    def test_headless_items_keeps_its_contract_for_round_readings(self):
+        """`round-readings.py` reads `headless_items` and treats `[]` as unread — unchanged."""
+        self.assertEqual(gf.headless_items(["hst:" + _CLOSED], dead_url()), [])
 
 
 if __name__ == "__main__":

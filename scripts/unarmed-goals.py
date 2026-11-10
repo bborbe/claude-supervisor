@@ -147,12 +147,19 @@ def read_live(registry_dir=None, heartbeat_dir=None):
     return records if isinstance(records, list) else None
 
 
-def manager_state(subject):
-    """`manager-liveness.py --state`'s verdict for one goal, or None when unreadable."""
+def manager_state(subject, vault):
+    """`manager-liveness.py --state`'s verdict for one goal, or None when unreadable.
+
+    ⚠️ **`--vault` is passed, and it is what makes `UNARMED` mean what this report says.**
+    `--state` answers `UNARMED` only once the subject's page resolves under `--vault`; a name
+    that resolves no page and no record is refused (exit 3, empty stdout), which reads here
+    as None — a dangling `goals:` link is not a manager gap. Without `--vault` the page test
+    runs against this process's cwd, and every never-armed goal would be refused instead.
+    """
     try:
         proc = subprocess.run(
             [sys.executable, MANAGER_LIVENESS, "--state", "--branch", "goal",
-             "--subject", subject],
+             "--subject", subject, "--vault", vault],
             capture_output=True, text=True,
         )
     except OSError:
@@ -161,7 +168,7 @@ def manager_state(subject):
     return first.split("\t")[0].strip() or None
 
 
-def collect(tasks_dir, live):
+def collect(tasks_dir, live, vault):
     """The rows: unarmed goals and no-subject tasks, each with its live sessions.
 
     `live` is never None here — the caller refuses before this runs, so an unreadable
@@ -201,7 +208,7 @@ def collect(tasks_dir, live):
 
     unarmed = []
     for goal in sorted(goals):
-        if manager_state(goal) == "UNARMED":
+        if manager_state(goal, vault) == "UNARMED":
             row = goals[goal]
             unarmed.append({
                 "goal": row["goal"],
@@ -267,7 +274,7 @@ def main(argv=None):
         )
         return 2
 
-    unarmed, no_subject = collect(args.tasks_dir, live)
+    unarmed, no_subject = collect(args.tasks_dir, live, args.vault)
 
     if args.json:
         json.dump(

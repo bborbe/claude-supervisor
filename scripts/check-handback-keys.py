@@ -69,6 +69,10 @@ LEGS = {
         "sites": ("commands/steps/round-readings.md",),
         "required": (
             "readings", "rows", "payload",
+            # did the tracked set resolve to anything? `unresolved` / `empty` is the
+            # refusal — a document that observed nothing must not reach the caller as a
+            # quiet fleet, and the caller cannot tell without these two keys.
+            "resolution", "tracked", "unresolved",
             # liveness
             "live", "absent", "unknown",
             # in-flight — all three values, the `unread` under its own key
@@ -100,7 +104,8 @@ LEGS = {
         "agent": "agents/fleet-keepalive-actor.md",
         "sites": ("commands/steps/keepalive.md",),
         "required": (
-            "legs", "legs-reason", "lapsed-managers", "dead-workers", "dead-scan",
+            "legs", "legs-reason", "lapsed-managers", "topicless-goal-managers", "dead-workers",
+            "dead-scan",
             "restarted", "resumed", "parked-due", "nudged", "undelivered",
             # one count per truncatable row list: the caller's reconciliation is
             # `rows printed + that list's dropped count == this count`, so a list without

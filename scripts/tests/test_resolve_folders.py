@@ -85,6 +85,57 @@ class Base(unittest.TestCase):
 
 
 class ResolvesTheOwningVault(Base):
+    def test_vault_flag_resolves_the_named_vault_not_the_cwd(self):
+        """The fleet round acts on a vault other than its cwd; first-match picked the wrong one."""
+        other = self.make_vault("private-starcitizen", os.path.join(self.root, "..", "sc"))
+        vaults = [other] + self.vaults
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out, \
+             mock.patch.object(rf.subprocess, "run", return_value=mock.Mock(
+                 returncode=0, stdout=json.dumps(vaults), stderr="")), \
+             mock.patch.object(rf.os, "getcwd", lambda: "/definitely/not/a/vault"):
+            code = rf.main(["--vault", self.root])
+        self.assertEqual(code, 0)
+        self.assertTrue(out.getvalue().strip().endswith("|private-personal"))
+
+    def run_vault(self, vaults, argv):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out, \
+             mock.patch.object(rf.subprocess, "run", return_value=mock.Mock(
+                 returncode=0, stdout=json.dumps(vaults), stderr="")):
+            code = rf.main(argv)
+        return code, out.getvalue().strip()
+
+    def test_require_narrows_the_keys_and_prints_an_unrequired_absent_key_empty(self):
+        """A vault with no topics_dir still answers a caller that reads only tasks and goals."""
+        vault = dict(self.vaults[0]); del vault["topics_dir"]
+        code, out = self.run_vault([vault], ["--vault", self.root, "--require", "tasks_dir,goals_dir"])
+        self.assertEqual(code, 0, out)
+        topics, goals, tasks, name = out.split("|")
+        self.assertEqual(topics, "")
+        self.assertEqual(goals, os.path.join(self.root, "24 Goals"))
+        self.assertEqual(tasks, os.path.join(self.root, "25 Tasks"))
+
+    def test_a_required_key_that_is_absent_is_still_refused(self):
+        vault = dict(self.vaults[0]); del vault["topics_dir"]
+        code, out = self.run_vault([vault], ["--vault", self.root, "--require", "topics_dir"])
+        self.assertEqual(code, 1)
+        self.assertIn("does not configure topics_dir", out)
+
+    def test_an_unrequired_key_naming_a_missing_folder_is_still_refused(self):
+        vault = dict(self.vaults[0], topics_dir="99 Gone")
+        code, out = self.run_vault([vault], ["--vault", self.root, "--require", "tasks_dir"])
+        self.assertEqual(code, 1)
+        self.assertIn("the key is stale", out)
+
+    def test_an_unknown_required_key_is_refused(self):
+        code, out = self.run_vault(self.vaults, ["--vault", self.root, "--require", "nope_dir"])
+        self.assertEqual(code, 1)
+        self.assertIn("UNKNOWN usage", out)
+
+    def test_a_malformed_argument_list_is_refused(self):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(rf.main(["--vault"]), 1)
+        self.assertIn("UNKNOWN usage", out.getvalue())
+
     def test_from_the_vault_root(self):
         code, out, seen = run_main(self.vaults, cwd=self.root)
         self.assertEqual(code, 0)
