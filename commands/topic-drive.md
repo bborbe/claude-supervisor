@@ -77,7 +77,7 @@ arm or the step file — do not act from memory of a previous round.
 
 ## Keep alive — inline, because it runs every tick
 
-⚠️ **Row 0a — this topic manager's own liveness record — runs here, once per round, before the per-goal loop.** It records the **topic's** cadence, not a goal's, so a subject taken from the loop would arm a goal under the topic branch. Rule: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-liveness.md` — `--branch topic`, `--subject` the topic name.
+⚠️ **Row 0a — this topic manager's own liveness record — runs here each round, before the per-goal loop.** It records the **topic's** cadence, not a goal's; a loop-sourced subject would arm a goal under the topic branch. Rule: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-liveness.md` — `--branch topic`.
 
 ⚠️ **First, drop every goal whose page reads a terminal `status`.** Row 4c may have just closed
 one, and `topic-keepalive.py` reads `claude_session_id` liveness and the armed-loop state, never
