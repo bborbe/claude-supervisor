@@ -82,8 +82,11 @@ delegate rule's carve-out).
    transcript-derived roster row does not.
    ⚠️ **The selected names come from the payload**, `<digest minus .digest>.open` — written by
    `agents/fleet-open-actor.md` § 2 *before* § 3 acts. Its numbered rows read `  <n>. <name> — <why>`,
-   and `<why>` is always one of `flagged` / `priority <n>` / `no priority`, so a name is its line
-   minus that prefix and that suffix.
+   where `<why>` is the row's RANK — `flagged · priority <n>` or `flagged · no priority`, since the
+   flag is the admission gate and every selected row carries it. Take the name as the field between
+   the `<n>. ` prefix and the LAST ` — ` separator; never strip a fixed suffix, because a suffix
+   that names the rank goes stale the moment the rank vocabulary changes and leaves a fragment on
+   the name.
    ⚠️ **`read_ledger()` answers three ways, and this guard must branch on all three.** Its own
    docstring is explicit: `{}` is *read it, nobody is recorded* while `None` is *could not read it*,
    and collapsing them "turns a failure into a confident empty fleet". A guard that tests only
@@ -102,15 +105,16 @@ delegate rule's carve-out).
 
 ## What the leg does not decide
 
-⚠️ **The leg ranks; `/supervisor:open` decides admissibility.** Every gate that command owns —
+⚠️ **The leg gates and ranks; `/supervisor:open` decides admissibility.** Every gate that command owns —
 Gate 1 (approval), Gate 2 (the readiness ladder, `docs/fleet-surface.md` § Spawn a worker item 2),
 Gate 3 (the cap and the operator-named marker) — runs unchanged for every row this leg hands it.
 The leg never pre-clears one, and a row that clears the leg can still be refused at the spawn.
 
 ⚠️ **Never open a row the leg skipped.** The skipped list carries a reason per row and those
-reasons are the whole point of printing it: `waiting approval` is the operator's inbox
-(`commands/open.md` § Step 1.5 Gate 1), `blocked` and `deferred` are the row's own conditions, and
-`capacity` means the rank admitted more than the fleet has room for. A round that opens past the
+reasons are the whole point of printing it: `not flagged` is a row the operator did not mark for
+auto-open, `waiting approval` is the operator's inbox (`commands/open.md` § Step 1.5 Gate 1),
+`blocked` and `deferred` are the row's own conditions, and `capacity` means the admitted rows exceed
+the room the fleet has. A round that opens past the
 printed count has replaced the rank with its own judgement.
 
 ⚠️ **This leg opens workers only. It never spawns, arms or resumes a topic manager or a goal
