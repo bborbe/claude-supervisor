@@ -26,6 +26,9 @@ absence clause needs:
     QUOTED `flag: "true"` is admitted by `select()` and refused by the batch, because
     `is_flagged()` strips quotes where the batch's task predicate reads a YAML string.
     `test_a_quoted_flag_diverges_from_the_batch` pins that last one in both directions.
+    A fourth is DELIBERATE too: `select()`'s `prior_wait()` guard (`waiting-external`,
+    `waiting-operator`) is unattended-round-only, so the batch opens such a row when the
+    operator names it — `PriorWaitTest` pins the round's side.
 
 Run: python3 -m unittest discover -s scripts/tests -v
 """

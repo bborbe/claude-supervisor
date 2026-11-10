@@ -296,6 +296,11 @@ def prior_wait(block, attention_dir, now_s=None):
       (Monitor, ScheduleWakeup, a background shell …) died with the session — this leg
       only sees rows with no live session — so nothing will fire it, and the row opens.
     * `waiting-operator` — that Stop is a `question` card whose item was never closed.
+
+    ⚠️ **The `--flagged` batch (`flagged-rows.py`) does not apply this guard, on purpose.**
+    That batch is the operator opening named rows by hand; this leg is the fleet round
+    filling free slots unattended, and only the unattended path must not spend a slot on
+    a row that will park. `test_open_queue.py` names it as the fourth divergence.
     """
     newest_sid, newest, closed = None, None, set()
     for sid in _predispatch.session_id_set(block):
