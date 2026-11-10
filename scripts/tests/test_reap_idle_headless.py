@@ -230,6 +230,54 @@ class TestGuard(unittest.TestCase):
         self.assertEqual(verdict[0], "watcher-alive")
 
 
+class TestCandidateSessionIds(unittest.TestCase):
+    """`--all`'s candidate set: headless and idle, and nothing the guards would refuse anyway.
+
+    The filter is load-bearing in both directions. Too narrow and the trigger silently
+    stops closing the population it exists for; too wide and every tick prints one refusal
+    per tab worker, which buries the refusals that carry information.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="reap-candidates-")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _write(self, name, **rec):
+        path = os.path.join(self.dir, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(rec, handle)
+        return path
+
+    def test_a_headless_idle_record_is_a_candidate(self):
+        self._write("a.json", sessionId="sid-a", entrypoint="sdk-cli", status="idle")
+        self.assertEqual(reap.candidate_session_ids(self.dir), ["sid-a"])
+
+    def test_a_tab_worker_is_not(self):
+        self._write("a.json", sessionId="sid-a", entrypoint="cli", status="idle")
+        self.assertEqual(reap.candidate_session_ids(self.dir), [])
+
+    def test_a_busy_worker_is_not(self):
+        self._write("a.json", sessionId="sid-a", entrypoint="sdk-cli", status="busy")
+        self.assertEqual(reap.candidate_session_ids(self.dir), [])
+
+    def test_a_record_without_a_session_id_is_skipped(self):
+        self._write("a.json", entrypoint="sdk-cli", status="idle")
+        self.assertEqual(reap.candidate_session_ids(self.dir), [])
+
+    def test_a_duplicate_id_is_returned_once(self):
+        self._write("a.json", sessionId="sid-a", entrypoint="sdk-cli", status="idle")
+        self._write("b.json", sessionId="sid-a", entrypoint="sdk-cli", status="idle")
+        self.assertEqual(reap.candidate_session_ids(self.dir), ["sid-a"])
+
+    def test_an_unreadable_file_is_skipped(self):
+        with open(os.path.join(self.dir, "bad.json"), "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        self._write("a.json", sessionId="sid-a", entrypoint="sdk-cli", status="idle")
+        self.assertEqual(reap.candidate_session_ids(self.dir), ["sid-a"])
+
+
 class _Store(http.server.BaseHTTPRequestHandler):
     """A stub wrapper + attention store; the test sets the payloads."""
 
@@ -569,6 +617,67 @@ class TestScript(unittest.TestCase):
         done = self._run()
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
         self.assertIn("transcript MISSING", done.stdout)
+
+
+    # --- --all ------------------------------------------------------------------------
+
+    def _run_all(self, *extra):
+        """`--all` takes no ids, so this is the one run shape `_run_env` cannot express."""
+        return subprocess.run(
+            [sys.executable, SCRIPT, "--all", *extra],
+            capture_output=True,
+            text=True,
+            env=self._env(),
+            timeout=60,
+        )
+
+    def test_all_enumerates_and_reaps_without_ids(self):
+        """The trigger's call shape: no ids on the command line, one candidate closed."""
+        child = self._spawn()
+        entry = self._registry(child.pid)
+        self._task()
+        transcript = self._transcript()
+        done = self._run_all()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(child.wait(timeout=10), -signal.SIGTERM)
+        self.assertFalse(os.path.exists(entry), "the registry entry must be gone")
+        self.assertTrue(os.path.exists(transcript), "the transcript must survive")
+        self.assertIn("transcript kept", done.stdout)
+
+    def test_all_skips_a_tab_worker(self):
+        child = self._spawn()
+        self._registry(child.pid, entrypoint="cli")
+        self._task()
+        done = self._run_all()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn("🧹 reap-idle-headless", done.stdout)
+        self.assertIsNone(child.poll(), "a tab worker must not be signalled")
+
+    def test_all_skips_a_busy_worker(self):
+        child = self._spawn()
+        self._registry(child.pid, status="busy")
+        self._task()
+        done = self._run_all()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn("🧹 reap-idle-headless", done.stdout)
+        self.assertIsNone(child.poll(), "a busy worker must not be signalled")
+
+    def test_all_over_an_empty_registry_exits_zero(self):
+        """An empty fleet is not a usage error — a clock must not read it as one."""
+        done = self._run_all()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("nothing to do", done.stdout)
+
+    def test_no_ids_and_no_all_is_a_usage_error(self):
+        done = subprocess.run(
+            [sys.executable, SCRIPT],
+            capture_output=True,
+            text=True,
+            env=self._env(),
+            timeout=60,
+        )
+        self.assertEqual(done.returncode, 2, done.stdout + done.stderr)
+        self.assertIn("--all", done.stderr)
 
 
 if __name__ == "__main__":

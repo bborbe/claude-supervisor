@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rank the approved queue and select the rows a fleet round may open this tick.
+"""Gate on the flag, rank the admitted queue, and select the rows a fleet round may open.
 
 Why this exists
 ---------------
@@ -32,8 +32,9 @@ This script adds only what that one does not answer:
 
   * the **guards** — a row this round may not open even though it is approved and
     unstarted (see below);
-  * the **rank** — operator-flag, then priority, then age;
-  * the **capacity** — how many rows the free slots admit;
+  * the **gate and the rank** — `flag: true` decides WHETHER a row is admitted; priority
+    then age decide only the order among the admitted;
+  * the **capacity** — how many of the admitted rows the free slots take;
   * the **skipped list**, with a reason per row, so a round that opens three of 133
     names the other 130 rather than printing `skipped: capacity`.
 
@@ -345,7 +346,8 @@ def run_scalar(cmd):
 
 
 def collect(tasks_dir, today, approved_json=None):
-    """The ranked eligible rows plus the skipped ones with their reasons.
+    """The ranked eligible rows (flagged and unflagged — `select()` applies the gate) plus
+    the skipped ones with their reasons.
 
     `approved_json` is injectable so the suite can drive this without a live registry;
     production passes None and the script calls `approved-not-started.py` itself.
@@ -458,7 +460,7 @@ def render(opened, skipped, live, target):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Rank the approved queue and select the rows a fleet round may open"
+        description="Gate on the flag, rank the admitted queue, and select the rows a fleet round may open"
     )
     parser.add_argument("--tasks-dir", required=True, help="the vault's task directory")
     parser.add_argument("--now", default=None,
