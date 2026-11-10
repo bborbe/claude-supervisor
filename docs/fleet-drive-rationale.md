@@ -78,3 +78,17 @@ Measured 2026-10-19, round 55: `Start Day - 2026-10-19 · Start Day - 2026-10-19
 
 - **"Idle"** = roster status `idle` (turn ended). This agent adds **no age floor** — the sweep-reader's `parked` bucket is the idle test.
 - **"One tick"** = one `fleet-loop` round, **~15 min**. The ledger suppression (step 3) keeps a still-idle session from being re-nudged or re-reaped every round.
+
+## Stale waits — why step 0c exists, and why it is not the `PARKED` signal
+
+`Session Lifecycle.md:43` and edge case E5 (`:95`) require one card to the operator when a session's declared wait has had no observable change for 24 h. Nothing implemented it, and the omission was structural rather than an oversight: `scripts/declared-wait.py` answers a **boolean**, so a declared wait suppresses every other reader — `fleet-board.py` withholds `nudge`, `manager-predispatch.py` returns `LIVENESS_PARKED` — and nothing expires it. That reader's own docstring records the result as *"the honest gap"*: nothing in a declaration says when the wait began, so a reader cannot expire it. A wake that never fires waits forever, silently.
+
+**The 24 h needs no live probe.** The declaration is already on disk. The newest `Stop` record carries `ts` (when it was rendered) and a `detail` holding the `⏰ Ends:` text (what it waits on). A resumed session that re-parks writes a newer record, so *"the pair has not moved for 24 h"* is simply *"that record is still the newest"*. `declared-wait.py` gained `wait_record()` and `--detail-json` so this keeps one home for the `⏰ Ends:` read rather than adding a second parser.
+
+**Why the dedup key is the `(ts, ends)` pair and not the timestamp alone.** A re-declaration on the *same* observable writes a new `ts`, which correctly resets the clock — the session was touched. A declaration re-rendered with a *different* deadline is a different wait and must be cardable again. Keying on the pair makes both true without a third field.
+
+**Why the state is not in the drive ledger.** `drive-ledger.py merge` replaces a session's **whole** entry through `canonical()`. A row that is `waiting` this round and a `parked` candidate the next is written by two callers, and the second one's entry carries no wait fields — the card dedup would be silently dropped and the same stall re-carded every time the row changed class. `~/.claude/state/fleet-drive/waits.json` has one writer.
+
+**Why the liveness guard is load-bearing.** Measured 2026-11-10 against the operator's real attention store: **317** sessions carry a newest `Stop` record declaring a wait older than 24 h, and the overwhelming majority exited days ago — the logs are append-only and outlive the process. Without a filter the first round posts 317 cards for waits nobody holds, a worse failure than the silence this step exists to end. `session-liveness.py --list` narrows the population in **one** call; probing per session (`--check`, as step 0 does for a handful of retained rows) took **3 m 40 s** for the same 317, a third of the round's budget. After the guard: 290 stale declarations, **0 of them live**.
+
+**Why it cannot be folded into `PARKED`.** `PARKED` is a **change** signal — it fires when a row's parking verdict or probe changed this round. Step 0c is an **absence** signal — it fires when nothing changed for 24 h. A row can appear in both, in neither, or in one alone; a single block would silence exactly one of the two failures.

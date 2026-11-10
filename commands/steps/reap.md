@@ -15,5 +15,14 @@ When: the drive leg runs
 ⚠️ **That contract is TASK-shaped, and a manager has no task file.** The manager-subject
 half — a goal or topic page whose `status` is terminal, joined to the session id recorded on
 it — is `commands/steps/manager-reap.md`, and its reader is `scripts/subject-reap.py`. Two
-populations, one rule: the reap is evidence plus the session's own close, never a kill.
+populations, one rule: the reap is evidence plus the session's own close.
+
+⚠️ **The one carve-out is a finished headless (`sdk-cli`) row.** It has no self-close path —
+vault-cli `session-self-exit.py` proves a controlling tty and always answers `SELF-EXIT: stay`
+for it — so the round closes it through `scripts/close-worker.py`. ⚠️ **The tier read is the
+caller's** (`commands/steps/drive.md`), not the drive agent's: that agent's `allowed-tools`
+grants no `Bash(python3:*)`, so `agents/fleet-drive.md` step 1b only points at the caller and
+drafts the message for every finished row. That is not a kill by hand: it is the same guarded
+mechanism `/supervisor:close` runs, with the busy / gate / worktree / hold / terminal refusals
+intact.
 
