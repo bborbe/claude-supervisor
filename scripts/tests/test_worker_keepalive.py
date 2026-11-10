@@ -348,12 +348,16 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.assertIn("attempt 3 of 3", out[1])
 
     def test_no_progress_cycles_spaced_beyond_the_old_window_still_stop(self):
-        # SC1: the cap is close->resume cycles since the last progress, not a time window.
-        # Three cycles ~40 min apart (beyond the retired 30-min window) with no progress
-        # must still stop the loop, and exactly one card is posted.
+        # SC1: for a migrated store the cap is cycles since the last progress, not a time
+        # window. Three cycles ~40 min apart with no progress must still stop the loop,
+        # and exactly one card is posted.
         self.page()
         now = 1_800_000_000.0
-        self.seed([now - 2400, now - 4800, now - 7200])
+        sig = self.k.progress_signature(TASK_PAGE.format(sid="sid-1"))
+        with open(self.k.state_path(str(self.vault), "A Task"), "w", encoding="utf-8") as fh:
+            json.dump({"resumes": [now - 2400, now - 4800, now - 7200],
+                       "progress": {"open_boxes": sig[0], "progress_hash": sig[1],
+                                    "head_sha": ""}}, fh)
         rc, out = self.run_it(live="ABSENT", argv=("--now", str(now)))
         self.assertEqual(1, rc)
         self.assertEqual("crash-loop", out[0])
@@ -416,6 +420,43 @@ class WorkerKeepAliveTest(unittest.TestCase):
         rc, out = self.run_it(live="ABSENT", argv=("--now", str(now)))
         self.assertEqual(0, rc)
         self.assertEqual("resume", out[0])
+
+    def test_a_new_commit_counts_as_progress(self):
+        # The commit signal: a changed HEAD on the task's repo: branch is progress.
+        prev = {"open_boxes": 1, "progress_hash": "h", "head_sha": "aaa"}
+        self.assertTrue(self.k.made_progress(prev, (1, "h"), "bbb"))
+        self.assertFalse(self.k.made_progress(
+            {"open_boxes": 1, "progress_hash": "h", "head_sha": "bbb"}, (1, "h"), "bbb"))
+
+    def test_legacy_store_counts_only_the_old_window_on_the_first_probe(self):
+        # A pre-progress store has no baseline. Its old resumes must not read as a live
+        # crash loop: the first probe falls back to the retired 30-minute window.
+        self.page()
+        now = 1_800_000_000.0
+        self.seed([now - 3600, now - 7200, now - 10800])
+        rc, out = self.run_it(live="ABSENT", argv=("--now", str(now)))
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out[0])
+
+    def test_legacy_store_inside_the_window_still_stops(self):
+        self.page()
+        now = 1_800_000_000.0
+        self.seed([now - 60, now - 120, now - 180])
+        rc, out = self.run_it(live="ABSENT", argv=("--now", str(now)))
+        self.assertEqual(1, rc)
+        self.assertEqual("crash-loop", out[0])
+
+    def test_a_record_with_no_task_page_still_counts(self):
+        # No page to measure progress against: the resume is recorded with no marker.
+        self.kp.session_verdict = lambda sid: "LIVE"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.k.main(["--vault", str(self.vault), "--task", "A Task",
+                              "--record-resume", "sid-1", "--now", "1800000000"])
+        self.assertEqual(0, rc)
+        self.assertEqual("recorded", out.getvalue().splitlines()[0])
+        with open(self.k.state_path(str(self.vault), "A Task"), encoding="utf-8") as fh:
+            self.assertEqual(1, len(json.load(fh)["resumes"]))
 
 
 if __name__ == "__main__":

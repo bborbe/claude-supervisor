@@ -184,7 +184,11 @@ def save_state(path: str, state: dict) -> None:
 
 
 def repo_head(fm: str) -> str:
-    """HEAD sha of the task's `repo:` checkout, or "" when it names none / cannot be read."""
+    """HEAD sha of the task's `repo:` checkout, or "" when it names none / cannot be read.
+
+    ⚠️ The commit signal requires a **local** checkout path (`~` expanded). A URL, a bare
+    repo name, or an absent path returns "" and the commit signal is inert for that task.
+    """
     repo = _keepalive().scalar(fm, "repo")
     if not repo:
         return ""
@@ -422,7 +426,12 @@ def main(argv: list[str]) -> int:
     # record resets the count here too — a worker that advanced and then died must not be
     # refused for the cycles it ran before it advanced.
     state = load_state(path)
-    if made_progress(state.get("progress"), progress_signature(text), repo_head(fm)):
+    if state.get("progress") is None:
+        # Legacy store (written before the progress marker existed): it has no baseline, so
+        # its old resumes cannot be read as a live crash loop. Fall back to the retired
+        # 30-minute window; the next --record-resume writes the marker and migrates it.
+        spent = len([t for t in state["resumes"] if now - t < k.RESUME_WINDOW])
+    elif made_progress(state["progress"], progress_signature(text), repo_head(fm)):
         spent = 0
     else:
         spent = len(state["resumes"])
