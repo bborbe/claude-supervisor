@@ -409,6 +409,21 @@ class ConsumeTests(unittest.TestCase):
                         "the transient refusal was recorded — the answer is lost")
         self.assertEqual(pending2, 1)
 
+    def test_a_name_containing_the_separator_is_not_truncated(self):
+        """A task name may itself contain ` — ` — 4 of the 33 live bad blocks were this."""
+        name = "Brogrammers Assistant Dies Mid-Request — claude process ended"
+        (self.vault / "25 Tasks" / f"{name}.md").write_text(
+            "---\nstatus: next\nphase: planning\npriority: \"1\"\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        payload = f"{name} — priority: 1, in no current plan — /x/25 Tasks/x.md:1"
+
+        consumed, notes = self.run_consume([self.card("add it to the plan", payload=payload)])
+
+        self.assertEqual(consumed[0]["name"], name, "the name was truncated")
+        self.assertEqual(notes, [])
+        self.assertIn(f"**Task:** [[{name}]]", self.weekly.read_text(encoding="utf-8"))
+
     def test_notes_render_on_an_empty_round(self):
         """A round that could not look must not read like a round that found nothing."""
         rendered = answer.render([], ["k: unhandled answer 'x' — not consumed"], 2, 1)

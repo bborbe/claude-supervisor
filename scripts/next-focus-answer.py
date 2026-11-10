@@ -416,7 +416,13 @@ def consume_items(items, vault, tasks_dir, dismissed_dir, consumed_dir, now):
         # Unquote ONCE and derive both fields from it: reading `why_text` off the raw
         # payload left a trailing `'` in the row for any quoted multi-segment payload.
         payload = unquote_payload(card.get("payload", ""))
-        segments = payload.split(" — ")
+        # SPLIT FROM THE RIGHT. A task name may itself contain ` — ` (measured
+        # 2026-11-10: `Brogrammers Assistant Dies Mid-Request — claude process ended on
+        # Every Discord Mention`), so `split(" — ")[0]` truncated a legitimate name —
+        # 4 of the 33 bad live blocks were this shape. The payload is
+        # `<name> — <why> — <file>:<line>`, and `why` never contains the separator, so
+        # `rsplit(…, 2)` takes everything before the last two as the name.
+        segments = payload.rsplit(" — ", 2)
         name = segments[0].strip()
         why_text = segments[1] if len(segments) > 1 else ""
         kind = kind_of_key(card_key)
