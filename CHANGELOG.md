@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: open leg skips a row whose last session ended on a wait a new session cannot clear — `waiting-external` (newest Stop carries `⏰ Ends:`) and `waiting-operator` (newest Stop is an unanswered question card) — read from the row's whole session-id set in `<sid>.events.jsonl`, so slots stop going to workers that park on their first turn
+
 ## v0.270.0
 
 - feat: **a `⏰ Ends:` declaration now expires, so a wait that can never fire stops suppressing the nudge.** `scripts/declared-wait.py` reads the `Stop` record's own `ts`. A declaration older than an hour (`SUPERVISOR_WAIT_MAX_AGE_S`) that names no future clock (an ISO date or datetime, such as a `defer_date`) is now `expired`. `fleet-board.py`, `manager-predispatch.py` and the fleet sweep's `parked-on-watcher` row all stop treating an expired declaration as a wait, and the session is re-driven. If the wait is still real, the session re-parks. A declaration now carries two clocks: `last_ts` is the newest render and drives the 1 h re-check, while `ts` is the start of the trailing run naming the same observable (digits ignored). So an hourly re-park no longer resets `drive-escalate.py`'s 24 h card, and that script is unchanged. Measured 2026-11-10: 16 of 27 idle 🟡 sessions would never wake.

@@ -136,6 +136,14 @@ def _load(name, filename):
 #: `defer_date` is an instant, not a date — see `defer-date.py` for the accepted shapes.
 defer_date = _load("defer_date", "defer-date.py")
 
+#: The row's session-id set (`claude_session_id` + every `metrics_sessions` id) and the
+#: `⏰ Ends:` pattern both have one home each; reuse them rather than re-deriving.
+_predispatch = _load("manager_predispatch", "manager-predispatch.py")
+_readings = _load("round_readings", "round-readings.py")
+
+#: Where the Stop hook appends each session's `<sid>.events.jsonl`.
+ATTENTION_DIR = _readings.ATTENTION_DIR
+
 APPROVED = os.path.join(HERE, "approved-not-started.py")
 WORKER_SESSIONS = os.path.join(HERE, "worker-sessions.py")
 WORKER_TARGET = os.path.join(HERE, "worker-target.py")
@@ -241,7 +249,67 @@ def has_blocked_by(block):
     return False
 
 
-def guards(block, today):
+def _newest_stop(session_id, attention_dir):
+    """(newest `Stop` record, set of closed item ids) for one session's event log.
+
+    ``(None, set())`` when the log is absent or carries no Stop — an absent log is a row
+    that never ran, and a never-run row is runnable.
+    """
+    path = os.path.join(attention_dir, "%s.events.jsonl" % session_id)
+    newest, closed = None, set()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                if rec.get("event") is None and rec.get("closed_by") is not None:
+                    closed.add(rec.get("item_id"))
+                    continue
+                if rec.get("event") != "Stop" or not isinstance(rec.get("ts"), (int, float)):
+                    continue
+                if newest is None or rec["ts"] > newest["ts"]:
+                    newest = rec
+    except OSError:
+        pass
+    return newest, closed
+
+
+def prior_wait(block, attention_dir):
+    """`waiting-external` | `waiting-operator` | None — did this row's last session end
+    on a wait a new session cannot clear?
+
+    Opening a row whose previous session parked on a machine (`⏰ Ends:` — a PR, CI, a
+    card poll, a clock) or on an unanswered operator question starts a worker that parks
+    on its first turn, holding a slot and no model call. Measured 2026-11-10: of 37 idle
+    headless workers, 17 ended 🟡 WAITING and 15 on an operator ask or block.
+
+    Read from the NEWEST `Stop` across the row's whole session-id set, so an old wait
+    that a later turn moved past does not hold the row forever. A `question` Stop whose
+    item was since closed (answered or cleared) no longer blocks.
+    """
+    newest, closed = None, set()
+    for sid in _predispatch.session_id_set(block):
+        rec, done = _newest_stop(sid, attention_dir)
+        closed |= done
+        if rec is not None and (newest is None or rec["ts"] > newest["ts"]):
+            newest = rec
+    if newest is None:
+        return None
+    detail = newest.get("detail") or ""
+    if isinstance(detail, list):
+        detail = " ".join(str(x) for x in detail)
+    if _readings.ENDS_RE.search(str(detail)):
+        return "waiting-external"
+    if newest.get("kind") == "question" and newest.get("item_id") not in closed:
+        return "waiting-operator"
+    return None
+
+
+def guards(block, today, attention_dir=None):
     """The reason this row may not open, or None when it may.
 
     The first failing guard is the reason reported, so the operator is told one thing
@@ -260,7 +328,7 @@ def guards(block, today):
         print("open-queue: %s — treating as deferred" % detail, file=sys.stderr)
     if state in ("deferred", "invalid"):
         return "deferred"
-    return None
+    return prior_wait(block, attention_dir or ATTENTION_DIR)
 
 
 def rank_key(row):
@@ -311,7 +379,7 @@ def run_scalar(cmd):
     return proc.stdout.strip(), None
 
 
-def collect(tasks_dir, today, approved_json=None):
+def collect(tasks_dir, today, approved_json=None, attention_dir=None):
     """The ranked eligible rows (flagged and unflagged — `select()` applies the gate) plus
     the skipped ones with their reasons.
 
@@ -330,7 +398,7 @@ def collect(tasks_dir, today, approved_json=None):
     for entry in payload.get("rows", []):
         name = entry["name"]
         block = read_frontmatter(tasks_dir, name)
-        reason = guards(block, today)
+        reason = guards(block, today, attention_dir)
         if reason:
             skipped.append({"name": name, "reason": reason})
             continue
