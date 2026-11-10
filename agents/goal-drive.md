@@ -381,7 +381,7 @@ One compact report — see `<output_format>`. You do not render the status table
 Plain markdown, one line per action, in the order you performed them. Omit empty sections.
 
 ```text
-Drive: <subject> — audited <n> · cap re-dispatched <n> · reaped <n> · reap moot <n> · closed clean <n> · nudged <n> · freshness / in-flight drops <n> · to resume <n> · to open <n> · card <n> · stale <n> · held <n> · blocked <n>
+Drive: <subject> — audited <n> · cap re-dispatched <n> · reaped <n> · reap moot <n> · closed clean <n> · closed headless <n> · nudged <n> · freshness / in-flight drops <n> · to resume <n> · to open <n> · card <n> · stale <n> · held <n> · blocked <n>
 Provenance: recorded_at=<the store's recorded_at> · own sets: <bucket>{<task>, …} · <bucket>{…}
 Batch held — no store provenance (missing: <which half>) — no per-row clause ran   ← clause (0)(a); ONE line for the whole batch, never one per row
 Batch held — that value is NOT the named source's — no per-row clause ran   ← clause (0)(b); same rule, and name which file disagreed
@@ -399,6 +399,9 @@ Reap moot (2):         ← the fifth read found no live recipient — NOTHING se
 
 Closed clean (1):      ← passed the three disk reads; the fourth read found the close already run — NO message sent
   <task> — status: completed · phase: done · 0 open boxes · closer <timestamp> "👤 You: nothing — session closed" — not reaped
+
+Closed (headless) (1): ← passed the three disk reads; the tier read found `entrypoint sdk-cli` and `close-worker.py` closed it — NO message sent, NOT counted as reaped
+  <task> — status: completed · phase: done · 0 open boxes · close-worker.py → ✅ closed headless session (sdk-cli) · pid <pid> dead · registry entry removed
 
 Parked on operator (1): ← passed the three disk reads; the fourth read found a standing `approve:`/`pick` gate — NO message sent, and NOT folded into `Closed clean`
   <task> — status: completed · phase: done · 0 open boxes · closer <timestamp> "👤 You: approve: …" — parked, not reaped
@@ -480,6 +483,7 @@ Next (3):              ← the round's ONE ranked rendering, and the LAST block 
 - Every reap decision is backed by the three disk reads — `status`, `phase`, open-box count — taken **this run**, never from a session's claim or its colour.
 - **Every `Reaped` row was routed through `scripts/reap-line.py` and returned `live`; every other verdict is reported under `Reap moot` and counted as not reaped.** A reap handed over without the fifth read is the tick-86 defect — a decision recorded as taken with no recipient.
 - Every `Closed clean` row quotes the closer line and its timestamp. A row that passed the three reads and was neither reaped nor listed there is a bug; report it as one.
+- **Every `Closed (headless)` row was closed through `scripts/close-worker.py` and its own success line is quoted** — never a claim of a close that was not run, and never a headless row counted as reaped.
 - Every auto-resume names all **eleven** gate clauses, and any clause that failed is quoted with the value that failed it — including which blocker, which date, or `mode=interactive`.
 - Every `To resume` row was preceded by a re-probe at the hand-off site, and a positive re-probe aborted the row without arming the crash-loop cap.
 - No `last_auto_resume` was written by this file. The stamp is the caller's, written only through `vault-cli task set` and only **after** a spawn it verified against the **session-heartbeat endpoint** (`session-liveness.py --check`, which reads the endpoint and **not** the session registry since v0.125.0) — this file hands over a decision and records no act.
