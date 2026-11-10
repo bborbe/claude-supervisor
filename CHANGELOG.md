@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **`attention-ask.py poll` prints `ANSWERED_CLIENT:` beside `ANSWERED_BY:`**, rendering the store-recorded `answered_client` — `user_agent`, `remote_addr` and `forwarded_for` — so "who answered this card" is one command away instead of a grep of the controller's 182 MB stderr log. `answered_by` names the surface; the client is what separates the operator's browser from a script. `forwarded_for` renders in its own parenthetical because the header is caller-set, never in place of the peer address. An item that recorded no client prints no line.
+
 ## v0.267.1
 
 - fix: **the topic tier can now answer parks, so its `mcp` reach can actually be written.** `commands/topic-loop.md` and `commands/topic-drive.md` granted only `list_agents` and `agent_status` from the supervisor, so the sentinel `answer_permission` call added to `commands/steps/round-liveness.md` would have been refused before reaching the server — the same 0-`mcp`-reach failure this change exists to fix, left unfixed for one of its two tiers. A topic manager may open a worker (`docs/session-tiers.md`), and a worker it opened parks with it, so the grant closes a pre-existing gap as well.
