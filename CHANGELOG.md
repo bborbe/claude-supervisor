@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: `fleet-keeper.py`'s lapse card for a live Fleet Manager offers `restart fresh` — on the operator's answer only, once per card, it runs `restart-worker.py <sid> --reason lapse --fresh-prompt /supervisor:fleet-loop`, which stops the stalled manager and starts a NEW session (fresh context) instead of resuming the exhausted one (operator ruling 2026-11-10). `restart-worker.py` gains `--fresh-prompt` (allowlisted). The keeper's no-kill pin is narrowed to exactly this executor and the 2026-11-06 resume.
+
 ## v0.270.0
 
 - feat: **a `⏰ Ends:` declaration now expires, so a wait that can never fire stops suppressing the nudge.** `scripts/declared-wait.py` reads the `Stop` record's own `ts`. A declaration older than an hour (`SUPERVISOR_WAIT_MAX_AGE_S`) that names no future clock (an ISO date or datetime, such as a `defer_date`) is now `expired`. `fleet-board.py`, `manager-predispatch.py` and the fleet sweep's `parked-on-watcher` row all stop treating an expired declaration as a wait, and the session is re-driven. If the wait is still real, the session re-parks. A declaration now carries two clocks: `last_ts` is the newest render and drives the 1 h re-check, while `ts` is the start of the trailing run naming the same observable (digits ignored). So an hourly re-park no longer resets `drive-escalate.py`'s 24 h card, and that script is unchanged. Measured 2026-11-10: 16 of 27 idle 🟡 sessions would never wake.
