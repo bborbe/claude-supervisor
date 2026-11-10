@@ -185,6 +185,18 @@ class ResumeCommand(unittest.TestCase):
         inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc-private-claude")[-1]
         self.assertIn('"/l/cc-private-claude" --resume sid', inner)
 
+    def test_fresh_prompt_starts_a_new_session_not_a_resume(self):
+        """`--fresh-prompt` (keeper `restart fresh`, 2026-11-10) must never carry `--resume`:
+        a resumed session brings its exhausted context back, which is the whole failure."""
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc",
+                                  "/supervisor:fleet-loop")[-1]
+        self.assertNotIn("--resume", inner)
+        self.assertIn('"/l/cc" -n "title" "/supervisor:fleet-loop"', inner)
+        self.assertIn("trap _sx EXIT", inner)
+
+    def test_fresh_prompt_is_allowlisted(self):
+        self.assertEqual(("/supervisor:fleet-loop",), rw.FRESH_PROMPTS)
+
     def test_no_exec_so_the_exit_status_survives(self):
         """`exec` makes a SIGKILLed worker leave no record anywhere — the whole point.
 
