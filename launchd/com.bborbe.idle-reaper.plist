@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Idle reaper: one tick every 15 minutes, with no Claude session as its parent.
+
+  The operator's rule (2026-11-07, restated 2026-11-10): a headless worker idle for 15 minutes
+  exits. `reap-idle-headless.py` shipped as the close verb, but no command, step, agent or
+  plist ever called it. This job is that missing caller.
+
+  WHY A LAUNCHD AGENT, and not a slash command or an in-session `Monitor`:
+
+    * A slash command is started by a human, and the rule is meant to hold with nobody watching.
+    * An in-session `Monitor` dies with its session, so the reap would stop exactly when the
+      idle population is largest.
+    * `StartInterval` gives a FRESH PROCESS per tick, so there is no loop to die. Same shape
+      as `com.bborbe.rebase-agent`.
+
+  WHY NOT `com.bborbe.fleet-keeper`: that job is report-only by operator decision
+  (2026-11-01, card efc771fb) after it killed the Fleet Manager twice, and
+  `scripts/tests/test_fleet_keeper.py` pins it against every kill path. A reaper on that
+  clock would undo the decision. This job is separate so the two stay distinguishable in
+  `launchctl` and in their logs.
+
+  The cadence is 900 s. Measured from the moment a worker turns idle, the close lands between
+  15 and 30 minutes later.
+
+  ⚠️ WHAT THIS JOB DOES: it SIGTERMs live `claude` processes. That is its purpose and the
+  reason installing it is an operator step. It closes the PROCESS only: the transcript and the
+  task's `claude_session_id` survive, so a parked worker can be resumed later. Each candidate
+  first passes the reaper's eleven guards (busy, wrapper state, open card, live watcher, task
+  state, …); every refusal is final for that tick and is logged with its token.
+
+  Install:
+    cp launchd/com.bborbe.idle-reaper.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.bborbe.idle-reaper.plist
+
+  Stop it (the reap halts at once; nothing else depends on it):
+    launchctl bootout gui/$UID/com.bborbe.idle-reaper
+
+  Reload after an upgrade:
+    launchctl kickstart -k gui/$UID/com.bborbe.idle-reaper
+
+  The script path is the marketplace clone, not a version-pinned cache dir, for the same
+  reason `fleet-keeper` uses it: a cache path would pin the agent to one release and
+  silently run stale code after every upgrade.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bborbe.idle-reaper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/python3</string>
+        <string>/Users/bborbe/.claude/plugins/marketplaces/claude-supervisor/scripts/idle-reaper-tick.py</string>
+    </array>
+
+    <!--
+      launchd gives a job no login shell, so it never reads ~/.zshrc. The verbs need only
+      `ps` (/bin) plus Python's own urllib for the wrapper and the attention store, so the
+      system directories are the whole list. Nothing from Homebrew is required.
+    -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <!--
+      Not at load: the first tick waits a full interval. Installing the job should not
+      SIGTERM anything on the spot. A deliberate first run is
+      `launchctl kickstart gui/$UID/com.bborbe.idle-reaper`.
+    -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/bborbe/Library/Logs/idle-reaper.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/bborbe/Library/Logs/idle-reaper.log</string>
+</dict>
+</plist>
