@@ -7,6 +7,12 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
+
+## Unreleased
+
+- feat: **a `⏰ Ends:` declaration now expires, so a wait that can never fire stops suppressing the nudge.** `scripts/declared-wait.py` reads the `Stop` record's own `ts`. A declaration older than an hour (`SUPERVISOR_WAIT_MAX_AGE_S`) that names no future clock (an ISO date or datetime, such as a `defer_date`) is now `expired`. `fleet-board.py`, `manager-predispatch.py` and the fleet sweep's `parked-on-watcher` row all stop treating an expired declaration as a wait, and the session is re-driven. If the wait is still real, re-parking writes a fresh `ts`. Measured 2026-11-10: 16 of 27 idle 🟡 sessions would never wake.
+- feat: **`declared-wait.py --verdicts [--json]` prints each declaration with its verdict, age and `mechanism`.** `mechanism` is `session-bound` (`Monitor`, `ScheduleWakeup`, `CronCreate`, a background shell, task or sub-agent) or `external`. A session-bound wake dies with its process, so it is flagged for headless workers.
+
 ## v0.268.2
 
 - fix: **`commands/goal-loop.md` no longer says the `mcp` reach comes "from the server", which read as "no emitter needed".** It needs an explicit sentinel `answer_permission` call — answering real parks does not write it, because they settle on a different arm of the handler. That wording is what produced the measured 0-`mcp`-reach state the emitter fix corrected.

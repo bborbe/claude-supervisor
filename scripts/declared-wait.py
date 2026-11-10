@@ -31,11 +31,29 @@ declaration says when the wait began, so a reader **cannot expire it**. That tie
 defence is two-part — the WRITER clears the field when the wait ends, and the cell
 **renders the declaration's own text verbatim**, so a stale one reads as stale rather
 than as a live wait.
-⚠️ **This reader carries the first half and not the second.** It answers a boolean, so
-its consumers cannot tell a live declaration from a stale one the way the sibling cell
-can. A hard bound would need the declaration to carry its own date — a convention change
-this reader does not make on its own. Recorded here as the honest gap rather than
-papered over, which is what the sibling tier does with the same residual.
+⚠️ **Closed 2026-11-10: the declaration DOES carry its date.** The `Stop` record's
+own `ts` is the moment the wait was declared, so the gap above was a reading of the slot
+text alone. `declaration()` now gives every newest-`Stop` declaration a verdict, and only
+`declared` suppresses:
+
+| verdict | when | effect |
+|---|---|---|
+| `declared` | a non-empty slot younger than `MAX_AGE_S`, or naming a clock (ISO date/datetime) still in the future | suppresses the nudge, as before |
+| `expired` | older than `MAX_AGE_S` (default 3600 s, `SUPERVISOR_WAIT_MAX_AGE_S`) and naming no future clock | **not** a wait: the session is re-driven, re-checks its observable, and either works or re-parks — re-parking writes a fresh `Stop` with a fresh `ts`, so a genuine long wait costs one cheap re-check per hour |
+
+Each row also carries `mechanism`: `session-bound` when the slot names a wake that lives
+inside the session (`Monitor`, `ScheduleWakeup`, `CronCreate`, a `run_in_background` /
+background shell or task, a background sub-agent), else `external`. It is a FLAG, not a
+verdict: a live session's background task does wake it, and `~/.claude/CLAUDE.md` § Async
+State Closer allows such a wake in the `(mechanism, id)` slot. What it cannot do is outlive
+the process — so for a headless worker, which the reaper closes at 15 min idle, it is the
+wake that never fires. The age bound is what re-drives it; the flag is what names why.
+
+Measured 2026-11-10: of 27 idle 🟡 sessions, 16 would never wake — 6 whose event had
+already happened, 5 whose watcher had died, 5 declaring nothing. A bounded re-check is
+the one rule that reaches all three without probing each observable. A record with no
+`ts` keeps the pre-change behaviour (`declared`) — the failed-read rule below, applied to
+the clock.
 
 ⚠️ **A `Stop` record is a rendered closer panel, never a raised gate** — the same
 discriminator `who-needs-me.py`'s `is_open_gate()` reads to reach the *opposite*
@@ -50,7 +68,9 @@ leaves today's behaviour exactly as it was rather than inventing a park.
 import glob
 import json
 import os
+import re
 import sys
+import time
 
 STATE = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser(
     "~/.claude/state/attention"
@@ -58,20 +78,102 @@ STATE = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser(
 
 ENDS_MARKER = "⏰ Ends:"
 
+MAX_AGE_S = 3600
 
-def declared_wait(sid, state_dir=None):
-    """True when `sid`'s newest `Stop` record carries a non-empty `⏰ Ends:` slot.
+# A mechanism that lives inside the session that armed it. Matched against the slot
+# text only (case-insensitive); the list mirrors `~/.claude/CLAUDE.md` § Async State
+# Closer's banned wakes, so widen both together.
+SESSION_BOUND = re.compile(
+    r"\bMonitor\b|ScheduleWakeup|CronCreate|run_in_background"
+    r"|\bbackground\s+(?:bash|shell|task|watcher|sub-?agent)\b"
+    r"|\bbg\s+(?:bash|shell|task|watcher)\b"
+    r"|\bbackground\s+poll\b|\bharness\s+tasks?\b"
+    # A Claude Code background-task id: `b` + 8 lower-case alphanumerics, at least one
+    # outside hex so a short commit SHA never matches.
+    r"|\bb(?=[a-z0-9]{8}\b)(?=[a-z0-9]*[g-z])[a-z0-9]{8}\b",
+    re.IGNORECASE,
+)
 
-    Returns a bool. A log that is missing, unreadable or malformed, or that holds no
-    `Stop` record at all, is **False** — see the module docstring's failed-read rule.
+
+def _max_age():
+    try:
+        return float(os.environ.get("SUPERVISOR_WAIT_MAX_AGE_S") or MAX_AGE_S)
+    except ValueError:
+        return float(MAX_AGE_S)
+
+
+def declared_wait(sid, state_dir=None, now=None):
+    """True when `sid`'s newest `Stop` record carries a LIVE `⏰ Ends:` declaration.
+
+    Live means verdict `declared` — see `declaration()`. A log that is missing,
+    unreadable or malformed, or that holds no `Stop` record at all, is **False** — see
+    the module docstring's failed-read rule.
     """
+    d = declaration(sid, state_dir=state_dir, now=now)
+    return d is not None and d["verdict"] == "declared"
+
+
+def declaration(sid, state_dir=None, now=None):
+    """The newest `Stop` record's `⏰ Ends:` declaration with its verdict, or None.
+
+    Returns `{"ends", "ts", "age_s", "verdict"}`; `ts`/`age_s` are None when the record
+    carries no `ts`. None when nothing is declared or the read fails.
+    """
+    newest = _newest_stop(sid, state_dir)
+    if newest is None or not _has_ends(newest.get("detail")):
+        return None
+    detail = newest["detail"]
+    ends = detail[detail.find(ENDS_MARKER) + len(ENDS_MARKER):].strip().splitlines()[0]
+    ts = newest.get("ts")
+    ts = float(ts) if isinstance(ts, (int, float)) else None
+    age = None if ts is None else (time.time() if now is None else now) - ts
+    clock = _latest_clock(ends)
+    now_s = time.time() if now is None else now
+    if age is not None and age > _max_age() and not (clock and clock > now_s):
+        verdict = "expired"
+    else:
+        verdict = "declared"
+    mechanism = "session-bound" if SESSION_BOUND.search(ends) else "external"
+    return {"ends": ends, "ts": ts, "age_s": age, "verdict": verdict,
+            "mechanism": mechanism}
+
+
+_CLOCK = re.compile(
+    r"(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2})(?::\d{2})?(Z|[+-]\d{2}:?\d{2})?)?"
+)
+
+
+def _latest_clock(text):
+    """The latest ISO date/datetime the slot names, as epoch seconds, or None.
+
+    A bare date means the END of that local day — `defer_date: 2026-11-11` resurfaces
+    the task that day, so the wait holds through it. A datetime with no offset is local.
+    """
+    from datetime import datetime, timedelta
+    best = None
+    for date, hm, tz in _CLOCK.findall(text):
+        try:
+            if not hm:
+                dt = datetime.fromisoformat(date) + timedelta(days=1)
+            else:
+                off = "+00:00" if tz == "Z" else (tz[:3] + ":" + tz[-2:] if tz else "")
+                dt = datetime.fromisoformat(f"{date}T{hm}{off}")
+            t = dt.timestamp()
+        except ValueError:
+            continue
+        best = t if best is None else max(best, t)
+    return best
+
+
+def _newest_stop(sid, state_dir=None):
+    """The newest `Stop` record in `sid`'s log, or None on no record / failed read."""
     if not sid or "/" in sid or "\\" in sid:
         # ⚠️ **A sid is not a path.** `declared_wait_ids()` derives its ids from
         # `os.path.basename`, but this per-session form takes one from its caller, and an
         # id carrying a separator would read outside the store. No current caller supplies
         # one, so this is defence-in-depth rather than a live traversal — it costs a line
         # and keeps the failed-read contract total.
-        return False
+        return None
     path = os.path.join(state_dir or STATE, f"{sid}.events.jsonl")
     newest = None
     try:
@@ -97,10 +199,8 @@ def declared_wait(sid, state_dir=None):
                 if rec.get("event") == "Stop":
                     newest = rec
     except Exception:
-        return False
-    if newest is None:
-        return False
-    return _has_ends(newest.get("detail"))
+        return None
+    return newest
 
 
 def _has_ends(detail):
@@ -124,7 +224,7 @@ def _has_ends(detail):
     return bool(detail[idx + len(ENDS_MARKER):].strip())
 
 
-def declared_wait_ids(state_dir=None):
+def declared_wait_ids(state_dir=None, now=None):
     """Every session id whose newest `Stop` record declares a non-empty `⏰ Ends:`.
 
     The whole-store form, for the renderers: they classify every live row at once and
@@ -143,12 +243,38 @@ def declared_wait_ids(state_dir=None):
     out = set()
     for path in glob.glob(os.path.join(base, "*.events.jsonl")):
         sid = os.path.basename(path)[: -len(".events.jsonl")]
-        if declared_wait(sid, state_dir=base):
+        if declared_wait(sid, state_dir=base, now=now):
             out.add(sid)
     return out
 
 
+def declarations(state_dir=None, now=None):
+    """`{sid: declaration}` for every session whose newest `Stop` declares a wait."""
+    base = state_dir or STATE
+    out = {}
+    for path in glob.glob(os.path.join(base, "*.events.jsonl")):
+        sid = os.path.basename(path)[: -len(".events.jsonl")]
+        d = declaration(sid, state_dir=base, now=now)
+        if d is not None:
+            out[sid] = d
+    return out
+
+
 def main(argv):
+    if "--verdicts" in argv:
+        rows = declarations()
+        if "--json" in argv:
+            print(json.dumps(rows, sort_keys=True))
+            return 0
+        for sid, d in sorted(rows.items()):
+            age = "?" if d["age_s"] is None else f"{int(d['age_s'] // 60)}m"
+            print(f"{sid}\t{d['verdict']}\t{d['mechanism']}\t{age}\t{d['ends'][:100]}")
+        counts = {}
+        for d in rows.values():
+            for k in (d["verdict"], d["mechanism"]):
+                counts[k] = counts.get(k, 0) + 1
+        print(" · ".join(f"{k}={v}" for k, v in sorted(counts.items())), file=sys.stderr)
+        return 0
     ids = declared_wait_ids()
     if "--json" in argv:
         print(json.dumps(sorted(ids)))
