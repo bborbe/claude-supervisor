@@ -229,7 +229,7 @@ def main(argv: list[str]) -> int:
     # death to recover from. Placed before `defer_date` for the reason `guards()` places it
     # before `blocked` — a stop outranks a derived state, and a row that is both stopped
     # and deferred must read `stopped` rather than reappear when the defer expires.
-    if k.scalar(fm, STOPPED_KEY) in TRUTHY:
+    if k.scalar(fm, STOPPED_KEY).strip().lower() in TRUTHY:
         print("jump")
         print("task is stopped by the operator; a stop is not a death")
         return 0

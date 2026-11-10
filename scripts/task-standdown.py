@@ -75,9 +75,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 STOPPED = "stopped"
 STOP_DATE = "stop_date"
-#: The truthy set `open-queue.is_flagged()` already uses for `flag: true`, so the two
-#: boolean readers in this repo cannot disagree about what `true` looks like.
-TRUTHY = {"true", "yes", "on"}
 
 
 def _load(name, filename):

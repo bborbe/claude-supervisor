@@ -180,7 +180,7 @@ def is_flagged(block):
     flag still only decides WHICH already-approved row goes first — the approval is
     `approved_at`, which this leg requires on every row it opens.
     """
-    return (field(block, "flag") or "").strip().lower() in ("true", "yes", "on")
+    return (field(block, "flag") or "").strip().lower() in TRUTHY
 
 
 def priority_of(block):
