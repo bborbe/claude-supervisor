@@ -442,6 +442,50 @@ class FeedParse(Tmp):
                                       self.attention, self.projects)
         self.assertEqual(verdict, "none")
 
+    def test_a_fresh_aborting_transcript_yields_permission_channel(self):
+        sid = "abcd0007"
+        now = time.time()
+        self._abort_transcript(sid, now - 120, now)
+        verdict, reason = rr.stuck_verdict({"mtime": now}, [sid], "LIVE", "clear",
+                                           900, now, self.attention, self.projects)
+        self.assertEqual(verdict, "permission-channel")
+        self.assertIn("abcd0007", reason)
+
+    def test_a_STALE_aborting_transcript_is_not_permission_channel(self):
+        """⚠️ The blocking defect from this change's first review, 2026-11-09.
+
+        A row carries every id it ever ran under, and the window is anchored on the
+        transcript's own last stamp — so an id whose session died months ago with its
+        last 15 minutes full of aborts matches forever and pins a healthy LIVE row to
+        `permission-channel`. The staleness bound is what stops it.
+        """
+        sid = "abcd0008"
+        now = time.time()
+        self._abort_transcript(sid, now - 3 * 60 * 60, now - 3 * 60 * 60)
+        verdict, _ = rr.stuck_verdict({"mtime": now}, [sid], "LIVE", "clear",
+                                      900, now, self.attention, self.projects)
+        self.assertEqual(verdict, "none")
+
+    def _abort_transcript(self, sid, first_ts, last_ts):
+        """A transcript whose tool results carry the closed-channel marker."""
+        lines = []
+        for i in range(4):
+            ts = first_ts + (last_ts - first_ts) * i / 3
+            iso = datetime.datetime.fromtimestamp(
+                ts, datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+            lines.append(json.dumps({"type": "user", "timestamp": iso, "message": {
+                "content": [{"type": "tool_result", "tool_use_id": f"t{i}",
+                             "is_error": True,
+                             "content": "Tool permission request failed: "
+                                        "AbortError: Stream closed"}]}}))
+        project = os.path.join(self.projects, "project")
+        os.makedirs(project, exist_ok=True)
+        path = os.path.join(project, f"{sid}.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        os.utime(path, (last_ts, last_ts))
+        return path
+
     def test_a_stale_denial_still_falls_through_to_the_frozen_carrier(self):
         """Dropping the denial must not short-circuit to `none`: a live worker whose
         task file has not moved is still frozen."""
@@ -652,27 +696,32 @@ class FeedFamilyInvariant(Tmp):
         super().setUp()
         self.predispatch = rr._load("manager-predispatch")
         self.filt = rr._load("gate-owner-filter")
-        self._resolve = self.predispatch.resolve_tracked
+        self._resolve = self.predispatch.resolve_tracked_by_member
         self._checked = self.filt.headless_items_checked
         self._live = rr.liveness
         rr.liveness = lambda ids, endpoint, registry_dir: "ABSENT"
 
     def tearDown(self):
-        self.predispatch.resolve_tracked = self._resolve
+        self.predispatch.resolve_tracked_by_member = self._resolve
         self.filt.headless_items_checked = self._checked
         rr.liveness = self._live
         super().tearDown()
 
     def document(self, rows, feed):
-        self.predispatch.resolve_tracked = lambda vault, members: [
-            {"name": name, "mtime": 0, "session": None, "sessions": rows[name]}
-            for name in members
-        ]
+        def resolve(vault, members):
+            # `(tasks, matched members)` — every member here resolves, so the second
+            # half is the member list itself. Patching `resolve_tracked_by_member`
+            # rather than `resolve_tracked` is deliberate: `compute` reads the pair,
+            # and a patch on the wrapper would leave the real resolver to run.
+            return ([{"name": name, "mtime": 0, "session": None, "sessions": rows[name]}
+                     for name in members], list(members))
+
+        self.predispatch.resolve_tracked_by_member = resolve
         path = os.path.join(self.dir, "tracked.txt")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write("\n".join(rows) + "\n")
-        # A truthy vault is what routes through `resolve_tracked`, which is patched
-        # above; the path itself is never read.
+        # A truthy vault is what routes through the resolver, which is patched above;
+        # the path itself is never read.
         return rr.compute("A subject", path, self.dir, 900, now=1_700_000_000,
                           attention_dir=self.attention, feed=feed)
 
@@ -753,6 +802,111 @@ class FeedFamilyInvariant(Tmp):
                          "who-needs-me.py --section needs-you --all")
         self.assertIn("failed twice", doc["probes"][0]["error"])
         self.assert_invariant(doc)
+
+
+class UnresolvedTrackedSet(Tmp):
+    """A tracked set that resolves to nothing reads `unread`, never `clear`.
+
+    Measured 2026-11-08 (Development Pipeline Throughput): the caller passed 38
+    vault-relative page paths, `resolve_tracked` matched none of them against a task's
+    name or its `goals:`, and the `if not rows` fallback synthesised one placeholder per
+    member with `sessions: []`. Every family then read that empty list as evidence —
+    `feed_verdict([], gated, "read")` answers `clear`, `external_wait([])` answers
+    `none` — so the document reported `clear=38 · none=38` for a fleet of 543 real task
+    rows (387 carrying a session id) it never looked at.
+
+    The fixture's input is those 38 page paths, and the vault behind it is a real one:
+    the resolver runs for real, so the test fails if the placeholder ever comes back.
+    """
+
+    PAGE_PATHS = ["24 Goals/Goal %02d.md" % n for n in range(1, 39)]
+
+    def vault(self, tasks):
+        """A real vault: `tasks` maps a task name to the goal names it declares."""
+        tasks_dir = os.path.join(self.dir, "25 Tasks")
+        os.makedirs(tasks_dir, exist_ok=True)
+        for name, goals in tasks.items():
+            goals_fm = "".join("    - '[[%s]]'\n" % g for g in goals)
+            with open(os.path.join(tasks_dir, name + ".md"), "w", encoding="utf-8") as fh:
+                fh.write("---\nstatus: in_progress\nphase: execution\ngoals:\n%s---\n"
+                         "Tags: [[Task]]\n" % goals_fm)
+        return self.dir
+
+    def document(self, members, tasks=None):
+        vault = self.vault(tasks or {})
+        path = os.path.join(self.dir, "tracked.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(members) + ("\n" if members else ""))
+        sessions = os.path.join(self.dir, "sessions")
+        os.makedirs(sessions, exist_ok=True)
+        return rr.compute("A subject", path, vault, 900, now=1_700_000_000,
+                          attention_dir=self.attention, sessions_dir=sessions,
+                          projects_dir=self.projects, feed=CLEAN_FEED)
+
+    def test_the_real_2026_11_08_case_reads_unread_not_clear(self):
+        """SC4: the fixture's input is the 38 page paths that started this."""
+        doc = self.document(self.PAGE_PATHS)
+        self.assertEqual(doc["resolution"]["state"], "unresolved")
+        self.assertEqual(doc["resolution"]["tracked"], 38)
+        self.assertEqual(doc["resolution"]["resolved_rows"], 0)
+        self.assertEqual(len(doc["resolution"]["unresolved"]), 38)
+        self.assertEqual(len(doc["rows"]), 38)
+        self.assertEqual(doc["feed_counts"]["clear"], 0)
+        for name, rec in doc["rows"].items():
+            self.assertFalse(rec["resolved"], name)
+            self.assertEqual(rec["feed"], "unread", name)
+            self.assertEqual(rec["external_wait"], "unread", name)
+            self.assertEqual(rec["stuck"], "unread", name)
+            self.assertEqual(rec["liveness"], "UNKNOWN", name)
+            self.assertEqual(rec["in_flight"], "unread", name)
+
+    def test_no_unresolved_row_carries_a_negative(self):
+        """SC2: the placeholder is gone, so no family can read one as evidence.
+
+        Asserted on the ROWS, not the source: `clear` / `none` on an empty id set is a
+        legitimate answer for a resolved ownerless task, and only the `resolved` marker
+        separates that from a row nobody read.
+        """
+        doc = self.document(self.PAGE_PATHS)
+        negatives = {"feed": "clear", "external_wait": "none",
+                     "in_flight": "quiet", "stuck": "none"}
+        for name, rec in doc["rows"].items():
+            self.assertFalse(rec["resolved"], name)
+            for family, negative in negatives.items():
+                self.assertNotEqual(rec[family], negative,
+                                    "%s read %s for unresolved %s" % (family, negative, name))
+
+    def test_a_name_set_that_resolves_carries_no_unresolved_row(self):
+        doc = self.document(["Task One", "Task Two"],
+                            {"Task One": ["A Goal"], "Task Two": ["A Goal"]})
+        self.assertEqual(doc["resolution"]["state"], "resolved")
+        self.assertEqual(doc["resolution"]["resolved_rows"], 2)
+        self.assertEqual(doc["resolution"]["unresolved"], [])
+        self.assertEqual(sorted(doc["rows"]), ["Task One", "Task Two"])
+        self.assertTrue(all(rec["resolved"] for rec in doc["rows"].values()))
+
+    def test_a_goal_member_that_resolves_is_not_itself_unresolved(self):
+        """A goal name never equals a row's `name`, so deriving the unresolved set from
+        the row names alone reports every goal as unresolved and carries a spurious
+        `unread` row beside the tasks it admitted."""
+        doc = self.document(["A Goal"],
+                            {"Task One": ["A Goal"], "Task Two": ["A Goal"]})
+        self.assertEqual(doc["resolution"]["state"], "resolved")
+        self.assertEqual(doc["resolution"]["unresolved"], [])
+        self.assertEqual(sorted(doc["rows"]), ["Task One", "Task Two"])
+
+    def test_a_partly_resolved_set_names_only_the_names_that_admitted_nothing(self):
+        doc = self.document(["A Goal", "24 Goals/Gone.md"], {"Task One": ["A Goal"]})
+        self.assertEqual(doc["resolution"]["state"], "partial")
+        self.assertEqual(doc["resolution"]["unresolved"], ["24 Goals/Gone.md"])
+        self.assertEqual(doc["rows"]["24 Goals/Gone.md"]["feed"], "unread")
+        self.assertTrue(doc["rows"]["Task One"]["resolved"])
+
+    def test_no_tracked_names_at_all_is_empty_not_a_quiet_fleet(self):
+        doc = self.document([])
+        self.assertEqual(doc["resolution"]["state"], "empty")
+        self.assertEqual(doc["rows"], {})
+        self.assertEqual(doc["feed_counts"], {"gated": 0, "clear": 0, "unread": 0})
 
 
 if __name__ == "__main__":

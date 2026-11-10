@@ -255,6 +255,15 @@ EXIT_WRITE_OK = 0
 # response is the same shape — stop and look rather than proceed — while staying a
 # separate name so a reader cannot mistake it for the digest verdict.
 EXIT_DIVERGENT = 10
+# The `caller-format` verdict is the one divergence that is a hard stop rather than a
+# report: the two memberships share NO name at all, so every downstream read would be
+# attributed to a row that does not exist and would render from empty lists. Measured
+# 2026-11-08 (Development Pipeline Throughput): a tracked set of 38 vault-relative page
+# paths against 543 real task rows classified `caller-format`, the round continued, and
+# the readings document rendered `clear=38 · none=38` for a fleet it never read. Distinct
+# from EXIT_DIVERGENT because the caller's response is different — refuse the round, not
+# "stop and look" — and distinct from EXIT_USAGE because the arguments were well formed.
+EXIT_CALLER_FORMAT = 11
 
 STUCK_SECONDS = 30 * 60
 
@@ -701,8 +710,18 @@ def declared_members(topic_path: str) -> list[str]:
     return members
 
 
-def resolve_tracked(vault: str, members: list[str]) -> list[dict]:
-    """A member may be a goal (admits tasks whose `goals:` name it) or a task.
+def resolve_tracked_by_member(vault: str, members: list[str]) -> tuple[list[dict], list[str]]:
+    """`(tracked tasks, the members that admitted at least one of them)`.
+
+    `resolve_tracked`'s flat list erases *which* member produced a task, and a caller that
+    renders one row per member cannot recover it: a member is a goal name or a task name,
+    and only a task name ever equals a row's `name`. Measured 2026-11-08: a caller deriving
+    its unresolved set from the row names alone would read a goal that admitted 30 tasks as
+    unresolved and carry a spurious `unread` row beside them — the same false negative the
+    member-level report exists to remove, one level down.
+
+    The admission rule lives here and only here; `resolve_tracked` is this function's first
+    half.
 
     Vault-only and pure: it never touches the registry, so a fixture can run it against a
     throwaway vault and get the same values the live run gets.
@@ -710,17 +729,32 @@ def resolve_tracked(vault: str, members: list[str]) -> list[dict]:
     tasks_dir = os.path.join(vault, TASKS_DIRNAME)
     member_set = set(members)
     tracked: list[dict] = []
+    matched: set[str] = set()
     for entry in sorted(os.listdir(tasks_dir)):
         if not entry.endswith(".md"):
             continue
         task = read_task(os.path.join(tasks_dir, entry))
         if task is None:
             continue
+        # Every member that admitted this task, not just the first: one task may name two
+        # tracked goals, and both are resolved.
+        admitted = member_set.intersection(task["goals"])
         if task["name"] in member_set:  # declared directly as a task entry
-            tracked.append(task)
-        elif member_set.intersection(task["goals"]):
-            tracked.append(task)
-    return sorted(tracked, key=lambda t: t["name"])
+            admitted.add(task["name"])
+        if not admitted:
+            continue
+        tracked.append(task)
+        matched |= admitted
+    return sorted(tracked, key=lambda t: t["name"]), sorted(matched)
+
+
+def resolve_tracked(vault: str, members: list[str]) -> list[dict]:
+    """A member may be a goal (admits tasks whose `goals:` name it) or a task.
+
+    Vault-only and pure: it never touches the registry, so a fixture can run it against a
+    throwaway vault and get the same values the live run gets.
+    """
+    return resolve_tracked_by_member(vault, members)[0]
 
 
 def page_type_of(path: str) -> str:
@@ -3023,6 +3057,18 @@ def main(argv: list[str]) -> int:
         if kind == DIVERGENCE_HEALTHY:
             print(f"✅ COMPARE healthy — {sentence}")
             return EXIT_NOCHANGE
+        if kind == DIVERGENCE_CALLER_FORMAT:
+            # Refuse, do not report: nothing downstream can attribute a verdict to a row
+            # when the two sets share no name, so continuing writes a document that reads
+            # as a quiet fleet while it is really a wrong-form scan. Printed BEFORE the
+            # names so the caller's first line is the verdict, not a list to interpret.
+            print(f"⛔ COMPARE caller-format — {sentence}")
+            for label, names in (("caller-only", only_mine), ("gate-only", only_gate)):
+                for n in names[:10]:
+                    print(f"  {label}: {n}")
+                if len(names) > 10:
+                    print(f"  … and {len(names) - 10} more {label}")
+            return EXIT_CALLER_FORMAT
         print(f"⚠️ DIVERGENCE ({kind}): {sentence}")
         for label, names in (("caller-only", only_mine), ("gate-only", only_gate)):
             for n in names[:10]:

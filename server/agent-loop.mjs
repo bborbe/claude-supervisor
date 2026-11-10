@@ -1,5 +1,15 @@
 // The headless worker's message loop, extracted so it can be tested.
 //
+// ⚠️ **NODE-ONLY PATH — the terminal ledger patch below is DEAD on the current fleet.**
+// The session ledger's terminal verdict belongs to the process that holds the child's
+// stdin, and on every Mac here that is the Go daemon `bborbe/claude-wrapper`
+// (`http://127.0.0.1:18090/supervisor/mcp`, which is what each vault's MCP entry names):
+// `pgrep -f supervisor.mjs` returns nothing. This loop is retained as the reference
+// semantics the Go port was measured against, and would still be correct for a
+// Node-hosted deployment — but nothing may add a SECOND writer for a Go-spawned worker,
+// because whichever PATCH landed last would silently become the row's verdict. See
+// `docs/ledger-ownership.md`.
+//
 // Why this is its own module: the loop's whole job is a timing guarantee — when a
 // worker's `status` and its ledger's terminal patch become terminal — and timing
 // guarantees are exactly what a live reproduction cannot establish reliably. The
@@ -51,6 +61,20 @@ import { config } from './config.mjs'
 // test with a synthetic stream and no filesystem.
 const NO_HEARTBEAT = { start() {}, stop() {} }
 
+// The reason a zero-turn worker settles `error`. Exported so tests match the same literal.
+export const ZERO_TURN_ERROR = 'zero-turn: the session produced a result with num_turns 0 — no model turn ran, the prompt was not executed'
+
+// Zero-turn means NO turn ran in this stream — never merely "the last result has num_turns 0".
+const isZeroTurn = (result, agent) => Boolean(result) && !result.is_error && result.num_turns === 0 && !agent.sawTurn
+
+const markZeroTurn = (agent) => {
+  agent.status = 'error'
+  agent.error = ZERO_TURN_ERROR
+  // Mutated, never replaced: the supervisor's bounded keep holds this exact object, and swapping
+  // it here made that timer a no-op — so the wrapper child was never reaped once the loop settled.
+  agent.result.zero_turn = true
+}
+
 export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_HEARTBEAT, onTurnComplete = null }) {
   try {
     for await (const message of q) {
@@ -71,6 +95,15 @@ export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_
       // while its transcript was still growing (measured 2026-09-22). The payload is
       // overwritten per result, so the value left after the loop is the last one —
       // which is what the ledger's terminal patch must carry.
+      // ⚠️ Latch that a model turn RAN, before the terminal settle reads the last result. A
+      // synthetic `<task-notification>` result can land AFTER the real turn's result (orphaned
+      // background agents finish at different times), and `agent.result` keeps only the last one —
+      // so "the last result has num_turns 0" is not the same fact as "no turn ran". Reading it as
+      // one would report a worker that did the work as `zero-turn: the prompt was not executed`,
+      // inviting exactly the duplicate re-run this module's header warns about.
+      if (message.type === 'assistant' || (message.type === 'result' && (message.num_turns ?? 0) > 0)) {
+        agent.sawTurn = true
+      }
       if (message.type === 'result') {
         agent.result = {
           subtype: message.subtype,
@@ -106,11 +139,18 @@ export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_
     // settle.
     if (agent.status === 'running') agent.status = 'done'
     if (agent.result) {
-      agent.status = agent.result.is_error ? 'error' : 'done'
+      // ⚠️ **A zero-turn result is never success.** `num_turns: 0` means the model ran no turn —
+      // on resume, the CLI's own `<task-notification>` for orphaned background agents settles that
+      // way while the caller's prompt is still queued behind it (measured 2026-11-05, agent_12 /
+      // agent_13). Reporting it `done` let a manager record a resume that did nothing as one that
+      // acted. It settles `error` with a named reason instead, so `status` alone tells them apart.
+      if (isZeroTurn(agent.result, agent)) markZeroTurn(agent)
+      else agent.status = agent.result.is_error ? 'error' : 'done'
       writeLedger(agent, {
         status: agent.status,
         ended_at: new Date().toISOString(),
         result: agent.result,
+        ...(agent.error ? { error: agent.error } : {}),
       })
     }
   } catch (error) {
@@ -141,11 +181,17 @@ export async function runAgentLoop({ q, agent, writeLedger, log, heartbeat = NO_
     // name. Every gap class in `wrapper-stream.mjs` carries `gap = true`, so this one test
     // covers all of them, present and future.
     const terminal = { ended_at: new Date().toISOString() }
-    const turnClosed = agent.result && !agent.result.is_error && error?.gap !== true
+    const turnClosed = agent.result && !isZeroTurn(agent.result, agent) && !agent.result.is_error && error?.gap !== true
     if (turnClosed) {
       agent.status = 'done'
       writeLedger(agent, { ...terminal, status: 'done', result: agent.result })
       log(`agent ${agent.id} stream ended after a completed turn: ${error}`)
+    } else if (agent.result && isZeroTurn(agent.result, agent) && error?.gap !== true) {
+      // The stream died after a zero-turn result with no gap: the same empty run as the clean
+      // path above, so it carries the same contract (`error: zero-turn: …`, `result.zero_turn`).
+      markZeroTurn(agent)
+      writeLedger(agent, { ...terminal, status: 'error', error: agent.error, result: agent.result })
+      log(`agent ${agent.id} stream ended after a zero-turn result: ${error}`)
     } else {
       agent.status = 'error'
       agent.error = String(error)

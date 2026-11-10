@@ -53,14 +53,24 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.kp = self.k._keepalive()
         self.state = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(self.state, ignore_errors=True))
-        self._orig = (self.kp.session_verdict, self.kp.state_path)
+        self._orig = (self.kp.session_verdict, self.kp.state_path,
+                      self.kp.cadence_state_detail)
         self.kp.state_path = lambda vault, subject, branch="goal": str(
             self.state / f"{branch}--{self.kp.base_slug(subject)}.json"
         )
+        # ⚠️ The loop probe is injected, never left to read this machine's
+        # `~/.claude/state/sweep-gate` tree: a test whose verdict depends on whether a real
+        # goal happens to be armed asserts nothing about the code.
+        self.kp.cadence_state_detail = lambda subject, branch="goal": ("UNARMED", "")
         self.addCleanup(self._restore)
 
     def _restore(self):
-        self.kp.session_verdict, self.kp.state_path = self._orig
+        (self.kp.session_verdict, self.kp.state_path,
+         self.kp.cadence_state_detail) = self._orig
+
+    def goal_loop(self, state):
+        """Give every goal page this test reads one loop state."""
+        self.kp.cadence_state_detail = lambda subject, branch="goal": (state, "detail")
 
     def page(self, sid="sid-1", body=None):
         (self.vault / "25 Tasks" / "A Task.md").write_text(
@@ -212,13 +222,53 @@ class WorkerKeepAliveTest(unittest.TestCase):
         (self.vault / "24 Goals" / "A Goal.md").write_text(
             "---\nclaude_session_id: gm-1\n---\n# Success Criteria\n", encoding="utf-8")
         self.kp.session_verdict = lambda sid: "LIVE" if sid == "gm-1" else "ABSENT"
+        self.goal_loop("OK")
         out = io.StringIO()
         with redirect_stdout(out):
             rc = self.k.main(["--vault", str(self.vault), "--task", "A Task"])
         self.assertEqual(0, rc)
         lines = out.getvalue().splitlines()
         self.assertEqual("jump", lines[0])
-        self.assertIn("owns this task", lines[1])
+        # ⚠️ The reason must CARRY the evidence, not just the verdict: the round log is the
+        # only durable record that this jump rested on a live-and-armed manager.
+        self.assertIn("goal manager gm-1 is an owner (session LIVE, loop OK)", lines[1])
+
+    def test_a_goal_manager_stopped_with_its_loop_is_not_an_owner(self):
+        """THE BOUNDARY this task was filed for.
+
+        A goal manager that ran `/supervisor:stop` keeps its session and its loop marker says
+        `STOPPED`. Reading the session alone made it an owner, the fleet leg deferred to it,
+        and the goal round that would resume the worker is exactly what stopped — so the
+        worker had no keeper. It must fall through to the fleet leg's own resume.
+        """
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution", "phase: execution\ngoals:\n    - '[[A Goal]]'"))
+        (self.vault / "24 Goals").mkdir(parents=True)
+        (self.vault / "24 Goals" / "A Goal.md").write_text(
+            "---\nclaude_session_id: gm-1\n---\n", encoding="utf-8")
+        self.kp.session_verdict = lambda sid: "LIVE" if sid == "gm-1" else "ABSENT"
+        self.goal_loop("STOPPED")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.k.main(["--vault", str(self.vault), "--task", "A Task"])
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out.getvalue().splitlines()[0])
+
+    def test_an_unreadable_owner_probe_never_hands_the_worker_to_the_fleet(self):
+        # `not-owner` is what licenses a resume. A probe that could not answer is
+        # `cannot-tell`, and resuming on it is the second writer this whole tier avoids.
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution", "phase: execution\ngoals:\n    - '[[A Goal]]'"))
+        (self.vault / "24 Goals").mkdir(parents=True)
+        (self.vault / "24 Goals" / "A Goal.md").write_text(
+            "---\nclaude_session_id: gm-1\n---\n", encoding="utf-8")
+        self.kp.session_verdict = lambda sid: "UNKNOWN"
+        self.goal_loop("OK")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.k.main(["--vault", str(self.vault), "--task", "A Task"])
+        self.assertEqual(1, rc)
+        self.assertEqual("cannot-tell", out.getvalue().splitlines()[0])
 
     def test_a_mixed_goal_page_resolves_claude_session_id_first(self):
         # A re-armed legacy page carries both keys. Reading the retired one first
@@ -230,13 +280,14 @@ class WorkerKeepAliveTest(unittest.TestCase):
             "---\nmanager_session_id: gm-old\nclaude_session_id: gm-new\n---\n",
             encoding="utf-8")
         self.kp.session_verdict = lambda sid: "LIVE" if sid == "gm-new" else "ABSENT"
+        self.goal_loop("OK")
         out = io.StringIO()
         with redirect_stdout(out):
             rc = self.k.main(["--vault", str(self.vault), "--task", "A Task"])
         self.assertEqual(0, rc)
         lines = out.getvalue().splitlines()
         self.assertEqual("jump", lines[0])
-        self.assertIn("owns this task", lines[1])
+        self.assertIn("goal manager gm-new is an owner", lines[1])
 
     def test_a_task_whose_goal_manager_is_dead_is_still_resumed(self):
         self.page(body=TASK_PAGE.format(sid="sid-1").replace(

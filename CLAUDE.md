@@ -26,6 +26,8 @@ manager session ──MCP──► supervisor server ──query()×N──► w
 
 ## Where a worker runs
 
+⚠️ **`server/supervisor.mjs` is NOT the supervisor tool a session binds — do not fix spawn behaviour there.** The live tool is the Go **`claude-wrapper`** daemon at `http://127.0.0.1:18090/supervisor/mcp`: every `cc-*` launcher loads `~/.claude/mcp-private-personal.json` with `--strict-mcp-config`, and this plugin ships no `.mcp.json`. Nothing on the operator's machine starts the JS server: it is reachable only from the drill scripts and from `scripts/mcp-start.py`, the plugin's own launcher for a deployment that wires an `.mcp.json`. A spawn, model or permission fix belongs in `bborbe/claude-wrapper` — `pkg/roster_mcp.go` (spawn handler, `headlessModel`) and `pkg/spawn_cwd.go` (launcher + model resolution). Measured 2026-11-09: a headless-spawn model fix was written and tested in `server/supervisor.mjs`, then discarded — the live path was the Go daemon. A `PreToolUse` hook on the operator's machine now refuses edits to that file, so the redirect lands before the write.
+
 `spawn_agent` requires `vault` or `cwd` and **refuses when neither is given**. `server/spawn-cwd.mjs` owns that resolution, and it is a pure function — no filesystem, no environment, no clock — so it is unit-testable without a server.
 
 Both halves used to be silent, and the failure is worth keeping in view when editing it. An absent `cwd` became this server's own working directory; an unresolvable launcher became the vault named `personal` and then the bare `claude` binary. Measured 2026-10-03: **27 workers** spawned that way in one batch, every one in the supervisor repo and on Opus instead of the vault's `cc-private-deepseek` — and the response named neither the launcher, nor the vault, nor the model, so a wrong spawn was indistinguishable from a correct one.
@@ -36,14 +38,16 @@ The spawn response carries `vault`, `launcher` and `model`. The model is read fr
 
 ## Reaching a running tab worker
 
-`send_agent_message(agent_id, message)` sends a follow-up to a running worker, over one of two transports picked from the worker's own record (`server/message-channel.mjs`). For a **tab** worker it types into the pane and submits — focus is stolen, and a failure is reported rather than passed off as a success. For a **cluster** worker there is no pane: it posts one more turn on that worker's **existing session id** through the claude-interactive service, blocks until the pod answers, and returns the answer. This is the `send_to_agent` the server never had: a worker that has gone wrong can be corrected, and one that has stalled can be nudged, without a human at the tab.
+`send_agent_message(agent_id, message)` sends a follow-up to a running worker, over one of four transports picked from the worker's own record (`server/message-channel.mjs`). For a **tab** worker it types into the pane and submits — focus is stolen, and a failure is reported rather than passed off as a success. For a **cluster** worker there is no pane: it posts one more turn on that worker's **existing session id** through the claude-interactive service, blocks until the pod answers, and returns the answer. For an **A2A** worker (`docker` / `k8s`) it opens one more turn on the worker's own endpoint. For a **headless** worker it does not deliver at all — it resolves the worker's **session-registry name** and returns it with `sent: false`, and the CALLER sends it with `SendMessage(to: <name>)`, because the server is not a Claude session and cannot call that tool. This is the `send_to_agent` the server never had: a worker that has gone wrong can be corrected, and one that has stalled can be nudged, without a human at the tab.
+
+⚠️ **The headless hand-back is a send the caller must finish, and `sent: false` says so rather than reporting a failure.** Measured 2026-11-08: session `6d16758d` was live and registered as `claude-1f`, while the old refusal told the caller to *"reach it mid-task with SendMessage"* — which, given only the id the caller held, answers `No agent named '6d16758d…' is reachable`. The join is `namesForSessionId` (`liveness.mjs`, the inverse of `sessionIdsNamed`) over the session registry Claude Code writes per session; a name another live session also answers to is refused rather than guessed (so is a second name for one id), and a worker with no entry at all (the session exited, or it runs in-process under the SDK, which registers no name) is refused too — the fix widens the success path, never the failure one.
 
 ⚠️ **A 2xx from a cluster follow-up is not evidence the SAME conversation ran.** The service takes the session id from the caller and echoes none back, so a turn against an id the pod no longer holds is indistinguishable, from this side, from a real continuation — and it would look like a successful send. The proof is the pod's own log (`turn start id=<id>` / `turn end id=<id>`, from `interactive/session-cache.go`), which is the caller's to read. The same discipline `cluster-spawn.mjs` states for a spawn applies to every later turn.
 
 Three things about the **pane** transport are measured rather than assumed, and each one is a trap:
 
-- **It reaches a tab worker only.** A headless worker has no pane, so the call is refused rather than attempted — typing into a pane that does not exist is how a channel reports success while delivering nothing. A cluster worker has no pane either, and is reached over HTTP instead (above) — so read this bullet as scoped to the pane transport, never as "the tool is tab-only".
-- **It activates the worker's tab, which steals focus.** Not silent by design; there is no way to type into a wezterm pane without making its tab active.
+- **It reaches a tab worker only.** The PANE transport is scoped to a tab worker: a headless worker has no pane, so the pane branch is never taken for one — typing into a pane that does not exist is how a channel reports success while delivering nothing. A cluster or A2A worker has no pane either, and a headless worker is handed back to the caller's `SendMessage` (above) — so read this bullet as scoped to the pane transport, never as "the tool is tab-only".
+- **It does not activate the worker's tab.** `send-text --pane-id` reaches a pane in a background tab, so a send never takes the operator's focus. This bullet previously claimed the opposite — that activation was unavoidable and stole focus — and that claim did not reproduce (measured 2026-11-09: 6/6 bytes delivered with `focused_pane_id` unchanged). The earlier 0-byte readings were a canonical-mode artefact, not a delivery failure.
 - **It waits for the input prompt, it does not sleep.** A fixed delay is a race that fails on a loaded machine. Readiness is the `❯` glyph in the pane, which appears about a second after spawn.
 
 **The colour is set the same way, and that is a bug fix.** `SUPERVISOR_WORKER_COLOR` (default `/color pink`) used to be seeded as the first line of the worker's prompt, and it never worked: Claude Code parses one submitted message as one command, and `/color` takes the *entire* trimmed argument, so the colour swallowed the blank line and the whole task — `Invalid color "pink\n\n<task>"`. It is now sent as its own message once the pane is up, and the spawn response reports `color: {applied: true}` only when it actually landed.
@@ -179,6 +183,7 @@ docs/subject-resolution.md                      the four-source subject chain th
 scripts/topic-spawn.py                           the topic tier's spawn gate — goal-not-in-scope / goal-not-startable / manager-cap, the § 1 ranking, and the worker refusal
 scripts/topic-keepalive.py                       the topic tier's keep-alive — resume-not-respawn, 3 resumes per goal per 30 min, crash-loop line
 scripts/topicless-goal-keepalive.py              the fleet tier's keep-alive for goal managers no topic declares — selects in_progress+execution goals, asks topic-keepalive.py per goal, never acts
+scripts/owner.py                                 THE ownership definition (`docs/session-tiers.md` § Keep-alive) as code — owner / not-owner / cannot-tell from session liveness + loop state; every keeper and filter resolves through it
 docs/voice-asks.md                               a voiced question is also a board card — rule + detector (canonical)
 docs/orphan-recovery.md                          stop + recreate a remote worker whose container or pod is gone (canonical)
 scripts/voice-ask-pairing.py                     flags question `say`s with no `attention-ask.py post` within 60 s
@@ -191,6 +196,7 @@ scripts/session-scope.py                         that arm's durable ownership in
 commands/read-guides.md                          load every guide in docs/
 scripts/{jump,who-needs-me}.py                   their helpers
 scripts/service-guard.py                         the fleet round's standing resource guard (fifth reading, router row 15) — `phys_footprint` + CPU per launchd service against `~/.claude/state/service-guard.json`; `--apply` reopens the owning row on a breach, never restarts
+scripts/keeper-census.py                         the sixth reading (router row 15) — every live session's keeper tier and every page's, against `docs/session-tiers.md` § Keep-alive; names each unkept / double-kept row and exits 1, posts one card per red episode, never acts
 scripts/declared-wait.py                         the shared `⏰ Ends:` reader — one home for the slot `fleet-board.py`, `manager-predispatch.py` and the fleet sweep all key on (the "fourth definition of idle" guard)
 agents/goal-wrangler.md                routine approval loop over headless workers
 agents/topic-sweep-reader.md            the TOPIC sweep's read half — goal rows and their managers (called by topic-loop/topic-status)
@@ -203,7 +209,7 @@ agents/goal-verify.md                  the goal tier's checks + report shape (di
 agents/fleet-drive.md                    the fleet drive leg — revive/blocked split, re-nudge ledger (called by /fleet-drive and by /fleet-loop every round)
 agents/gate-relay-read.md                the manager's gate relay, read leg — pane id in, ≤15-line per-pane summary out; declares no write tool at all
 agents/gate-relay-send.md                the manager's gate relay, send leg — the operator's answer into a tab worker's pane; never drives a selection modal
-server/supervisor.mjs                    the MCP server
+server/supervisor.mjs                    the DEPRECATED MCP server — drill scripts only; the live tool is the Go claude-wrapper daemon
 server/policy.json                       bundled approval rules (see README § The approval policy)
 ```
 

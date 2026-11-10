@@ -213,20 +213,6 @@ def last_closer(path, max_bytes=MAX_SCAN):
     return None if found is None else (found[0], found[1])
 
 
-def last_ends(path, max_bytes=MAX_SCAN):
-    """`(timestamp, line)` for the `⏰ Ends:` line of the message `last_closer` reads, or `None`.
-
-    ⚠️ The SAME message, from the same scan — never a second scanner. A `⏰ Ends:` from an
-    older message would judge a wait the session already left. `None` when that message
-    carries no `⏰ Ends:`, and on the partial-write salvage path, which recovers the
-    `👤 You:` line alone: a caller reading `None` must treat it as "nothing to check".
-    """
-    found = last_closer_and_ends(path, max_bytes)
-    if found is None or found[2] is None:
-        return None
-    return found[0], found[2]
-
-
 def last_closer_and_ends(path, max_bytes=MAX_SCAN):
     """`(timestamp, you_line, ends_line_or_None)` from ONE scan, or `None` with no closer.
 

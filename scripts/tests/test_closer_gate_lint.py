@@ -84,6 +84,15 @@ EXPECTED = {
     "34-ends-external-probe.jsonl": 0,
     "35-ends-monitor-in-path.jsonl": 0,
     "36-ends-pr-watch-compliant.jsonl": 0,
+    # ⚠️ `gh -R <owner>/<repo> pr ready N` is the form CLAUDE.md mandates, and the entry
+    # originally required `gh` and `pr ready` to be adjacent — so the mandated form fell
+    # through as `not-allow-listed` while the bare form was released.
+    "37-gh-pr-ready-with-repo-flag.jsonl": 2,
+    # ⚠️ A full ISO datetime is a legal clock (CLAUDE.md § Async State Closer names
+    # "a clock (`defer_date` / timestamp)"), and the trailing `\b` after `\d{2}` cannot
+    # match between `9` and `T` — both word characters — so this closer was blocked.
+    # The watcher stays in the slot, so only the datetime keeps it clean.
+    "38-ends-iso-datetime.jsonl": 0,
 }
 
 ENDS_POSITIVE = {
@@ -306,11 +315,47 @@ class CloserGateLintTest(unittest.TestCase):
             self.payload("08-prod-buca.jsonl"), environ={})
         self.assertEqual("not-allow-listed", record["reason"])
 
-    def test_stop_hook_active_allows_even_a_gated_closer(self):
+    def test_stop_hook_active_allows_when_nothing_was_blocked(self):
         # The loop guard: without it a continued turn ending on the same closer re-blocks
-        # forever.
+        # forever. With no prior block on record the retry is allowed, exactly as before.
         code, _text, record = self.mod.evaluate(
-            self.payload("01-github-pr-watch.jsonl", stop_hook_active=True), environ={})
+            self.payload("01-github-pr-watch.jsonl", stop_hook_active=True),
+            environ={self.mod.STATE_DIR_ENV: self.dir})
+        self.assertEqual(0, code)
+        self.assertEqual("stop-hook-active", record["reason"])
+
+    def test_a_re_emitted_closer_is_blocked_once_more_then_allowed(self):
+        # ⚠️ The SC2 fixture: a closer the lint blocked once must NOT be admitted on the
+        # retry. The bound comes from the hook's own record, so the sequence is
+        # block → blocked-retry → allow. Three asserts, because a fix that blocks the
+        # retry but never releases it would loop, and that is the guard's whole purpose.
+        env = {self.mod.STATE_DIR_ENV: self.dir}
+        payload = self.payload("37-gh-pr-ready-with-repo-flag.jsonl")
+
+        first = self.mod.evaluate(payload, environ=env)
+        self.assertEqual(2, first[0])
+        self.assertEqual("allow-listed", first[2]["reason"])
+        self.mod.write_record(first[2], directory=self.dir)
+
+        retry = self.mod.evaluate(dict(payload, stop_hook_active=True), environ=env)
+        self.assertEqual(2, retry[0], "the retry must be blocked, not released")
+        self.assertEqual("blocked-retry", retry[2]["reason"])
+        self.assertIn("re-emitted unchanged", retry[1])
+        self.mod.write_record(retry[2], directory=self.dir)
+
+        third = self.mod.evaluate(dict(payload, stop_hook_active=True), environ=env)
+        self.assertEqual(0, third[0], "a third identical stop is allowed — the guard is bounded")
+        self.assertEqual("stop-hook-active", third[2]["reason"])
+
+    def test_a_different_closer_on_the_retry_is_allowed(self):
+        # The bound keys on the closer, not the session: a continued turn that ends on a
+        # *different* gate is the guard's normal case and must not be re-blocked.
+        env = {self.mod.STATE_DIR_ENV: self.dir}
+        first = self.mod.evaluate(
+            self.payload("37-gh-pr-ready-with-repo-flag.jsonl"), environ=env)
+        self.mod.write_record(first[2], directory=self.dir)
+        code, _text, record = self.mod.evaluate(
+            self.payload("01-github-pr-watch.jsonl", stop_hook_active=True), environ=env)
         self.assertEqual(0, code)
         self.assertEqual("stop-hook-active", record["reason"])
 
@@ -386,7 +431,8 @@ class CloserGateLintTest(unittest.TestCase):
         # The operator's "observable only" scope: the watcher may stay in the slot.
         for name in ("31-ends-file-path.jsonl", "32-ends-card-id.jsonl",
                      "33-ends-defer-date.jsonl", "34-ends-external-probe.jsonl",
-                     "35-ends-monitor-in-path.jsonl", "36-ends-pr-watch-compliant.jsonl"):
+                     "35-ends-monitor-in-path.jsonl", "36-ends-pr-watch-compliant.jsonl",
+                     "38-ends-iso-datetime.jsonl"):
             with self.subTest(fixture=name):
                 code, text, record = self.mod.evaluate(self.payload(name), environ={})
                 self.assertEqual(0, code)
@@ -398,6 +444,82 @@ class CloserGateLintTest(unittest.TestCase):
         # ⚠️ `times out ~18:40` dies with the watcher; only defer_date / an ISO date count.
         self.assertEqual("background-sub-agent", self.mod.session_bound_class(
             "⏰ Ends:   chunk 7a done (background agent a1, times out ~18:40)"))
+
+    def test_an_iso_datetime_is_a_clock_observable(self):
+        # ⚠️ Three boundary regressions, each caught on its own review round: a trailing
+        # `\b` failed between `9` and `T`, then between the final digit and a `Z`, and a
+        # `(?![\w-])` terminator newly blocked `2026-11-09-15:30` and
+        # `2026-11-09-rollout` — `-` is a valid `fromisoformat` separator, and blocking a
+        # compliant closer is the exact false positive this class exists to remove.
+        # CLAUDE.md § Async State Closer names a clock as legal, so every form clears.
+        for body in (
+            "⏰ Ends:   2026-11-09T15:30:00+01:00 (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09T15:30Z (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09T15:30:00Z (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09T00:00:00Z (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09T15:30:00.5+01:00 (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09T15 (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09t15:30:00 (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09T15:30:00z (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09-15:30 (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09-rollout (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09 15:30 (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09 (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   defer_date 2026-11-09 (CronCreate j4f2 as early wake)",
+            # ⚠️ Malformed time suffix, still a durable clock: its `T15` prefix is a
+            # parser-accepted hour, so this clears on the same fail-open rule that lets
+            # `2026-11-09 15:30abc` clear via its bare date. Blocking it would mean
+            # rejecting a real date+hour the writer plainly meant.
+            "⏰ Ends:   2026-11-09T15:30abc (CronCreate j4f2 as early wake)",
+        ):
+            with self.subTest(body=body):
+                self.assertIsNone(self.mod.session_bound_class(body))
+        # The other half, and the guard against a permissive fix: a truncated date or a
+        # trailing digit run is not a clock `parse_defer_date` accepts, so the
+        # session-bound watcher still blocks.
+        for body in (
+            "⏰ Ends:   2026-11-9 (CronCreate j4f2 as early wake)",
+            "⏰ Ends:   2026-11-09123 (CronCreate j4f2 as early wake)",
+        ):
+            with self.subTest(body=body):
+                self.assertEqual("cron-create", self.mod.session_bound_class(body))
+
+    def test_a_representative_sample_of_parser_accepted_clocks_clears_the_clock_class(self):
+        # ⚠️ A SAMPLE, not the parser's full accepted set. `parse_defer_date` accepts an
+        # unbounded family — `fromisoformat` takes any single separator character and any
+        # fraction precision — so no literal list can be exhaustive and this test must not
+        # claim parity. What it pins is that the two sides agree on every shape seen so
+        # far, including the three that each cost a review round (`…T15:30`, `…T15:30Z`,
+        # `…-15:30`). The assertion is two-sided by construction: each value must be
+        # parser-accepted AND lint-cleared, so an entry the parser rejects fails here
+        # rather than silently widening the gate.
+        spec = importlib.util.spec_from_file_location(
+            "defer_date", os.path.join(os.path.dirname(_HERE), "defer-date.py"))
+        defer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(defer)
+        sample = (
+            "2026-11-09",
+            "2026-11-09T00:00:00Z",
+            "2026-11-09T15",
+            "2026-11-09T15:30",
+            "2026-11-09T15:30Z",
+            "2026-11-09T15:30:00Z",
+            "2026-11-09T15:30:00z",
+            "2026-11-09t15:30:00",
+            "2026-11-09T15:30:00+01:00",
+            "2026-11-09T15:30:00-05:00",
+            "2026-11-09T15:30:00",
+            "2026-11-09 15:30:00",
+            "2026-11-09-15:30",
+        )
+        for value in sample:
+            with self.subTest(value=value):
+                _parsed, reason = defer.parse_defer_date(value)
+                self.assertIsNone(reason, f"{value!r} is not parser-accepted — fix the sample")
+                self.assertIsNone(
+                    self.mod.session_bound_class(
+                        f"⏰ Ends:   {value} (CronCreate j4f2 as early wake)"),
+                    f"{value!r} is parser-accepted but the lint blocks it")
 
     def test_lowercase_monitor_in_a_path_is_not_the_monitor_class(self):
         self.assertIsNone(self.mod.session_bound_class(

@@ -133,8 +133,9 @@ def scalar(fm: str, key: str) -> str:
 
 #: Every spelling of "no id recorded", compared case-insensitively — the same set
 #: `scripts/goals-declaration.py` uses for "declares nothing", and the same fold
-#: `scripts/topic-keepalive.py`'s `session_id` performs. Duplicated deliberately: both
-#: scripts run standalone out of the plugin cache, so there is no shared module to import.
+#: `scripts/owner.py`'s `page_session_id` owns. Duplicated deliberately: this script loads
+#: no `owner.py`, and both run standalone out of the plugin cache, so there is no shared
+#: module to import — `test_topic_keepalive.py` asserts the two agree.
 _EMPTY_IDS = frozenset({"", "[]", "null", "~"})
 
 
@@ -145,8 +146,7 @@ def session_id(fm: str) -> str:
     `claude_session_id: null` arrives as the four characters `null` — non-empty, and a legal
     `session-liveness.py` argument, so it probes as a session that was never named. This
     script only counts a LIVE probe (`probe.returncode == 0`), so a `null` id never inflated
-    the manager count; the fold is here to keep the two copies in step, per
-    `test_topic_keepalive.py`'s agreement check on `flagged`.
+    the manager count; the fold is here to keep the two copies in step.
     """
     value = scalar(fm, "claude_session_id").strip()
     return "" if value.lower() in _EMPTY_IDS else value

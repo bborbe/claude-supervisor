@@ -59,10 +59,14 @@ class UnarmedGoals(unittest.TestCase):
         self.state.cleanup()
         os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
 
-    def task(self, name, sid, goals=None, themes=None, status="in_progress"):
+    def task(self, name, sid, goals=None, themes=None, status="in_progress", pages=True):
         extra = ""
         if goals:
             extra += "goals:\n" + "".join("    - '[[%s]]'\n" % g for g in goals)
+            # A goal the task links has a page, as in a real vault — `--state` answers
+            # `UNARMED` only for a subject whose page resolves.
+            for g in goals if pages else ():
+                self.page(g)
         if themes:
             extra += "themes:\n" + "".join("    - '[[%s]]'\n" % t for t in themes)
         text = TASK.format(sid=sid, extra=extra).replace("status: in_progress", "status: " + status)
@@ -81,13 +85,24 @@ class UnarmedGoals(unittest.TestCase):
         return [{"sessionId": s, "alive": True} for s in sids]
 
     def collect(self, *sids):
-        return self.m.collect(self.tasks, self.live(*sids))
+        return self.m.collect(self.tasks, self.live(*sids), self.tmp.name)
+
+    def page(self, goal):
+        open(os.path.join(self.tmp.name, "24 Goals", goal + ".md"), "w").close()
 
     def test_a_goal_with_a_live_session_and_no_record_is_reported(self):
         self.task("T", "aaaaaaaa-1111", goals=["Gap Goal"])
         unarmed, _ = self.collect("aaaaaaaa-1111")
         self.assertEqual(["Gap Goal"], [r["goal"] for r in unarmed])
         self.assertEqual(["aaaaaaaa-1111"], unarmed[0]["sessions"])
+
+    def test_a_goal_link_with_no_page_and_no_record_is_not_reported_unarmed(self):
+        # `--state` refuses a name that resolves no page and no record: a dangling
+        # `goals:` link is not a goal nothing armed, and reporting it as one sends an
+        # arm instruction to a manager that does not exist.
+        self.task("T", "abababab-1111", goals=["No Such Goal"], pages=False)
+        unarmed, _ = self.collect("abababab-1111")
+        self.assertEqual([], unarmed)
 
     def test_a_goal_with_a_record_is_not_reported(self):
         # Lapsed is `STALE`'s class, not this report's — folding it in is the defect.

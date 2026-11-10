@@ -1,4 +1,18 @@
 #!/usr/bin/env node
+// ⚠️ DEPRECATED AS THE LIVE MCP SURFACE — do not fix spawn behaviour here.
+//
+// The `supervisor` tool a session actually binds is the Go claude-wrapper daemon at
+// http://127.0.0.1:18090/supervisor/mcp. Every cc-* launcher loads
+// ~/.claude/mcp-private-personal.json with --strict-mcp-config, and this plugin ships no
+// .mcp.json of its own, so nothing on the operator's machine starts this file: it is
+// reachable only from the drill scripts and from scripts/mcp-start.py, the plugin's own
+// launcher for a deployment that DOES wire an .mcp.json.
+//
+// A spawn, model or permission fix belongs in bborbe/claude-wrapper:
+// `pkg/roster_mcp.go` (spawn handler) and `pkg/spawn_cwd.go` (launcher + model resolution).
+// Measured 2026-11-09: a headless model fix was written here, tested, and discarded —
+// the live path was the Go daemon. A PreToolUse hook on this machine now refuses edits to
+// this file, so a session that tries gets the redirect before writing.
 // supervisor.mjs — MCP server that spawns Claude sessions and lets the calling
 // manager session answer THEIR permission prompts.
 //
@@ -22,13 +36,14 @@ import { HEARTBEAT_INTERVAL_MS, a2aStamp, clearStamp, heartbeatDir, selfStampRef
 import { invalidateCountCache, workerSessions } from './worker-sessions.mjs'
 import { pollCluster } from './cluster-heartbeat.mjs'
 import { startAttentionPoll, storeDecisionRecord, timeoutDecisionRecord } from './attention-poll.mjs'
+import { writeAnswerMarker } from './answer-marker.mjs'
 import { startMessageDelivery, storeMessageRecord } from './message-delivery.mjs'
 import { POLICY_UNREACHABLE_MODES, resolveEffectiveMode } from './mode.mjs'
 import { decide as decideWith, inputKey, overlayRules } from './policy.mjs'
 import { WRAPPER_POLICY_INTERVAL_MS, createWrapperPolicyPoller } from './wrapper-policy.mjs'
 import { confinedCandidate, loadManagerAllowlist, matchManagerEntry } from './manager-allowlist.mjs'
 import { permissionTier } from './permission-tier.mjs'
-import { checkLiveness, findRegisteredByName, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
+import { checkLiveness, findRegisteredByName, namesForSessionId, pidIsAlive, sessionIdsNamed, uniqueTabName } from './liveness.mjs'
 import { DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT_HARD, concurrentLimitRefusal, managerLimitRefusal, resolveEnvOverrides, resolveMaxConcurrent, resolveMaxManagers, resolveSpawnMode, resolveSpawnTarget, shellQuote, spawnTargetImplementationRefusal, unknownKeyWarnings, workerEnvFor } from './spawn-mode.mjs'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -51,9 +66,10 @@ import { buildRecord, ledgerWriteRoute, mergeRecord, parentSessionId, stoppedPat
 import { awaitingInput, currentToolCallFrom, lastAssistantTextFrom, sessionStatusFor, transcriptPathFor } from './tab-read.mjs'
 import { resumeRefusal } from './resume-guard.mjs'
 import { resumeAdmission } from './context-guard.mjs'
-import { shouldEndIdleWorker } from './idle-worker.mjs'
+import { armZeroTurnGrace, shouldEndIdleWorker, ZERO_TURN_GRACE_MS } from './idle-worker.mjs'
 import { fetchAttentionItems, fetchOpenCards, openCardsOf } from './open-cards.mjs'
 import { foreignParkRefusal } from './park-refusal.mjs'
+import { recordReach } from './answer-reach.mjs'
 import { answerPathRefusal } from './answer-path.mjs'
 import { buildParkRecord, clearParkPatch, PARK_FIELD } from './park-record.mjs'
 import { renderResumePrompt, validateDecision } from './resume-decision.mjs'
@@ -807,6 +823,27 @@ async function answerWrapperPark(requestId, behavior) {
     }
     if (agent.status === 'blocked-on-permission') agent.status = 'running'
     log(`permission ${requestId} ${wanted.toUpperCase()} by manager (wrapper-backed worker ${agent.id})`)
+    // Record WHO answered, where the worker's own attention hook can stamp its close line.
+    // Without it a question a manager settled is indistinguishable, in the local event log,
+    // from one the operator answered — which is what makes "worker questions that no manager
+    // answered" uncountable.
+    //
+    // ⚠️ Keyed on `agent.sessionId`, NOT `agent.id`. `agent.id` is the in-process roster
+    // label (`agent_<n>`), while the attention state dir is keyed by the Claude session id
+    // (`<session>.events.jsonl`, and the `<sid>.posted.json` the ask arm writes from its own
+    // `CLAUDE_CODE_SESSION_ID`). A marker written under `agent_<n>` is one no hook reads.
+    //
+    // Gated on the tool: a `permission` verdict is already attributed by the
+    // `permissions.jsonl` row the policy hook writes, and a marker left by one would be read
+    // at that worker's NEXT question close — a misattribution, not a saving.
+    if (session.question?.tool_name === 'AskUserQuestion') {
+      writeAnswerMarker({
+        stateDir: config.attentionStateDir,
+        sessionId: agent.sessionId,
+        answererSession: parentSessionId({ dir: config.sessionsDir }) ?? '',
+        answererKind: 'manager',
+      })
+    }
     return { answered: requestId, behavior: wanted, agent_id: agent.id, via: 'wrapper' }
   }
   return { not_found: true }
@@ -3041,7 +3078,7 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
   // `question` is waiting on a manager; a worker with an open attention card is waiting on a
   // person. Neither is finished, and stopping either would orphan exactly the card this whole
   // task exists to protect.
-  const endWorkerIfIdle = async (current) => {
+  const endWorkerIfIdle = async (current, { zeroTurnGraceExpired = false } = {}) => {
     let session
     try {
       session = await readWrappedSession({ baseUrl: config.wrapperUrl, sessionId: wrapperSession.id })
@@ -3052,12 +3089,13 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     // Decide everything except the card check first, so an incomplete wrapper record is reported
     // before we spend an attention-store round trip on it — and is reported at all, because a
     // silent keep would let the idle-worker leak survive the fix that exists to remove it.
-    const pre = shouldEndIdleWorker({ session, cards: [] })
+    const pre = shouldEndIdleWorker({ session, cards: [], lastResult: current.result, zeroTurnGraceExpired })
     if (pre.reason === 'wrapper-record-incomplete') {
       log(`WARNING: the wrapper's record for ${current.id} carries no state/pending_turns — the idle-worker end-of-life is a no-op for it until it does`)
       return
     }
-    if (!pre.end) return
+    // `zero-turn-result` is decided only after the card check, so it proceeds to it.
+    if (!pre.end && pre.reason !== 'zero-turn-result') return
     // ⚠️ **A deliberately-absent store is NOT an unreadable one.** With
     // `SUPERVISOR_ATTENTION_STORE=off`, `config.attentionStoreUrl` is null and `fetchOpenCards`
     // returns null without issuing a request — which the predicate would read as
@@ -3068,7 +3106,14 @@ async function spawnAgent({ prompt, cwd, label, interactive, resume, decision, p
     const cards = config.attentionStoreUrl
       ? await fetchOpenCards({ storeUrl: config.attentionStoreUrl, sessionId: current.sessionId })
       : []
-    const verdict = shouldEndIdleWorker({ session, cards })
+    const verdict = shouldEndIdleWorker({ session, cards, lastResult: current.result, zeroTurnGraceExpired })
+    if (verdict.reason === 'zero-turn-result') {
+      // Bounded keep: the timer re-runs THIS whole decision with the grace expired, so it can
+      // only end a session that is still idle, unparked and cardless — never a live turn.
+      log(`WARNING: agent ${current.id}: zero-turn result — keeping the session ${ZERO_TURN_GRACE_MS} ms so a queued prompt can still run`)
+      armZeroTurnGrace({ agent: current, recheck: endWorkerIfIdle })
+      return
+    }
     if (!verdict.end) {
       // The two keeps that explain a worker which is never reaped are logged; `not-idle` and
       // `turn-in-flight` are the ordinary mid-turn path and would log on every result.
@@ -3331,12 +3376,12 @@ const TOOLS = [
   {
     name: 'send_agent_message',
     description:
-      'Send a follow-up message to a running worker — the send_to_agent this server has never had. TWO transports, chosen from the worker\'s own record. A TAB worker: activates its tab, waits for the input prompt, and types the message, so it STEALS FOCUS; returns an error rather than a false success when the pane is gone, the tab cannot be activated, or the prompt never appears. A CLUSTER worker: posts one more turn on its EXISTING session id through the claude-interactive service — the bearer token is resolved inside the server, so the caller passes no credential — and BLOCKS until the pod answers, so expect a long call on a long turn. ⚠️ A 2xx proves a turn ran, not that the SAME conversation ran: the pod\'s own log (`turn start id=<id>` / `turn end id=<id>`) is the only proof of that, so never read the returned `answer` as a delivery receipt. An A2A worker (`docker` / `k8s`): sends one more turn to the WORKER\'s own endpoint on the conversation its first turn opened — the controller is not in the path — and returns once the worker acknowledges, with `send_ms`; the result is collected in the background and read with `agent_status`. A row re-adopted after a reconnect holds no token and is refused. A headless worker has neither a pane nor a cluster session and is refused; answer its parked prompts with `answer_permission` instead.',
+      'Send a follow-up message to a running worker — the send_to_agent this server has never had. FOUR transports, chosen from the worker\'s own record. A TAB worker: waits for the input prompt and types the message WITHOUT activating, so the send reaches a background tab and the operator\'s focus is never taken; returns an error rather than a false success when the pane is gone or the prompt never appears. A CLUSTER worker: posts one more turn on its EXISTING session id through the claude-interactive service — the bearer token is resolved inside the server, so the caller passes no credential — and BLOCKS until the pod answers, so expect a long call on a long turn. ⚠️ A 2xx proves a turn ran, not that the SAME conversation ran: the pod\'s own log (`turn start id=<id>` / `turn end id=<id>`) is the only proof of that, so never read the returned `answer` as a delivery receipt. An A2A worker (`docker` / `k8s`): sends one more turn to the WORKER\'s own endpoint on the conversation its first turn opened — the controller is not in the path — and returns once the worker acknowledges, with `send_ms`; the result is collected in the background and read with `agent_status`. A row re-adopted after a reconnect holds no token and is refused. A headless worker has neither a pane nor a cluster session, but it IS addressable — this call returns its session-registry `name` with `sent: false`, and YOU deliver with `SendMessage(to: <name>)`, which this server cannot call itself. ⚠️ Never read `sent: false` as a failure: for the peer channel it means the address is resolved and the send is yours. A headless worker with no registry entry (the session exited, or it runs in-process under the SDK) is refused; answer its parked prompts with `answer_permission`.',
     inputSchema: {
       type: 'object',
       properties: {
-        agent_id: { type: 'string', description: 'The tab worker to message.' },
-        message: { type: 'string', description: 'The message to type into its input box and submit.' },
+        agent_id: { type: 'string', description: 'The worker to message — the id from spawn_agent / list_agents.' },
+        message: { type: 'string', description: 'The message to deliver. For the peer channel the caller sends it with SendMessage; the text is not forwarded by this server.' },
       },
       required: ['agent_id', 'message'],
     },
@@ -3542,8 +3587,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // "has a pane?" wearing a general guard's clothes: true for a headless worker, and
       // accidentally true for every cluster worker, whose record carries `paneId: null` by
       // construction.
-      const channel = resolveMessageChannel(agent)
+      // Both resolvers are PID-CHECKED: a name handed to `SendMessage` must be one a live
+      // session answers to, and a collision guard must not fire on a crashed session's
+      // leftover entry. `namesForSessionId` defaults to `pidIsAlive`; the holders read does
+      // not, because its other caller (`uniqueTabName`) wants presence.
+      const channel = resolveMessageChannel(agent, {
+        peerNamesFor: namesForSessionId,
+        peerHoldersFor: (name) => sessionIdsNamed(name, { isAlive: pidIsAlive }),
+      })
       if (channel.error) return reply({ error: channel.error })
+
+      if (channel.channel === 'peer') {
+        // ⚠️ NOT A SEND, AND THE REPLY MUST NOT SAY OTHERWISE. This server is not a Claude
+        // session, so it cannot call `SendMessage` — that tool lives in the CALLER's harness.
+        // What the server owns is the join the caller cannot perform: it holds the worker's
+        // session id, `SendMessage` takes a registry name, and the registry is the only place
+        // that maps one to the other. So the delivery is handed back, `sent` stays false, and
+        // the name is the whole payload. Claiming `sent: true` here would be the same defect
+        // as the refusal it replaces — a channel reported as working while delivering nothing.
+        log(`resolved headless worker ${agent.id} to registry name ${channel.name} — the caller delivers`)
+        return reply({
+          agent_id: agent.id,
+          sent: false,
+          channel: 'peer',
+          name: channel.name,
+          note:
+            `this server cannot reach a headless worker's conversation itself — send it with ` +
+            `SendMessage(to: "${channel.name}"), which is the registry name this worker answers to`,
+        })
+      }
 
       if (channel.channel === 'cluster') {
         // Resolved per call, never cached on the agent record: the config file is the only
@@ -3896,14 +3968,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         if (viaWrapper.answered || viaWrapper.error) return reply({ ...viaWrapper, sources_consulted: consulted })
         // Both sources were read and neither holds the id.
-        return reply({
-          error: await foreignParkRefusal({ requestId: args.request_id, readLedger: readSessionLedger }),
-          sources_consulted: consulted,
+        const foreign = await foreignParkRefusal({ requestId: args.request_id, readLedger: readSessionLedger })
+        // ⚠️ **This reply IS the MCP reach**, and it is the only place it can be recorded.
+        // Reaching here means this session's `answer_permission` call actually arrived at the
+        // answer route, was consulted against both sources, and was refused harmlessly —
+        // nothing was settled and no gate moved. `scripts/answer-path-check.py` reads this
+        // record instead of trusting an armed loop, because an armed loop is not a channel
+        // (measured 2026-11-09: 27 workers, 56 store-released parks, 0 by the spawner, exit 0).
+        // ⚠️ Written BEFORE the reply and never on an error path: a call that never arrived —
+        // a classifier denial, a crashed server, a transport failure — must leave no reach,
+        // or the probe would certify exactly the spawner this exists to refuse.
+        await recordReach({
+          dir: config.reachDir,
+          // The server's own session, resolved the same way the spawn gate resolves it
+          // (`parentSessionId`), so the record and the gate cannot disagree about who this is.
+          // Null writes nothing — see `recordReach`.
+          sessionId: parentSessionId({ dir: config.sessionsDir }),
+          leg: 'mcp',
+          outcome: 'foreign-park',
         })
+        return reply({ error: foreign, sources_consulted: consulted })
       }
       // Record the manager's verdict too: a key the manager allows over and over
       // is the raw material for the next policy rule.
-      const logDecision = (behavior) =>
+      const logDecision = (behavior) => {
         logPermission({
           ts: new Date().toISOString(),
           agent: record.agentId,
@@ -3920,6 +4008,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           request_id: args.request_id,
           latency_ms: Date.now() - Date.parse(record.requestedAt),
         })
+        // ⚠️ The marker is NOT written here. This branch is unreachable for the fleet: it
+        // needs `pending.get(args.request_id)`, and `pending` is populated only inside
+        // `makeCanUseTool`, which has had no call site since the wrapper migration
+        // (572fbe6e). Every headless worker is wrapper-backed, so `answer_permission` takes
+        // the `answerWrapperPark` branch and returns above. The write lives there instead.
+      }
 
       if (args.behavior === 'allow') {
         logDecision('allow')

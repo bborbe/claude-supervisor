@@ -23,6 +23,49 @@ _spec = importlib.util.spec_from_file_location("session_scope", _SCRIPT)
 ss = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(ss)
 
+
+class _Verdict:
+    """What `owner.verdict_of` hands back: a verdict, a reason, the two facts."""
+
+    def __init__(self, verdict, reason):
+        self.verdict, self.reason = verdict, reason
+        self.session, self.loop, self.session_id, self.detail = "LIVE", "OK", "", ""
+
+    def describe(self):
+        return f"session {self.session}, loop {self.loop}"
+
+
+class _OwnerStub:
+    """`scripts/owner.py` as the scope tests need it: a verdict, no probes.
+
+    ⚠️ Injected, never left live. The real resolver spawns `session-liveness.py` and
+    `manager-liveness.py`, so an unstubbed `load()` would read this machine's state — a test
+    whose result depends on whether a real goal happens to be armed asserts nothing.
+    """
+
+    NOT_OWNER = "not-owner"
+    OWNER = "owner"
+    CANNOT_TELL = "cannot-tell"
+
+    def __init__(self, verdict="owner", reason="live-armed"):
+        self.verdict, self.reason = verdict, reason
+        self.asked = []
+
+    def of_session(self, sid, subject="", branch="goal"):
+        self.asked.append((sid, subject, branch))
+        return _Verdict(self.verdict, self.reason)
+
+
+_ORIGINAL_OWNER = ss._owner
+
+
+def setUpModule():
+    ss._OWNER = _OwnerStub()
+
+
+def tearDownModule():
+    ss._OWNER = _ORIGINAL_OWNER
+
 ME = "49b471f1-a8a6-48b0-b2b2-14b9cb2437e3"
 OWN_TASK_SESSION = "aaaaaaaa-1111-4111-8111-111111111111"
 FOREIGN_SESSION = "bbbbbbbb-2222-4222-8222-222222222222"
@@ -308,6 +351,40 @@ class Unresolved(unittest.TestCase):
         scope = ss.load(ME, [os.path.join(self.vault.root, "nope")])
         self.assertFalse(scope.resolved)
         self.assertIn("does not exist", scope.reason)
+
+    def test_a_stamped_manager_that_is_not_an_owner_scopes_nothing(self):
+        """THE BOUNDARY: a goal page's `claude_session_id` names a candidate, not an owner.
+
+        A manager stood down with `/supervisor:stop` keeps its session and its page stamp, so
+        reading the stamp as ownership let its watcher keep excluding other goals' gates as
+        foreign — while the round that would make it a manager is exactly what stopped. A
+        `not-owner` verdict leaves the scope UNRESOLVED, which excludes nothing (fail open).
+        """
+        vault = Vault()
+        try:
+            vault.goal("A Goal", f"claude_session_id: {ME}\n", ["Own Task"])
+            vault.task("Own Task", f"claude_session_id: {LAST_KEY_OWN}\n")
+            scope = ss.load(ME, [vault.root],
+                            ownership=_Verdict("not-owner", "loop-stopped"))
+            self.assertFalse(scope.resolved)
+            self.assertIn("is not an owner (loop-stopped)", scope.reason)
+            self.assertEqual(scope.exclusion(LAST_KEY_OWN, ME), (False, ""))
+        finally:
+            vault.close()
+
+    def test_a_cannot_tell_verdict_keeps_the_scope(self):
+        # An unreadable probe must not strip a manager of its scope: that would flood the
+        # manager with every other goal's gates on evidence it does not have.
+        vault = Vault()
+        try:
+            vault.goal("A Goal", f"claude_session_id: {ME}\n", ["Own Task"])
+            vault.task("Own Task", f"claude_session_id: {LAST_KEY_OWN}\n")
+            scope = ss.load(ME, [vault.root],
+                            ownership=_Verdict("cannot-tell", "loop-unarmed"))
+            self.assertTrue(scope.resolved)
+            self.assertEqual(scope.own_titles, {"A Goal", "Own Task"})
+        finally:
+            vault.close()
 
     def test_a_goal_with_no_tasks_scopes_to_itself_alone(self):
         """A manager with no workers still has a scope — its own goal — and everything

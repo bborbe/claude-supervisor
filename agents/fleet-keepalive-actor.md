@@ -364,19 +364,19 @@ session is **gone** — no pid left to kill, no channel left to reopen.
 enforces the exclusion itself, not via this prose.** That gate runs on the goal tier's tick with
 its own `last_auto_resume` cap; this leg runs on the fleet tick with the `worker--<slug>` cap,
 and both record only **after** a resume the instrument confirms `LIVE`, so a check-then-act race
-would let two resumes land before either cap arms. The script therefore scans the task's
-frontmatter wikilinks and, if any named page has a `claude_session_id` the instrument reads
-`LIVE`, returns `jump` with *"goal manager <id> is live and owns this task"* — the fleet leg
-takes only rows whose goal has no live manager (`docs/fleet-surface.md` § Which manager owns a
-subject).
+would let two resumes land before either cap arms. The script asks `scripts/owner.py` about each
+goal the task declares — the ONE ownership definition (`docs/session-tiers.md` § Keep-alive) —
+so only a manager that is an **owner** (session `LIVE` **and** loop `OK`/`STALE`) returns `jump`,
+naming the evidence; a manager stood down with `/supervisor:stop` does not hold the row, and a
+`cannot-tell` is reported, never resumed.
 
 **Record the count — in the digest, and labelled as a floor while the scan cannot finish.**
 `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg dead-workers --count <n> --floor`.
-`--floor` is what renders `(lower bound, scan incomplete)`; `--exact` asserts the scan completed.
-⚠️ **The script refuses a bare `dead-workers` count** — one of the two is mandatory, because a
-number with no label reads as a measurement, and while the scan cannot finish inside its own
-timeout the floor is the only honest form. Both flags are refused on any other key. Format and
-rationale: `commands/steps/output-shape.md` item 14.
+`--floor` is what renders `(lower bound, scan incomplete)`; `--exact` asserts completion.
+⚠️ **A bare `dead-workers` count is refused** — one of the two is mandatory: a number with
+no label reads as a measurement, and while the scan cannot finish the floor is the only
+honest form. Both flags are refused on any other key. Format and rationale:
+`commands/steps/output-shape.md` item 14. Stood-down: `commands/steps/keepalive-stood-down.md`.
 
 ## 5. Record why a half did not run — and never leave the sweep's seed standing
 

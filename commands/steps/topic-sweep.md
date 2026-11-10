@@ -25,10 +25,16 @@ Rationale: `agents/topic-sweep-reader.md` is the plugin's canonical procedure fo
 
    ```bash
    python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py \
-     --state --subject "<goal>" --branch goal
+     --state --subject "<goal>" --branch goal --vault "<vault-root>"
    ```
 
-   Record `<goal> → OK | STALE | STOPPED | SLEEPING | INVALID`. ⚠️ **`--branch goal` is not optional** —
+   ⚠️ **`--vault` is what makes `UNARMED` mean "never armed" rather than "not found here".** Without
+   it the page test runs against the process cwd, and a goal whose page lives in another vault is
+   refused (exit 3) instead of read as a never-armed loop.
+
+   Record `<goal> → OK | STALE | STOPPED | SLEEPING | UNARMED | INVALID | WRONG-BRANCH`; a non-zero
+   exit (exit 3: the name resolves no page and no record) is no verdict — leave the slot unstated,
+   never `UNARMED`. ⚠️ **`--branch goal` is not optional** —
    the state slug carries the tier (`goal--<base>`), so a topic and a goal that share a name
    never overwrite each other's cadence record.
 

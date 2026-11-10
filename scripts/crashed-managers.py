@@ -117,7 +117,10 @@ PROBE_TIMEOUT = 30
 POST_TIMEOUT = 60
 
 # The states `manager-liveness.py --state` can answer, plus this file's own probe failure.
-CADENCE_STATES = ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID")
+# `WRONG-BRANCH` (the record lives on another tier) is named rather than folded into the probe
+# failure; neither is `STALE`, so neither cards. An unresolvable subject is not a word: `--state`
+# refuses it with exit 3, which reads as PROBE_FAILED below.
+CADENCE_STATES = ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID", "WRONG-BRANCH")
 PROBE_FAILED = "UNREADABLE"
 
 # `session-liveness.py --check`'s documented exit codes. The instrument's contract, not a
@@ -164,6 +167,12 @@ def helpers():
 #: running `--state-dir X` enumerated X and then classified each subject from the DEFAULT
 #: store — two different readings in one run, silently.
 _STATE_DIR_OVERRIDE: str | None = None
+
+#: The `--vault` this run was given, forwarded to the child probe. `--state` answers `UNARMED`
+#: only once the subject's page resolves under `--vault`; without it the page test runs against
+#: this process's cwd, so a subject whose page lives in the named vault reads as a refused,
+#: unresolvable name instead of a never-armed loop.
+_VAULT: str | None = None
 
 _MEMO: dict = {}
 
@@ -393,7 +402,9 @@ def topic_manager_live(vault: str, goal_name: str) -> bool:
         # nothing — and treating it as coverage would suppress a real goal-manager crash. The
         # topic's own cadence is the only thing that says the loop is actually running.
         topic_stem = entry[: -len(".md")]
-        if cadence_state(topic_stem, "topic") in ("STOPPED", "STALE", "UNARMED", PROBE_FAILED):
+        if cadence_state(topic_stem, "topic") in (
+            "STOPPED", "STALE", "UNARMED", "WRONG-BRANCH", PROBE_FAILED
+        ):
             continue
         return True
     return False
@@ -415,9 +426,12 @@ def cadence_state(name: str, branch: str) -> str:
             env = None
             if _STATE_DIR_OVERRIDE:
                 env = {**os.environ, "MANAGER_LIVENESS_STATE_DIR": _STATE_DIR_OVERRIDE}
+            argv = [sys.executable, os.path.join(REPO, "scripts", "manager-liveness.py"),
+                    "--state", "--subject", name, "--branch", branch]
+            if _VAULT:
+                argv += ["--vault", _VAULT]
             done = subprocess.run(
-                [sys.executable, os.path.join(REPO, "scripts", "manager-liveness.py"),
-                 "--state", "--subject", name, "--branch", branch],
+                argv,
                 capture_output=True, text=True, timeout=PROBE_TIMEOUT, env=env,
             )
         except (OSError, subprocess.SubprocessError):
@@ -528,7 +542,8 @@ def main(argv: list[str]) -> int:
     a = ap.parse_args(argv)
 
     vault = os.path.abspath(os.path.expanduser(a.vault))
-    global _STATE_DIR_OVERRIDE
+    global _STATE_DIR_OVERRIDE, _VAULT
+    _VAULT = vault
     _STATE_DIR_OVERRIDE = os.path.abspath(os.path.expanduser(a.state_dir))
     a.state_dir = _STATE_DIR_OVERRIDE  # the parent's read must use the same path as the child
     _MEMO.clear()  # the memo is per RUN, so a second call in one process starts clean

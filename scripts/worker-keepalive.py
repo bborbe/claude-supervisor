@@ -86,6 +86,27 @@ def _keepalive():
     return _KEEPALIVE
 
 
+_OWNER = None
+
+
+def _owner():
+    """`scripts/owner.py` loaded as a module — the ONE ownership definition.
+
+    ⚠️ **This file must not decide ownership itself.** Its predecessor, `goal_manager_live()`,
+    read a goal page's `claude_session_id` and the session's liveness verdict and nothing else,
+    so a goal manager stood down with `/supervisor:stop` — session `LIVE`, loop `STOPPED` —
+    still counted as an owner, and the worker it "owned" was kept by nobody: the fleet leg
+    deferred to the goal tier, and the goal round is exactly what stopped.
+    """
+    global _OWNER
+    if _OWNER is None:
+        spec = importlib.util.spec_from_file_location(
+            "owner", os.path.join(REPO, "scripts", "owner.py"))
+        _OWNER = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_OWNER)
+    return _OWNER
+
+
 def state_path(vault: str, task: str) -> str:
     return _keepalive().state_path(vault, task, "worker")
 
@@ -100,25 +121,36 @@ def open_boxes(text: str) -> int:
     return n
 
 
-def goal_manager_live(fm: str, vault: str, goals_dir: str) -> str:
-    """The id of a LIVE goal manager that already owns this task, else "".
+def goal_owners(fm: str, vault: str, goals_dir: str) -> list:
+    """The `Ownership` of every goal this task declares, resolved by `scripts/owner.py`.
 
     ⚠️ **This is the mutual exclusion with `agents/goal-drive.md`'s orphan gate, and it is a
     mechanism rather than a note on purpose.** That gate resumes the same dead-worker
     population on the goal tier's tick, and both caps record only AFTER a resume the
     instrument confirms LIVE — so a check-then-act race lets two resumes land before either
     cap arms. Deferring here means the fleet leg never races at all: a worker whose goal has a
-    live manager is that manager's to resume.
+    live, ARMED manager is that manager's to resume.
+
+    ⚠️ **An owner is a session `LIVE` with its loop `OK` or `STALE` — never a live session
+    alone.** `docs/session-tiers.md` § Keep-alive owns that definition and `scripts/owner.py`
+    implements it; this function only collects the pages.
+
+    Returns every goal's answer rather than the first: `main()` needs to see an owner anywhere
+    in the list before it may defer, and a cannot-tell anywhere in it before it may hand the
+    worker to the fleet leg.
     """
     k = _keepalive()
+    o = _owner()
     # `goals:` is a YAML list, so `scalar` cannot read it. Scope the scan to that key's own
     # block: a wikilink in ANY other frontmatter field (a `themes:` or a stray `related:`)
     # would otherwise match a page with a live manager and silently skip a dead worker.
     block = re.search(r"^goals:[ \t]*(.*(?:\n[ \t-].*)*)", fm, re.MULTILINE)
     if not block:
-        return ""
+        return []
+    found = []
     for name in re.findall(r"\[\[([^\]|]+)", block.group(1)):
-        page = os.path.join(vault, goals_dir, name.strip() + ".md")
+        subject = name.strip()
+        page = os.path.join(vault, goals_dir, subject + ".md")
         try:
             with open(page, encoding="utf-8") as fh:
                 gfm = k.frontmatter(fh.read())
@@ -127,9 +159,11 @@ def goal_manager_live(fm: str, vault: str, goals_dir: str) -> str:
         # `claude_session_id` is the only field a goal page records its manager in; the
         # retired-key fallback was removed once both vaults were migrated.
         sid = k.session_id(gfm)
-        if sid and k.session_verdict(sid) == "LIVE":
-            return sid
-    return ""
+        loop, detail = k.cadence_state_detail(subject, "goal")
+        live = k.session_verdict(sid) if sid else o.NONE
+        verdict, reason = o.verdict_of(live, loop)
+        found.append(o.Ownership(verdict, reason, live, loop, sid, detail))
+    return found
 
 
 def main(argv: list[str]) -> int:
@@ -206,11 +240,27 @@ def main(argv: list[str]) -> int:
         print("no open boxes; the worker has nothing left to drive")
         return 0
 
-    owner = goal_manager_live(fm, vault, a.goals_dir)
-    if owner:
-        print("jump")
-        print(f"goal manager {owner} is live and owns this task; the goal tier resumes it")
-        return 0
+    owners = goal_owners(fm, vault, a.goals_dir)
+    # An OWNER anywhere in the task's goals defers the row: that goal's manager runs the round
+    # that resumes it. Checked before the cannot-tell pass, so one resolvable owner is not
+    # masked by another goal whose probe failed.
+    for own in owners:
+        if own.is_owner:
+            print("jump")
+            print(f"goal manager {own.session_id} is an owner ({own.describe()}); "
+                  f"the goal tier resumes it")
+            return 0
+    # ⚠️ A goal whose ownership could not be decided is NOT "no owner". `not-owner` is what
+    # licenses this leg to resume; answering it on a read that failed is the second writer the
+    # whole keep-alive exists to prevent — here, a fleet resume of a worker whose goal manager
+    # is merely unmeasurable.
+    for own in owners:
+        if own.is_cannot_tell:
+            print("cannot-tell")
+            print(f"goal manager {own.session_id or '(none recorded)'} → {own.verdict} "
+                  f"({own.reason}: {own.describe()}); an undecidable owner read never hands the "
+                  f"worker to the fleet leg")
+            return 1
 
     sid = k.session_id(fm)
     if not sid:

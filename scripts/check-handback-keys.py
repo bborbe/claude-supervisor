@@ -69,6 +69,10 @@ LEGS = {
         "sites": ("commands/steps/round-readings.md",),
         "required": (
             "readings", "rows", "payload",
+            # did the tracked set resolve to anything? `unresolved` / `empty` is the
+            # refusal — a document that observed nothing must not reach the caller as a
+            # quiet fleet, and the caller cannot tell without these two keys.
+            "resolution", "tracked", "unresolved",
             # liveness
             "live", "absent", "unknown",
             # in-flight — all three values, the `unread` under its own key

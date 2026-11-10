@@ -63,6 +63,7 @@ import http.client
 import json
 import math
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -71,6 +72,71 @@ import urllib.request
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
 # Local store; a hung one must cost a clear failure, never a stalled session.
 STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
+
+# Where the worker's own attention hook looks for the record of WHO answered it.
+#
+# ⚠️ This is the WRITER half of a two-repo change: `~/.claude/hooks/attention-log.py` reads
+# `<session>.answer.json` from this directory and stamps `answerer_session` / `answerer_kind`
+# onto the close line. Written alone it is a file nobody reads; the hook alone is a reader
+# whose file never exists. They ship as a pair.
+#
+# The resolution mirrors the hook exactly (`ATTENTION_STATE_DIR`, then the default) — a
+# writer pointed at a different directory than the reader is a silent no-op on both sides.
+ATTENTION_STATE_DIR = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser(
+    "~/.claude/state/attention")
+
+# The kinds the hook accepts. Anything else is ignored there, so an unknown value here would
+# be a write that can never be read.
+ANSWERER_KINDS = ("manager", "operator", "other")
+
+# A Claude session id, which is the only thing the hook keys a marker on. Validated before the
+# value reaches a filesystem path — see `write_answer_marker`.
+_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def write_answer_marker(producer_id, answerer_session, answerer_kind):
+    """Record who answered `producer_id`'s item, for its own hook to stamp on close.
+
+    Best-effort by design and never raises: this is a measurement side-channel, and failing
+    to record WHO answered must never stop the answer being delivered. The caller has already
+    written the answer to the store; trading a missing attribution for a failed command would
+    be the wrong way round.
+
+    Returns True when the marker landed. A false return is not an error — the answer stands.
+    """
+    if answerer_kind not in ANSWERER_KINDS:
+        return False
+    # ⚠️ Validated as a UUID, not merely non-empty. `producer_id` is external store data —
+    # the store is an unauthenticated localhost endpoint — and it is interpolated into a
+    # filesystem path. An absolute value makes `os.path.join` discard ATTENTION_STATE_DIR
+    # outright, and `..` segments walk out of it; both would write a marker outside the
+    # directory the hook reads, or over a file that has nothing to do with attention.
+    if not isinstance(producer_id, str) or not _UUID.match(producer_id):
+        return False
+    path = os.path.join(ATTENTION_STATE_DIR, f"{producer_id}.answer.json")
+    # pid-suffixed temp + replace, the same reason `<sid>.posted.json` does it: a fixed `.tmp`
+    # lets two concurrent writers interleave, and a crash between write and replace orphans it.
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        os.makedirs(ATTENTION_STATE_DIR, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({
+                "answerer_session": answerer_session or "",
+                "answerer_kind": answerer_kind,
+                # EPOCH SECONDS, not milliseconds: the hook parses with `float()` and
+                # compares against `time.time()`. Milliseconds read as ~50 000 years ahead,
+                # which the hook rejects as future-dated — silently.
+                "ts": time.time(),
+            }, f)
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
 
 # How long a permission answer waits for the store's delivery report before it
 # calls the delivery unconfirmed. ⚠️ It must outlast the poller's IDLE interval,
@@ -376,6 +442,23 @@ def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None,
     print(f"ANSWERED: {item_id} at {answered.get('answered_at')} by {answered.get('answered_by')}", file=out)
     print(f"RESOLVED_BY: {resolved_by}" if resolved_by else
           "RESOLVED_BY: unknown -- CLAUDE_CODE_SESSION_ID unset, so this item will read as unresolved", file=out)
+    # Tell the asking session's own hook WHO answered, so its close line carries the party
+    # rather than only the event that cleared the gate. Written AFTER the store accepted the
+    # answer, never before: a marker for an answer that failed to land would attribute a
+    # question nobody answered.
+    #
+    # ⚠️ `operator`, not `manager`. This arm is `/supervisor:attention-next`, which
+    # `commands/attention-next.md` defines as relaying the operator's own words — *"This
+    # command relays an operator answer; it is not a channel for a manager's own decisions."*
+    # Hardcoding `manager` here would inflate the count this marker exists to produce, in the
+    # exact direction that makes SC8 look better than it is. A manager answering a park goes
+    # through `answer_permission`, which is a different writer.
+    #
+    # The session is `resolved_by` — the session that RAN the relay — but the party is the
+    # operator, so `answerer_session` stays empty: the board and the operator are arms, not
+    # sessions, and naming the relaying session as the answerer would be the same
+    # misattribution one field over.
+    write_answer_marker(item.get("producer_id", ""), "", "operator")
     print(target_line(item.get("producer_id", ""), registry), file=out)
     return 0
 

@@ -20,14 +20,18 @@ that predates the scope input has no `--no-scope` flag, so passing one would be 
 error rather than a pre-fix run — the replay would fail loudly on the wrong thing.
 """
 import argparse
+import importlib.util
 import json
 import os
 import subprocess
 import sys
+import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TESTS = os.path.dirname(os.path.dirname(HERE))
-DEFAULT_SCRIPT = os.path.join(os.path.dirname(TESTS), "gate-owner-filter.py")
+SCRIPTS = os.path.dirname(TESTS)
+DEFAULT_SCRIPT = os.path.join(SCRIPTS, "gate-owner-filter.py")
 
 sys.path.insert(0, TESTS)
 import endpoint_fixture  # noqa: E402
@@ -35,6 +39,8 @@ import endpoint_fixture  # noqa: E402
 SELF = "49b471f1-a8a6-48b0-b2b2-14b9cb2437e3"
 #: The five foreign panes, in the order the fixture's feed carries them.
 FOREIGN = ("269", "260", "272", "278", "279")
+#: The goal this manager serves — the page the vault fixture stamps `SELF` on.
+GOAL = "Managers Unblock Their Own Workers and Approve Routine Permissions Within Policy"
 #: The negative control: a pane spawned by `--self`, in the goal's own `# Tasks`.
 CONTROL = "410"
 
@@ -77,16 +83,76 @@ def _command(script, scope, shape):
     return argv
 
 
-def run(script=DEFAULT_SCRIPT, scope=True):
+def _owner_env(root, stopped=False):
+    """Environment making `SELF` an OWNER — session `LIVE` **and** loop `OK`.
+
+    ⚠️ **Ownership is resolved by `scripts/owner.py` now (`docs/session-tiers.md` § Keep-alive),
+    so the fixture must model the FACT rather than assume it.** Before that, a page stamp was
+    enough; a manager that ran `/supervisor:stop` keeps its stamp while its round has stopped,
+    and a scope applied on the stamp alone hides gates the manager no longer serves. The filter
+    therefore asks the resolver about `--self` first, and a fixture that left this unset would
+    exercise the stood-down path by accident and see every foreign row emitted.
+
+    The three variables are the seams `owner.py` already reads, so the child resolves ownership
+    through the real code path — no verdict is stubbed:
+
+      * `SUPERVISOR_WORKER_MANAGER_DIR` → the manager's own registration, which names the
+        subject its loop is read under;
+      * `MANAGER_LIVENESS_STATE_DIR` → a freshly armed cadence for that subject, which is what
+        `manager-liveness.py --state` reads `OK` from;
+      * `ATTENTION_STORE_URL` → the stub heartbeat, which answers `LIVE` for `SELF` (set by the
+        caller, since it needs the endpoint's URL).
+
+    ⚠️ **`stopped=True` is the negative control, and it is what makes the state load-bearing.**
+    It writes the `.stopped` marker instead of an armed cadence, so the same session and the
+    same stamp resolve `not-owner` — and the filter must then exclude NOTHING. A fixture that
+    could not express this would pass just as happily if the ownership gate were deleted.
+    """
+    sweep = os.path.join(root, "sweep-gate")
+    managers = os.path.join(root, "worker-manager")
+    os.makedirs(sweep, exist_ok=True)
+    os.makedirs(managers, exist_ok=True)
+
+    # The slug carries the branch (`goal--<base>`), and it is taken from
+    # `manager-liveness.py`'s own function so the fixture cannot drift from the reader.
+    spec = importlib.util.spec_from_file_location(
+        "manager_liveness", os.path.join(SCRIPTS, "manager-liveness.py"))
+    liveness = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(liveness)
+    slug = liveness.slug(GOAL, "goal")
+    if stopped:
+        with open(os.path.join(sweep, slug + ".stopped"), "w", encoding="utf-8") as handle:
+            handle.write(time.strftime("%Y-%m-%dT%H:%M:%S%z") + "\n")
+    else:
+        with open(os.path.join(sweep, slug + ".cadence"), "w", encoding="utf-8") as handle:
+            handle.write("900\n")
+
+    with open(os.path.join(managers, SELF + ".json"), "w", encoding="utf-8") as handle:
+        json.dump({"subject": GOAL, "branch": "goal",
+                   "resolved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}, handle)
+
+    env = dict(os.environ)
+    env["MANAGER_LIVENESS_STATE_DIR"] = sweep
+    env["SUPERVISOR_WORKER_MANAGER_DIR"] = managers
+    return env
+
+
+def run(script=DEFAULT_SCRIPT, scope=True, stopped=False):
     """`{shape: CompletedProcess}` for the two shapes, plus the endpoint URL used."""
     out = {}
-    with endpoint_fixture.FixtureEndpoint(ledger_rows=_ledger_rows()) as endpoint:
+    with tempfile.TemporaryDirectory() as root, \
+            endpoint_fixture.FixtureEndpoint(
+                rows=[endpoint_fixture.row(SELF, live=True)],
+                ledger_rows=_ledger_rows(),
+            ) as endpoint:
+        env = _owner_env(root, stopped=stopped)
+        env["ATTENTION_STORE_URL"] = endpoint.url
         for name, shape in (("feed", []), ("json", ["--explain", "--json"])):
             argv = _command(script, scope, shape)
             argv += ["--endpoint", endpoint.url]
             with open(os.path.join(HERE, "feed.txt"), encoding="utf-8") as feed:
                 out[name] = subprocess.run(
-                    argv, stdin=feed, capture_output=True, text=True,
+                    argv, stdin=feed, capture_output=True, text=True, env=env,
                 )
         out["endpoint"] = endpoint.url
     return out

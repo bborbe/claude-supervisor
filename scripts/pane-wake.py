@@ -176,19 +176,13 @@ def _composer_clear(text):
 def send(pane_id, message, *, run=subprocess.run, read=read_pane, sleep=time.sleep):
     """Type `message` into a pane the guard just cleared, then confirm POSITIVELY.
 
-    The guard is re-run after activation and immediately before the keystrokes: the plan's
-    read can be seconds old, and a modal that opened since is exactly what must not be typed
-    into. Text and Enter go separately, and a bare `\\r` is repeated up to three times —
-    the trailing Enter is routinely swallowed (measured 2026-09-15, 2026-09-20).
+    The guard is re-run immediately before the keystrokes: the plan's read can be seconds
+    old, and a modal that opened since is exactly what must not be typed into. Nothing is
+    activated — `send-text --pane-id` reaches a background tab, and activating would take
+    the operator's focus mid-keystroke (measured 2026-11-09). Text and Enter go separately,
+    and a bare `\\r` is repeated up to three times — the trailing Enter is routinely
+    swallowed (measured 2026-09-15, 2026-09-20).
     """
-    try:
-        act = run(["wezterm", "cli", "activate-pane", "--pane-id", str(pane_id)],
-                  capture_output=True, text=True, timeout=20)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return f"failed:activate {exc}"
-    if act.returncode != 0:
-        return f"failed:activate exit {act.returncode}"
-
     before = read(pane_id)
     v = guard.verdict(before)
     if not v.startswith("wake"):

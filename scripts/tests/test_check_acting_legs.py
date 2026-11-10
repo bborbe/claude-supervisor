@@ -1,8 +1,8 @@
 """check-acting-legs.py: the delegate rule's carve-out, and each acting leg's own statement.
 
 The round's delegate rule sends everything that is not the sweep to a sub-agent, and rows 5b
-(keep alive), 5c (flagged open), 5d (own parks) and 16 (open leg) are exactly that — while being
-the only rows whose purpose is to act. With no carve-out a round delegates them read-only and
+(keep alive), 5c (flagged open), 5d (own parks), 16 (open leg) and 16b (manager-subject reap)
+are exactly that — while being the only rows whose purpose is to act. With no carve-out a round delegates them read-only and
 prints a count it was told to print: measured 2026-11-01 13:27 CET, a round instructed its
 sub-agent to print `opened=0` and resumed none of the 8 `resume` rows it read.
 
@@ -26,13 +26,14 @@ KEEPALIVE = "commands/steps/keepalive.md"
 FLAGGED = "commands/steps/flagged-open.md"
 OWN_PARKS = "commands/steps/own-parks.md"
 OPEN = "commands/steps/open.md"
+MANAGER_REAP = "commands/steps/manager-reap.md"
 
-CARVEOUT = "5b, 5c, 5d and 16 are acting legs"
+CARVEOUT = "5b, 5c, 5d, 16 and 16b are acting legs"
 MARKER = "a read-only execution is not a run of it"
 WHEN = "every tick"
 
 
-def router(with_carveout: bool = True, rows: tuple[tuple[str, str], ...] = (("5b", KEEPALIVE), ("5c", FLAGGED), ("5d", OWN_PARKS), ("16", OPEN))) -> str:
+def router(with_carveout: bool = True, rows: tuple[tuple[str, str], ...] = (("5b", KEEPALIVE), ("5c", FLAGGED), ("5d", OWN_PARKS), ("16", OPEN), ("16b", MANAGER_REAP))) -> str:
     lines = [
         "# Fleet drive",
         "",
@@ -83,6 +84,7 @@ class Base(unittest.TestCase):
         self.write(FLAGGED, step("Flagged open"))
         self.write(OWN_PARKS, step("Own parks"))
         self.write(OPEN, step("Open leg"))
+        self.write(MANAGER_REAP, step("Manager-subject reap"))
 
     def write(self, rel: str, text: str) -> None:
         (pathlib.Path(self.dir) / rel).write_text(text, encoding="utf-8")
@@ -140,6 +142,16 @@ class TestGuard(Base):
         r = self.guard()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("commands/steps/open.md", r.stderr)
+        self.assertIn("carries no acting statement", r.stderr)
+
+    def test_manager_reap_without_its_statement_fails(self) -> None:
+        # 16b posts the reap card and hands every reap line over for sending. Delegated
+        # read-only it prints `reap=0` while stale managers keep running — a count it was
+        # told to print, not one it measured.
+        self.write(MANAGER_REAP, step("Manager-subject reap", with_marker=False))
+        r = self.guard()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("commands/steps/manager-reap.md", r.stderr)
         self.assertIn("carries no acting statement", r.stderr)
 
     def test_carveout_moved_off_the_router_fails(self) -> None:
