@@ -96,6 +96,29 @@ YEARLY = """# Plan for 2026
 - run [[Yearly Topic]]
 """
 
+# The deferred section is prose bullets, not `### N.` blocks: some carry no wikilink,
+# some nest one or two. It is closed by a `---` rule and by the next heading, and a
+# reader that runs to end-of-file swallows `# Planning Notes` with it.
+WEEKLY_DEFERRED = """# Fixture week
+
+# Tasks
+
+### 1. Weekly first item
+
+**Task:** [[Weekly Task]]
+
+# Explicitly Deferred
+
+- **A single link** ([[Deferred One]]) — parked.
+- **📧 [[Deferred Two]] · 📊 [[Deferred Three]]** — both parked.
+- **No link at all** — prose only, and it must not break the parse.
+
+---
+# Planning Notes
+
+- **[[After The Section]]** — a note, not a deferral.
+"""
+
 
 def task(name, *, phase="planning", status="in_progress", priority="2",
          defer=None, due=None, flag=None, blocked=None):
@@ -271,6 +294,62 @@ class NextFocusTest(unittest.TestCase):
         self.write("24 Goals/Parked Goal.md", task("Parked Goal", status="hold"))
         result = self.run_script()
         self.assertNotIn("Parked Goal", [r["name"] for r in result["proposed"]])
+
+    def test_explicitly_deferred_is_never_proposed(self):
+        """A settled answer is not a gap in the plan.
+
+        The section is prose bullets, so `parse_weekly` cannot see it and every row in
+        it was eligible for a proposal card — an ask to re-decide a question the
+        operator already answered. Three shapes are asserted together: a single-link
+        bullet, a two-link bullet (first-link-only extraction misses the second), and a
+        bullet naming nothing (it must not swallow the bullets after it). The positive
+        half is the control: a row the section does not name IS still proposed, and a
+        row named AFTER the section's terminator is still proposed — a reader that runs
+        to end-of-file suppresses `# Planning Notes` too and would pass without it.
+        """
+        self.write(f"60 Periodic Notes/Weekly/{WEEK}.md", WEEKLY_DEFERRED)
+        for name in ("Deferred One", "Deferred Two", "Deferred Three",
+                     "After The Section", "Unplanned P1 0"):
+            self.write(f"25 Tasks/{name}.md", task(name, priority="1"))
+        proposed = [r["name"] for r in self.run_script()["proposed"]]
+        self.assertNotIn("Deferred One", proposed)
+        self.assertNotIn("Deferred Two", proposed)
+        self.assertNotIn("Deferred Three", proposed,
+                         "the second wikilink on one bullet is deferred too")
+        self.assertIn("Unplanned P1 0", proposed, "a task in no plan must still surface")
+        self.assertIn("After The Section", proposed,
+                      "the section ends at its `---`/heading, not at end-of-file")
+
+    def test_deferred_exclusion_is_named_in_the_output(self):
+        """An exclusion that reads like a pass is the defect this section exists for.
+
+        `unknown` and `0` must not render alike: the note is emitted whenever the
+        section is present, and it carries the count so a reader can tell "nothing was
+        deferred" from "the section was never read".
+        """
+        self.write(f"60 Periodic Notes/Weekly/{WEEK}.md", WEEKLY_DEFERRED)
+        for name in ("Deferred One", "Deferred Two", "Deferred Three"):
+            self.write(f"25 Tasks/{name}.md", task(name, priority="1"))
+        result = self.run_script()
+        named = [n for n in result["notes"] if "# Explicitly Deferred" in n]
+        self.assertEqual(len(named), 1, result["notes"])
+        self.assertIn("3", named[0], "the note must carry the number excluded")
+        self.assertIn("note:", result["render"], "the note must reach the rendered block")
+
+    def test_deferred_section_with_no_links_still_reports_zero(self):
+        """Present-but-empty is a fact; absent is a different one. Neither is silence."""
+        self.write(f"60 Periodic Notes/Weekly/{WEEK}.md",
+                   WEEKLY + "\n# Explicitly Deferred\n\n- **prose only** — no link.\n")
+        result = self.run_script()
+        named = [n for n in result["notes"] if "# Explicitly Deferred" in n]
+        self.assertEqual(len(named), 1, result["notes"])
+        self.assertIn("0", named[0])
+
+    def test_weekly_without_a_deferred_section_says_nothing_about_it(self):
+        """The note is a reading of the section, not a standing line on every run."""
+        result = self.run_script()
+        self.assertFalse([n for n in result["notes"] if "Explicitly Deferred" in n],
+                         result["notes"])
 
     def test_block_style_blocked_by_is_read(self):
         """The vault writes `blocked_by` as a BLOCK even for one entry.

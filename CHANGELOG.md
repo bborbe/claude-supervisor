@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: **A task under `# Explicitly Deferred` is never proposed back.** `parse_weekly` reads `### N.` blocks carrying a `**Task:** [[name]]` line, and the deferred section is authored as plain `- ` bullets, so nothing in it could ever enter `planned_keys` — every row parked there stayed eligible for a proposal card, and a card is an ask. `parse_deferred` reads the section from the same weekly note the picked sections resolve, bounded by its `---`/heading terminator (an end-of-file reader swallows `# Planning Notes` and suppresses real proposals while looking correct), takes every wikilink on a bullet (one bullet may carry two), and reports the count in `notes` so an exclusion cannot read the same as a section that was never found. `scripts/next-focus.py`, `scripts/tests/test_next_focus.py`.
+
 ## v0.265.4
 
 - fix: **The stood-down close is a numbered step, not a footnote.** v0.261.0 shipped the close as a step file plus a pointer, and the pointer was a trailing clause inside `section 4`'s digest-count paragraph — no imperative, no heading, no place in the sequence. Section 1 sees a `STOPPED` manager and correctly declines to restart it, and nothing then acted on it, so the leg closed nothing in any round. It became a footnote because `check-budget` refused the actor at its 30720 body budget: the procedure moved to a step file and the pointer was cut to a noun phrase to fit the remaining characters, so *"the reference exists"* was read as *"the reference is followed"*. Now `## 4b. Stood-down close` with an imperative, paid for by tightening four verbose clauses in the same file; `commands/steps/keepalive.md`'s procedure count corrected from five to six. `agents/fleet-keepalive-actor.md`, `commands/steps/keepalive.md`.

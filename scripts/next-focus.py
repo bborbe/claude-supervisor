@@ -199,6 +199,42 @@ def parse_weekly(text):
     return [r for r in rows if r["names"]]
 
 
+DEFERRED_HEADING = re.compile(r"^#{1,2}\s+Explicitly Deferred\s*$", re.I)
+
+
+def parse_deferred(text):
+    """The names listed under `# Explicitly Deferred`, with their line numbers.
+
+    The section is authored as plain `- ` bullets — some carrying no wikilink, some
+    nesting one or two — not as `### N.` blocks, so `parse_weekly` cannot see it and
+    every row listed there stayed eligible for a proposal card. A card is an ask, and
+    an ask to re-decide a question the operator already answered is the cost this
+    reading removes.
+
+    The section ends at the next heading or at the `---` rule that closes it. A reader
+    that runs to end-of-file swallows every later section into the deferred set, which
+    suppresses real proposals while looking correct.
+
+    Returns `([(name, line)], present)`. `present` is a fact about the section rather
+    than about its contents, so a section that excludes nothing can be reported as such
+    instead of reading like one that was never found.
+    """
+    rows, inside = [], False
+    for i, line in enumerate(text.splitlines(), 1):
+        if DEFERRED_HEADING.match(line):
+            inside = True
+            continue
+        if not inside:
+            continue
+        if re.match(r"^#{1,6}\s", line) or line.strip() == "---":
+            break
+        if not line.lstrip().startswith("- "):
+            continue
+        for name in wikilinks(line):
+            rows.append((name, i))
+    return rows, inside
+
+
 def parse_monthly(text):
     """`## Must / Should / Could` numbered items, `**Must**` before `**Should**` before `**Could**`."""
     rows, bucket = [], None
@@ -412,7 +448,7 @@ def candidate(name, kind, fm, source, why):
 
 
 def plan_candidates(vault, board, day, notes):
-    """Walk the four tiers in rank order, returning (rows, unread list)."""
+    """Walk the four tiers in rank order, returning (rows, deferred keys)."""
     keys = period_keys(day)
     tiers = [
         ("weekly", parse_weekly),
@@ -421,12 +457,15 @@ def plan_candidates(vault, board, day, notes):
         ("yearly", parse_yearly),
     ]
     out = []
+    weekly_text = None
     for period, parser in tiers:
         path = plan_path(vault, period, keys[period])
         text, err = read_text(path)
         if err:
             notes.append(f"{period} {keys[period]}: {err}")
             continue
+        if period == "weekly":
+            weekly_text = text
         items = parser(text)
         # A tier with no parseable item is a fact about that tier, not a pass.
         if not items:
@@ -442,7 +481,23 @@ def plan_candidates(vault, board, day, notes):
                     {"period": period, "file": str(path), "line": item["line"]},
                     item.get("title", ""),
                 ))
-    return out
+    # `# Explicitly Deferred` is a settled answer, not a gap in the plan: a row parked
+    # there must never be offered back as a proposal. Read from the same weekly note the
+    # picked sections resolve, and REPORTED — a section that excluded nothing and a
+    # section that was never read must not look the same.
+    deferred = set()
+    if weekly_text is not None:
+        names, present = parse_deferred(weekly_text)
+        if present:
+            for name, _line in names:
+                kind, _, _fm = board.read(name)
+                if kind is None:
+                    notes.append(f"deferred {name}: no page in tasks/goals/topics")
+                    continue
+                deferred.add((kind, name))
+            notes.append(f"weekly {keys['weekly']}: # Explicitly Deferred — "
+                         f"{len(deferred)} name(s) excluded")
+    return out, deferred
 
 
 def due_today(board, tasks_dir, day, now=None):
@@ -620,7 +675,7 @@ def build(vault, tasks_dir, day, live=None, target=None, plugin=None, alerts_scr
         notes.append(f"tasks dir {tasks_dir}: missing")
         today = []
 
-    planned = plan_candidates(vault, board, day, notes)
+    planned, deferred_keys = plan_candidates(vault, board, day, notes)
     ranked = today + planned
 
     seen, ordered = set(), []
@@ -638,9 +693,13 @@ def build(vault, tasks_dir, day, live=None, target=None, plugin=None, alerts_scr
     for i, row in enumerate(emitted, 1):
         row["rank"] = i
 
+    # `deferred_keys` joins the planned set here rather than in `ordered`: a deferred row
+    # is not a candidate, so it must not occupy a rank slot, but it is planned in the
+    # only sense this script asks about — it must never be proposed back.
     proposed_rows = proposed(
         vault, board, Path(vault) / tasks_dir,
-        {(row["kind"], row["name"]) for row in ordered}, alerts_state, alerts_lines,
+        {(row["kind"], row["name"]) for row in ordered} | deferred_keys,
+        alerts_state, alerts_lines,
         dismissed_keys=dismissed_keys,
     )
     proposed_overflow = proposed_rows[PROPOSAL_CAP:]
