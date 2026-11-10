@@ -187,6 +187,18 @@ SITE_LIST = {
     # so the mechanism and this list agree; like `spawn-goal.py`'s `send` it is also an
     # ACTION, so it is deliberately not driven into the three states below.
     ("fleet-keeper.py", "wezterm"),
+    # added 2026-11-10 — `fleet-reset.py`'s three `ps` reads behind the stop leg. They are
+    # PREDICATES, not read-and-render sites, and each fails CLOSED rather than empty:
+    # `own_pids` protects this process and its parent even when the walk fails (so a broken
+    # read can never shrink the protected set to nothing), `pid_alive` answers True when the
+    # state cannot be read (so an entry is kept, never cleared over a process that may be
+    # alive), and `proc_comm` answers '' (so the process-shape guard refuses to signal).
+    # Enumerated for mechanism/list agreement; deliberately NOT driven into the three states,
+    # because their broken answer is a conservative refusal and not an empty read — driving
+    # them would assert `broken -> None`, which is the wrong contract for a fail-closed
+    # predicate. Same shape as `restart-worker.py`'s `worker_argv` above.
+    ("fleet-reset.py", "own_pids"), ("fleet-reset.py", "pid_alive"),
+    ("fleet-reset.py", "proc_comm"),
 }
 
 

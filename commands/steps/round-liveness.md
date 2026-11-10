@@ -39,7 +39,13 @@ When: every round, before the pre-dispatch gate
 
   ⚠️ **This is the goal and topic tiers' half of a contract the fleet round writes in `commands/steps/re-arm.md`.** All three tiers can open headless workers and all three answer parks, so all three must refresh. The fleet round does it per tick in its own step; this one covers `commands/goal-drive.md` and `commands/topic-drive.md`, which run this step every round. A tier that emitted neither would have its headless spawns refused once the probe's verdict flips onto the reaches.
 
-  **Leg `mcp` needs nothing here** — the server records it on `answer_permission`'s existing foreign-park reply, which a call with an unknown `request_id` already gets.
+  **Leg `mcp` is ONE tool call, and it must actually be made.** `answer_permission` with a sentinel `request_id` that no worker holds. The server finds no park, consults the wrapper (which returns "consulted, no answer" without issuing a POST for an id it does not hold), and replies with the foreign-park message — **that reply is the reach**, and it is the only place the `mcp` leg is written.
+
+  ```
+  mcp__supervisor__answer_permission(request_id="answer-path-reach-sentinel", behavior="deny")
+  ```
+
+  ⚠️ **A manager's ordinary `answer_permission` calls do NOT produce this leg.** They name a real park, which IS in the server's `pending` map, so the handler takes the settle path and never reaches the foreign-park arm. Measured 2026-11-10: the reach store held **18 `wrapper` reaches and 0 `mcp` reaches** because this step said the leg needed nothing — a claimed mechanism with no emitter. Do not remove this call on the reasoning that answering real parks covers it; it does not.
 
   **Leg `wrapper` is two calls, deliberately separate** so the curl keeps the exact command shape the permission classifier judges:
 
