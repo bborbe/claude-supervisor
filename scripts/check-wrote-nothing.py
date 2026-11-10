@@ -23,19 +23,24 @@ read `python3 $P/spawn-ledger.py` (a library module — it printed nothing and e
 `date -r <file> +%s` (GNU-only, errors on the fleet's macOS host), so the corrected rule still
 could not run.
 
-Nine properties, each of which fails silently on its own:
+Every marker in `REQUIRED` is a property, and each fails silently on its own. `REQUIRED` is the
+authoritative count — this list names the concepts, not the number of strings:
 
-1. **The check exists and names a class.**
-2. **The spawn time comes from the spawn ledger's `spawned_at`**, never `claude_session_started`
-   (a vault-ui flag, `nonempty 0` on every task).
-3. **The headless population is admitted** — a correct source on an unreachable set changes nothing.
-4. **The mtime read is portable** (`os.path.getmtime`), not a `date -r` call.
-5. **The ledger read is executable** (`--json`), not a bare module invocation.
-6. **The join key is named** — the ledger carries a full uuid, `CLASSIFICATION` an 8-char handle.
-7. **A grace window exists** — otherwise a worker spawned seconds ago is flagged immediately.
-8. **The verdict is wired** into step 5's table and the hand-back counts, or a row it classifies
-   has no ledger value and no count key.
-9. **The positive control is stated, and the mtime is called evidence.**
+- **The check exists and names a class.**
+- **The spawn time comes from the spawn ledger's `spawned_at`**, never `claude_session_started`
+  (a vault-ui flag, `nonempty 0` on every task).
+- **The headless population is admitted** — a correct source on an unreachable set changes nothing.
+- **Both reads are executable** — `os.path.getmtime`, not GNU-only `date -r`; `--json`, not a bare
+  module invocation that printed nothing and exited 0.
+- **Both joins are named** — ledger row to `CLASSIFICATION` (8-char handle) and ledger row to its
+  task page (the wire row carries no task reference).
+- **An exit is required** — `ended_at` set, so a still-running worker is never flagged.
+- **A grace window exists** — otherwise a worker spawned seconds ago is flagged immediately.
+- **The ledger is read once per round**, not once per candidate.
+- **The Z-parse and the unreadable-mtime branch are pinned.**
+- **The verdict is wired** into step 5's table and the hand-back counts, or a row it classifies
+  has no ledger value and no count key.
+- **The positive control is stated, and the mtime is called evidence.**
 
 **What this proves, and what it does not.** It proves the rule is present, uses executable and
 portable commands on a reachable population, states both its opposite direction and its own
@@ -84,9 +89,30 @@ REQUIRED = [
         "caller reads empty stdout as 'no rows'. The `--json` CLI is what makes it executable.",
     ),
     (
-        "join on the first 8 characters",
+        "compare the first 8 characters of `session_id`",
         "The ledger keys on the full uuid while `CLASSIFICATION` carries an 8-char handle; an "
         "unnamed join matches nothing or, worse, duplicates rows.",
+    ),
+    (
+        "`ended_at` is set",
+        "A still-running worker satisfies `mtime <= spawned_at` exactly — long analysis, a tool "
+        "call in flight, progress written only at the end — so without the exit gate every live "
+        "headless worker reads as a dead one. Gate on `ended_at`, not `status`: the ledger records "
+        "824 of 1,075 rows reading `running` against 26 live sessions.",
+    ),
+    (
+        "session-ids.py",
+        "The wire row carries no task reference, so without a named ledger-to-task-page join the "
+        "headless branch has no stated way to run.",
+    ),
+    (
+        "read the ledger once per round",
+        "The ledger is an HTTP fetch with a timeout; a per-candidate call costs N round-trips.",
+    ),
+    (
+        'replace("z", "+00:00")',
+        "A bare `fromisoformat` raises on Python < 3.11 and a naive parse compares a local offset "
+        "against a UTC instant.",
     ),
     (
         "15-minute park window",
