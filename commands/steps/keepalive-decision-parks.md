@@ -98,6 +98,38 @@ Kinds (a) and (d) resume each named task through `/supervisor:open --task "<name
 as § 2, never a fresh session and never a bare `claude`, which brings a session back on a reduced
 MCP surface.
 
+## Consumption: these waits never un-clear, so the cap is what bounds the leg
+
+⚠️ **Kinds (b) and (d) have no natural consumption.** An answered card stays answered and a
+terminal `blocked_by` stays terminal, so a row resumed on either wait is still eligible on the
+next round — and the round after. A worker that exits without clearing its task would be
+re-resumed every fleet round forever, with nothing in the output to say so. Kind (a) has the same
+shape once `approved_at` is in the past.
+
+So **every resume this half performs goes through § 4's machinery, not around it**:
+
+```bash
+python3 "$P/worker-keepalive.py" --vault "<vault>" --task "<name>" --record-resume "<id>"
+```
+
+`RESUME_CAP` is 3 and `--record-resume` refuses an id the liveness instrument does not read
+`LIVE`, so a resume that never landed does not arm the cap against a retry. Once the cap is spent
+the verdict is `crash-loop`: **stop resuming that task and escalate once** with the
+`⚠️ WORKER CRASH-LOOP` line — that line is the consumption marker. It is deliberately not a
+"consumed" flag on the card or the `blocked_by` set: those are facts about the past, not about
+whether the resume worked, and a marker that suppresses the second resume also suppresses the
+escalation the third one owes.
+
+⚠️ **This is also what keeps the leg inside the ownership and cap gates § 4 already enforces.**
+Resuming a decision-parked row through a bare `/supervisor:open` would skip the `worker--<slug>`
+cap the dead-worker path applies.
+
+⚠️ **The three-valued rule covers kinds (a) and (d) too, not only (b).** An unreadable task file,
+an `approved_at` that cannot be compared against the transcript timestamp, and a `blocked_by` name
+that resolves to no task are each `unread` — never "wait not cleared" and never "cleared". The
+count is `decision-unread`; a row counted there is resumed on no round and is named in the
+round's report.
+
 ## The hand-back
 
 **Three counts, and the third exists so an unread answer is never folded into a not-cleared
