@@ -6,7 +6,7 @@ user-invocable: false
 
 # Readings
 
-When: every tick — take all six readings (commands in the step)
+When: every tick — take all seven readings (commands in the step)
 
 ## The version line — first, before anything else
 
