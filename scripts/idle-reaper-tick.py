@@ -31,6 +31,7 @@ with an unexpected code).
 import argparse
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -104,6 +105,17 @@ def main(argv=None):
         if not os.path.exists(path):
             print(f"❌ idle-reaper-tick: missing verb {path}")
             return 1
+    # Both verbs resolve a session's task through `vault-cli config list`, and when the binary
+    # is missing they swallow that into an empty config. Every candidate then reads
+    # `task-unresolved`, a tick of normal-looking refusals that closes nothing, forever. So a
+    # missing `vault-cli` is checked here and made a fault. `SUPERVISOR_VAULT_CONFIG` is the
+    # verbs' own override and makes the binary unnecessary.
+    if not os.environ.get("SUPERVISOR_VAULT_CONFIG") and not shutil.which("vault-cli"):
+        print(
+            "❌ idle-reaper-tick: `vault-cli` is not on PATH, so every task would read "
+            f"task-unresolved and nothing would close. PATH={os.environ.get('PATH', '')}"
+        )
+        return 1
 
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     rows, ok = tick(args.sessions_dir, args.dry_run)

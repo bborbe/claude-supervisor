@@ -137,19 +137,39 @@ class TestTick(unittest.TestCase):
 
 
 class TestMain(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="idle-reaper-main-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, env):
+        return subprocess.run(
+            [sys.executable, SCRIPT, "--sessions-dir", self.tmp, "--dry-run"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+
     def test_an_empty_registry_exits_zero_with_a_summary(self):
-        tmp = tempfile.mkdtemp(prefix="idle-reaper-main-")
-        try:
-            done = subprocess.run(
-                [sys.executable, SCRIPT, "--sessions-dir", tmp, "--dry-run"],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-            self.assertIn("candidates=0 closed=0 refused=0", done.stdout)
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+        env = dict(os.environ)
+        # The verbs' own override, so the test does not depend on vault-cli being installed.
+        env["SUPERVISOR_VAULT_CONFIG"] = os.path.join(self.tmp, "vault-config.json")
+        done = self._run(env)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("candidates=0 closed=0 refused=0", done.stdout)
+
+    def test_a_missing_vault_cli_is_a_fault_not_a_quiet_tick(self):
+        """Measured 2026-11-10: with no `vault-cli` on PATH, every candidate reads
+        `task-unresolved`. A tick that closes nothing must not exit 0 as if it were healthy."""
+        empty_bin = os.path.join(self.tmp, "bin")
+        os.makedirs(empty_bin)
+        env = {"HOME": os.environ.get("HOME", self.tmp), "PATH": empty_bin}
+        done = self._run(env)
+        self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
+        self.assertIn("vault-cli", done.stdout)
+        self.assertNotIn("candidates=", done.stdout, "it must stop before running any verb")
 
 
 if __name__ == "__main__":
