@@ -23,6 +23,14 @@ re-derive that index: `approved-not-started.py` already walks it and splits the 
 `never-started` (no id; the lever is open, not resume) and **`orphaned`** (id not live; the lever
 is resume). This half takes `orphaned` only.
 
+⚠️ **That index is a starting point, not the whole population, and its own predicate says so.**
+`approved-not-started.py` selects rows carrying `approved_at`, so a reaped worker whose task was
+never formally approved is absent from its `orphaned` class — and every row it does return carries
+`approved_at` by construction, which is why kind (a) below cannot be read as "the field is present".
+Where the index and a direct task-file read disagree, the task file wins: the population this half
+owes is *reaped workers still owed a resume*, and an approval record is one wait among three, not
+the entry condition.
+
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
 python3 "$P/approved-not-started.py" --tasks-dir "<vault>/<tasks-dir>" --json
@@ -43,9 +51,17 @@ wait produces no act on any round.
 
 | Kind | The read | Resume |
 |---|---|---|
-| (a) approval | the row carries `approved_at` — the vault's own record, written only by `vault-cli task approve` | `/supervisor:open --task` |
+| (a) approval | `approved_at` is **later than the session's last transcript message** — the approval landed while the worker was already gone | `/supervisor:open --task` |
 | (b) answered card | the session's attention event log `~/.claude/state/attention/<sid>.events.jsonl`, folded as `who-needs-me.py` folds it: an `open` line closed by a later `close` line is an answered card, and `scripts/attention-card-lookup.py` resolves it to its item — **never** `GET /api/1.0/attention`, which returns open items only and so can never show an answered one | **`spawn_agent`, with the answer as the prompt** |
 | (d) `blocked_by` | every name in `blocked_by` resolves to a task whose status is terminal | `/supervisor:open --task` |
+
+⚠️ **Kind (a) is the read most easily written wrong, because the population makes it look
+already-true.** `approved-not-started.py` selects rows that **carry `approved_at`**, so inside its
+`orphaned` class every candidate has one — a read of "the row carries `approved_at`" is satisfied by
+100% of candidates and resumes rows whose approval is months old. The event is not the field's
+presence, it is its **ordering**: the approval must be later than the session's last transcript
+message, which is what "the approval landed and nothing resumed it" means. A row whose approval
+predates its last turn was still running after it was approved, and its wait is something else.
 
 ⚠️ **Kind (b) is the one resume that carries a prompt, and it is the only reason this leg holds
 `spawn_agent`.** An exited worker still holds its unanswered question: resuming it with an empty
