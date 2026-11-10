@@ -131,6 +131,27 @@ def scalar(fm: str, key: str) -> str:
     return (m.group(1).strip().strip("\"'") if m else "")
 
 
+#: Every spelling of "no id recorded", compared case-insensitively — the same set
+#: `scripts/goals-declaration.py` uses for "declares nothing", and the same fold
+#: `scripts/topic-keepalive.py`'s `session_id` performs. Duplicated deliberately: both
+#: scripts run standalone out of the plugin cache, so there is no shared module to import.
+_EMPTY_IDS = frozenset({"", "[]", "null", "~"})
+
+
+def session_id(fm: str) -> str:
+    """The page's recorded session id, or "" for every spelling of "none recorded".
+
+    ⚠️ **`scalar()` alone returns the literal text after the colon**, so
+    `claude_session_id: null` arrives as the four characters `null` — non-empty, and a legal
+    `session-liveness.py` argument, so it probes as a session that was never named. This
+    script only counts a LIVE probe (`probe.returncode == 0`), so a `null` id never inflated
+    the manager count; the fold is here to keep the two copies in step, per
+    `test_topic_keepalive.py`'s agreement check on `flagged`.
+    """
+    value = scalar(fm, "claude_session_id").strip()
+    return "" if value.lower() in _EMPTY_IDS else value
+
+
 def section(text: str, heading: str) -> str:
     """The body under `## <heading>`, up to the next `## ` or `# ` heading."""
     m = re.search(rf"^##\s+{re.escape(heading)}\s*$", text, re.MULTILINE)
@@ -245,7 +266,7 @@ def live_goal_managers(vault: str, topics_dir: str, goals: list[str]) -> int:
             with open(page, encoding="utf-8") as fh:
                 # `claude_session_id` is the only field a goal page records its manager in.
                 _fm = frontmatter(fh.read())
-                sid = scalar(_fm, "claude_session_id")
+                sid = session_id(_fm)
         except OSError:
             continue
         if not sid:

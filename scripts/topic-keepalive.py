@@ -80,6 +80,30 @@ def scalar(fm: str, key: str) -> str:
     return (m.group(1).strip().strip("\"'") if m else "")
 
 
+#: Every spelling of "no id recorded", compared case-insensitively — the same set
+#: `scripts/goals-declaration.py` uses for "declares nothing".
+_EMPTY_IDS = frozenset({"", "[]", "null", "~"})
+
+
+def session_id(fm: str) -> str:
+    """The page's recorded session id, or "" for every spelling of "none recorded".
+
+    ⚠️ **`scalar()` alone is the defect this exists for.** It returns the literal text after
+    the colon, so `claude_session_id: null` arrives as the four characters `null` —
+    non-empty, and a legal `session-liveness.py` argument (that guard admits any lowercase
+    prefix by design, so it can accept the 12-char recovery prefix its own AMBIGUOUS verdict
+    hands back). The probe therefore answers ABSENT, and ABSENT is the one verdict that
+    licenses a resume. Measured 2026-11-08: `worker-keepalive.py` printed `resume` for a row
+    whose id was the string `null`.
+
+    ⚠️ **Folded here, never inside `scalar()`.** `scalar()` reads every key on the page —
+    `status`, `phase`, `defer_date` — and `defer_date: null` must keep reaching
+    `defer_state()` as the unreadable value that parks a row, not as "no defer".
+    """
+    value = scalar(fm, "claude_session_id").strip()
+    return "" if value.lower() in _EMPTY_IDS else value
+
+
 FLAG_TRUTHY = ("true", "yes", "on")
 
 
