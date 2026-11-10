@@ -69,7 +69,7 @@ FIELDS = (
     "unverifiable_action",
     "unverifiable_observation",
 )
-VERDICTS = ("revive", "blocked", "unverifiable", "finished")
+VERDICTS = ("revive", "blocked", "unverifiable", "finished", "wrote-nothing")
 #: What the 2-round rule did about a row, or "" when it has not acted. The marker is what
 #: makes the action fire ONCE per silence rather than on every round at or past the
 #: threshold: a row held back by the per-round cap keeps advancing its streak, so a
