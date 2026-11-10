@@ -51,9 +51,23 @@ wait produces no act on any round.
 
 | Kind | The read | Resume |
 |---|---|---|
-| (a) approval | `approved_at` is **later than the session's last transcript message** — the approval landed while the worker was already gone | `/supervisor:open --task` |
+| (a) approval | `approved_at` is **later than the session's last transcript message** — the timestamp `fleet-sessions.py:last_message_ts()` reads, the one `LAST-ACTIVE` renders, never the file mtime | `/supervisor:open --task` |
 | (b) answered card | the session's attention event log `~/.claude/state/attention/<sid>.events.jsonl`, folded as `who-needs-me.py` folds it: an `open` line closed by a later `close` line is an answered card, and `scripts/attention-card-lookup.py` resolves it to its item — **never** `GET /api/1.0/attention`, which returns open items only and so can never show an answered one | **`spawn_agent`, with the answer as the prompt** |
-| (d) `blocked_by` | every name in `blocked_by` resolves to a task whose status is terminal | `/supervisor:open --task` |
+| (d) `blocked_by` | `blocked_by` is **non-empty** AND every name resolves to a task whose status is terminal | `/supervisor:open --task` |
+
+⚠️ **The non-empty guard on kind (d) is load-bearing, not defensive.** "Every name is terminal" is
+satisfied **vacuously** by an empty `blocked_by` — the common case — so without the guard the leg
+resumes every orphaned row on every round and kinds (a) and (b) become moot. This repo already
+names the trap: `scripts/manager-predispatch.py:496` — *"An empty blocked_by is unblocked — and that
+is exactly why an EMPTY read is not neutral: it satisfies the ready-to-start clause vacuously"* —
+and `blocked_by_verdict` asks whether the set is non-empty before it asks whether it is terminal.
+An empty set is **not a wait that cleared**; it is a row with no wait of this kind, and this half
+resumes it on no round.
+
+⚠️ **Kind (b)'s "answered" excludes a decline.** A card record reading `skip` is the operator
+declining, not a question answered — it is neither a cleared wait nor an unread one, and resuming
+on it would hand the worker an "answer" that answers nothing. It is counted separately and resumes
+nothing.
 
 ⚠️ **Kind (a) is the read most easily written wrong, because the population makes it look
 already-true.** `approved-not-started.py` selects rows that **carry `approved_at`**, so inside its
