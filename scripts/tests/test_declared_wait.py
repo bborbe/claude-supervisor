@@ -108,6 +108,22 @@ class TestDeclaredWait(unittest.TestCase):
                          "detail": {"nested": "⏰ Ends: inside a dict"}})
         self.assertFalse(dw.declared_wait(SID, state_dir=self.dir))
 
+    def test_a_boolean_ts_is_unreadable_not_a_wait_since_1970(self):
+        """`bool` is an `int` in Python, so `ts: true` would sail through as epoch 1.
+
+        ⚠️ A near-zero timestamp makes the row look like a wait declared half a century
+        ago, and `drive-escalate.py` would card it immediately on no evidence. The guard
+        is one `isinstance(value, bool)` clause, so it needs its own case: the indirect
+        coverage in `test_drive_escalate.py` only ever passes `ts: None`, which exercises
+        the non-numeric half and leaves this one unpinned.
+        """
+        rec = stop("⏰ Ends: the real wait")
+        rec["ts"] = True
+        self.write(SID, rec)
+        record = dw.wait_record(SID, state_dir=self.dir)
+        self.assertIsNotNone(record, "the declaration itself is still real")
+        self.assertIsNone(record["ts"], "a boolean ts is unreadable, never epoch 1")
+
     def test_a_non_dict_line_keeps_an_earlier_declaration(self):
         """A bare JSON string or list after a real Stop must not reset the session.
 
@@ -169,7 +185,7 @@ class TestDeclarationVerdict(unittest.TestCase):
 
     def verdict(self, detail, age_s):
         self.write(SID, stop_at(detail, NOW - age_s))
-        return dw.declaration(SID, state_dir=self.dir, now=NOW)["verdict"]
+        return dw.wait_record(SID, state_dir=self.dir, now=NOW)["verdict"]
 
     def test_a_fresh_external_wait_is_declared(self):
         self.assertEqual(self.verdict("⏰ Ends: PR #753 approved (gh pr view)", 600), "declared")
@@ -186,13 +202,13 @@ class TestDeclarationVerdict(unittest.TestCase):
         ):
             with self.subTest(ends=ends):
                 self.write(SID, stop_at(ends, NOW - 60))
-                d = dw.declaration(SID, state_dir=self.dir, now=NOW)
+                d = dw.wait_record(SID, state_dir=self.dir, now=NOW)
                 self.assertEqual(d["mechanism"], "session-bound")
                 self.assertEqual(d["verdict"], "declared")
 
     def test_an_external_observable_is_not_flagged(self):
         self.write(SID, stop_at("⏰ Ends: PR #753 approved (gh pr view)", NOW - 60))
-        self.assertEqual(dw.declaration(SID, state_dir=self.dir, now=NOW)["mechanism"],
+        self.assertEqual(dw.wait_record(SID, state_dir=self.dir, now=NOW)["mechanism"],
                          "external")
 
     def test_an_old_session_bound_wake_expires(self):
@@ -220,7 +236,7 @@ class TestDeclarationVerdict(unittest.TestCase):
 
     def test_a_record_without_ts_keeps_the_old_behaviour(self):
         self.write(SID, stop("⏰ Ends: PR #753 approved"))
-        self.assertEqual(dw.declaration(SID, state_dir=self.dir, now=NOW)["verdict"],
+        self.assertEqual(dw.wait_record(SID, state_dir=self.dir, now=NOW)["verdict"],
                          "declared")
 
     def test_only_a_live_declaration_suppresses(self):
@@ -234,8 +250,71 @@ class TestDeclarationVerdict(unittest.TestCase):
         os.environ["SUPERVISOR_WAIT_MAX_AGE_S"] = "120"
         self.addCleanup(os.environ.pop, "SUPERVISOR_WAIT_MAX_AGE_S", None)
         self.write(SID, stop_at("⏰ Ends: PR merged (gh)", NOW - 300))
-        self.assertEqual(dw.declaration(SID, state_dir=self.dir, now=NOW)["verdict"],
+        self.assertEqual(dw.wait_record(SID, state_dir=self.dir, now=NOW)["verdict"],
                          "expired")
+
+
+_ESC = os.path.join(os.path.dirname(_HERE), "drive-escalate.py")
+_esc_spec = importlib.util.spec_from_file_location("drive_escalate", _ESC)
+de = importlib.util.module_from_spec(_esc_spec)
+_esc_spec.loader.exec_module(de)
+
+
+class TestTwoClocks(unittest.TestCase):
+    """The 1 h re-drive must not silence `drive-escalate.py`'s 24 h card.
+
+    Re-driving an expired wait makes the session re-park, which writes a fresh `Stop`
+    every hour. `ts` is the start of the trailing same-observable run, so that
+    mechanical re-park does not move the clock the escalation reads — while a re-park
+    on a DIFFERENT observable does. Both cases go through the real `disposition()`.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def write(self, *records):
+        with open(os.path.join(self.dir, f"{SID}.events.jsonl"), "w", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+
+    def card(self):
+        rec = dw.wait_record(SID, state_dir=self.dir, now=NOW)
+        self.row = de.disposition(rec, {}, NOW, alive=True)
+        return rec, self.row["action"]
+
+    def test_hourly_mechanical_reparks_for_25h_still_card(self):
+        # 26 renders, one per hour from 25 h ago to now, each with a fresh ETA digit.
+        self.write(*[stop_at(f"⏰ Ends: PR #753 approved (gh pr view, ~{h} min)",
+                             NOW - h * 3600) for h in range(25, -1, -1)])
+        rec, action = self.card()
+        self.assertEqual(rec["ts"], NOW - 25 * 3600)
+        self.assertEqual(rec["last_ts"], NOW)
+        self.assertEqual(rec["verdict"], "declared")
+        self.assertEqual(action, "escalate")
+        # The card names the FIRST record of the run, not the newest — without this a
+        # `ts` that was still the newest render would pass the line above only by luck.
+        self.assertEqual(self.row["wait_since"], de._iso(NOW - 25 * 3600))
+        self.assertNotEqual(self.row["wait_since"], de._iso(NOW))
+
+    def test_a_changed_observable_resets_the_clock(self):
+        records = [stop_at("⏰ Ends: PR #753 approved (gh pr view)", NOW - h * 3600)
+                   for h in range(25, 1, -1)]
+        records.append(stop_at("⏰ Ends: release tag v1.2 exists (gh release view)",
+                               NOW - 3600))
+        records.append(stop_at("⏰ Ends: release tag v1.2 exists (gh release view)", NOW))
+        self.write(*records)
+        rec, action = self.card()
+        self.assertEqual(rec["ts"], NOW - 3600)
+        self.assertEqual(action, "fresh")
+
+    def test_a_closer_without_ends_breaks_the_run(self):
+        self.write(stop_at("⏰ Ends: PR #753 approved (gh)", NOW - 25 * 3600),
+                   stop_at("👤 You: nothing", NOW - 7200),
+                   stop_at("⏰ Ends: PR #753 approved (gh)", NOW - 600))
+        rec, action = self.card()
+        self.assertEqual(rec["ts"], NOW - 600)
+        self.assertEqual(action, "fresh")
 
 
 if __name__ == "__main__":
