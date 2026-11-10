@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.265.2
 
 - fix: **the proposal payload's row name is resolved from its own file path, so a task name containing ` — ` is no longer lost.** The payload is `<name> — <why> — <file>:<line>`, and **no split direction works**: `source.file` is `25 Tasks/<name>.md`, so a name carrying ` — ` puts the separator in the path too — 65 files in `25 Tasks/` do. `split(" — ")[0]` truncated such a name (4 of the 33 unresolvable blocks on the first live day), a right-split lands inside the path instead, and since v0.265.1's resolve check those rows are *refused*, silently dropping the operator's `add it to the plan` answer. `_name_from_payload()` now resolves in three descending steps: the payload's **`.md:<line>` tail** — the whole payload ends with `<name>.md:<line>`, so the stem of everything before it is the name, exact even when the name (and therefore the path) carries the separator — then the **longest** leading ` — `-joined prefix that resolves to a page (longest-first, so a row genuinely named `Foo` is not captured by an existing `Foo — bar`), then the first segment unchanged, which `add_to_plan` refuses. Alert rows are the exception: their name is a raw `prometheus-alerts.sh` line that can never be a page, so they split from the right against their fixed tail rather than being oracle-resolved into some unrelated task. Change set: `scripts/next-focus-answer.py`, `scripts/tests/test_next_focus_answer.py`, `CHANGELOG.md`.
 
