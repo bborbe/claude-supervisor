@@ -55,6 +55,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import sys
 import urllib.parse
 import urllib.request
@@ -89,7 +90,30 @@ class Refused(Exception):
     """A read that failed. Never collapsed into an empty result."""
 
 
+class Unresolvable(Refused):
+    """A PERMANENT refusal: the name can never become a page.
+
+    Recorded as consumed so `pending` drains — otherwise the same note re-renders
+    every tick forever. A TRANSIENT refusal (an unreadable weekly note, a fresh week
+    with no `### N.` blocks yet) is deliberately NOT recorded: that would silently
+    drop the operator's `add it to the plan` answer, and the next tick could have
+    succeeded.
+    """
+
+
 # --------------------------------------------------------------- the two writes
+
+
+def _page_path(vault, tasks_dir, name):
+    """The board page for `name`, or None — the SAME predicate the reader resolves with.
+
+    Delegates to `Board.find` rather than re-implementing it: the reader
+    (`plan_candidates` → `Board.read` → `Board.find`) searches task/goal/objective/topic
+    and carries a containment guard, so a local copy diverges both ways — a name this
+    check accepts and the reader rejects is exactly the inert-block defect again.
+    """
+    kind, path = nf.Board(vault, tasks_dir).find(name)
+    return path if kind is not None else None
 
 
 def _task_state(vault, tasks_dir, name):
@@ -98,14 +122,14 @@ def _task_state(vault, tasks_dir, name):
     Both board dirs are tried: a proposal row is a task OR a blocked goal, and a
     tasks-only read recorded a goal's `hold` as nothing at all.
     """
-    board = nf.Board(vault, tasks_dir)
-    for directory in (Path(vault) / tasks_dir, Path(board.dirs["goal"])):
-        text, err = nf.read_text(directory / f"{name}.md")
-        if err:
-            continue
-        fm = nf.frontmatter(text)
-        return str(fm.get("status", "")), str(fm.get("phase", ""))
-    return "", ""
+    page = _page_path(vault, tasks_dir, name)
+    if page is None:
+        return "", ""
+    text, err = nf.read_text(page)
+    if err:
+        return "", ""
+    fm = nf.frontmatter(text)
+    return str(fm.get("status", "")), str(fm.get("phase", ""))
 
 
 def _block_number(lines):
@@ -214,6 +238,15 @@ def add_to_plan(vault, tasks_dir, name, day, why_text=""):
     text, err = nf.read_text(weekly)
     if err:
         raise Refused(f"weekly note unreadable: {weekly} ({err})")
+
+    # A block whose `**Task:** [[name]]` resolves to no page is INERT: `plan_candidates`
+    # drops it with `no page in tasks/goals/topics`, the row never enters `planned_keys`,
+    # and it re-proposes — while the note carries a block that reads as planned. Measured
+    # 2026-11-10: 33 of 110 live blocks named no page and every one of those rows was
+    # still proposed. So a name that resolves to nothing is never written.
+    if _page_path(vault, tasks_dir, name) is None:
+        raise Unresolvable(f"no page for {name!r} on the task/goal/objective/topic "
+                           f"board — refusing to write a plan row that can never resolve")
 
     lines = text.splitlines()
     already_block = any(name in row["names"] for row in nf.parse_weekly(text))
@@ -325,14 +358,75 @@ def fetch_history(store, timeout, limit):
         return lookup.items_of(json.loads(resp.read().decode("utf-8")))
 
 
-def split_payload(payload):
-    """The row name out of `<name> — <why> — <file>:<line>`.
+def unquote_payload(payload):
+    """The raw payload text, un-shell-quoted when the store kept the quoted form.
 
-    The name is the first segment: `next-focus.py` builds the payload with ` — ` as
-    the separator, and a task filename may itself contain a dash but never that
-    spaced em dash pair.
+    `next-focus.py` shell-quotes the payload (`shlex.quote`) so the round can paste it
+    bare into a command line, and the store sometimes keeps that quoted text. Reading
+    it raw left the leading `'` and the `'"'"'` escape in the row name — 33 of 110
+    live blocks named no page and the rows kept re-proposing.
+
+    A quoted payload is ONE `shlex` token; an unquoted one splits into many (or raises
+    on an apostrophe). Only the single-token case is unquoted — anything else is
+    returned verbatim rather than guessed at.
     """
-    return str(payload or "").split(" — ")[0].strip()
+    text = str(payload or "")
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        return text
+    return parts[0] if len(parts) == 1 else text
+
+
+def _name_from_payload(payload, vault, tasks_dir, kind=""):
+    """`(name, why_text)` — the row name, resolved from the payload's own file path.
+
+    The payload is `<name> — <why> — <file>:<line>`, and **no split direction works**:
+    `source.file` is `25 Tasks/<name>.md`, so a name containing ` — ` puts the separator
+    in the path too (65 files in `25 Tasks/` carry one).
+
+    Three oracles, strongest first:
+      1. **The payload's own path.** `due_today`, the P1-task and the blocked-goal rows
+         all build `{"file": str(path)}` with `name = path.stem`, so the stem IS the
+         name — exact, and immune to the separator on both sides. A `plan_candidates`
+         row cites a plan page whose stem never resolves, so it falls through.
+      2. **The longest leading ` — `-joined prefix that resolves to a page** — longest
+         first, because the name is the maximal prefix and a shorter one is a
+         different (wrong) page. The loop stops before the final segment, so a path can
+         never be mistaken for a name.
+      3. **The first segment, unchanged** — `add_to_plan` then refuses it, so a name
+         that resolves to nothing is never written as a wrong row.
+    """
+    parts = payload.split(" — ")
+    first = parts[0].strip()
+
+    # An alert's name is a raw `prometheus-alerts.sh` line and can never be a page, so
+    # the board oracles below would resolve a fragment of it to some unrelated task.
+    # Its tail IS fixed (`alert firing, in no current plan` / `prometheus-alerts.sh:<n>`),
+    # so splitting from the right is exact here even though it is wrong for tasks.
+    if kind == "alert":
+        tail = payload.rsplit(" — ", 2)
+        return tail[0].strip(), (tail[1].strip() if len(tail) > 1 else "")
+
+    if len(parts) > 1:
+        # The payload ends with `<source.file>:<source.line>` and `source.file` ends
+        # with `<name>.md`, so the WHOLE payload ends with `<name>.md:<line>`. Reading
+        # that tail as a path is exact even when the name — and therefore the path —
+        # carries the separator: `parts[-1]` is only a full path when the name has
+        # none, which is the very case this is here to fix.
+        match = re.search(r"^(.*)\.md:(\d+)$", payload, re.S)
+        if match:
+            stem = Path(match.group(1)).stem
+            if stem and _page_path(vault, tasks_dir, stem) is not None:
+                k = stem.count(" — ") + 1
+                return stem, (parts[k].strip() if k < len(parts) else "")
+
+    for i in range(len(parts) - 1, 0, -1):
+        candidate = " — ".join(parts[:i]).strip()
+        if candidate and _page_path(vault, tasks_dir, candidate) is not None:
+            return candidate, parts[i].strip()
+
+    return first, (parts[1].strip() if len(parts) > 1 else "")
 
 
 def kind_of_key(card_key):
@@ -370,11 +464,11 @@ def consume_items(items, vault, tasks_dir, dismissed_dir, consumed_dir, now):
             continue
 
         answer = str((card.get("answer") or {}).get("value", ""))
-        payload = str(card.get("payload", ""))
-        name = split_payload(payload)
-        segments = payload.split(" — ")
-        why_text = segments[1] if len(segments) > 1 else ""
+        # Unquote ONCE and derive both fields from it: reading `why_text` off the raw
+        # payload left a trailing `'` in the row for any quoted multi-segment payload.
+        payload = unquote_payload(card.get("payload", ""))
         kind = kind_of_key(card_key)
+        name, why_text = _name_from_payload(payload, vault, tasks_dir, kind)
         if not name:
             notes.append(f"{card_key}: card carries no payload name — not consumed")
             continue
@@ -396,10 +490,25 @@ def consume_items(items, vault, tasks_dir, dismissed_dir, consumed_dir, now):
                 try:
                     detail, extra = add_to_plan(
                         vault, tasks_dir, name, now.date(), why_text)
+                except Unresolvable as exc:
+                    # PERMANENT: record it so `pending` drains. Without this an
+                    # unresolvable name re-rendered the same note every tick forever
+                    # (measured on three consecutive live ticks, `pending=1` each).
+                    # No dismissal record — that would suppress the row if its page is
+                    # created later.
+                    notes.append(f"{card_key}: refused — {exc}")
+                    append_consumed(log_path, {
+                        "at": now.isoformat(), "card_key": card_key,
+                        "item_id": item_id, "name": name, "kind": kind,
+                        "action": "refused", "reason": str(exc),
+                    })
+                    done.add((card_key, item_id))
+                    continue
                 except Refused as exc:
-                    # One unaddable card must not starve the rest of the tick: a
-                    # `leave it out` answer needs nothing from the weekly note, and a
-                    # fresh-week note legitimately carries no `### N.` blocks yet.
+                    # TRANSIENT (unreadable note, a fresh week with no `### N.` blocks
+                    # yet): NOT recorded. Recording it would drop the operator's
+                    # `add it to the plan` answer for good, when the next tick could
+                    # succeed. One unaddable card must not starve the rest of the tick.
                     notes.append(f"{card_key}: refused — {exc}")
                     continue
                 notes.extend(extra)

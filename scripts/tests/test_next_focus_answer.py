@@ -22,6 +22,7 @@ to fail on a plausible wrong implementation rather than on a broken one:
 import importlib.util
 import json
 import pathlib
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -317,6 +318,179 @@ class ConsumeTests(unittest.TestCase):
         self.assertNotIn(f"| 1 | 📌 {TASK_NAME} |", text)
         self.assertTrue(any("row not written" in note for note in notes))
         self.assertIsNotNone(consumed[0]["block"], "the block should still be written")
+
+    def test_a_shell_quoted_payload_yields_the_clean_name(self):
+        """The store sometimes keeps the `shlex.quote` form of the payload.
+
+        Measured 2026-11-10: 33 of 110 live blocks carried the leading quote or the
+        `'"'"'` escape, named no page, and their rows kept re-proposing.
+        """
+        quoted = shlex.quote(f"{TASK_NAME} — priority: 1, in no current plan — /x:1")
+        self.assertNotEqual(quoted, f"{TASK_NAME} — priority: 1, in no current plan — /x:1")
+
+        consumed, _ = self.run_consume([self.card("add it to the plan", payload=quoted)])
+        text = self.weekly.read_text(encoding="utf-8")
+
+        self.assertEqual(consumed[0]["name"], TASK_NAME)
+        self.assertIn(f"**Task:** [[{TASK_NAME}]]", text)
+        self.assertNotIn(f"📌 '{TASK_NAME}", text)
+
+    def test_an_unresolvable_name_writes_no_block(self):
+        """A payload that is not `name — why — file` must never become a plan row."""
+        consumed, notes = self.run_consume([
+            self.card("add it to the plan",
+                      payload="proposed for this week plan (see next-focus reading)"),
+        ])
+
+        self.assertEqual(consumed, [])
+        self.assertTrue(any("refusing to write" in note for note in notes))
+        self.assertNotIn("proposed for this week plan",
+                         self.weekly.read_text(encoding="utf-8"))
+
+    def test_unquote_handles_the_escape_form_and_a_raw_apostrophe(self):
+        """The `'"'"'` form is what a naive `strip("'")` gets wrong."""
+        raw = "A Headless Worker's Vault Write — priority: 1 — /x:1"
+        escaped = shlex.quote(raw)
+        self.assertIn("'\"'\"'", escaped, "the fixture did not produce the escape form")
+
+        self.assertEqual(answer.unquote_payload(escaped), raw)
+        # An UNQUOTED payload with an apostrophe makes shlex.split raise.
+        self.assertEqual(answer.unquote_payload(raw), raw)
+
+    def test_an_apostrophe_name_is_written_clean(self):
+        """The live shape: 4 of 33 bad blocks carried this escape into the name."""
+        name = "A Headless Worker's Vault Write"
+        (self.vault / "25 Tasks" / f"{name}.md").write_text(
+            "---\nstatus: next\nphase: planning\npriority: \"1\"\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        quoted = shlex.quote(f"{name} — priority: 1, in no current plan — /x:1")
+        self.run_consume([self.card("add it to the plan", payload=quoted)])
+
+        text = self.weekly.read_text(encoding="utf-8")
+        self.assertIn(f"**Task:** [[{name}]]", text)
+        self.assertNotIn("\"'\"", text)
+
+    def test_a_refusal_is_recorded_so_it_does_not_repeat(self):
+        """A permanent refusal must drain `pending`, or it re-renders every tick."""
+        card = self.card("add it to the plan",
+                         payload="proposed for this week plan (see next-focus reading)")
+        args = ([card], str(self.vault), "25 Tasks",
+                str(self.dismissed), str(self.consumed), NOW)
+
+        consumed1, notes1, pending1 = answer.consume_items(*args)
+        self.assertEqual(consumed1, [])
+        self.assertTrue(any("refusing to write" in note for note in notes1))
+        # `pending` counts cards still awaiting consumption AFTER the run — the refusal
+        # is a disposition, so it drains. Before the fix it stayed 1 forever.
+        self.assertEqual(pending1, 0, "the refusal was not recorded — pending never drains")
+
+        consumed2, notes2, pending2 = answer.consume_items(*args)
+        self.assertEqual(consumed2, [])
+        self.assertEqual(pending2, 0)
+        self.assertEqual(notes2, [], "the refusal note repeated on the next tick")
+
+    def test_a_transient_refusal_is_not_recorded(self):
+        """A fresh week with no `### N.` blocks must not burn the operator's answer.
+
+        Recording a transient failure would drop the `add it to the plan` answer for
+        good, when the next tick could succeed.
+        """
+        self.weekly.write_text("# Weekly\n\nno blocks here\n", encoding="utf-8")
+        args = ([self.card("add it to the plan")], str(self.vault), "25 Tasks",
+                str(self.dismissed), str(self.consumed), NOW)
+
+        _, notes1, pending1 = answer.consume_items(*args)
+        self.assertTrue(any("refused" in note for note in notes1))
+        self.assertEqual(pending1, 1, "a transient refusal must stay pending")
+
+        _, notes2, pending2 = answer.consume_items(*args)
+        self.assertTrue(any("refused" in note for note in notes2),
+                        "the transient refusal was recorded — the answer is lost")
+        self.assertEqual(pending2, 1)
+
+    def test_a_name_containing_the_separator_is_not_truncated(self):
+        """A task name may itself contain ` — ` — 4 of the 33 live bad blocks were this.
+
+        The payload is built EXACTLY as `next-focus.py` builds it, `source.file`
+        included: the path is `25 Tasks/<name>.md`, so it carries the separator too and
+        no fixed split direction can find the boundary. A fixture path without the name
+        would pass while the live shape still failed.
+        """
+        name = "Brogrammers Assistant Dies Mid-Request — claude process ended"
+        page = self.vault / "25 Tasks" / f"{name}.md"
+        page.write_text(
+            "---\nstatus: next\nphase: planning\npriority: \"1\"\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        payload = f"{name} — priority: 1, in no current plan — {page}:1"
+
+        consumed, notes = self.run_consume([self.card("add it to the plan", payload=payload)])
+
+        self.assertEqual(consumed[0]["name"], name, "the name was truncated")
+        self.assertEqual(notes, [])
+        self.assertIn(f"**Task:** [[{name}]]", self.weekly.read_text(encoding="utf-8"))
+
+    def test_the_path_oracle_wins_over_a_longer_page_name(self):
+        """`Foo — bar` may exist; a row genuinely named `Foo` must still resolve to Foo.
+
+        The payload's own path is the exact oracle: `source.file` is the page that
+        produced the row, so its stem is the name however many separators either side
+        carries.
+        """
+        for page_name in ("Foo", "Foo — bar"):
+            (self.vault / "25 Tasks" / f"{page_name}.md").write_text(
+                "---\nstatus: next\n---\n\nbody\n", encoding="utf-8")
+        foo = self.vault / "25 Tasks" / "Foo.md"
+
+        name, why = answer._name_from_payload(
+            f"Foo — bar — baz — {foo}:1", str(self.vault), "25 Tasks", "task")
+
+        self.assertEqual(name, "Foo", "resolved to the longer page")
+        self.assertEqual(why, "bar")
+
+    def test_a_vanished_page_falls_back_and_is_refused(self):
+        """A separator-carrying name whose page is gone must be refused, not guessed."""
+        gone = self.vault / "25 Tasks" / "Gone — name.md"
+        consumed, notes = self.run_consume([
+            self.card("add it to the plan",
+                      payload=f"Gone — name — priority: 1, in no current plan — {gone}:1"),
+        ])
+
+        self.assertEqual(consumed, [])
+        self.assertTrue(any("refusing to write" in note for note in notes))
+        self.assertNotIn("Gone", self.weekly.read_text(encoding="utf-8"))
+
+    def test_an_alert_name_is_taken_verbatim(self):
+        """An alert's name is a raw alert line — never a page, so never oracle-resolved."""
+        (self.vault / "25 Tasks" / "Trading.md").write_text(
+            "---\nstatus: next\n---\n\nbody\n", encoding="utf-8")
+
+        name, _ = answer._name_from_payload(
+            "Trading — High error rate — alert firing, in no current plan — "
+            "prometheus-alerts.sh:1",
+            str(self.vault), "25 Tasks", "alert")
+
+        self.assertEqual(name, "Trading — High error rate")
+
+    def test_the_path_oracle_survives_a_separator_in_the_path(self):
+        """`parts[-1]` is only a full path when the name has no separator.
+
+        With one, the path splits too, so a fragment can resolve to an unrelated page
+        and a wrong row would be written. The `.md:<line>` tail is the exact oracle.
+        """
+        name = "Brogrammers Assistant Dies Mid-Request — claude process ended"
+        # A page named after the path FRAGMENT the broken oracle would have produced.
+        (self.vault / "25 Tasks" / "claude process ended.md").write_text(
+            "---\nstatus: next\n---\n\nbody\n", encoding="utf-8")
+        page = self.vault / "25 Tasks" / f"{name}.md"
+        page.write_text("---\nstatus: next\n---\n\nbody\n", encoding="utf-8")
+
+        got, _ = answer._name_from_payload(
+            f"{name} — priority: 1, in no current plan — {page}:1",
+            str(self.vault), "25 Tasks", "task")
+
+        self.assertEqual(got, name, "resolved to the path fragment instead of the name")
 
     def test_notes_render_on_an_empty_round(self):
         """A round that could not look must not read like a round that found nothing."""
