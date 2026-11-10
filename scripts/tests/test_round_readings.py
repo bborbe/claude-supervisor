@@ -295,6 +295,44 @@ class TheParkLimb(Tmp):
         self.assertEqual(verdict, "frozen")
 
 
+    def test_compute_wires_the_park_verdict_through_to_stuck(self):
+        """`compute()` must pass its `in_flight` verdict into `stuck_verdict()`.
+
+        The unit cases above call `stuck_verdict()` directly, so they would all pass
+        on a build that computed `parked` and then dropped it at the call site — the
+        row would read `in_flight: parked` beside `stuck: frozen`, which is exactly
+        the contradiction this change exists to remove.
+        """
+        sid = "7777cccc"
+        sessions = os.path.join(self.dir, "sessions")
+        os.makedirs(sessions, exist_ok=True)
+        with open(os.path.join(sessions, "12345.json"), "w", encoding="utf-8") as fh:
+            json.dump({"sessionId": sid, "status": "waiting", "pid": 12345}, fh)
+
+        predispatch = rr._load("manager-predispatch")
+        orig_resolve = predispatch.resolve_tracked_by_member
+        orig_live = rr.liveness
+        try:
+            predispatch.resolve_tracked_by_member = lambda vault, members: (
+                [{"name": "A task", "mtime": 1_700_000_000 - 3600,
+                  "session": sid, "sessions": [sid]}], list(members))
+            rr.liveness = lambda ids, endpoint, registry_dir: "LIVE"
+            path = os.path.join(self.dir, "tracked.txt")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("A task\n")
+            doc = rr.compute("A subject", path, self.dir, 900, now=1_700_000_000,
+                             attention_dir=self.attention, sessions_dir=sessions,
+                             feed={"panes": set(), "owners": {}, "orphan_owners": [],
+                                   "state": "read", "error": None})
+        finally:
+            predispatch.resolve_tracked_by_member = orig_resolve
+            rr.liveness = orig_live
+
+        row = doc["rows"]["A task"]
+        self.assertEqual(row["in_flight"], "parked")
+        self.assertEqual(row["stuck"], "none")
+
+
 # The feed's pane column is right-aligned to four, so a real row reads `[ 417]`, and a
 # headless gate reads `[ hst]` with its store item id on the `answer:` continuation
 # line. The pre-fix pattern `^\s*\[(\d+)\]` matched 1 of these 3 rows (`[1234]`).

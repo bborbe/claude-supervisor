@@ -167,7 +167,7 @@ no task** — the two fields a caller needs to tell a quiet fleet from a set tha
 `rows=` is `resolution.resolved_rows` plus `len(resolution.unresolved)`, never the tracked-set
 line count (a goal member admits many rows).
 
-⚠️ **Every family carries all three of its values, including the zeros** — the caller's render
+⚠️ **Every family carries all of its values, including the zeros** — the caller's render
 tests the counts, and a missing key is a cell it cannot evaluate. ⚠️ **A family whose read
 failed carries its `unread` count, never a `0` in the `clear`/`none`/`quiet` slot.** ⚠️ **Each
 family's `unread` has its own key:** `unread=` is the **feed** family's, while the in-flight and
