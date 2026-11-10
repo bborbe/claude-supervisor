@@ -55,18 +55,35 @@ the round's act:
 The positive control lives in the test suite (`test_open_queue.py`'s control row) and in
 the round itself, which prints the opened set in order.
 
-Rank
-----
-1. **flag first** — `flag: true`, **whoever set it**. Operator ruling 2026-10-30: *"in the
-   end it should not matter how set the flag … if flag, should be open if claude session
-   limit allow it"* — so `flag_set_by` is a note here, not a gate, and a bare `flag: true`
-   with no setter ranks exactly as an operator's does. ⚠️ **This is deliberately wider than
-   `commands/open.md` Step 0.5's batch selector**, which keeps its provenance gate because
-   that batch writes `approved_by: operator`; this leg only ranks a row for opening, and
-   `docs/session-tiers.md` § rule 2 owns the split.
-2. **`priority` ascending** — 1 before 2 before 3; a row carrying no `priority` sorts
+The gate: the flag, and only the flag
+-------------------------------------
+`flag: true` — **whoever set it** — is the ADMISSION predicate, not a ranking hint. A row
+that is approved, eligible and un-flagged is **never** selected, at any position: it is
+skipped with reason `not flagged`, so the round reports it rather than silently dropping
+it.
+
+Operator requirement 2026-11-10, in their own words: *"we only want auto open for flagged
+items"*. The earlier reading of the 2026-10-30 ruling treated the flag as an ordering
+signal and `approved_at` as the gate, which left the approved queue — **2793 rows**
+measured 2026-11-10 — unbounded the moment `bborbe/vault-cli#367` removed the admission
+cap. The flag is the bound. `docs/session-tiers.md` § rule 2 states the same rule one tier
+up: *"A flagged page is opened automatically by the tier above it … the only bound after
+the flag is capacity."*
+
+⚠️ **The 2026-10-30 provenance ruling is narrower than it was read.** *"in the end it
+should not matter how set the flag"* governs WHICH flagged row may be opened —
+`flag_set_by` is a note, never a gate — and it does not admit an unflagged row. Provenance
+is not read here; the flag itself is. ⚠️ **This remains deliberately wider than
+`commands/open.md` Step 0.5's batch selector on provenance**, which keeps its gate because
+that batch writes `approved_by: operator`; `docs/session-tiers.md` § rule 2 owns the split.
+
+Rank — among the admitted rows
+------------------------------
+Once the gate admits the flagged rows, their order decides which of them the free slots
+take:
+1. **`priority` ascending** — 1 before 2 before 3; a row carrying no `priority` sorts
    after every row that does, because an unset field is not a high priority.
-3. **oldest `approved_at` first** — the tiebreak, so the queue drains in the order it
+2. **oldest `approved_at` first** — the tiebreak, so the queue drains in the order it
    was approved rather than the order the directory happens to list.
 
 Ranked, never bulk
@@ -172,13 +189,14 @@ def read_frontmatter(tasks_dir, name):
 
 
 def is_flagged(block):
-    """`flag: true` — **whoever set it**. Provenance is not read.
+    """`flag: true` — **whoever set it**. This is the ADMISSION predicate.
 
     Operator ruling 2026-10-30: *"in the end it should not matter how set the flag … if flag,
-    should be open if claude session limit allow it"*. `flag_set_by` is a note, not a gate,
-    so a bare `flag: true` with no setter ranks exactly as one written `--by operator`. The
-    flag still only decides WHICH already-approved row goes first — the approval is
-    `approved_at`, which this leg requires on every row it opens.
+    should be open if claude session limit allow it"*. `flag_set_by` is a note, never a gate,
+    so a bare `flag: true` with no setter is admitted exactly as one written `--by operator`.
+    A row this returns False for is never selected, at any position (`select()` skips it as
+    `not flagged`); the flag decides WHETHER a row opens, and `rank_key` decides only the
+    order among the rows this admits.
     """
     return (field(block, "flag") or "").strip().lower() in TRUTHY
 
@@ -272,13 +290,17 @@ def guards(block, today):
 
 
 def rank_key(row):
-    """Sort key: operator-flag first, then priority asc, then oldest approval."""
+    """Sort key among the ADMITTED rows: priority asc, then oldest approval.
+
+    The flag is not part of this key. `select()` admits only flagged rows, so a flag
+    component would sort a constant on every row it ever sees; the flag decides WHETHER a
+    row is admitted, and this key decides the order among the rows that were.
+    """
     # ⚠️ `-age_seconds`, never the raw `approved_at` string. `approved-not-started.py`
     # re-emits it via `datetime.isoformat()`, which preserves each row's own UTC offset,
     # so two rows in different offsets compare as strings and sort by the digits rather
     # than by the instant. `age_seconds` is already normalised and sorts correctly.
     return (
-        0 if row["flagged"] else 1,
         row["priority"] if row["priority"] is not None else NO_PRIORITY,
         -float(row["age_seconds"]),
     )
@@ -370,7 +392,12 @@ def capacity():
 
 
 def select(rows, live, target):
-    """Split ranked rows into (opened, skipped-for-capacity).
+    """Split the admitted rows into (opened, skipped).
+
+    The flag is the GATE, applied first: a row whose `flag` is not truthy is never
+    admitted, at any position — it is skipped with reason `not flagged`, so the round
+    reports it instead of dropping it silently. `rows` arrives already ranked, so the
+    flagged rows keep their order and the cap takes the head of that list.
 
     ⚠️ **`target is None` (the soft key set to `0`, i.e. unlimited) admits NOTHING.**
     "Unlimited" switches the server's cap off, and a cap is the only thing this leg has
@@ -379,10 +406,14 @@ def select(rows, live, target):
     ("approving and starting all of them is not a good idea"). So the leg refuses and
     names the config state instead of guessing a number — the operator can set a target.
     """
+    flagged = [row for row in rows if row["flagged"]]
+    unflagged = [{"name": row["name"], "reason": "not flagged"}
+                 for row in rows if not row["flagged"]]
     if target is None:
-        return [], list(rows)
+        return [], [{"name": row["name"], "reason": "capacity"} for row in flagged] + unflagged
     free = max(0, target - live)
-    return rows[:free], rows[free:]
+    return (flagged[:free],
+            [{"name": row["name"], "reason": "capacity"} for row in flagged[free:]] + unflagged)
 
 
 def render(opened, skipped, live, target):
@@ -402,12 +433,12 @@ def render(opened, skipped, live, target):
     head = "open leg: selected %d (workers %d/%d)" % (len(opened), live, target)
     lines = [head]
     for index, row in enumerate(opened, start=1):
-        if row["flagged"]:
-            why = "flagged"
-        elif row["priority"] is not None:
-            why = "priority %d" % row["priority"]
+        # Every opened row is flagged (the gate admitted it), so the per-row reason is
+        # the RANK that placed it here, not the flag.
+        if row["priority"] is not None:
+            why = "flagged · priority %d" % row["priority"]
         else:
-            why = "no priority"
+            why = "flagged · no priority"
         lines.append("  %d. %s — %s" % (index, row["name"], why))
     if skipped:
         counts = {}
@@ -462,8 +493,10 @@ def main(argv=None):
         print("⚠️ capacity unreadable — cannot tell free slots from a full fleet", file=sys.stderr)
         return 2
 
-    opened, capacity_skipped = select(rows, live, target)
-    all_skipped = skipped + [{"name": r["name"], "reason": "capacity"} for r in capacity_skipped]
+    opened, select_skipped = select(rows, live, target)
+    # `select()` now carries each skipped row's reason (`capacity` or `not flagged`), so
+    # the two populations stay distinguishable in the round's tally.
+    all_skipped = skipped + select_skipped
 
     if args.json:
         # ⚠️ `action` is pre-quoted with `shlex.quote`, mirroring `next-focus.py`'s
