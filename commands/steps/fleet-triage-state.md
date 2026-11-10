@@ -36,7 +36,7 @@ definition of "idle".** The manager tier's own ladder (`commands/steps/round-rea
 `agents/goal-drive.md:100-134`) is the shipped reading and this command reuses it verbatim,
 in this order:
 
-1. **the registry's `status`** — `shell` ⇒ **in-flight**; `waiting` ⇒ **quiet** (a gate park,
+1. **the registry's `status`** — `shell` ⇒ **in-flight**; `waiting` ⇒ **parked** (a gate park,
    3.4); `idle` / `busy` ⇒ no signal, fall through. ⚠️ **`busy` is deliberately not the
    signal** — it is the weaker word and it lags both ways. ⚠️ **`shell` carries the manager
    tier's carve-out, and dropping it turns a parked worker into a live one:** `shell` means
