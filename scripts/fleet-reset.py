@@ -1,0 +1,550 @@
+#!/usr/bin/env python3
+"""`/supervisor:fleet-reset` — clear the fleet's remembered state. Destructive, confirm-gated.
+
+The fleet remembers itself in five stores, and auto-resume reads the task files on top of
+them. A reset must clear the five AND (behind a separate opt-in) strip the task-file links,
+or the next keep-alive leg resumes the sessions the reset was meant to retire:
+
+  sessions         <root>/sessions/*.json                the live registry, one file per pid
+  worker-manager   <root>/state/worker-manager/*.json    manager-loop anchors
+  open-items       <root>/state/open-items/*.json        per-session asks ledgers
+  holds            <root>/state/session-holds.json       the operator's do-not-work marks
+  snapshot         <root>/state/fleet-snapshot.json      the sweep baseline
+
+Three properties are load-bearing, and each has a test in `tests/test_fleet_reset.py`:
+
+  * NOTHING happens without `--confirm fleet-reset`. Without the token the verb refuses
+    with a named reason and touches nothing.
+  * `--dry-run` is INERT: it prints the full plan — per-store counts, the pids it would
+    signal, the task files it would touch — and changes no file, not even an mtime.
+  * The task-link strip is a SEPARATE flag, `--strip-task-links`, never implied by the
+    state clear. A state-only run leaves every task file byte-identical.
+
+Sessions are stopped BEFORE their registry entries are removed, so no live process is
+orphaned into a registry-less state. Each pid is SIGTERMed, given `--grace` seconds, then
+SIGKILLed; a pid that survives both KEEPS its registry entry and is reported, because a
+cleared entry over a live process is exactly the orphan this ordering exists to prevent.
+This session's own pid and its ancestors are never signalled, and their registry entries
+are never removed — a reset that kills the session running it cannot report what it did.
+
+⚠️ This is NOT `/supervisor:reset`. That verb re-discovers state and NEVER deletes; its
+contract is the vault's `Manager Session` runbook § Reset. This verb deletes. The two share
+no code and must not be folded together.
+
+Store roots are overridable so a drill or a test never reads or writes the live tree:
+`--root` (default `~/.claude`), `SUPERVISOR_FLEET_RESET_ROOT`, and for the process-shape
+guard `SUPERVISOR_FLEET_RESET_PROC_PATTERN` (default `claude`). Task directories come from
+`--task-dir` (repeatable) or, when absent, from `vault-cli config list`.
+"""
+import argparse
+import fcntl
+import glob
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+
+CONFIRM_TOKEN = "fleet-reset"
+
+#: Statuses after which a task is not resumed. `hold` is terminal for this purpose: the
+#: operator parked the session, so the keep-alive leg will not resume it either.
+TERMINAL_STATUSES = {"completed", "aborted", "hold"}
+
+LINK_KEYS = ("claude_session_id", "metrics_sessions")
+
+
+class Stores(object):
+    """The five stores, under one root so a drill can point the whole verb at a fixture."""
+
+    def __init__(self, root):
+        self.root = os.path.expanduser(root)
+        self.sessions = os.path.join(self.root, "sessions")
+        self.state = os.path.join(self.root, "state")
+        self.worker_manager = os.path.join(self.state, "worker-manager")
+        self.open_items = os.path.join(self.state, "open-items")
+        self.holds = os.path.join(self.state, "session-holds.json")
+        self.snapshot = os.path.join(self.state, "fleet-snapshot.json")
+        self.lock = os.path.join(self.state, "fleet-reset.lock")
+
+
+class Locked(object):
+    """The whole run is one read-modify-write; the sidecar flock makes it one critical section.
+
+    Same discipline `session-holds.py` uses: a sidecar lock, released on exit, and every
+    individual change landed by `os.unlink` or a tmp+`os.replace`. The lock is skipped in
+    dry-run, because creating it would itself be a write.
+    """
+
+    def __init__(self, path):
+        self.path = path
+
+    def __enter__(self):
+        parent = os.path.dirname(self.path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        self.handle = open(self.path, "a+")
+        fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+        self.handle.close()
+        return False
+
+
+# ---------------------------------------------------------------- readers
+
+def read_json(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def count_jsons(directory):
+    return len(glob.glob(os.path.join(directory, "*.json")))
+
+
+def count_holds(path):
+    """Hold ENTRIES, not the file. An absent or unreadable store counts as zero."""
+    holds = read_json(path).get("holds")
+    return len(holds) if isinstance(holds, dict) else 0
+
+
+def file_count(path):
+    return 1 if os.path.exists(path) else 0
+
+
+def registry_entries(directory):
+    """`[(path, record)]` for every parsable registry file. Unreadable files are skipped."""
+    entries = []
+    for path in sorted(glob.glob(os.path.join(directory, "*.json"))):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                rec = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if isinstance(rec, dict):
+            entries.append((path, rec))
+    return entries
+
+
+# ---------------------------------------------------------------- process control
+
+def own_pids():
+    """This process and every ancestor, so the reset never signals the session running it.
+
+    `os.getppid()` seeds the parent without a subprocess, so a failed `ps` walk still
+    protects the immediate parent — the smallest protected set is this process and its
+    parent, never this process alone.
+    """
+    pids = {os.getpid()}
+    ppid = os.getppid()
+    if ppid > 1:
+        pids.add(ppid)
+    pid = ppid
+    while True:
+        try:
+            out = subprocess.run(
+                ["ps", "-o", "ppid=", "-p", str(pid)],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            break
+        if out.returncode != 0:
+            break
+        try:
+            ppid = int((out.stdout or "0").strip() or 0)
+        except ValueError:
+            break
+        if ppid <= 1 or ppid in pids:
+            break
+        pids.add(ppid)
+        pid = ppid
+    return pids
+
+
+def pid_alive(pid):
+    """Whether `pid` is a RUNNING process.
+
+    ⚠️ `os.kill(pid, 0)` alone answers True for a zombie: the pid still exists until its
+    parent reaps it, so a SIGTERMed session whose parent has not yet called wait() would
+    read as alive, burn the whole grace window, and then be reported `SURVIVED` — a false
+    survivor on every kill. The process STATE is the discriminator, so `Z` answers False.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return not (out.stdout or "").strip().startswith("Z")
+
+
+def proc_comm(pid):
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "comm=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (out.stdout or "").strip()
+
+
+def stop_sessions(stores, dry_run, grace):
+    """Stop every live session, then remove its registry file.
+
+    Returns `(lines, survivors, kept)`. `kept` is the number of entries this run leaves
+    behind — the session running it, its ancestors, and any pid it could not stop — so a
+    dry-run can print the count it WOULD leave rather than the count still on disk.
+
+    Ordering is the contract: a registry entry is removed only after its pid is proven gone.
+    A pid that survives SIGTERM and SIGKILL keeps its entry and is reported as a survivor,
+    so the caller can exit non-zero rather than claim a clean reset over a live process.
+    """
+    lines = []
+    survivors = []
+    kept = 0
+    protected = own_pids()
+    self_sid = (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip()
+    pattern = os.environ.get("SUPERVISOR_FLEET_RESET_PROC_PATTERN", "claude")
+    comm_re = re.compile(pattern, re.I)
+    entries = registry_entries(stores.sessions)
+    lines.append(f"   registry {len(entries)} entry(ies) under {stores.sessions}")
+
+    for path, rec in entries:
+        sid = str(rec.get("sessionId") or rec.get("session_id") or "").strip()
+        name = str(rec.get("name") or "").strip()
+        pid = rec.get("pid")
+        label = f"{sid[:8] or '?'} {name or ''}".strip()
+        if sid and self_sid and sid == self_sid:
+            kept += 1
+            lines.append(f"   keep    {label} — this session")
+            continue
+        if not isinstance(pid, int) or isinstance(pid, bool):
+            # No pid cannot name a live process, so there is nothing to orphan: the entry is
+            # stale metadata and is cleared with the rest of the registry.
+            lines.append(f"   stale   {label} — no integer pid")
+            if not dry_run:
+                _unlink(path)
+            continue
+        if pid in protected:
+            kept += 1
+            lines.append(f"   keep    {label} — pid {pid} is this process or an ancestor")
+            continue
+        if not pid_alive(pid):
+            lines.append(f"   stale   {label} — pid {pid} already gone")
+            if not dry_run:
+                _unlink(path)
+            continue
+        comm = proc_comm(pid)
+        if not comm_re.search(comm):
+            survivors.append((path, pid, label))
+            kept += 1
+            lines.append(
+                f"   refuse  {label} — pid {pid} is {comm or 'unreadable'}, not /{pattern}/; "
+                "its entry is kept"
+            )
+            continue
+        if dry_run:
+            lines.append(f"   would stop {label} — pid {pid} ({comm})")
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            lines.append(f"   stale   {label} — pid {pid} vanished before the signal")
+            _unlink(path)
+            continue
+        except PermissionError:
+            survivors.append((path, pid, label))
+            kept += 1
+            lines.append(f"   refuse  {label} — pid {pid} cannot be signalled (permission)")
+            continue
+        if _wait_gone(pid, grace):
+            _unlink(path)
+            lines.append(f"   stopped {label} — pid {pid} (SIGTERM)")
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            _unlink(path)
+            lines.append(f"   stopped {label} — pid {pid} (exited during grace)")
+            continue
+        except PermissionError:
+            survivors.append((path, pid, label))
+            kept += 1
+            lines.append(f"   refuse  {label} — pid {pid} cannot be killed (permission)")
+            continue
+        if _wait_gone(pid, grace):
+            _unlink(path)
+            lines.append(f"   stopped {label} — pid {pid} (SIGKILL after grace)")
+        else:
+            survivors.append((path, pid, label))
+            kept += 1
+            lines.append(f"   SURVIVED {label} — pid {pid} is still alive; its entry is kept")
+    return lines, survivors, kept
+
+
+def _wait_gone(pid, timeout):
+    deadline = time.time() + max(timeout, 0)
+    while time.time() < deadline:
+        if not pid_alive(pid):
+            return True
+        time.sleep(0.1)
+    return not pid_alive(pid)
+
+
+def _unlink(path):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+# ---------------------------------------------------------------- store clear
+
+def clear_json_dir(directory, dry_run):
+    """Empty a directory of `*.json` files. Returns `(before, after)`.
+
+    The dry-run's `after` is the count it WOULD leave — 0 — not the count still on disk.
+    Printing `168 → 168` under `--dry-run` would describe a no-op, which is the opposite
+    of the plan the operator is approving.
+    """
+    before = count_jsons(directory)
+    if not dry_run and os.path.isdir(directory):
+        for path in glob.glob(os.path.join(directory, "*.json")):
+            _unlink(path)
+    after = 0 if dry_run else count_jsons(directory)
+    return before, after
+
+
+def clear_file(path, before, dry_run):
+    """Remove one store file. Returns `(before, after)` — 0 in a dry-run, as above."""
+    if not dry_run:
+        _unlink(path)
+    return before, (0 if dry_run else file_count(path))
+
+
+# ---------------------------------------------------------------- task-link strip
+
+def task_dirs(explicit):
+    """`--task-dir` values, else every configured vault's task directory."""
+    if explicit:
+        return [os.path.expanduser(p) for p in explicit]
+    override = os.environ.get("SUPERVISOR_VAULT_CONFIG")
+    try:
+        if override:
+            with open(os.path.expanduser(override), encoding="utf-8") as fh:
+                vaults = json.load(fh)
+        else:
+            out = subprocess.run(
+                ["vault-cli", "config", "list", "--output", "json"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if out.returncode != 0:
+                return []
+            vaults = json.loads(out.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    dirs = []
+    for vault in vaults if isinstance(vaults, list) else []:
+        if not isinstance(vault, dict):
+            continue
+        root = str(vault.get("path") or "").strip()
+        tasks = str(vault.get("tasks_dir") or "").strip()
+        if root and tasks:
+            dirs.append(os.path.expanduser(os.path.join(root, tasks)))
+    return dirs
+
+
+def split_frontmatter(text):
+    """`(frontmatter, rest)` or `(None, text)` when the page carries no frontmatter.
+
+    `frontmatter` keeps the leading newline after the opening `---`; reassembling with
+    `"---" + frontmatter + rest` reproduces the file byte-for-byte apart from the edit.
+    """
+    if not text.startswith("---"):
+        return None, text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return None, text
+    return text[3:end], text[end:]
+
+
+def frontmatter_status(frontmatter):
+    match = re.search(r"^status:\s*(\S+)", frontmatter, re.M)
+    return match.group(1).strip("'\"") if match else ""
+
+
+def has_links(frontmatter):
+    return any(re.search(rf"^{key}\s*:", frontmatter, re.M) for key in LINK_KEYS)
+
+
+def strip_key(frontmatter, key):
+    """Remove a top-level `key:` and its indented block, leaving every other line intact."""
+    lines = frontmatter.split("\n")
+    out = []
+    i = 0
+    while i < len(lines):
+        if re.match(rf"^{re.escape(key)}\s*:", lines[i]):
+            i += 1
+            while i < len(lines) and lines[i][:1] in (" ", "\t"):
+                i += 1
+            continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out)
+
+
+def write_atomic(path, text):
+    tmp = path + ".fleet-reset.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
+def scan_tasks(dirs):
+    """`[(path, status, frontmatter, rest)]` for every task file, in a stable order."""
+    rows = []
+    for directory in dirs:
+        for path in sorted(glob.glob(os.path.join(directory, "*.md"))):
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+            except OSError:
+                continue
+            frontmatter, rest = split_frontmatter(text)
+            if frontmatter is None:
+                continue
+            rows.append((path, frontmatter_status(frontmatter), frontmatter, rest))
+    return rows
+
+
+def strip_task_links(dirs, dry_run):
+    """Strip the links from every non-terminal task. Returns `(candidates, stripped)`.
+
+    A terminal task (`completed` / `aborted` / `hold`) is left byte-identical: its session
+    link is history, not a resume target, and rewriting it would be an edit the reset has
+    no reason to make.
+    """
+    rows = scan_tasks(dirs)
+    candidates = [r for r in rows if has_links(r[2]) and r[1] not in TERMINAL_STATUSES]
+    stripped = 0
+    if dry_run:
+        return len(candidates), 0
+    for path, _status, frontmatter, rest in candidates:
+        new = frontmatter
+        for key in LINK_KEYS:
+            new = strip_key(new, key)
+        write_atomic(path, "---" + new + rest)
+        stripped += 1
+    return len(candidates), stripped
+
+
+# ---------------------------------------------------------------- report
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        description="Clear the fleet's remembered state. Destructive; requires --confirm.",
+    )
+    ap.add_argument("--root", default=os.environ.get("SUPERVISOR_FLEET_RESET_ROOT") or "~/.claude",
+                    help="store root (default: ~/.claude)")
+    ap.add_argument("--confirm", default="",
+                    help=f"the literal token {CONFIRM_TOKEN!r}; without it nothing is changed")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print the full plan and change nothing")
+    ap.add_argument("--strip-task-links", action="store_true",
+                    help="ALSO strip claude_session_id / metrics_sessions from non-terminal task "
+                         "files — never implied by the state clear")
+    ap.add_argument("--task-dir", action="append", default=[],
+                    help="a task directory to scan for the strip (repeatable; default: every "
+                         "configured vault's tasks dir)")
+    ap.add_argument("--grace", type=float, default=10.0,
+                    help="seconds to wait after SIGTERM before SIGKILL (default: 10)")
+    args = ap.parse_args(argv)
+
+    stores = Stores(args.root)
+    if not args.dry_run and args.confirm != CONFIRM_TOKEN:
+        print(
+            f"❌ fleet-reset: refusing to act without --confirm {CONFIRM_TOKEN}. "
+            "Nothing was changed. Run --dry-run first to see the plan."
+        )
+        return 2
+
+    dirs = task_dirs(args.task_dir) if args.strip_task_links else []
+    if args.strip_task_links and not dirs:
+        print("❌ fleet-reset: --strip-task-links found no task directory; pass --task-dir.")
+        return 2
+
+    print(
+        f"🧨 FLEET RESET · root {stores.root}"
+        f"{' · dry-run' if args.dry_run else ''}"
+        f"{' · strip-task-links' if args.strip_task_links else ' · state-only'}"
+    )
+
+    def run():
+        # Counted BEFORE the stop: `stop_sessions` removes each entry as it stops its pid, so
+        # a count taken afterwards would report 0 → 0 on a successful run.
+        sessions_before = len(registry_entries(stores.sessions))
+        print("1. sessions — stop before the registry is cleared")
+        sess_lines, survivors, kept = stop_sessions(stores, args.dry_run, args.grace)
+        print("\n".join(sess_lines))
+        sessions_after = kept if args.dry_run else len(registry_entries(stores.sessions))
+        print(f"   sessions         {sessions_before} → {sessions_after}")
+
+        print("2. five stores")
+        wm_before, wm_after = clear_json_dir(stores.worker_manager, args.dry_run)
+        oi_before, oi_after = clear_json_dir(stores.open_items, args.dry_run)
+        h_before, h_after = clear_file(stores.holds, count_holds(stores.holds), args.dry_run)
+        s_before, s_after = clear_file(stores.snapshot, file_count(stores.snapshot), args.dry_run)
+        print(f"   worker-manager   {wm_before} → {wm_after}")
+        print(f"   open-items       {oi_before} → {oi_after}")
+        print(f"   session-holds    {h_before} → {h_after}")
+        print(f"   fleet-snapshot   {s_before} → {s_after}")
+
+        if args.strip_task_links:
+            print("3. task-link strip (separate opt-in)")
+            print(f"   task dirs        {len(dirs)}")
+            candidates, stripped = strip_task_links(dirs, args.dry_run)
+            print(
+                f"   task files       {candidates} candidate(s)"
+                f"{'' if args.dry_run else f' → {stripped} stripped'}"
+            )
+        else:
+            print("3. task-link strip — NOT requested (state-only run; task files untouched)")
+        return survivors
+
+    if args.dry_run:
+        survivors = run()
+    else:
+        with Locked(stores.lock):
+            survivors = run()
+
+    if survivors:
+        print(
+            f"⚠️ {len(survivors)} session(s) survived the stop and kept their registry entry: "
+            + ", ".join(f"{label} (pid {pid})" for _path, pid, label in survivors)
+        )
+        return 3
+    print(
+        "✅ fleet-reset complete"
+        + (" (dry-run — nothing changed)" if args.dry_run else "")
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

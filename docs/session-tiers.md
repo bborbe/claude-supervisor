@@ -256,6 +256,7 @@ other side.
 | `/supervisor:goal-drain` | goal manager | worker; topic manager — it serves headless workers only |
 | `/supervisor:stop` | topic manager, goal manager — bare, stands down *this* session's loop; by name, stands down a subject this session owns | worker — bare only; the by-name form stands down the worker's **own** task and refuses any subject it does not own |
 | `/supervisor:reset` | topic manager, goal manager — re-discovers *this* manager's state | worker |
+| `/supervisor:fleet-reset` | **the operator** — destructive, confirm-gated; stops every session and clears the fleet's five remembered-state stores, with the task-link strip behind a separate opt-in | every manager and worker — a fleet-wide stop is the operator's act, never a session's; it also must not be auto-invoked |
 | `/supervisor:open` | fleet manager, topic manager, goal manager — resolves a name, then jumps, resumes or spawns | worker — workers never open sessions |
 | `/supervisor:open-a2a` | fleet manager, topic manager, goal manager — resolves a name, then creates the worker on the a2a-worker-controller (the backend chosen by the row's `target:`) | worker — workers never open sessions |
 | `/supervisor:worker-drive` | worker — drives its own anchored task | any manager — a manager moves workers with `goal-drive`, never by driving a task itself |
