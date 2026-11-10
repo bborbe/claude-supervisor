@@ -55,6 +55,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import sys
 import urllib.parse
 import urllib.request
@@ -92,20 +93,30 @@ class Refused(Exception):
 # --------------------------------------------------------------- the two writes
 
 
+def _page_path(vault, tasks_dir, name):
+    """The board page for `name`, or None when neither dir carries it."""
+    board = nf.Board(vault, tasks_dir)
+    for directory in (Path(vault) / tasks_dir, Path(board.dirs["goal"])):
+        candidate = directory / f"{name}.md"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _task_state(vault, tasks_dir, name):
     """`(status, phase)` for the row, or empty strings when no page carries it.
 
     Both board dirs are tried: a proposal row is a task OR a blocked goal, and a
     tasks-only read recorded a goal's `hold` as nothing at all.
     """
-    board = nf.Board(vault, tasks_dir)
-    for directory in (Path(vault) / tasks_dir, Path(board.dirs["goal"])):
-        text, err = nf.read_text(directory / f"{name}.md")
-        if err:
-            continue
-        fm = nf.frontmatter(text)
-        return str(fm.get("status", "")), str(fm.get("phase", ""))
-    return "", ""
+    page = _page_path(vault, tasks_dir, name)
+    if page is None:
+        return "", ""
+    text, err = nf.read_text(page)
+    if err:
+        return "", ""
+    fm = nf.frontmatter(text)
+    return str(fm.get("status", "")), str(fm.get("phase", ""))
 
 
 def _block_number(lines):
@@ -214,6 +225,15 @@ def add_to_plan(vault, tasks_dir, name, day, why_text=""):
     text, err = nf.read_text(weekly)
     if err:
         raise Refused(f"weekly note unreadable: {weekly} ({err})")
+
+    # A block whose `**Task:** [[name]]` resolves to no page is INERT: `plan_candidates`
+    # drops it with `no page in tasks/goals/topics`, the row never enters `planned_keys`,
+    # and it re-proposes — while the note carries a block that reads as planned. Measured
+    # 2026-11-10: 33 of 110 live blocks named no page and every one of those rows was
+    # still proposed. So a name that resolves to nothing is never written.
+    if _page_path(vault, tasks_dir, name) is None:
+        raise Refused(f"no page for {name!r} under the task or goal board — "
+                      f"refusing to write a plan row that can never resolve")
 
     lines = text.splitlines()
     already_block = any(name in row["names"] for row in nf.parse_weekly(text))
@@ -325,6 +345,26 @@ def fetch_history(store, timeout, limit):
         return lookup.items_of(json.loads(resp.read().decode("utf-8")))
 
 
+def unquote_payload(payload):
+    """The raw payload text, un-shell-quoted when the store kept the quoted form.
+
+    `next-focus.py` shell-quotes the payload (`shlex.quote`) so the round can paste it
+    bare into a command line, and the store sometimes keeps that quoted text. Reading
+    it raw left the leading `'` and the `'"'"'` escape in the row name — 33 of 110
+    live blocks named no page and the rows kept re-proposing.
+
+    A quoted payload is ONE `shlex` token; an unquoted one splits into many (or raises
+    on an apostrophe). Only the single-token case is unquoted — anything else is
+    returned verbatim rather than guessed at.
+    """
+    text = str(payload or "")
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        return text
+    return parts[0] if len(parts) == 1 else text
+
+
 def split_payload(payload):
     """The row name out of `<name> — <why> — <file>:<line>`.
 
@@ -332,7 +372,7 @@ def split_payload(payload):
     the separator, and a task filename may itself contain a dash but never that
     spaced em dash pair.
     """
-    return str(payload or "").split(" — ")[0].strip()
+    return unquote_payload(payload).split(" — ")[0].strip()
 
 
 def kind_of_key(card_key):

@@ -22,6 +22,7 @@ to fail on a plausible wrong implementation rather than on a broken one:
 import importlib.util
 import json
 import pathlib
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -317,6 +318,34 @@ class ConsumeTests(unittest.TestCase):
         self.assertNotIn(f"| 1 | 📌 {TASK_NAME} |", text)
         self.assertTrue(any("row not written" in note for note in notes))
         self.assertIsNotNone(consumed[0]["block"], "the block should still be written")
+
+    def test_a_shell_quoted_payload_yields_the_clean_name(self):
+        """The store sometimes keeps the `shlex.quote` form of the payload.
+
+        Measured 2026-11-10: 33 of 110 live blocks carried the leading quote or the
+        `'"'"'` escape, named no page, and their rows kept re-proposing.
+        """
+        quoted = shlex.quote(f"{TASK_NAME} — priority: 1, in no current plan — /x:1")
+        self.assertNotEqual(quoted, f"{TASK_NAME} — priority: 1, in no current plan — /x:1")
+
+        consumed, _ = self.run_consume([self.card("add it to the plan", payload=quoted)])
+        text = self.weekly.read_text(encoding="utf-8")
+
+        self.assertEqual(consumed[0]["name"], TASK_NAME)
+        self.assertIn(f"**Task:** [[{TASK_NAME}]]", text)
+        self.assertNotIn(f"📌 '{TASK_NAME}", text)
+
+    def test_an_unresolvable_name_writes_no_block(self):
+        """A payload that is not `name — why — file` must never become a plan row."""
+        consumed, notes = self.run_consume([
+            self.card("add it to the plan",
+                      payload="proposed for this week plan (see next-focus reading)"),
+        ])
+
+        self.assertEqual(consumed, [])
+        self.assertTrue(any("refusing to write" in note for note in notes))
+        self.assertNotIn("proposed for this week plan",
+                         self.weekly.read_text(encoding="utf-8"))
 
     def test_notes_render_on_an_empty_round(self):
         """A round that could not look must not read like a round that found nothing."""
