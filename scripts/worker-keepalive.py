@@ -78,6 +78,15 @@ TERMINAL = {"completed", "aborted"}
 PARKED_STATUS = {"hold", "blocked"}
 PARKED_PHASE = {"human_review", "todo", "done"}
 
+#: The task tier's deliberate-stop marker, written by `scripts/task-standdown.py` when
+#: `/supervisor:stop` runs from a worker. ⚠️ **This is the restart half of the crash-vs-stop
+#: distinction, and without it the marker only closed the *reopen* path.** Before this read
+#: existed, a worker the operator stopped and whose process then died was resumed on the
+#: next keepalive sweep — the marker was on the page and nothing here looked at it.
+#: Truthiness matches `open-queue.is_stopped()`'s set so the two readers agree.
+STOPPED_KEY = "stopped"
+TRUTHY = {"true", "yes", "on"}
+
 
 _KEEPALIVE = None
 
@@ -356,6 +365,15 @@ def main(argv: list[str]) -> int:
     if status in TERMINAL:
         print("jump")
         print(f"task is {status}; nothing to resume")
+        return 0
+    # ⚠️ **Ahead of the parked check and of every derived state**, on the same footing as
+    # `TERMINAL`: the operator ended this row deliberately, so a dead process is not a
+    # death to recover from. Placed before `defer_date` for the reason `guards()` places it
+    # before `blocked` — a stop outranks a derived state, and a row that is both stopped
+    # and deferred must read `stopped` rather than reappear when the defer expires.
+    if k.scalar(fm, STOPPED_KEY).strip().lower() in TRUTHY:
+        print("jump")
+        print("task is stopped by the operator; a stop is not a death")
         return 0
     phase = k.scalar(fm, "phase")
     if status in PARKED_STATUS or phase in PARKED_PHASE:

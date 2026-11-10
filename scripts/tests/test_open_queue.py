@@ -535,6 +535,69 @@ class OpenQueueTest(unittest.TestCase):
 
         self.assertEqual(json.loads(json.dumps([r["name"] for r in opened])), ["high"])
 
+    # -- the task-tier stop marker ----------------------------------------
+
+    def test_a_stopped_row_is_skipped_with_its_own_reason(self):
+        """SC1: absent from `selected`, present in `skipped` with reason `stopped`.
+
+        The control row is the point. Without it, a leg that refused every row would
+        satisfy the absence clause identically — and that is the exact defect the guard
+        could introduce, since it runs ahead of every other guard.
+        """
+        # ⚠️ Both rows carry `flag: true`, because `select()` gates on the flag first — a
+        # control row that is unflagged would be skipped `not flagged` and the assertion
+        # would pass for the wrong reason. The marker is then the only difference.
+        task_file(self.tasks, "stopped", "status: in_progress\nflag: true\nstopped: true\nstop_date: 2026-11-10T17:00:00+01:00\n")
+        task_file(self.tasks, "live", "status: in_progress\nflag: true\n")
+        rows, skipped = self.collect(["stopped", "live"])
+
+        opened, _ = oq.select(rows, live=29, target=30)
+
+        self.assertEqual([r["name"] for r in opened], ["live"])
+        self.assertEqual(skipped, [{"name": "stopped", "reason": "stopped"}])
+
+    def test_the_stop_marker_is_read_through_the_same_truthy_set_as_the_flag(self):
+        """`stopped: yes` / `stopped: on` must refuse too.
+
+        Pinning only `true` would let the widening regress silently — and a reader that
+        accepted a narrower set than the writer emits is the shape that made
+        `is_flagged()`'s spellings a pinned case.
+        """
+        for spelling in ("true", "yes", "on"):
+            with self.subTest(spelling=spelling):
+                sub = os.path.join(self.tasks, spelling)
+                os.makedirs(sub, exist_ok=True)
+                task_file(sub, spelling, "status: in_progress\nstopped: %s\n" % spelling)
+                rows, skipped, err = oq.collect(sub, TODAY, approved_json=approved([spelling]))
+                self.assertIsNone(err)
+                self.assertEqual(rows, [])
+                self.assertEqual(skipped, [{"name": spelling, "reason": "stopped"}])
+
+    def test_a_false_stop_marker_does_not_refuse(self):
+        """The control: `stopped: false` is not a stop. Without this a predicate that
+        returned True on any `stopped:` key would pass every case above."""
+        task_file(self.tasks, "off", "status: in_progress\nstopped: false\n")
+        rows, skipped = self.collect(["off"])
+
+        self.assertEqual([r["name"] for r in rows], ["off"])
+        self.assertEqual(skipped, [])
+
+    def test_a_stop_outranks_a_defer(self):
+        """A row that is both stopped and deferred reports `stopped`.
+
+        The operator's own act outranks a derived state. Reporting `deferred` instead
+        would let the row silently reappear the day the defer expires, with nothing on
+        the page recording that the operator had already ended it.
+        """
+        task_file(
+            self.tasks,
+            "both",
+            "status: in_progress\nstopped: true\ndefer_date: 2099-01-01\n",
+        )
+        _rows, skipped = self.collect(["both"])
+
+        self.assertEqual(skipped, [{"name": "both", "reason": "stopped"}])
+
 
 class PriorWaitTest(unittest.TestCase):
     """A row whose last session ended on a wait a new session cannot clear is skipped,
