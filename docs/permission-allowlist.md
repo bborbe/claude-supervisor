@@ -121,6 +121,7 @@ without a matcher that rejects those flags.
 | `Bash` | `head` | any path | reads a prefix of a file |
 | `Bash` | `tail` | any path | reads a suffix of a file (`-f` blocks, it does not act) |
 | `Bash` | `wc` | any path | counts lines, words and bytes |
+| `Bash` | `diff` | any path | compares two files; `-r` walks directories, still read-only |
 | `Bash` | `grep` | any path | matches patterns; cannot execute a match |
 | `Bash` | `shasum` | any path | hashes file content |
 | `Bash` | `md5` | any path | hashes file content |
