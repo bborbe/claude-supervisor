@@ -205,7 +205,11 @@ def proc_comm(pid):
 
 
 def stop_sessions(stores, dry_run, grace):
-    """Stop every live session, then remove its registry file. Returns `(lines, survivors)`.
+    """Stop every live session, then remove its registry file.
+
+    Returns `(lines, survivors, kept)`. `kept` is the number of entries this run leaves
+    behind — the session running it, its ancestors, and any pid it could not stop — so a
+    dry-run can print the count it WOULD leave rather than the count still on disk.
 
     Ordering is the contract: a registry entry is removed only after its pid is proven gone.
     A pid that survives SIGTERM and SIGKILL keeps its entry and is reported as a survivor,
@@ -213,6 +217,7 @@ def stop_sessions(stores, dry_run, grace):
     """
     lines = []
     survivors = []
+    kept = 0
     protected = own_pids()
     self_sid = (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip()
     pattern = os.environ.get("SUPERVISOR_FLEET_RESET_PROC_PATTERN", "claude")
@@ -226,6 +231,7 @@ def stop_sessions(stores, dry_run, grace):
         pid = rec.get("pid")
         label = f"{sid[:8] or '?'} {name or ''}".strip()
         if sid and self_sid and sid == self_sid:
+            kept += 1
             lines.append(f"   keep    {label} — this session")
             continue
         if not isinstance(pid, int) or isinstance(pid, bool):
@@ -236,6 +242,7 @@ def stop_sessions(stores, dry_run, grace):
                 _unlink(path)
             continue
         if pid in protected:
+            kept += 1
             lines.append(f"   keep    {label} — pid {pid} is this process or an ancestor")
             continue
         if not pid_alive(pid):
@@ -246,6 +253,7 @@ def stop_sessions(stores, dry_run, grace):
         comm = proc_comm(pid)
         if not comm_re.search(comm):
             survivors.append((path, pid, label))
+            kept += 1
             lines.append(
                 f"   refuse  {label} — pid {pid} is {comm or 'unreadable'}, not /{pattern}/; "
                 "its entry is kept"
@@ -262,6 +270,7 @@ def stop_sessions(stores, dry_run, grace):
             continue
         except PermissionError:
             survivors.append((path, pid, label))
+            kept += 1
             lines.append(f"   refuse  {label} — pid {pid} cannot be signalled (permission)")
             continue
         if _wait_gone(pid, grace):
@@ -276,6 +285,7 @@ def stop_sessions(stores, dry_run, grace):
             continue
         except PermissionError:
             survivors.append((path, pid, label))
+            kept += 1
             lines.append(f"   refuse  {label} — pid {pid} cannot be killed (permission)")
             continue
         if _wait_gone(pid, grace):
@@ -283,8 +293,9 @@ def stop_sessions(stores, dry_run, grace):
             lines.append(f"   stopped {label} — pid {pid} (SIGKILL after grace)")
         else:
             survivors.append((path, pid, label))
+            kept += 1
             lines.append(f"   SURVIVED {label} — pid {pid} is still alive; its entry is kept")
-    return lines, survivors
+    return lines, survivors, kept
 
 
 def _wait_gone(pid, timeout):
@@ -306,20 +317,25 @@ def _unlink(path):
 # ---------------------------------------------------------------- store clear
 
 def clear_json_dir(directory, dry_run):
-    """Empty a directory of `*.json` files. Returns `(before, after)`."""
+    """Empty a directory of `*.json` files. Returns `(before, after)`.
+
+    The dry-run's `after` is the count it WOULD leave — 0 — not the count still on disk.
+    Printing `168 → 168` under `--dry-run` would describe a no-op, which is the opposite
+    of the plan the operator is approving.
+    """
     before = count_jsons(directory)
     if not dry_run and os.path.isdir(directory):
         for path in glob.glob(os.path.join(directory, "*.json")):
             _unlink(path)
-    after = before if dry_run else count_jsons(directory)
+    after = 0 if dry_run else count_jsons(directory)
     return before, after
 
 
 def clear_file(path, before, dry_run):
-    """Remove one store file. Returns `(before, after)`."""
+    """Remove one store file. Returns `(before, after)` — 0 in a dry-run, as above."""
     if not dry_run:
         _unlink(path)
-    return before, (before if dry_run else file_count(path))
+    return before, (0 if dry_run else file_count(path))
 
 
 # ---------------------------------------------------------------- task-link strip
@@ -484,9 +500,9 @@ def main(argv=None):
         # a count taken afterwards would report 0 → 0 on a successful run.
         sessions_before = len(registry_entries(stores.sessions))
         print("1. sessions — stop before the registry is cleared")
-        sess_lines, survivors = stop_sessions(stores, args.dry_run, args.grace)
+        sess_lines, survivors, kept = stop_sessions(stores, args.dry_run, args.grace)
         print("\n".join(sess_lines))
-        sessions_after = sessions_before if args.dry_run else len(registry_entries(stores.sessions))
+        sessions_after = kept if args.dry_run else len(registry_entries(stores.sessions))
         print(f"   sessions         {sessions_before} → {sessions_after}")
 
         print("2. five stores")
