@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.272.0
 
 - feat: `fleet-keeper.py`'s lapse card for a live Fleet Manager offers `restart fresh` — on the operator's answer only, once per card, it runs `restart-worker.py <sid> --reason lapse --fresh-prompt /supervisor:fleet-loop`, which stops the stalled manager and starts a NEW session (fresh context) instead of resuming the exhausted one (operator ruling 2026-11-10). `restart-worker.py` gains `--fresh-prompt` (allowlisted). The keeper's no-kill pin is narrowed to exactly this executor and the 2026-11-06 resume.
 
