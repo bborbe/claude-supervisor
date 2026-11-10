@@ -50,7 +50,12 @@ RESUME_WINDOW = 30 * 60
 
 #: A row is a candidate while its task is still live. A terminal task is finished, not parked.
 LIVE_STATUS = {"next", "todo", "in_progress", ""}
-TERMINAL = {"completed", "aborted", "hold"}
+#: Only `completed` MET a dependency. `hold` is an ACTIVE block of unknown length
+#: (`docs/worker-session-states.md`) and `aborted` is an abandoned one — neither is a finished
+#: dependency, and the fleet's own `blocked_by_verdict` (`manager-predispatch.py:524`) counts only
+#: `completed`. Treating `hold` as cleared resumes a worker whose blocker is still parked, and
+#: `/supervisor:open`'s resume path does not re-check `blocked_by`.
+DEPENDENCY_MET = {"completed"}
 
 PROJECTS_DIR = os.path.expanduser(os.environ.get("PROJECTS_DIR") or "~/.claude/projects")
 
@@ -201,7 +206,7 @@ def blocked_by_cleared(names: list[str], tasks_dir: str) -> bool | None:
                 status = frontmatter(handle.read()).get("status", "")
         except OSError:
             return None
-        if status not in TERMINAL:
+        if status not in DEPENDENCY_MET:
             return False
     return True
 
@@ -309,6 +314,7 @@ def main(argv: list[str]) -> int:
     result = decide(args.vault, args.tasks_dir, now)
     if not result["ok"]:
         print(f"unread — {result['reason']}")
+        print("decision-candidates=0 · decision-resumed=0 · decision-unread=0")
         return 1
     if args.json:
         print(json.dumps(result))

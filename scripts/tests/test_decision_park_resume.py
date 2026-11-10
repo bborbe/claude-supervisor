@@ -115,6 +115,20 @@ class TestTheWaits(Base):
         rc, out = self.decide()
         self.assertEqual("d", self.resumed(out)[0]["kind"])
 
+    def test_a_held_dependency_does_not_fire(self):
+        """`hold` is an ACTIVE block, not a finished dependency — the fleet's own
+        `blocked_by_verdict` counts only `completed`."""
+        self.task("Dep Held", status="hold", claude_session_id="")
+        self.parked(blocked_by="'[[Dep Held]]'")
+        rc, out = self.decide()
+        self.assertFalse(self.resumed(out), "a held blocker must not resume the worker")
+
+    def test_an_aborted_dependency_does_not_fire(self):
+        self.task("Dep Aborted", status="aborted", claude_session_id="")
+        self.parked(blocked_by="'[[Dep Aborted]]'")
+        rc, out = self.decide()
+        self.assertFalse(self.resumed(out), "aborted is not completed")
+
     def test_a_non_terminal_dependency_does_not_fire(self):
         self.task("Dep Open", status="in_progress", claude_session_id="")
         self.parked(blocked_by="'[[Dep Open]]'")
@@ -174,6 +188,14 @@ class TestUnread(Base):
         self.verdicts["sid-9"] = "ABSENT"
         rc, out = self.decide()
         self.assertEqual(0, out["candidates"])
+
+    def test_an_unreadable_tasks_dir_still_carries_the_counts(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = dpr.main(["--vault", self.vault, "--tasks-dir", os.path.join(self.root, "nope"),
+                           "--now", str(NOW)])
+        self.assertEqual(1, rc)
+        self.assertIn("decision-candidates=0", out.getvalue())
 
     def test_a_non_dict_json_line_in_the_transcript_does_not_crash(self):
         project = os.path.join(self.projects, "-Users-someone-vault")
