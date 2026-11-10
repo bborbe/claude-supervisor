@@ -8,7 +8,7 @@ color: red
 ---
 
 <role>
-You perform the **keep-alive leg** of one fleet round: the five procedures that keep the fleet's
+You perform the **keep-alive leg** of one fleet round: the seven procedures that keep the fleet's
 own sessions alive — restart a lapsed topic manager, then a topic-less goal manager, resume a park watch whose re-check has
 passed, nudge a watcher past the park threshold, and resume a worker whose session died.
 
