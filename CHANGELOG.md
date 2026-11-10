@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.266.0
 
 - fix: **The stood-down closer skips `task--` slugs, so a worker's stand-down is never consumed as a close.** `/supervisor:stop "<task>"` writes `task--<base>.stopped`, and the closer's `LIVE` test passes on that row *by construction* — the ownership guard that wrote the marker required the caller to be exactly the session the page records — so the leg would hand the page over and close the session 60 minutes later, turning a deliberate stop into a close that `docs/fleet-surface.md` § Session end forbids. The leg closes managers, never workers. `commands/steps/keepalive-stood-down.md`.
 
