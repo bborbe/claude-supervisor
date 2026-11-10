@@ -234,7 +234,7 @@ class OpenQueueTest(unittest.TestCase):
         selector's, so the fixture composes it — the table is about the VERDICT, not the
         mechanism that reached it.
 
-        ⚠️ **Two divergences are DELIBERATE and excluded from this table rather than
+        ⚠️ **Three divergences are DELIBERATE and excluded from this table rather than
         papered over:**
           * `phase: todo` — the batch treats `flag: true` on a todo row as the approval
             and opens it (`commands/open.md` § Step 0.6); `select()` must refuse it,
@@ -242,6 +242,11 @@ class OpenQueueTest(unittest.TestCase):
           * `flag_set_by` — the batch keeps `OPENING_ACTORS` because it writes
             `approved_by: operator`; `select()` reads the flag alone (this task's Out of
             Scope; `docs/session-tiers.md` § rule 2).
+          * a QUOTED flag — `is_flagged()` runs `field()`, which strips quotes, so
+            `flag: "true"` is admitted here; `flagged-rows.py`'s task predicate rejects a
+            quoted scalar, because YAML reads it as a string and never a boolean. This is
+            the only divergence that changes WHAT OPENS, and
+            `test_a_quoted_flag_diverges_from_the_batch` pins both directions.
         """
         fixtures = [
             ("flagged", "status: in_progress\nflag: true\n"),
@@ -275,6 +280,26 @@ class OpenQueueTest(unittest.TestCase):
                     "%s: batch=%s select=%s" % (name, batch_verdict[name], select_verdict[name]))
         # The table is only meaningful if it carries both verdicts.
         self.assertEqual(set(batch_verdict.values()), {"admit", "refuse"})
+
+    def test_a_quoted_flag_diverges_from_the_batch(self):
+        """The third divergence, pinned in BOTH directions.
+
+        `is_flagged()` reads through `field()`, which strips quotes, so `flag: "true"` is
+        admitted by the fleet round; `flagged-rows.py`'s task predicate rejects a quoted
+        scalar because YAML resolves it to a string, never a boolean. So this row opens
+        automatically through the round and is refused by the `--flagged` batch — the one
+        divergence that changes WHAT OPENS, and the reason it is named here rather than
+        folded into the agreement table.
+        """
+        block = 'status: in_progress\nflag: "true"\n'
+        task_file(self.tasks, "quoted", block)
+
+        self.assertTrue(oq.is_flagged(block))
+        self.assertFalse(flagged_rows.flag_admits(block, "task"))
+
+        rows, _ = self.collect(["quoted"])
+        opened, _ = oq.select(rows, live=0, target=30)
+        self.assertEqual([r["name"] for r in opened], ["quoted"])
 
     # -- the guards, each with a control row ------------------------------
 
@@ -433,6 +458,24 @@ class OpenQueueTest(unittest.TestCase):
         self.assertEqual(len(skipped), 2)
         self.assertEqual({r["reason"] for r in skipped}, {"capacity"})
         self.assertIn("target unlimited — selected 0", block)
+
+    def test_unlimited_target_keeps_both_skip_reasons_apart(self):
+        """The mixed branch under `target is None`: both skip reasons coexist in one result.
+
+        Without this fixture the unlimited refusal is pinned only on an all-flagged
+        population, so a `select()` that dropped the unflagged rows there — or tagged them
+        `capacity` — would pass. The gate is not suspended by the cap's absence, and the
+        two reasons must stay distinguishable in the round's tally.
+        """
+        task_file(self.tasks, "on", "status: in_progress\nflag: true\n")
+        task_file(self.tasks, "off", "status: in_progress\n")
+        rows, _ = self.collect(["on", "off"])
+
+        opened, skipped = oq.select(rows, live=99, target=None)
+
+        self.assertEqual(opened, [])
+        self.assertEqual({r["name"]: r["reason"] for r in skipped},
+                         {"on": "capacity", "off": "not flagged"})
 
     # -- the block --------------------------------------------------------
 
