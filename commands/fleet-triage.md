@@ -30,7 +30,7 @@ idle row fills its context until it can no longer do its own job (measured 2026-
 tier table bans it from the Fleet Manager. That ban is a rule, not a mechanism: nothing refuses
 the run, so placing the session correctly is on whoever opens it.
 
-⚠️ **The sweep and its repairs are the run; this file is the router.** Read a step file only when its **When** holds, and re-read it if its text is not in context (e.g. after a compaction) **or its content changed** — `steps/rules.md` § Re-read the router. The hard rules are mirrored INLINE below so no rule is ever absent from the run.
+⚠️ **The sweep and its repairs are the run; this file is the router.** Read a step file only when its **When** holds, and re-read it if its text is not in context (e.g. after a compaction). The hard rules are mirrored INLINE below so no rule is ever absent from the run.
 
 ## The invariant
 

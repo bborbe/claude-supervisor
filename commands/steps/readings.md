@@ -8,6 +8,16 @@ user-invocable: false
 
 When: every tick — take all six readings (commands in the step)
 
+## The version line — first, before anything else
+
+Print both versions on one line: the **executing** one, read from the probe path, beside the **installed** one. The probe is owned by `docs/fleet-surface.md` § *A plugin install does not reach a running session — the probe and the lever*, and it is **cited, never restated** — that section declares itself *"the single statement of the rule"*.
+
+⚠️ **When the probe resolves to nothing** — no `.in_use` entry carrying this session's pid — report the executing version as `unknown` and compare nothing.
+
+⚠️ **Read the executing version from the probe path** — never echo the installed value into both slots.
+
+⚠️ **When the two differ, name the divergence** — *"executing `<X>` against `<Y>` installed"*; when they agree, report agreement and raise no warning. That divergence is what `commands/steps/rules.md` § Re-read the router acts on: the step bodies this session holds came from `<X>`, whatever the disk now carries. The lever is `/reload-plugins` — never a restart.
+
 ## The saturation reading — the ratio, not tok/s
 
 Every tick prints the fleet working ratio beside the marker line:

@@ -76,7 +76,7 @@ Before naming a cause in Step 5, confirm it against the system it is about — `
 
 Measured 2026-10-12 on a cold `v0.130.0` round: rows 3 (`orphan=46`, `collision=1`), 8 (`ledger=16`) and 11 (`blocked=3`) each held, none was read, and the mandatory `📋 Open with the operator` render was omitted.
 
-⚠️ **The round already prints the reading that settles this — act on it.** `commands/steps/round-readings.md` § *The four reads that stay yours* runs the probe **first on every tick** and prints the executing version beside the installed one, naming a divergence `executing <X> against <Y> installed`. That line *is* the staleness verdict for every step body this session holds: they came from `<X>`, whatever the disk now carries. **When it reports a divergence, re-read each step before executing it** and print `re-read <step> (loaded <X>, installed <Y>)`.
+⚠️ **The round already prints the reading that settles this — act on it.** Both tiers print a version line **first on every tick**: the goal tier in `commands/steps/round-readings.md` § *The four reads that stay yours*, the fleet tier in `commands/steps/readings.md` § *The version line*. Each prints the executing version beside the installed one, naming a divergence `executing <X> against <Y> installed`. That line *is* the staleness verdict for every step body this session holds: they came from `<X>`, whatever the disk now carries. **When it reports a divergence, re-read each step before executing it** and print `re-read <step> (loaded <X>, installed <Y>)`.
 
 ⚠️ **`unknown` never fires.** An unresolvable probe compares nothing, and reading it as stale re-reads a body nobody proved old.
 

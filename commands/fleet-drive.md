@@ -53,7 +53,7 @@ them — it prints a count it was told, not one it measured.
 
 ## Router
 
-Read a step file only when its **When** holds; re-read it if its text is not in context (e.g. after a compaction) **or its content changed** — `steps/rules.md` § Re-read the router.
+Read a step file only when its **When** holds; re-read it if its text is not in context (e.g. after a compaction).
 
 | # | Step | When | File |
 |---|---|---|---|
