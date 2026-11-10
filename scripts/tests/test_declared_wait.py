@@ -308,6 +308,21 @@ class TestTwoClocks(unittest.TestCase):
         self.assertEqual(rec["ts"], NOW - 3600)
         self.assertEqual(action, "fresh")
 
+    def test_a_different_pr_number_is_a_different_wait(self):
+        """Only clock/ETA tokens are volatile — an id still names the observable."""
+        self.write(stop_at("⏰ Ends: PR #753 approved (gh)", NOW - 25 * 3600),
+                   stop_at("⏰ Ends: PR #754 approved (gh)", NOW - 600))
+        rec, action = self.card()
+        self.assertEqual(rec["ts"], NOW - 600)
+        self.assertEqual(action, "fresh")
+
+    def test_eta_and_clock_changes_are_the_same_wait(self):
+        self.assertTrue(dw._same_wait("CI green by ~22:05 (gh, 20 min cap)",
+                                      "CI green by ~23:10 (gh, 45 min cap)"))
+        self.assertTrue(dw._same_wait("re-check 2026-11-10T21:00+01:00",
+                                      "re-check 2026-11-11T09:00+01:00"))
+        self.assertFalse(dw._same_wait("tag v1.2 exists", "tag v1.3 exists"))
+
     def test_a_closer_without_ends_breaks_the_run(self):
         self.write(stop_at("⏰ Ends: PR #753 approved (gh)", NOW - 25 * 3600),
                    stop_at("👤 You: nothing", NOW - 7200),

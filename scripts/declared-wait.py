@@ -55,8 +55,8 @@ dead wait would never be carded.
 Each record also carries `mechanism`: `session-bound` when the slot names a wake living
 inside the session (`Monitor`, `ScheduleWakeup`, `CronCreate`, a background shell / task
 / poll, a background sub-agent, a harness task id), else `external`. A FLAG, not a
-verdict: a live session's background task does wake it, and `~/.claude/CLAUDE.md`
-§ Async State Closer allows it in the `(mechanism, id)` slot — it just cannot outlive
+verdict: a live session's background task does wake it, and the operator's global
+closer rule (§ Async State Closer) allows it in the `(mechanism, id)` slot — it just cannot outlive
 the process, which is why a headless worker the reaper closes never hears it.
 
 ⚠️ **A `Stop` record is a rendered closer panel, never a raised gate** — the same
@@ -85,7 +85,7 @@ ENDS_MARKER = "⏰ Ends:"
 
 MAX_AGE_S = 3600
 
-# Mirrors `~/.claude/CLAUDE.md` § Async State Closer's session-bound wakes — widen both.
+# Mirrors the operator's global closer rule (§ Async State Closer) — widen both.
 SESSION_BOUND = re.compile(
     r"\bMonitor\b|ScheduleWakeup|CronCreate|run_in_background"
     r"|\bbackground\s+(?:bash|shell|task|watcher|poll|sub-?agent)\b"
@@ -129,10 +129,22 @@ def _latest_clock(text):
     return best
 
 
+# Tokens that change between renders of ONE wait — clock times, dates, ETAs, ages,
+# durations. Everything else (a PR number, a version, an id) names the observable and
+# must still distinguish two waits: `PR #753` and `PR #754` are different waits.
+_VOLATILE = re.compile(
+    r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?(?:Z|[+-]\d{2}:?\d{2})?)?"
+    r"|~?\s*\b\d{1,2}:\d{2}(?::\d{2})?\b"
+    r"|~?\s*\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)\b"
+    r"|~\s*\d+",
+    re.IGNORECASE,
+)
+
+
 def _same_wait(a, b):
-    """Two `⏰ Ends:` texts name the same observable — digits ignored (ETAs, ages)."""
+    """Two `⏰ Ends:` texts name the same observable — clock/ETA/duration tokens ignored."""
     def norm(x):
-        return re.sub(r"\s+", " ", re.sub(r"\d+", "", x)).strip().lower()
+        return re.sub(r"\s+", " ", _VOLATILE.sub("", x)).strip().lower()
     return norm(a) == norm(b)
 
 
