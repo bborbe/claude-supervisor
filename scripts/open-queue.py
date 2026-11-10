@@ -128,6 +128,12 @@ FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 # sentinel string, so the key stays a tuple of comparables.
 NO_PRIORITY = 10**6
 
+#: The task tier's deliberate-stop marker — see `is_stopped()`. Shared with
+#: `scripts/task-standdown.py`, which is the only writer, and `scripts/worker-keepalive.py`,
+#: which reads it on the restart path. One key, one truthy set, three readers.
+STOPPED_KEY = "stopped"
+TRUTHY = {"true", "yes", "on"}
+
 
 def frontmatter(text):
     """Return the frontmatter block, or '' when the file has none."""
@@ -222,6 +228,21 @@ def has_blocked_by(block):
     return False
 
 
+def is_stopped(block):
+    """`stopped: true` — the operator deliberately stood this row down.
+
+    The task tier's stand-down marker, written by `scripts/task-standdown.py` (through
+    `vault-cli task set`) when `/supervisor:stop` runs from a worker session. It is a
+    **page field**, not the manager tier's `<slug>.stopped` file, for the reason that
+    file cannot serve here: the state dir is per-user, so a slug would let two same-titled
+    tasks in different vaults share one marker.
+
+    Truthiness matches `is_flagged()`'s set, so the two boolean readers cannot disagree
+    about what `true` looks like.
+    """
+    return (field(block, STOPPED_KEY) or "").strip().lower() in TRUTHY
+
+
 def guards(block, today):
     """The reason this row may not open, or None when it may.
 
@@ -232,6 +253,12 @@ def guards(block, today):
         return "unreadable task file"
     if (field(block, "phase") or "").strip() == "todo":
         return "waiting approval"
+    # ⚠️ **Ahead of every other guard, including `blocked_by` and `defer_date`.** A stop is
+    # the operator's own act and outranks a derived state: a row that is both stopped and
+    # deferred must report `stopped`, or the operator sees the row silently reappear the
+    # day the defer expires with nothing recording that they had ended it.
+    if is_stopped(block):
+        return "stopped"
     if has_blocked_by(block):
         return "blocked"
     state, detail = defer_date.defer_state(field(block, "defer_date"), today)

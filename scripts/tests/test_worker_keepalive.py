@@ -375,6 +375,51 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.assertEqual("recorded", out.getvalue().splitlines()[0])
         self.assertTrue(os.path.exists(
             self.k.state_path(str(self.vault), "A Task")))
+    # --- a stop is not a death ------------------------------------------------
+
+    def test_a_stopped_task_is_not_resumed(self):
+        """SC3(b): the restart half of the crash-vs-stop distinction.
+
+        Paired with the control below, which runs the identical page minus one line. An
+        implementation that jumped every row would pass this case alone — and before this
+        read existed the marker was on the page and nothing here looked at it, so a worker
+        the operator stopped was resumed after its process died.
+        """
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution", "phase: execution\nstopped: true"))
+        rc, out = self.run_it(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("jump", out[0])
+        self.assertIn("stopped", out[1])
+
+    def test_the_same_task_without_the_marker_resumes(self):
+        """The control: one line removed, the verdict flips to `resume`."""
+        self.page()
+        rc, out = self.run_it(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out[0])
+
+    def test_a_stop_outranks_a_defer(self):
+        """A stopped and deferred row reports the stop, not the defer.
+
+        Same ordering rule `open-queue.guards()` applies: the operator's own act outranks
+        a derived state, so the reason names what actually ended the row.
+        """
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution",
+            "phase: execution\nstopped: true\ndefer_date: \"2999-01-01\""))
+        rc, out = self.run_it(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("jump", out[0])
+        self.assertIn("stopped", out[1])
+
+    def test_a_false_stop_marker_still_resumes(self):
+        """The control for the truthy set: `stopped: false` is not a stop."""
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution", "phase: execution\nstopped: false"))
+        rc, out = self.run_it(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out[0])
 
 
 if __name__ == "__main__":
