@@ -7,6 +7,9 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
+## Unreleased
+
+- fix: **the worker crash-loop cap counts close→resume cycles, not resumes inside a 30-minute window.** `scripts/worker-keepalive.py` now resets the resume count only on **progress** — an open box ticked, a new `# Progress` entry, or a new commit on the task's `repo:` branch — so a loop that closes and resumes every ~40 minutes with no progress stops at the 4th resume instead of never tripping. It posts ONE attention card on `crash-loop` (`dedup_key` `crash-loop:<slug>`), which the script did not do before. The store gains a `progress` marker beside `resumes`; a legacy `{resumes: [...]}` store has no baseline, so its first probe falls back to the retired 30-minute window and the next `--record-resume` migrates it. The manager tier (`topic-keepalive.py`) keeps its 30-minute window — the shared helper is untouched. `scripts/tests/test_worker_keepalive.py` covers the no-progress cycles spaced beyond the old window (refused + one card) and the progress reset.
 
 ## v0.274.0
 
