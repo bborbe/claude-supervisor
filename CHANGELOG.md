@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.265.4
 
 - fix: **The stood-down close is a numbered step, not a footnote.** v0.261.0 shipped the close as a step file plus a pointer, and the pointer was a trailing clause inside `section 4`'s digest-count paragraph — no imperative, no heading, no place in the sequence. Section 1 sees a `STOPPED` manager and correctly declines to restart it, and nothing then acted on it, so the leg closed nothing in any round. It became a footnote because `check-budget` refused the actor at its 30720 body budget: the procedure moved to a step file and the pointer was cut to a noun phrase to fit the remaining characters, so *"the reference exists"* was read as *"the reference is followed"*. Now `## 4b. Stood-down close` with an imperative, paid for by tightening four verbose clauses in the same file; `commands/steps/keepalive.md`'s procedure count corrected from five to six. `agents/fleet-keepalive-actor.md`, `commands/steps/keepalive.md`.
 
