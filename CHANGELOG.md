@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.265.3
 
 - fix: **`check-open-manager-resolution` now pins the launcher invocation on both manager create arms, so a rewrite that drops `--default-source manager-default` fails the build instead of silently putting a manager on the `-claude` sibling.** `manager-launcher.py` falls to its sibling rung when `--default-source` is omitted or `vault`, and `resolveManagerLauncher` (`server/spawn-cwd.mjs:266`) does the same when `managerDefault` is absent — which is how a goal manager came up on `claude-opus-5-5` on 2026-11-10 while every configured rung said `cc-private-deepseek`. The three code arms already carry guards (`server/spawn-cwd.test.mjs:280`, `test_flagged_rows.py:426-433`, `test_restart_worker.py:355,429,453`); the two `commands/open.md` prose arms carried none. `LAUNCHER_MARKERS` pins the **whole invocation** per branch, not the bare flag — Step 2C also mentions the flag in prose ("tells it the value came from config"), so a substring marker passes the very mutation it exists to catch; measured, the first version of this guard did. `test_missing_launcher_flag_fails` is the negative control. Change set: `scripts/check-open-manager-resolution.py`, `scripts/tests/test_check_open_manager_resolution.py`, `CHANGELOG.md`.
 
