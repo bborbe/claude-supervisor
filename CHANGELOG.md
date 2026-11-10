@@ -11,6 +11,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - feat: open leg skips a row whose last session ended on a wait a new session cannot clear — `waiting-external` (newest Stop carries `⏰ Ends:`) and `waiting-operator` (newest Stop is an unanswered question card) — read from the row's whole session-id set in `<sid>.events.jsonl`, so slots stop going to workers that park on their first turn
+- feat: `fleet-keeper.py`'s lapse card for a live Fleet Manager offers `restart fresh` — on the operator's answer only, once per card, it runs `restart-worker.py <sid> --reason lapse --fresh-prompt /supervisor:fleet-loop`, which stops the stalled manager and starts a NEW session (fresh context) instead of resuming the exhausted one (operator ruling 2026-11-10). `restart-worker.py` gains `--fresh-prompt` (allowlisted). The keeper's no-kill pin is narrowed to exactly this executor and the 2026-11-06 resume.
 
 ## v0.271.0
 
