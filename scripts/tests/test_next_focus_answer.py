@@ -390,6 +390,25 @@ class ConsumeTests(unittest.TestCase):
         self.assertEqual(pending2, 0)
         self.assertEqual(notes2, [], "the refusal note repeated on the next tick")
 
+    def test_a_transient_refusal_is_not_recorded(self):
+        """A fresh week with no `### N.` blocks must not burn the operator's answer.
+
+        Recording a transient failure would drop the `add it to the plan` answer for
+        good, when the next tick could succeed.
+        """
+        self.weekly.write_text("# Weekly\n\nno blocks here\n", encoding="utf-8")
+        args = ([self.card("add it to the plan")], str(self.vault), "25 Tasks",
+                str(self.dismissed), str(self.consumed), NOW)
+
+        _, notes1, pending1 = answer.consume_items(*args)
+        self.assertTrue(any("refused" in note for note in notes1))
+        self.assertEqual(pending1, 1, "a transient refusal must stay pending")
+
+        _, notes2, pending2 = answer.consume_items(*args)
+        self.assertTrue(any("refused" in note for note in notes2),
+                        "the transient refusal was recorded — the answer is lost")
+        self.assertEqual(pending2, 1)
+
     def test_notes_render_on_an_empty_round(self):
         """A round that could not look must not read like a round that found nothing."""
         rendered = answer.render([], ["k: unhandled answer 'x' — not consumed"], 2, 1)

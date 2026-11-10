@@ -90,6 +90,17 @@ class Refused(Exception):
     """A read that failed. Never collapsed into an empty result."""
 
 
+class Unresolvable(Refused):
+    """A PERMANENT refusal: the name can never become a page.
+
+    Recorded as consumed so `pending` drains — otherwise the same note re-renders
+    every tick forever. A TRANSIENT refusal (an unreadable weekly note, a fresh week
+    with no `### N.` blocks yet) is deliberately NOT recorded: that would silently
+    drop the operator's `add it to the plan` answer, and the next tick could have
+    succeeded.
+    """
+
+
 # --------------------------------------------------------------- the two writes
 
 
@@ -234,8 +245,8 @@ def add_to_plan(vault, tasks_dir, name, day, why_text=""):
     # 2026-11-10: 33 of 110 live blocks named no page and every one of those rows was
     # still proposed. So a name that resolves to nothing is never written.
     if _page_path(vault, tasks_dir, name) is None:
-        raise Refused(f"no page for {name!r} on the task/goal/objective/topic board — "
-                      f"refusing to write a plan row that can never resolve")
+        raise Unresolvable(f"no page for {name!r} on the task/goal/objective/topic "
+                           f"board — refusing to write a plan row that can never resolve")
 
     lines = text.splitlines()
     already_block = any(name in row["names"] for row in nf.parse_weekly(text))
@@ -430,22 +441,26 @@ def consume_items(items, vault, tasks_dir, dismissed_dir, consumed_dir, now):
                 try:
                     detail, extra = add_to_plan(
                         vault, tasks_dir, name, now.date(), why_text)
-                except Refused as exc:
-                    # One unaddable card must not starve the rest of the tick: a
-                    # `leave it out` answer needs nothing from the weekly note, and a
-                    # fresh-week note legitimately carries no `### N.` blocks yet.
+                except Unresolvable as exc:
+                    # PERMANENT: record it so `pending` drains. Without this an
+                    # unresolvable name re-rendered the same note every tick forever
+                    # (measured on three consecutive live ticks, `pending=1` each).
+                    # No dismissal record — that would suppress the row if its page is
+                    # created later.
                     notes.append(f"{card_key}: refused — {exc}")
-                    # RECORD the refusal before moving on. Without it `pending` never
-                    # drains: an unresolvable name is a permanent property, so the same
-                    # card re-rendered the same note every tick forever (measured on
-                    # three consecutive live ticks, `pending=1` each time). No dismissal
-                    # record — that would suppress the row if its page is created later.
                     append_consumed(log_path, {
                         "at": now.isoformat(), "card_key": card_key,
                         "item_id": item_id, "name": name, "kind": kind,
                         "action": "refused", "reason": str(exc),
                     })
                     done.add((card_key, item_id))
+                    continue
+                except Refused as exc:
+                    # TRANSIENT (unreadable note, a fresh week with no `### N.` blocks
+                    # yet): NOT recorded. Recording it would drop the operator's
+                    # `add it to the plan` answer for good, when the next tick could
+                    # succeed. One unaddable card must not starve the rest of the tick.
+                    notes.append(f"{card_key}: refused — {exc}")
                     continue
                 notes.extend(extra)
             entry = {
