@@ -1,30 +1,24 @@
 #!/usr/bin/env python3
-"""`scripts/decision-park-resume.py` — one test per defect the prose version shipped.
+"""`scripts/decision-park-resume.py` — one test per defect, driven through the REAL parsers.
 
-The procedure was prose for six review rounds and each round found a different real defect in it.
-Each of those is a test here, named for the defect, so the seventh cannot come back:
+Round seven's finding was that the previous suite mocked `answered_card` and `last_turn` and
+fabricated a store file, so it was green while three defects were live. Nothing here stands in for
+the code under test: `last_turn` reads a real transcript, `--record` writes the real store through
+`topic-keepalive.py`, and `frontmatter` / `blocked_by` / `parse_iso` are the production functions.
 
-1. kind (b) resumed with no prompt          → `test_kind_b_carries_the_answer_as_the_prompt`
-2. kind (a) read a field the population already guarantees
-                                            → `test_kind_a_requires_the_approval_to_postdate_the_turn`
-3. kind (d) treated an empty `blocked_by` as cleared
-                                            → `test_an_empty_blocked_by_is_not_a_cleared_wait`
-4. no consumption bound at all              → `test_the_cap_is_spent_at_three`
-5. the id recorded was not the one produced → `test_the_emitted_id_is_the_sessions_own`
-6. the cap was armed but never read         → `test_crash_loop_fires_for_a_row_worker_keepalive_would_jump`
+The one seam patched is `session_verdict` — liveness is an external instrument, not this script's.
 """
 import importlib.util
 import io
 import json
 import os
-import sys
+import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.dirname(HERE)
-sys.path.insert(0, SCRIPTS)
 
 _spec = importlib.util.spec_from_file_location(
     "decision_park_resume", os.path.join(SCRIPTS, "decision-park-resume.py"))
@@ -32,185 +26,167 @@ dpr = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dpr)
 
 NOW = 1_800_000_000.0
-
-
-class FakeKeepalive:
-    """The seams: liveness, and the resume store the cap is read from."""
-
-    def __init__(self, verdicts, stamps=None):
-        self.verdicts = verdicts
-        self.stamps = stamps or []
-
-    def session_verdict(self, sid):
-        return self.verdicts.get(sid, "ABSENT")
-
-    def state_path(self, vault, subject, branch="goal"):
-        return os.path.join(vault, f"{subject}.{branch}.resumes")
-
-    def load_resumes(self, path):
-        try:
-            with open(path, encoding="utf-8") as handle:
-                return [float(x) for x in handle.read().split()]
-        except OSError:
-            return list(self.stamps)
-
-    def recent(self, stamps, now):
-        return [s for s in stamps if now - s <= dpr.RESUME_WINDOW]
+TURN = "2026-11-05T00:00:00Z"
+APPROVED_AFTER = "2026-11-06T00:00:00Z"
+APPROVED_BEFORE = "2026-11-04T00:00:00Z"
 
 
 class Base(unittest.TestCase):
     def setUp(self):
-        self.dir = tempfile.mkdtemp()
-        self.vault = self.dir
-        self.tasks = os.path.join(self.dir, "tasks")
+        self.root = tempfile.mkdtemp()
+        self.vault = os.path.join(self.root, "vault")
+        self.tasks = os.path.join(self.vault, "25 Tasks")
+        self.projects = os.path.join(self.root, "projects")
         os.makedirs(self.tasks, exist_ok=True)
+        os.makedirs(self.projects, exist_ok=True)
         self.verdicts = {}
-        self.fake = FakeKeepalive(self.verdicts)
-        self._orig_keepalive = dpr.keepalive
-        dpr.keepalive = lambda: self.fake
-        self._orig_last_turn = dpr.last_turn
-        self._orig_answered = dpr.answered_card
-        dpr.last_turn = lambda sid: dpr.parse_iso("2026-11-05T00:00:00Z")
-        dpr.answered_card = lambda sid: ""
+
+        self._orig_projects = dpr.PROJECTS_DIR
+        dpr.PROJECTS_DIR = self.projects
+        self.k = dpr.keepalive()
+        self._orig_verdict = self.k.session_verdict
+        self.k.session_verdict = lambda sid: self.verdicts.get(sid, "ABSENT")
+        # The store's LOCATION is global (keyed off the vault), so a suite that used it
+        # unisolated would accumulate across runs and across tests. Only the location is
+        # redirected — `record`, `load_resumes` and `recent` stay the production functions.
+        self._orig_store_path = dpr.store_path
+        self.store = os.path.join(self.root, "store")
+        os.makedirs(self.store, exist_ok=True)
+        dpr.store_path = lambda vault, task: os.path.join(self.store, task.replace(" ", "-") + ".json")
 
     def tearDown(self):
-        dpr.keepalive = self._orig_keepalive
-        dpr.last_turn = self._orig_last_turn
-        dpr.answered_card = self._orig_answered
+        dpr.PROJECTS_DIR = self._orig_projects
+        self.k.session_verdict = self._orig_verdict
+        dpr.store_path = self._orig_store_path
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def transcript(self, sid, last_message=TURN):
+        """A real transcript file, in the shape `last_turn` parses."""
+        project = os.path.join(self.projects, "-Users-someone-vault")
+        os.makedirs(project, exist_ok=True)
+        with open(os.path.join(project, sid + ".jsonl"), "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "user", "timestamp": "2026-11-01T00:00:00Z"}) + "\n")
+            handle.write(json.dumps({"type": "assistant", "timestamp": last_message}) + "\n")
 
     def task(self, name, **fm):
         body = "---\n" + "".join(f"{k}: {v}\n" for k, v in fm.items()) + "---\n\n# Impact\n"
         with open(os.path.join(self.tasks, name + ".md"), "w", encoding="utf-8") as handle:
             handle.write(body)
 
-    def run_it(self):
+    def parked(self, name="A Row", sid="sid-1", **extra):
+        fm = {"status": "in_progress", "claude_session_id": sid}
+        fm.update(extra)
+        self.task(name, **fm)
+        self.verdicts[sid] = "ABSENT"
+        self.transcript(sid)
+        return name
+
+    def decide(self):
         out = io.StringIO()
         with redirect_stdout(out):
             rc = dpr.main(["--vault", self.vault, "--tasks-dir", self.tasks,
                            "--now", str(NOW), "--json"])
         return rc, json.loads(out.getvalue())
 
-    def parked(self, name="A Row", sid="sid-1", **extra):
-        fm = {"status": "in_progress", "claude_session_id": sid}
-        fm.update(extra)
-        self.task(name, **fm)
-        self.verdicts[sid] = "ABSENT"
-        return name
+    def resumed(self, result):
+        return [r for r in result["rows"] if r["verdict"] == "resume"]
 
 
-class TestTheSixDefects(Base):
-    # 1
-    def test_kind_b_carries_the_answer_as_the_prompt(self):
-        self.parked()
-        dpr.answered_card = lambda sid: "run it"
-        rc, out = self.run_it()
+class TestTheWaits(Base):
+    def test_kind_a_requires_the_approval_to_postdate_the_real_transcript(self):
+        self.parked(approved_at=APPROVED_BEFORE)
+        rc, out = self.decide()
         self.assertEqual(0, rc)
-        row = [r for r in out["rows"] if r["verdict"] == "resume"][0]
-        self.assertEqual("b", row["kind"])
-        self.assertEqual("run it", row["prompt"], "kind (b) must never resume bare")
-
-    def test_a_skip_answer_is_not_an_answer(self):
-        self.parked()
-        # answered_card returns None for a skip, by construction — assert the contract here.
-        dpr.answered_card = lambda sid: ""
-        dpr.last_turn = lambda sid: None
-        rc, out = self.run_it()
-        self.assertEqual(0, rc)
-        self.assertFalse([r for r in out["rows"] if r["verdict"] == "resume"])
-
-    # 2
-    def test_kind_a_requires_the_approval_to_postdate_the_turn(self):
-        self.parked(approved_at="2026-11-01T00:00:00Z")
-        # approval BEFORE the last turn → the worker was still running after approval
-        dpr.last_turn = lambda sid: dpr.parse_iso("2026-11-02T00:00:00Z")
-        rc, out = self.run_it()
-        self.assertEqual(0, rc)
-        self.assertFalse([r for r in out["rows"] if r["verdict"] == "resume"],
-                         "an old approval is not a cleared wait")
+        self.assertFalse(self.resumed(out), "an approval older than the last turn is not a wait")
 
     def test_kind_a_fires_when_the_approval_is_later(self):
-        self.parked(approved_at="2026-11-03T00:00:00Z")
-        dpr.last_turn = lambda sid: dpr.parse_iso("2026-11-02T00:00:00Z")
-        rc, out = self.run_it()
-        self.assertEqual(0, rc)
-        row = [r for r in out["rows"] if r["verdict"] == "resume"][0]
-        self.assertEqual("a", row["kind"])
+        self.parked(approved_at=APPROVED_AFTER)
+        rc, out = self.decide()
+        self.assertEqual("a", self.resumed(out)[0]["kind"])
 
-    # 3
     def test_an_empty_blocked_by_is_not_a_cleared_wait(self):
-        self.parked()  # no blocked_by at all
-        dpr.last_turn = lambda sid: dpr.parse_iso("2026-11-05T00:00:00Z")
-        rc, out = self.run_it()
-        self.assertEqual(0, rc)
-        self.assertFalse([r for r in out["rows"] if r["verdict"] == "resume"],
-                         "an empty set satisfies 'every name is terminal' vacuously")
+        self.parked()
+        rc, out = self.decide()
+        self.assertFalse(self.resumed(out), "'every name is terminal' is vacuously true of {}")
 
     def test_a_non_empty_blocked_by_all_terminal_fires(self):
         self.task("Dep Done", status="completed", claude_session_id="")
         self.parked(blocked_by="'[[Dep Done]]'")
-        dpr.last_turn = lambda sid: dpr.parse_iso("2026-11-05T00:00:00Z")
-        rc, out = self.run_it()
-        self.assertEqual(0, rc)
-        row = [r for r in out["rows"] if r["verdict"] == "resume"][0]
-        self.assertEqual("d", row["kind"])
+        rc, out = self.decide()
+        self.assertEqual("d", self.resumed(out)[0]["kind"])
 
-    # 4
-    def test_the_cap_is_spent_at_three(self):
-        name = self.parked()
-        dpr.answered_card = lambda sid: "go"
-        path = os.path.join(self.vault, f"{name}.decision.resumes")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(" ".join(str(NOW - 60) for _ in range(3)))
-        rc, out = self.run_it()
-        self.assertEqual(0, rc)
+    def test_a_non_terminal_dependency_does_not_fire(self):
+        self.task("Dep Open", status="in_progress", claude_session_id="")
+        self.parked(blocked_by="'[[Dep Open]]'")
+        rc, out = self.decide()
+        self.assertFalse(self.resumed(out))
+
+    def test_one_unreadable_wait_does_not_strand_the_other(self):
+        """Round seven's all-or-nothing rule: (a) unreadable must not suppress a cleared (d)."""
+        self.task("Dep Done", status="completed", claude_session_id="")
+        self.parked(approved_at="not-a-date", blocked_by="'[[Dep Done]]'")
+        rc, out = self.decide()
+        self.assertEqual("d", self.resumed(out)[0]["kind"])
+
+
+class TestTheCap(Base):
+    def test_the_cap_is_read_from_the_store_the_record_writes(self):
+        name = self.parked(approved_at=APPROVED_AFTER)
+        for _ in range(dpr.RESUME_CAP):
+            dpr.record(self.vault, name, "sid-1", NOW - 60)
+        self.assertEqual(dpr.RESUME_CAP, dpr.spent(self.vault, name, NOW))
+        rc, out = self.decide()
         self.assertEqual("crash-loop", out["rows"][0]["verdict"])
 
-    # 5
-    def test_the_emitted_id_is_the_sessions_own(self):
-        self.parked(sid="sid-abc")
-        dpr.answered_card = lambda sid: "go"
-        rc, out = self.run_it()
-        self.assertEqual("sid-abc", out["rows"][0]["sid"])
+    def test_record_writes_the_path_spent_reads(self):
+        """Round seven's defect in one assertion: a counter nothing writes is not a bound."""
+        name = self.parked(approved_at=APPROVED_AFTER)
+        path = dpr.store_path(self.vault, name)
+        self.assertEqual(0, dpr.spent(self.vault, name, NOW))
+        dpr.record(self.vault, name, "sid-1", NOW - 10)
+        self.assertTrue(os.path.exists(path))
+        self.assertEqual(1, dpr.spent(self.vault, name, NOW))
 
-    # 6
-    def test_crash_loop_fires_for_a_row_worker_keepalive_would_jump(self):
-        """The cap this script reads is its own — worker-keepalive's verdict would `jump` a
-        parked-phase row and never reach its crash-loop branch, which is why it cannot bound."""
-        name = self.parked(phase="todo")
-        dpr.answered_card = lambda sid: "go"
-        path = os.path.join(self.vault, f"{name}.decision.resumes")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(" ".join(str(NOW - 60) for _ in range(3)))
-        rc, out = self.run_it()
-        self.assertEqual("crash-loop", out["rows"][0]["verdict"])
+    def test_a_resume_under_the_cap_is_emitted(self):
+        self.parked(approved_at=APPROVED_AFTER)
+        rc, out = self.decide()
+        self.assertEqual("resume", out["rows"][0]["verdict"])
+        self.assertIn("attempt 1 of", out["rows"][0]["detail"])
 
 
 class TestUnread(Base):
     def test_a_live_session_is_not_a_candidate(self):
-        self.parked()
+        self.parked(approved_at=APPROVED_AFTER)
         self.verdicts["sid-1"] = "LIVE"
-        rc, out = self.run_it()
+        rc, out = self.decide()
         self.assertEqual(0, out["candidates"])
 
     def test_an_undecidable_probe_is_unread_not_zero(self):
-        self.parked()
+        self.parked(approved_at=APPROVED_AFTER)
         self.verdicts["sid-1"] = "UNKNOWN"
-        rc, out = self.run_it()
+        rc, out = self.decide()
         self.assertEqual(1, len(out["unread"]))
         self.assertEqual(0, out["candidates"])
-
-    def test_an_unparseable_approval_is_unread(self):
-        self.parked(approved_at="not-a-date")
-        dpr.last_turn = lambda sid: NOW
-        rc, out = self.run_it()
-        self.assertEqual(1, len(out["unread"]))
 
     def test_a_terminal_task_is_not_a_candidate(self):
         self.task("Done Row", status="completed", claude_session_id="sid-9",
-                  approved_at="2026-11-01T00:00:00Z")
+                  approved_at=APPROVED_AFTER)
         self.verdicts["sid-9"] = "ABSENT"
-        rc, out = self.run_it()
+        rc, out = self.decide()
         self.assertEqual(0, out["candidates"])
+
+    def test_a_non_dict_json_line_in_the_transcript_does_not_crash(self):
+        project = os.path.join(self.projects, "-Users-someone-vault")
+        os.makedirs(project, exist_ok=True)
+        with open(os.path.join(project, "sid-1.jsonl"), "w", encoding="utf-8") as handle:
+            handle.write('"just a string"\n')
+            handle.write(json.dumps({"timestamp": TURN}) + "\n")
+        self.task("A Row", status="in_progress", claude_session_id="sid-1",
+                  approved_at=APPROVED_AFTER)
+        self.verdicts["sid-1"] = "ABSENT"
+        rc, out = self.decide()
+        self.assertEqual(0, rc, "a non-dict line must not take the round down")
+        self.assertEqual("a", self.resumed(out)[0]["kind"])
 
 
 if __name__ == "__main__":
