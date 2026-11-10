@@ -18,11 +18,14 @@ absence clause needs:
   * **`unknown` is never `0`** -- an unreadable queue or capacity store exits non-zero.
   * **the `--flagged` batch and `select()` agree on the flag gate and the shared guards** --
     a fixture table through `flagged-rows.py`'s `eligible()` (the executable form of
-    `commands/open.md` § Step 0.5's selector) and through `select()`. Two divergences are
+    `commands/open.md` § Step 0.5's selector) and through `select()`. Three divergences are
     DELIBERATE and are named in `test_batch_and_select_agree_on_the_shared_verdicts`, never
     claimed as agreement: the batch treats `flag: true` on a `phase: todo` row as the
-    approval and opens it, while the fleet round must never approve; and the batch keeps a
-    `flag_set_by` provenance gate (`OPENING_ACTORS`) that `select()` does not read.
+    approval and opens it, while the fleet round must never approve; the batch keeps a
+    `flag_set_by` provenance gate (`OPENING_ACTORS`) that `select()` does not read; and a
+    QUOTED `flag: "true"` is admitted by `select()` and refused by the batch, because
+    `is_flagged()` strips quotes where the batch's task predicate reads a YAML string.
+    `test_a_quoted_flag_diverges_from_the_batch` pins that last one in both directions.
 
 Run: python3 -m unittest discover -s scripts/tests -v
 """
@@ -244,8 +247,9 @@ class OpenQueueTest(unittest.TestCase):
             Scope; `docs/session-tiers.md` § rule 2).
           * a QUOTED flag — `is_flagged()` runs `field()`, which strips quotes, so
             `flag: "true"` is admitted here; `flagged-rows.py`'s task predicate rejects a
-            quoted scalar, because YAML reads it as a string and never a boolean. This is
-            the only divergence that changes WHAT OPENS, and
+            quoted scalar, because YAML reads it as a string and never a boolean. Unlike
+            the other two — separate gates each side deliberately owns — this is a
+            disagreement about the FLAG PREDICATE itself, and
             `test_a_quoted_flag_diverges_from_the_batch` pins both directions.
         """
         fixtures = [
@@ -287,9 +291,10 @@ class OpenQueueTest(unittest.TestCase):
         `is_flagged()` reads through `field()`, which strips quotes, so `flag: "true"` is
         admitted by the fleet round; `flagged-rows.py`'s task predicate rejects a quoted
         scalar because YAML resolves it to a string, never a boolean. So this row opens
-        automatically through the round and is refused by the `--flagged` batch — the one
-        divergence that changes WHAT OPENS, and the reason it is named here rather than
-        folded into the agreement table.
+        automatically through the round and is refused by the `--flagged` batch. All three
+        divergences change what opens; this is the only one that is a disagreement about
+        the flag PREDICATE rather than about a separate gate each side owns, which is why
+        it is pinned here rather than folded into the agreement table.
         """
         block = 'status: in_progress\nflag: "true"\n'
         task_file(self.tasks, "quoted", block)
