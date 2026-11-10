@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.265.3
 
 - fix: **the answer-reach `mcp` leg now has an emitter, so the reach record can actually carry both routes.** `commands/steps/round-liveness.md` and `commands/steps/re-arm.md` said the leg "needs nothing" because the server writes it on `answer_permission`'s foreign-park reply — true of the server, false of the caller: a manager only ever calls with a real park id, which IS in the server's `pending` map, so the settle path runs and the foreign-park arm never does. Measured 2026-11-10: **18 `wrapper` reaches and 0 `mcp` reaches**. Both steps now spell out the sentinel call, which settles nothing and is the only writer of that leg.
 
