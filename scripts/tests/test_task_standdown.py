@@ -120,6 +120,21 @@ class TaskStanddownTest(unittest.TestCase):
         self.assertEqual("stopped\t/elsewhere/25 Tasks/A Task.md", out[0])
         self.assertEqual(self.writes[0][3], "explicit")
 
+    def test_a_vault_that_disagrees_with_the_page_is_refused(self):
+        """⚠️ The wrong-target write `--vault` could cause.
+
+        The stem is written through `vault-cli task set`, which resolves it against the
+        vault it is *given* — so a page resolved in vault `v` plus `--vault other` would
+        write `other`'s same-titled task. The flag exists to disambiguate, never to
+        redirect, so a disagreement refuses.
+        """
+        ts.anchored_task = lambda sid, cwd, root: ("/tmp/v/25 Tasks/A Task.md", False, "")
+        code, out = self.run_main(["--session", "sid-1", "--vault", "other"])
+
+        self.assertEqual(1, code)
+        self.assertEqual("cannot-tell\t/tmp/v/25 Tasks/A Task.md", out[0])
+        self.assertEqual([], self.writes)
+
     def test_the_writer_gets_the_stem_not_the_path(self):
         self.assertEqual(ts.task_name("/v/25 Tasks/Some Long Title.md"), "Some Long Title")
         self.assertEqual(ts.task_name("Bare Name"), "Bare Name")

@@ -175,6 +175,36 @@ def now_iso():
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
+def write_vault(explicit, path, known):
+    """`(vault, reason)` — which vault to write the stem under, or why not.
+
+    ⚠️ **`--vault` must agree with the path's own vault, and an earlier version let it
+    silently override.** The stem is written through `vault-cli task set`, which resolves
+    it against the vault it is *given* — so a page resolved in vault A plus `--vault B`
+    would write B's same-titled task, a wrong-target write reached through the very flag
+    meant to prevent one. A disagreement is `cannot-tell`, not a preference.
+    """
+    resolved = vault_name_for(path, known)
+    if explicit:
+        if resolved and resolved != explicit:
+            return "", (
+                "%s belongs to vault %r but --vault names %r; refusing to write a stem "
+                "into the wrong vault" % (path, resolved, explicit)
+            )
+        return explicit, ""
+    if not resolved:
+        # ⚠️ **Never hand `vault-cli` a bare stem.** It resolves the stem against its
+        # *configured default* vault, so a page this process could not attribute would be
+        # written into a same-titled task in a different vault — a silent wrong-target
+        # write, and exactly the failure the stem-plus-`--vault` rule exists to prevent.
+        # An unattributable path is `cannot-tell`, never "the default is probably right".
+        return "", (
+            "cannot attribute %s to a configured vault; pass --vault (a bare stem would "
+            "be written against vault-cli's default vault instead)" % path
+        )
+    return resolved, ""
+
+
 def anchored_task(session_id, cwd, vault_root):
     """`(path, handed_off, reason)` for the task this session is anchored to.
 
@@ -238,19 +268,10 @@ def stamp(args):
         print("cannot-tell\t%s" % path)
         print("vault-cli config list is unreadable", file=sys.stderr)
         return 1
-    vault = args.vault or vault_name_for(path, known)
+    vault, reason = write_vault(args.vault, path, known)
     if not vault:
-        # ⚠️ **Never hand `vault-cli` a bare stem.** It resolves the stem against its
-        # *configured default* vault, so a page this process could not attribute would be
-        # written into a same-titled task in a different vault — a silent wrong-target
-        # write, and exactly the failure the stem-plus-`--vault` rule exists to prevent.
-        # An unattributable path is `cannot-tell`, never "the default is probably right".
         print("cannot-tell\t%s" % path)
-        print(
-            "cannot attribute %s to a configured vault; pass --vault (a bare stem would "
-            "be written against vault-cli's default vault instead)" % path,
-            file=sys.stderr,
-        )
+        print(reason, file=sys.stderr)
         return 1
     name = task_name(path)
 
@@ -322,14 +343,10 @@ def clear(args):
         print("no-task\t")
         print(reason, file=sys.stderr)
         return 1
-    vault = args.vault or vault_name_for(path, known)
+    vault, reason = write_vault(args.vault, path, known)
     if not vault:
         print("cannot-tell\t%s" % path)
-        print(
-            "cannot attribute %s to a configured vault; pass --vault (a bare stem would "
-            "be written against vault-cli's default vault instead)" % path,
-            file=sys.stderr,
-        )
+        print(reason, file=sys.stderr)
         return 1
     name = task_name(path)
 

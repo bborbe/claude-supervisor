@@ -46,9 +46,15 @@ the round's act:
 
   * **`phase: todo`** — the operator's approval inbox. `commands/open.md` Gate 1
     refuses it, and this leg does not become an approval path by being automated.
+  * **`stopped: true`** — the operator ended the row deliberately
+    (`scripts/task-standdown.py`, written by `/supervisor:stop`). It outranks every
+    **derived** guard — a stopped-and-deferred row reports `stopped` — but not the two
+    above, which describe the row's own state rather than a derivation.
   * **a `blocked_by`** — the row names a dependency that is not met.
   * **a future `defer_date`** — defer-UNTIL, not a due date: the row is deliberately
     parked, and `next-focus.py` reads the same distinction.
+  * **a declared wait** — `prior_wait()` reads the session's own `Stop` records; see its
+    docstring for why only the unattended path must not spend a slot on a row that parks.
   * **an unreadable task file** — refused, because an absent guard read is not a clean
     one. Opening on an unknown guard state is the failure this branch exists to stop.
 
