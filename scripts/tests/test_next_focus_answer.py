@@ -409,6 +409,89 @@ class ConsumeTests(unittest.TestCase):
                         "the transient refusal was recorded — the answer is lost")
         self.assertEqual(pending2, 1)
 
+    def test_a_name_containing_the_separator_is_not_truncated(self):
+        """A task name may itself contain ` — ` — 4 of the 33 live bad blocks were this.
+
+        The payload is built EXACTLY as `next-focus.py` builds it, `source.file`
+        included: the path is `25 Tasks/<name>.md`, so it carries the separator too and
+        no fixed split direction can find the boundary. A fixture path without the name
+        would pass while the live shape still failed.
+        """
+        name = "Brogrammers Assistant Dies Mid-Request — claude process ended"
+        page = self.vault / "25 Tasks" / f"{name}.md"
+        page.write_text(
+            "---\nstatus: next\nphase: planning\npriority: \"1\"\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        payload = f"{name} — priority: 1, in no current plan — {page}:1"
+
+        consumed, notes = self.run_consume([self.card("add it to the plan", payload=payload)])
+
+        self.assertEqual(consumed[0]["name"], name, "the name was truncated")
+        self.assertEqual(notes, [])
+        self.assertIn(f"**Task:** [[{name}]]", self.weekly.read_text(encoding="utf-8"))
+
+    def test_the_path_oracle_wins_over_a_longer_page_name(self):
+        """`Foo — bar` may exist; a row genuinely named `Foo` must still resolve to Foo.
+
+        The payload's own path is the exact oracle: `source.file` is the page that
+        produced the row, so its stem is the name however many separators either side
+        carries.
+        """
+        for page_name in ("Foo", "Foo — bar"):
+            (self.vault / "25 Tasks" / f"{page_name}.md").write_text(
+                "---\nstatus: next\n---\n\nbody\n", encoding="utf-8")
+        foo = self.vault / "25 Tasks" / "Foo.md"
+
+        name, why = answer._name_from_payload(
+            f"Foo — bar — baz — {foo}:1", str(self.vault), "25 Tasks", "task")
+
+        self.assertEqual(name, "Foo", "resolved to the longer page")
+        self.assertEqual(why, "bar")
+
+    def test_a_vanished_page_falls_back_and_is_refused(self):
+        """A separator-carrying name whose page is gone must be refused, not guessed."""
+        gone = self.vault / "25 Tasks" / "Gone — name.md"
+        consumed, notes = self.run_consume([
+            self.card("add it to the plan",
+                      payload=f"Gone — name — priority: 1, in no current plan — {gone}:1"),
+        ])
+
+        self.assertEqual(consumed, [])
+        self.assertTrue(any("refusing to write" in note for note in notes))
+        self.assertNotIn("Gone", self.weekly.read_text(encoding="utf-8"))
+
+    def test_an_alert_name_is_taken_verbatim(self):
+        """An alert's name is a raw alert line — never a page, so never oracle-resolved."""
+        (self.vault / "25 Tasks" / "Trading.md").write_text(
+            "---\nstatus: next\n---\n\nbody\n", encoding="utf-8")
+
+        name, _ = answer._name_from_payload(
+            "Trading — High error rate — alert firing, in no current plan — "
+            "prometheus-alerts.sh:1",
+            str(self.vault), "25 Tasks", "alert")
+
+        self.assertEqual(name, "Trading — High error rate")
+
+    def test_the_path_oracle_survives_a_separator_in_the_path(self):
+        """`parts[-1]` is only a full path when the name has no separator.
+
+        With one, the path splits too, so a fragment can resolve to an unrelated page
+        and a wrong row would be written. The `.md:<line>` tail is the exact oracle.
+        """
+        name = "Brogrammers Assistant Dies Mid-Request — claude process ended"
+        # A page named after the path FRAGMENT the broken oracle would have produced.
+        (self.vault / "25 Tasks" / "claude process ended.md").write_text(
+            "---\nstatus: next\n---\n\nbody\n", encoding="utf-8")
+        page = self.vault / "25 Tasks" / f"{name}.md"
+        page.write_text("---\nstatus: next\n---\n\nbody\n", encoding="utf-8")
+
+        got, _ = answer._name_from_payload(
+            f"{name} — priority: 1, in no current plan — {page}:1",
+            str(self.vault), "25 Tasks", "task")
+
+        self.assertEqual(got, name, "resolved to the path fragment instead of the name")
+
     def test_notes_render_on_an_empty_round(self):
         """A round that could not look must not read like a round that found nothing."""
         rendered = answer.render([], ["k: unhandled answer 'x' — not consumed"], 2, 1)

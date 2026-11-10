@@ -378,6 +378,57 @@ def unquote_payload(payload):
     return parts[0] if len(parts) == 1 else text
 
 
+def _name_from_payload(payload, vault, tasks_dir, kind=""):
+    """`(name, why_text)` — the row name, resolved from the payload's own file path.
+
+    The payload is `<name> — <why> — <file>:<line>`, and **no split direction works**:
+    `source.file` is `25 Tasks/<name>.md`, so a name containing ` — ` puts the separator
+    in the path too (65 files in `25 Tasks/` carry one).
+
+    Three oracles, strongest first:
+      1. **The payload's own path.** `due_today`, the P1-task and the blocked-goal rows
+         all build `{"file": str(path)}` with `name = path.stem`, so the stem IS the
+         name — exact, and immune to the separator on both sides. A `plan_candidates`
+         row cites a plan page whose stem never resolves, so it falls through.
+      2. **The longest leading ` — `-joined prefix that resolves to a page** — longest
+         first, because the name is the maximal prefix and a shorter one is a
+         different (wrong) page. The loop stops before the final segment, so a path can
+         never be mistaken for a name.
+      3. **The first segment, unchanged** — `add_to_plan` then refuses it, so a name
+         that resolves to nothing is never written as a wrong row.
+    """
+    parts = payload.split(" — ")
+    first = parts[0].strip()
+
+    # An alert's name is a raw `prometheus-alerts.sh` line and can never be a page, so
+    # the board oracles below would resolve a fragment of it to some unrelated task.
+    # Its tail IS fixed (`alert firing, in no current plan` / `prometheus-alerts.sh:<n>`),
+    # so splitting from the right is exact here even though it is wrong for tasks.
+    if kind == "alert":
+        tail = payload.rsplit(" — ", 2)
+        return tail[0].strip(), (tail[1].strip() if len(tail) > 1 else "")
+
+    if len(parts) > 1:
+        # The payload ends with `<source.file>:<source.line>` and `source.file` ends
+        # with `<name>.md`, so the WHOLE payload ends with `<name>.md:<line>`. Reading
+        # that tail as a path is exact even when the name — and therefore the path —
+        # carries the separator: `parts[-1]` is only a full path when the name has
+        # none, which is the very case this is here to fix.
+        match = re.search(r"^(.*)\.md:(\d+)$", payload, re.S)
+        if match:
+            stem = Path(match.group(1)).stem
+            if stem and _page_path(vault, tasks_dir, stem) is not None:
+                k = stem.count(" — ") + 1
+                return stem, (parts[k].strip() if k < len(parts) else "")
+
+    for i in range(len(parts) - 1, 0, -1):
+        candidate = " — ".join(parts[:i]).strip()
+        if candidate and _page_path(vault, tasks_dir, candidate) is not None:
+            return candidate, parts[i].strip()
+
+    return first, (parts[1].strip() if len(parts) > 1 else "")
+
+
 def kind_of_key(card_key):
     parts = card_key.split(":")
     return parts[2] if len(parts) > 2 else ""
@@ -416,10 +467,8 @@ def consume_items(items, vault, tasks_dir, dismissed_dir, consumed_dir, now):
         # Unquote ONCE and derive both fields from it: reading `why_text` off the raw
         # payload left a trailing `'` in the row for any quoted multi-segment payload.
         payload = unquote_payload(card.get("payload", ""))
-        segments = payload.split(" — ")
-        name = segments[0].strip()
-        why_text = segments[1] if len(segments) > 1 else ""
         kind = kind_of_key(card_key)
+        name, why_text = _name_from_payload(payload, vault, tasks_dir, kind)
         if not name:
             notes.append(f"{card_key}: card carries no payload name — not consumed")
             continue
