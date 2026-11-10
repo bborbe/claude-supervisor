@@ -4,11 +4,11 @@
   "files": {
     "agents/fleet-drive.md": 35497,
     "agents/fleet-sweep-reader.md": 41585,
-    "agents/goal-drive.md": 142819,
-    "agents/goal-sweep-reader.md": 167634,
+    "agents/goal-drive.md": 142809,
+    "agents/goal-sweep-reader.md": 167629,
     "commands/fleet-loop.md": 4903,
     "commands/goal-drive.md": 10210,
-    "commands/goal-status.md": 47051,
+    "commands/goal-status.md": 47046,
     "commands/open.md": 83880,
     "commands/steps/round-tail.md": 31618,
     "commands/worker-drive.md": 49817
