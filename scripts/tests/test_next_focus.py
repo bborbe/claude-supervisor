@@ -378,6 +378,23 @@ class NextFocusTest(unittest.TestCase):
         self.assertIn("After The Rule", proposed,
                       "a bullet after the rule is not deferred")
 
+    def test_deferred_link_resolves_regardless_of_filename_case(self):
+        """The exclusion must key on the entry's name, not on the link's spelling.
+
+        `find()` builds the path from the link text, so on a case-insensitive
+        filesystem `[[deferred task]]` resolves to a stem spelled the link's way while
+        `proposed()` keys on the entry's `Deferred Task` — keying on the link's stem
+        reports "1 excluded" and proposes the row anyway. On a case-sensitive
+        filesystem the same link resolves to nothing at all.
+        """
+        self.write(f"60 Periodic Notes/Weekly/{WEEK}.md",
+                   WEEKLY + "\n# Explicitly Deferred\n\n- **[[deferred task]]** — link.\n")
+        self.write("25 Tasks/Deferred Task.md", task("Deferred Task", priority="1"))
+        result = self.run_script()
+        self.assertNotIn("Deferred Task", [r["name"] for r in result["proposed"]])
+        self.assertIn("— 1 name(s) excluded",
+                      [n for n in result["notes"] if "# Explicitly Deferred" in n][0])
+
     def test_weekly_without_a_deferred_section_says_nothing_about_it(self):
         """The note is a reading of the section, not a standing line on every run."""
         result = self.run_script()

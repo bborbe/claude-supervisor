@@ -332,6 +332,27 @@ class Board:
                 return kind, path
         return None, None
 
+    def resolve_page(self, name):
+        """The page a link names, carrying the filename's real casing.
+
+        `find()` builds the path from the LINK's own text, which is the wrong name to
+        key an exclusion on: on a case-insensitive filesystem `[[deferred one]]`
+        resolves to a stem spelled the link's way while `proposed()` keys on the
+        directory entry's `Deferred One`, and on a case-sensitive one the same link
+        resolves to nothing at all. Both would leave the row proposed. Matching the
+        entry by its casefolded stem returns the name `proposed()` will use, on either
+        filesystem.
+        """
+        # Same containment rule as `find`: a plan page is content and may link anywhere.
+        if not name or name.startswith(("/", "~")) or ".." in Path(name).parts:
+            return None, None
+        target = name.casefold()
+        for kind, d in self.dirs.items():
+            for entry in sorted(d.glob("*.md")):
+                if entry.stem.casefold() == target:
+                    return kind, entry
+        return None, None
+
     def read(self, name):
         if name in self._cache:
             return self._cache[name]
@@ -491,14 +512,14 @@ def plan_candidates(vault, board, day, notes):
         names, heading_line, present = parse_deferred(weekly_text)
         if present:
             for name, _line in names:
-                kind, path, _fm = board.read(name)
+                # Resolved to the entry's own name, not the link text: `proposed()` keys
+                # on the directory entry's stem, so a link spelled differently would be
+                # reported as excluded while the row was still proposed.
+                kind, path = board.resolve_page(name)
                 if path is None:
                     notes.append(f"deferred {name}: no page in tasks/goals/topics")
                     continue
-                # Keyed on the resolved filename stem, not on the link text: `proposed()`
-                # keys on `path.stem`, so a link whose case differs from the file's would
-                # be reported as excluded while the row was still proposed.
-                deferred.add((kind, Path(path).stem))
+                deferred.add((kind, path.stem))
             notes.append(f"weekly {keys['weekly']}: # Explicitly Deferred "
                          f"(line {heading_line}) — {len(deferred)} name(s) excluded")
     return out, deferred
