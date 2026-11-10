@@ -390,21 +390,26 @@ def cmd_render(args):
             # dedup key and re-card a stall that was already carded.
             continue
         prior_carded = row["wait_carded"]
+        posted = ""
         if row["action"] == "escalate":
             if args.no_post:
                 row["card"] = "not posted (--no-post)"
             else:
-                row["card"] = post_card(row, threshold=threshold,
-                                        ask_script=args.attention_ask_script) or ""
-        # The carded marker names the observable pair that was carded. It survives only
-        # while that pair is unchanged: a re-declaration clears it, so a later stall on
-        # the new observable can card again (SC2). A failed post leaves it cleared, so
-        # the next round retries rather than silently swallowing the stall.
-        if row["action"] == "escalate" and row["card"]:
+                posted = post_card(row, threshold=threshold,
+                                   ask_script=args.attention_ask_script) or ""
+                row["card"] = posted
+        # ⚠️ **The carded marker is set by a REAL post only, never by a rendered one.**
+        # Keying it off `row["card"]` was the first draft and `--no-post` sets that field
+        # to a non-empty "not posted" string — so a dry run recorded every stall as
+        # carded and the next real round suppressed the card it exists to send. A dry
+        # run must leave the store's dedup state exactly as it found it.
+        if posted:
             new_carded = row["key"]
         elif prior_carded == row["key"]:
             new_carded = prior_carded
         else:
+            # The observable moved: clear the marker so a later stall on the new
+            # observable can card again (SC2).
             new_carded = ""
         entry = {
             "wait_since": row["wait_since"],

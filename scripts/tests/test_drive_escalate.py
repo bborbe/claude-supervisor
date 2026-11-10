@@ -189,6 +189,35 @@ class EscalateTest(unittest.TestCase):
         self.assertEqual(stored[sid]["wait_carded"], "", "fresh, so nothing carded yet")
         self.assertEqual(self.posts, [])
 
+    def test_no_post_leaves_the_dedup_state_alone(self):
+        """`--no-post` must not mark a stall carded, or the next real round suppresses it.
+
+        This is the bug the local review caught: keying the carded marker off a non-empty
+        `row["card"]` meant the dry run's own "not posted (--no-post)" string counted as a
+        post, so every stall was recorded as carded and never actually sent.
+        """
+        sid = "aaaaaaaa-0000-0000-0000-00000000000c"
+        self.write_events(sid, stop_record(NOW - 25 * HOUR))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            drive_escalate.main(
+                ["render", "--now", str(NOW), "--store", self.store, "--no-post",
+                 "--declared-wait-script", str(DECLARED_WAIT)]
+            )
+        self.assertIn("not posted (--no-post)", buf.getvalue())
+        with open(self.store, encoding="utf-8") as handle:
+            stored = json.load(handle)
+        self.assertEqual(
+            stored[sid]["wait_carded"], "",
+            "a dry run must leave the dedup state exactly as it found it",
+        )
+        self.assertEqual(self.posts, [], "a dry run posts nothing")
+
+        # The real round that follows must still send the card.
+        rc, out = self.render(now=NOW + 60)
+        self.assertIn("card: ITEM1", out)
+        self.assertEqual(len(self.posts), 1)
+
     def test_corrupt_store_refuses_rather_than_recarding(self):
         """An unparseable store is a refusal, never an empty one — else every card repeats."""
         sid = "aaaaaaaa-0000-0000-0000-000000000007"
