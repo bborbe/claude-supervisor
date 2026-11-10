@@ -129,6 +129,39 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.assertEqual(1, rc)
         self.assertEqual("cannot-tell", out[0])
 
+    def test_every_spelling_of_no_id_is_one_fact(self):
+        """Absent, empty and literal `null` must be the same fact: nothing recorded.
+
+        The `null` shape is the measured defect (2026-11-08). `scalar()` returns the four
+        characters `null`, which is truthy, and `session-liveness.py` admits any lowercase
+        prefix as a legal argument — so the probe answered ABSENT and this script printed
+        `resume` for a session that was never named. The assertion is on the probe NOT being
+        called, which is the state-independent form: a version that folded the id but still
+        probed it would pass an output-only check on a day the registry read failed.
+        """
+        shapes = {
+            "absent": TASK_PAGE.format(sid="sid-1").replace(
+                "claude_session_id: sid-1\n", ""),
+            "empty": TASK_PAGE.format(sid=""),
+            "literal null": TASK_PAGE.format(sid="null"),
+        }
+        for name, body in shapes.items():
+            with self.subTest(shape=name):
+                self.page(body=body)
+                probed = []
+
+                def boom(sid):
+                    probed.append(sid)
+                    raise AssertionError(f"session_verdict({sid!r}) must not be called")
+
+                self.kp.session_verdict = boom
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    rc = self.k.main(["--vault", str(self.vault), "--task", "A Task"])
+                self.assertEqual(1, rc)
+                self.assertEqual("cannot-tell", out.getvalue().splitlines()[0])
+                self.assertEqual([], probed)
+
     # --- a park is not a death ------------------------------------------------
 
     def test_a_held_task_is_not_resumed(self):
