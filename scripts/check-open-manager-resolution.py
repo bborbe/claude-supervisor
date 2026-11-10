@@ -57,6 +57,18 @@ AMBIGUITY_MARKERS = {
 #: route at all, which is a worse regression than the duplicate spawn this change fixes.
 SPAWN_SCOPE_MARKER = "registry empty AND the page carried no session id"
 
+#: The launcher must come from the resolver with the vault's `manager_launcher` supplied.
+#: `manager-launcher.py` falls to its `-claude` sibling rung when `--default-source` is
+#: omitted or set to `vault`, so a rewrite that drops the flag silently puts the manager on
+#: the Claude launcher instead of the vault's configured one. Pinned per branch as the whole
+#: invocation, not the bare flag: Step 2C also *mentions* the flag in prose ("tells it the
+#: value came from config"), so a substring marker is satisfied by the sentence that survives
+#: the command losing it — the exact defect this pin exists to catch.
+LAUNCHER_MARKERS = {
+    "Step 2B": '"<manager_launcher>" "<goal page>" --default-source manager-default',
+    "Step 2C": '"<manager_launcher>" "<topic page>" --default-source manager-default',
+}
+
 #: Literal denial pins — the superseded wording. Any of these present means the fix was
 #: reverted, half-applied, or copied back from an older revision.
 DENIED = (
@@ -116,6 +128,14 @@ def check(root):
                 f"spawn route left"
             )
 
+        launcher_marker = LAUNCHER_MARKERS[name]
+        if launcher_marker not in body:
+            failures.append(
+                f"{COMMAND} {name}: the manager spawn does not invoke "
+                f"`manager-launcher.py {launcher_marker}` — it would fall to the `-claude` "
+                f"sibling rung instead of the vault's configured manager_launcher"
+            )
+
         for denied in DENIED:
             if denied in body:
                 failures.append(
@@ -136,8 +156,8 @@ def main():
 
     print(
         f"  open-manager-resolution ok: {len(SECTIONS)} branch(es) read the page field "
-        f"{UNCONDITIONAL_MARKER.lower()}, state the empty-match ambiguity, and keep the "
-        f"no-page-id spawn arm"
+        f"{UNCONDITIONAL_MARKER.lower()}, state the empty-match ambiguity, keep the "
+        f"no-page-id spawn arm, and pass `--default-source manager-default`"
     )
 
 

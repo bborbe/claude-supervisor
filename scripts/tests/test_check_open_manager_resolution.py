@@ -28,14 +28,25 @@ GOOD = (
     "result.**\n"
     "   ⚠️ **An empty match never *proves* \"no manager ever existed\".**\n"
     "4. **`UNKNOWN` or `AMBIGUOUS`, or `None` with no page id → spawn.** ⚠️ **`None` here "
-    "means registry empty AND the page carried no session id.**\n\n"
+    "means registry empty AND the page carried no session id.** Spawn from `manager-launcher.py` "
+    '"<manager_launcher>" "<goal page>" --default-source manager-default`.\n\n'
     "## Step 2C — Topic branch\n\n"
     "1. Resolve from the registry; an empty match is **ambiguous**.\n"
     "   ⚠️ **Read the topic page's `claude_session_id` UNCONDITIONALLY, before the registry "
     "result.**\n"
     "4. **`UNKNOWN` or `AMBIGUOUS`, or `None` with no page id → spawn.** ⚠️ **`None` here "
-    "means registry empty AND the page carried no session id.**\n\n"
+    "means registry empty AND the page carried no session id.** Spawn from `manager-launcher.py` "
+    '"<manager_launcher>" "<topic page>" --default-source manager-default`.\n\n'
     "## Step 3 — Spawn the tab (resume/create branches)\n"
+)
+
+#: The launcher negative control — `GOOD` with the flag dropped from Step 2C's invocation, while
+#: the flag still appears in that branch's prose. A bare-substring marker is satisfied by the
+#: sentence and the command goes unguarded, which is why the marker is pinned as the whole
+#: invocation. Measured 2026-11-10: the first version of this guard passed this exact mutation.
+PRE_LAUNCHER_FLAG = GOOD.replace(
+    '"<topic page>" --default-source manager-default`',
+    '"<topic page>"` — the flag tells it the value came from config.',
 )
 
 #: The wording at `origin/master` before this change — the negative control.
@@ -128,6 +139,19 @@ class CheckOpenManagerResolutionTest(unittest.TestCase):
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
         self.assertIn("registry empty AND the page carried no", result.stderr)
+
+    def test_missing_launcher_flag_fails(self):
+        """Dropping `--default-source manager-default` sends the manager to the sibling rung.
+
+        The flag survives in the branch's prose here, so this also pins that the marker is the
+        whole invocation and not the bare flag — a substring marker passes this text.
+        """
+        self.write("commands/open.md", PRE_LAUNCHER_FLAG)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Step 2C", result.stderr)
+        self.assertIn("--default-source manager-default", result.stderr)
+        self.assertNotIn("Step 2B: the manager spawn", result.stderr)
 
     def test_missing_command_fails(self):
         (pathlib.Path(self.dir) / "commands" / "open.md").unlink()
