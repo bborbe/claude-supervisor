@@ -421,6 +421,17 @@ class AnsweredFreshRestartTest(KeeperBase):
         self.assertEqual([SID], self.restarts, "an answer must never become a loop")
         self.assertTrue(any(k.startswith("fleet-keeper-fresh-") for k in self.cards))
 
+    def test_a_busy_refusal_retries_within_the_bound_then_stops(self):
+        self.answer = fk.FRESH_OPTION
+        fk.restart_fresh_session = lambda sid: (self.restarts.append(sid)
+                                                or (False, "exit 1: busy-target"))
+        self.stale_run(T0, 41 + 40)
+        tries_in_bound = len(self.restarts)
+        self.assertGreater(tries_in_bound, 1, "a busy refusal must not spend the answer")
+        self.assertLessEqual(tries_in_bound, fk.RESUME_DEFER_MAX // 60 + 1)
+        self.stale_run(T0 + 81 * MIN, 30)
+        self.assertEqual(tries_in_bound, len(self.restarts), "retries must stop after the bound")
+
     def test_a_non_live_manager_is_never_restarted_fresh(self):
         self.live = "UNKNOWN"
         self.answer = fk.FRESH_OPTION

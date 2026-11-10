@@ -610,6 +610,15 @@ def act_on_fresh_answer(sid, lapse, now):
         log(f"cannot persist the fresh-restart marker for {sid[:8]}; refusing to restart", now)
         return None
     done, detail = restart_fresh_session(sid)
+    first = lapse.setdefault("fresh_first_try", now)
+    if not done and "busy-target" in detail and now - first < RESUME_DEFER_MAX:
+        # A mid-turn manager is refused, never killed. Re-arm the SAME answer for the next tick
+        # rather than spend it, bounded like the resume's wait so it can never fire hours later.
+        lapse["fresh_consumed"] = None
+        save_lapse(lapse)
+        log(f"fresh restart of {sid[:8]} waiting — manager mid-turn ({int(now - first)}s of "
+            f"{RESUME_DEFER_MAX}s)", now)
+        return None
     log(f"fresh restart of {sid[:8]} on answer {item}: {'ok' if done else 'FAILED'} — {detail}", now)
     notify(f"fleet-keeper-fresh-{item}",
            (f"Restarted the fleet manager fresh on your answer (old session {sid[:8]}): {detail}. "
