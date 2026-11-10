@@ -234,7 +234,7 @@ def add_to_plan(vault, tasks_dir, name, day, why_text=""):
     # 2026-11-10: 33 of 110 live blocks named no page and every one of those rows was
     # still proposed. So a name that resolves to nothing is never written.
     if _page_path(vault, tasks_dir, name) is None:
-        raise Refused(f"no page for {name!r} under the task or goal board — "
+        raise Refused(f"no page for {name!r} on the task/goal/objective/topic board — "
                       f"refusing to write a plan row that can never resolve")
 
     lines = text.splitlines()
@@ -365,16 +365,6 @@ def unquote_payload(payload):
     except ValueError:
         return text
     return parts[0] if len(parts) == 1 else text
-
-
-def split_payload(payload):
-    """The row name out of `<name> — <why> — <file>:<line>`.
-
-    The name is the first segment: `next-focus.py` builds the payload with ` — ` as
-    the separator, and a task filename may itself contain a dash but never that
-    spaced em dash pair.
-    """
-    return unquote_payload(payload).split(" — ")[0].strip()
 
 
 def kind_of_key(card_key):
