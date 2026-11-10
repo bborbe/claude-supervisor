@@ -19,25 +19,32 @@ import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-headless-reap-close.py"
 
-#: A conforming set: the drive leg names the script twice and the entrypoint, the goal leg
-#: names both, the command carries the rule without the retired literal, the reap contract
-#: carries the carve-out.
-GOOD_DRIVE = """\
-1b. Run `python3 $P/close-worker.py "<sid>" --dry-run`, then `python3 $P/close-worker.py "<sid>"`.
-    A `would close pid N (entrypoint sdk-cli, no pane)` row is headless.
+#: The caller (holds python3): the dry-run and the real close, and the entrypoint.
+GOOD_STEP = """\
+Before sending, run `python3 $P/session-liveness.py --list --json`, then
+`python3 $P/close-worker.py "<sid>" --dry-run`; a `(entrypoint sdk-cli, no pane)`
+row is closed for real with `python3 $P/close-worker.py "<sid>"`.
 """
 
+#: The agent (no python3): points at the caller and names the entrypoint.
+GOOD_DRIVE = """\
+A finished headless row is closed through `close-worker.py`, which
+`commands/steps/drive.md` runs; this leg holds no `python3`. An `sdk-cli`
+worker cannot self-close.
+"""
+
+#: The goal leg (holds python3): dry-run + real close + entrypoint.
 GOOD_GOAL = """\
 - Read the tier: `python3 scripts/close-worker.py "<sid>" --dry-run`.
-  A `(entrypoint sdk-cli, no pane)` row is closed, not reaped.
+  A `(entrypoint sdk-cli, no pane)` row is closed with `python3 scripts/close-worker.py "<sid>"`.
 """
 
 GOOD_CMD = """\
-- **Close via `close-worker.py` only.** A finished headless row is closed by the drive leg.
+- **Close via `close-worker.py` only** — never a hand-rolled `kill`.
 """
 
 GOOD_REAP = """\
-The one carve-out is a finished headless row: the drive leg closes it through
+The one carve-out is a finished headless row: the round closes it through
 `scripts/close-worker.py`.
 """
 
@@ -49,8 +56,17 @@ class Base(unittest.TestCase):
         (self.root / "scripts").mkdir()
         shutil.copyfile(SCRIPT, self.root / "scripts" / SCRIPT.name)
 
-    def stage(self, drive=GOOD_DRIVE, goal=GOOD_GOAL, cmd=GOOD_CMD, reap=GOOD_REAP, callee=True):
+    def stage(
+        self,
+        step=GOOD_STEP,
+        drive=GOOD_DRIVE,
+        goal=GOOD_GOAL,
+        cmd=GOOD_CMD,
+        reap=GOOD_REAP,
+        callee=True,
+    ):
         for rel, body in (
+            ("commands/steps/drive.md", step),
             ("agents/fleet-drive.md", drive),
             ("agents/goal-drive.md", goal),
             ("commands/fleet-drive.md", cmd),
@@ -91,26 +107,44 @@ class TestCalleeMissing(Base):
         self.assert_fails_naming("does not exist")
 
 
-class TestDriveLeg(Base):
+class TestCallerStep(Base):
     def test_one_mention_is_the_prefix_state(self):
-        # The real pre-fix text with a single name dropped in: a comment, not a close.
-        self.stage(drive='Run `close-worker.py "<sid>"` eventually.\n')
+        self.stage(step='Run `close-worker.py "<sid>"` for an sdk-cli row.\n')
         self.assert_fails_naming("fewer than the 2")
 
     def test_no_sdk_cli_means_no_tier_read(self):
         self.stage(
-            drive='`close-worker.py "<sid>" --dry-run`, then `close-worker.py "<sid>"`.\n'
+            step='`close-worker.py "<sid>" --dry-run`, then `close-worker.py "<sid>"`.\n'
         )
         self.assert_fails_naming("sdk-cli")
 
 
+class TestDriveAgent(Base):
+    def test_the_agent_must_name_the_script(self):
+        self.stage(drive="Run `commands/steps/drive.md` for an `sdk-cli` row.\n")
+        self.assert_fails_naming("fleet-drive.md never names")
+
+    def test_the_agent_must_point_at_the_caller(self):
+        self.stage(drive="A finished headless (`sdk-cli`) row is closed by `close-worker.py`.\n")
+        self.assert_fails_naming("commands/steps/drive.md")
+
+    def test_the_agent_must_name_sdk_cli(self):
+        self.stage(
+            drive="A finished row is closed through `close-worker.py`, which "
+            "`commands/steps/drive.md` runs.\n"
+        )
+        self.assert_fails_naming("fleet-drive.md never names `sdk-cli`")
+
+
 class TestGoalLeg(Base):
-    def test_the_goal_leg_must_name_the_script(self):
-        self.stage(goal="Reap the finished with SendMessage. A `sdk-cli` row is special.\n")
-        self.assert_fails_naming("goal-drive.md never names")
+    def test_the_goal_leg_needs_both_calls(self):
+        self.stage(goal="A `sdk-cli` row is closed with `scripts/close-worker.py`.\n")
+        self.assert_fails_naming("fewer than the 2")
 
     def test_the_goal_leg_must_name_sdk_cli(self):
-        self.stage(goal="Run `scripts/close-worker.py` for a finished row.\n")
+        self.stage(
+            goal="Run `scripts/close-worker.py --dry-run`, then `scripts/close-worker.py`.\n"
+        )
         self.assert_fails_naming("goal-drive.md never names `sdk-cli`")
 
 
