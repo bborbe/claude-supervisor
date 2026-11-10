@@ -28,15 +28,15 @@ GOOD = (
     "result.**\n"
     "   ⚠️ **An empty match never *proves* \"no manager ever existed\".**\n"
     "4. **`UNKNOWN` or `AMBIGUOUS`, or `None` with no page id → spawn.** ⚠️ **`None` here "
-    "means registry empty AND the page carried no session id.** Spawn from `manager-launcher.py` "
-    '"<manager_launcher>" "<goal page>" --default-source manager-default`.\n\n'
+    "means registry empty AND the page carried no session id.** Spawn from "
+    '`manager-launcher.py" "<manager_launcher>" "<goal page>" --default-source manager-default`.\n\n'
     "## Step 2C — Topic branch\n\n"
     "1. Resolve from the registry; an empty match is **ambiguous**.\n"
     "   ⚠️ **Read the topic page's `claude_session_id` UNCONDITIONALLY, before the registry "
     "result.**\n"
     "4. **`UNKNOWN` or `AMBIGUOUS`, or `None` with no page id → spawn.** ⚠️ **`None` here "
-    "means registry empty AND the page carried no session id.** Spawn from `manager-launcher.py` "
-    '"<manager_launcher>" "<topic page>" --default-source manager-default`.\n\n'
+    "means registry empty AND the page carried no session id.** Spawn from "
+    '`manager-launcher.py" "<manager_launcher>" "<topic page>" --default-source manager-default`.\n\n'
     "## Step 3 — Spawn the tab (resume/create branches)\n"
 )
 
@@ -44,9 +44,14 @@ GOOD = (
 #: the flag still appears in that branch's prose. A bare-substring marker is satisfied by the
 #: sentence and the command goes unguarded, which is why the marker is pinned as the whole
 #: invocation. Measured 2026-11-10: the first version of this guard passed this exact mutation.
-PRE_LAUNCHER_FLAG = GOOD.replace(
+PRE_LAUNCHER_FLAG_2B = GOOD.replace(
+    '"<goal page>" --default-source manager-default`',
+    '"<goal page>"`; pass `--default-source manager-default` as config provenance.',
+)
+
+PRE_LAUNCHER_FLAG_2C = GOOD.replace(
     '"<topic page>" --default-source manager-default`',
-    '"<topic page>"` — the flag tells it the value came from config.',
+    '"<topic page>"`; pass `--default-source manager-default` as config provenance.',
 )
 
 #: The wording at `origin/master` before this change — the negative control.
@@ -140,18 +145,26 @@ class CheckOpenManagerResolutionTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("registry empty AND the page carried no", result.stderr)
 
-    def test_missing_launcher_flag_fails(self):
-        """Dropping `--default-source manager-default` sends the manager to the sibling rung.
+    def test_missing_launcher_flag_on_the_topic_arm_fails(self):
+        """Dropping the flag from Step 2C's invocation sends the manager to the sibling rung.
 
-        The flag survives in the branch's prose here, so this also pins that the marker is the
-        whole invocation and not the bare flag — a substring marker passes this text.
+        The flag survives in this fixture's *prose*, so the test also pins that the marker is
+        the whole invocation: a bare-substring marker passes this text and would report the
+        branch clean with its command unguarded.
         """
-        self.write("commands/open.md", PRE_LAUNCHER_FLAG)
+        self.write("commands/open.md", PRE_LAUNCHER_FLAG_2C)
         result = self.run_check()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("Step 2C", result.stderr)
-        self.assertIn("--default-source manager-default", result.stderr)
+        self.assertIn("Step 2C: the manager spawn", result.stderr)
         self.assertNotIn("Step 2B: the manager spawn", result.stderr)
+
+    def test_missing_launcher_flag_on_the_goal_arm_fails(self):
+        """Step 2B needs its own control — it is the branch the 2026-10-27 incident came from."""
+        self.write("commands/open.md", PRE_LAUNCHER_FLAG_2B)
+        result = self.run_check()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Step 2B: the manager spawn", result.stderr)
+        self.assertNotIn("Step 2C: the manager spawn", result.stderr)
 
     def test_missing_command_fails(self):
         (pathlib.Path(self.dir) / "commands" / "open.md").unlink()

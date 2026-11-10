@@ -10,12 +10,16 @@ Manager reached Step 2B item 4 (spawn) on a goal whose page carried a recorded s
 (the field has since been unified onto `claude_session_id`), and `--check`
 resolved that id `ABSENT` — a verdict item 3 maps to RESUME.
 
-This check asserts the three things that keep that from recurring in `commands/open.md`:
+This check asserts the four things that keep that from recurring in `commands/open.md`:
 
   (a) both branches read the page field **unconditionally**, before the registry result
   (b) the empty-match **ambiguity is stated** where a caller reads it
   (c) the spawn arm stays reachable for a subject that **never had a manager** — `None`
       means registry empty AND no page id, never registry empty alone
+  (d) the spawn passes the vault's `manager_launcher` to `manager-launcher.py` explicitly —
+      without `--default-source manager-default` the script takes its `-claude` sibling rung
+      whenever that sibling exists, and reports the launcher as `vault` rather than
+      `manager-default`
 
 ⚠️ **What this check does not prove.** It is a prose-shape check over a markdown command
 file, because a command file *is* prose — there is no function to call and no return value to
@@ -58,15 +62,16 @@ AMBIGUITY_MARKERS = {
 SPAWN_SCOPE_MARKER = "registry empty AND the page carried no session id"
 
 #: The launcher must come from the resolver with the vault's `manager_launcher` supplied.
-#: `manager-launcher.py` falls to its `-claude` sibling rung when `--default-source` is
-#: omitted or set to `vault`, so a rewrite that drops the flag silently puts the manager on
-#: the Claude launcher instead of the vault's configured one. Pinned per branch as the whole
+#: `manager-launcher.py` takes its `-claude` sibling rung when `--default-source` is omitted
+#: or set to `vault` and that sibling exists — so a rewrite that drops the flag silently puts
+#: the manager on the Claude launcher, and reports `vault` rather than `manager-default` even
+#: when the sibling is absent. Pinned per branch as the whole
 #: invocation, not the bare flag: Step 2C also *mentions* the flag in prose ("tells it the
 #: value came from config"), so a substring marker is satisfied by the sentence that survives
 #: the command losing it — the exact defect this pin exists to catch.
 LAUNCHER_MARKERS = {
-    "Step 2B": '"<manager_launcher>" "<goal page>" --default-source manager-default',
-    "Step 2C": '"<manager_launcher>" "<topic page>" --default-source manager-default',
+    "Step 2B": 'manager-launcher.py" "<manager_launcher>" "<goal page>" --default-source manager-default',
+    "Step 2C": 'manager-launcher.py" "<manager_launcher>" "<topic page>" --default-source manager-default',
 }
 
 #: Literal denial pins — the superseded wording. Any of these present means the fix was
