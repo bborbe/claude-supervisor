@@ -7,7 +7,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
-## Unreleased
+## v0.268.3
 
 - docs: **the open leg now documents the render vocabulary it actually emits, and pins the third batch/`select()` divergence.** `commands/steps/open.md` stated `<why>` was one of `flagged` / `priority <n>` / `no priority` and that a name is its line minus that suffix; `render()` emits `flagged · priority <n>` / `flagged · no priority`, so the enum named strings the code no longer produces and a suffix strip would leave the rank fragment on the name — the re-invoke guard now takes the name between the `<n>. ` prefix and the LAST ` — ` separator. The same file's skip-reason list gains `not flagged`, the gate's own reason, and `open-queue.py`'s module title, feature bullet and argparse description no longer read rank-first. The quoted-flag divergence — `is_flagged()` strips quotes and admits `flag: "true"`, while `flagged-rows.py`'s task predicate reads a YAML string and refuses it — is named as the third divergence and pinned in both directions, and a mixed flagged/unflagged fixture covers the `target=None` branch where `capacity` and `not flagged` coexist. `commands/steps/open.md`, `scripts/open-queue.py`, `scripts/tests/test_open_queue.py`.
 
