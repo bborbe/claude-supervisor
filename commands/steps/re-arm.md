@@ -34,7 +34,13 @@ When: every tick — arm `ScheduleWakeup` FIRST, before the read half
 
   ⚠️ **This file is the FLEET tier's copy. The goal and topic tiers emit the same two reaches from `commands/steps/round-liveness.md`, every round.** All three tiers open headless workers, so all three must refresh; a tier that emitted neither would have its headless spawns refused once stage 2 ships.
 
-  **Leg `mcp` is the server's.** Nothing to run here: the server records it on `answer_permission`'s existing foreign-park path, which is the reply a call with an unknown `request_id` already gets. If the call is refused before it reaches the server — a classifier denial, the outage case the Impact names — no record is written, which is the correct outcome.
+  **Leg `mcp` is ONE tool call.** `answer_permission` with a sentinel `request_id` that no worker holds; the server finds no park, consults the wrapper, replies with the foreign-park message, and **that reply writes the reach**. If the call is refused before it reaches the server — a classifier denial, the outage case the Impact names — no record is written, which is the correct outcome.
+
+  ```
+  mcp__supervisor__answer_permission(request_id="answer-path-reach-sentinel", behavior="deny")
+  ```
+
+  ⚠️ **A manager's ordinary `answer_permission` calls do NOT produce this leg** — they name a real park, which is in the server's `pending` map, so the settle path runs and the foreign-park arm never does. Measured 2026-11-10: **18 `wrapper` reaches and 0 `mcp` reaches**, because this step previously said the leg needed nothing.
 
   **Leg `wrapper` is a Bash `curl`, in its own call, then the recorder in another.** Two calls, deliberately: folding the recorder onto the same line changes the command shape the permission classifier judges, and a green reach would then prove the wrong thing.
 
