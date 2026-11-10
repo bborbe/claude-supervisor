@@ -172,14 +172,23 @@ FULL_CARD_RE = re.compile(r"\b[0-9a-f]{32}\b", re.IGNORECASE)
 # in prose (a manager rendering a table, a docstring) is not read as a state line.
 BLOCKED_LINE_RE = re.compile(r"^[\s>*#-]*🔴\s*BLOCKED\b.*·", re.MULTILINE)
 
-# What a BLOCKED closer may name as its owner: a card id, a manager / supervisor role, or a
-# re-checkable `⏰ Ends:` observable. ⚠️ A bare "waiting on someone" names none of these,
-# which is the shape this check exists to refuse.
+# What a BLOCKED closer may name as its owner: a card id, a manager / supervisor role, a
+# re-checkable `⏰ Ends:` observable, or — the case the first draft missed — an
+# operator-directed VERB, which names the operator as the owner by construction.
+#
+# ⚠️ That last arm is not a convenience. `fixtures/e4fd1919-transcript.jsonl` is a RECORDED
+# real closer whose `👤 You:` reads `you run: switch this tab to accept edits (Shift+Tab),
+# then reply go` — a legitimate block on a step only the operator can take. Refusing it is
+# the false positive that made the bot request changes on #778.
+#
+# ⚠️ A bare "waiting on someone" still names none of these, which is the shape this check
+# exists to refuse.
 OWNER_RE = re.compile(
-    r"\b[0-9a-f]{8,32}\b"           # card id, or a session-id prefix
-    r"|\bmanager\b|\bsupervisor\b"  # a role that can actually be reached
-    r"|⏰\s*Ends:",                  # a declared, re-checkable observable
-    re.IGNORECASE)
+    r"\b[0-9a-f]{8,32}\b"                        # card id, or a session-id prefix
+    r"|\bmanager\b|\bsupervisor\b"               # a role that can actually be reached
+    r"|⏰\s*Ends:"                                # a declared, re-checkable observable
+    r"|^\s*(?:approve|review|you run|pick)\b",   # an operator verb names the operator
+    re.IGNORECASE | re.MULTILINE)
 
 STORE_PROBE_ENV = "SUPERVISOR_CLOSER_GATE_LINT_STORE"
 STORE_TIMEOUT_SECONDS = 1.5

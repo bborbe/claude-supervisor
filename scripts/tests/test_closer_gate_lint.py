@@ -190,6 +190,22 @@ class CloserGateLintTest(unittest.TestCase):
                     prefix="🔴 BLOCKED · nothing running · needs intervention\n")[0]
                 self.assertEqual(0, code)
 
+    def test_the_recorded_e4fd1919_blocked_closer_passes(self):
+        # ⚠️ The exact shape that made the bot request changes on #778. `fixtures/
+        # e4fd1919-transcript.jsonl` is a RECORDED real closer: an operator verb IS an
+        # owner, because only the operator can take the step it names.
+        code, _text, _record = self._closer(
+            "you run: switch this tab to `accept edits` (Shift+Tab), then reply `go`",
+            prefix="🔴 BLOCKED · nothing running · needs intervention\n")
+        self.assertEqual(0, code)
+
+    def test_a_bare_status_line_is_still_not_a_state_line(self):
+        # ⚠️ The negative half of the pair above: without the `·` separator this is prose.
+        code, _text, _record = self._closer(
+            "you run: switch this tab to `accept edits`",
+            prefix="🔴 BLOCKED\n")
+        self.assertEqual(0, code)
+
     def test_prose_mentioning_a_blocked_row_is_not_a_state_line(self):
         code, _text, _record = self._closer(
             "nothing",
