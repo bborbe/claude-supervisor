@@ -162,16 +162,15 @@ test('a malformed row does not crash the count', async () => {
   assert.equal((await count(dir, rows)).length, 1)
 })
 
-test('an auto-resumed worker is not counted', async () => {
-  // Auto-resumes answer to the auto-resume gate's own 30-min crash-loop cap, not this one:
-  // counting them would leave a sweep that revived two dead workers unable to open a new one.
-  // ⚠️ The marker is the ledger's `resumed_from`, and this exclusion used to hold by ACCIDENT —
-  // every auto-resume is headless, and a headless worker held no registry entry under the old
-  // registry-only count. Reading a channel that CAN see headless workers removes that accident.
+test('a resumed worker IS counted — the exclusion that used to sit here was the defect', async () => {
+  // A resumed worker is a live process consuming exactly the load the cap exists to bound.
+  // Until 2026-11-10 this test asserted the opposite, and the rule it pinned made the cap blind
+  // to every session the keep-alive leg revived: measured 2026-11-10, 22 counted against 78 live
+  // worker sessions. The crash-loop cap on the resume path is a separate control and is not this.
   const dir = fixture()
   const sid = 'ffffffff-0000-0000-0000-000000000004'
   ledger(dir, sid, 'auto-resumed', { resumed_from: 'aaaaaaaa-0000-0000-0000-000000000009' })
-  assert.equal((await count(dir, [row(sid)])).length, 0)
+  assert.equal((await count(dir, [row(sid)])).length, 1)
 })
 
 test('a manager record is not counted against the worker cap', async () => {
@@ -481,7 +480,10 @@ test('populations split the fleet by role and mode', async () => {
     stateDir: dir.root,
     registry: [],
   })
-  assert.deepEqual(populations, { managers: 1, interactive: 1, headless: 1, cluster: 0, a2a: 0, total: 2 })
+  // The resumed headless worker counts in the headless column like any other: a resume is load,
+  // not a separate species. Until 2026-11-10 this read `headless: 1, total: 2` — the exclusion
+  // that made the cap blind to every session the keep-alive leg revived.
+  assert.deepEqual(populations, { managers: 1, interactive: 1, headless: 2, cluster: 0, a2a: 0, total: 3 })
 })
 
 // `mode` decides the split, and an absent one reads as interactive — the same rule `role`
@@ -521,7 +523,7 @@ test('populations exclude a ghost row', async () => {
 // both a manager and an auto-resume is dropped from every population rather than counted as a
 // manager. Measured 2026-11-08, the Python twin had the opposite order and disagreed on exactly
 // this record — the divergence this consolidation exists to remove.
-test('a manager that is an auto-resume is not a manager', async () => {
+test('a manager that is an auto-resume is still a manager', async () => {
   const dir = fixture()
   const sid = 'ffffffff-0000-0000-0000-000000000036'
   ledger(dir, sid, 'resumed manager', {
@@ -536,7 +538,10 @@ test('a manager that is an auto-resume is not a manager', async () => {
     stateDir: dir.root,
     registry: [],
   })
-  assert.equal(populations.managers, 0)
+  // `role` is the only exclusion, so a resumed manager IS a manager — and managers are still
+  // outside `total`, which is the cap's unit. Until 2026-11-10 `resumed_from` was checked first
+  // and this record was dropped from every population.
+  assert.equal(populations.managers, 1)
   assert.equal(populations.total, 0)
 })
 
