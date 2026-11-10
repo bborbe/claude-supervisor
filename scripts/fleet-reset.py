@@ -78,9 +78,6 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _VERDICT_MEMO = {}
 _IDENTITY_MEMO = {}
 
-#: The identity registry: one `<pid>.json` per session, carrying `sessionId` and `pid`.
-SESSIONS_DIR = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
-
 
 class Stores(object):
     """The five stores, under one root so a drill can point the whole verb at a fixture."""
@@ -535,6 +532,12 @@ def _identity_rows(directory):
                         rec = json.load(fh)
                 except (OSError, ValueError):
                     continue
+                if not isinstance(rec, dict):
+                    # A registry file that decodes to a list or scalar would raise
+                    # AttributeError here — and `except (OSError, ValueError)` would not
+                    # catch it, aborting the reset AFTER the fleet is stopped and the five
+                    # stores cleared. `registry_entries` guards the same way.
+                    continue
                 sid = str(rec.get("sessionId") or "").strip()
                 pid = rec.get("pid")
                 if sid and pid:
@@ -545,7 +548,7 @@ def _identity_rows(directory):
     return rows
 
 
-def identity_alive(sid, sessions_dir=None):
+def identity_alive(sid, sessions_dir):
     """Does the identity registry hold a RUNNING pid for this session id?
 
     ⚠️ **`ABSENT` alone is not evidence of death.** Measured 2026-11-10: `--check 4295ddac`
@@ -554,13 +557,13 @@ def identity_alive(sid, sessions_dir=None):
     alone would have re-run the very incident this guard exists to prevent, so a positive
     liveness verdict is corroborated against the one store that knows the pid.
 
-    The directory is the verb's OWN registry (`<root>/sessions`), never a hardcoded
-    `~/.claude/sessions`: `--root` exists so a drill or a test never reads the live tree,
-    and corroborating against a different store than the one just stopped would be a
-    silent mismatch. Fail-closed in both directions — an unreadable registry answers
-    "alive", because keeping a link is always the safe move.
+    `sessions_dir` is REQUIRED and is the verb's own registry (`stores.sessions`, i.e.
+    `<root>/sessions`) — never a hardcoded `~/.claude/sessions`: `--root` exists so a drill
+    or a test never reads the live tree, and corroborating against a different store than
+    the one just stopped would be a silent mismatch. Fail-closed in both directions — an
+    unreadable registry answers "alive", because keeping a link is always the safe move.
     """
-    rows = _identity_rows(sessions_dir or SESSIONS_DIR)
+    rows = _identity_rows(sessions_dir)
     if rows is None:
         return True
     pid = rows.get(sid)
@@ -599,12 +602,24 @@ class LinkState(object):
     def __init__(self, sessions_dir, verdict=None, alive=None):
         self._verdict = verdict or session_verdict
         self._alive = alive or (lambda sid: identity_alive(sid, sessions_dir))
-        self._memo = {}
+        self._dead = {}
+
+    def snapshot(self, ids):
+        """Evaluate every id NOW. Call this BEFORE anything destructive.
+
+        ⚠️ Storing the probes and calling them lazily is not a snapshot — the first call
+        would land inside `strip_task_links()`, which runs after `stop_sessions()` has
+        killed the fleet and pruned its registry entries. The real run would then measure a
+        post-kill fleet while `--dry-run` measured a live one, and the outcome would depend
+        on whether the probe fell inside `HEARTBEAT_TTL_MS` of the kill.
+        """
+        for sid in ids:
+            if sid not in self._dead:
+                self._dead[sid] = self._verdict(sid) == "ABSENT" and not self._alive(sid)
 
     def dead(self, sid):
-        if sid not in self._memo:
-            self._memo[sid] = self._verdict(sid) == "ABSENT" and not self._alive(sid)
-        return self._memo[sid]
+        """The snapshotted verdict. An id never snapshotted is NOT dead — fail closed."""
+        return self._dead.get(sid, False)
 
 
 def strippable(row, state):
@@ -622,6 +637,16 @@ def strippable(row, state):
     if not ids:
         return False
     return all(state.dead(sid) for sid in ids)
+
+
+def all_session_ids(dirs):
+    """Every session id carried by a linked, non-terminal task — the snapshot's input."""
+    ids = set()
+    for path, status, frontmatter, _rest in scan_tasks(dirs):
+        if status in TERMINAL_STATUSES or not has_links(frontmatter):
+            continue
+        ids.update(session_ids(frontmatter))
+    return ids
 
 
 def strip_task_links(dirs, dry_run, state):
@@ -693,6 +718,8 @@ def main(argv=None):
     # probe at strip time would read a post-kill fleet in a real run and a live fleet in a
     # dry run — and the prediction would stop being the count the real run strips.
     link_state = LinkState(stores.sessions) if args.strip_task_links else None
+    if link_state is not None:
+        link_state.snapshot(all_session_ids(dirs))
 
     print(
         f"🧨 FLEET RESET · root {stores.root}"

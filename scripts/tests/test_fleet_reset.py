@@ -353,6 +353,46 @@ class FleetResetTest(unittest.TestCase):
         self.assertTrue(fr.identity_alive(DEAD_SID, missing))
         self.assertFalse(fr.identity_alive(DEAD_SID, empty))
 
+    def test_verdicts_are_snapshotted_before_the_stop(self):
+        """The advertised snapshot must actually be taken. A lazy one probes a post-kill
+        fleet in the real run and a live one in the dry-run, so the approved prediction
+        stops being the count the real run strips."""
+        self.seed_tasks()
+        log = []
+        original_stop, original_verdict = fr.stop_sessions, fr.session_verdict
+        original_alive = fr.identity_alive
+        fr.stop_sessions = lambda *_a, **_k: (log.append("stop"), ([], [], 0))[1]
+        fr.session_verdict = lambda sid: (log.append("probe"), "ABSENT")[1]
+        fr.identity_alive = lambda sid, sessions_dir=None: False
+        try:
+            self.run_main(["--root", self.root, "--confirm", "fleet-reset",
+                           "--strip-task-links", "--task-dir", self.tasks])
+        finally:
+            fr.stop_sessions, fr.session_verdict = original_stop, original_verdict
+            fr.identity_alive = original_alive
+        self.assertIn("probe", log)
+        self.assertLess(log.index("probe"), log.index("stop"))
+
+    def test_a_malformed_registry_file_is_skipped(self):
+        """A registry file decoding to a list would raise AttributeError, which
+        `except (OSError, ValueError)` does not catch — aborting the reset after the fleet
+        is already stopped."""
+        reg = os.path.join(self.root, "reg-list")
+        os.makedirs(reg)
+        with open(os.path.join(reg, "1.json"), "w") as fh:
+            fh.write("[1, 2]")
+        with open(os.path.join(reg, "2.json"), "w") as fh:
+            fh.write("{not json")
+        self.assertFalse(fr.identity_alive(DEAD_SID, reg))
+
+    def test_a_non_int_pid_keeps_the_link(self):
+        """`ps -p 1234.0` exits non-zero, which would read as dead and open the strip."""
+        reg = os.path.join(self.root, "reg-strpid")
+        os.makedirs(reg)
+        with open(os.path.join(reg, "1.json"), "w") as fh:
+            json.dump({"sessionId": DEAD_SID, "pid": "1234.0"}, fh)
+        self.assertTrue(fr.identity_alive(DEAD_SID, reg))
+
     def test_dry_run_prediction_counts_only_strippable(self):
         self.seed_tasks({"in_progress": LIVE_SID, "next": DEAD_SID})
         with self.verdicts({LIVE_SID: "LIVE", DEAD_SID: "ABSENT"}):
