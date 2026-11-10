@@ -46,9 +46,15 @@ the round's act:
 
   * **`phase: todo`** — the operator's approval inbox. `commands/open.md` Gate 1
     refuses it, and this leg does not become an approval path by being automated.
+  * **`stopped: true`** — the operator ended the row deliberately
+    (`scripts/task-standdown.py`, written by `/supervisor:stop`). It outranks every
+    **derived** guard — a stopped-and-deferred row reports `stopped` — but not the two
+    above, which describe the row's own state rather than a derivation.
   * **a `blocked_by`** — the row names a dependency that is not met.
   * **a future `defer_date`** — defer-UNTIL, not a due date: the row is deliberately
     parked, and `next-focus.py` reads the same distinction.
+  * **a declared wait** — `prior_wait()` reads the session's own `Stop` records; see its
+    docstring for why only the unattended path must not spend a slot on a row that parks.
   * **an unreadable task file** — refused, because an absent guard read is not a clean
     one. Opening on an unknown guard state is the failure this branch exists to stop.
 
@@ -155,6 +161,16 @@ FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 # sentinel string, so the key stays a tuple of comparables.
 NO_PRIORITY = 10**6
 
+#: The task tier's deliberate-stop marker — see `is_stopped()`. `scripts/task-standdown.py`
+#: is the only writer; this module and `scripts/worker-keepalive.py` are the readers.
+#: ⚠️ **The truthy set is declared in the two READERS rather than imported** — the repo's
+#: scripts are loaded by path, so a cross-module import would couple two files that are
+#: otherwise independent. `scripts/task-standdown.py` is the writer and holds no set: it
+#: writes the literal `"true"`. Keep the two readers' literals identical: a drift would
+#: make the open queue and the keepalive disagree about whether one row is stopped.
+STOPPED_KEY = "stopped"
+TRUTHY = {"true", "yes", "on"}
+
 
 def frontmatter(text):
     """Return the frontmatter block, or '' when the file has none."""
@@ -202,7 +218,7 @@ def is_flagged(block):
     `not flagged`); the flag decides WHETHER a row opens, and `rank_key` decides only the
     order among the rows this admits.
     """
-    return (field(block, "flag") or "").strip().lower() in ("true", "yes", "on")
+    return (field(block, "flag") or "").strip().lower() in TRUTHY
 
 
 def priority_of(block):
@@ -248,6 +264,21 @@ def has_blocked_by(block):
             continue
         break
     return False
+
+
+def is_stopped(block):
+    """`stopped: true` — the operator deliberately stood this row down.
+
+    The task tier's stand-down marker, written by `scripts/task-standdown.py` (through
+    `vault-cli task set`) when `/supervisor:stop` runs from a worker session. It is a
+    **page field**, not the manager tier's `<slug>.stopped` file, for the reason that
+    file cannot serve here: the state dir is per-user, so a slug would let two same-titled
+    tasks in different vaults share one marker.
+
+    Truthiness matches `is_flagged()`'s set, so the two boolean readers cannot disagree
+    about what `true` looks like.
+    """
+    return (field(block, STOPPED_KEY) or "").strip().lower() in TRUTHY
 
 
 def _newest_stop(session_id, attention_dir):
@@ -328,6 +359,16 @@ def guards(block, today, attention_dir=None):
         return "unreadable task file"
     if (field(block, "phase") or "").strip() == "todo":
         return "waiting approval"
+    # ⚠️ **Ahead of every DERIVED guard — `blocked_by` and `defer_date` — but after the two
+    # that describe the row's own state rather than a derivation.** A stop is the operator's
+    # own act and outranks a computed "not now": a row that is both stopped and deferred
+    # must report `stopped`, or the operator sees it silently reappear the day the defer
+    # expires with nothing recording that they had ended it. It deliberately does NOT
+    # outrank `unreadable task file` or `waiting approval`: an unreadable page is not
+    # evidence of a stop, and a `phase: todo` row is in the operator's approval inbox,
+    # which is the boundary `commands/open.md` Gate 1 owns.
+    if is_stopped(block):
+        return "stopped"
     if has_blocked_by(block):
         return "blocked"
     state, detail = defer_date.defer_state(field(block, "defer_date"), today)
