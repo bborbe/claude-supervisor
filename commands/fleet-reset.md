@@ -1,5 +1,5 @@
 ---
-description: Clear the fleet's remembered state — stop every session, empty the five stores, and (only behind a separate opt-in) strip the task-file links a keep-alive leg resumes. Destructive; refuses without a confirm token.
+description: Clear the fleet's remembered state — stop every session, empty the five stores, and (only behind a separate opt-in) strip the task-file links a keep-alive leg resumes. The strip unlinks only a session that is positively ABSENT. Destructive; refuses without a confirm token.
 allowed-tools:
   - Read
   - Bash(python3:*)
@@ -56,6 +56,10 @@ folded into the other.
   the operator has seen, not a plan they have not.
 - **Never run the strip without an explicit request.** `--strip-task-links` is a separate
   opt-in; a state clear never implies it, and the two are reported as separate levels.
+- **The strip keeps a live session's link, by construction.** It probes each candidate's
+  `claude_session_id` through `session-liveness.py --check` and unlinks only on `ABSENT`;
+  `LIVE`, `UNKNOWN`, `AMBIGUOUS` and `MALFORMED` all keep the link. Do not "finish the job"
+  by hand when the run reports a `kept` line — an unreadable probe is not evidence of death.
 - **Never remove a live process's registry entry.** The script stops sessions first and
   keeps the entry of any pid it could not stop (and of this session, and its ancestors).
   Do not "clean up" a `SURVIVED` or `refuse` line by deleting the file by hand.

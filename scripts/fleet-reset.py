@@ -11,7 +11,7 @@ or the next keep-alive leg resumes the sessions the reset was meant to retire:
   holds            <root>/state/session-holds.json       the operator's do-not-work marks
   snapshot         <root>/state/fleet-snapshot.json      the sweep baseline
 
-Three properties are load-bearing, and each has a test in `tests/test_fleet_reset.py`:
+Four properties are load-bearing, and each has a test in `tests/test_fleet_reset.py`:
 
   * NOTHING happens without `--confirm fleet-reset`. Without the token the verb refuses
     with a named reason and touches nothing.
@@ -19,6 +19,15 @@ Three properties are load-bearing, and each has a test in `tests/test_fleet_rese
     signal, the task files it would touch — and changes no file, not even an mtime.
   * The task-link strip is a SEPARATE flag, `--strip-task-links`, never implied by the
     state clear. A state-only run leaves every task file byte-identical.
+  * The strip is LIVENESS-GATED: it unlinks a task only when its `claude_session_id`
+    answers `ABSENT` from `session-liveness.py --check` AND the identity registry holds no
+    running pid for that id. `LIVE`, `UNKNOWN`, `AMBIGUOUS`, `MALFORMED` and a
+    registry-backed process all KEEP the link — fail-closed, because an unlink is what
+    makes a live session invisible to keep-alive, nudge, close and resume (measured
+    2026-11-10: one status-only strip unlinked 30 live sessions across two vaults).
+    ⚠️ The corroboration is not belt-and-braces: `--check` answered `ABSENT` for session
+    `4295ddac` while its pid 26515 was running, so `ABSENT` alone is not evidence of death.
+    The probe runs on the dry-run path too, so its count is the count the real run strips.
 
 Sessions are stopped BEFORE their registry entries are removed, so no live process is
 orphaned into a registry-less state. Each pid is SIGTERMed, given `--grace` seconds, then
@@ -54,6 +63,21 @@ CONFIRM_TOKEN = "fleet-reset"
 TERMINAL_STATUSES = {"completed", "aborted", "hold"}
 
 LINK_KEYS = ("claude_session_id", "metrics_sessions")
+
+#: `session-liveness.py --check`'s documented exit codes. The instrument's contract, not a
+#: re-derivation: it prints LIVE on stdout and every other verdict on stderr, so the exit code
+#: is the only channel that carries all five.
+SESSION_VERDICTS = {0: "LIVE", 1: "ABSENT", 2: "UNKNOWN", 3: "AMBIGUOUS", 4: "MALFORMED"}
+
+#: One probe per id per run; the child is bounded so a wedged endpoint cannot hang a reset.
+PROBE_TIMEOUT = 20.0
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_VERDICT_MEMO = {}
+_IDENTITY_MEMO = {}
+
+#: The identity registry: one `<pid>.json` per session, carrying `sessionId` and `pid`.
+SESSIONS_DIR = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
 
 
 class Stores(object):
@@ -433,25 +457,130 @@ def scan_tasks(dirs):
     return rows
 
 
-def strip_task_links(dirs, dry_run):
-    """Strip the links from every non-terminal task. Returns `(candidates, stripped)`.
+def session_id(frontmatter):
+    """The task's `claude_session_id`, or `""` when it carries none."""
+    match = re.search(r"^claude_session_id:\s*(\S+)", frontmatter, re.M)
+    return match.group(1).strip("'\"") if match else ""
+
+
+def session_verdict(sid):
+    """`session-liveness.py --check`'s verdict for one id, memoized per run.
+
+    Read from the exit code, not the text: the instrument prints `LIVE` on stdout and every
+    other verdict on stderr, so a stdout-only reader can only ever answer `LIVE` or `UNKNOWN`.
+    An unreadable probe is `UNKNOWN` — never `ABSENT`, which is a verdict about a session
+    rather than about the probe.
+    """
+    if sid in _VERDICT_MEMO:
+        return _VERDICT_MEMO[sid]
+    try:
+        done = subprocess.run(
+            [sys.executable, os.path.join(_HERE, "session-liveness.py"), "--check", sid],
+            capture_output=True, text=True, timeout=PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _VERDICT_MEMO[sid] = "UNKNOWN"
+        return "UNKNOWN"
+    verdict = SESSION_VERDICTS.get(done.returncode, "UNKNOWN")
+    _VERDICT_MEMO[sid] = verdict
+    return verdict
+
+
+def _pid_alive(pid):
+    """`ps -p <pid>` — the same existence check the stop leg already uses."""
+    try:
+        done = subprocess.run(["ps", "-p", str(pid)], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return True  # an unreadable probe never proves a process gone
+    return done.returncode == 0
+
+
+def _identity_rows():
+    """`{session id: pid}` from `~/.claude/sessions/*.json`, or `None` when unreadable."""
+    if "rows" in _IDENTITY_MEMO:
+        return _IDENTITY_MEMO["rows"]
+    rows = {}
+    try:
+        for path in glob.glob(os.path.join(SESSIONS_DIR, "*.json")):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    rec = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            sid = str(rec.get("sessionId") or "").strip()
+            pid = rec.get("pid")
+            if sid and pid:
+                rows[sid] = pid
+    except OSError:
+        rows = None
+    _IDENTITY_MEMO["rows"] = rows
+    return rows
+
+
+def identity_alive(sid):
+    """Does the identity registry hold a RUNNING pid for this session id?
+
+    ⚠️ **`ABSENT` alone is not evidence of death.** Measured 2026-11-10: `--check 4295ddac`
+    answered `ABSENT` for a session whose registry entry carried pid 26515 and whose process
+    was running — the endpoint's coverage gap, not a verdict. A strip that trusted `ABSENT`
+    alone would have re-run the very incident this guard exists to prevent, so a positive
+    liveness verdict is corroborated against the one store that knows the pid.
+
+    Fail-closed in both directions: an unreadable registry answers "alive", because keeping
+    a link is always the safe move.
+    """
+    rows = _identity_rows()
+    if rows is None:
+        return True
+    pid = rows.get(sid)
+    return pid is not None and _pid_alive(pid)
+
+
+def strippable(row, verdict, alive=None):
+    """May this task lose its links? Only when its session is positively dead.
+
+    Both conditions are required: the instrument answers `ABSENT`, **and** the identity
+    registry holds no running pid for that id. `LIVE`, `UNKNOWN`, `AMBIGUOUS`, `MALFORMED`,
+    an id the registry still backs with a process, and a link carrying no id all keep the
+    link — fail-closed, the mirror of resume's rule.
+    """
+    sid = session_id(row[2])
+    if not sid:
+        return False
+    if verdict(sid) != "ABSENT":
+        return False
+    return not (alive or identity_alive)(sid)
+
+
+def strip_task_links(dirs, dry_run, verdict=None, alive=None):
+    """Strip the links from every non-terminal task whose session is dead.
+
+    Returns `(candidates, stripped, kept_live)`.
 
     A terminal task (`completed` / `aborted` / `hold`) is left byte-identical: its session
     link is history, not a resume target, and rewriting it would be an edit the reset has
-    no reason to make.
+    no reason to make. A non-terminal task whose session is not positively `ABSENT` is kept
+    for the same kind of reason — it is still resumable, and unlinking it is what made 30
+    live sessions invisible to keep-alive on 2026-11-10.
+
+    The probe runs on the DRY-RUN path too, so the predicted count is the count the real run
+    strips rather than every linked task in sight.
     """
+    probe = verdict or session_verdict
     rows = scan_tasks(dirs)
-    candidates = [r for r in rows if has_links(r[2]) and r[1] not in TERMINAL_STATUSES]
+    linked = [r for r in rows if has_links(r[2]) and r[1] not in TERMINAL_STATUSES]
+    candidates = [r for r in linked if strippable(r, probe, alive)]
+    kept_live = len(linked) - len(candidates)
     stripped = 0
     if dry_run:
-        return len(candidates), 0
+        return len(candidates), 0, kept_live
     for path, _status, frontmatter, rest in candidates:
         new = frontmatter
         for key in LINK_KEYS:
             new = strip_key(new, key)
         write_atomic(path, "---" + new + rest)
         stripped += 1
-    return len(candidates), stripped
+    return len(candidates), stripped, kept_live
 
 
 # ---------------------------------------------------------------- report
@@ -518,11 +647,16 @@ def main(argv=None):
         if args.strip_task_links:
             print("3. task-link strip (separate opt-in)")
             print(f"   task dirs        {len(dirs)}")
-            candidates, stripped = strip_task_links(dirs, args.dry_run)
+            candidates, stripped, kept_live = strip_task_links(dirs, args.dry_run)
             print(
                 f"   task files       {candidates} candidate(s)"
                 f"{'' if args.dry_run else f' → {stripped} stripped'}"
             )
+            if kept_live:
+                print(
+                    f"   kept             {kept_live} task(s) whose session is not proven dead"
+                    " — link preserved"
+                )
         else:
             print("3. task-link strip — NOT requested (state-only run; task files untouched)")
         return survivors

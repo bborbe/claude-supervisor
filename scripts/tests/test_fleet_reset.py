@@ -43,8 +43,12 @@ _spec.loader.exec_module(fr)
 NON_TERMINAL = ("in_progress", "next")
 TERMINAL = ("completed", "aborted", "hold")
 
+DEFAULT_SID = "11111111-1111-1111-1111-111111111111"
+LIVE_SID = "22222222-2222-2222-2222-222222222222"
+DEAD_SID = "33333333-3333-3333-3333-333333333333"
 
-def task_page(status, sid="11111111-1111-1111-1111-111111111111"):
+
+def task_page(status, sid=DEFAULT_SID):
     """A task file carrying both link keys, in the shape the vault writes them."""
     return (
         "---\n"
@@ -99,14 +103,32 @@ class FleetResetTest(unittest.TestCase):
         with open(self.stores.snapshot, "w") as fh:
             json.dump({"sessions": {}}, fh)
 
-    def seed_tasks(self):
+    def seed_tasks(self, sid_by_status=None):
         paths = {}
         for status in NON_TERMINAL + TERMINAL:
+            sid = (sid_by_status or {}).get(status, DEFAULT_SID)
             path = os.path.join(self.tasks, f"{status}.md")
             with open(path, "w", encoding="utf-8") as fh:
-                fh.write(task_page(status))
+                fh.write(task_page(status, sid))
             paths[status] = path
         return paths
+
+    @contextlib.contextmanager
+    def verdicts(self, mapping, alive=()):
+        """Stub the liveness instrument and the registry — the DECISION, not the probes.
+
+        `crashed-managers`' tests take the same stance: each instrument has its own tests, so
+        re-testing them here would only make this file flaky against the live endpoint.
+        `alive` names the ids whose registry entry still backs a running pid.
+        """
+        orig_verdict, orig_alive = fr.session_verdict, fr.identity_alive
+        backed = set(alive)
+        fr.session_verdict = lambda sid: mapping.get(sid, "UNKNOWN")
+        fr.identity_alive = lambda sid: sid in backed
+        try:
+            yield
+        finally:
+            fr.session_verdict, fr.identity_alive = orig_verdict, orig_alive
 
     def mtimes(self):
         rows = {}
@@ -142,8 +164,9 @@ class FleetResetTest(unittest.TestCase):
         self.seed_store()
         self.seed_tasks()
         before = self.mtimes()
-        rc, out = self.run_main(["--root", self.root, "--dry-run", "--strip-task-links",
-                                 "--task-dir", self.tasks])
+        with self.verdicts({DEFAULT_SID: "ABSENT"}):
+            rc, out = self.run_main(["--root", self.root, "--dry-run", "--strip-task-links",
+                                     "--task-dir", self.tasks])
         self.assertEqual(rc, 0)
         self.assertEqual(self.mtimes(), before)
         for label in ("sessions", "worker-manager", "open-items", "session-holds",
@@ -181,10 +204,11 @@ class FleetResetTest(unittest.TestCase):
     def test_strip_removes_links_from_non_terminal_only(self):
         paths = self.seed_tasks()
         terminal_before = {paths[s]: sha(paths[s]) for s in TERMINAL}
-        rc, out = self.run_main([
-            "--root", self.root, "--confirm", "fleet-reset",
-            "--strip-task-links", "--task-dir", self.tasks,
-        ])
+        with self.verdicts({DEFAULT_SID: "ABSENT"}):
+            rc, out = self.run_main([
+                "--root", self.root, "--confirm", "fleet-reset",
+                "--strip-task-links", "--task-dir", self.tasks,
+            ])
         self.assertEqual(rc, 0)
         for status in NON_TERMINAL:
             with open(paths[status], encoding="utf-8") as fh:
@@ -200,15 +224,79 @@ class FleetResetTest(unittest.TestCase):
 
     def test_strip_count_equals_the_dry_run_prediction(self):
         self.seed_tasks()
-        _rc, dry = self.run_main(["--root", self.root, "--dry-run", "--strip-task-links",
-                                  "--task-dir", self.tasks])
         predicted = len(NON_TERMINAL)
-        self.assertIn(f"{predicted} candidate(s)", dry)
-        _rc, real = self.run_main([
-            "--root", self.root, "--confirm", "fleet-reset",
-            "--strip-task-links", "--task-dir", self.tasks,
-        ])
+        with self.verdicts({DEFAULT_SID: "ABSENT"}):
+            _rc, dry = self.run_main(["--root", self.root, "--dry-run", "--strip-task-links",
+                                      "--task-dir", self.tasks])
+            self.assertIn(f"{predicted} candidate(s)", dry)
+            _rc, real = self.run_main([
+                "--root", self.root, "--confirm", "fleet-reset",
+                "--strip-task-links", "--task-dir", self.tasks,
+            ])
         self.assertIn(f"{predicted} candidate(s) → {predicted} stripped", real)
+
+    # -- strip is liveness-gated -------------------------------------------
+
+    def test_strip_keeps_a_live_session_and_strips_a_dead_one(self):
+        paths = self.seed_tasks({"in_progress": LIVE_SID, "next": DEAD_SID})
+        live_before = sha(paths["in_progress"])
+        with self.verdicts({LIVE_SID: "LIVE", DEAD_SID: "ABSENT"}):
+            rc, out = self.run_main([
+                "--root", self.root, "--confirm", "fleet-reset",
+                "--strip-task-links", "--task-dir", self.tasks,
+            ])
+        self.assertEqual(rc, 0)
+        # The too-loose direction: a status-only strip removes both, so the live file must
+        # be proven byte-identical and the dead one proven stripped.
+        self.assertEqual(sha(paths["in_progress"]), live_before)
+        with open(paths["in_progress"], encoding="utf-8") as fh:
+            self.assertIn(f"claude_session_id: {LIVE_SID}", fh.read())
+        with open(paths["next"], encoding="utf-8") as fh:
+            self.assertNotIn("claude_session_id", fh.read())
+        self.assertIn("1 candidate(s) → 1 stripped", out)
+        self.assertIn("kept             1 task(s)", out)
+
+    def test_strip_keeps_an_unreadable_probe(self):
+        paths = self.seed_tasks({"in_progress": LIVE_SID})
+        before = {p: sha(p) for p in paths.values()}
+        # Every id answers UNKNOWN — the probe could not run. That is not evidence of death.
+        with self.verdicts({}):
+            rc, out = self.run_main([
+                "--root", self.root, "--confirm", "fleet-reset",
+                "--strip-task-links", "--task-dir", self.tasks,
+            ])
+        self.assertEqual(rc, 0)
+        self.assertEqual({p: sha(p) for p in paths.values()}, before)
+        self.assertIn("0 candidate(s) → 0 stripped", out)
+        self.assertIn(f"kept             {len(NON_TERMINAL)} task(s)", out)
+
+    def test_strip_keeps_a_session_the_registry_still_backs(self):
+        """`ABSENT` alone is not death — measured 2026-11-10, where `--check 4295ddac`
+        answered `ABSENT` for a session whose pid 26515 was running. The registry
+        corroboration is the half that keeps the link."""
+        paths = self.seed_tasks({"in_progress": LIVE_SID})
+        before = sha(paths["in_progress"])
+        with self.verdicts({LIVE_SID: "ABSENT"}, alive=[LIVE_SID]):
+            rc, out = self.run_main([
+                "--root", self.root, "--confirm", "fleet-reset",
+                "--strip-task-links", "--task-dir", self.tasks,
+            ])
+        self.assertEqual(rc, 0)
+        self.assertEqual(sha(paths["in_progress"]), before)
+        self.assertIn("0 candidate(s) → 0 stripped", out)
+
+    def test_dry_run_prediction_counts_only_strippable(self):
+        self.seed_tasks({"in_progress": LIVE_SID, "next": DEAD_SID})
+        with self.verdicts({LIVE_SID: "LIVE", DEAD_SID: "ABSENT"}):
+            _rc, dry = self.run_main(["--root", self.root, "--dry-run", "--strip-task-links",
+                                      "--task-dir", self.tasks])
+            _rc, real = self.run_main([
+                "--root", self.root, "--confirm", "fleet-reset",
+                "--strip-task-links", "--task-dir", self.tasks,
+            ])
+        # The prediction is the strip's own count, not every linked task in sight.
+        self.assertIn("1 candidate(s)", dry)
+        self.assertIn("1 candidate(s) → 1 stripped", real)
 
     def test_strip_with_no_task_dir_refuses(self):
         # An empty vault config is the "no task dir resolves" state — without it the
