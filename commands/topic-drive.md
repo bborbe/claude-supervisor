@@ -30,6 +30,7 @@ allowed-tools:
   - mcp__tts__say
   - mcp__supervisor__list_agents
   - mcp__supervisor__agent_status
+  - mcp__supervisor__answer_permission
 argument-hint: "[topic] [--interval <N>m] (topic detected when omitted)"
 ---
 ⚠️ **A voiced question is also a board card** — any `mcp__tts__say` containing `?` is paired with an `attention-ask.py post` within 60 s. [`docs/voice-asks.md`](../docs/voice-asks.md).
@@ -76,7 +77,7 @@ arm or the step file — do not act from memory of a previous round.
 
 ## Keep alive — inline, because it runs every tick
 
-⚠️ **Row 0a — this topic manager's own liveness record — runs here, once per round, before the per-goal loop.** It records the **topic's** cadence, not a goal's, so a subject taken from the loop would arm a goal under the topic branch. Rule: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-liveness.md` — `--branch topic`, `--subject` the topic name.
+⚠️ **Row 0a — this topic manager's own liveness record — runs here each round, before the per-goal loop.** It records the **topic's** cadence, not a goal's; a loop-sourced subject would arm a goal under the topic branch. Rule: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-liveness.md` — `--branch topic`.
 
 ⚠️ **First, drop every goal whose page reads a terminal `status`.** Row 4c may have just closed
 one, and `topic-keepalive.py` reads `claude_session_id` liveness and the armed-loop state, never
