@@ -409,10 +409,17 @@ def _name_from_payload(payload, vault, tasks_dir, kind=""):
         return tail[0].strip(), (tail[1].strip() if len(tail) > 1 else "")
 
     if len(parts) > 1:
-        stem = Path(parts[-1].rsplit(":", 1)[0].strip()).stem
-        if stem and _page_path(vault, tasks_dir, stem) is not None:
-            k = stem.count(" — ") + 1
-            return stem, (parts[k].strip() if k < len(parts) else "")
+        # The payload ends with `<source.file>:<source.line>` and `source.file` ends
+        # with `<name>.md`, so the WHOLE payload ends with `<name>.md:<line>`. Reading
+        # that tail as a path is exact even when the name — and therefore the path —
+        # carries the separator: `parts[-1]` is only a full path when the name has
+        # none, which is the very case this is here to fix.
+        match = re.search(r"^(.*)\.md:(\d+)$", payload, re.S)
+        if match:
+            stem = Path(match.group(1)).stem
+            if stem and _page_path(vault, tasks_dir, stem) is not None:
+                k = stem.count(" — ") + 1
+                return stem, (parts[k].strip() if k < len(parts) else "")
 
     for i in range(len(parts) - 1, 0, -1):
         candidate = " — ".join(parts[:i]).strip()
