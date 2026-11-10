@@ -18,6 +18,13 @@ terminal-task worker is **refused** here and stays with `close-worker.py`.
 survive: the resume consumer needs both. The success path asserts the transcript still
 exists before reporting, so a change that turned this into a session delete fails loudly.
 
+`--all` enumerates its own candidates instead of taking them on the command line: every
+registry record that is `entrypoint: sdk-cli` and `status: idle`. That is exactly the
+population the `not-headless` and `busy-target` guards would refuse anyway, so an
+unfiltered sweep would print one refusal per tab worker per tick and bury the refusals
+that matter. It decides *which* sessions to consider, never *when* to run — the caller
+still owns the clock.
+
 Eleven refusals, each exit 1 with a stable token as the first line of output:
 
   unknown-session-id    no registry entry carries that session id.
@@ -133,6 +140,36 @@ def registry_entries(session_id, sessions_dir=None):
         if rec.get("sessionId") == session_id:
             out.append((path, rec))
     return out
+
+
+def candidate_session_ids(sessions_dir=None):
+    """Every registry `sessionId` this verb can ever act on: headless, and currently idle.
+
+    Filtered here rather than left to the guards. `not-headless` and `busy-target` would
+    refuse every other record, so a sweep over the whole registry would emit one refusal
+    per tab worker and per mid-turn worker on every tick — noise that buries the refusals
+    that carry information. The other nine guards still run per candidate; this filter
+    removes only the two that can never pass for the excluded records.
+
+    A record with no `sessionId` is skipped: nothing downstream could join it back.
+    """
+    ids = []
+    for path in sorted(glob.glob(os.path.join(sessions_dir or SESSIONS_DIR, "*.json"))):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                rec = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        session_id = rec.get("sessionId")
+        if not session_id:
+            continue
+        if rec.get("entrypoint") != "sdk-cli":
+            continue
+        if rec.get("status") != "idle":
+            continue
+        if session_id not in ids:
+            ids.append(session_id)
+    return ids
 
 
 def idle_seconds(rec, now=None):
@@ -396,7 +433,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Close the process of an idle headless worker, keeping its transcript."
     )
-    parser.add_argument("session_ids", nargs="+", help="session id(s) to reap")
+    parser.add_argument("session_ids", nargs="*", help="session id(s) to reap")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="enumerate every headless idle session from the registry, in addition to any ids given",
+    )
     parser.add_argument(
         "--dry-run", action="store_true", help="check every guard, close nothing"
     )
@@ -405,10 +447,22 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
+    session_ids = list(args.session_ids)
+    if args.all:
+        for session_id in candidate_session_ids(args.sessions_dir):
+            if session_id not in session_ids:
+                session_ids.append(session_id)
+        if not session_ids:
+            # An empty fleet is not a usage error: --all found nothing to consider.
+            print("nothing to do: no headless idle session in the registry")
+            return 0
+    elif not session_ids:
+        parser.error("pass at least one session id, or --all")
+
     today = close_worker.defer_date.as_now()
     exit_code = 0
 
-    for session_id in args.session_ids:
+    for session_id in session_ids:
         entries = registry_entries(session_id, args.sessions_dir)
         if not entries:
             exit_code = refuse(
