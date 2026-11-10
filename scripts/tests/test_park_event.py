@@ -16,6 +16,11 @@ about *agreement and identity*, not about parsing:
   joining never delays a peer who is already parked.
 - **Distinct keys stay distinct.** A slug that collided two keys would merge two
   unrelated watches silently, which is worse than no dedup at all.
+- **One identifier per watch.** `list` and `due` print the slug and a caller
+  copies it straight back into `--event`, so `register` and `release` resolve it
+  to the stored description rather than keying on it directly. A refusal for an
+  unknown key names the keys that DO exist — a bare "no watch" reads as "nothing
+  is parked", which is the one answer that sends the caller away.
 """
 import json
 import os
@@ -290,6 +295,56 @@ class ParkEventTest(unittest.TestCase):
         last = self.run_script("release", "--event", "a metric", "--session", "bbbbbbbb")
         self.assertEqual(last.returncode, 0, last.stderr)
         self.assertEqual(list(self.state.glob("*.json")), [])
+
+    # --- the printed slug is a valid key ------------------------------------
+
+    def slug_of(self, event):
+        """The token `list`/`due` print first — what a caller copies verbatim."""
+        proc = self.run_script("list")
+        for line in proc.stdout.splitlines():
+            if f"event: {event} ·" in line:
+                return line.split(" · ")[0]
+        self.fail(f"no watch line for {event!r}: {proc.stdout!r}")
+
+    def test_release_accepts_the_slug_that_list_prints(self):
+        self.run_script("register", "--event", "a metric",
+                        "--recheck", "2026-11-02T02:00:00+01:00", "--session", "aaaaaaaa")
+        slug = self.slug_of("a metric")
+
+        proc = self.run_script("release", "--event", slug, "--session", "aaaaaaaa")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(list(self.state.glob("*.json")), [])
+
+    def test_register_by_the_printed_slug_joins_the_one_watch(self):
+        self.run_script("register", "--event", "a metric",
+                        "--recheck", "2026-11-02T02:00:00+01:00", "--session", "aaaaaaaa")
+        slug = self.slug_of("a metric")
+
+        joined = self.run_script("register", "--event", slug,
+                                 "--recheck", "2026-11-02T02:00:00+01:00",
+                                 "--session", "bbbbbbbb")
+        self.assertEqual(joined.returncode, 0, joined.stderr)
+        # One watch carrying both members: a second file here is the defect, not
+        # a join. `slugify` appends a digest, so re-slugifying the printed slug
+        # would land on a different path if the resolver were not there.
+        self.assertEqual(len(list(self.state.glob("*.json"))), 1)
+        listing = self.run_script("list")
+        self.assertEqual(len(listing.stdout.strip().splitlines()), 1, listing.stdout)
+        self.assertIn("sessions: 2", listing.stdout)
+
+    def test_release_of_an_unknown_event_names_the_keys_that_exist(self):
+        self.run_script("register", "--event", "a metric",
+                        "--recheck", "2026-11-02T02:00:00+01:00", "--session", "aaaaaaaa")
+
+        proc = self.run_script("release", "--event", "no-such-event", "--session", "aaaaaaaa")
+        self.assertEqual(proc.returncode, 3, proc.stdout)
+        self.assertIn("no-such-event", proc.stderr)
+        self.assertIn("a metric", proc.stderr)
+
+    def test_release_with_no_watches_at_all_says_none(self):
+        proc = self.run_script("release", "--event", "no-such-event", "--session", "aaaaaaaa")
+        self.assertEqual(proc.returncode, 3, proc.stdout)
+        self.assertIn("(known: none)", proc.stderr)
 
     # --- the key lands on the task -----------------------------------------
 
