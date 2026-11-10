@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _FIXTURES = os.path.join(_HERE, "fixtures", "closer-gate-lint")
@@ -198,6 +199,63 @@ class CloserGateLintTest(unittest.TestCase):
             "you run: switch this tab to `accept edits` (Shift+Tab), then reply `go`",
             prefix="🔴 BLOCKED · nothing running · needs intervention\n")
         self.assertEqual(0, code)
+
+    def test_a_blocked_closer_naming_a_separate_line_ends_observable_passes(self):
+        # ⚠️ The conventional layout: the observable is its OWN line below the verb. A
+        # body-scoped owner search refused exactly this shape (bot finding on #778).
+        code, _text, _record = self._closer(
+            "nothing",
+            prefix="🔴 BLOCKED · nothing running · needs intervention\n"
+                   "⏰ Ends: PR #480 merged\n")
+        self.assertEqual(0, code)
+
+    def test_an_absent_card_probe_does_not_run_on_a_non_gate_closer(self):
+        # ⚠️ A closer that merely CITES a 32-hex token in prose is not a gate nobody can
+        # answer; probing it would refuse the session for the citation.
+        code, _text, _record = self._closer(
+            "nothing — see the uuid " + "7e55adaf" * 4 + " in the log",
+            card_probe=lambda _item, _env: False)
+        self.assertEqual(0, code)
+
+    def test_card_in_store_404_is_absent(self):
+        self.assertEqual(False, self._probe(urllib.error.HTTPError("u", 404, "no", {}, None)))
+
+    def test_card_in_store_other_http_error_is_unknown(self):
+        self.assertEqual(None, self._probe(urllib.error.HTTPError("u", 500, "boom", {}, None)))
+
+    def test_card_in_store_connection_error_is_unknown(self):
+        self.assertEqual(None, self._probe(urllib.error.URLError("down")))
+
+    def test_card_in_store_200_is_present(self):
+        self.assertEqual(True, self._probe(None, status=200))
+
+    def test_card_in_store_off_switch_skips_the_probe(self):
+        self.assertIsNone(self.mod.card_in_store(
+            "7e55adaf" * 4, {self.mod.STORE_PROBE_ENV: "off"}))
+
+    def _probe(self, raises, status=200):
+        """`card_in_store` with `urlopen` replaced by a stub that raises or answers."""
+        class _Resp:
+            def __init__(self, status):
+                self.status = status
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+        def fake(_request, timeout=None):
+            if raises is not None:
+                raise raises
+            return _Resp(status)
+
+        original = self.mod.urllib.request.urlopen
+        self.mod.urllib.request.urlopen = fake
+        try:
+            return self.mod.card_in_store("7e55adaf" * 4, {})
+        finally:
+            self.mod.urllib.request.urlopen = original
 
     def test_a_bare_status_line_is_still_not_a_state_line(self):
         # ⚠️ The negative half of the pair above: without the `·` separator this is prose.

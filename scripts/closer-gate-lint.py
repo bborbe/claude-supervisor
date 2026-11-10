@@ -215,11 +215,38 @@ def card_in_store(item_id, environ=None):
         return None
 
 
-def absent_card_handles(body, environ=None, card_probe=None):
-    """Full-width card ids in `body` the store does not hold. Fail-open: unknown is not absent."""
+# The operator-verb closers an absent-card probe may run on. ⚠️ `pick` is here but not in
+# `GATE_RE`: it asks the operator to choose, so a card nobody can answer is the same defect,
+# even though it is not a gate the lint releases.
+GATE_OR_HANDLE_RE = re.compile(r"^(?:approve|review|you run|pick)\b", re.IGNORECASE)
+
+# A `⏰ Ends:` line carrying an observable. ⚠️ Matched over the whole message, never the
+# `👤 You:` body alone — the conventional layout puts it on its own line.
+ENDS_OWNER_RE = re.compile(r"^[\s>*#-]*⏰\s*Ends:\s*\S", re.MULTILINE)
+
+
+def owner_named(body, text=""):
+    """Whether a BLOCKED closer names an owner the fleet can route to.
+
+    ⚠️ Two haystacks on purpose: the `👤 You:` body carries the card id / role / operator
+    verb, while a `⏰ Ends:` observable is conventionally its OWN line below it. A
+    body-only search refused the very shape this task exists to accept.
+    """
+    if OWNER_RE.search(body):
+        return True
+    return bool(text and ENDS_OWNER_RE.search(text))
+
+
+def absent_card_handles(body, environ=None, card_probe=None, max_probes=3):
+    """Full-width card ids in `body` the store does not hold. Fail-open: unknown is not absent.
+
+    ⚠️ Deduped and capped. A `Stop` hook that probed every token in a pathological body at
+    `STORE_TIMEOUT_SECONDS` each would outlive the hook's own timeout and be killed — which
+    is not the same as allowing the stop, so the cap is a correctness bound, not a nicety.
+    """
     probe = card_probe or card_in_store
     absent = []
-    for handle in FULL_CARD_RE.findall(body):
+    for handle in list(dict.fromkeys(FULL_CARD_RE.findall(body)))[:max_probes]:
         try:
             if probe(handle, environ) is False:
                 absent.append(handle)
@@ -585,11 +612,18 @@ def evaluate(payload, environ=None, card_probe=None):
     # fleet round, never blocked: the closer-mirror mint became opt-in on 2026-10-17
     # because Stop-hook mirrors were 58.3% of board volume, so blocking every card-less
     # `pick` would reverse that decision and refuse most sessions on the machine.
-    absent = absent_card_handles(body, environ, card_probe)
-    if absent:
-        code, _text, record = verdict(2, "absent-card", closer=line)
-        return code, _absent_card_message(absent), record
-    if text and BLOCKED_LINE_RE.search(text) and not OWNER_RE.search(body):
+    # ⚠️ GATE closers only. `FULL_CARD_RE` matches ANY 32-hex run, so probing every closer
+    # would refuse a session that merely CITES an md5 or a uuid in prose. The defect this
+    # refuses — an operator gate nobody can answer — only exists on a gate closer.
+    if GATE_OR_HANDLE_RE.match(body):
+        absent = absent_card_handles(body, environ, card_probe)
+        if absent:
+            code, _text, record = verdict(2, "absent-card", closer=line)
+            return code, _absent_card_message(absent), record
+    # ⚠️ The owner test searches the WHOLE message, not just the `👤 You:` body: the
+    # conventional Async State Closer layout puts `⏰ Ends:` on its own line below the
+    # verb, so a body-scoped search refused exactly the shape this task exists to accept.
+    if text and BLOCKED_LINE_RE.search(text) and not owner_named(body, text):
         code, _text, record = verdict(2, "ownerless-blocked", closer=line)
         return code, _blocked_owner_message(), record
 
