@@ -7,7 +7,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
-## Unreleased
+## v0.273.1
 
 - fix: **The headless-reap close rule, the name→session-id match and the gate's own docstring now agree with the shipped behaviour.** `commands/steps/rules.md` said a manager closes a finished worker *only through `/supervisor:close`*, contradicting the fleet round's drive step, which closes a finished headless row itself through `close-worker.py`; it now names both routes as the one script. `commands/steps/drive.md` resolves a `REAPS` roster name after stripping a leading decoration run and casefolding, exact equality, never a substring — the join `agents/fleet-sweep-reader.md` owns — so a `⚙ `-prefixed or re-cased name still matches and a partial one cannot. `scripts/check-headless-reap-close.py`'s docstring counted five assertions while listing six.
 
