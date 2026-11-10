@@ -65,20 +65,23 @@ without it the command falls back to the wezterm route, which opens a tab whatev
 - **Nothing else**: no batch helper, no in-line `spawn_agent` (that tool is held for `resume=`
   alone — `docs/fleet-surface.md` § Spawn a worker item 6), no reordering.
 - **Never open a row the leg skipped.** `open-queue.py` prints a reason per skipped row and those
-  reasons are the point of printing them: `waiting approval` is the operator's inbox
-  (`commands/open.md` § Step 1.5 Gate 1), `blocked` and `deferred` are the row's own conditions,
-  and `capacity` means the rank admitted more than the fleet has room for. Opening past the
-  printed count replaces the rank with your own judgement.
+  reasons are the point of printing them: `not flagged` is a row the operator did not mark for
+  auto-open, `waiting approval` is the operator's inbox (`commands/open.md` § Step 1.5 Gate 1),
+  `blocked` and `deferred` are the row's own conditions, and `capacity` means the admitted rows
+  exceed the room the fleet has. Opening past the printed count replaces the rank with your own
+  judgement.
 - **Never open a manager.** Operator ruling 2026-10-30, verbatim: *"we dont want to auto open
   topic-manager, goal-manager ... but flag are fine"*. A goal with ready rows gets its **workers**
   opened; its manager state is unchanged by this leg.
-- **The flag is a mark, not an approval, and whoever set it counts.** `flag: true`
-  (`true`/`yes`/`on`) ranks a row first; `flag_set_by` is a note, not a gate (operator ruling
-  2026-10-30: *"it should not matter how set the flag"*). The approval is `approved_at`, which
-  every row this leg ranks already carries. ⚠️ **This predicate is deliberately wider than
-  `commands/open.md` § Step 0.5's** — that selector keeps `OPENING_ACTORS = ('operator',
-  'legacy')` because it writes `approved_by: operator`; this leg only orders already-approved rows,
-  so it reads the flag alone. `docs/session-tiers.md` § rule 2 owns the split.
+- **The flag is the GATE, and whoever set it counts.** Only a row with `flag: true`
+  (`true`/`yes`/`on`) is admitted — an approved, eligible, un-flagged row is skipped with reason
+  `not flagged`, never opened at any position. Operator requirement 2026-11-10, verbatim: *"we only
+  want auto open for flagged items"*. `flag_set_by` is a note, not a gate (operator ruling
+  2026-10-30: *"it should not matter how set the flag"*), and the approval is `approved_at`, which
+  every admitted row already carries. ⚠️ **This predicate is deliberately wider than
+  `commands/open.md` § Step 0.5's on PROVENANCE** — that selector keeps
+  `OPENING_ACTORS = ('operator', 'legacy')` because it writes `approved_by: operator`; this leg
+  reads the flag alone. `docs/session-tiers.md` § rule 2 owns the split.
 - **Your only writes are this round's block payload and, only when the hand-back must be
   truncated, the refusal payload `<output_format>` names.** Nothing else on disk. ⚠️ **A command
   you invoke writes its own page** — `/supervisor:open` approves and stamps the task pages it
