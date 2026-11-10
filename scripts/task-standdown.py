@@ -235,6 +235,19 @@ def stamp(args):
         print("vault-cli config list is unreadable", file=sys.stderr)
         return 1
     vault = args.vault or vault_name_for(path, known)
+    if not vault:
+        # ⚠️ **Never hand `vault-cli` a bare stem.** It resolves the stem against its
+        # *configured default* vault, so a page this process could not attribute would be
+        # written into a same-titled task in a different vault — a silent wrong-target
+        # write, and exactly the failure the stem-plus-`--vault` rule exists to prevent.
+        # An unattributable path is `cannot-tell`, never "the default is probably right".
+        print("cannot-tell\t%s" % path)
+        print(
+            "cannot attribute %s to a configured vault; pass --vault (a bare stem would "
+            "be written against vault-cli's default vault instead)" % path,
+            file=sys.stderr,
+        )
+        return 1
     name = task_name(path)
 
     reason = set_field(name, STOPPED, "true", vault)
@@ -295,6 +308,14 @@ def clear(args):
         print(reason, file=sys.stderr)
         return 1
     vault = args.vault or vault_name_for(path, known)
+    if not vault:
+        print("cannot-tell\t%s" % path)
+        print(
+            "cannot attribute %s to a configured vault; pass --vault (a bare stem would "
+            "be written against vault-cli's default vault instead)" % path,
+            file=sys.stderr,
+        )
+        return 1
     name = task_name(path)
 
     for key in (STOPPED, STOP_DATE):

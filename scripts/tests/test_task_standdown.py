@@ -95,6 +95,31 @@ class TaskStanddownTest(unittest.TestCase):
         # silent from this script's side because it only sees a non-zero exit.
         self.assertEqual(self.writes[0][0], "A Task")
 
+    def test_an_unattributable_path_is_refused_not_written_to_a_default_vault(self):
+        """⚠️ The wrong-target write.
+
+        `vault_name_for()` answers None for a page under no configured root, and a bare
+        stem handed to `vault-cli task set` resolves against its **configured default**
+        vault — so the stop would land on a same-titled task in a different vault. The
+        stem-plus-`--vault` rule exists to prevent exactly that; an unattributable path
+        must refuse.
+        """
+        ts.anchored_task = lambda sid, cwd, root: ("/elsewhere/25 Tasks/A Task.md", False, "")
+        code, out = self.run_main(["--session", "sid-1"])
+
+        self.assertEqual(1, code)
+        self.assertEqual("cannot-tell\t/elsewhere/25 Tasks/A Task.md", out[0])
+        self.assertEqual([], self.writes, "a bare stem must never reach vault-cli")
+
+    def test_an_explicit_vault_overrides_the_path_detection(self):
+        """`--vault` is the escape hatch the refusal above names."""
+        ts.anchored_task = lambda sid, cwd, root: ("/elsewhere/25 Tasks/A Task.md", False, "")
+        code, out = self.run_main(["--session", "sid-1", "--vault", "explicit"])
+
+        self.assertEqual(0, code)
+        self.assertEqual("stopped\t/elsewhere/25 Tasks/A Task.md", out[0])
+        self.assertEqual(self.writes[0][3], "explicit")
+
     def test_the_writer_gets_the_stem_not_the_path(self):
         self.assertEqual(ts.task_name("/v/25 Tasks/Some Long Title.md"), "Some Long Title")
         self.assertEqual(ts.task_name("Bare Name"), "Bare Name")
@@ -181,7 +206,9 @@ class TaskStanddownTest(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write("---\nstopped: true\nstop_date: 2026-11-10\n---\n")
             self.stub_resolve(path)
-            code, out = self.run_main(["--clear", "--subject", "A Task"])
+            # `--vault` named explicitly: the fixture page lives in a temp dir that is not
+            # under the stubbed vault root, and an unattributable path is now refused.
+            code, out = self.run_main(["--clear", "--subject", "A Task", "--vault", "v"])
 
         self.assertEqual(0, code)
         self.assertEqual("cleared\t%s" % path, out[0])
