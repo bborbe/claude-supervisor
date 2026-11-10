@@ -163,11 +163,13 @@ def save_store(store, path=None):
 def observable_key(record):
     """The dedup key: this declaration's `ts` paired with its `⏰ Ends:` text.
 
-    Both halves, not the timestamp alone. A resumed session that re-parks on the SAME
-    observable writes a new `ts` — that resets the 24 h clock (correctly: it was
-    touched) — while a session whose declaration is merely re-rendered with a different
-    deadline is a different wait and must be cardable again. Keying on the pair makes
-    both true without a third field.
+    Both halves, not the timestamp alone. `ts` is owned by `declared-wait.py`'s
+    `wait_record()`: the start of the trailing run of `Stop` records naming the same
+    observable (digits ignored), NOT the newest render. A session that re-parks on the
+    SAME observable — including the hourly re-park the 1 h re-drive provokes — keeps
+    the same `ts`, so the 24 h clock keeps running; a session that declares a different
+    observable starts a new run and a new `ts`, and is cardable again. This script only
+    compares; it never computes the clock.
     """
     ts = record.get("ts")
     stamp = "" if ts is None else repr(float(ts))
