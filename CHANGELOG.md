@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.268.0
 
 - feat: **`attention-ask.py poll` prints `ANSWERED_CLIENT:` beside `ANSWERED_BY:`**, rendering the store-recorded `answered_client` — `user_agent`, `remote_addr` and `forwarded_for` — so "who answered this card" is one command away instead of a grep of the controller's 182 MB stderr log. `answered_by` names the surface; the client is what separates the operator's browser from a script. `forwarded_for` renders in its own parenthetical because the header is caller-set, never in place of the peer address. An item that recorded no client prints no line.
 
