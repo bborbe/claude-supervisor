@@ -106,6 +106,8 @@ import json
 import os
 import re
 import sys
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 
 KILL_SWITCH_ENV = "SUPERVISOR_CLOSER_GATE_LINT"
@@ -157,6 +159,100 @@ def unpollable_handles(body):
     """Card handles in `body` that `poll` cannot address."""
     return [h for h in CARD_HANDLE_RE.findall(body)
             if len(h) != STORE_ITEM_ID_LEN and _HEX_LETTER_RE.search(h)]
+
+
+# ⚠️ ANY 32-hex run, deliberately not keyed on the word `card`/`item`/`poll` the way
+# `CARD_HANDLE_RE` is. That one refuses a handle `poll` cannot ADDRESS; this one refuses
+# one it can address but the store does not HOLD. The word in front of the id is not what
+# makes the second defect wrong, so keying on it would miss `answered 3f2a…` shapes.
+FULL_CARD_RE = re.compile(r"\b[0-9a-f]{32}\b", re.IGNORECASE)
+
+# The `🔴 BLOCKED` state line of `~/.claude/CLAUDE.md` § Async State Closer. ⚠️ Anchored to
+# a line that carries the `·` separator, so a message that merely DISCUSSES a blocked row
+# in prose (a manager rendering a table, a docstring) is not read as a state line.
+BLOCKED_LINE_RE = re.compile(r"^[\s>*#-]*🔴\s*BLOCKED\b.*·", re.MULTILINE)
+
+# What a BLOCKED closer may name as its owner: a card id, a manager / supervisor role, a
+# re-checkable `⏰ Ends:` observable, or — the case the first draft missed — an
+# operator-directed VERB, which names the operator as the owner by construction.
+#
+# ⚠️ That last arm is not a convenience. `fixtures/e4fd1919-transcript.jsonl` is a RECORDED
+# real closer whose `👤 You:` reads `you run: switch this tab to accept edits (Shift+Tab),
+# then reply go` — a legitimate block on a step only the operator can take. Refusing it is
+# the false positive that made the bot request changes on #778.
+#
+# ⚠️ A bare "waiting on someone" still names none of these, which is the shape this check
+# exists to refuse.
+OWNER_RE = re.compile(
+    r"\b[0-9a-f]{8,32}\b"                        # card id, or a session-id prefix
+    r"|\bmanager\b|\bsupervisor\b"               # a role that can actually be reached
+    r"|⏰\s*Ends:"                                # a declared, re-checkable observable
+    r"|^\s*(?:approve|review|you run|pick)\b",   # an operator verb names the operator
+    re.IGNORECASE | re.MULTILINE)
+
+STORE_PROBE_ENV = "SUPERVISOR_CLOSER_GATE_LINT_STORE"
+STORE_TIMEOUT_SECONDS = 1.5
+
+
+def card_in_store(item_id, environ=None):
+    """`True` / `False` when the store answers, `None` when it cannot be asked.
+
+    ⚠️ Fail-open is part of the contract, not a nicety: `None` must never block. A `Stop`
+    hook that refuses a session because the store is down would break every session on the
+    machine, and a missed lint costs one operator gate.
+    """
+    environ = os.environ if environ is None else environ
+    if (environ.get(STORE_PROBE_ENV) or "").strip().lower() == "off":
+        return None
+    base = (environ.get("ATTENTION_STORE_URL") or "http://localhost:18080").rstrip("/")
+    try:
+        request = urllib.request.Request(f"{base}/api/1.0/attention/{item_id}")
+        with urllib.request.urlopen(request, timeout=STORE_TIMEOUT_SECONDS) as response:
+            return 200 <= response.status < 300
+    except urllib.error.HTTPError as exc:
+        return False if exc.code == 404 else None
+    except Exception:
+        return None
+
+
+# The operator-verb closers an absent-card probe may run on. ⚠️ `pick` is here but not in
+# `GATE_RE`: it asks the operator to choose, so a card nobody can answer is the same defect,
+# even though it is not a gate the lint releases.
+GATE_OR_HANDLE_RE = re.compile(r"^(?:approve|review|you run|pick)\b", re.IGNORECASE)
+
+# A `⏰ Ends:` line carrying an observable. ⚠️ Matched over the whole message, never the
+# `👤 You:` body alone — the conventional layout puts it on its own line.
+ENDS_OWNER_RE = re.compile(r"^[\s>*#-]*⏰\s*Ends:\s*\S", re.MULTILINE)
+
+
+def owner_named(body, text=""):
+    """Whether a BLOCKED closer names an owner the fleet can route to.
+
+    ⚠️ Two haystacks on purpose: the `👤 You:` body carries the card id / role / operator
+    verb, while a `⏰ Ends:` observable is conventionally its OWN line below it. A
+    body-only search refused the very shape this task exists to accept.
+    """
+    if OWNER_RE.search(body):
+        return True
+    return bool(text and ENDS_OWNER_RE.search(text))
+
+
+def absent_card_handles(body, environ=None, card_probe=None, max_probes=3):
+    """Full-width card ids in `body` the store does not hold. Fail-open: unknown is not absent.
+
+    ⚠️ Deduped and capped. A `Stop` hook that probed every token in a pathological body at
+    `STORE_TIMEOUT_SECONDS` each would outlive the hook's own timeout and be killed — which
+    is not the same as allowing the stop, so the cap is a correctness bound, not a nicety.
+    """
+    probe = card_probe or card_in_store
+    absent = []
+    for handle in list(dict.fromkeys(FULL_CARD_RE.findall(body)))[:max_probes]:
+        try:
+            if probe(handle, environ) is False:
+                absent.append(handle)
+        except Exception:
+            continue
+    return absent
 
 # Derived from `~/.claude/CLAUDE.md` § After Opening a PR and § Execution Phase No Re-Ask
 # § Named No-Ask Actions. ⚠️ Order is irrelevant; the name is what the record carries.
@@ -369,6 +465,16 @@ def last_closer_and_ends(transcript_path):
     return _reap_closer().last_closer_and_ends(transcript_path)
 
 
+def last_closer_scan(transcript_path):
+    """`(timestamp, you_line, ends_line_or_None, message_text_or_None)` from ONE scan.
+
+    Same single scan as `last_closer_and_ends`, plus the message text the owner test
+    needs. ⚠️ Two separate calls could straddle a write and decide on a closer the
+    operator never saw, which is the defect `last_closer_and_ends` exists to avoid.
+    """
+    return _reap_closer().last_closer_scan(transcript_path)
+
+
 def closer_body(line):
     """Everything after `👤 You: `, with the entities and backticks a closer carries stripped."""
     body = line.split("👤 You:", 1)[1] if "👤 You:" in line else line
@@ -395,7 +501,7 @@ def match_allow(body):
     return None
 
 
-def _retry_verdict(payload, environ, verdict):
+def _retry_verdict(payload, environ, verdict, card_probe=None):
     """The `stop_hook_active` branch: ONE re-block of a re-emitted closer, then allow.
 
     ⚠️ The loop guard exists so a continued turn ending on the same closer cannot re-block
@@ -412,7 +518,7 @@ def _retry_verdict(payload, environ, verdict):
     """
     inner = dict(payload)
     inner["stop_hook_active"] = False
-    code, text, record = evaluate(inner, environ)
+    code, text, record = evaluate(inner, environ, card_probe)
     closer = record.get("closer")
     if code != 2:
         return verdict(0, "stop-hook-active", closer=closer)
@@ -441,8 +547,12 @@ def _retry_message(text):
     )
 
 
-def evaluate(payload, environ=None):
-    """`(exit_code, stderr_text, record)` — the whole decision, pure but for the transcript read."""
+def evaluate(payload, environ=None, card_probe=None):
+    """`(exit_code, stderr_text, record)` — the whole decision, pure but for the transcript read.
+
+    `card_probe(item_id, environ) -> True|False|None` is injectable so the store read is
+    testable without a live service; `None` means "cannot tell" and never blocks.
+    """
     environ = os.environ if environ is None else environ
     session_id = payload.get("session_id") if isinstance(payload, dict) else None
 
@@ -464,19 +574,19 @@ def evaluate(payload, environ=None):
     if payload.get("stop_hook_active") is True:
         # ⚠️ A loop guard, not a courtesy — see the module docstring. Bounded, not
         # unconditional: one re-block, then the stop is allowed.
-        return _retry_verdict(payload, environ, verdict)
+        return _retry_verdict(payload, environ, verdict, card_probe)
 
     transcript = payload.get("transcript_path")
     if not transcript:
         return verdict(0, "no-transcript-path")
     try:
-        found = last_closer_and_ends(transcript)
+        found = last_closer_scan(transcript)
     except Exception:
         return verdict(0, "transcript-unreadable")
     if not found:
         return verdict(0, "no-closer")
 
-    _ts, line, ends = found
+    _ts, line, ends, text = found
     # ⚠️ Before the gate checks: the shape this catches ends `👤 You: nothing`, which they
     # return `not-a-gate` on. Fail-open — a matcher error skips this check, never blocks.
     if ends:
@@ -496,6 +606,27 @@ def evaluate(payload, environ=None):
             code, _text, record = verdict(2, "unpollable-handle",
                                           verb=handle_gate.group(1).lower(), closer=line)
             return code, _handle_message(bad), record
+
+    # ⚠️ THE SHARP SHAPES ONLY — operator decision 2026-11-10, card
+    # `f5b085a591e5a5d7ca130860fabc6cc0`. A card-less `pick` closer is RECORDED for the
+    # fleet round, never blocked: the closer-mirror mint became opt-in on 2026-10-17
+    # because Stop-hook mirrors were 58.3% of board volume, so blocking every card-less
+    # `pick` would reverse that decision and refuse most sessions on the machine.
+    # ⚠️ GATE closers only. `FULL_CARD_RE` matches ANY 32-hex run, so probing every closer
+    # would refuse a session that merely CITES an md5 or a uuid in prose. The defect this
+    # refuses — an operator gate nobody can answer — only exists on a gate closer.
+    if GATE_OR_HANDLE_RE.match(body):
+        absent = absent_card_handles(body, environ, card_probe)
+        if absent:
+            code, _text, record = verdict(2, "absent-card", closer=line)
+            return code, _absent_card_message(absent), record
+    # ⚠️ The owner test searches the WHOLE message, not just the `👤 You:` body: the
+    # conventional Async State Closer layout puts `⏰ Ends:` on its own line below the
+    # verb, so a body-scoped search refused exactly the shape this task exists to accept.
+    if text and BLOCKED_LINE_RE.search(text) and not owner_named(body, text):
+        code, _text, record = verdict(2, "ownerless-blocked", closer=line)
+        return code, _blocked_owner_message(), record
+
     gate = GATE_RE.match(body)
     if not gate:
         return verdict(0, "not-a-gate", closer=line)
@@ -516,6 +647,27 @@ def _ends_message(cls, phrase):
         "id, a `defer_date` / ISO date, or an external probe (PR, CI, `gh`, `kubectl`, a "
         "pod) — and keep the watcher in the `(mechanism, id)` slot as the wake. If nothing "
         "durable exists yet, make the producer write one, or set `defer_date` and exit.\n"
+    )
+
+
+def _absent_card_message(handles):
+    named = ", ".join(f"`{h}`" for h in handles)
+    return (
+        f"closer-gate-lint: the closer names card {named}, which the attention store does "
+        "not hold. An operator answering that id has nothing to answer, so the gate never "
+        "reaches anyone. Post the ask with `attention-ask.py post`, name the `ITEM_ID:` it "
+        "prints, then end the turn.\n"
+    )
+
+
+def _blocked_owner_message():
+    return (
+        "closer-gate-lint: this closer reports `🔴 BLOCKED` but names no owner. A block "
+        "nobody owns is invisible: the fleet round can only route it to a manager or "
+        "re-check an observable if the closer names one. CLAUDE.md § Async State Closer — "
+        "name the owner in the `👤 You:` line: the full 32-hex card id the operator must "
+        "answer, the manager or supervisor that owns it, or a re-checkable `⏰ Ends:` "
+        "observable. `waiting on someone` is not an owner.\n"
     )
 
 

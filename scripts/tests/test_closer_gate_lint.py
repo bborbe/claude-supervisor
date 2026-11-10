@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _FIXTURES = os.path.join(_HERE, "fixtures", "closer-gate-lint")
@@ -93,6 +94,11 @@ EXPECTED = {
     # match between `9` and `T` — both word characters — so this closer was blocked.
     # The watcher stays in the slot, so only the datetime keeps it clean.
     "38-ends-iso-datetime.jsonl": 0,
+    # ⚠️ The ownerless-blocked pair, and it is a PAIR on purpose: the same `🔴 BLOCKED`
+    # state line with only the `👤 You:` body changed. A check that blocked both would be
+    # refusing the state rather than the missing owner.
+    "39-ownerless-blocked.jsonl": 2,
+    "40-blocked-with-manager-owner.jsonl": 0,
 }
 
 ENDS_POSITIVE = {
@@ -122,14 +128,15 @@ class CloserGateLintTest(unittest.TestCase):
                 code, _text, _record = self.mod.evaluate(self.payload(name), environ={})
                 self.assertEqual(expected, code)
 
-    def _closer(self, text):
+    def _closer(self, text, card_probe=None, prefix="done\n"):
         path = os.path.join(self.dir, "t.jsonl")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(json.dumps({"type": "assistant", "timestamp": "2026-11-05T20:00:00Z",
                                  "message": {"role": "assistant", "content": [
-                                     {"type": "text", "text": "done\n👤 You: " + text}]}}) + "\n")
+                                     {"type": "text", "text": prefix + "👤 You: " + text}]}}) + "\n")
         return self.mod.evaluate({"transcript_path": path, "stop_hook_active": False,
-                                  "session_id": "test-session"}, environ={})
+                                  "session_id": "test-session"}, environ={},
+                                 card_probe=card_probe)
 
     def test_truncated_card_handle_is_refused_under_review(self):
         code, text, record = self._closer("review: dismiss card `7e55adaf` — reply `ok`")
@@ -143,9 +150,125 @@ class CloserGateLintTest(unittest.TestCase):
         self.assertIn("7e55adaf", text)
 
     def test_full_store_id_passes(self):
-        code, text, _record = self._closer("review: card " + "7e55adaf" * 4 + " — reply `seen`")
+        # ⚠️ The shape check passes; existence is a SEPARATE check (`absent-card`), so the
+        # probe is injected here — otherwise this asserts a store round-trip, not a shape.
+        code, text, _record = self._closer(
+            "review: card " + "7e55adaf" * 4 + " — reply `seen`",
+            card_probe=lambda _item, _env: True)
         self.assertEqual(0, code)
         self.assertEqual("", text)
+
+    def test_a_full_store_id_the_store_does_not_hold_is_refused(self):
+        code, text, record = self._closer(
+            "review: card " + "7e55adaf" * 4 + " — reply `seen`",
+            card_probe=lambda _item, _env: False)
+        self.assertEqual(2, code)
+        self.assertIn("7e55adaf", text)
+        self.assertEqual("absent-card", record["reason"])
+
+    def test_an_unaskable_store_never_blocks(self):
+        # Fail-open: "cannot tell" is not "absent". A store outage must not refuse a turn.
+        code, _text, _record = self._closer(
+            "review: card " + "7e55adaf" * 4 + " — reply `seen`",
+            card_probe=lambda _item, _env: None)
+        self.assertEqual(0, code)
+
+    def test_a_blocked_closer_naming_no_owner_is_refused(self):
+        code, text, record = self._closer(
+            "nothing",
+            prefix="🔴 BLOCKED · nothing running · needs intervention\n")
+        self.assertEqual(2, code)
+        self.assertIn("names no owner", text)
+        self.assertEqual("ownerless-blocked", record["reason"])
+
+    def test_a_blocked_closer_naming_an_owner_passes(self):
+        for body in ("approve: reply `go` — card " + "7e55adaf" * 4,
+                     "you run: wait on the manager to re-arm the loop"):
+            with self.subTest(body=body):
+                code = self._closer(
+                    body,
+                    card_probe=lambda _item, _env: True,
+                    prefix="🔴 BLOCKED · nothing running · needs intervention\n")[0]
+                self.assertEqual(0, code)
+
+    def test_the_recorded_e4fd1919_blocked_closer_passes(self):
+        # ⚠️ The exact shape that made the bot request changes on #778. `fixtures/
+        # e4fd1919-transcript.jsonl` is a RECORDED real closer: an operator verb IS an
+        # owner, because only the operator can take the step it names.
+        code, _text, _record = self._closer(
+            "you run: switch this tab to `accept edits` (Shift+Tab), then reply `go`",
+            prefix="🔴 BLOCKED · nothing running · needs intervention\n")
+        self.assertEqual(0, code)
+
+    def test_a_blocked_closer_naming_a_separate_line_ends_observable_passes(self):
+        # ⚠️ The conventional layout: the observable is its OWN line below the verb. A
+        # body-scoped owner search refused exactly this shape (bot finding on #778).
+        code, _text, _record = self._closer(
+            "nothing",
+            prefix="🔴 BLOCKED · nothing running · needs intervention\n"
+                   "⏰ Ends: PR #480 merged\n")
+        self.assertEqual(0, code)
+
+    def test_an_absent_card_probe_does_not_run_on_a_non_gate_closer(self):
+        # ⚠️ A closer that merely CITES a 32-hex token in prose is not a gate nobody can
+        # answer; probing it would refuse the session for the citation.
+        code, _text, _record = self._closer(
+            "nothing — see the uuid " + "7e55adaf" * 4 + " in the log",
+            card_probe=lambda _item, _env: False)
+        self.assertEqual(0, code)
+
+    def test_card_in_store_404_is_absent(self):
+        self.assertEqual(False, self._probe(urllib.error.HTTPError("u", 404, "no", {}, None)))
+
+    def test_card_in_store_other_http_error_is_unknown(self):
+        self.assertEqual(None, self._probe(urllib.error.HTTPError("u", 500, "boom", {}, None)))
+
+    def test_card_in_store_connection_error_is_unknown(self):
+        self.assertEqual(None, self._probe(urllib.error.URLError("down")))
+
+    def test_card_in_store_200_is_present(self):
+        self.assertEqual(True, self._probe(None, status=200))
+
+    def test_card_in_store_off_switch_skips_the_probe(self):
+        self.assertIsNone(self.mod.card_in_store(
+            "7e55adaf" * 4, {self.mod.STORE_PROBE_ENV: "off"}))
+
+    def _probe(self, raises, status=200):
+        """`card_in_store` with `urlopen` replaced by a stub that raises or answers."""
+        class _Resp:
+            def __init__(self, status):
+                self.status = status
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+        def fake(_request, timeout=None):
+            if raises is not None:
+                raise raises
+            return _Resp(status)
+
+        original = self.mod.urllib.request.urlopen
+        self.mod.urllib.request.urlopen = fake
+        try:
+            return self.mod.card_in_store("7e55adaf" * 4, {})
+        finally:
+            self.mod.urllib.request.urlopen = original
+
+    def test_a_bare_status_line_is_still_not_a_state_line(self):
+        # ⚠️ The negative half of the pair above: without the `·` separator this is prose.
+        code, _text, _record = self._closer(
+            "you run: switch this tab to `accept edits`",
+            prefix="🔴 BLOCKED\n")
+        self.assertEqual(0, code)
+
+    def test_prose_mentioning_a_blocked_row_is_not_a_state_line(self):
+        code, _text, _record = self._closer(
+            "nothing",
+            prefix="The round rendered 3 rows: a 🔴 BLOCKED row for pane 809.\n")
+        self.assertEqual(0, code)
 
     def test_handle_spelled_with_id_is_refused(self):
         for body in ("review: card id 7e55adaf — reply `ok`",
