@@ -91,6 +91,7 @@ wnm = _load("who_needs_me", "who-needs-me.py")
 fs = _load("fleet_sessions", "fleet-sessions.py")
 fc = _load("fleet_colours", "fleet-colours.py")
 dw = _load("declared_wait", "declared-wait.py")
+dd = _load("defer_date", "defer-date.py")
 erc = _load("exit_record_coverage", "exit-record-coverage.py")
 
 # --- the tree's inputs -------------------------------------------------------
@@ -601,7 +602,7 @@ UNBLOCKS_VALUES = (UNBLOCKS_OPERATOR, UNBLOCKS_NUDGE, UNBLOCKS_REAP, UNBLOCKS_WO
 NUDGE_SECONDS = 30 * 60
 
 
-def unblocks_for(sid, age, meta, panel_ids, declared_wait=frozenset()):
+def unblocks_for(sid, age, meta, panel_ids, declared_wait=frozenset(), now=None):
     """Which of the four `Unblocks` values this session carries.
 
     Order is the whole rule — first match wins, and the classes are disjoint by
@@ -624,6 +625,15 @@ def unblocks_for(sid, age, meta, panel_ids, declared_wait=frozenset()):
        parameter exists to remove. `reap/close` and `operator-keystroke` still
        outrank it, because a finished task wants closing whatever the session
        declared, and a keystroke row is the operator's to press.
+       ⚠️ **Neither is a session whose task carries a FUTURE `defer_date`.** That
+       is the second inactive-by-design shape, and the `⏰ Ends:` reader cannot
+       see it: a defer is a task-file field, not a closer slot, so a row parked
+       on one reached this rule with an empty `details` and read `nudge` — which
+       is how a `/fleet-triage` pass nudged a worker whose only blocker was the
+       clock (2026-10-28, then 20 such rows in one 2026-11-10 pass). The field is
+       parsed by `scripts/defer-date.py`, the tree's single reader, and only
+       `deferred` suppresses the nudge: a `defer_date` that has PASSED leaves the
+       row `nudge` again, so the defer parks work rather than muting it forever.
     4. `working` — everything else, including a session with no stamped task
        (`meta` is None). ⚠️ `working` is the DEFAULT, not a finding: a session
        with no task cannot be shown to be idle, and inventing a nudge for it
@@ -632,6 +642,9 @@ def unblocks_for(sid, age, meta, panel_ids, declared_wait=frozenset()):
     `age` of `inf` (no transcript at all) counts as past the threshold rather
     than as unknown — `session_transcript_age()`'s own reading, "nothing has been
     written", is the maximal inactive case, and the cell renders it `—`.
+
+    `now` pins the clock for the `defer_date` comparison, so a test can construct
+    a deferred and an expired row without waiting for either.
     """
     if sid in panel_ids:
         return UNBLOCKS_OPERATOR
@@ -641,9 +654,35 @@ def unblocks_for(sid, age, meta, panel_ids, declared_wait=frozenset()):
         if (sid not in declared_wait
                 and age is not None and age >= NUDGE_SECONDS
                 and meta.get("phase") == "execution"
-                and meta.get("open_boxes", 0) >= 1):
+                and meta.get("open_boxes", 0) >= 1
+                and not _is_deferred(meta, now)):
             return UNBLOCKS_NUDGE
     return UNBLOCKS_WORKING
+
+
+def _defer_reading(meta, now=None):
+    """`(state, detail)` for a row's `defer_date`, or `("none", None)` when absent.
+
+    Reads through `scripts/defer-date.py` rather than slicing the scalar: that
+    module is the tree's ONE `defer_date` reader, and its header records what
+    the seven ad-hoc readers it replaced got wrong (an offset shifting the day,
+    a bare date surfacing at midnight instead of start-of-local-day).
+    """
+    value = (meta or {}).get("defer_date") or ""
+    if not value:
+        return "none", None
+    return dd.defer_state(value, now=now)
+
+
+def _is_deferred(meta, now=None):
+    """Is this row's task deferred into the future?
+
+    Only `deferred` answers True. `due` is a wait that has expired, `none` is no
+    defer at all, and `invalid` is a value that could not be parsed — the last
+    deliberately falls through to the ordinary nudge rule rather than silently
+    parking a row forever on a typo. `build_rows` reports that case in `details`.
+    """
+    return _defer_reading(meta, now=now)[0] == "deferred"
 
 
 def registry_records(sessions_dir=None):
@@ -1143,6 +1182,16 @@ def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, gr
             details[sid] = (
                 f"waiting on your keystroke: {closer}" if closer else
                 f"waiting on your keystroke for {sid[:8]} — closer not readable from the transcript"
+            )
+        # An unparseable `defer_date` is the one case where the defer field says
+        # something and the classification ignores it, so it reports itself
+        # rather than passing as a plain `nudge`. `setdefault`, so a gate's pane
+        # detail and a closer both outrank it — they name something actionable,
+        # this names a vault value to correct.
+        _state, _detail = _defer_reading(meta)
+        if _state == "invalid":
+            details.setdefault(
+                sid, f"defer_date invalid: {_detail} — the row is classified as if it had no defer"
             )
     rows.sort(key=lambda r: (BUCKET_ORDER.index(r["bucket"]), r["label"].lower()))
     return rows, details
