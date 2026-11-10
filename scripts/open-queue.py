@@ -148,10 +148,11 @@ NO_PRIORITY = 10**6
 
 #: The task tier's deliberate-stop marker — see `is_stopped()`. `scripts/task-standdown.py`
 #: is the only writer; this module and `scripts/worker-keepalive.py` are the readers.
-#: ⚠️ **The truthy set is declared in each of the three rather than imported** — the repo's
+#: ⚠️ **The truthy set is declared in the two READERS rather than imported** — the repo's
 #: scripts are loaded by path, so a cross-module import would couple two files that are
-#: otherwise independent. Keep the three literals identical: a drift would make the
-#: open-queue and the keepalive disagree about whether one row is stopped.
+#: otherwise independent. `scripts/task-standdown.py` is the writer and holds no set: it
+#: writes the literal `"true"`. Keep the two readers' literals identical: a drift would
+#: make the open queue and the keepalive disagree about whether one row is stopped.
 STOPPED_KEY = "stopped"
 TRUTHY = {"true", "yes", "on"}
 
