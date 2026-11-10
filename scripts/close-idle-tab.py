@@ -183,8 +183,8 @@ def main(argv=None):
         if entries is None:
             exit_code = refuse(
                 "unknown-session-id",
-                f"the registry at {args.sessions_dir} could not be read, so {session_id} "
-                "cannot be resolved",
+                f"the registry at {args.sessions_dir or 'the default location'} could not "
+                f"be read, so {session_id} cannot be resolved",
             )
             continue
         path, rec = restart_worker.find_target(entries, session_id)
@@ -219,8 +219,8 @@ def main(argv=None):
             continue
 
         cwd = (rec.get("cwd") or "").strip()
-        dirty, tracked, _untracked = precheck.worktree_probe(cwd)
-        if dirty == "dirty" and precheck.other_occupants(entries, cwd, session_id) == 0:
+        tree, tracked, _untracked = precheck.worktree_probe(cwd)
+        if tree == "dirty" and precheck.other_occupants(entries, cwd, session_id) == 0:
             exit_code = refuse(
                 "dirty-worktree",
                 f"session {session_id} is the only live session in {cwd} and that "
