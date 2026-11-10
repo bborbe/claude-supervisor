@@ -69,7 +69,12 @@ FIELDS = (
     "unverifiable_action",
     "unverifiable_observation",
 )
-VERDICTS = ("revive", "blocked", "unverifiable", "finished")
+#: `closed` is the drive leg's idle-after-nudge outcome: the row was nudged in an earlier
+#: round, was unchanged this one, and its pane was closed by `close-idle-tab.py`. It is a
+#: verdict rather than a `nudge` value because the row left the candidate set — recording
+#: it keeps the history explicit, and a later round that finds the session gone reads a
+#: closed entry rather than an unexplained absence.
+VERDICTS = ("revive", "blocked", "unverifiable", "finished", "closed")
 #: What the 2-round rule did about a row, or "" when it has not acted. The marker is what
 #: makes the action fire ONCE per silence rather than on every round at or past the
 #: threshold: a row held back by the per-round cap keeps advancing its streak, so a
