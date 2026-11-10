@@ -236,6 +236,65 @@ class Verdicts(Tmp):
         self.assertEqual(rr.feed_verdict(["x"], {"x"}, "read"), "gated")
 
 
+class TheParkLimb(Tmp):
+    """A `waiting` session is parked, not stuck — asserted on BOTH fields of one row.
+
+    Measured 2026-10-29: a headless worker suspended on a permission gate writes
+    nothing to its transcript, so transcript staleness reads identically to a finished
+    turn. `in_flight()` returned `quiet` for it and `stuck_verdict()` — which took no
+    `in_flight` argument at all — stamped the same row `frozen`, from the same read.
+    """
+
+    def registry(self, sid, status):
+        return {sid: {"status": status}}
+
+    def stale(self, sid):
+        """A transcript older than `LIVE_WINDOW`, i.e. the frozen shape."""
+        return 600.0
+
+    def test_a_waiting_session_reads_parked(self):
+        sid = "eeee5555"
+        verdict, limb = rr.in_flight([sid], self.registry(sid, "waiting"),
+                                     self.attention, time.time(), self.stale)
+        self.assertEqual(verdict, "parked")
+        self.assertIn("waiting", limb)
+
+    def test_a_parked_row_is_not_frozen(self):
+        sid = "ffff6666"
+        row = {"mtime": time.time() - 3600}
+        verdict, _ = rr.stuck_verdict(
+            row, [sid], "LIVE", "clear", 900, time.time(),
+            self.attention, self.projects, in_flight_verdict="parked")
+        self.assertEqual(
+            verdict, "none",
+            "a parked worker's tool call is suspended, so the transcript cannot tell "
+            "a park from a death — and this is the park")
+
+    def test_an_idle_session_with_a_static_transcript_is_still_frozen(self):
+        """The negative control: the park limb must not swallow the real case."""
+        sid = "9999aaaa"
+        row = {"mtime": time.time() - 3600}
+        fl, _ = rr.in_flight([sid], self.registry(sid, "idle"),
+                             self.attention, time.time(), self.stale)
+        self.assertEqual(fl, "quiet")
+        verdict, _ = rr.stuck_verdict(
+            row, [sid], "LIVE", "clear", 900, time.time(),
+            self.attention, self.projects, in_flight_verdict=fl)
+        self.assertEqual(verdict, "frozen")
+
+    def test_a_park_does_not_survive_the_gate_being_released(self):
+        """Once the registry leaves `waiting`, the same row is frozen again."""
+        sid = "8888bbbb"
+        row = {"mtime": time.time() - 3600}
+        fl, _ = rr.in_flight([sid], self.registry(sid, "busy"),
+                             self.attention, time.time(), self.stale)
+        self.assertNotEqual(fl, "parked")
+        verdict, _ = rr.stuck_verdict(
+            row, [sid], "LIVE", "clear", 900, time.time(),
+            self.attention, self.projects, in_flight_verdict=fl)
+        self.assertEqual(verdict, "frozen")
+
+
 # The feed's pane column is right-aligned to four, so a real row reads `[ 417]`, and a
 # headless gate reads `[ hst]` with its store item id on the `answer:` continuation
 # line. The pre-fix pattern `^\s*\[(\d+)\]` matched 1 of these 3 rows (`[1234]`).
