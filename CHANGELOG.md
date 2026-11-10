@@ -7,7 +7,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
-## Unreleased
+## v0.269.0
 
 - feat: **A headless worker idle for 15 minutes is now closed with no session running — `launchd/com.bborbe.idle-reaper.plist` drives `scripts/idle-reaper-tick.py` every 900 s.** The operator's rule (2026-11-07, restated 2026-11-10) is that an idle headless worker exits after 15 minutes; `reap-idle-headless.py` was the verb and nothing called it. Each tick enumerates candidates through the reaper's own `candidate_session_ids()` (so the tick and `--all` cannot disagree on the population), runs the reaper once per candidate, and routes exactly one refusal onward — `task-terminal` goes to `close-worker.py`, the finished-task verb, because `close-worker.py` takes one id and cannot enumerate. Every other refusal is final for the tick and logged with its token; a refusal exits 0, an unexpected verb exit exits 1. ⚠️ Deliberately **not** on `com.bborbe.fleet-keeper`, which is report-only by operator decision (2026-11-01, card efc771fb) and pinned against every kill path by `test_fleet_keeper.py`. `RunAtLoad` is false, so installing it signals nothing until the first interval. Installing it is an operator step. Also repairs a CHANGELOG fold: a stray `## Unreleased` below `## v0.268.2` held two bullets whose merges (`dc27080d`, `15e31e4e`) shipped in `v0.268.3`; both now sit under `## v0.268.3`.
 
