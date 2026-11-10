@@ -19,8 +19,10 @@ populations, one rule: the reap is evidence plus the session's own close.
 
 ⚠️ **The one carve-out is a finished headless (`sdk-cli`) row.** It has no self-close path —
 vault-cli `session-self-exit.py` proves a controlling tty and always answers `SELF-EXIT: stay`
-for it — so the drive leg closes it through `scripts/close-worker.py` (`agents/fleet-drive.md`
-step 1b owns the tier read, the guards and the refusal tokens). That is not a kill by hand: it
-is the same guarded mechanism `/supervisor:close` runs, with the busy / gate / worktree / hold /
-terminal refusals intact.
+for it — so the round closes it through `scripts/close-worker.py`. ⚠️ **The tier read is the
+caller's** (`commands/steps/drive.md`), not the drive agent's: that agent's `allowed-tools`
+grants no `Bash(python3:*)`, so `agents/fleet-drive.md` step 1b only points at the caller and
+drafts the message for every finished row. That is not a kill by hand: it is the same guarded
+mechanism `/supervisor:close` runs, with the busy / gate / worktree / hold / terminal refusals
+intact.
 
