@@ -53,6 +53,16 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
    ⚠️ **Every retained row is re-probed every round, and its `probe` is rewritten with this round's command and result.** Carrying the previous round's `probe` string forward is the defect this step exists to remove — the stub-probe test fails it. The same rewrite is what makes the dedup key work: an unchanged observation is precisely what `already signalled` means.
 
+0c. **Card the waits that never resolve — before the candidate scan.** Run `python3 $P/drive-escalate.py render --round <round tag>`. It reads every session's newest `Stop` record carrying a non-empty `⏰ Ends:`, measures how long that declaration has stood, and posts **one** attention card for any whose observable has not moved for 24 h — the criterion challenge `Session Lifecycle.md:43` and its edge case E5 (`:95`) require, which nothing implemented before this step. Paste its `ESCALATED` block into the payload **verbatim**, every row.
+
+   ⚠️ **This is not the `PARKED` signal and must never be merged into it.** `PARKED` fires when a parking verdict **changed** this round; this fires when a wait has **not** changed for 24 h. One is a change signal, the other an absence signal — a row can appear in both, in neither, or in one alone, and collapsing them would silence exactly one of the two failures they cover.
+
+   ⚠️ **Never re-implement the 24 h test here.** The script owns the clock, the threshold (`--threshold-seconds`, default 86400) and the dedup key, and `scripts/tests/test_drive_escalate.py` asserts that a second round at the same observable posts nothing. A block that re-derives "older than 24 h" from the rendered line passes any content check while carding twice, and a duplicate card trains the operator to ignore the one that matters — the same discounting a false park check-in trains in a manager.
+
+   ⚠️ **`parked-on-watcher` rows are this step's input, and step 1 excludes them from yours.** Do not move them into the candidate set to reach them: they are classified `parked-on-watcher` precisely because their turn ended on a declared machine wait, and step 1's exclusion is what keeps this leg from nudging them.
+
+   A **refusal** (exit 2 — an unparseable wait store) wrote nothing and posted nothing: report it in the header and continue. Never read it as "no stale waits".
+
 1. **Candidates.** Every `CLASSIFICATION` row whose class is `parked`. ⚠️ **`parked-on-watcher` and `waiting-on-human` are never candidates, and the naming is the trap.** Both were split out of the reader's `stalled` bucket by `agents/fleet-sweep-reader.md` step 8: a `parked-on-watcher` row is a session whose turn ended and which **declared a machine-watched wait**, and a `waiting-on-human` row is one held by an operator gate. ⚠️ **`parked-on-watcher` is not a near-miss for `parked`** — it shares the prefix and nothing else, so a `startswith` or substring match would sweep in exactly the rows this leg exists to leave alone. Match the class **exactly**, and treat any class you do not recognise as **not yours** rather than as `parked`. ⚠️ **The rendered class cell carries a leading `⌛`** — the reader emits `⌛ parked-on-watcher` and `⌛ waiting-on-human` — so strip that glyph before matching, in the row's class cell and in the `CLASSIFICATION` header's `<class>=<n>` terms. Matching the bare name against a glyph-prefixed cell fails silently, and step 2's park-row clause would then read a healthy all-parked fleet as a malformed handoff. `finished — reap candidate` rows (and `REAP CANDIDATES`) are **finished**: never nudged, but **reaped** in step 1b — before any revive is drafted. `deferred` rows are never nudged either; step 1b verifies them and lists them as freeable. `[unresolved]` rows and rows with no task are **unverifiable**.
 
 1b. **Reap the finished — before drafting any nudge.** This is the reap contract's canonical home: `fleet-loop` Step 3b dispatches this leg on every round and points here rather than restating it. For each finished row, re-read the three disk facts this run:
@@ -122,6 +132,8 @@ RETAINED — re-probed from the ledger, not the digest
   (none)
 PARKED — one line per row whose parking verdict or probe changed this round
   <name> [<sid8>] · <verdict> · <probe> → <result> · <link|no pane — <reason>>
+  (none)
+STALE WAITS — verbatim from drive-escalate.py (step 0c); a wait unchanged for 24 h
   (none)
 ESCALATION — grouped by cause
   <cause>
