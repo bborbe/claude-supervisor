@@ -584,7 +584,7 @@ BUCKET_ORDER = ("problem", "needs-input", "running", "idle")
 # `Unblocks` — what would move this session forward. Display-only, in the
 # operator's vocabulary: it answers "what do I do about this row", and it
 # deliberately does NOT replace `agents/fleet-drive.md`'s
-# revive/blocked/unverifiable/finished verdicts, which drive the fleet round's
+# revive/blocked/unverifiable/finished/wrote-nothing verdicts, which drive the fleet round's
 # act leg over these same sessions. Two taxonomies over one population is a
 # drift risk; this one is a column, that one is a decision.
 UNBLOCKS_OPERATOR = "operator-keystroke"

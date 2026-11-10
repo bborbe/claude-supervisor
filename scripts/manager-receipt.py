@@ -739,7 +739,7 @@ def sweep_shape(text: str) -> bool:
 
 READINGS_VERDICTS = {
     "liveness": {"LIVE", "ABSENT", "UNKNOWN"},
-    "in_flight": {"in-flight", "quiet", "unread"},
+    "in_flight": {"in-flight", "parked", "quiet", "unread"},
     "feed": {"gated", "clear", "unread"},
     "external_wait": {"external", "none", "unread"},
 }
