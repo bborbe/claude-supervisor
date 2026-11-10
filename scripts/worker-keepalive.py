@@ -221,7 +221,7 @@ def post_card(task: str, spent: int) -> None:
     traceback, so the failure is swallowed and the verdict still stands.
     """
     slug = _keepalive().base_slug(task)
-    script = os.path.expanduser("~/.claude/scripts/attention-ask.py")
+    script = os.path.join(HERE, "attention-ask.py")
     if not os.path.exists(script):
         return
     try:
