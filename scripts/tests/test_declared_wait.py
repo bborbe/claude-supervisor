@@ -108,6 +108,22 @@ class TestDeclaredWait(unittest.TestCase):
                          "detail": {"nested": "⏰ Ends: inside a dict"}})
         self.assertFalse(dw.declared_wait(SID, state_dir=self.dir))
 
+    def test_a_boolean_ts_is_unreadable_not_a_wait_since_1970(self):
+        """`bool` is an `int` in Python, so `ts: true` would sail through as epoch 1.
+
+        ⚠️ A near-zero timestamp makes the row look like a wait declared half a century
+        ago, and `drive-escalate.py` would card it immediately on no evidence. The guard
+        is one `isinstance(value, bool)` clause, so it needs its own case: the indirect
+        coverage in `test_drive_escalate.py` only ever passes `ts: None`, which exercises
+        the non-numeric half and leaves this one unpinned.
+        """
+        rec = stop("⏰ Ends: the real wait")
+        rec["ts"] = True
+        self.write(SID, rec)
+        record = dw.wait_record(SID, state_dir=self.dir)
+        self.assertIsNotNone(record, "the declaration itself is still real")
+        self.assertIsNone(record["ts"], "a boolean ts is unreadable, never epoch 1")
+
     def test_a_non_dict_line_keeps_an_earlier_declaration(self):
         """A bare JSON string or list after a real Stop must not reset the session.
 
