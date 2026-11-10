@@ -75,8 +75,8 @@ LEGS = {
             "resolution", "tracked", "unresolved",
             # liveness
             "live", "absent", "unknown",
-            # in-flight — all three values, the `unread` under its own key
-            "inflight", "quiet", "inflight-unread",
+            # in-flight — all four values, the `unread` under its own key
+            "inflight", "parked", "quiet", "inflight-unread",
             # attention feed
             "gated", "clear", "unread",
             # external wait — all three values, the `unread` under its own key
