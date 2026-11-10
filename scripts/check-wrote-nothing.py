@@ -103,9 +103,11 @@ REQUIRED = [
         "824 of 1,075 rows reading `running` against 26 live sessions.",
     ),
     (
-        "session-ids.py",
+        "session-ids.py --task",
         "The wire row carries no task reference, so without a named ledger-to-task-page join the "
-        "headless branch has no stated way to run.",
+        "headless branch has no stated way to run — and the marker carries `--task` because the "
+        "script requires it and exits on a bare invocation, so naming the script alone is not a "
+        "join that can run.",
     ),
     (
         "read the ledger once per round",

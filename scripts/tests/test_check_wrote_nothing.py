@@ -34,7 +34,7 @@ MARKERS = {
     "mtime": 'python3 -c "import os,sys;print(int(os.path.getmtime(sys.argv[1])))"',
     "ledger": "python3 $P/spawn-ledger.py --json",
     "join": "compare the first 8 characters of `session_id`",
-    "task_join": "`python3 $P/session-ids.py`",
+    "task_join": "`python3 $P/session-ids.py --task \"<task file>\"`",
     "exit_gate": "require the ledger row to record an exit — **`ended_at` is set** — before flagging it",
     "once": "Read the ledger once per round, up front, and reuse the spawn times",
     "zparse": '.replace("Z", "+00:00") before `fromisoformat`',
