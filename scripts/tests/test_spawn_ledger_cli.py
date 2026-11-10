@@ -71,6 +71,13 @@ class SpawnLedgerCliTest(unittest.TestCase):
         self.assertEqual(out, "")
         self.assertIn("usage: spawn-ledger.py --json", err)
 
+    def test_trailing_argument_is_refused_not_ignored(self) -> None:
+        """A silently-ignored extra arg hides a caller that thinks it asked for something else."""
+        code, out, err = self.run_main(["--json", "--mode", "headless"], {"x": {"session_id": "x"}})
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")
+        self.assertIn("usage: spawn-ledger.py --json", err)
+
 
 if __name__ == "__main__":
     unittest.main()

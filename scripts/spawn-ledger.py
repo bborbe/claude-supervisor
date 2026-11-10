@@ -223,7 +223,7 @@ def _main(argv):
     file exists to remove. `--json` is the only output shape: `None` (unreadable) is
     exit 2, never `{}`, for the reason the module docstring gives.
     """
-    if argv and argv[0] not in ("--json",):
+    if len(argv) > 1 or (argv and argv[0] != "--json"):
         print("usage: spawn-ledger.py --json", file=sys.stderr)
         return 2
     rows = read_ledger()

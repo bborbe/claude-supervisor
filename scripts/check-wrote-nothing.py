@@ -4,8 +4,10 @@
 The fleet round's drive leg revives `parked` candidates and reaps `finished` rows, and both
 assume a worker that did something. Neither could tell a worker that never wrote from one that
 wrote and stopped: `finished` is decided by the task's own boxes (`agents/fleet-sweep-reader.md`
-step 8 — `idle` and every box `[x]`), which a task completed before the worker spawned satisfies
-without the worker having done anything.
+step 8 — `idle` **and** every box `[x]`), so a worker that never wrote leaves its page as the
+manager wrote it, the row classifies `parked`, and the drive leg drafts a nudge that cannot reach
+a headless worker. ⚠️ A page already all `[x]` before the spawn is a *different* case — it reads
+`finished` and is reaped by 1b, and this rule deliberately does not cover it.
 
 Measured 2026-11-07: a fleet manager's worker hit a plan gate, nobody answered, the 15-minute
 timeout denied it, and the worker exited with its task file untouched — found twenty minutes

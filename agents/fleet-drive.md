@@ -85,7 +85,9 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
    ⚠️ **The mtime is evidence, not proof.** It moves when *anyone* writes the page — a sibling session, a manager flipping a status field, obsidian-git. So the signal asserts *"the task page has not been modified since this worker spawned"*; the digest carries that wording, never a claim about what the worker did.
 
-   `finished` is decided by the task's boxes, not here — step 8 needs `idle` and every box `[x]`, so this catches only what that rule cannot see: a task already complete when the worker spawned.
+   `finished` is decided by the task's boxes, not here — `agents/fleet-sweep-reader.md` step 8 needs `idle` **and** every box `[x]`. A worker that never wrote leaves its page exactly as the manager wrote it, so an `execution` task with open boxes classifies as `parked` and step 1 would draft a nudge — and a nudge cannot reach a headless worker. That is the gap this check closes.
+
+   ⚠️ **A task whose boxes were already all `[x]` before the worker spawned is a different case and is not covered here.** It reads as `finished — reap candidate` and 1b reaps it; name that rather than implying this check sees it. The two are deliberately separate: this rule keys on open boxes, so a complete-at-spawn page never reaches it.
 
 1b. **Reap the finished — before drafting any nudge.** This is the reap contract's canonical home: `fleet-loop` Step 3b dispatches this leg on every round and points here rather than restating it. For each finished row, re-read the three disk facts this run:
 
