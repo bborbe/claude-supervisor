@@ -76,27 +76,15 @@ Before naming a cause in Step 5, confirm it against the system it is about — `
 
 Measured 2026-10-12 on a cold `v0.130.0` round: rows 3 (`orphan=46`, `collision=1`), 8 (`ledger=16`) and 11 (`blocked=3`) each held, none was read, and the mandatory `📋 Open with the operator` render was omitted.
 
-⚠️ **The round already prints the reading that settles this — act on it.** `commands/steps/round-readings.md` § *The four reads that stay yours* runs the probe **first on every tick** and prints the executing version beside the installed one, naming a divergence `executing <X> against <Y> installed`. That line *is* the staleness verdict for every step body this session holds: they came from `<X>`. **When it reports a divergence, re-read each step before executing it** and print `re-read <step> (loaded <X>, installed <Y>)`. ⚠️ **`unknown` never fires** — an unresolvable probe compares nothing, and reading it as stale re-reads a body nobody proved old.
+⚠️ **The round already prints the reading that settles this — act on it.** `commands/steps/round-readings.md` § *The four reads that stay yours* runs the probe **first on every tick** and prints the executing version beside the installed one, naming a divergence `executing <X> against <Y> installed`. That line *is* the staleness verdict for every step body this session holds: they came from `<X>`, whatever the disk now carries. **When it reports a divergence, re-read each step before executing it** and print `re-read <step> (loaded <X>, installed <Y>)`.
 
-⚠️ **The second line of defence, for what the version line cannot see: a step file edited in place, with no release.** After `/reload-plugins` the session keeps the body it read at session start — the paths were pinned to the version directory current then, the disk has moved since, and the rule above sees a body that *is* in context and re-reads nothing. Before executing a step you already hold, compare the file's current `shasum -a 256` against the hash recorded for it, and re-read when they differ.
+⚠️ **`unknown` never fires.** An unresolvable probe compares nothing, and reading it as stale re-reads a body nobody proved old.
 
-⚠️ **Key the record on the step's path *inside the plugin*, never its absolute path.** `${CLAUDE_PLUGIN_ROOT}` resolves under `~/.claude/plugins/cache/…/<version>/` (`docs/fleet-surface.md` § the probe and the lever), so an absolute path changes at every release — keying on it forces a blanket re-read at each bump, which is the version trigger this section rejects. The key is `<rel>`: the step file's path relative to the plugin root, e.g. `commands/steps/keepalive.md`.
+⚠️ **This is deliberately the coarse trigger, and its cost is accepted.** Measured 2026-11-08 20:48: four rounds ran against `0.251.3` step files while five releases shipped, and all four step files the round reads were byte-identical — so a divergent tab re-reads bodies that had not changed. That waste is the price of the alternative, which was measured and is worse: a content-hash ledger shipped in `v0.264.6` and **never fired once** across 11 step-file commits and six releases, because its condition — *a step you already hold* — is unreachable for a manager obeying `commands/goal-drive.md:86` (*"a round assumes no context left over … re-read what a step needs rather than carrying it forward"*). A re-read that is sometimes unnecessary beats a trigger that never fires.
 
-⚠️ **The session id is `$CLAUDE_CODE_SESSION_ID`, and the ledger holds ONE line per step.** An append-only file grows without bound and leaves several hashes per step with no stated winner; rewrite the entry instead:
+⚠️ **A step file edited in place, with no release, is out of scope.** No version line can see it, and the ledger that could was removed as inert rather than kept as untested machinery. Every step change in this repo ships as a tagged release.
 
-```bash
-L=~/.claude/state/step-body-hashes/$CLAUDE_CODE_SESSION_ID.txt
-mkdir -p "$(dirname "$L")"
-grep -v "  <rel>$" "$L" 2>/dev/null > "$L.new"
-shasum -a 256 "<file>" | awk -v k="<rel>" '{print $1 "  " k}' >> "$L.new"
-mv "$L.new" "$L"
-```
 
-Compare with `grep "  <rel>$" "$L" | awk '{print $1}'`. One target, the same in every router.
-
-⚠️ **A missing record is a stale verdict, not a skip.** The case this rule exists for is a body read before it did, so there is nothing to compare against — re-read the file and record it, once. Reading "no record" as "unchanged" reproduces the defect exactly, in the one round that matters most. **When the compare fires, print one line naming the step, `read under <hash>` and `now <hash>`, then re-read** — a refresh nobody can see in the round's own output is indistinguishable from no refresh at all.
-
-⚠️ **The measure is the file's content, never the plugin version.** Measured 2026-11-08 20:48: four rounds ran against `0.251.3` step files while five releases shipped, and all four step files the round reads were byte-identical — what moved was the version segment in every path. A version trigger fires on every release (a blanket re-read by another name) while still missing a step file edited in place. Measured 2026-11-05: six rounds on `0.240.0` skipped the keepalive leg for 80 minutes, because the Fleet Manager still held the `0.238.5` body, which carries no park-nudge procedure.
 
 ## No manager-proposal row
 
