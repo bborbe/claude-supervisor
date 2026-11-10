@@ -59,6 +59,8 @@ Run this section only when a name survives argument parsing. A bare call skips i
 
 4. **Write the marker** — `manager-liveness.py --stop --subject "<name>" --branch "<resolved branch>"`. It writes `<branch>--<base>.stopped` plus `<branch>--<base>.reset`. ⚠️ `--subject`, never the deprecated `--topic` alias, and always the explicit `--branch`: a branch-less call defaults to `goal` and marks the wrong record. Report it as `✓ stop marker — <path>`.
 
+   ⚠️ **When the resolved branch is `task`, also stamp the page** — `task-standdown.py --subject "<name>"`. The `task--<base>.stopped` state file is a **record**, not a consumer: neither `open-queue.py` nor `worker-keepalive.py` reads it, so a task stopped by name and stamped only that way is still reopened by the open leg and resumed by the keepalive. The page field is what both readers gate on. Report the second line as `✓ task marker — <path>`; when it returns `no-task` or `ambiguous`, say so and keep the state marker — the stand-down still stands for the by-name path, it is only the task tier that could not be stamped.
+
 5. **Print the report** — the header form `⏹️ STOP — <subject> (<branch> · <vault>) · session <sid8>` that `<process>` step 3 owns, then only the rows this run can actually fill:
 
    ```
@@ -142,7 +144,7 @@ Run this section for the **bare** form only.
 </process>
 
 <constraints>
-- **Write at most one marker, and the right one for the tier.** A **worker's** bare stop writes the task page's `stopped: true` + `stop_date` and **no** state file (`<process>` step 2b, worker limb). A **manager's** writes `<branch>--<base>.stopped` + `<branch>--<base>.reset` and no page (`<process>` step 2b, manager limb). The by-name form writes the subject marker (`<by_name>` step 4). `stop` is a disarm, not a bookkeeping act; each marker exists only so a deliberate stop is not reported as a lapse — and, for the task tier, so the row is neither reopened nor resumed.
+- **Write at most one marker per tier, and the right one for each.** A **worker's** bare stop writes the task page's `stopped: true` + `stop_date` and **no** state file (`<process>` step 2b, worker limb). A **manager's** writes `<branch>--<base>.stopped` + `<branch>--<base>.reset` and no page (`<process>` step 2b, manager limb). The by-name form writes the subject marker, and **additionally** the page field when the subject is a task (`<by_name>` step 4) — the state file is a record no reader consumes. `stop` is a disarm, not a bookkeeping act; each marker exists only so a deliberate stop is not reported as a lapse — and, for the task tier, so the row is neither reopened nor resumed.
 - **The by-name form refuses rather than gates.** There is no operator prompt and no confirmation turn: a session that does not own the subject prints `not-owned:` and stops. A stand-down is cheap to re-run and expensive to misattribute.
 - End the turn with the session's normal closer. This report is not one.
 </constraints>

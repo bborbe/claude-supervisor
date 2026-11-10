@@ -99,6 +99,31 @@ class TaskStanddownTest(unittest.TestCase):
         self.assertEqual(ts.task_name("/v/25 Tasks/Some Long Title.md"), "Some Long Title")
         self.assertEqual(ts.task_name("Bare Name"), "Bare Name")
 
+    def test_a_by_name_stamp_writes_the_same_keys(self):
+        """The by-name form must reach the same page field.
+
+        ⚠️ Without this path a task stopped by name writes only the
+        `task--<base>.stopped` state file, which **no reader consumes** — so the row was
+        still reopened by the open leg and resumed by the keepalive. That was the
+        half-merge the by-name PR's own SC3 deferred to this change, and the local review
+        caught it.
+        """
+        self.stub_resolve("/tmp/v/25 Tasks/A Task.md")
+        code, out = self.run_main(["--subject", "A Task"])
+
+        self.assertEqual(0, code)
+        self.assertEqual("stopped\t/tmp/v/25 Tasks/A Task.md", out[0])
+        self.assertEqual([w[1] for w in self.writes], [ts.STOPPED, ts.STOP_DATE])
+        self.assertEqual(self.writes[0][0], "A Task")
+
+    def test_a_by_name_stamp_of_an_unknown_name_writes_nothing(self):
+        self.stub_resolve("")
+        code, out = self.run_main(["--subject", "Nope"])
+
+        self.assertEqual(1, code)
+        self.assertEqual("no-task\t", out[0])
+        self.assertEqual([], self.writes)
+
     def test_a_handed_off_task_refuses(self):
         """The id is only in `metrics_sessions` — the task belongs to a successor."""
         ts.anchored_task = lambda sid, cwd, root: ("/tmp/v/25 Tasks/A Task.md", True, "")

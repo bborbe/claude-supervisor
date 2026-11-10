@@ -193,19 +193,41 @@ def anchored_task(session_id, cwd, vault_root):
 
 
 def stamp(args):
-    path, handed_off, reason = anchored_task(args.session, args.cwd or os.getcwd(), args.vault_path)
-    if not path:
-        print("no-task\t")
-        print(reason or "no task claims this session", file=sys.stderr)
-        return 1
-    if handed_off:
-        print("handed-off\t%s" % path)
-        print(
-            "this session handed the task off; its current owner holds it as "
-            "claude_session_id — refusing to stop a task this session no longer owns",
-            file=sys.stderr,
+    """Write the marker, resolving the task by session id or by name.
+
+    ⚠️ **Both entry points reach this function.** The bare form passes `--session` (the
+    caller's own anchor); the by-name form passes `--subject`, because
+    `/supervisor:stop "<task>"` writes the `task--<base>.stopped` state marker and
+    **neither `open-queue.py` nor `worker-keepalive.py` reads that file** — without this
+    second write a task stopped by name was still reopened and resumed, which is the
+    half-merge the by-name PR's own SC3 deferred to this change.
+    """
+    if args.subject.strip():
+        path, ambiguous, reason = by_name(args.subject)
+        if ambiguous:
+            print("ambiguous\t")
+            return 1
+        if not path:
+            print("no-task\t")
+            print(reason or "no task named %r" % args.subject, file=sys.stderr)
+            return 1
+        handed_off = False
+    else:
+        path, handed_off, reason = anchored_task(
+            args.session, args.cwd or os.getcwd(), args.vault_path
         )
-        return 1
+        if not path:
+            print("no-task\t")
+            print(reason or "no task claims this session", file=sys.stderr)
+            return 1
+        if handed_off:
+            print("handed-off\t%s" % path)
+            print(
+                "this session handed the task off; its current owner holds it as "
+                "claude_session_id — refusing to stop a task this session no longer owns",
+                file=sys.stderr,
+            )
+            return 1
 
     known = vaults()
     if known is None:
@@ -235,28 +257,42 @@ def stamp(args):
     return 0
 
 
+def by_name(subject):
+    """`(path, ambiguous, reason)` for a task resolved by NAME.
+
+    Delegates to `resolve-task-file.py`, the repo's own "never guesses" resolver: zero
+    hits or more than one inside the tier reached resolves nothing, and the colliding
+    paths go to stderr. Shared by the by-name stamp and the `--clear` verb, so the two
+    cannot disagree about which page a name means.
+    """
+    resolve = _load("resolve_task_file", "resolve-task-file.py")
+    payload, degraded = resolve.vault_dirs()
+    if degraded:
+        return "", [], degraded
+    path, ambiguous = resolve.resolve(subject, payload)
+    if ambiguous:
+        for candidate in ambiguous:
+            print("AMBIGUOUS %s\t%s" % (subject, candidate), file=sys.stderr)
+        return "", ambiguous, "ambiguous name"
+    if not path:
+        return "", [], "no task named %r" % subject
+    return path, [], ""
+
+
 def clear(args):
     """Clear the marker by NAME — the operator's verb, resolved by the repo's own rule."""
-    resolve = _load("resolve_task_file", "resolve-task-file.py")
     known = vaults()
     if known is None:
         print("cannot-tell\t")
         print("vault-cli config list is unreadable", file=sys.stderr)
         return 1
-    payload, degraded = resolve.vault_dirs()
-    if degraded:
-        print("cannot-tell\t")
-        print(degraded, file=sys.stderr)
-        return 1
-    path, ambiguous = resolve.resolve(args.subject, payload)
+    path, ambiguous, reason = by_name(args.subject)
     if ambiguous:
         print("ambiguous\t")
-        for candidate in ambiguous:
-            print("AMBIGUOUS %s\t%s" % (args.subject, candidate), file=sys.stderr)
         return 1
     if not path:
-        print("no-task\t")
-        print("no task named %r" % args.subject, file=sys.stderr)
+        print("cannot-tell\t" if "unreadable" in reason or "DEGRADED" in reason else "no-task\t")
+        print(reason, file=sys.stderr)
         return 1
     vault = args.vault or vault_name_for(path, known)
     name = task_name(path)
@@ -266,8 +302,16 @@ def clear(args):
         # A key that is already absent is the state we want, so a refusal here is only a
         # failure when the field is still present afterwards — checked by re-reading.
         if reason:
-            with open(path, encoding="utf-8") as handle:
-                text = handle.read()
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    text = handle.read()
+            except OSError as exc:
+                # ⚠️ Guarded: an unreadable page after a failed clear is `cannot-tell`,
+                # never a traceback out of a verb whose whole contract is three verdicts.
+                print("cannot-tell\t%s" % path)
+                print("could not clear %s: %s; page unreadable (%s)" % (key, reason, exc),
+                      file=sys.stderr)
+                return 1
             if ("\n%s:" % key) in text:
                 print("cannot-tell\t%s" % path)
                 print("could not clear %s: %s" % (key, reason), file=sys.stderr)
@@ -282,7 +326,8 @@ def main(argv=None):
     )
     parser.add_argument("--session", default="", help="the caller's session id (stamp)")
     parser.add_argument("--clear", action="store_true", help="clear the marker (operator verb)")
-    parser.add_argument("--subject", default="", help="task name to clear")
+    parser.add_argument("--subject", default="",
+                        help="task name — stamps it, or names the row to clear with --clear")
     parser.add_argument("--vault", default="", help="vault name (overrides path detection)")
     parser.add_argument("--vault-path", default=None,
                         help="vault root for the task lookup (default: derive from cwd)")
@@ -293,8 +338,8 @@ def main(argv=None):
         if not args.subject.strip():
             parser.error("--clear needs --subject")
         return clear(args)
-    if not args.session.strip():
-        parser.error("one of --session or --clear is required")
+    if not args.session.strip() and not args.subject.strip():
+        parser.error("one of --session, --subject or --clear is required")
     return stamp(args)
 
 
