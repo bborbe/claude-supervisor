@@ -64,10 +64,12 @@ and `blocked_by_verdict` asks whether the set is non-empty before it asks whethe
 An empty set is **not a wait that cleared**; it is a row with no wait of this kind, and this half
 resumes it on no round.
 
-⚠️ **Kind (b)'s "answered" excludes a decline.** A card record reading `skip` is the operator
-declining, not a question answered — it is neither a cleared wait nor an unread one, and resuming
-on it would hand the worker an "answer" that answers nothing. It is counted separately and resumes
-nothing.
+⚠️ **Kind (b)'s "answered" excludes a decline and excludes an empty answer.** A card record
+reading `skip` is the operator declining, not a question answered — it is neither a cleared wait
+nor an unread one, and resuming on it would hand the worker an "answer" that answers nothing. An
+answer that is present but **empty** is the same case: there is no prompt to deliver, and
+`spawn_agent` with an empty prompt is precisely the bare resume this section forbids. Both are
+counted separately and resume nothing.
 
 ⚠️ **Kind (a) is the read most easily written wrong, because the population makes it look
 already-true.** `approved-not-started.py` selects rows that **carry `approved_at`**, so inside its
@@ -111,6 +113,15 @@ So **every resume this half performs goes through § 4's machinery, not around i
 ```bash
 python3 "$P/worker-keepalive.py" --vault "<vault>" --task "<name>" --record-resume "<id>"
 ```
+
+⚠️ **`<id>` is the id the resume actually produced, never the task's stored one.** A kind (b)
+resume goes through `spawn_agent(resume=…)`, and whether that continues the recorded session id or
+returns a fresh one is a property of the transport, not of this step — so take the id from the
+call's own return and record *that*. Recording the stored id instead is the silent failure this
+whole paragraph exists to prevent: `--record-resume` refuses an id the liveness instrument does not
+read `LIVE`, so a stale id leaves the cap unarmed and the row is re-resumed on every round with a
+`crash-loop` that never fires. If the resume returns no id at all, the row is `unread` and nothing
+is recorded.
 
 `RESUME_CAP` is 3 and `--record-resume` refuses an id the liveness instrument does not read
 `LIVE`, so a resume that never landed does not arm the cap against a retry. Once the cap is spent
