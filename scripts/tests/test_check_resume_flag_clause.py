@@ -28,6 +28,7 @@ def gate(parked=FIXED, extra="", terminal="- **not terminal**: `status` not `com
         "- task `status: in_progress` AND `phase` is `planning` or `execution`;\n"
         "- the task's **id set is non-empty** (`claude_session_id`);\n"
         f"{parked}\n"
+        "- **not stopped**: the page carries no `stopped: true`;\n"
         "- **no live id on ANY id in the set** — probe each id;\n"
         "- **not shared**: no id in another task's set;\n"
         "- **not on roster**: no roster entry matches;\n"
