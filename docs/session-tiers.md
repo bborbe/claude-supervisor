@@ -254,7 +254,7 @@ other side.
 | `/supervisor:goal-spawn` | goal manager — spawns a worker | worker — workers never start sessions |
 | `/supervisor:goal-answer` | goal manager | worker; topic manager — a goal manager is a tab session and answers its own prompts |
 | `/supervisor:goal-drain` | goal manager | worker; topic manager — it serves headless workers only |
-| `/supervisor:stop` | topic manager, goal manager — stands down *this* session's loop | worker (it has no loop to stop) |
+| `/supervisor:stop` | topic manager, goal manager — bare, stands down *this* session's loop; by name, stands down a subject this session owns | worker — bare only; the by-name form stands down the worker's **own** task and refuses any subject it does not own |
 | `/supervisor:reset` | topic manager, goal manager — re-discovers *this* manager's state | worker |
 | `/supervisor:open` | fleet manager, topic manager, goal manager — resolves a name, then jumps, resumes or spawns | worker — workers never open sessions |
 | `/supervisor:open-a2a` | fleet manager, topic manager, goal manager — resolves a name, then creates the worker on the a2a-worker-controller (the backend chosen by the row's `target:`) | worker — workers never open sessions |
