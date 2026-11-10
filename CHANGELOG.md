@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.265.5
 
 - fix: **`park-event.py release` and `register` accept the slug that `due` and `list` print, so the documented `--event "<key>"` form works with the token a caller actually copies.** The two subcommands disagreed about what "the key" was: watch files are keyed on `slugify(description)`, and `slugify` appends `sha256(input)[:8]` — so a printed slug cannot be inverted back to a path — while `due` and `list` print `{slug} · event: {description}` first. `resolve_event_key()` now resolves either form to the stored description, scanning the records on a path miss, and it runs **before** `locked()`: `lock_path` is `slugify(key).lock`, so resolving afterwards would put a slug and its description on two different lock files and let their read-modify-write cycles interleave. The unknown-key refusal now names the keys that exist (`no watch for event key 'x' (known: a metric)`), because a bare "no watch" reads as "nothing is parked" rather than "you passed the wrong identifier". Change set: `scripts/park-event.py`, `scripts/tests/test_park_event.py`, `CHANGELOG.md`.
 
