@@ -59,11 +59,22 @@ STATE = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser(
 ENDS_MARKER = "⏰ Ends:"
 
 
-def declared_wait(sid, state_dir=None):
-    """True when `sid`'s newest `Stop` record carries a non-empty `⏰ Ends:` slot.
+def wait_record(sid, state_dir=None):
+    """`sid`'s newest `Stop` record's wait, as `{"session_id", "ts", "ends"}`, or None.
 
-    Returns a bool. A log that is missing, unreadable or malformed, or that holds no
-    `Stop` record at all, is **False** — see the module docstring's failed-read rule.
+    THE DETAIL FORM EXISTS FOR THE 24 h ESCALATION. `declared_wait()` answers a
+    boolean, so its consumers cannot tell a live declaration from a stale one — the
+    module docstring records that as the honest gap. `scripts/drive-escalate.py` closes
+    it by needing the two facts the record already carries: **when** the wait was last
+    declared (`ts`) and **what** it waits on (`detail`'s `⏰ Ends:` text). A wait is
+    stale exactly when that pair has not moved for 24 h.
+
+    ⚠️ **This does not make the boolean callers stale-aware, and must not be read as
+    having done so.** `fleet-board.py`, `manager-predispatch.py` and the sweep still
+    take `declared_wait_ids()`; only the escalation reads this form.
+
+    Returns None — never raises — on the same failed-read rule as `declared_wait()`:
+    a missing, unreadable or malformed log, or one holding no `Stop` record at all.
     """
     if not sid or "/" in sid or "\\" in sid:
         # ⚠️ **A sid is not a path.** `declared_wait_ids()` derives its ids from
@@ -71,7 +82,7 @@ def declared_wait(sid, state_dir=None):
         # id carrying a separator would read outside the store. No current caller supplies
         # one, so this is defence-in-depth rather than a live traversal — it costs a line
         # and keeps the failed-read contract total.
-        return False
+        return None
     path = os.path.join(state_dir or STATE, f"{sid}.events.jsonl")
     newest = None
     try:
@@ -97,10 +108,45 @@ def declared_wait(sid, state_dir=None):
                 if rec.get("event") == "Stop":
                     newest = rec
     except Exception:
-        return False
+        return None
     if newest is None:
-        return False
-    return _has_ends(newest.get("detail"))
+        return None
+    detail = newest.get("detail")
+    if not _has_ends(detail):
+        return None
+    return {
+        "session_id": sid,
+        "ts": _number(newest.get("ts")),
+        "ends": _ends_text(detail),
+    }
+
+
+def _ends_text(detail):
+    """The text after the `⏰ Ends:` marker, stripped. "" when there is none."""
+    idx = detail.find(ENDS_MARKER)
+    return detail[idx + len(ENDS_MARKER):].strip()
+
+
+def _number(value):
+    """`ts` as a float, or None.
+
+    ⚠️ **A non-numeric `ts` is None, never 0.** Zero is a real epoch (1970) and would
+    make a record with no readable timestamp look like a wait declared half a century
+    ago — the escalation would card it immediately on no evidence. None makes the
+    caller treat the row as unreadable instead, which is the safe direction.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def declared_wait(sid, state_dir=None):
+    """True when `sid`'s newest `Stop` record carries a non-empty `⏰ Ends:` slot.
+
+    Returns a bool. A log that is missing, unreadable or malformed, or that holds no
+    `Stop` record at all, is **False** — see the module docstring's failed-read rule.
+    """
+    return wait_record(sid, state_dir=state_dir) is not None
 
 
 def _has_ends(detail):
@@ -149,6 +195,20 @@ def declared_wait_ids(state_dir=None):
 
 
 def main(argv):
+    if "--detail-json" in argv:
+        # The 24 h escalation's input: one record per declaring session, carrying the
+        # `ts` and `⏰ Ends:` text `declared_wait_ids()` throws away. A record whose `ts`
+        # is unreadable still renders, with `ts: null`, so the caller can name it as
+        # unverifiable rather than silently dropping the row.
+        records = []
+        base = STATE
+        for path in sorted(glob.glob(os.path.join(base, "*.events.jsonl"))):
+            sid = os.path.basename(path)[: -len(".events.jsonl")]
+            rec = wait_record(sid, state_dir=base)
+            if rec is not None:
+                records.append(rec)
+        print(json.dumps(records, indent=2, sort_keys=True))
+        return 0
     ids = declared_wait_ids()
     if "--json" in argv:
         print(json.dumps(sorted(ids)))
