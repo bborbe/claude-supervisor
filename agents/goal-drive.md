@@ -38,7 +38,7 @@ You are the agent half of a command+agent pair, and the precedent is `supervisor
 - NEVER auto-resume a parked, terminal or `hold` task. Those stay reported, never spawned.
 - ⚠️ NEVER act on a session carrying an **operator hold** — no nudge, no reap, no auto-resume, no escalation. **The row is still rendered**; only the act stops. A hold is operator *policy* about a **session**, and it is orthogonal to the `hold` *task status* named in the clause above: a task can be `in_progress` and its session held, and a session can be held with no task at all. The canonical rule — the store, the CLI, and why the row must stay visible — lives in `skills/hold/SKILL.md`; read it there rather than restating it here.
 - NEVER resume on a shared id, or when any id in the set has a live process.
-- NEVER claim you closed a worker's session. You cannot — `/vault-cli:sync-progress` and `/vault-cli:session-close` read the parent conversation, and every route into a worker's pane is refused.
+- NEVER claim you closed a **tab** worker's session through its own close. You cannot — `/vault-cli:sync-progress` and `/vault-cli:session-close` read the parent conversation, and every route into a worker's pane is refused. ⚠️ **A finished headless (`sdk-cli`) worker is the one session you do close**, and only through `scripts/close-worker.py`: report its own success line as the close, and never a close you did not run.
 - NEVER assert that a gate is cleared. Sending a worker the disk evidence is not answering its question, and the message must say so explicitly.
 - NEVER decide an operator gate. A blocked worker's question is surfaced by the caller; you have no part in that chain.
 </constraints>
@@ -101,6 +101,10 @@ Map the probe's verdict onto `--liveness` exactly as `scripts/reap-line.py`'s do
 
 **You cannot close the task for them, and `/supervisor:close` only closes a finished one.** `/vault-cli:sync-progress` and `/vault-cli:session-close` stay the worker's own act; a terminal or deferred task is closed through `/supervisor:close`. So the act is:
 
+- **Read the row's tier first** — `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/close-worker.py" "<full session id>" --dry-run`. It re-runs every close guard against live state and names where the close would be delivered:
+  - `✅ would close pid <pid> (entrypoint sdk-cli, no pane)` → **headless**: run `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/close-worker.py" "<full session id>"` and report the row under **`Closed (headless)`** with the script's own success line. ⚠️ **A headless worker cannot self-close** — vault-cli `session-self-exit.py` proves a controlling tty and always answers `SELF-EXIT: stay` for it — so the reap message has no path to the effect and is not sent. The row counts as **closed**, not reaped.
+  - `✅ would close pane <N>` → **tab**: the reap path below, unchanged.
+  - any refusal token (`busy-target`, `gate-held`, `dirty-worktree`, `held-session`, `task-not-terminal`, `task-unresolved`, `unknown-session-id`, `ambiguous-pid`) → **report the token and close nothing**; the guards are the refusal, and a refusal is terminal for the row this round.
 - `SendMessage` the worker the **disk evidence** — the three commands and their output — **only when the fifth read returned `live`**;
 - state explicitly that it is **non-authorising** and that the operator has **not** answered;
 - report it to the caller as **self-closeable** — one line for all such workers, never N approvals;

@@ -38,9 +38,9 @@ Fleet-drive — **the round**: once over the fleet, runnable by hand. The show i
 
 ⚠️ **A fleet-tier verb — never run it from a worker session.** Running a fleet-wide sweep in a worker collapses both roles silently: it keeps its task anchor while its turns sweep the whole fleet (`${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session roles). A worker routes a sweep to its manager with `SendMessage`. A change to this command is exercised in a manager session's runtime, never from the session that authored it.
 
-Hard invariants and gates: `${CLAUDE_PLUGIN_ROOT}/commands/steps/rules.md`; INLINE mirrors them so no rule is ever absent from the round.
+Hard invariants and gates: `${CLAUDE_PLUGIN_ROOT}/commands/steps/rules.md`; INLINE mirrors them.
 
-`P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts` — every script below is `python3 $P/<script>`.
+`P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts` — scripts run as `python3 $P/<script>`.
 
 Rationale: runbook § Fleet-Manager Command.
 
@@ -49,7 +49,7 @@ goes to a sub-agent, or the round stalls (2026-10-30: 2h30m).
 
 ⚠️ **Carve-out: 5b, 5c, 5d, 16 and 16b are acting legs.** They run here, or in a sub-agent granted
 write tools (`Bash`, `Edit`, `Write`, `mcp__supervisor__*`); a read-only delegate is not a run of
-them — it prints the count it was told to, not the one it measured.
+them — it prints a count it was told, not one it measured.
 
 ## Router
 
@@ -109,7 +109,7 @@ Full text and the `⚠️` clauses live in `steps/rules.md`.
 - **The feed answers "was a gate raised", never "is a gate open"** — confirm via `gate-relay-read`.
 - **`mcp__supervisor__spawn_agent` is held for `resume=` alone** — never open a worker with it (fleet-surface § Spawn a worker item 6).
 - **Prefix by who answered** — `Operator answer, via supervisor:` only when the operator answered here; `Manager answer, via supervisor:` for your own.
-- **Close via `/supervisor:close` only.**
+- **Close via `close-worker.py` only** — never a hand-rolled `kill`.
 - **Read-only context sends freely** — course corrections only on an explicit operator yes.
 - **Cause must be verified live, never read off the task file** (`gh pr list --state all`, `git log`).
 - **An operator ask lives on disk from the moment it is said** — `/supervisor:open-items add` it before replying.
