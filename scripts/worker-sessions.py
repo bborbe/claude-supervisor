@@ -279,13 +279,17 @@ def live_workers(endpoint=None, ledger=None, on_failure=None):
     for session_id, record in ledger.items():
         if session_id not in live:
             continue
-        # Auto-resumes are excluded — they answer to the auto-resume gate's own 30-min
-        # crash-loop cap, and counting them here would leave a sweep that revived two dead
-        # workers unable to start any new one (docs/fleet-surface.md § Spawn a worker item 5).
-        # The marker is the ledger record's `resumed_from`, the same field
-        # `check-spawn-ledger.py` reads.
-        if record.get("resumed_from"):
-            continue
+        # ⚠️ **A RESUMED WORKER IS COUNTED, and the exclusion that used to sit here was the
+        # defect.** Until 2026-11-10 this loop skipped every record carrying `resumed_from`, on
+        # the reasoning that auto-resumes answer to the auto-resume gate's own 30-min crash-loop
+        # cap and that counting them "would leave a sweep that revived two dead workers unable to
+        # start any new one". That reasoning inverts the cap: a resumed worker is a live process
+        # consuming exactly the load the cap exists to bound, so a sweep that revives two dead
+        # workers has added two to the fleet and must be refused at the ceiling like any other
+        # addition. Measured 2026-11-10: the keep-alive leg resumed 34 dead workers in one round,
+        # none counted, and this counter read 22 against 78 live worker sessions — every session
+        # it missed was a resume. The crash-loop cap on the resume path is a separate control on
+        # how many resumes a round may perform, and it is unchanged by this.
         # A manager is not a worker. `spawn_agent(role="manager")` writes a ledger record
         # exactly like a worker's, so presence in the ledger alone would count a manager
         # against the cap and push the fleet toward refusing ordinary spawns. ⚠️ **ONLY an
@@ -338,13 +342,10 @@ def worker_populations(endpoint=None, ledger=None, on_failure=None):
     for session_id, record in ledger.items():
         if session_id not in live:
             continue
-        # ⚠️ **`resumed_from` is checked FIRST, before `role`** — the same order
-        # `live_workers` and the JS twin use. An auto-resume is not counted in ANY
-        # population, so a record that is both a manager and an auto-resume is dropped
-        # rather than counted as a manager. Measured 2026-11-08: the two readers had
-        # opposite orders and therefore disagreed on exactly that record.
-        if record.get("resumed_from"):
-            continue
+        # ⚠️ **`role` is the ONLY exclusion — `resumed_from` is not one**, the same rule
+        # `live_workers` and the JS twin carry. A resumed worker is counted in the population its
+        # mode names, exactly as a fresh one is; the crash-loop cap on the resume path is a
+        # separate control and does not remove the session from this census.
         if record.get("role") == "manager":
             managers += 1
             continue

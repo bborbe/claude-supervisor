@@ -357,17 +357,16 @@ never act.
 rule 3's approved-work path, not this leg's. Both resume paths continue the **recorded id** and
 neither opens a second worker (constraints, first bullet).
 
-⚠️ **Three worker mechanisms, three different populations — never merge them.**
-`scripts/restart-worker.py` restarts a **live, idle** session whose loaded code is stale (it
-refuses `busy-target` and `headless-target`); `scripts/stuck-heal.py` heals a **stuck** headless
-worker whose permission channel died while the session lives; this leg resumes a worker whose
-session is **gone** — no pid left to kill, no channel left to reopen.
+⚠️ **Three worker mechanisms, three populations — never merge them.**
+`scripts/restart-worker.py` restarts a **live, idle** session on stale code (refuses
+`busy-target` and `headless-target`); `scripts/stuck-heal.py` heals a **stuck** headless worker
+whose channel died while the session lives; this leg resumes one whose session is **gone**.
 
 ⚠️ **`agents/goal-drive.md`'s orphan gate covers the same population, and `worker-keepalive.py`
 enforces the exclusion itself, not via this prose.** That gate runs on the goal tier's tick with
 its own `last_auto_resume` cap; this leg runs on the fleet tick with the `worker--<slug>` cap,
-and both record only **after** a resume the instrument confirms `LIVE`, so a check-then-act race
-would let two resumes land before either cap arms. The script asks `scripts/owner.py` about each
+and both record only **after** the instrument confirms `LIVE`, so a check-then-act race lets two
+resumes land before either cap arms. The script asks `scripts/owner.py` about each
 goal the task declares — the ONE ownership definition (`docs/session-tiers.md` § Keep-alive) —
 so only a manager that is an **owner** (session `LIVE` **and** loop `OK`/`STALE`) returns `jump`,
 naming the evidence; a manager stood down with `/supervisor:stop` does not hold the row, and a
@@ -375,11 +374,15 @@ naming the evidence; a manager stood down with `/supervisor:stop` does not hold 
 
 **Record the count — in the digest, and labelled as a floor while the scan cannot finish.**
 `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg dead-workers --count <n> --floor`.
-`--floor` is what renders `(lower bound, scan incomplete)`; `--exact` asserts completion.
-⚠️ **A bare `dead-workers` count is refused** — one of the two is mandatory: a number with
-no label reads as a measurement, and while the scan cannot finish the floor is the only
-honest form. Both flags are refused on any other key. Format and rationale:
-`commands/steps/output-shape.md` item 14. Stood-down: `commands/steps/keepalive-stood-down.md`.
+`--floor` renders `(lower bound, scan incomplete)`; `--exact` asserts completion.
+⚠️ **A bare `dead-workers` count is refused** — one of the two is mandatory: an unlabelled
+number reads as a measurement. Both flags are refused on any other key; format and
+rationale: `commands/steps/output-shape.md` item 14.
+
+## 4b. Stood-down close
+
+§ 1 correctly declines to restart a `STOPPED` manager and nothing else acts on it. Run
+`<plugin root>/commands/steps/keepalive-stood-down.md` (absolute; never search for it).
 
 ## 5. Record why a half did not run — and never leave the sweep's seed standing
 

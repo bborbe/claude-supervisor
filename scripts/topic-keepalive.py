@@ -125,6 +125,17 @@ def scalar(fm: str, key: str) -> str:
     return (m.group(1).strip().strip("\"'") if m else "")
 
 
+def session_id(fm: str) -> str:
+    """The page's recorded session id, or "" for every spelling of "none recorded".
+
+    ⚠️ **A thin delegate to `scripts/owner.py`'s `page_session_id`, which owns the fold.**
+    The rule lives there because that module is the single reader of a page's session id;
+    a second implementation here is exactly the drift `owner.py` was introduced to end.
+    Kept as a name because `worker-keepalive.py` calls it through this module.
+    """
+    return _owner().page_session_id(fm)
+
+
 FLAG_TRUTHY = ("true", "yes", "on")
 
 
@@ -312,7 +323,7 @@ def main(argv: list[str]) -> int:
     # implementation of `docs/session-tiers.md` § Keep-alive; this file no longer combines the
     # two signals itself. The probes stay reachable here (the wrappers above) because
     # `worker-keepalive.py` and the suites patch them at this module.
-    sid = scalar(fm, "claude_session_id")
+    sid = session_id(fm)
     loop, loop_detail = cadence_state_detail(a.subject, a.branch, a.vault)
     live = session_verdict(sid) if sid else _owner().NONE
     verdict, reason = _owner().verdict_of(live, loop)

@@ -38,7 +38,7 @@ You are the agent half of a command+agent pair, and the precedent is `supervisor
 - NEVER auto-resume a parked, terminal or `hold` task. Those stay reported, never spawned.
 - ⚠️ NEVER act on a session carrying an **operator hold** — no nudge, no reap, no auto-resume, no escalation. **The row is still rendered**; only the act stops. A hold is operator *policy* about a **session**, and it is orthogonal to the `hold` *task status* named in the clause above: a task can be `in_progress` and its session held, and a session can be held with no task at all. The canonical rule — the store, the CLI, and why the row must stay visible — lives in `skills/hold/SKILL.md`; read it there rather than restating it here.
 - NEVER resume on a shared id, or when any id in the set has a live process.
-- NEVER claim you closed a worker's session. You cannot — `/vault-cli:sync-progress` and `/vault-cli:session-close` read the parent conversation, and every route into a worker's pane is refused.
+- NEVER claim you closed a **tab** worker's session through its own close. You cannot — `/vault-cli:sync-progress` and `/vault-cli:session-close` read the parent conversation, and every route into a worker's pane is refused. ⚠️ **A finished headless (`sdk-cli`) worker is the one session you do close**, and only through `scripts/close-worker.py`: report its own success line as the close, and never a close you did not run.
 - NEVER assert that a gate is cleared. Sending a worker the disk evidence is not answering its question, and the message must say so explicitly.
 - NEVER decide an operator gate. A blocked worker's question is surfaced by the caller; you have no part in that chain.
 </constraints>
@@ -101,6 +101,10 @@ Map the probe's verdict onto `--liveness` exactly as `scripts/reap-line.py`'s do
 
 **You cannot close the task for them, and `/supervisor:close` only closes a finished one.** `/vault-cli:sync-progress` and `/vault-cli:session-close` stay the worker's own act; a terminal or deferred task is closed through `/supervisor:close`. So the act is:
 
+- **Read the row's tier first** — `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/close-worker.py" "<full session id>" --dry-run`. It re-runs every close guard against live state and names where the close would be delivered:
+  - `✅ would close pid <pid> (entrypoint sdk-cli, no pane)` → **headless**: run `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/close-worker.py" "<full session id>"` and report the row under **`Closed (headless)`** with the script's own success line. ⚠️ **A headless worker cannot self-close** — vault-cli `session-self-exit.py` proves a controlling tty and always answers `SELF-EXIT: stay` for it — so the reap message has no path to the effect and is not sent. The row counts as **closed**, not reaped.
+  - `✅ would close pane <N>` → **tab**: the reap path below, unchanged.
+  - any refusal token (`busy-target`, `gate-held`, `dirty-worktree`, `held-session`, `task-not-terminal`, `task-unresolved`, `unknown-session-id`, `ambiguous-pid`) → **report the token and close nothing**; the guards are the refusal, and a refusal is terminal for the row this round.
 - `SendMessage` the worker the **disk evidence** — the three commands and their output — **only when the fifth read returned `live`**;
 - state explicitly that it is **non-authorising** and that the operator has **not** answered;
 - report it to the caller as **self-closeable** — one line for all such workers, never N approvals;
@@ -377,7 +381,7 @@ One compact report — see `<output_format>`. You do not render the status table
 Plain markdown, one line per action, in the order you performed them. Omit empty sections.
 
 ```text
-Drive: <subject> — audited <n> · cap re-dispatched <n> · reaped <n> · reap moot <n> · closed clean <n> · nudged <n> · freshness / in-flight drops <n> · to resume <n> · to open <n> · card <n> · stale <n> · held <n> · blocked <n>
+Drive: <subject> — audited <n> · cap re-dispatched <n> · reaped <n> · reap moot <n> · closed clean <n> · closed headless <n> · nudged <n> · freshness / in-flight drops <n> · to resume <n> · to open <n> · card <n> · stale <n> · held <n> · blocked <n>
 Provenance: recorded_at=<the store's recorded_at> · own sets: <bucket>{<task>, …} · <bucket>{…}
 Batch held — no store provenance (missing: <which half>) — no per-row clause ran   ← clause (0)(a); ONE line for the whole batch, never one per row
 Batch held — that value is NOT the named source's — no per-row clause ran   ← clause (0)(b); same rule, and name which file disagreed
@@ -395,6 +399,9 @@ Reap moot (2):         ← the fifth read found no live recipient — NOTHING se
 
 Closed clean (1):      ← passed the three disk reads; the fourth read found the close already run — NO message sent
   <task> — status: completed · phase: done · 0 open boxes · closer <timestamp> "👤 You: nothing — session closed" — not reaped
+
+Closed (headless) (1): ← passed the three disk reads; the tier read found `entrypoint sdk-cli` and `close-worker.py` closed it — NO message sent, NOT counted as reaped
+  <task> — status: completed · phase: done · 0 open boxes · close-worker.py → ✅ closed headless session (sdk-cli) · pid <pid> dead · registry entry removed
 
 Parked on operator (1): ← passed the three disk reads; the fourth read found a standing `approve:`/`pick` gate — NO message sent, and NOT folded into `Closed clean`
   <task> — status: completed · phase: done · 0 open boxes · closer <timestamp> "👤 You: approve: …" — parked, not reaped
@@ -476,6 +483,7 @@ Next (3):              ← the round's ONE ranked rendering, and the LAST block 
 - Every reap decision is backed by the three disk reads — `status`, `phase`, open-box count — taken **this run**, never from a session's claim or its colour.
 - **Every `Reaped` row was routed through `scripts/reap-line.py` and returned `live`; every other verdict is reported under `Reap moot` and counted as not reaped.** A reap handed over without the fifth read is the tick-86 defect — a decision recorded as taken with no recipient.
 - Every `Closed clean` row quotes the closer line and its timestamp. A row that passed the three reads and was neither reaped nor listed there is a bug; report it as one.
+- **Every `Closed (headless)` row was closed through `scripts/close-worker.py` and its own success line is quoted** — never a claim of a close that was not run, and never a headless row counted as reaped.
 - Every auto-resume names all **eleven** gate clauses, and any clause that failed is quoted with the value that failed it — including which blocker, which date, or `mode=interactive`.
 - Every `To resume` row was preceded by a re-probe at the hand-off site, and a positive re-probe aborted the row without arming the crash-loop cap.
 - No `last_auto_resume` was written by this file. The stamp is the caller's, written only through `vault-cli task set` and only **after** a spawn it verified against the **session-heartbeat endpoint** (`session-liveness.py --check`, which reads the endpoint and **not** the session registry since v0.125.0) — this file hands over a decision and records no act.

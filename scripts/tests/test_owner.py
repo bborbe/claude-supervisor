@@ -225,6 +225,21 @@ class CliTest(unittest.TestCase):
         o = load()
         self.assertEqual(2, o.main(["--subject", "A Goal"]))
 
+    def test_an_empty_session_flag_refuses_rather_than_falling_back(self):
+        """THE FAIL-OPEN THIS DISPATCH EXISTS TO CLOSE.
+
+        `$CLAUDE_CODE_SESSION_ID` is unset in some spawned children, so `--session ""` reaches
+        the CLI in the field. A truthiness dispatch sent that call to `of_subject()`, whose
+        verdict for a live foreign manager with an armed loop is `owner` — the guard silently
+        became the resolution it replaces, and the marker was written.
+        """
+        o = load()
+        self.assertEqual(2, o.main(["--session", "", "--subject", "A Goal", "--vault", "/tmp"]))
+
+    def test_an_empty_vault_flag_refuses_rather_than_falling_back(self):
+        o = load()
+        self.assertEqual(2, o.main(["--session", "gm-1", "--subject", "A Goal", "--vault", "  "]))
+
 
 class SessionVerdictTest(unittest.TestCase):
     """`session_verdict` must read the instrument's EXIT CODE, not its text.
@@ -610,6 +625,35 @@ class PageResolutionTest(unittest.TestCase):
         self.assertEqual("sid-1", self.o.page_session_id("claude_session_id: 'sid-1'\n"))
         self.assertEqual("", self.o.page_session_id("status: in_progress\n"))
 
+    def test_page_session_id_treats_every_spelling_of_none_as_none(self):
+        """Absent, empty and literal `null` are one fact — nothing recorded.
+
+        ⚠️ This is the single fold every consumer reads through, so the `null` shape is
+        pinned here rather than only at the scripts that call it. Measured 2026-11-08:
+        `scalar()` returned the four characters `null`, `session-liveness.py` accepted it as
+        a legal id (it admits any lowercase prefix by design), the probe answered `ABSENT`,
+        and `worker-keepalive.py` printed `resume` for a session that was never named.
+        """
+        for fm in (
+            "status: in_progress\n",
+            "claude_session_id:\n",
+            "claude_session_id: null\n",
+            "claude_session_id: NULL\n",
+            "claude_session_id: ~\n",
+            "claude_session_id: []\n",
+            "claude_session_id: \"null\"\n",
+            "claude_session_id: ''\n",
+        ):
+            with self.subTest(fm=fm):
+                self.assertEqual("", self.o.page_session_id(fm))
+
+    def test_page_session_id_keeps_a_real_id(self):
+        """The negative control: the fold must not swallow an id that only looks odd."""
+        for sid in ("3716bdff-a825-433a-bd73-c96d64970d29", "fa2dc5f3-8dd", "nullify"):
+            with self.subTest(sid=sid):
+                self.assertEqual(
+                    sid, self.o.page_session_id(f"claude_session_id: {sid}\n"))
+
     def test_page_path_matches_the_exact_basename(self):
         self.page("A Goal", "claude_session_id: gm-1\n")
         self.page("A Goal Extra", "claude_session_id: gm-2\n")
@@ -686,6 +730,70 @@ class PageResolutionTest(unittest.TestCase):
         o = self.o.of_subject(str(self.vault), "No Such Goal")
         self.assertEqual("not-owner", o.verdict)
         self.assertEqual("no-session", o.reason)
+
+
+class CallerAnchoredTest(unittest.TestCase):
+    """`of_caller` — does THIS session own THIS subject?
+
+    ⚠️ **`of_session()` cannot answer this and its verdict must never be reused for it.** It
+    asks whether the CALLER is live and whether the NAMED SUBJECT's loop is armed, so a live
+    foreign worker facing an armed topic reads `owner`. A stand-down guard built on that verdict
+    is inert for exactly the population it exists to stop, which is why the identity comparison
+    lives here instead.
+    """
+
+    def setUp(self):
+        self.o = load()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.vault = pathlib.Path(self.tmp.name)
+        (self.vault / "24 Goals").mkdir(parents=True)
+        (self.vault / "25 Tasks").mkdir(parents=True)
+
+    def page(self, name, front, directory="24 Goals"):
+        path = self.vault / directory / (name + ".md")
+        path.write_text("---\n" + front + "---\n# Success Criteria\n", encoding="utf-8")
+        return path
+
+    def test_the_page_recording_the_caller_is_an_owner(self):
+        self.page("A Goal", "claude_session_id: caller-1\n")
+        o = self.o.of_caller("caller-1", str(self.vault), "A Goal")
+        self.assertEqual("owner", o.verdict)
+        self.assertEqual("caller-anchored", o.reason)
+
+    def test_a_page_recording_another_session_is_not_an_owner(self):
+        # The case the whole guard exists for: the caller is live, the subject's loop is armed,
+        # and `of_session` would still say `owner` — this must not.
+        self.page("A Goal", "claude_session_id: someone-else\n")
+        o = self.o.of_caller("caller-1", str(self.vault), "A Goal")
+        self.assertEqual("not-owner", o.verdict)
+
+    def test_a_short_prefix_of_the_anchor_resolves(self):
+        # Callers pass `sid8` and roster `[ref]` prefixes; a 6+ char unique prefix is an
+        # identity claim, exactly as `session-liveness.py --check` accepts one.
+        self.page("A Goal", "claude_session_id: 30fae0ae-1111-2222-3333-444455556666\n")
+        o = self.o.of_caller("30fae0ae", str(self.vault), "A Goal")
+        self.assertEqual("owner", o.verdict)
+
+    def test_a_page_recording_no_session_is_cannot_tell(self):
+        self.page("A Goal", "status: in_progress\n")
+        o = self.o.of_caller("caller-1", str(self.vault), "A Goal")
+        self.assertEqual("cannot-tell", o.verdict)
+
+    def test_a_missing_page_is_not_an_owner(self):
+        o = self.o.of_caller("caller-1", str(self.vault), "No Such Goal")
+        self.assertEqual("not-owner", o.verdict)
+
+    def test_an_unreadable_page_is_cannot_tell(self):
+        path = self.page("A Goal", "claude_session_id: caller-1\n")
+        path.write_bytes(b"---\nclaude_session_id: caller-1\n\xff\xfe not utf-8\n---\n")
+        o = self.o.of_caller("caller-1", str(self.vault), "A Goal")
+        self.assertEqual("cannot-tell", o.verdict)
+
+    def test_the_task_branch_resolves_a_task_page(self):
+        self.page("A Task", "claude_session_id: caller-1\n", directory="25 Tasks")
+        o = self.o.of_caller("caller-1", str(self.vault), "A Task", "task")
+        self.assertEqual("owner", o.verdict)
 
 
 if __name__ == "__main__":
