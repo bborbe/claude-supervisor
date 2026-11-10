@@ -6,14 +6,62 @@ allowed-tools:
   - CronDelete
   - TaskStop
   - Bash(python3:*)
-argument-hint: "(no argument)"
+argument-hint: "[<topic|goal|task name>] [--task|--goal|--topic] [--vault <name>]"
 ---
 
-Stand the manager loop **this session** is running down. This is the operator's verb; it is not a close. It takes no argument — the cadence is session-scoped, so there is nothing to name.
+Stand a manager loop down. Two forms:
+
+- **Bare — this session's own loop.** Disarm the model-waking cadence, leave the model-free gate loop running, keep the session (and its asks ledger) alive, and report what was disarmed.
+- **By name — a topic, goal or task.** Resolve the name to its subject page, refuse unless this session owns it, then write that subject's stand-down marker. This is the operator's verb; it is not a close, and it does not touch another session's pane.
+
+The bare form is the default and is unchanged. The by-name form exists because a deliberate stand-down must not require jumping to the subject's own pane (which the fleet forbids anyway: never type into another session's pane except through `pane-wake.py`).
 
 **The disarm contract — what must be disarmed, which harness surface reaches each driver and which it cannot, and what must be left running — is `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Session end. Read it and execute it from there; do not restate it here.** The vault's `Manager Session` runbook § Guardrails item 6 — Session end carries the per-vault operating statement and points back at both. **What this file owns is the procedure and the report** — the knowledge is the contract doc, read directly at step 1; an agent behind this file would only add a hop between it and the doc it points at, and could not reach the drivers anyway, since they are session-scoped and a subagent has its own session.
 
+<by_name>
+Run this section only when a name survives argument parsing. A bare call skips it entirely and runs `<process>`.
+
+**Parse `$ARGUMENTS` yourself — never positional argument references.** A title is multi-word, so a positional resolves to one word of it.
+
+- **name (optional):** everything that is not a recognised flag. May contain spaces; never word-split it, and quote it when passing to `vault-cli`.
+- **`--task` / `--goal` / `--topic`:** force the type, skipping resolution. Use when a name matches more than one kind.
+- **`--vault <name>`:** target vault. Overrides cwd detection.
+
+1. **Resolve the vault** — `--vault` → the vault whose `path` contains the cwd → `default_vault` from config. If both arms fail, STOP.
+
+2. **Resolve the type — never guess.** Skip when a type flag was given. Otherwise probe all three and report which matched:
+
+   ```bash
+   vault-cli --vault "<vault>" task get "<name>" status  2>/dev/null
+   vault-cli --vault "<vault>" goal get "<name>" status  2>/dev/null
+   find "<topics_dir>" -maxdepth 1 -iname "<name>.md"
+   ```
+
+   Use `find -iname`, never a case-sensitive shell glob. Exactly one match → act on it and say which type matched. More than one → print every match with its type and STOP, telling the operator to re-run with `--task` / `--goal` / `--topic`. None → print the closest candidates and STOP; never create anything from an unmatched name.
+
+3. **Ownership guard — refuse, never gate.**
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/owner.py \
+     --session "${CLAUDE_CODE_SESSION_ID}" --subject "<name>" --branch "<goal|topic|task>" --vault "<vault>"
+   ```
+
+   The first tab-separated field is the verdict. `owner` → continue. **Anything else — `not-owner` and `cannot-tell` alike — refuses**: print, as the first line,
+
+   ```
+   not-owned: <name> is not this session's subject
+   ```
+
+   then the verdict's own reason, and STOP without writing a marker. ⚠️ `cannot-tell` refuses because an unreadable probe licenses nothing — a stand-down written on an unknown owner is the exact defect this guard exists to prevent.
+
+4. **Write the marker** — `manager-liveness.py --stop --subject "<name>" --branch "<resolved branch>"`. It writes `<branch>--<base>.stopped` plus `<branch>--<base>.reset`. ⚠️ `--subject`, never the deprecated `--topic` alias, and always the explicit `--branch`: a branch-less call defaults to `goal` and marks the wrong record. Report it as `✓ stop marker — <path>`.
+
+5. **Print the report** — the same `⏹️ STOP — <subject> (<branch> · <vault>) · session <sid8>` block `<process>` step 3 owns, with the marker line under `Disarmed`. The bare form's driver rows do not apply: this run disarmed no driver of its own.
+</by_name>
+
 <process>
+Run this section for the **bare** form only.
+
 1. **Read the contract, then disarm every model-waking driver it names** — in the order it gives, printing each driver's line as you go and *before* the call that removes it, since a deletion the operator cannot see is indistinguishable from a job that was never armed. Those lines **are** the report's `Disarmed` block — collect them, and do not print the set a second time.
 
    **Three forms, because not every driver has a read surface.** `✓` and `·` are claims a read surface confirmed; `~` is the honest form for a driver nothing can confirm — whether a stop was sent or none could be. Never print `✓` for a driver you could not read.
@@ -69,7 +117,8 @@ Stand the manager loop **this session** is running down. This is the operator's 
 </process>
 
 <constraints>
-- **Write no page, and no state file except the stop marker (step 2b).** `stop` is a disarm, not a bookkeeping act; the marker exists only so a deliberate stop is not reported as a lapse.
+- **Write no page, and no state file except the stop marker** — `<process>` step 2b for the bare form, `<by_name>` step 4 for a named subject. `stop` is a disarm, not a bookkeeping act; the marker exists only so a deliberate stop is not reported as a lapse.
+- **The by-name form refuses rather than gates.** There is no operator prompt and no confirmation turn: a session that does not own the subject prints `not-owned:` and stops. A stand-down is cheap to re-run and expensive to misattribute.
 - End the turn with the session's normal closer. This report is not one.
 </constraints>
 

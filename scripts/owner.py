@@ -128,7 +128,7 @@ PROBE_FAILED = "UNREADABLE"
 
 #: `manager-liveness.py`'s three tiers. A loop record carries its branch in the slug
 #: (`goal--<base>`), because a topic and a goal may share a name.
-BRANCHES = ("goal", "topic", "fleet")
+BRANCHES = ("goal", "topic", "fleet", "task")
 
 PROBE_TIMEOUT = 30  # seconds, on both probes: a hung liveness probe must not wedge a tick
 
@@ -144,6 +144,7 @@ MANAGER_DIR = os.path.expanduser(
 SUBJECT_DIRS = {
     "goal": ("24 Goals", "23 Goals", "goals"),
     "topic": ("23 Topics", "topics"),
+    "task": ("25 Tasks", "24 Tasks", "tasks"),
 }
 
 
@@ -413,6 +414,39 @@ def of_page(fm: str, subject: str, branch: str = "goal", vault: str = "") -> Own
     return Ownership(verdict, reason, session, loop, sid, detail)
 
 
+def of_caller(sid: str, vault: str, subject: str, branch: str = "goal", directory: str = "") -> Ownership:
+    """Does THIS session own THIS subject? The caller-anchored answer.
+
+    The page's `claude_session_id` is the anchor: a session owns a subject iff the page records
+    that session. ⚠️ **This is deliberately the only identity comparison in this module.**
+    `of_session()` answers *"is the caller live and is the subject's loop armed"* — a live
+    foreign worker passes it — so it cannot gate a stand-down; that is the defect
+    `session-scope.py`'s table row above records.
+
+    Three outcomes, and the middle one is load-bearing: an unreadable page or a page recording
+    no session is `cannot-tell`, never `not-owner`, because `not-owner` licenses a second
+    writer. A caller gating a stand-down refuses on both.
+    """
+    page, reason = locate(vault, subject, branch, directory)
+    if reason:
+        return Ownership(CANNOT_TELL, reason, NONE, NONE, sid, reason)
+    if not page:
+        return Ownership(NOT_OWNER, "no page", NONE, NONE, sid, "")
+    try:
+        with open(page, encoding="utf-8") as fh:
+            fm = frontmatter(fh.read())
+    except (OSError, UnicodeDecodeError) as err:
+        return Ownership(CANNOT_TELL, f"{page} is unreadable ({err})", NONE, NONE, sid, page)
+    anchor = page_session_id(fm)
+    if not anchor:
+        return Ownership(CANNOT_TELL, "page records no session", NONE, NONE, sid, page)
+    # A caller may pass a prefix (`sid8`, a roster `[ref]`), exactly as `session-liveness.py`
+    # accepts one. A unique 6+ char prefix resolves; anything shorter is not an identity claim.
+    if anchor == sid or (len(sid) >= 6 and anchor.startswith(sid)):
+        return Ownership(OWNER, "caller-anchored", NONE, NONE, anchor, page)
+    return Ownership(NOT_OWNER, "page records another session", NONE, NONE, anchor, page)
+
+
 def locate(vault: str, subject: str, branch: str = "goal", directory: str = "") -> tuple:
     """`(path, reason)` — the subject page, or why it could not be shown that there is none.
 
@@ -500,7 +534,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--dir", help="override the subject directory")
     a = ap.parse_args(argv)
 
-    if a.subject and a.vault:
+    if a.session and a.subject and a.vault:
+        o = of_caller(a.session, a.vault, a.subject, a.branch, a.dir or "")
+    elif a.subject and a.vault:
         o = of_subject(a.vault, a.subject, a.branch, a.dir or "")
     elif a.session:
         o = of_session(a.session, a.subject or "", a.branch)

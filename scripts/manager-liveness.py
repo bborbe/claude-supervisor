@@ -194,7 +194,7 @@ PENDING = "liveness-pending.json"
 # reads a session with no record as having no answer path, which refuses every headless spawn
 # the Fleet Manager makes (measured 2026-10-23 — the refusal was correct for the probe and
 # wrong for that session, and the fix is the record, not a bypass).
-BRANCHES = ("goal", "topic", "fleet")
+BRANCHES = ("goal", "topic", "fleet", "task")
 SLACK = 180  # seconds: the tick's own runtime plus ordinary jitter before a re-arm lands
 PERIOD_CAP = 2.5  # the p90 period estimate never exceeds this multiple of the median
 ARMS_KEEP = 12  # re-arm epochs retained per topic — enough for a stable percentile
@@ -463,7 +463,13 @@ DEFAULT_TOPICS_DIR = "23 Topics"
 # The page folders `--state` accepts as proof a subject exists. `private-personal` /
 # `seibert-*` keep goals in `24 Goals`, the `24 Tasks` vaults in `23 Goals` — the same pair
 # `scripts/close-worker.py` resolves.
-PAGE_DIRS = (("goal", "24 Goals"), ("goal", "23 Goals"), ("topic", DEFAULT_TOPICS_DIR))
+PAGE_DIRS = (
+    ("goal", "24 Goals"),
+    ("goal", "23 Goals"),
+    ("topic", DEFAULT_TOPICS_DIR),
+    ("task", "25 Tasks"),
+    ("task", "24 Tasks"),
+)
 # What counts as "a record exists on this branch" — the files `--arm` / `--stop` /
 # `--sleep` write. `.arms` alone is history, never written without a `.cadence`.
 RECORD_EXTS = ("cadence", "stopped", "sleeping")
