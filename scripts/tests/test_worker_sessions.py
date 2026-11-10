@@ -144,17 +144,17 @@ class WorkerSessionsTest(unittest.TestCase):
             result = self.run_script("--count")
         self.assertEqual(result.stdout.strip(), "1", result.stderr)
 
-    def test_an_auto_resumed_worker_is_not_counted(self):
-        """Auto-resumes answer to the auto-resume gate's own 30-min crash-loop cap, not this
-        one: counting them would leave a sweep that revived two dead workers unable to open a
-        new one. The marker is the ledger record's `resumed_from`, the same field
-        `check-spawn-ledger.py` reads."""
+    def test_a_resumed_worker_is_counted(self):
+        """A resumed worker is a live process consuming exactly the load the cap bounds. Until
+        2026-11-10 this test asserted the opposite, and the rule it pinned made the cap blind to
+        every session the keep-alive leg revived: measured 2026-11-10, 22 counted against 78 live
+        worker sessions. The crash-loop cap on the resume path is a separate control, not this."""
         sid = "ffffffff-0000-0000-0000-000000000004"
         ledger = [self.ledger_entry(sid, "auto-resumed", resumed_from="aaaaaaaa-0000-0000-0000-000000000009")]
         with FixtureEndpoint(rows=[row(sid)], ledger_rows=ledger) as ep:
             self.endpoint = ep.url
             result = self.run_script("--count")
-        self.assertEqual(result.stdout.strip(), "0", result.stderr)
+        self.assertEqual(result.stdout.strip(), "1", result.stderr)
 
     def test_a_manager_record_is_not_counted_against_the_worker_cap(self):
         """`spawn_agent(role="manager")` writes a ledger record exactly like a worker's, so
@@ -400,7 +400,8 @@ class WorkerSessionsTest(unittest.TestCase):
 
     def test_populations_split_the_fleet_by_role_and_mode(self):
         """The three populations the caps are meant to act on: a manager, an interactive
-        worker, a headless worker, and an auto-resume that belongs to none of them."""
+        worker, a headless worker, and a resumed headless worker — which counts in the headless
+        column like any other, since a resume is load, not a separate species."""
         manager = "ffffffff-0000-0000-0000-000000000030"
         interactive = "ffffffff-0000-0000-0000-000000000031"
         headless = "ffffffff-0000-0000-0000-000000000032"
@@ -420,7 +421,7 @@ class WorkerSessionsTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             result.stdout.split("\n")[:6],
-            ["managers: 1", "interactive: 1", "headless: 1", "cluster: 0", "a2a: 0", "total: 2"],
+            ["managers: 1", "interactive: 1", "headless: 2", "cluster: 0", "a2a: 0", "total: 3"],
         )
 
     def test_a_pre_mode_record_reads_as_interactive(self):
@@ -435,11 +436,11 @@ class WorkerSessionsTest(unittest.TestCase):
         self.assertIn("interactive: 1", result.stdout, result.stderr)
         self.assertIn("headless: 0", result.stdout, result.stderr)
 
-    def test_a_manager_that_is_an_auto_resume_is_not_a_manager(self):
-        """⚠️ THE READER-DIVERGENCE CASE. `resumed_from` is checked BEFORE `role`, so a record
-        that is both is dropped from every population rather than counted as a manager. The JS
-        twin and `live_workers` use the same order; measured 2026-11-08, the two readers had
-        opposite orders and disagreed on exactly this record."""
+    def test_a_manager_that_is_an_auto_resume_is_still_a_manager(self):
+        """⚠️ THE CASE THE OLD ORDER GOT WRONG. Until 2026-11-10 `resumed_from` was checked
+        BEFORE `role`, so a record that was both was dropped from every population. Now `role` is
+        the only exclusion, so a resumed manager is a manager — and the JS twin and `live_workers`
+        carry the same rule, which is what keeps the three readers from disagreeing."""
         sid = "ffffffff-0000-0000-0000-000000000036"
         ledger = [
             self.ledger_entry(
@@ -450,7 +451,7 @@ class WorkerSessionsTest(unittest.TestCase):
         with FixtureEndpoint(rows=[row(sid)], ledger_rows=ledger) as ep:
             self.endpoint = ep.url
             result = self.run_script("--populations")
-        self.assertIn("managers: 0", result.stdout, result.stderr)
+        self.assertIn("managers: 1", result.stdout, result.stderr)
         self.assertIn("total: 0", result.stdout, result.stderr)
 
     def test_populations_exclude_a_ghost_row(self):

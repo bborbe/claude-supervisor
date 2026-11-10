@@ -247,19 +247,17 @@ export async function workerSessions({
   const modes = { interactive: 0, headless: 0, cluster: 0, a2a: 0 }
   for (const [sessionId, record] of Object.entries(ledger)) {
     if (!live.has(sessionId)) continue
-    // Auto-resumes are excluded — they answer to the auto-resume gate's own 30-min crash-loop
-    // cap, and counting them here would leave a sweep that revived two dead workers unable to
-    // start any new one (docs/fleet-surface.md § Spawn a worker item 5). The marker is the
-    // ledger's `resumed_from`, the same field `scripts/check-spawn-ledger.py` reads.
-    //
-    // ⚠️ **This filter is not new behaviour being invented; it is a contract that used to hold
-    // by accident.** The exclusion was never implemented in code, and every auto-resume is
-    // HEADLESS — the gate hands over path A, which `resumeSupportError` refuses alongside an
-    // interactive resolution — so under the old registry-only count a resumed worker held a
-    // ledger record and no registry entry and was excluded *by construction*. Reading a channel
-    // that can see headless workers is exactly what removes that accident, so the rule has to be
-    // written down or the move silently un-excludes the population item 5 names.
-    if (record.resumed_from) continue
+    // ⚠️ **A RESUMED WORKER IS COUNTED, and the exclusion that used to sit here was the defect.**
+    // Until 2026-11-10 this loop skipped every record carrying `resumed_from`, on the reasoning
+    // that auto-resumes answer to the auto-resume gate's own 30-min crash-loop cap and that
+    // counting them "would leave a sweep that revived two dead workers unable to start any new
+    // one". That reasoning inverts the cap: a resumed worker is a live process consuming exactly
+    // the load the cap exists to bound, so a sweep that revives two dead workers has added two to
+    // the fleet and must be refused at the ceiling like any other addition. Measured 2026-11-10:
+    // the keep-alive leg resumed 34 dead workers in one round, none of them counted, and the
+    // counter read 22 against 78 live worker sessions — every session it missed was a resume.
+    // The crash-loop cap on the resume path is a separate control on how many resumes a round may
+    // perform, and it is unchanged by this.
     // A manager is not a worker. `spawn_agent(role="manager")` writes a ledger record exactly
     // like a worker's, so presence in the ledger alone would count a manager against the cap
     // and push the fleet toward refusing ordinary spawns. ⚠️ **ONLY an explicit `manager`

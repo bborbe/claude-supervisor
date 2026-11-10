@@ -33,6 +33,13 @@ and keep the row **only** when the page's `claude_session_id` is a session
 `session-liveness.py` reads `LIVE`. A dead session needs no close — the marker simply outlived
 it, and closing nothing is the correct answer for those rows.
 
+⚠️ **Skip every `task--` slug outright — this leg closes managers, never workers.** A
+`task--<base>.stopped` marker is written by `/supervisor:stop "<task>"`, and the `LIVE` test
+above passes on it **by construction**: the guard that wrote the marker required the caller to
+be exactly the session the page records. Consuming it would turn a deliberate stand-down into a
+close, which `docs/fleet-surface.md` § Session end forbids in as many words (*"`stop` is not a
+close"*). A task's session is closed by its own `session-close`, never by this leg.
+
 **Step 0's heldness read applies** — a held session is neither closed nor adopted.
 
 ## 2. Hand over the page first, and prove it landed
