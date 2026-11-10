@@ -347,6 +347,49 @@ class ConsumeTests(unittest.TestCase):
         self.assertNotIn("proposed for this week plan",
                          self.weekly.read_text(encoding="utf-8"))
 
+    def test_unquote_handles_the_escape_form_and_a_raw_apostrophe(self):
+        """The `'"'"'` form is what a naive `strip("'")` gets wrong."""
+        raw = "A Headless Worker's Vault Write — priority: 1 — /x:1"
+        escaped = shlex.quote(raw)
+        self.assertIn("'\"'\"'", escaped, "the fixture did not produce the escape form")
+
+        self.assertEqual(answer.unquote_payload(escaped), raw)
+        # An UNQUOTED payload with an apostrophe makes shlex.split raise.
+        self.assertEqual(answer.unquote_payload(raw), raw)
+
+    def test_an_apostrophe_name_is_written_clean(self):
+        """The live shape: 4 of 33 bad blocks carried this escape into the name."""
+        name = "A Headless Worker's Vault Write"
+        (self.vault / "25 Tasks" / f"{name}.md").write_text(
+            "---\nstatus: next\nphase: planning\npriority: \"1\"\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        quoted = shlex.quote(f"{name} — priority: 1, in no current plan — /x:1")
+        self.run_consume([self.card("add it to the plan", payload=quoted)])
+
+        text = self.weekly.read_text(encoding="utf-8")
+        self.assertIn(f"**Task:** [[{name}]]", text)
+        self.assertNotIn("\"'\"", text)
+
+    def test_a_refusal_is_recorded_so_it_does_not_repeat(self):
+        """A permanent refusal must drain `pending`, or it re-renders every tick."""
+        card = self.card("add it to the plan",
+                         payload="proposed for this week plan (see next-focus reading)")
+        args = ([card], str(self.vault), "25 Tasks",
+                str(self.dismissed), str(self.consumed), NOW)
+
+        consumed1, notes1, pending1 = answer.consume_items(*args)
+        self.assertEqual(consumed1, [])
+        self.assertTrue(any("refusing to write" in note for note in notes1))
+        # `pending` counts cards still awaiting consumption AFTER the run — the refusal
+        # is a disposition, so it drains. Before the fix it stayed 1 forever.
+        self.assertEqual(pending1, 0, "the refusal was not recorded — pending never drains")
+
+        consumed2, notes2, pending2 = answer.consume_items(*args)
+        self.assertEqual(consumed2, [])
+        self.assertEqual(pending2, 0)
+        self.assertEqual(notes2, [], "the refusal note repeated on the next tick")
+
     def test_notes_render_on_an_empty_round(self):
         """A round that could not look must not read like a round that found nothing."""
         rendered = answer.render([], ["k: unhandled answer 'x' — not consumed"], 2, 1)

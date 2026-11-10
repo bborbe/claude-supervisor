@@ -94,13 +94,15 @@ class Refused(Exception):
 
 
 def _page_path(vault, tasks_dir, name):
-    """The board page for `name`, or None when neither dir carries it."""
-    board = nf.Board(vault, tasks_dir)
-    for directory in (Path(vault) / tasks_dir, Path(board.dirs["goal"])):
-        candidate = directory / f"{name}.md"
-        if candidate.is_file():
-            return candidate
-    return None
+    """The board page for `name`, or None — the SAME predicate the reader resolves with.
+
+    Delegates to `Board.find` rather than re-implementing it: the reader
+    (`plan_candidates` → `Board.read` → `Board.find`) searches task/goal/objective/topic
+    and carries a containment guard, so a local copy diverges both ways — a name this
+    check accepts and the reader rejects is exactly the inert-block defect again.
+    """
+    kind, path = nf.Board(vault, tasks_dir).find(name)
+    return path if kind is not None else None
 
 
 def _task_state(vault, tasks_dir, name):
@@ -410,9 +412,11 @@ def consume_items(items, vault, tasks_dir, dismissed_dir, consumed_dir, now):
             continue
 
         answer = str((card.get("answer") or {}).get("value", ""))
-        payload = str(card.get("payload", ""))
-        name = split_payload(payload)
+        # Unquote ONCE and derive both fields from it: reading `why_text` off the raw
+        # payload left a trailing `'` in the row for any quoted multi-segment payload.
+        payload = unquote_payload(card.get("payload", ""))
         segments = payload.split(" — ")
+        name = segments[0].strip()
         why_text = segments[1] if len(segments) > 1 else ""
         kind = kind_of_key(card_key)
         if not name:
@@ -441,6 +445,17 @@ def consume_items(items, vault, tasks_dir, dismissed_dir, consumed_dir, now):
                     # `leave it out` answer needs nothing from the weekly note, and a
                     # fresh-week note legitimately carries no `### N.` blocks yet.
                     notes.append(f"{card_key}: refused — {exc}")
+                    # RECORD the refusal before moving on. Without it `pending` never
+                    # drains: an unresolvable name is a permanent property, so the same
+                    # card re-rendered the same note every tick forever (measured on
+                    # three consecutive live ticks, `pending=1` each time). No dismissal
+                    # record — that would suppress the row if its page is created later.
+                    append_consumed(log_path, {
+                        "at": now.isoformat(), "card_key": card_key,
+                        "item_id": item_id, "name": name, "kind": kind,
+                        "action": "refused", "reason": str(exc),
+                    })
+                    done.add((card_key, item_id))
                     continue
                 notes.extend(extra)
             entry = {
