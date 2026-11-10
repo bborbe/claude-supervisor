@@ -481,8 +481,11 @@ class OpenQueueTest(unittest.TestCase):
         satisfy the absence clause identically — and that is the exact defect the guard
         could introduce, since it runs ahead of every other guard.
         """
-        task_file(self.tasks, "stopped", "status: in_progress\nstopped: true\nstop_date: 2026-11-10T17:00:00+01:00\n")
-        task_file(self.tasks, "live", "status: in_progress\n")
+        # ⚠️ Both rows carry `flag: true`, because `select()` gates on the flag first — a
+        # control row that is unflagged would be skipped `not flagged` and the assertion
+        # would pass for the wrong reason. The marker is then the only difference.
+        task_file(self.tasks, "stopped", "status: in_progress\nflag: true\nstopped: true\nstop_date: 2026-11-10T17:00:00+01:00\n")
+        task_file(self.tasks, "live", "status: in_progress\nflag: true\n")
         rows, skipped = self.collect(["stopped", "live"])
 
         opened, _ = oq.select(rows, live=29, target=30)
