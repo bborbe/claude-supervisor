@@ -3,7 +3,7 @@ name: fleet-drive
 description: Perform the fleet sweep's drive leg — read the digest render at the `payload=` path the caller passes, split its `parked` rows into revive (observed routine-continue closer, no verified blocker) and blocked (verified blocker), suppress re-nudges through a session-keyed ledger, draft reap-evidence messages for finished rows (before any nudge), write the drafted reaps, nudges and escalation groups to its own payload, and return the ≤ 1 KB drive-verdict hand-back. Dispatched by the fleet round `/supervisor:fleet-drive` on every round (armed by `/supervisor:fleet-loop`, or run by hand). Consumes the classification the sweep already produced; never builds a second one, never sends.
 model: sonnet
 tools: Read, Bash, Write, Task
-allowed-tools: Bash(vault-cli:*), Bash(gh:*), Bash(grep:*), Bash(cat:*), Bash(mkdir:*), Bash(mv:*), Bash(date:*), Bash(git:*)
+allowed-tools: Bash(vault-cli:*), Bash(gh:*), Bash(grep:*), Bash(cat:*), Bash(mkdir:*), Bash(mv:*), Bash(date:*), Bash(git:*), Bash(python3:*)
 color: red
 ---
 
@@ -57,18 +57,27 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
 1a. **Did the worker write at all?** Before reviving a `parked` candidate or reaping a `finished` row, compare the task page's mtime against the worker's spawn time.
 
-   **The spawn time is `spawned_at` on the session's spawn-ledger row** (`python3 $P/spawn-ledger.py`, endpoint `/api/1.0/session-ledger`; rows carry `session_id`, `spawned_at`, `mode`, `role`, `spawner_session_id`). Compare in **epoch seconds on both sides** — `date -r "<task file>" +%s` against `spawned_at` as UTC. ⚠️ A bare `date -r` prints local time against a UTC instant, so a string comparison answers for the wrong reason.
+   **Read both sides as epoch seconds, with commands that actually run on this host.**
 
-   ⚠️ **`metrics_sessions[].started_at` is the wrong source — using it was this step's original defect.** A headless spawn never binds one (it is written by `vault-cli task work-on`, which a `spawn_agent` worker never runs), so every headless row fell through and the check could not fire for the worker it exists to catch. The ledger records headless spawns (`scripts/spawn-ledger.py:22`), so it is the only source covering both.
+   ```bash
+   python3 -c "import os,sys;print(int(os.path.getmtime(sys.argv[1])))" "<task file>"   # mtime
+   python3 $P/spawn-ledger.py --json                                                    # the ledger
+   ```
 
-   ⚠️ **Never `claude_session_started`** — a vault-ui Start-button flag, `nonempty 0` on every task, already refused by `agents/fleet-sweep-reader.md` step 5. No ledger row → no spawn time: keep the ordinary disposition and say the check did not run; never infer one.
+   ⚠️ **Each half has already failed here once, and both failed silently.** `date -r "<file>" +%s` is GNU-only — BSD/macOS `date -r` takes epoch *input*, so it errors on this fleet's macOS host — hence the portable `os.path.getmtime` idiom from `agents/fleet-sweep-reader.md:95` rather than a `date` call. And `spawn-ledger.py` is a library module: run without `--json` it printed nothing and exited `0`, so a caller read empty stdout as "no rows". `--json` prints the ledger as one object and exits **2** when the ledger is unreadable — `None` is never `{}`, for the reason its module docstring gives.
 
-   ⚠️ **A headless worker has no `CLASSIFICATION` row** (`agents/fleet-sweep-reader.md:122` — *"invisible to `ListAgents` by construction"*), so step 1's candidate set cannot see it. Take candidates from **both**: step 1's `parked` and `finished — reap candidate` rows, **and** every ledger row absent from `CLASSIFICATION`, reading `mode: headless`, with a `task` page in `execution` and open boxes. Without the second half the signal fires only for rows the roster already showed — not the population the incident came from.
+   **The spawn time is `spawned_at` on the row keyed by the worker's full session uuid**, an ISO-8601 instant (`2026-10-14T00:00:00Z`). Parse it to epoch before comparing — a string against an integer compares nothing.
 
-   - mtime **at or before** `spawned_at`, task `execution` with open boxes → **`wrote nothing since spawn`**: report it as a failure, never as `finished`, and draft no nudge (a nudge assumes a worker that can be woken; this one never wrote). Name both timestamps.
+   ⚠️ **`metrics_sessions[].started_at` is the wrong source — using it was this step's original defect.** A headless spawn never binds one (it is written by `vault-cli task work-on`, which a `spawn_agent` worker never runs), so every headless row fell through. **Never `claude_session_started`** either — a vault-ui Start-button flag, `nonempty 0` on every task, already refused by `agents/fleet-sweep-reader.md` step 5. No ledger row, or an unreadable ledger → no spawn time: keep the ordinary disposition and say the check did not run; never infer one.
+
+   ⚠️ **A headless worker has no `CLASSIFICATION` row** (`agents/fleet-sweep-reader.md:122` — *"invisible to `ListAgents` by construction"*), so step 1's candidate set cannot see it. Take candidates from **both**: step 1's `parked` and `finished — reap candidate` rows, **and** every ledger row absent from `CLASSIFICATION`, reading `mode: headless`, with a `task` page in `execution` and open boxes. **Join on the first 8 characters of `session_id`** — the ledger carries the full uuid while a `CLASSIFICATION` row carries `[<sid8>]`, and comparing a uuid against an 8-char handle matches nothing.
+
+   ⚠️ **A worker spawned moments ago must not be flagged.** `mtime <= spawned_at` holds from the first second for any task a manager wrote before spawning its worker, so without a grace window the open leg's own new spawns report as failures in the same round. Flag only once **`now - spawned_at` exceeds the 15-minute park window** — the window a park auto-denies in, so a worker that had its full chance to write and still has not is the population this rule is for.
+
+   - mtime **at or before** `spawned_at`, past the grace window, task `execution` with open boxes → **`wrote nothing since spawn`**: report it as a failure, never as `finished`, and draft no nudge (a nudge assumes a worker that can be woken; this one never wrote). Name both timestamps.
    - mtime **after** `spawned_at` → the worker wrote: keep the ordinary disposition and do **not** call it a failure. That is the positive control.
 
-   ⚠️ **The mtime is evidence, not proof.** It moves when *anyone* writes the page — a sibling session, a manager flipping a status field, obsidian-git. So the signal asserts *"the task page has not been modified since this worker spawned"*; the digest carries that wording, never a claim about what the worker did. A row reading `wrote nothing since spawn` is a prompt to look, not a conviction.
+   ⚠️ **The mtime is evidence, not proof.** It moves when *anyone* writes the page — a sibling session, a manager flipping a status field, obsidian-git. So the signal asserts *"the task page has not been modified since this worker spawned"*; the digest carries that wording, never a claim about what the worker did.
 
    `finished` is decided by the task's boxes, not here — step 8 needs `idle` and every box `[x]`, so this catches only what that rule cannot see: a task already complete when the worker spawned.
 
@@ -109,6 +118,7 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
    | **blocked** | a probe found a live blocker | escalate, with the probe and its result |
    | **unverifiable** | a probe could not run, no task resolved, no `CLOSERS` row, or a row classed `parked-wait` / `none` | observation only — except at streak 2 (6b): a resolving pane acts, a pane-less row is observed |
    | **finished** | from step 1, disk facts hold (1b) | reap message drafted |
+   | **wrote-nothing** | from step 1a — task page not modified since `spawned_at`, past the 15-minute grace window, task `execution` with open boxes | report as a failure; draft no nudge |
 
 6. **Draft nudges** for `revive` only. Read-only context: name the peer's next unchecked subtask, state that nothing was authorised and nothing was done on its behalf, and that this is not a green light past any gate. For a revive, quote the closer and what earned it — the `routine` class, or the table rows it passed. Never a course correction ("stop that", "work on X instead").
 
@@ -116,7 +126,7 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
 6b. **Unverifiable 2 rounds — read the pane, act once.** Write this round's entries to `/tmp/drive-round.json` and run `python3 $P/drive-unverifiable.py handle --entries /tmp/drive-round.json --json-out /tmp/drive-round.json --digest <payload= path>`; paste its `UNVERIFIABLE` block verbatim into the payload's `UNVERIFIABLE` section, nudge lines into `NUDGES`, escalation rows into `ESCALATION`. Step 7 merges the **patched** file. Share + rules: `drive-share.py` docstring. ⚠️ **`observation` = no pane: no card, no cap slot.** ⚠️ **Never omit it** — `(none)` on an empty round.
 
-7. **Persist the ledger** — `python3 $P/drive-ledger.py merge`, with **this round's entries only** on stdin as `{"round": "<ts>", "entries": [...]}`. The script owns the merge, so a round cannot shrink the ledger by omission ([`fleet-drive-rationale.md`](../docs/fleet-drive-rationale.md) § The ledger's one writer). ⚠️ **Never write the ledger yourself** — no `jq`, no `python3 -c`, no `mkdir`/`mv`, and never pass a pre-merged set. `scripts/check-drive-ledger-writes.py` fails the build if any ledger-referencing line across `agents/` and `commands/` **writes** the ledger through an inline interpreter — a read is not an offence. A refused merge (exit 2) wrote **nothing**: report the refusal in the header rather than retrying by hand. One entry per candidate of **every** verdict — revive, blocked, unverifiable, finished — because step 3 compares each field against the previous round's value: session id, name, verdict, open-box count, probe + result, `nudge: drafted|none`, suppression reason, **`task_file`** — what step 0 re-reads, and an entry without one cannot be re-probed — and, for a retained row, **`reprobe_verdict`** + **`reprobe_probe`**, copied verbatim from step 0's output. Those two are step 0's dedup key on the next round; an entry written without them reads as a first observation and re-signals. Also `unverifiable_streak` + `unverifiable_round` + `unverifiable_observation`, copied from 6b's patched file — separate field, never an action. A `drafted` entry counts as nudged next round — if the caller's send fails, the next round suppresses rather than nags.
+7. **Persist the ledger** — `python3 $P/drive-ledger.py merge`, with **this round's entries only** on stdin as `{"round": "<ts>", "entries": [...]}`. The script owns the merge, so a round cannot shrink the ledger by omission ([`fleet-drive-rationale.md`](../docs/fleet-drive-rationale.md) § The ledger's one writer). ⚠️ **Never write the ledger yourself** — no `jq`, no `python3 -c`, no `mkdir`/`mv`, and never pass a pre-merged set. `scripts/check-drive-ledger-writes.py` fails the build if any ledger-referencing line across `agents/` and `commands/` **writes** the ledger through an inline interpreter — a read is not an offence. A refused merge (exit 2) wrote **nothing**: report the refusal in the header rather than retrying by hand. One entry per candidate of **every** verdict — revive, blocked, unverifiable, finished, wrote-nothing — because step 3 compares each field against the previous round's value: session id, name, verdict, open-box count, probe + result, `nudge: drafted|none`, suppression reason, **`task_file`** — what step 0 re-reads, and an entry without one cannot be re-probed — and, for a retained row, **`reprobe_verdict`** + **`reprobe_probe`**, copied verbatim from step 0's output. Those two are step 0's dedup key on the next round; an entry written without them reads as a first observation and re-signals. Also `unverifiable_streak` + `unverifiable_round` + `unverifiable_observation`, copied from 6b's patched file — separate field, never an action. A `drafted` entry counts as nudged next round — if the caller's send fails, the next round suppresses rather than nags.
 
 </process>
 
@@ -128,7 +138,7 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 Return exactly this in the payload, each section `(none)` rather than dropped:
 
 ```
-fleet-drive — <N> candidates (<L> retained from the ledger) · <F> finished (reaped) · <R> revive (<C> routine continue) · <B> blocked · <U> unverifiable · headless=<H> · channel=pane-free-closer
+fleet-drive — <N> candidates (<L> retained from the ledger) · <F> finished (reaped) · <W> wrote-nothing · <R> revive (<C> routine continue) · <B> blocked · <U> unverifiable · headless=<H> · channel=pane-free-closer
   <name> [<sid8>] · <bucket> · <open boxes> · <verdict>
       probe: <command → result>   |   (revive: the CLOSERS row + the four step-4a rows)
       ledger: <drafted | suppressed: <reason> | excluded>
@@ -178,11 +188,11 @@ the caller prints what you hand it.
 **Hand-back** — obey `${CLAUDE_PLUGIN_ROOT}/docs/handback-contract.md` **for the form**: verdict lines and counts in `key=value` form, **≤ 1 KB**, non-empty, payload off the hand-back. ⚠️ **The contract's payload-path section does not cover this leg** — its table lists the manager store only and its keying rule is the subject slug, while the fleet loop keys on the round. The path rule that applies here is the one in this `<output_format>`. This leg's required set is the **drive verdicts — one line per candidate you decided, carrying the decision**:
 
 ```text
-candidates=<N> · finished=<F> · revive=<R> · blocked=<B> · unverifiable=<U> · headless=<H> · truncated=<n> · payload=<path>
+candidates=<N> · finished=<F> · wrote-nothing=<W> · revive=<R> · blocked=<B> · unverifiable=<U> · headless=<H> · truncated=<n> · payload=<path>
 <name> [<sid8>] = <verdict>
 ```
 
-⚠️ **Every candidate of every verdict gets a line** — revive, blocked, unverifiable and finished alike — because step 3's suppression compares each round against the previous one's value, and a row absent from the hand-back reads as a row that no longer exists. A row re-probed in step 0 is a candidate this round and gets its line like any other.
+⚠️ **Every candidate of every verdict gets a line** — revive, blocked, unverifiable, finished and wrote-nothing alike — because step 3's suppression compares each round against the previous one's value, and a row absent from the hand-back reads as a row that no longer exists. A row re-probed in step 0 is a candidate this round and gets its line like any other.
 
 ⚠️ **Those two requirements meet at a cap, and the counts win.** One line per candidate and ≤ 1 KB cannot both hold on a large fleet — at roughly 45 bytes a line the cap arrives near twenty candidates. When they conflict, the **counts line is authoritative and is never dropped**; trim per-candidate lines until the whole hand-back fits and add `truncated=<n>` naming how many you dropped. Nothing is lost by the trim, because the payload carries every candidate regardless — so `truncated=` is the caller's instruction to read the payload, not a report that the fleet shrank. A hand-back that silently dropped rows to stay under the cap would read as candidates that no longer exist, which is the exact failure the per-line rule exists to prevent.
 
