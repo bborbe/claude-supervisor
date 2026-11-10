@@ -199,40 +199,41 @@ def parse_weekly(text):
     return [r for r in rows if r["names"]]
 
 
-DEFERRED_HEADING = re.compile(r"^#{1,2}\s+Explicitly Deferred\s*$", re.I)
+DEFERRED_HEADING = re.compile(r"^#{1,2}\s+Explicitly Deferred\b", re.I)
 
 
 def parse_deferred(text):
-    """The names listed under `# Explicitly Deferred`, with their line numbers.
+    """The names listed under `# Explicitly Deferred`, their lines, and the heading line.
 
-    The section is authored as plain `- ` bullets — some carrying no wikilink, some
-    nesting one or two — not as `### N.` blocks, so `parse_weekly` cannot see it and
-    every row listed there stayed eligible for a proposal card. A card is an ask, and
-    an ask to re-decide a question the operator already answered is the cost this
-    reading removes.
+    The section is authored as plain bullets — some carrying no wikilink, some nesting
+    one or two — not as `### N.` blocks, so `parse_weekly` cannot see it and every row
+    listed there stayed eligible for a proposal card. A card is an ask, and an ask to
+    re-decide a question the operator already answered is the cost this reading removes.
 
     The section ends at the next heading or at the `---` rule that closes it. A reader
     that runs to end-of-file swallows every later section into the deferred set, which
     suppresses real proposals while looking correct.
 
-    Returns `([(name, line)], present)`. `present` is a fact about the section rather
-    than about its contents, so a section that excludes nothing can be reported as such
-    instead of reading like one that was never found.
+    Returns `([(name, line)], heading_line, present)`. `present` is a fact about the
+    section rather than about its contents, so a section that excludes nothing can be
+    reported as such instead of reading like one that was never found.
     """
-    rows, inside = [], False
+    rows, inside, heading = [], False, 0
     for i, line in enumerate(text.splitlines(), 1):
         if DEFERRED_HEADING.match(line):
-            inside = True
+            inside, heading = True, i
             continue
         if not inside:
             continue
         if re.match(r"^#{1,6}\s", line) or line.strip() == "---":
             break
-        if not line.lstrip().startswith("- "):
+        if not re.match(r"^\s*[-*+]\s", line):
             continue
-        for name in wikilinks(line):
+        # An embed is not a page: `wikilinks` would read `![[chart.png]]` as a name and
+        # report it as a deferred page with no task/goal/topic behind it.
+        for name in wikilinks(re.sub(r"!\[\[[^\]]*\]\]", "", line)):
             rows.append((name, i))
-    return rows, inside
+    return rows, heading, inside
 
 
 def parse_monthly(text):
@@ -487,16 +488,19 @@ def plan_candidates(vault, board, day, notes):
     # section that was never read must not look the same.
     deferred = set()
     if weekly_text is not None:
-        names, present = parse_deferred(weekly_text)
+        names, heading_line, present = parse_deferred(weekly_text)
         if present:
             for name, _line in names:
-                kind, _, _fm = board.read(name)
-                if kind is None:
+                kind, path, _fm = board.read(name)
+                if path is None:
                     notes.append(f"deferred {name}: no page in tasks/goals/topics")
                     continue
-                deferred.add((kind, name))
-            notes.append(f"weekly {keys['weekly']}: # Explicitly Deferred — "
-                         f"{len(deferred)} name(s) excluded")
+                # Keyed on the resolved filename stem, not on the link text: `proposed()`
+                # keys on `path.stem`, so a link whose case differs from the file's would
+                # be reported as excluded while the row was still proposed.
+                deferred.add((kind, Path(path).stem))
+            notes.append(f"weekly {keys['weekly']}: # Explicitly Deferred "
+                         f"(line {heading_line}) — {len(deferred)} name(s) excluded")
     return out, deferred
 
 

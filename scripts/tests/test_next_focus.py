@@ -97,8 +97,10 @@ YEARLY = """# Plan for 2026
 """
 
 # The deferred section is prose bullets, not `### N.` blocks: some carry no wikilink,
-# some nest one or two. It is closed by a `---` rule and by the next heading, and a
-# reader that runs to end-of-file swallows `# Planning Notes` with it.
+# some nest one or two. The link-less bullet sits BETWEEN two linked ones on purpose —
+# as the last bullet it could not prove it does not swallow the ones after it. The
+# section is closed by a `---` rule and by the next heading; a reader that runs to
+# end-of-file swallows `# Planning Notes` with it.
 WEEKLY_DEFERRED = """# Fixture week
 
 # Tasks
@@ -110,13 +112,27 @@ WEEKLY_DEFERRED = """# Fixture week
 # Explicitly Deferred
 
 - **A single link** ([[Deferred One]]) — parked.
+- **No link at all** — prose only, and it must not swallow the bullet after it.
 - **📧 [[Deferred Two]] · 📊 [[Deferred Three]]** — both parked.
-- **No link at all** — prose only, and it must not break the parse.
+- **[[Deferred Goal]]** — a blocked goal is deferred by the same section.
 
 ---
 # Planning Notes
 
 - **[[After The Section]]** — a note, not a deferral.
+"""
+
+# `---` with no heading after it: the rule is the terminator, not a decoration before
+# one. Without this case, deleting the rule clause changes nothing observable.
+WEEKLY_DEFERRED_RULE = """# Fixture week
+
+# Explicitly Deferred
+
+- **Parked** ([[Deferred One]]) — parked.
+
+---
+
+- **[[After The Rule]]** — after the rule, and no heading between.
 """
 
 
@@ -311,11 +327,15 @@ class NextFocusTest(unittest.TestCase):
         for name in ("Deferred One", "Deferred Two", "Deferred Three",
                      "After The Section", "Unplanned P1 0"):
             self.write(f"25 Tasks/{name}.md", task(name, priority="1"))
+        self.write("24 Goals/Deferred Goal.md",
+                   task("Deferred Goal", status="hold", blocked="Some Bug Task"))
         proposed = [r["name"] for r in self.run_script()["proposed"]]
         self.assertNotIn("Deferred One", proposed)
         self.assertNotIn("Deferred Two", proposed)
         self.assertNotIn("Deferred Three", proposed,
                          "the second wikilink on one bullet is deferred too")
+        self.assertNotIn("Deferred Goal", proposed,
+                         "a blocked goal parked in the section is deferred too")
         self.assertIn("Unplanned P1 0", proposed, "a task in no plan must still surface")
         self.assertIn("After The Section", proposed,
                       "the section ends at its `---`/heading, not at end-of-file")
@@ -333,8 +353,11 @@ class NextFocusTest(unittest.TestCase):
         result = self.run_script()
         named = [n for n in result["notes"] if "# Explicitly Deferred" in n]
         self.assertEqual(len(named), 1, result["notes"])
-        self.assertIn("3", named[0], "the note must carry the number excluded")
-        self.assertIn("note:", result["render"], "the note must reach the rendered block")
+        # The count PHRASE, not the bare digit: the note's own week key (`2026-W43`)
+        # contains a 3 and a 0, so `assertIn("3", …)` passed on any count at all.
+        self.assertIn("— 3 name(s) excluded", named[0], "the note must carry the count")
+        self.assertIn(f"note: {named[0]}", result["render"],
+                      "the note must reach the rendered block verbatim")
 
     def test_deferred_section_with_no_links_still_reports_zero(self):
         """Present-but-empty is a fact; absent is a different one. Neither is silence."""
@@ -343,7 +366,17 @@ class NextFocusTest(unittest.TestCase):
         result = self.run_script()
         named = [n for n in result["notes"] if "# Explicitly Deferred" in n]
         self.assertEqual(len(named), 1, result["notes"])
-        self.assertIn("0", named[0])
+        self.assertIn("— 0 name(s) excluded", named[0])
+
+    def test_deferred_section_ends_at_its_rule_without_a_heading(self):
+        """The `---` is the terminator, not a decoration before the next heading."""
+        self.write(f"60 Periodic Notes/Weekly/{WEEK}.md", WEEKLY_DEFERRED_RULE)
+        self.write("25 Tasks/Deferred One.md", task("Deferred One", priority="1"))
+        self.write("25 Tasks/After The Rule.md", task("After The Rule", priority="1"))
+        proposed = [r["name"] for r in self.run_script()["proposed"]]
+        self.assertNotIn("Deferred One", proposed)
+        self.assertIn("After The Rule", proposed,
+                      "a bullet after the rule is not deferred")
 
     def test_weekly_without_a_deferred_section_says_nothing_about_it(self):
         """The note is a reading of the section, not a standing line on every run."""
