@@ -5,8 +5,8 @@ The sweep gate already answers "changed vs unchanged" model-free
 (`manager-predispatch.py` in this plugin; the vault's `sweep-gate.py` for the loop
 tick). This script is the pane-wake half of wiring that verdict into the wake path
 (operator pick, attention card 1803ce3c, 2026-11-10): an unchanged tick types
-nothing and costs zero model rounds; a changed tick types exactly one wake prompt
-into the manager's pane, costing one model turn.
+nothing and costs zero model rounds; a changed tick types one wake prompt into the
+manager's pane, costing one model turn.
 
     manager-wake.py --vault <path> --subject <name> [--tier auto|goal|topic|fleet]
                     [--interval 15] [--dry-run]
@@ -29,9 +29,16 @@ Resolution, in order:
        `wake` / `wake:suggestion` -> type the prompt
        `skip:*`                   -> print `SKIP <reason>`, type nothing
 
-Exit status: 0 for every wake decision — woken, skipped, or no manager found. A
-non-zero here would make the detached loop read a quiet tick as FAILED, which is
-exactly the confusion this task removes. 2 is reserved for a usage error.
+Submission is CONFIRMED, not assumed. The repo has twice measured the
+swallowed-submit defect (`scripts/send-delivery-drill.py`): `send-text` reaching
+the pty is not proof the Enter submitted. After typing, the pane is re-read and
+the result is `WOKEN` only when the composer cleared or the session started
+working; a composer that still holds the prompt is `UNVERIFIED`, never a success.
+
+Exit status: 0 for every wake decision — woken, unverified, skipped, or no manager
+found. A non-zero here would make the detached loop read a quiet tick as FAILED,
+which is exactly the confusion this task removes. 2 is reserved for a usage error
+(a bad `--interval`).
 
 ⚠️ This types into a live manager pane. It never activates the tab (`send-text`
 reaches an inactive pane), and it never wakes a pane `pane-wake-guard.py` refuses —
@@ -44,11 +51,14 @@ import json
 import os
 import subprocess
 import sys
+import time
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-PLUGIN_ROOT = os.environ.get("CLAUDE_PLUGIN_ROOT") or os.path.dirname(HERE)
+PLUGIN_ROOT = os.environ.get("CLAUDE_PLUGIN_ROOT") or os.path.expanduser(
+    "~/.claude/plugins/marketplaces/claude-supervisor"
+)
 GUARD = os.path.join(PLUGIN_ROOT, "scripts", "pane-wake-guard.py")
 MANAGER_STATE = os.path.expanduser("~/.claude/state/worker-manager")
+VALID_BRANCHES = ("goal", "topic", "fleet")
 
 
 def _jump():
@@ -123,11 +133,16 @@ def guard(pane_id):
 
 
 def wake(pane_id, prompt, dry_run):
-    """Type the wake prompt into the pane (or say what it would do).
+    """Type the wake prompt and CONFIRM the submit; never report WOKEN unverified.
 
-    An ACTION, not a read: it reports its own failure rather than collapsing one
-    into an empty result. Enumerated in `transport-read-check.py` for mechanism/list
-    agreement, deliberately not driven into the three states.
+    The repo has measured the swallowed-submit defect: a `send-text` that reaches
+    the pty can strand the Enter while the TUI is mid-turn. So after typing, the
+    pane is re-read — `wake` (composer cleared) or `skip:spinner` (the session
+    started working) means the submit landed; a composer that still holds the
+    prompt means the Enter was swallowed. This is an ACTION, not a read: it reports
+    its own outcome rather than collapsing a failure into an empty result, and it is
+    enumerated in `transport-read-check.py` for mechanism/list agreement, deliberately
+    not driven into the three states.
     """
     if dry_run:
         return f"WOULD-WAKE pane={pane_id} prompt={prompt!r}"
@@ -139,7 +154,13 @@ def wake(pane_id, prompt, dry_run):
         return f"WAKE-FAILED pane={pane_id} {exc}"
     if r.returncode != 0:
         return f"WAKE-FAILED pane={pane_id} {(r.stderr or '').strip()}"
-    return f"WOKEN pane={pane_id} prompt={prompt!r}"
+    last = "error:no-verdict"
+    for _ in range(8):
+        time.sleep(0.5)
+        last = guard(pane_id)
+        if last.startswith("wake") or last == "skip:spinner":
+            return f"WOKEN pane={pane_id} prompt={prompt!r}"
+    return f"UNVERIFIED pane={pane_id} prompt={prompt!r} (last verdict: {last})"
 
 
 def main(argv=None):
@@ -154,9 +175,19 @@ def main(argv=None):
                     help="resolve and guard, but type nothing")
     args = ap.parse_args(argv)
 
+    # The interval is interpolated into the typed prompt, so validate it rather than
+    # passing an arbitrary string through to a live pane.
+    if not (args.interval.isdigit() and 1 <= int(args.interval) <= 1440):
+        print(f"USAGE: --interval must be an integer 1..1440 minutes, got {args.interval!r}",
+              file=sys.stderr)
+        return 2
+
     sid, branch = resolve_manager_session(args.subject, args.tier)
     if not sid:
         print(f"NO-MANAGER subject={args.subject!r} tier={args.tier}")
+        return 0
+    if branch not in VALID_BRANCHES:
+        print(f"NO-MANAGER subject={args.subject!r} (unexpected branch {branch!r})")
         return 0
 
     pane = resolve_pane(sid)
