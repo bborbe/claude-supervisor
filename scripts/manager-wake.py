@@ -49,6 +49,7 @@ import glob
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -59,6 +60,7 @@ PLUGIN_ROOT = os.environ.get("CLAUDE_PLUGIN_ROOT") or os.path.expanduser(
 GUARD = os.path.join(PLUGIN_ROOT, "scripts", "pane-wake-guard.py")
 MANAGER_STATE = os.path.expanduser("~/.claude/state/worker-manager")
 VALID_BRANCHES = ("goal", "topic", "fleet")
+SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 PROMPT_GLYPH = "❯"
 QUEUED_HINTS = ("queued message", "queued messages", "press up to edit queued")
 
@@ -126,6 +128,8 @@ def resolve_manager_session(subject, tier):
         if tier != "auto" and branch != tier:
             continue
         sid = os.path.splitext(os.path.basename(f))[0]
+        if not SESSION_ID_RE.match(sid):
+            continue  # `last-<vault>.json` and other non-session records in this dir
         ts = d.get("resolved_at") or ""
         if best is None or ts > best[0]:
             best = (ts, sid, branch)
@@ -180,6 +184,7 @@ def wake(pane_id, prompt, dry_run):
     if dry_run:
         return f"WOULD-WAKE pane={pane_id} prompt={prompt!r}"
     head = prompt.split("\n")[0].strip()[:40]
+    saw_ours = False
     for attempt in range(3):
         payload = prompt + "\r" if attempt == 0 else "\r"
         try:
@@ -190,6 +195,7 @@ def wake(pane_id, prompt, dry_run):
             return f"WAKE-FAILED pane={pane_id} {exc}"
         if r.returncode != 0:
             return f"WAKE-FAILED pane={pane_id} {(r.stderr or '').strip()}"
+        time.sleep(0.4)  # let the text reach the composer before the first read
         for _ in range(5):
             time.sleep(0.5)
             text = _pane_text(pane_id)
@@ -200,15 +206,17 @@ def wake(pane_id, prompt, dry_run):
             if composer == "":
                 if head in text:
                     return f"WOKEN pane={pane_id} prompt={prompt!r}"
-                return (f"UNVERIFIED pane={pane_id} prompt={prompt!r} "
-                        "— composer empty but the prompt never reached it")
+                continue  # not landed yet — keep polling this attempt, never claim success
             if head in composer:
-                break  # our text is still in the composer: the Enter was swallowed
+                saw_ours = True
+                break  # still in the composer: swallowed Enter, retried on the next attempt
             if any(h in composer.lower() for h in QUEUED_HINTS):
                 return f"WOKEN pane={pane_id} prompt={prompt!r} (queued)"
             return (f"UNVERIFIED pane={pane_id} prompt={prompt!r} "
                     "— composer holds text this send did not write")
-    return f"FAILED pane={pane_id} prompt={prompt!r} — the Enter was swallowed"
+    if saw_ours:
+        return f"FAILED pane={pane_id} prompt={prompt!r} — the Enter was swallowed"
+    return f"UNVERIFIED pane={pane_id} prompt={prompt!r} — the submit could not be confirmed"
 
 
 def main(argv=None):
