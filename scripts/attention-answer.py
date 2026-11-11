@@ -12,6 +12,15 @@ Order matters in `answer`: the store's open -> answered compare-and-set runs
 first, and a caller that loses it (409) must NOT route its answer -- another arm
 already did. Only the winner prints a TARGET.
 
+⚠️ **A Stop-hook MIRROR card is the one exception, and it has NO compare-and-set.**
+Such a card lives in the event log and never in the store (`who-needs-me.py`'s
+`board_missing_gates()`), so there is nothing to POST: the branch resolves the
+card through the folded log, prints a TARGET, and the caller delivers. Because
+no CAS exists there, two arms answering one mirror id will BOTH deliver — the
+operator should answer a mirror card once. A mirror whose card has closed, or
+whose kind is `permission`, is refused rather than routed: a relay cannot release
+another session's parked gate.
+
 The answer carries two identities: `answered_by` names the arm, and `resolved_by`
 names the session that ran it. The session id is read from the environment, so a
 resolution is attributable without the caller passing a flag -- and the invoking
@@ -238,6 +247,69 @@ def fetch_item(item_id):
         return json.load(resp)
 
 
+def mirror_gate(item_id, state_dir=None):
+    """`(session_id, kind)` for an EVENT-LOG-only card that is still OPEN, else None.
+
+    ⚠️ **A Stop-hook mirror card is not in the store.** The hook mints a card for a
+    closer and writes it to the event log; the store never carries it. So `fetch_item()`
+    404s on a mirror's id, and before this fallback that 404 escaped `cmd_answer` before
+    any `TARGET:` line was printed — the operator's approve reached nobody and the
+    session kept waiting (measured 2026-11-11: `urllib.error.HTTPError: HTTP Error 404`,
+    fixture `MirrorCardLookup`).
+
+    ⚠️ **This is a SUPERSET of what `board_missing_gates()` offers, deliberately.** That
+    function applies further gates (`STORE_OK`, `is_superseded`, and `is_open_gate()`'s
+    `is_parked_verb` / `is_reapable` / `names_peer_gate` / `is_rendered_panel`), and those
+    exclude exactly the record this branch exists for: a `Stop`-sourced closer panel is
+    `event: "Stop"`, `kind: "question"`, and a **rendered panel** — which `is_open_gate()`
+    filters out as a card that raises no ask. A mirror card IS that panel, so narrowing
+    this to `board_missing_gates()`' class would make the branch answer nothing at all.
+    The gates that DO matter here are enforced: the card must be open (the fold) and its
+    kind must be `question` (a `permission` card is refused as laundering).
+
+    ⚠️ **The log is FOLDED, not scanned for a first match.** A record is a live card only
+    when an `open` line names it (`type: "open"`) and no `close` line does anywhere
+    (`closed_by`, which the close line carries instead of a `type`). The test is
+    order-independent — any close wins, in any file. ⚠️ **That matches
+    `who-needs-me.load_events()`, and it inherits its limitation:** `item_id` is
+    `sha256(sid:kind:detail)`, so a byte-identical ask re-parked AFTER its card closed
+    appends a second `open` for the same id, and any-close-wins then refuses a live card.
+    The two surfaces agree, so this is consistent rather than novel — but it is a real
+    edge, not a soundness guarantee. A first-match scan would be worse: it would route an
+    answer for a card that closed, and the store path has a compare-and-set for exactly
+    that, while the mirror path has none.
+
+    `kind` is returned because the caller MUST NOT treat a `permission` card as a
+    message: a session cannot release another session's parked gate, and relaying a
+    verdict to it is permission laundering.
+    """
+    base = state_dir or ATTENTION_STATE_DIR
+    opened = None
+    closed = False
+    for path in glob.glob(os.path.join(base, "*.events.jsonl")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue  # a torn final line is expected, not fatal
+                    if not isinstance(rec, dict) or rec.get("item_id") != item_id:
+                        continue
+                    if rec.get("closed_by") is not None:
+                        closed = True
+                    elif rec.get("type") == "open":
+                        opened = rec
+        except OSError:
+            continue
+    if opened is None or closed:
+        return None
+    return (opened.get("session_id") or "", opened.get("kind") or "")
+
+
 def fetch_delivery(item_id, timeout=None):
     """Return the store's delivery report for `item_id` (`GET …/attempt`)."""
     with urllib.request.urlopen(
@@ -420,7 +492,53 @@ def cmd_next(registry, out=sys.stdout):
 
 
 def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None, decision=""):
-    item = fetch_item(item_id)
+    try:
+        item = fetch_item(item_id)
+    except urllib.error.HTTPError as err:
+        if err.code != 404:
+            print(f"FAILED: store returned {err.code} for {item_id}", file=out)
+            return 1
+        # A Stop-hook MIRROR card: the event log holds it and the store never did. There
+        # is no store record to answer, so nothing is POSTed — the caller delivers the
+        # answer straight to the producing session, which is what the TARGET line is for.
+        gate = mirror_gate(item_id)
+        if gate is None:
+            print(f"FAILED: {item_id} is neither a store item nor an open event-log card", file=out)
+            return 1
+        producer, kind = gate
+        if not producer:
+            print(f"FAILED: {item_id} carries no producing session", file=out)
+            return 1
+        if kind == "permission":
+            # ⚠️ Never relay a verdict for another session's parked gate. The store path
+            # routes these through `answer_permission`, which the spawning server polls;
+            # a SendMessage carrying `--decision allow` is permission laundering even when
+            # the action looks small, and this arm cannot record a verdict anywhere.
+            print(f"REFUSED: {item_id} is a permission card; a relay cannot release "
+                  "another session's parked gate", file=out)
+            return 2
+        if kind != "question":
+            # Only `question` is a card here, which is also what `board_missing_gates()`
+            # offers (`is_open_gate()`). Every other kind is a turn record — an `idle`
+            # line names no ask — so there is nothing to answer.
+            print(f"FAILED: {item_id} is a {kind or 'typeless'} record, not a card", file=out)
+            return 1
+        # ⚠️ The marker goes down only for a card that can actually be DELIVERED to. The
+        # store path writes it after the store accepted the answer, for the same reason it
+        # states: "a marker for an answer that failed to land would attribute a question
+        # nobody answered". A mirror has no store write to wait on, so deliverability —
+        # `resolve_target` returning a name — is the equivalent gate.
+        name, reason = resolve_target(producer, registry)
+        if not name:
+            # Nothing was recorded and nothing will be delivered, so `ANSWERED:` would be a
+            # state claim this branch has not established — the store path earns that line
+            # from a successful POST.
+            print(f"UNDELIVERABLE: {reason}", file=out)
+            return 0
+        write_answer_marker(producer, "", "operator")
+        print(f"ANSWERED: {item_id} (no store record)", file=out)
+        print(f"TARGET: {name}", file=out)
+        return 0
     mech = item.get("answer_mechanism")
     if mech == "permission":
         return cmd_answer_permission(item, answered_by, resolved_by, decision, out)
@@ -543,6 +661,36 @@ def post_attempt(item_id, carrier, outcome):
         return json.load(resp)
 
 
+def mirror_known(item_id, state_dir=None):
+    """True when the EVENT LOG has ever named this id — open OR closed.
+
+    ⚠️ **The attempt leg must not ask `mirror_gate()`.** By the time a delivery is
+    reported the card has usually ALREADY CLOSED — the session's next turn clears it —
+    so requiring a still-open gate there would re-raise `FAILED` for a delivery that
+    succeeded, which is the opposite of what the branch exists for. "The log knows this
+    id" is the discriminator that does not depend on card state, and it still separates a
+    mirror from a store id: the two id spaces are disjoint, so a store id is never in the
+    log and an older store's missing `/attempt` endpoint keeps its `FAILED:` signal.
+    """
+    base = state_dir or ATTENTION_STATE_DIR
+    for path in glob.glob(os.path.join(base, "*.events.jsonl")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(rec, dict) and rec.get("item_id") == item_id:
+                        return True
+        except OSError:
+            continue
+    return False
+
+
 def cmd_attempt(item_id, carrier, outcome, out=sys.stdout):
     """Record the outcome of a delivery this arm attempted.
 
@@ -558,7 +706,29 @@ def cmd_attempt(item_id, carrier, outcome, out=sys.stdout):
             file=out,
         )
         return 1
-    post_attempt(item_id, carrier, outcome)
+    try:
+        post_attempt(item_id, carrier, outcome)
+    except urllib.error.HTTPError as err:
+        # ⚠️ A 404 alone does NOT mean "mirror". `commands/attention-next.md` documents the
+        # other cause: against a store older than attention-controller v0.30.0 the `/attempt`
+        # endpoint does not exist, and that is "a missing endpoint, not a failed delivery".
+        # Swallowing every 404 would delete that documented `FAILED:` signal and mislabel it
+        # as a mirror card.
+        #
+        # ⚠️ And the test is `mirror_known`, NOT `mirror_gate`: by the time this leg runs the
+        # card has usually already closed, so asking for a still-open gate would re-raise
+        # FAILED for a delivery that succeeded.
+        if err.code != 404 or not mirror_known(item_id):
+            raise
+        # A mirror card has no store record, so there is no attempt trail to append to.
+        # Reporting that as a failure would turn a delivery that DID happen into a failed
+        # attempt — the command runs this step unconditionally after every delivery.
+        print(
+            f"ATTEMPT: {item_id} {outcome} by {carrier} (mirror card — no store record, "
+            "nothing recorded)",
+            file=out,
+        )
+        return 0
     print(f"ATTEMPT: {item_id} {outcome} by {carrier}", file=out)
     return 0
 
