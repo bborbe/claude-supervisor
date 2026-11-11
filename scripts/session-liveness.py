@@ -54,6 +54,19 @@ the same predicate `coverage()` and `unstamped()` already use, so they cannot di
     for a session whose registry entry said `busy`, whose transcript had been written a minute
     earlier, and whose pane rendered with a live status bar.
 
+⚠️ **ONE CLASS OF LIVE SESSION IS NEVER RE-STAMPED, and it is why a stale row is not death.**
+The `mcp-timer` stamp is written by `claude-wrapper`'s heartbeat poster (`pkg/heartbeat.go`), which
+posts every 30 s for each session the session registry lists with a live pid — and **deliberately
+skips any session id the spawn ledger records terminal** (`done`/`error`), so a finished worker
+does not read live. A session id reused by a later resume of the same id inherits that terminal
+row — a resume writes no new ledger row — so the poster never posts for it again and its row
+freezes at the last POST while its process runs. Measured 2026-11-11: `1c05c414` was
+registry-alive on pid 81794 with its endpoint row frozen at `2026-11-09T22:09:51Z`, because its
+ledger row has read `done` since `2026-11-07T08:49:12Z`. The verdict for this class is
+**UNKNOWN**, never ABSENT, and the registry read in `_absent_licensed` is what keeps it there —
+so that read must never be shortened to "the row says not-live, that is death". The poster's own
+cadence and the ledger's terminal vocabulary are audited in `bborbe/claude-wrapper`, not here.
+
 ⚠️ **AMBIGUOUS is a fourth answer, and it is not a liveness verdict.** Two sessions sharing an
 8-char prefix means the ARGUMENT did not identify one session; answering LIVE or ABSENT either
 way would be a guess. Exit 3 names it and prints the candidates, so the caller can pass the

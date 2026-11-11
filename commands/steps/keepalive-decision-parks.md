@@ -25,7 +25,8 @@ python3 "$P/decision-park-resume.py" --vault "<vault>" --tasks-dir "<vault>/<tas
 
 `--tasks-dir` is the vault's own, resolved from `vault-cli config` — never a hardcoded directory
 name, which would glob nothing and report a clean round. The script prints one line per row and a
-summary carrying `decision-candidates=`, `decision-resumed=` and `decision-unread=`. Print the
+summary carrying `decision-candidates=`, `decision-resumed-a=`, `decision-resumed-d=` and
+`decision-unread=`. Print the
 summary; it is the hand-back's three counts and none of them is a digest key.
 
 ⚠️ **This was prose for six review rounds, and every round found a different real defect** — an

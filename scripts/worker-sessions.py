@@ -46,7 +46,7 @@ the liveness source.**
 blind to headless workers, so a fleet that was silently under-counting now counts what it was
 rendering dead. Measured 2026-10-09 on this host: **11** under the registry join, **22** under
 the endpoint. `docs/fleet-surface.md` § Spawn a worker item 5 already carries the warning —
-re-read `spawn.maxConcurrent` before the first sweep after upgrading, because the first tick
+re-read `spawn.maxWorkerSoft` before the first sweep after upgrading, because the first tick
 can read **at or over** the target with no error on either side.
 
   * The **ledger's own `status` is not a liveness source.** Measured 2026-10-01: 824 of its

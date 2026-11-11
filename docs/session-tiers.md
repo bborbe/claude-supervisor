@@ -69,7 +69,7 @@ nothing new, while opening one decides who supervises. Four rules follow:
    `approved_by: operator`. **Which legs read the flag alone and which read `flag_set_by` has
    one home — `docs/fleet-surface.md` § Approval provenance; read the split there.** A flag on
    a page no leg reads is inert, which is the defect `--topic-open` was added to remove.
-3. **An approved worker is opened automatically**, up to `spawn.maxConcurrent`.
+3. **An approved worker is opened automatically**, up to `spawn.maxWorkerSoft`.
 4. **A manager is never opened fresh on the operator's behalf** — not by a loop, not by a
    round, not to fill a gap. Only restarted, or opened because it was flagged.
 
@@ -202,7 +202,7 @@ or that was stood down while its session lives, is closed so its workers fall to
 
 **The stood-down half is implemented, in the fleet keep-alive leg.** `manager-liveness.py
 --stood-down-past <MINUTES>` selects a manager whose loop has read `STOPPED` past the bound
-(60 min — 4× the round's cadence), and `agents/fleet-keepalive-actor.md` § 4b joins each row to
+(60 min — a fixed bound, no longer "4× the round's cadence": the goal tier arms no cadence now), and `agents/fleet-keepalive-actor.md` § 4b joins each row to
 session liveness, hands the page over, proves the handover through `close-worker.py`'s own
 `page_verdict`, and closes. ⚠️ **The marker outlives the session it describes** — measured
 2026-11-09, 83 `.stopped` markers against 2 whose session was still `LIVE` — so the liveness

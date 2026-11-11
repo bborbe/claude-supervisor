@@ -179,20 +179,43 @@ def approval_cleared(approved: str, turn: float | None) -> bool | None:
     return stamp > turn
 
 
-def blocked_by_cleared(names: list[str], tasks_dir: str) -> bool | None:
+def blocked_by_cleared(names: list[str], tasks_dir: str, turn: float | None) -> bool | None:
     """Kind (d). ⚠️ An EMPTY set is not a cleared wait — "every name is terminal" is vacuously
-    true of it, and that would resume every orphaned row on every round."""
+    true of it, and that would resume every orphaned row on every round.
+
+    ⚠️ **Completion alone is not the event either — ordering is, exactly as for kind (a).** A set
+    whose every member is `completed` stays completed forever, so a read of status alone fires on
+    every round the worker is closed: resume → idle → reaped → resume again, with nothing ever
+    consuming the wait. The event is "the last dependency finished after the worker last spoke":
+    the latest `completed_date` must be later than the session's last turn. Once the resumed
+    worker writes a turn, that ordering is false and the wait is consumed. `None` = could not
+    compare (a missing or unparseable `completed_date`, or no readable transcript).
+
+    Measured 2026-11-11 on the private-personal vault: 5158 of 7275 completed tasks carry
+    `completed_date` (2133 of 2388 touched in the last 14 days). An undated dependency is `unread`
+    — reported, never resumed — rather than guessed from a file mtime that a checkout resets.
+    """
     if not names:
         return False
+    k = keepalive()
+    latest = None
     for name in names:
         try:
             with open(os.path.join(tasks_dir, name + ".md"), encoding="utf-8") as handle:
-                status = keepalive().scalar(keepalive().frontmatter(handle.read()), "status")
+                fm = k.frontmatter(handle.read())
         except OSError:
             return None
-        if status not in DEPENDENCY_MET:
+        if k.scalar(fm, "status") not in DEPENDENCY_MET:
             return False
-    return True
+        done = k.scalar(fm, "completed_date")
+        try:
+            stamp = parse_iso(done)
+        except Exception:
+            return None
+        latest = stamp if latest is None else max(latest, stamp)
+    if turn is None:
+        return None
+    return latest > turn
 
 
 def spent(vault: str, task: str, now: float) -> int:
@@ -245,8 +268,9 @@ def decide(vault: str, tasks_dir: str, now: float) -> dict:
             continue
 
         candidates += 1
-        approved = approval_cleared(k.scalar(fm, "approved_at"), last_turn(sid))
-        blocked = blocked_by_cleared(blocked_by(fm), tasks_dir)
+        turn = last_turn(sid)
+        approved = approval_cleared(k.scalar(fm, "approved_at"), turn)
+        blocked = blocked_by_cleared(blocked_by(fm), tasks_dir, turn)
 
         # ⚠️ Per-wait, never all-or-nothing: one unreadable wait must not strand a row whose
         # other wait DID clear — that turns a partial read into a silent no-op.
@@ -298,7 +322,7 @@ def main(argv: list[str]) -> int:
     result = decide(args.vault, args.tasks_dir, now)
     if not result["ok"]:
         print(f"unread — {result['reason']}")
-        print("decision-candidates=0 · decision-resumed=0 · decision-unread=1")
+        print("decision-candidates=0 · decision-resumed-a=0 · decision-resumed-d=0 · decision-unread=1")
         return 1
     if args.json:
         print(json.dumps(result))
@@ -312,8 +336,12 @@ def main(argv: list[str]) -> int:
             print(f"resume kind={row['kind']} {row['task']} {row['sid']} — {row['detail']}")
     for row in result["unread"]:
         print(f"unread {row['task']} — {row['reason']}")
+    # Per wait kind, never one total: SC5 grades each kind on its own, and a single number
+    # cannot say which wait cleared — nor reconcile against the `--record` store by kind.
+    by_kind = {k: sum(1 for r in resumed if r["kind"] == k) for k in ("a", "d")}
     print(f"decision-candidates={result['candidates']} · "
-          f"decision-resumed={len(resumed)} · decision-unread={len(result['unread'])}")
+          f"decision-resumed-a={by_kind['a']} · decision-resumed-d={by_kind['d']} · "
+          f"decision-unread={len(result['unread'])}")
     return 0
 
 
