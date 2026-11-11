@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.283.2
 
 - fix: **the `restart-worker` CLI tests point `SUPERVISOR_WEZTERM` at an existing executable, so master's `test` check goes green again.** `e39c1d7c` made `main()` resolve the wezterm binary **before** the kill and refuse with exit 1 when it cannot — correct, so a spawn that cannot happen never leaves a killed pid behind it — but a CI runner has no wezterm, so all 15 success-path tests in `Cli` / `HeldSession` / `HoldWindow` took that refusal and master has been red since `v0.283.1`. The fixture's `run_cli` now sets it with `setdefault`, never an assignment, because the tests that *prove* the refusal and the one that points the override at a missing path set it themselves and must keep what they set. Change set: `scripts/tests/test_restart_worker.py`, `CHANGELOG.md`.
 
