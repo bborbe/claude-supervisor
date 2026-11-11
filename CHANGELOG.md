@@ -7,7 +7,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
-## Unreleased
+## v0.278.0
 
 - feat: **the fleet round closes a finished or deferred tab row through `close-worker.py` instead of only drafting the reap message.** `commands/steps/drive.md` closed a finished headless row and, for a tab row, sent the reap message and stopped — so a worker whose task was terminal sat holding its pane and its spawn-cap slot until an operator clicked. The caller now runs the same close for a `FREEABLE TABS` row classed `finished` or `deferred <date>`: `close-worker.py` is the script `/supervisor:close` wraps, so the busy / gate / worktree / hold / terminal refusals are unchanged and the round gains no new authority. ⚠️ **A refusal is reported as its token and never retried as a message** — all eight tokens the script emits (`busy-target`, `gate-held`, `dirty-worktree`, `held-session`, `task-not-terminal`, `task-unresolved`, `unknown-session-id`, `ambiguous-pid`) leave the row for the next round. ⚠️ **`long-wait <age>` is never closed by this arm** — it is a parked worker holding a live wait, and closing it would destroy the wait. Change set: `commands/steps/drive.md`, `commands/steps/reap.md`, `agents/fleet-drive.md`, `scripts/tests/test_close_worker.py`, `CHANGELOG.md`.
 
