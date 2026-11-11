@@ -49,12 +49,18 @@ def _load(name, filename):
     return module
 
 
+UNREADABLE = []
+
+
 def frontmatter(path):
     fields = {}
     try:
         with open(path, encoding="utf-8", errors="replace") as handle:
             lines = handle.read().split("\n")
     except OSError:
+        # Recorded, not swallowed: an unreadable task file is skipped by every
+        # sweep, so a silent skip here reads exactly like a clean scan.
+        UNREADABLE.append(path)
         return fields
     if not lines or lines[0].strip() != "---":
         return fields
@@ -161,11 +167,14 @@ def main():
     # Undated rows are subtracted from `historical`, not counted in both. They are
     # a row set with no window date, so leaving them inside `historical` made the
     # three numbers exceed the total.
-    print(
+    counts = (
         f"  recent: {len(recent)} (since {args.since})"
         f" · historical: {len(found) - len(recent) - len(undated)}"
         f" · undated: {len(undated)}"
     )
+    if UNREADABLE:
+        counts += f" · unreadable: {len(UNREADABLE)}"
+    print(counts)
     if recent:
         print("  ⚠️ recently minted — the mint is still producing the empty field")
     else:
