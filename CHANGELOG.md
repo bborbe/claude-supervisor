@@ -7,7 +7,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
-## Unreleased
+## v0.275.0
 
 - feat: **`manager-wake.py` wakes a subject's manager pane on change only — the pane-wake half of the sweep-gate wake wiring.** Resolves the subject's manager session from `~/.claude/state/worker-manager/` (subject + tier, newest `resolved_at`), its pane via the `ps`/tty join over `wezterm cli list`, gates with `pane-wake-guard.py`, and types one `/supervisor:<tier>-drive --interval <N>m` prompt via `wezterm cli send-text` only when the guard returns `wake`/`wake:suggestion`. `skip:*` types nothing; the submit is CONFIRMED (the composer must clear or the session start working) before `WOKEN` is reported, and an unconfirmed submit is `UNVERIFIED`, never a false success; every decision (woken, unverified, skipped, no manager, no pane) exits 0 so a quiet tick never reads as FAILED. Operator pick: pane wake over headless resume (attention card 1803ce3c). `scripts/manager-wake.py`.
 
