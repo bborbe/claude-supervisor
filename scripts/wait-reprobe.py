@@ -31,8 +31,9 @@ So a bare `PR #N` renders `unprobeable`, and the unlock is a **declaration-writi
 convention** — a closer naming a PR should write it qualified (`bborbe/nuke#698`).
 Measured 2026-11-11 on the live store: 324 declarations, of which **4 resolve** —
 `bborbe/teamvault#2`, `bborbe/nuke#698`, `bborbe/nuke#1187` and `bborbe/sun#13` — and
-**all four were genuinely `MERGED` while still rendering as parked**. The row counts move
-with the live store; the four PRs above and the `0 still blocked` are the stable part.
+**all four were genuinely `MERGED` while still rendering as parked**. That is a dated
+snapshot: the store is live, sessions re-park, and a later run found 3 of the 4 still
+present.
 
 ⚠️ **`unprobeable` is never a clearance**, here as in the module it delegates to.
 
