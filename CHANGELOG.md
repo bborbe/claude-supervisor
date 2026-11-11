@@ -7,7 +7,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
-## Unreleased
+## v0.283.1
 
 - fix: **`restart-worker.py` spawns through the resolved wezterm binary, not a bare `wezterm` name — the keeper's `restart fresh` killed the Fleet Manager and could not start the replacement.** Under launchd the keeper's `PATH` is `/usr/bin:/bin:/usr/sbin:/sbin`, which holds no wezterm, so `["wezterm", "cli", "spawn", …]` raised `FileNotFoundError` after the pid was already signalled. Measured 2026-11-11: lapse card `f83d0cd0…` at 11:22:02Z, `fresh restart … FAILED — exit 1` at 11:23:02Z, manager ABSENT by 11:24Z, recovered only by the separate `--absent` path at 11:38Z — 14 minutes of an unsupervised fleet from a path that was destructive without being restorative. The `--absent` path never had the defect because it already called `find_wezterm()`; the normal path now does too, **before the kill**, alongside the launcher and cwd guards. Also: `fleet-keeper.py` reported `lines[0]` of restart-worker's stdout — always the `🔄 restart-worker …` header — as the failure reason, which is why the log hid the cause; it now reports the last `❌` line. Change set: `scripts/restart-worker.py`, `scripts/fleet-keeper.py`, `scripts/tests/test_restart_worker.py`, `scripts/tests/test_fleet_keeper.py`, `CHANGELOG.md`.
 
