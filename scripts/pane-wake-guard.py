@@ -84,8 +84,15 @@ def _lead_stripped(line):
     return line.lstrip(LEAD)
 
 
-def verdict(text):
-    """Return the verdict string for one captured screen. Pure — no I/O."""
+def verdict(text, allow_machine_wait=False):
+    """Return the verdict string for one captured screen. Pure — no I/O.
+
+    `allow_machine_wait` carves out the one caller a declared machine wait is
+    waiting for: a sweep-gate wake. A goal manager's resting state IS a machine wait
+    (the loop cadence is the machine), so refusing it would make the gate unable to
+    wake the sessions it exists to wake. An operator ask still blocks — that check
+    runs after this one, so a pane that is both stays refused.
+    """
     if text is None:
         return "error:unreadable"
     if not text.strip():
@@ -120,7 +127,7 @@ def verdict(text):
     else:
         suggestion = False
 
-    if any(m in ln for ln in lines for m in MACHINE_WAIT):
+    if any(m in ln for ln in lines for m in MACHINE_WAIT) and not allow_machine_wait:
         return "skip:machine-wait"
 
     # The last closer on screen asks the operator for something: the pane is waiting on a
@@ -154,6 +161,9 @@ def main(argv=None):
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--pane-id")
     src.add_argument("--text-file")
+    ap.add_argument("--allow-machine-wait", action="store_true",
+                    help="a sweep-gate wake may pass a declared machine wait "
+                         "(an operator ask still blocks)")
     args = ap.parse_args(argv)
 
     if args.pane_id is not None:
@@ -165,7 +175,7 @@ def main(argv=None):
         except OSError:
             text = None
 
-    v = verdict(text)
+    v = verdict(text, allow_machine_wait=args.allow_machine_wait)
     print(v)
     if v.startswith("wake"):
         return 0

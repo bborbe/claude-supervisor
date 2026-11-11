@@ -200,6 +200,17 @@ class VerdictTest(unittest.TestCase):
     def test_machine_wait_skips(self):
         self.assertEqual(guard.verdict(MACHINE_WAIT), "skip:machine-wait")
 
+    def test_machine_wait_passes_with_the_sweep_gate_carve_out(self):
+        # A sweep-gate wake is precisely what a manager's declared machine wait is
+        # waiting for; without this the gate could never wake a resting goal manager.
+        self.assertEqual(guard.verdict(MACHINE_WAIT, allow_machine_wait=True), "wake")
+
+    def test_operator_ask_still_blocks_with_the_carve_out(self):
+        # The operator-ask check runs AFTER the machine-wait branch, so the carve-out
+        # must not swallow it.
+        text = MACHINE_WAIT + "\n👤 You: approve: rm -rf /"
+        self.assertEqual(guard.verdict(text, allow_machine_wait=True), "skip:operator-ask")
+
     def test_unreadable_is_an_error(self):
         self.assertEqual(guard.verdict(None), "error:unreadable")
 
