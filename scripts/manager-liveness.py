@@ -1071,7 +1071,12 @@ def classify(s: str, now: float) -> tuple:
     # defer_date), so `topic-keepalive.py` recovers the manager off the STALE reading. The
     # gate-driven OK fallback below must not suppress that, or a date-gated goal manager
     # sleeps for ever.
-    sleep_pending = until is not None
+    # Keyed on the FILE's existence, not the parsed instant: an unparseable `.sleeping`
+    # marker reads as absent from `read_sleep`, and keying on the parse would let the
+    # gate-driven fallback return OK for a date-gated goal the gate cannot wake. The file
+    # existing is the fact that a sleep was recorded; its contents are only how long.
+    sleep_path, _ = resolve(s, "sleeping")
+    sleep_pending = os.path.exists(sleep_path)
     p, legacy = resolve(s, "cadence")
     try:
         with open(p, encoding="utf-8") as fh:

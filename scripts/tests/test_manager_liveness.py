@@ -1530,3 +1530,21 @@ class GateDrivenLiveness(unittest.TestCase):
         os.utime(p, (now, now))
         self.heartbeat("some-other-subject.heartbeat", 5)
         self.assertEqual("OK", self.m.classify(self.s, now)[0])
+
+    def test_an_unparseable_sleep_marker_with_a_fresh_gate_stays_stale(self):
+        """A corrupt `.sleeping` file still records a sleep; the gate cannot wake it, so
+        the fallback must not return OK."""
+        self.stale_arm()
+        with open(self.m.path(self.s, "sleeping"), "w", encoding="utf-8") as fh:
+            fh.write("someday\n")
+        now = time.time()
+        self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 5)
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        self.assertEqual("STALE", self.m.classify(self.s, now)[0])
+
+    def test_an_absent_gate_tree_stays_stale(self):
+        """A fresh install has no gate tree; the safe direction is STALE, not OK."""
+        self.stale_arm()
+        os.rmdir(self.gate_dir)
+        os.rmdir(self.m.GATE_LOOP_STATE_DIR)
+        self.assertEqual("STALE", self.m.classify(self.s, time.time())[0])
