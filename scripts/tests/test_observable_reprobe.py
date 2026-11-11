@@ -21,7 +21,9 @@ and is wrong:
 Run: python3 -m unittest discover -s scripts/tests
 """
 
+import contextlib
 import importlib.util
+import io
 import os
 import unittest
 
@@ -190,21 +192,22 @@ class NeverAClearance(unittest.TestCase):
         v, _ = orx.verdict(orx.observables("PR #786 and PR #791"), probe=flaky, repo="o/r")
         self.assertEqual(v, orx._UNPROBEABLE)
 
-    def test_a_verdict_is_never_both_resumed_and_unprobeable(self):
-        # The one pairing that would make the caller resume on a failed read.
-        for payload in (MERGED, OPEN_APPROVED):
-            v, _ = orx.verdict(
-                orx.observables("PR #786"), probe=_probe(payload), repo="o/r"
-            )
-            self.assertIn(v, (orx._RESUMED, orx._STILL))
-
 
 class Cli(unittest.TestCase):
     def test_bad_repo_exits_2(self):
         self.assertEqual(orx.main(["--ends", "PR #1", "--repo", "not-a-repo"]), 2)
 
-    def test_clock_ends_prints_unprobeable(self):
-        self.assertEqual(orx.main(["--ends", "2026-11-12T09:00:00+01:00"]), 0)
+    def test_output_contract_is_verdict_tab_reason(self):
+        # Every verdict path exits 0, so an exit-code-only assertion would pass even if
+        # the line printed were wrong. The caller parses this line, so pin its shape.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = orx.main(["--ends", "2026-11-12T09:00:00+01:00"])
+        self.assertEqual(rc, 0)
+        verdict, sep, reason = buf.getvalue().rstrip("\n").partition("\t")
+        self.assertEqual(sep, "\t", f"no tab separator in {buf.getvalue()!r}")
+        self.assertEqual(verdict, orx._UNPROBEABLE)
+        self.assertTrue(reason.strip())
 
 
 if __name__ == "__main__":

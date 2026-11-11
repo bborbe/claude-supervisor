@@ -19,7 +19,7 @@ to remove. This mirrors `declared-wait.py`'s failed-read rule: an unreadable inp
 a negative.
 
 ⚠️ **EVERY named PR must have cleared, not just the first.** A declaration routinely names
-more than one ("PR #786 merged and #791 reviewed"). Probing the first match alone would
+more than one ("PR #786 merged and PR #791 reviewed"). Probing the first match alone would
 report `resumed` off a merged PR while a second is still open — a clearance on partial
 evidence, which is the same false positive by a different route. `verdict()` therefore
 probes every distinct PR and returns `still-blocked` if ANY of them is still blocked.
@@ -68,10 +68,14 @@ _BARE = re.compile(r"\b(?:PR|pull\s+request)\s*#?\s*(\d+)\b", re.IGNORECASE)
 
 
 def observables(text):
-    """Every DISTINCT PR this `⏰ Ends:` text names, in the order it names them.
+    """Every DISTINCT PR this `⏰ Ends:` text names.
 
     Returns `[{"kind", "repo", "number"}, …]`, empty when the text names no PR at all —
     a clock, a person, a vendor reply. An empty list is `unprobeable`, never "cleared".
+
+    ⚠️ **The list is grouped by SHAPE, not by position in the text** — URLs first, then
+    `owner/repo#n`, then bare numbers. `verdict()` is order-independent (it ANDs the
+    results), so this only matters to a reader of the reason string.
 
     `repo` is None when a number appears with no repo — the caller supplies one with
     `--repo`. A number that a URL or `owner/repo#n` already identified is not repeated
