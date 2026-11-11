@@ -224,6 +224,41 @@ GATE_OR_HANDLE_RE = re.compile(r"^(?:approve|review|you run|pick)\b", re.IGNOREC
 # `👤 You:` body alone — the conventional layout puts it on its own line.
 ENDS_OWNER_RE = re.compile(r"^[\s>*#-]*⏰\s*Ends:\s*\S", re.MULTILINE)
 
+# PANE-ONLY ASKS FROM A SESSION WITH NO PANE. A headless supervisor worker has nobody at
+# its keyboard, so a closer asking the operator to press Shift+Tab or to type a harness
+# slash command into "this tab" names an action no one can take: the attention board
+# shows a card, the worker waits out its timeout, and nothing moves. Measured 2026-11-05..11
+# in the attention store: 131 Shift+Tab and 279 `/reload-plugins` closer lines in 7 days.
+#
+# ⚠️ Headless is read from `CLAUDE_CODE_ENTRYPOINT`, never from `WEZTERM_PANE`. Measured
+# 2026-11-11 across 42 live session records: every tab session reported `cli` and every
+# headless worker `sdk-cli`, while `WEZTERM_PANE` is inherited from the spawner (so a
+# headless worker can carry one) and was measured unset in a genuine tab session.
+# ⚠️ The SAME closer from a tab is legitimate — the recorded `e4fd1919` fixture
+# (`you run: switch this tab to accept edits (Shift+Tab), then reply go`) is a real block
+# on a step only the operator can take there — so this check fires on the headless
+# entrypoint ONLY, and an absent or unknown value is treated as a tab (fail-open).
+PANELESS_ENTRYPOINT_ENV = "CLAUDE_CODE_ENTRYPOINT"
+PANELESS_ENTRYPOINT = "sdk-cli"
+PANE_ONLY_ASK_RE = re.compile(
+    r"\bshift\s*[-+]?\s*tab\b"                   # the permission-mode switch
+    r"|(?<![\w/-])/(?:reload-plugins|exit|rename)\b",  # harness-only slash commands
+    re.IGNORECASE)
+
+
+def pane_only_ask(body, environ):
+    """The pane-only phrase a paneless session's operator-verb closer asks for, or `None`.
+
+    Scoped to operator-verb closers (`GATE_OR_HANDLE_RE`): a `👤 You: nothing` line that
+    merely mentions Shift+Tab in prose asks the operator for nothing.
+    """
+    if (environ.get(PANELESS_ENTRYPOINT_ENV) or "").strip() != PANELESS_ENTRYPOINT:
+        return None
+    if not GATE_OR_HANDLE_RE.match(body):
+        return None
+    found = PANE_ONLY_ASK_RE.search(body)
+    return found.group(0) if found else None
+
 
 def owner_named(body, text=""):
     """Whether a BLOCKED closer names an owner the fleet can route to.
@@ -599,6 +634,16 @@ def evaluate(payload, environ=None, card_probe=None):
                                           cls=cls, phrase=ends_body(ends))
             return code, _ends_message(cls, ends_body(ends)), record
     body = closer_body(line)
+    # ⚠️ Before the card and gate checks: a pane-only ask is unanswerable whatever card it
+    # carries, and `you run:` is not a verb the allow-list path ever reaches. Fail-open.
+    try:
+        pane_only = pane_only_ask(body, environ)
+    except Exception:
+        pane_only = None
+    if pane_only:
+        code, _text, record = verdict(2, "paneless-pane-only-ask", closer=line,
+                                      phrase=pane_only)
+        return code, _paneless_message(pane_only), record
     handle_gate = HANDLE_GATE_RE.match(body)
     if handle_gate:
         bad = unpollable_handles(body)
@@ -647,6 +692,22 @@ def _ends_message(cls, phrase):
         "id, a `defer_date` / ISO date, or an external probe (PR, CI, `gh`, `kubectl`, a "
         "pod) — and keep the watcher in the `(mechanism, id)` slot as the wake. If nothing "
         "durable exists yet, make the producer write one, or set `defer_date` and exit.\n"
+    )
+
+
+def _paneless_message(phrase):
+    return (
+        f"closer-gate-lint: this session has no pane ({PANELESS_ENTRYPOINT_ENV}="
+        f"{PANELESS_ENTRYPOINT}), and the closer asks the operator for `{phrase}` — a "
+        "keystroke or harness command nobody can perform here, so the card it mints cannot "
+        "be answered. CLAUDE.md § Permission Mode Precheck and § Deploy Then Verify "
+        "Plugins: route it instead. One risky or production-touching command → post it with "
+        "`approve-run.py` (a card the operator answers; the helper runs the command). "
+        "Routine shipping steps blocked by the classifier → `SendMessage` your manager to "
+        "switch this worker's mode or respawn it with `shipping: true`, and close "
+        "`🔴 BLOCKED` naming that manager. A plugin reload → tell your manager (a restart, "
+        "same session id) or the Fleet Manager, or finish without it. Never put the "
+        "keystroke to the operator.\n"
     )
 
 

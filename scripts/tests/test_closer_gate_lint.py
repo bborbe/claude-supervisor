@@ -99,6 +99,25 @@ EXPECTED = {
     # refusing the state rather than the missing owner.
     "39-ownerless-blocked.jsonl": 2,
     "40-blocked-with-manager-owner.jsonl": 0,
+    # ⚠️ The pane-only fixtures under a TAB environment (`environ={}`): every one passes,
+    # because a tab has an operator at the keyboard. PANELESS_EXPECTED below is the
+    # same set under `CLAUDE_CODE_ENTRYPOINT=sdk-cli`.
+    "41-paneless-shift-tab-recorded.jsonl": 0,
+    "42-paneless-reload-in-fleet-manager-tab.jsonl": 0,
+    "43-paneless-pick-shift-tab.jsonl": 0,
+    "44-paneless-prose-mention-only.jsonl": 0,
+    "45-paneless-path-not-a-slash-command.jsonl": 0,
+}
+
+PANELESS_ENV = {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}
+
+# The verdicts that CHANGE under a headless entrypoint. Every fixture not listed here must
+# keep its EXPECTED verdict under PANELESS_ENV too — pinned by
+# `test_paneless_env_changes_only_the_pane_only_fixtures`.
+PANELESS_EXPECTED = {
+    "41-paneless-shift-tab-recorded.jsonl": 2,
+    "42-paneless-reload-in-fleet-manager-tab.jsonl": 2,
+    "43-paneless-pick-shift-tab.jsonl": 2,
 }
 
 ENDS_POSITIVE = {
@@ -128,14 +147,67 @@ class CloserGateLintTest(unittest.TestCase):
                 code, _text, _record = self.mod.evaluate(self.payload(name), environ={})
                 self.assertEqual(expected, code)
 
-    def _closer(self, text, card_probe=None, prefix="done\n"):
+    def test_paneless_env_changes_only_the_pane_only_fixtures(self):
+        for name, expected in EXPECTED.items():
+            with self.subTest(fixture=name):
+                code, _text, record = self.mod.evaluate(self.payload(name),
+                                                        environ=PANELESS_ENV)
+                self.assertEqual(PANELESS_EXPECTED.get(name, expected), code)
+                if name in PANELESS_EXPECTED:
+                    self.assertEqual("paneless-pane-only-ask", record["reason"])
+
+    def test_paneless_block_names_the_phrase_and_the_routes(self):
+        code, text, record = self.mod.evaluate(
+            self.payload("41-paneless-shift-tab-recorded.jsonl"), environ=PANELESS_ENV)
+        self.assertEqual(2, code)
+        self.assertEqual("Shift+Tab", record["phrase"])
+        for needle in ("CLAUDE_CODE_ENTRYPOINT=sdk-cli", "approve-run.py",
+                       "SendMessage", "manager", "shipping: true"):
+            self.assertIn(needle, text)
+
+    def test_paneless_reload_phrase_is_the_slash_command(self):
+        _code, _text, record = self.mod.evaluate(
+            self.payload("42-paneless-reload-in-fleet-manager-tab.jsonl"),
+            environ=PANELESS_ENV)
+        self.assertEqual("/reload-plugins", record["phrase"])
+
+    def test_an_unknown_or_cli_entrypoint_is_a_tab(self):
+        for env in ({}, {"CLAUDE_CODE_ENTRYPOINT": "cli"},
+                    {"CLAUDE_CODE_ENTRYPOINT": ""}, {"CLAUDE_CODE_ENTRYPOINT": "SDK-CLI "}):
+            with self.subTest(env=env):
+                code, _text, _record = self.mod.evaluate(
+                    self.payload("41-paneless-shift-tab-recorded.jsonl"), environ=env)
+                self.assertEqual(0, code)
+
+    def test_the_recorded_e4fd1919_closer_is_blocked_only_when_paneless(self):
+        text = "you run: switch this tab to accept edits (Shift+Tab), then reply go"
+        self.assertEqual(0, self._closer(text)[0])
+        code, _t, record = self._closer(text, environ=PANELESS_ENV)
+        self.assertEqual(2, code)
+        self.assertEqual("paneless-pane-only-ask", record["reason"])
+
+    def test_paneless_block_is_bounded_by_the_loop_guard(self):
+        state = {"SUPERVISOR_CLOSER_GATE_LINT_STATE_DIR": self.dir, **PANELESS_ENV}
+        payload = self.payload("41-paneless-shift-tab-recorded.jsonl")
+        first = self.mod.evaluate(payload, environ=state)
+        self.assertEqual(2, first[0])
+        self.mod.write_record(first[2], directory=self.dir)
+        retry = self.mod.evaluate(dict(payload, stop_hook_active=True), environ=state)
+        self.assertEqual(2, retry[0])
+        self.assertEqual("blocked-retry", retry[2]["reason"])
+        self.mod.write_record(retry[2], directory=self.dir)
+        third = self.mod.evaluate(dict(payload, stop_hook_active=True), environ=state)
+        self.assertEqual(0, third[0])
+
+    def _closer(self, text, card_probe=None, prefix="done\n", environ=None):
         path = os.path.join(self.dir, "t.jsonl")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(json.dumps({"type": "assistant", "timestamp": "2026-11-05T20:00:00Z",
                                  "message": {"role": "assistant", "content": [
                                      {"type": "text", "text": prefix + "👤 You: " + text}]}}) + "\n")
         return self.mod.evaluate({"transcript_path": path, "stop_hook_active": False,
-                                  "session_id": "test-session"}, environ={},
+                                  "session_id": "test-session"},
+                                 environ={} if environ is None else environ,
                                  card_probe=card_probe)
 
     def test_truncated_card_handle_is_refused_under_review(self):
