@@ -668,6 +668,18 @@ class TestCliRefusals(unittest.TestCase):
         self.assertIn("would close", done.stdout)
         self.assertIsNone(child.poll(), "--dry-run must not signal")
 
+    def test_the_close_record_names_the_full_session_id(self):
+        """The round prints this header as its close record, and the refusal that follows a
+        close (`restart-worker.py`'s `task-terminal`) names the same full id. The two are
+        joined on it, so an 8-char prefix here leaves the refusal unjoinable and it reads as
+        an unrelated event — the defect measured on session 2e540d65, 2026-11-11."""
+        child = self._spawn_child()
+        self._registry(entrypoint="sdk-cli", pid=child.pid)
+        self._task(**{"claude_session_id": SID, "status": "completed"})
+        done = self._run("--dry-run")
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn(f"session {SID}", done.stdout)
+
     def test_held_session(self):
         self._registry()
         holds = os.path.join(self.tmp, "holds.json")
