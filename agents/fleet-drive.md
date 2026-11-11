@@ -216,12 +216,12 @@ never render a link, which needs `python3` this agent does not hold. The sweep r
 the caller prints what you hand it.
 
 **`manager` makes a blocked escalation reachable, and on a `blocked` row it always resolves.** It
-exists for the row whose closer named no owner. Resolve through `docs/fleet-surface.md` § *Which
-manager owns a subject*, **reusing the existing resolver** — never by reading the chain again here.
-⚠️ **Do not re-derive the tiers — read the parent the board already computed.** `fleet-board.py
---json` builds the grouping (`build_grouping` → `manager_on_chain`) and emits each session's
-parent, so tier 3 is already applied. Hand-building those arguments lands a topic-managed row on
-`fleet` — the wrong tier. The chain ends at the Fleet Manager, so render `fleet` for that
+exists for the row whose closer named no owner. Resolve it with
+`python3 $P/escalation-manager.py "<task title>"` — that script is the one implementation of
+`docs/fleet-surface.md` § *Which manager owns a subject*, printing `fleet` for tier 4's fallback
+and exiting non-zero when the registry cannot be read. ⚠️ **A failed read is `UNKNOWN`, never
+`fleet`**: rendering `fleet` there claims the Fleet Manager owns a row it may not own, which is
+the defect this field closes. The chain ends at the Fleet Manager, so render `fleet` for that
 fallback and never `—` or `unresolved`. ⚠️ **Scope is `blocked` rows only:**
 `scripts/drive-unverifiable.py` is the OTHER producer of `ESCALATION` rows (step 6b) and does not
 emit this field — an `unverifiable` row is carded, not routed, so it carries no `manager` and is
