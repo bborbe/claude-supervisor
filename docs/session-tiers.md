@@ -202,7 +202,7 @@ or that was stood down while its session lives, is closed so its workers fall to
 
 **The stood-down half is implemented, in the fleet keep-alive leg.** `manager-liveness.py
 --stood-down-past <MINUTES>` selects a manager whose loop has read `STOPPED` past the bound
-(60 min — 4× the round's cadence), and `agents/fleet-keepalive-actor.md` § 4b joins each row to
+(60 min — a fixed bound, no longer "4× the round's cadence": the goal tier arms no cadence now), and `agents/fleet-keepalive-actor.md` § 4b joins each row to
 session liveness, hands the page over, proves the handover through `close-worker.py`'s own
 `page_verdict`, and closes. ⚠️ **The marker outlives the session it describes** — measured
 2026-11-09, 83 `.stopped` markers against 2 whose session was still `LIVE` — so the liveness

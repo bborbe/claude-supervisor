@@ -1467,11 +1467,29 @@ class GateDrivenLiveness(unittest.TestCase):
         self.stale_arm()
         self.assertEqual("STALE", self.m.classify(self.s, time.time())[0])
 
-    def test_a_dead_gate_does_not_mask_a_stale_goal(self):
+    def test_a_dead_gate_reads_ok_gate_down_not_stale(self):
+        """A dead gate must not turn into an uncapped restart storm across the tier."""
         self.stale_arm()
         self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 4000)
         self.heartbeat("some-other-subject.heartbeat", 4000)
-        self.assertEqual("STALE", self.m.classify(self.s, time.time())[0])
+        state, detail = self.m.classify(self.s, time.time())
+        self.assertEqual("OK", state)
+        self.assertIn("gate-down", detail)
+
+    def test_an_expired_sleep_with_a_fresh_gate_heartbeat_stays_stale(self):
+        """The gate cannot see a `defer_date` arrive, so the expired-sleep STALE that
+        `topic-keepalive.py` recovers off must survive the gate-driven fallback."""
+        self.stale_arm()
+        with redirect_stdout(io.StringIO()):
+            self.m.sleep(
+                self.SUBJECT,
+                "goal",
+                (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat(),
+            )
+        now = time.time()
+        self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 5)
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        self.assertEqual("STALE", self.m.classify(self.s, now)[0])
 
     def test_a_dropped_subject_is_not_gate_driven(self):
         self.stale_arm()
@@ -1487,3 +1505,28 @@ class GateDrivenLiveness(unittest.TestCase):
         self.assertEqual(
             "STALE", self.m.classify(self.m.slug(self.SUBJECT, "topic"), now)[0]
         )
+
+    def test_check_does_not_report_a_gate_driven_goal(self):
+        """`--check` goes through `classify()`, so it must not flag a watched goal."""
+        self.stale_arm()
+        now = time.time()
+        self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 5)
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.m.check(now)
+        self.assertEqual((rc, out.getvalue()), (0, ""))
+
+    def test_a_same_named_heartbeat_in_another_vault_masks_the_subject(self):
+        """Known limitation, pinned: the heartbeat match is by bare filename across
+        vaults (the liveness namespace is deliberately flat)."""
+        self.stale_arm()
+        other = os.path.join(self.m.GATE_LOOP_STATE_DIR, "another-vault")
+        os.makedirs(other, exist_ok=True)
+        now = time.time()
+        p = os.path.join(other, f"{self.m.base_slug(self.SUBJECT)}.heartbeat")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("0 x rc=0\n")
+        os.utime(p, (now, now))
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        self.assertEqual("OK", self.m.classify(self.s, now)[0])
