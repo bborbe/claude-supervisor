@@ -980,6 +980,15 @@ class Cli(unittest.TestCase):
         self.assertEqual(code, 0, lines)
         self.assertIn("would kill", "\n".join(lines))
 
+    def test_the_restart_header_names_the_full_session_id(self):
+        """The round joins a close line and a refusal line on the full id, so the resume
+        header must carry it too — a truncated one leaves both unjoinable."""
+        sid = "aaaa1111-2222-4333-8444-555566667777"
+        self.write(1, entry(sid, name="Some Worker"))
+        code, lines = self.run_cli(sid)
+        self.assertEqual(code, 0, lines)
+        self.assertIn(f"session {sid}", "\n".join(lines))
+
     def test_help_exits_zero(self):
         out = subprocess.run(
             [sys.executable, SCRIPT, "--help"], capture_output=True, text=True
@@ -1100,6 +1109,13 @@ class AbsentMode(unittest.TestCase):
         code, lines = self.run_absent(dry=False)
         self.assertEqual(code, 0, lines)
         self.assertTrue(os.path.exists(self.spawned), "a permitted resume must spawn")
+
+    def test_the_absent_header_names_the_full_session_id(self):
+        self.register()
+        self.write_task("in_progress")
+        code, lines = self.run_absent(dry=True)
+        self.assertEqual(code, 0, lines)
+        self.assertIn(f"session {self.SID}", "\n".join(lines))
 
     def test_a_dead_registered_manager_resumes_into_its_vault_on_its_manager_launcher(self):
         self.register()
@@ -1437,6 +1453,9 @@ class TaskTerminalRefusal(unittest.TestCase):
         token, detail = self._refusal("completed")
         self.assertEqual(token, "task-terminal")
         self.assertIn("completed", detail)
+        # The close record names the full id, so the refusal must too — the round joins the
+        # two lines on it. A refusal naming only the task basename cannot be joined.
+        self.assertIn(self.SID, detail)
 
     def test_aborted_is_refused(self):
         self.assertEqual(self._refusal("aborted")[0], "task-terminal")
