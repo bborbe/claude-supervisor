@@ -21,8 +21,8 @@ Run: python3 -m unittest discover -s scripts/tests
 """
 
 import importlib.util
-import json
 import os
+import tempfile
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -106,25 +106,59 @@ class Render(unittest.TestCase):
         block = wr.render_block(rows)
         self.assertIn("REPROBED", block)
         self.assertIn("[aaaa1111-000]", block)
-        self.assertIn("1 resumed · 1 still blocked · 1 unprobeable", block)
-        self.assertIn("2 declared / 1 expired", block)
+        self.assertIn("2 declared: 1 resumed · 1 still blocked · 0 unprobeable", block)
+        self.assertIn("1 expired (not waits)", block)
 
     def test_empty_renders_none_not_a_blank(self):
         self.assertIn("(none)", wr.render_block([]))
 
-    def test_counts_sum_to_the_row_count(self):
-        rows = [{"session_id": "s", "ends": "", "verdict": v, "reason": "", "wait": "declared"}
-                for v in ("resumed", "still-blocked", "unprobeable")]
+    def test_an_expired_row_does_not_count_as_still_blocked(self):
+        # The misreading the per-row wait state exists to prevent: an expired
+        # declaration is not a wait, so its probe result must not report a blocked
+        # session that declares nothing.
+        rows = [{"session_id": "s", "ends": "", "verdict": "still-blocked", "reason": "r", "wait": "expired"}]
         block = wr.render_block(rows)
-        self.assertIn("of 3 rows", block)
+        self.assertIn("0 declared: 0 resumed · 0 still blocked", block)
+
+    def test_an_unknown_wait_state_is_counted_not_silently_dropped(self):
+        rows = [{"session_id": "s", "ends": "", "verdict": "unprobeable", "reason": "r", "wait": "unknown"}]
+        self.assertIn("1 unknown", wr.render_block(rows))
+
+    def test_the_wait_text_is_rendered_not_dead_data(self):
+        rows = [{"session_id": "s", "ends": "PR #1187 merges", "verdict": "resumed", "reason": "r", "wait": "declared"}]
+        self.assertIn("PR #1187 merges", wr.render_block(rows))
 
 
 class ReadWaits(unittest.TestCase):
-    def test_a_non_list_body_raises(self):
-        self.assertRaises(Exception, wr.read_waits, script=os.path.join(_HERE, "no-such.py"))
+    """The reader's refusals. Pass 1 shipped two byte-identical tests here, so neither
+    branch the docstring claims was pinned actually ran — these drive a real script."""
 
-    def test_a_missing_reader_raises(self):
-        self.assertRaises(Exception, wr.read_waits, script=os.path.join(_HERE, "no-such.py"))
+    def _reader(self, body, exit_code=0):
+        f = tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8")
+        f.write("import sys\n")
+        f.write(f"print({body!r})\n")
+        f.write(f"sys.exit({exit_code})\n")
+        f.close()
+        self.addCleanup(os.unlink, f.name)
+        return f.name
+
+    def test_a_non_list_body_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            wr.read_waits(script=self._reader('{"not":"a list"}'))
+        self.assertIn("did not return a list", str(ctx.exception))
+
+    def test_a_non_object_element_raises_rather_than_shortening_the_block(self):
+        with self.assertRaises(ValueError) as ctx:
+            wr.read_waits(script=self._reader('[{"session_id":"x"}, 7]'))
+        self.assertIn("non-object", str(ctx.exception))
+
+    def test_a_non_zero_reader_raises(self):
+        with self.assertRaises(Exception):
+            wr.read_waits(script=self._reader("[]", exit_code=1))
+
+    def test_a_well_formed_body_returns_the_records(self):
+        records = wr.read_waits(script=self._reader('[{"session_id":"x","ends":"y","verdict":"declared"}]'))
+        self.assertEqual(len(records), 1)
 
 
 class Cli(unittest.TestCase):
