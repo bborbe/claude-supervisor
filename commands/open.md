@@ -647,12 +647,8 @@ Then pass the pair to whichever spawn path runs:
 ### 3.1 Spawn — the wezterm path (fallback, resume's tab arm)
 
 ```bash
-# Pace the start FIRST, and never skip this line on this branch. The resume branch bypasses
-# the server, so this is the ONLY thing that throttles it — a batch of resumes issued without
-# it is exactly the 2026-10-10 burst (22 starts in 2.8 min). It reserves a slot and sleeps
-# until it, so no timing logic belongs here; exit 1 means the rate refused the start and the
-# reason is on stderr. The rule's single home is `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md`
-# § Spawn a worker item 5 — this is the call site, not the recipe.
+# Pace the start FIRST: the resume branch bypasses the server, so this is the only throttle.
+# Rule's single home: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 5.
 #
 # ⚠️ RUN THIS WITH A TIMEOUT OF AT LEAST 300s — never under the Bash tool's 120s default. The
 # script may sleep to MAX_START_DELAY_MS (300s) and it writes the reservation BEFORE sleeping,
@@ -670,13 +666,7 @@ RESOLVED=$(python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/cla
 LAUNCHER=$(printf '%s' "$RESOLVED" | cut -f1)
 CHIP=$(printf '%s' "$RESOLVED" | cut -f4)
 
-# The terminal-task guard, from its ONE implementation — never a copy of the check here.
-# A resume starts from "the process is gone", never from "the work is done", so a reaped
-# worker whose task reads `completed` would be handed a spawn slot and the close undone
-# (measured 2026-11-11: session 2e540d65 was reaped at 07:18:34Z and was live again at
-# 07:33:55Z). Read-only: it signals nothing and spawns nothing. Exit 1 with the
-# `task-terminal` token, which names the task and its status — stop the row and report it,
-# never fall through to the spawn.
+# Terminal-task guard: read-only, spawns nothing; `task-terminal` means stop the row.
 python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/restart-worker.py" "<session_id>" --task-guard --cwd "<cwd>" || exit 1
 
 wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- env SESSION_EXIT_RECORD="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-exit-record.py" bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; _sx() { rc=$?; "$SESSION_EXIT_RECORD" append --session "<session_id>" --pid $$ --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn --session "<session_id>" --pid $$ || true; "$SESSION_EXIT_RECORD" observe --pid $$ --session "<session_id>" || true; trap _sx EXIT; "'"$LAUNCHER"'" --resume <session_id> -n "<title>" "/color '"$CHIP"'"'
