@@ -242,7 +242,12 @@ PANELESS_ENTRYPOINT_ENV = "CLAUDE_CODE_ENTRYPOINT"
 PANELESS_ENTRYPOINT = "sdk-cli"
 PANE_ONLY_ASK_RE = re.compile(
     r"\bshift\s*[-+]?\s*tab\b"                   # the permission-mode switch
-    r"|(?<![\w/-])/(?:reload-plugins|exit|rename)\b",  # harness-only slash commands
+    # ⚠️ `(?![\w./-])`, NOT `\b`: `\b` holds between `t` and `-`, so `/exit-codes.md`,
+    # `~/exit` and `./rename-notes.md` all matched and a paneless closer merely CITING a
+    # path was refused. The lookbehind also excludes `~` and `.`, or a home-relative
+    # `~/exit` still matched — the second half of the same bot finding. Measured by the PR bot on #794 — the first draft shipped `\b` and
+    # its own path fixture used forms without a leading slash, so it passed.
+    r"|(?<![\w/.~-])/(?:reload-plugins|exit|rename)(?![\w./-])",  # harness-only slash commands
     re.IGNORECASE)
 
 
@@ -708,7 +713,7 @@ def _paneless_message(phrase):
         "keystroke or harness command nobody can perform here, so the card it mints cannot "
         "be answered. CLAUDE.md § Permission Mode Precheck and § Deploy Then Verify "
         "Plugins: route it instead. One risky or production-touching command → post it with "
-        "`approve-run.py` (a card the operator answers; the helper runs the command). "
+        "`~/.claude/scripts/approve-run.py` (a card the operator answers; the helper runs the command). "
         "Routine shipping steps blocked by the classifier → `SendMessage` your manager to "
         "switch this worker's mode or respawn it with `shipping: true`, and close "
         "`🔴 BLOCKED` naming that manager. A plugin reload → tell your manager (a restart, "

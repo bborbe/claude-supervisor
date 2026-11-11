@@ -165,6 +165,16 @@ class CloserGateLintTest(unittest.TestCase):
                        "SendMessage", "manager", "shipping: true"):
             self.assertIn(needle, text)
 
+    def test_a_path_that_merely_contains_a_slash_command_name_is_not_an_ask(self):
+        # ⚠️ The `\b` terminator the first draft shipped matched `/exit` inside
+        # `/exit-codes.md`, because `\b` holds between `t` and `-`. The fixture carries
+        # every form the PR bot named, each with a leading slash or dot so a `\b`-based
+        # pattern fails it.
+        code, _t, record = self.mod.evaluate(
+            self.payload("45-paneless-path-not-a-slash-command.jsonl"), environ=PANELESS_ENV)
+        self.assertEqual(0, code)
+        self.assertNotEqual("paneless-pane-only-ask", record["reason"])
+
     def test_paneless_reload_phrase_is_the_slash_command(self):
         _code, _text, record = self.mod.evaluate(
             self.payload("42-paneless-reload-in-fleet-manager-tab.jsonl"),
