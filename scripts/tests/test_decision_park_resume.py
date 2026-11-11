@@ -197,6 +197,21 @@ class TestUnread(Base):
         self.assertEqual(1, rc)
         self.assertIn("decision-candidates=0", out.getvalue())
 
+    def test_a_null_session_id_is_not_a_candidate(self):
+        """The measured false-resume: `claude_session_id: null` must read as no id."""
+        self.task("Null Row", status="in_progress", claude_session_id="null",
+                  approved_at=APPROVED_AFTER)
+        self.verdicts["null"] = "ABSENT"
+        rc, out = self.decide()
+        self.assertEqual(0, out["candidates"])
+
+    def test_an_empty_blocked_by_list_is_no_dependency_not_an_unread(self):
+        """`blocked_by: []` must be "no dependencies", never a list holding one bad name."""
+        self.parked(blocked_by="[]")
+        rc, out = self.decide()
+        self.assertFalse(self.resumed(out))
+        self.assertEqual(0, len(out["unread"]))
+
     def test_a_non_dict_json_line_in_the_transcript_does_not_crash(self):
         project = os.path.join(self.projects, "-Users-someone-vault")
         os.makedirs(project, exist_ok=True)

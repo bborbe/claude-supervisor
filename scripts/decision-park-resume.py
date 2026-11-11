@@ -89,34 +89,19 @@ def store_path(vault: str, task: str) -> str:
 # --------------------------------------------------------------------------- frontmatter
 
 
-def frontmatter(text: str) -> dict[str, str]:
-    """The leading `---` block as a flat map. Bodies quote these keys in prose, so a whole-file
-    scan reads a task as approved on the strength of a sentence about approval."""
-    lines = text.split("\n")
-    if not lines or lines[0].strip() != "---":
-        return {}
-    out: dict[str, str] = {}
-    key = None
-    for line in lines[1:]:
-        if line.strip() == "---":
-            break
-        if line.startswith((" ", "\t", "-")) and key:
-            if line.strip().startswith("- "):
-                out[key] = (out[key] + "\n" + line.strip()[2:].strip().strip("'\"")).strip()
-            continue
-        if ":" in line:
-            key, _, value = line.partition(":")
-            key = key.strip()
-            out[key] = value.strip().strip("'\"")
-    return out
+def blocked_by(fm: str) -> list[str]:
+    """The `blocked_by` members, read through the canonical scalar reader.
 
-
-def blocked_by(fm: dict[str, str]) -> list[str]:
+    ⚠️ `[]` and an empty value are BOTH "no dependencies" — not a list containing one
+    unresolvable name, which is how a hand-rolled parser turns every row with an empty set into
+    a permanent `unread`. Members arrive either as a YAML block (`- [[Name]]`) or inline.
+    """
+    raw = keepalive().scalar(fm, "blocked_by").strip()
+    if raw in ("", "[]"):
+        return []
     names = []
-    for line in (fm.get("blocked_by") or "").split("\n"):
-        name = line.strip().strip("'\"")
-        if name.startswith("[[") and name.endswith("]]"):
-            name = name[2:-2]
+    for chunk in raw.replace("[", "\n").replace("]", "\n").split("\n"):
+        name = chunk.strip().lstrip("-").strip().strip("'\"")
         if name:
             names.append(name)
     return names
@@ -177,13 +162,12 @@ def last_turn(sid: str) -> float | None:
     return None
 
 
-def approval_cleared(fm: dict[str, str], turn: float | None) -> bool | None:
+def approval_cleared(approved: str, turn: float | None) -> bool | None:
     """Kind (a). `approved_at` alone is NOT the read — every candidate carries it.
 
     The event is ordering: the approval must be later than the session's last turn, which is what
     "the approval landed and nothing resumed it" means. `None` = could not compare.
     """
-    approved = fm.get("approved_at") or ""
     if not approved:
         return False
     try:
@@ -203,7 +187,7 @@ def blocked_by_cleared(names: list[str], tasks_dir: str) -> bool | None:
     for name in names:
         try:
             with open(os.path.join(tasks_dir, name + ".md"), encoding="utf-8") as handle:
-                status = frontmatter(handle.read()).get("status", "")
+                status = keepalive().scalar(keepalive().frontmatter(handle.read()), "status")
         except OSError:
             return None
         if status not in DEPENDENCY_MET:
@@ -249,9 +233,9 @@ def decide(vault: str, tasks_dir: str, now: float) -> dict:
         except OSError:
             unread.append({"task": task, "reason": "task file unreadable"})
             continue
-        fm = frontmatter(text)
-        sid = fm.get("claude_session_id", "")
-        if not sid or fm.get("status", "") not in LIVE_STATUS:
+        fm = k.frontmatter(text)
+        sid = k.session_id(fm)
+        if not sid or k.scalar(fm, "status") not in LIVE_STATUS:
             continue
         verdict = k.session_verdict(sid)
         if verdict == "LIVE":
@@ -261,7 +245,7 @@ def decide(vault: str, tasks_dir: str, now: float) -> dict:
             continue
 
         candidates += 1
-        approved = approval_cleared(fm, last_turn(sid))
+        approved = approval_cleared(k.scalar(fm, "approved_at"), last_turn(sid))
         blocked = blocked_by_cleared(blocked_by(fm), tasks_dir)
 
         # ⚠️ Per-wait, never all-or-nothing: one unreadable wait must not strand a row whose
@@ -314,7 +298,7 @@ def main(argv: list[str]) -> int:
     result = decide(args.vault, args.tasks_dir, now)
     if not result["ok"]:
         print(f"unread — {result['reason']}")
-        print("decision-candidates=0 · decision-resumed=0 · decision-unread=0")
+        print("decision-candidates=0 · decision-resumed=0 · decision-unread=1")
         return 1
     if args.json:
         print(json.dumps(result))
