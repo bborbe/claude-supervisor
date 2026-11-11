@@ -61,9 +61,9 @@ The rules below are **inline because they must hold whether or not a step file w
 
 ⚠️ **Opening a worker is bound by `docs/fleet-surface.md` § Spawn a worker item 6** — the mode is passed in both directions (`mode: headless` → `interactive=false`, `mode: interactive` → `interactive=true`). This file grants the tool but does not open; the call lives in `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-spawn.md`.
 
-## Interval — the tick and its floor
+## Interval — the wake prompt's carried value and its floor
 
-`--interval <N>m` sets the tick. Default **15m**; floor **5m**. A value below the floor is **clamped up and announced** (`⚠️ --interval 2m is below the 5m floor — clamped to 5m`); never rejected.
+`--interval <N>m` is carried on the round's wake prompt. Default **15m**; floor **5m**. A value below the floor is **clamped up and announced** (`⚠️ --interval 2m is below the 5m floor — clamped to 5m`); never rejected.
 
 Parse it out of `$ARGUMENTS` before resolving the subject: `--interval` is orthogonal to the positional `[goal|topic]`, so a session may carry either, both, or neither.
 
