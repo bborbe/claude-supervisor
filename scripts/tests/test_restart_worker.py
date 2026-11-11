@@ -197,6 +197,13 @@ class ResumeCommand(unittest.TestCase):
     def test_fresh_prompt_is_allowlisted(self):
         self.assertEqual(("/supervisor:fleet-loop",), rw.FRESH_PROMPTS)
 
+    def test_resume_command_uses_the_resolved_wezterm_not_a_bare_name(self):
+        """Regression 2026-11-11: a bare `"wezterm"` is not on launchd's PATH, so the keeper's
+        `restart fresh` killed the Fleet Manager and could not spawn the replacement."""
+        argv = rw.resume_command("sid", "title", "pink", "/d", "/l/cc",
+                                 wezterm="/Applications/WezTerm.app/Contents/MacOS/wezterm")
+        self.assertEqual("/Applications/WezTerm.app/Contents/MacOS/wezterm", argv[0])
+
     def test_no_exec_so_the_exit_status_survives(self):
         """`exec` makes a SIGKILLed worker leave no record anywhere — the whole point.
 
@@ -906,6 +913,27 @@ class Cli(unittest.TestCase):
         self.assertEqual(out.returncode, 1, out.stdout)
         self.assertIn("no launcher could be resolved", out.stdout)
         self.assertNotIn("killed pid", out.stdout)
+
+    def test_missing_wezterm_refuses_before_the_kill(self):
+        """Regression 2026-11-11: the fresh restart killed the manager, then could not spawn.
+
+        `find_wezterm()` honours SUPERVISOR_WEZTERM, so pointing it at a missing path proves
+        the refusal fires on the same code path the keeper takes — and that it fires BEFORE
+        anything is signalled, which is what makes the failure non-destructive.
+        """
+        self.write(1, entry("nowez", name="Fleet Manager"))
+        env = dict(os.environ)
+        env["SUPERVISOR_LOAD_PATH"] = self.load
+        env["SUPERVISOR_LAUNCHER"] = os.path.join(self.dir, "loadpath")
+        env["SUPERVISOR_WEZTERM"] = os.path.join(self.dir, "no-such-wezterm")
+        out = subprocess.run(
+            [sys.executable, SCRIPT, "nowez", "--sessions-dir", self.reg,
+             "--reason", "lapse", "--fresh-prompt", "/supervisor:fleet-loop"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("no wezterm found", out.stdout)
+        self.assertNotIn("killing-pid", out.stdout)
 
     def _run_with_vault_cli(self, sid, vault_cli):
         """Run the CLI with NO config override, so `vault-cli` itself must be resolved."""
