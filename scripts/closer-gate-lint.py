@@ -451,8 +451,8 @@ PR_QUALIFIED = re.compile(
 # ⚠️ Deliberately NOT covered: a bare `#N` with no `PR` word (`the verdict lands on #973`).
 # It is a PR reference in context, but `#` also introduces issue numbers and headings, and
 # the measured population spells its PR references with the word. Widening later is cheap;
-# a false block on a compliant closer is not. The task that shipped this records the
-# residual in its own `# Progress`.
+# a false block on a compliant closer is not. A closer written as `#973` alone therefore
+# still passes — a known gap, not an oversight.
 
 
 def unqualified_pr(line):
