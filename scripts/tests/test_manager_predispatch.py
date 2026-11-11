@@ -3475,6 +3475,30 @@ class TestCheckboxCountStruckRows(unittest.TestCase):
         self.assertEqual(self.m.checkbox_count(text), "1/2")
 
 
+class LedgerPathDefault(unittest.TestCase):
+    """The ledger path is NOT derived from this script's own state dir.
+
+    The defect this pins: `os.path.join(STATE_DIR, "open-items")` resolves under
+    `~/.claude/state/manager-predispatch`, a directory that never exists — so
+    `open_asked_of_you()` returned `[]` on every call and the frozen-tree predicate
+    silently collapsed to mtime-only, the exact failure the gate exists to prevent.
+
+    It reads the DEFAULT, in its own class, because `TestFrozenTree.setUp` overrides
+    `OPEN_ITEMS_DIR` with a tempdir — which is why every other test passed while the
+    production path was wrong.
+    """
+
+    def test_the_default_ledger_path_is_the_real_ledger(self):
+        m = load(tempfile.mkdtemp())
+        self.assertNotIn(
+            os.path.realpath(m.STATE_DIR), os.path.realpath(m.OPEN_ITEMS_DIR)
+        )
+        self.assertTrue(
+            m.OPEN_ITEMS_DIR.endswith(os.path.join("state", "open-items")),
+            m.OPEN_ITEMS_DIR,
+        )
+
+
 class TestFrozenTree(Base):
     """The frozen-tree predicate — both conjuncts, and neither may stand in for the other.
 

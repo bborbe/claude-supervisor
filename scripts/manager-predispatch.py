@@ -773,7 +773,15 @@ def resolve_tracked(vault: str, members: list[str]) -> list[dict]:
 # and deliberately excludes raw mtime; `round-quiet.md` states the two are "a
 # different predicate, not a second spelling of this one", and neither may be read as
 # evidence for the other.
-OPEN_ITEMS_DIR = os.path.join(STATE_DIR, "open-items")
+# ⚠️ NOT under `STATE_DIR`. That is `~/.claude/state/manager-predispatch`, this script's
+# own store — deriving the ledger from it reads a directory that never exists, so
+# `open_asked_of_you()` returns `[]` on every call and the predicate silently collapses
+# to mtime-only. That is precisely the failure the gate exists to prevent, and it fails
+# silently: a missing ledger is a legitimate empty answer, so nothing distinguishes it.
+# The ledger's home is `open-items.py`'s: `~/.claude/state/open-items`.
+OPEN_ITEMS_DIR = os.path.expanduser(
+    os.environ.get("SUPERVISOR_OPEN_ITEMS_DIR", "~/.claude/state/open-items")
+)
 CADENCE_INTERVAL_SECONDS = 15 * 60
 FROZEN_INTERVALS = 2
 
