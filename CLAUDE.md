@@ -167,7 +167,7 @@ commands/restart.md                              restart ONE named session, work
 commands/worker-restart.md                       DEPRECATED alias for commands/restart.md
 commands/close.md                                close ONE finished session — eight guards, never a resume
 scripts/restart-precheck.py                      its read-only pre-kill probe: worktree, transcript, cause of death
-scripts/restart-worker.py                        the kill+resume leg — seven refusals, never a broad `kill`
+scripts/restart-worker.py                        the kill+resume leg — eight refusals, never a broad `kill`
 scripts/resolve-launcher.py                      the resume's launcher + chip, resolved by code — a thin CLI over `restart-worker.py`'s `resolve_launcher`, called by `commands/open.md` § 3.1
 scripts/close-worker.py                          the close leg — reuses restart-worker/restart-precheck/jump, adds the task gate
 commands/open.md                                 resolve a name → jump / resume / spawn (manager-only)

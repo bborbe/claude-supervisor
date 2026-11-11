@@ -1029,7 +1029,8 @@ class AbsentMode(unittest.TestCase):
         self.cfg = os.path.join(self.dir, "vaults.json")
         with open(self.cfg, "w") as fh:
             json.dump([{"name": "v1", "path": self.vault, "claude_script": self.vault_script,
-                        "manager_launcher": self.launcher, "worker_launcher": "/no/worker"}], fh)
+                        "manager_launcher": self.launcher, "worker_launcher": "/no/worker",
+                        "tasks_dir": "25 Tasks"}], fh)
         self.exits = os.path.join(self.dir, "session-exit")
         os.makedirs(self.exits)
         self.holds = os.path.join(self.dir, "holds.json")
@@ -1070,6 +1071,35 @@ class AbsentMode(unittest.TestCase):
             argv.append("--dry-run")
         out = subprocess.run(argv + list(extra), capture_output=True, text=True, env=env)
         return out.returncode, out.stdout.strip().splitlines()
+
+    def write_task(self, status, defer=None, sid=None):
+        tasks = os.path.join(self.vault, "25 Tasks")
+        os.makedirs(tasks, exist_ok=True)
+        lines = [f"status: {status}", f"claude_session_id: {sid or self.SID}"]
+        if defer:
+            lines.append(f'defer_date: "{defer}"')
+        with open(os.path.join(tasks, "A Task.md"), "w") as fh:
+            fh.write("---\n" + "\n".join(lines) + "\n---\n\n# Summary\n")
+
+    def test_a_finished_task_is_refused_before_the_spawn(self):
+        """The `--absent` resume is the only resume this script performs for a headless
+        worker, and the incident that motivated the guard was exactly this shape: a reaped
+        worker whose task read `completed` came back as a live process. Nothing may be
+        spawned, and the token must be the first line a caller reads."""
+        self.register()
+        self.write_task("completed")
+        code, lines = self.run_absent(dry=False)
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "task-terminal", lines)
+        self.assertFalse(os.path.exists(self.spawned), "a refused resume must not spawn")
+
+    def test_an_in_progress_task_still_resumes(self):
+        """The negative control: a live task must not be caught by the guard."""
+        self.register()
+        self.write_task("in_progress")
+        code, lines = self.run_absent(dry=False)
+        self.assertEqual(code, 0, lines)
+        self.assertTrue(os.path.exists(self.spawned), "a permitted resume must spawn")
 
     def test_a_dead_registered_manager_resumes_into_its_vault_on_its_manager_launcher(self):
         self.register()
@@ -1354,6 +1384,115 @@ class HoldWindow(Cli):
         code, lines = self.run_hold()
         self.assertEqual(code, 1, lines)
         self.assertEqual(lines[0], "hold-unreadable", lines)
+
+
+class TaskTerminalRefusal(unittest.TestCase):
+    """A resume must not start a process for a task that is already finished.
+
+    Measured 2026-11-11: session 2e540d65 was reaped at 07:18:34Z while its task read
+    `completed`, and the same id was live again at 07:33:55Z — a finished worker was handed
+    a spawn slot and the close was undone. Every case below is a fixture task in one of the
+    states the guard must tell apart, and the negative control (`in_progress`) is what keeps
+    the guard from being a blanket refusal that would stop every resume.
+    """
+
+    SID = "2e540d65-7916-4609-98aa-3fd8f1923211"
+
+    def _vault(self, frontmatter_lines):
+        """A one-task vault plus the config override that points the lookup at it."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        tasks = os.path.join(tmp.name, "25 Tasks")
+        os.makedirs(tasks)
+        task_path = os.path.join(tasks, "A Task.md")
+        self._write_task(task_path, frontmatter_lines)
+        config = os.path.join(tmp.name, "vaults.json")
+        with open(config, "w", encoding="utf-8") as fh:
+            json.dump([{"name": "v", "path": tmp.name, "tasks_dir": "25 Tasks"}], fh)
+        previous = os.environ.get("SUPERVISOR_VAULT_CONFIG")
+        os.environ["SUPERVISOR_VAULT_CONFIG"] = config
+
+        def restore():
+            if previous is None:
+                os.environ.pop("SUPERVISOR_VAULT_CONFIG", None)
+            else:
+                os.environ["SUPERVISOR_VAULT_CONFIG"] = previous
+
+        self.addCleanup(restore)
+        return tmp.name, task_path
+
+    @staticmethod
+    def _write_task(path, frontmatter_lines):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("---\n" + "\n".join(frontmatter_lines) + "\n---\n\n# Summary\n")
+
+    def _refusal(self, status, defer=None, sid=None):
+        lines = [f"status: {status}", f"claude_session_id: {sid or self.SID}"]
+        if defer:
+            lines.append(f'defer_date: "{defer}"')
+        cwd, _ = self._vault(lines)
+        return rw.task_terminal_refusal(self.SID, cwd)
+
+    def test_completed_is_refused(self):
+        token, detail = self._refusal("completed")
+        self.assertEqual(token, "task-terminal")
+        self.assertIn("completed", detail)
+
+    def test_aborted_is_refused(self):
+        self.assertEqual(self._refusal("aborted")[0], "task-terminal")
+
+    def test_hold_is_refused(self):
+        self.assertEqual(self._refusal("hold")[0], "task-terminal")
+
+    def test_a_future_defer_is_refused(self):
+        token, detail = self._refusal("in_progress", defer="2099-01-01")
+        self.assertEqual(token, "task-terminal")
+        self.assertIn("2099-01-01", detail)
+
+    def test_in_progress_still_resumes(self):
+        """The negative control: the guard must not refuse every resume."""
+        self.assertIsNone(self._refusal("in_progress")[0])
+
+    def test_a_past_defer_still_resumes(self):
+        self.assertIsNone(self._refusal("in_progress", defer="2020-01-01")[0])
+
+    def test_no_anchor_is_not_a_refusal(self):
+        """A session whose task belongs to someone else is not this guard's business."""
+        cwd, _ = self._vault(["status: completed", "claude_session_id: some-other-session"])
+        self.assertIsNone(rw.task_terminal_refusal(self.SID, cwd)[0])
+
+    def test_the_status_is_read_at_call_time_not_cached(self):
+        """The flip between enumeration and spawn must be seen.
+
+        A census or digest read taken earlier in the round would return `None` here and
+        start the process — which is the defect the guard exists to close.
+        """
+        cwd, task_path = self._vault(
+            ["status: in_progress", f"claude_session_id: {self.SID}"]
+        )
+        self.assertIsNone(rw.task_terminal_refusal(self.SID, cwd)[0])
+        self._write_task(task_path, ["status: completed", f"claude_session_id: {self.SID}"])
+        self.assertEqual(rw.task_terminal_refusal(self.SID, cwd)[0], "task-terminal")
+
+
+    def test_the_cli_task_guard_exits_one_on_a_finished_task(self):
+        """`--task-guard` is the route a leg that spawns on its own uses, so the CLI's own
+        exit code and first line are the contract — not the helper's return value."""
+        cwd, _ = self._vault(["status: completed", f"claude_session_id: {self.SID}"])
+        out = subprocess.run(
+            [sys.executable, SCRIPT, self.SID, "--task-guard", "--cwd", cwd],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertEqual(out.stdout.strip().splitlines()[0], "task-terminal")
+
+    def test_the_cli_task_guard_exits_zero_on_a_live_task(self):
+        cwd, _ = self._vault(["status: in_progress", f"claude_session_id: {self.SID}"])
+        out = subprocess.run(
+            [sys.executable, SCRIPT, self.SID, "--task-guard", "--cwd", cwd],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
 
 if __name__ == "__main__":

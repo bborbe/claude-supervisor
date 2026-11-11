@@ -1183,6 +1183,45 @@ def read_registration(sid):
     return rec if isinstance(rec, dict) else None
 
 
+def task_terminal_refusal(sid, cwd):
+    """`(token, detail)` when this session's anchored task is already finished, else `None`.
+
+    Every resume leg starts from "the process is gone", never from "the work is done", so a
+    reaped worker whose task reads `completed` is handed a spawn slot again and the close is
+    undone — measured 2026-11-11: session 2e540d65 was closed at 07:18:34Z and its id was live
+    again at 07:33:55Z. The status is read from disk **here, at resume time**, not from a
+    census or digest taken earlier in the round: a task that flips between the candidate
+    enumeration and this call must be refused, and a snapshot read would start it.
+
+    The terminal set and the task lookup are `close-worker.py`'s, not a second copy — the
+    close side and the resume side have to agree on what "finished" means, or the two drift
+    and a task the close refuses to reap is a task the resume happily restarts.
+
+    `(None, None)` is returned in three cases, and only the middle one is an oversight risk:
+      * no task anchor — a manager, or a worker that never entered its task. Refusing here
+        would stop every manager resume.
+      * handed off — the session no longer owns the task; terminality is the successor's.
+      * `task-not-terminal` — the ordinary case, the resume may proceed.
+    """
+    cw = load_sibling("close-worker.py")
+    task = cw.find_task(sid, cwd)
+    if task is None:
+        return None, None
+    path, fm, handed_off = task
+    if handed_off:
+        return None, None
+    if cw.task_verdict(task, cw.defer_date.as_now()) is not None:
+        return None, None
+    status = (fm.get("status") or "").strip()
+    defer = fm.get("defer_date")
+    return (
+        "task-terminal",
+        f"{os.path.basename(path)} is status {status or '(none)'!r} with "
+        f"defer_date {defer or '(unset)'!r}; its work is finished, so resuming would "
+        "restart a session for a closed task and undo the close",
+    )
+
+
 def resume_absent(sid, sessions_dir, dry_run):
     """Resume a session whose process is GONE. Signals nothing; exits 0 only on a resume.
 
@@ -1236,6 +1275,14 @@ def resume_absent(sid, sessions_dir, dry_run):
               f"existing directory — resuming without a cwd strands the session on a "
               f"workspace-trust dialog")
         return 1
+
+    # A resume must not start a process for a task that is already finished. This is the only
+    # resume this script can perform for a headless worker, and the incident that motivated the
+    # guard was exactly that shape: a reaped headless worker whose task read `completed` came
+    # back as a live process fifteen minutes later.
+    token, detail = task_terminal_refusal(sid, cwd)
+    if token is not None:
+        return refuse(token, detail)
 
     fb = load_sibling("fleet-board.py")
     subject = str(reg.get("subject") or "").strip() or sid[:8]
@@ -1332,6 +1379,14 @@ def main():
                     help="kill the session and start a NEW one (fresh context) through the same "
                          "launcher and cwd, with this prompt as its first turn, instead of "
                          "resuming the same id. Allowlisted: the value is typed into a shell")
+    ap.add_argument("--task-guard", action="store_true",
+                    help="read-only: run ONLY the terminal-task guard and exit. Exit 1 with the "
+                         "`task-terminal` token when the session's anchored task is finished, 0 "
+                         "when a resume may proceed. Signals nothing and spawns nothing, so a "
+                         "resume leg that does its own spawn (`commands/open.md` § 3) can route "
+                         "the check through this one implementation instead of copying it")
+    ap.add_argument("--cwd", help="with --task-guard: the directory the task lookup starts "
+                                  "from, normally the session's vault")
     args = ap.parse_args()
     if args.fresh_prompt and args.absent:
         ap.error("--fresh-prompt and --absent are exclusive")
@@ -1339,6 +1394,15 @@ def main():
     sid = args.session_id.strip()
     if not sid:
         ap.error("session id must not be empty")  # exits 2
+
+    if args.task_guard:
+        # The one implementation of the terminal-task guard, exposed so a resume leg that
+        # spawns on its own (`commands/open.md` § 3's wezterm `--resume`) can route the check
+        # here instead of copying it. Read-only: it signals nothing and spawns nothing.
+        token, detail = task_terminal_refusal(sid, args.cwd or os.getcwd())
+        if token is not None:
+            return refuse(token, detail)
+        return 0
 
     if args.absent:
         return resume_absent(sid, args.sessions_dir, args.dry_run)
@@ -1491,6 +1555,13 @@ def main():
         )
         return 1
     print(f"   launcher: {launcher} ({launcher_source})")
+
+    # Checked before the dry-run report and before the kill: an unresumable session must not be
+    # signalled, and a dry-run that skipped this guard would report a resume that the real run
+    # then refuses.
+    token, detail = task_terminal_refusal(sid, cwd)
+    if token is not None:
+        return refuse(token, detail)
 
     if args.dry_run:
         print("   ✅ would kill the pid above and "
