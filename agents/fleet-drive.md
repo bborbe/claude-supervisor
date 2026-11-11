@@ -218,11 +218,10 @@ the caller prints what you hand it.
 **`manager` makes a blocked escalation reachable, and on a `blocked` row it always resolves.** It
 exists for the row whose closer named no owner. Resolve through `docs/fleet-surface.md` § *Which
 manager owns a subject*, **reusing the existing resolver** — never by reading the chain again here.
-⚠️ **No CLI exposes it, so load the module by path**, the same way `closer-gate-lint.py` loads
-`reap-closer.py`: `importlib.util.spec_from_file_location` on `scripts/fleet-board.py`, then call
-its `manager_on_chain` / `topics_of` for tier 3 and `scripts/approved-not-started.py`'s
-`manager_for(goals, live_by_name, managed_by)` for tiers 1–2, with `live_by_name` built from
-`session-liveness.py --list --json`. The chain ends at the Fleet Manager, so render `fleet` for that
+⚠️ **Do not re-derive the tiers — read the parent the board already computed.** `fleet-board.py
+--json` builds the grouping (`build_grouping` → `manager_on_chain`) and emits each session's
+parent, so tier 3 is already applied. Hand-building those arguments lands a topic-managed row on
+`fleet` — the wrong tier. The chain ends at the Fleet Manager, so render `fleet` for that
 fallback and never `—` or `unresolved`. ⚠️ **Scope is `blocked` rows only:**
 `scripts/drive-unverifiable.py` is the OTHER producer of `ESCALATION` rows (step 6b) and does not
 emit this field — an `unverifiable` row is carded, not routed, so it carries no `manager` and is
