@@ -1830,5 +1830,48 @@ class RearmShapeReadsEpochsOnly(unittest.TestCase):
         self.assertTrue(self.m.rearm_shape(p, 1794141600, 1794141700))
 
 
+class GatedState(unittest.TestCase):
+    """A step the frozen-tree predicate suppressed is excused for THAT round only.
+
+    `.gated` is a different claim from `.abandoned`: an abandonment pays a leg that was
+    owed, a gate records that the leg was never owed this tick. Both are round-scoped,
+    because a gate that survived every later round would let a round skip a leg it owed
+    — the permanent-green failure the round window exists to prevent.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.m = load(self.tmp, self.tmp)
+
+    def _skips(self, started, now):
+        d = {"topic": "T", "round_started_at": started, "fields": {}}
+        return [step for step, _ in self.m._skips("t", "", d, started, 600, now, "topic")]
+
+    def test_a_gated_step_is_excused_this_round(self):
+        now = time.time()
+        self.m.gate("T", "", "readings")
+        self.assertNotIn("readings", self._skips(now - 1, now))
+
+    def test_an_ungated_step_still_reads_as_skipped(self):
+        # The negative control: the excuse must be per-step, not a blanket pass.
+        now = time.time()
+        self.m.gate("T", "", "readings")
+        self.assertIn("sweep", self._skips(now - 1, now))
+
+    def test_a_gate_from_a_previous_round_does_not_excuse(self):
+        now = time.time()
+        with open(self.m.gated_path("t"), "w", encoding="utf-8") as fh:
+            fh.write(f"{now - 3600:.3f} readings\n")
+        self.assertIn("readings", self._skips(now - 1, now))
+
+    def test_a_non_finite_epoch_is_ignored(self):
+        # Same tamper guard as `read_abandoned`: one `inf` line would excuse the step on
+        # every later round.
+        now = time.time()
+        with open(self.m.gated_path("t"), "w", encoding="utf-8") as fh:
+            fh.write("inf readings\n")
+        self.assertIn("readings", self._skips(now - 1, now))
+
+
 if __name__ == "__main__":
     unittest.main()
