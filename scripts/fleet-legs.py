@@ -63,6 +63,9 @@ KEYS_OF = {
 }
 FLOOR_KEY = "dead-workers"
 FLOOR_SUFFIX = " (lower bound, scan incomplete)"
+#: The flagged-open count. Its number means two different things — rows left by a batch that
+#: ran, and rows waiting because it never did — so the line carries which one.
+BATCH_KEY = "operator-flagged"
 SECTION = "LEGS"
 NOT_RUN = "not run — "
 #: The sweep reader's seed reason. `--check` treats it as NOT RECORDED: the shape exists,
@@ -72,7 +75,9 @@ NOT_RUN = "not run — "
 SEED_REASON = "no reading recorded this round"
 
 COUNT_RE = re.compile(
-    r"^(?P<leg>[\w-]+): unactioned: (?P<n>\d+) (?P<key>[\w-]+)(?P<floor> \(lower bound, scan incomplete\))?$"
+    r"^(?P<leg>[\w-]+): unactioned: (?P<n>\d+) (?P<key>[\w-]+)"
+    r"(?P<floor> \(lower bound, scan incomplete\))?"
+    r"(?P<batch> \((?:batch invoked|batch not invoked)\))?$"
 )
 NOTRUN_RE = re.compile(r"^(?P<leg>[\w-]+): not run — (?P<reason>.+?)(?: · (?P<keys>.+))?$")
 
@@ -107,9 +112,10 @@ def split_section(lines):
 def parse(body):
     """-> (entries, errors). An entry is (leg, kind, payload, keys).
 
-    `kind` is `count` (payload = (n, floor)) or `notrun` (payload = reason). A line that
-    matches neither is an error, never silently dropped: an unparseable line is a count the
-    round wrote and nobody can read.
+    `kind` is `count` (payload = (n, floor, batch)) or `notrun` (payload = reason). `batch`
+    is the ` (batch invoked)` / ` (batch not invoked)` marker, or `` for a key that has no
+    batch to report. A line that matches neither is an error, never silently dropped: an
+    unparseable line is a count the round wrote and nobody can read.
     """
     entries, errors = [], []
     for line in body:
@@ -118,12 +124,22 @@ def parse(body):
             continue
         m = COUNT_RE.match(text)
         if m:
+            key, batch = m.group("key"), m.group("batch") or ""
+            # The same invariant the writer enforces, read back: a bare operator-flagged count
+            # is ambiguous, and a marker on a key with no batch is a line nobody wrote on purpose.
+            # A digest carrying either is not a complete reading, which is what --check reports.
+            if key == BATCH_KEY and not batch:
+                errors.append(text)
+                continue
+            if key != BATCH_KEY and batch:
+                errors.append(text)
+                continue
             entries.append(
                 (
                     m.group("leg"),
                     "count",
-                    (int(m.group("n")), bool(m.group("floor"))),
-                    [m.group("key")],
+                    (int(m.group("n")), bool(m.group("floor")), batch),
+                    [key],
                 )
             )
             continue
@@ -151,9 +167,9 @@ def render(entries):
     out = []
     for leg, kind, payload, keys in sorted(entries, key=order_key):
         if kind == "count":
-            n, floor = payload
+            n, floor, batch = payload
             suffix = FLOOR_SUFFIX if floor else ""
-            out.append("  %s: unactioned: %d %s%s" % (leg, n, keys[0], suffix))
+            out.append("  %s: unactioned: %d %s%s%s" % (leg, n, keys[0], suffix, batch))
         else:
             # Print the key list only when it is a STRICT SUBSET of the leg's keys: a line
             # covering the whole leg is unambiguous from the leg name alone, and a partial
@@ -164,14 +180,14 @@ def render(entries):
     return out
 
 
-def set_count(entries, key, n, floor):
+def set_count(entries, key, n, floor, batch=""):
     """Replace `key`'s reading with a count line, dropping it from any not-run line."""
     entries = [
         (leg, kind, payload, [k for k in keys if k != key])
         for leg, kind, payload, keys in entries
     ]
     entries = [e for e in entries if e[3]]
-    entries.append((LEG_OF[key], "count", (n, floor), [key]))
+    entries.append((LEG_OF[key], "count", (n, floor, batch), [key]))
     return entries
 
 
@@ -269,12 +285,25 @@ def main(argv=None):
         help="assert the dead-worker scan completed, so the count is not a floor",
     )
     parser.add_argument("--not-run", dest="not_run", help="why the leg did not execute")
+    parser.add_argument(
+        "--invoked",
+        action="store_true",
+        help="the flagged-open leg ran its batch; the count is what the batch left",
+    )
+    parser.add_argument(
+        "--not-invoked",
+        dest="not_invoked",
+        action="store_true",
+        help="the flagged-open leg only counted the debt; the batch never ran",
+    )
     args = parser.parse_args(argv)
 
     if not args.check and args.count is None and args.not_run is None:
         parser.error("one of --check, --count or --not-run is required")
     if args.count is not None and args.not_run is not None:
         parser.error("--count and --not-run are mutually exclusive")
+    if args.invoked and args.not_invoked:
+        parser.error("--invoked and --not-invoked are mutually exclusive")
     if args.floor and args.exact:
         parser.error("--floor and --exact are mutually exclusive")
     if args.check and (args.leg or args.count is not None or args.not_run is not None):
@@ -361,7 +390,27 @@ def main(argv=None):
                 file=sys.stderr,
             )
             return EXIT_FAILED
-        new_body = render(set_count(entries, key, args.count, args.floor))
+        if key == BATCH_KEY:
+            # One line carried two meanings: "the leg ran and left N" and "the leg never ran,
+            # N rows are waiting". A reader — human or model — cannot tell them apart, and the
+            # second is the failure this leg exists to remove.
+            if not (args.invoked or args.not_invoked):
+                print(
+                    "fleet-legs: a %r count must say whether the batch was invoked — "
+                    "--invoked (the leg ran it) or --not-invoked (it only counted the debt)"
+                    % key,
+                    file=sys.stderr,
+                )
+                return EXIT_FAILED
+        elif args.invoked or args.not_invoked:
+            print(
+                "fleet-legs: --invoked / --not-invoked describe the %r batch only, not %r"
+                % (BATCH_KEY, key),
+                file=sys.stderr,
+            )
+            return EXIT_FAILED
+        batch = " (batch invoked)" if args.invoked else (" (batch not invoked)" if args.not_invoked else "")
+        new_body = render(set_count(entries, key, args.count, args.floor, batch))
     else:
         new_body = render(set_not_run(entries, leg, keys, args.not_run))
 

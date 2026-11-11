@@ -77,7 +77,7 @@ class Base(unittest.TestCase):
         self.run_legs("--leg", "lapsed-managers", "--count", str(lapsed))
         self.run_legs("--leg", "topicless-goal-managers", "--count", str(topicless))
         self.run_legs("--leg", "dead-workers", "--count", str(dead), "--exact")
-        self.run_legs("--leg", "operator-flagged", "--count", str(flagged))
+        self.run_legs("--leg", "operator-flagged", "--count", str(flagged), "--not-invoked")
 
 
 class TestCheck(Base):
@@ -114,7 +114,7 @@ class TestCheck(Base):
             + "  keep-alive: unactioned: 0 lapsed-managers\n"
             + "  keep-alive: unactioned: 1 lapsed-managers\n"
             + "  keep-alive: unactioned: 0 dead-workers\n"
-            + "  flagged-open: unactioned: 0 operator-flagged\n"
+            + "  flagged-open: unactioned: 0 operator-flagged (batch not invoked)\n"
         )
         self.assertEqual(self.run_legs("--check"), legs.EXIT_INCOMPLETE)
 
@@ -124,7 +124,7 @@ class TestCheck(Base):
             + "LEGS\n"
             + "  keep-alive: unactioned: 0 lapsed-managers\n"
             + "  keep-alive: unactioned: 0 dead-workers\n"
-            + "  keep-alive: unactioned: 0 operator-flagged\n"
+            + "  keep-alive: unactioned: 0 operator-flagged (batch not invoked)\n"
         )
         self.assertEqual(self.run_legs("--check"), legs.EXIT_INCOMPLETE)
 
@@ -157,13 +157,13 @@ class TestCount(Base):
         self.assertEqual(self.run_legs("--leg", "lapsed-managers", "--count", "0"), 0)
         self.assertEqual(self.run_legs("--leg", "topicless-goal-managers", "--count", "1"), 0)
         self.assertEqual(self.run_legs("--leg", "dead-workers", "--count", "0", "--exact"), 0)
-        self.assertEqual(self.run_legs("--leg", "operator-flagged", "--count", "3"), 0)
+        self.assertEqual(self.run_legs("--leg", "operator-flagged", "--count", "3", "--not-invoked"), 0)
         text = self.read()
         self.assertEqual(text.count("unactioned:"), 4)
         self.assertIn("keep-alive: unactioned: 0 lapsed-managers", text)
         self.assertIn("keep-alive: unactioned: 1 topicless-goal-managers", text)
         self.assertIn("keep-alive: unactioned: 0 dead-workers", text)
-        self.assertIn("flagged-open: unactioned: 3 operator-flagged", text)
+        self.assertIn("flagged-open: unactioned: 3 operator-flagged (batch not invoked)", text)
         self.assertEqual(self.run_legs("--check"), 0)
 
     def test_the_floor_marker_renders_on_the_dead_worker_line(self):
@@ -224,7 +224,7 @@ class TestNotRun(Base):
         """The whole point: suppressed and empty must be distinguishable."""
         self.write(digest_with_legs())
         self.run_legs("--leg", "keep-alive", "--not-run", "debt gate (re-arm, exit 12)")
-        self.run_legs("--leg", "operator-flagged", "--count", "0")
+        self.run_legs("--leg", "operator-flagged", "--count", "0", "--not-invoked")
         suppressed = self.read()
 
         self.write(digest_with_legs())
@@ -298,7 +298,7 @@ class TestDigestPreservation(Base):
         self.assertEqual(int(os.stat(self.path).st_mtime), 1700000000)
     def test_the_rest_of_the_digest_is_untouched(self):
         self.write(digest_with_legs())
-        self.run_legs("--leg", "operator-flagged", "--count", "1")
+        self.run_legs("--leg", "operator-flagged", "--count", "1", "--not-invoked")
         text = self.read()
         self.assertTrue(text.startswith("DIGEST 2026-11-06T19:10Z"))
         self.assertIn("CLASSIFICATION  24 classified", text)
@@ -315,7 +315,7 @@ class TestSingleHome(unittest.TestCase):
         self.assertIn("keep-alive: unactioned: <n> lapsed-managers", text)
         self.assertIn("keep-alive: unactioned: <n> topicless-goal-managers", text)
         self.assertIn("keep-alive: unactioned: <n> dead-workers", text)
-        self.assertIn("flagged-open: unactioned: <n> operator-flagged", text)
+        self.assertIn("flagged-open: unactioned: <n> operator-flagged (batch invoked|batch not invoked)", text)
         self.assertIn("(lower bound, scan incomplete)", text)
         self.assertIn("not run — <reason>", text)
         self.assertIn("fleet-legs.py", text)
@@ -336,6 +336,67 @@ class TestSingleHome(unittest.TestCase):
         self.assertIn("LEGS", text)
         self.assertIn("keep-alive: not run — no reading recorded this round", text)
         self.assertIn("flagged-open: not run — no reading recorded this round", text)
+
+
+class TestBatchMarker(Base):
+    """The flagged-open count must say whether the batch ran.
+
+    One bare number meant both "the leg ran and left N" and "the leg never ran, N
+    are waiting" — the second is the failure the leg exists to remove.
+    """
+
+    def test_an_unlabelled_operator_flagged_count_is_refused(self):
+        self.write(digest_with_legs())
+        self.assertNotEqual(self.run_legs("--leg", "operator-flagged", "--count", "3"), 0)
+
+    def test_an_unlabelled_other_count_is_unaffected(self):
+        self.write(digest_with_legs())
+        self.assertEqual(self.run_legs("--leg", "lapsed-managers", "--count", "3"), 0)
+
+    def test_the_marker_distinguishes_invoked_from_not_invoked(self):
+        self.write(digest_with_legs())
+        self.run_legs("--leg", "operator-flagged", "--count", "3", "--invoked")
+        self.assertIn(
+            "flagged-open: unactioned: 3 operator-flagged (batch invoked)", self.read()
+        )
+        self.run_legs("--leg", "operator-flagged", "--count", "3", "--not-invoked")
+        self.assertIn(
+            "flagged-open: unactioned: 3 operator-flagged (batch not invoked)", self.read()
+        )
+
+    LEGS_ALL = (
+        "DIGEST 2026-11-06T19:10Z\nLEGS\n"
+        "  keep-alive: unactioned: 0 lapsed-managers\n"
+        "  keep-alive: unactioned: 0 topicless-goal-managers\n"
+        "  keep-alive: unactioned: 0 dead-workers\n"
+    )
+
+    def test_the_marker_is_refused_on_a_key_with_no_batch(self):
+        self.write(digest_with_legs())
+        self.assertNotEqual(
+            self.run_legs("--leg", "lapsed-managers", "--count", "3", "--invoked"), 0
+        )
+
+    def test_check_accepts_a_labelled_flagged_line(self):
+        self.write(
+            self.LEGS_ALL
+            + "  flagged-open: unactioned: 3 operator-flagged (batch not invoked)\n"
+        )
+        self.assertEqual(self.run_legs("--check"), 0)
+
+    def test_check_rejects_a_bare_operator_flagged_line(self):
+        self.write(self.LEGS_ALL + "  flagged-open: unactioned: 3 operator-flagged\n")
+        self.assertEqual(self.run_legs("--check"), 1)
+
+    def test_check_rejects_a_marker_on_a_key_with_no_batch(self):
+        self.write(
+            "DIGEST 2026-11-06T19:10Z\nLEGS\n"
+            "  keep-alive: unactioned: 0 lapsed-managers (batch invoked)\n"
+            "  keep-alive: unactioned: 0 topicless-goal-managers\n"
+            "  keep-alive: unactioned: 0 dead-workers\n"
+            "  flagged-open: unactioned: 3 operator-flagged (batch invoked)\n"
+        )
+        self.assertEqual(self.run_legs("--check"), 1)
 
 
 if __name__ == "__main__":
