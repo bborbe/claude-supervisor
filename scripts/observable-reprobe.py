@@ -54,8 +54,11 @@ _STILL = "still-blocked"
 _UNPROBEABLE = "unprobeable"
 
 #: `https://github.com/<owner>/<repo>/pull/<n>` — the shape a closer carries when the
-#: session pasted a link rather than a reference.
-_URL = re.compile(r"https?://(?:www\.)?github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)")
+#: session pasted a link rather than a reference. The optional trailing fragment/query is
+#: part of the span, so `…#1` and `?diff=split#5` are not re-read as a second observable.
+_URL = re.compile(
+    r"https?://(?:www\.)?github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)(?:[#?][\w=&.-]*)?"
+)
 
 #: `<owner>/<repo>#<n>` — the shape a session writes when it names the repo inline.
 _QUALIFIED = re.compile(r"\b([\w.-]+)/([\w.-]+)#(\d+)\b")
@@ -66,14 +69,10 @@ _QUALIFIED = re.compile(r"\b([\w.-]+)/([\w.-]+)#(\d+)\b")
 #: reported as this row's evidence.
 _BARE = re.compile(r"\b(?:PR|pull\s+request)\s*#?\s*(\d+)\b", re.IGNORECASE)
 
-#: Any `#<n>`. Used ONLY to pick up an unprefixed second PR (`nuke #939`) after a PR
-#: token has appeared — see `observables()`. A commit SHA (`ee0fd9c`) and a date
-#: (`2026-11-11`) carry no `#`, and a fragment like `#issuecomment-1` is not numeric, so
-#: none of them match.
+#: Any `#<n>`, collected unconditionally — see `observables()`. A commit SHA (`ee0fd9c`)
+#: and a date (`2026-11-11`) carry no `#`, and `#issuecomment-1` is not numeric, so none
+#: of them match.
 _HASH = re.compile(r"#(\d+)\b")
-
-#: The token that licenses an unprefixed `#<n>` as a PR reference.
-_PR_TOKEN = re.compile(r"\b(?:PR|pull\s+request)\b", re.IGNORECASE)
 
 
 def observables(text):
@@ -82,19 +81,15 @@ def observables(text):
     Returns `[{"kind", "repo", "number"}, …]`, empty when the text names no PR at all —
     a clock, a person, a vendor reply. An empty list is `unprobeable`, never "cleared".
 
-    ⚠️ **An UNPREFIXED `#<n>` counts as a PR only AFTER a `PR` / `pull request` token has
-    appeared.** The fleet writes mixed shapes — *"bot verdict on PR #119 head `ee0fd9c`
-    or nuke #939 head `2ed9c4c`"* — and a prefix-only matcher probed #119 and never saw
-    #939, so a merged #119 cleared a declaration whose second PR was still open. That is
-    the same false clearance this module's second invariant forbids, reached through the
-    parser instead of the AND logic. The position rule is what keeps the widening safe:
-    a *counter* rather than a PR — *"audit #4 returns a score; PR #536 merges"* — sits
-    before any PR token and is therefore not collected, where a blanket `#<n>` matcher
-    would have probed it as a PR and could clear on it.
-
-    A text with no `PR` token at all (*"a review appears on #89 or #92"*) yields `[]` and
-    is `unprobeable`. That is the safe direction: the declaration is not identified, so
-    it is not cleared.
+    ⚠️ **EVERY `#<n>` in the text is collected, wherever it sits.** The fleet writes mixed
+    shapes — *"bot verdict on PR #119 head `ee0fd9c` or nuke #939 head `2ed9c4c`"*, and
+    the same two PRs in the other order — so any matcher that recognises only some of
+    them probes a subset and can clear on the rest. Two earlier drafts gated on a `PR`
+    prefix, then on a `PR` token appearing *before* the number; both were false-clearance
+    bugs, because under-collection is the only unsafe direction here: `verdict()` ANDs,
+    so an extra observable can only add a `still-blocked` or an `unprobeable`, never
+    remove one. A `#<n>` that turns out not to be a PR therefore costs a false NEGATIVE
+    (the row stays blocked), which is the direction this module always prefers.
 
     ⚠️ **The list is grouped by SHAPE, not by position in the text** — URLs first, then
     `owner/repo#n`, then bare numbers. `verdict()` is order-independent (it ANDs the
@@ -124,9 +119,8 @@ def observables(text):
         url_spans.append(m.span())
 
     for m in _QUALIFIED.finditer(text):
-        # A URL's own path/fragment is not a second observable: without this, a link
-        # ending `…#1` yielded a phantom `pull/786#1` whose probe failure turned a
-        # genuinely merged PR into `unprobeable`.
+        # A URL's own path is not a second observable: without this, a link yielded a
+        # phantom `pull/786#1` whose probe failure turned a merged PR into `unprobeable`.
         if inside(url_spans, m.start()):
             continue
         add(f"{m.group(1)}/{m.group(2)}", int(m.group(3)))
@@ -136,15 +130,10 @@ def observables(text):
         add(None, int(m.group(1)))
         prefixed_spans.append(m.span())
 
-    first_token = _PR_TOKEN.search(text)
-    if first_token is not None:
-        for m in _HASH.finditer(text):
-            pos = m.start()
-            if pos < first_token.start():
-                continue  # a counter before any PR token ("audit #4") is not a PR
-            if inside(prefixed_spans, pos) or inside(url_spans, pos):
-                continue  # already collected, or a URL fragment
-            add(None, int(m.group(1)))
+    for m in _HASH.finditer(text):
+        if inside(prefixed_spans, m.start()) or inside(url_spans, m.start()):
+            continue  # already collected, or a URL fragment
+        add(None, int(m.group(1)))
 
     # A bare number that a qualified reference already resolved adds nothing, and an
     # unresolvable duplicate would fail a declaration the qualified form had settled.
@@ -172,6 +161,22 @@ def probe_pr(repo, number):
     return data
 
 
+def _field(data, key):
+    """A probe field upper-cased, or "" when absent. A non-string RAISES.
+
+    The raise is deliberate and caught by `_one`: a payload whose field is an int or a
+    dict is a malformed read, and the caller's contract is "always a verdict". Letting
+    `.upper()` escape would kill `main` with a traceback instead of printing
+    `unprobeable`, breaking the one line the caller parses.
+    """
+    value = data.get(key)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"non-string {key} in probe payload")
+    return value.strip().upper()
+
+
 def _one(obs, probe, repo):
     """`(verdict, reason)` for a single observable. Never raises."""
     target = obs.get("repo") or repo
@@ -180,12 +185,12 @@ def _one(obs, probe, repo):
     ref = f"{target}#{obs['number']}"
     try:
         data = probe(target, obs["number"])
+        state = _field(data, "state")
+        review = _field(data, "reviewDecision") or "none"
+        merge = _field(data, "mergeStateStatus") or "unknown"
     except Exception as exc:  # every failure is the same verdict, and never a clearance
         return _UNPROBEABLE, f"{ref}: probe failed ({exc})"
 
-    state = (data.get("state") or "").upper()
-    review = (data.get("reviewDecision") or "").upper() or "none"
-    merge = (data.get("mergeStateStatus") or "").upper() or "unknown"
     if state == "MERGED":
         return _RESUMED, f"{ref} MERGED"
     if state == "CLOSED":

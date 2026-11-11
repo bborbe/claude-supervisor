@@ -25,6 +25,7 @@ import contextlib
 import importlib.util
 import io
 import os
+import types
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -92,20 +93,31 @@ class ObservableParsing(unittest.TestCase):
             [119, 939],
         )
 
-    def test_a_counter_before_any_pr_token_is_not_a_pr(self):
-        # "audit #4" is an ordinal, not a PR. A blanket `#<n>` matcher would probe it as
-        # one and could clear on it; the position rule drops it.
+    def test_a_pr_before_the_first_pr_token_is_still_collected(self):
+        # The mirror of the earlier bug: gating on a PR token appearing FIRST cleared
+        # 'nuke #939 … PR #119' on #119 alone while #939 was open. Under-collection is
+        # the only unsafe direction, so every '#<n>' is collected wherever it sits.
+        # Asserted as a SET: the list is grouped by shape, not by text position.
         self.assertEqual(
-            [o["number"] for o in orx.observables(
-                "audit #4 returns a score → I flip the phase; PR #536 merges → I rebase"
-            )],
-            [536],
+            sorted(o["number"] for o in orx.observables(
+                "nuke #939 head `2ed9c4c` and bot verdict on PR #119 head `ee0fd9c`"
+            )),
+            [119, 939],
         )
 
-    def test_a_text_with_no_pr_token_is_unprobeable(self):
-        # Nothing identifies these as PRs, so the declaration is not cleared — the safe
-        # direction, stated in the docstring.
-        self.assertEqual(orx.observables("a review appears on #89 or #92"), [])
+    def test_a_text_with_no_pr_token_still_yields_its_numbers(self):
+        self.assertEqual(
+            [o["number"] for o in orx.observables("a review appears on #89 or #92")],
+            [89, 92],
+        )
+
+    def test_a_url_fragment_is_not_a_second_observable_even_with_a_pr_token(self):
+        self.assertEqual(
+            sorted(o["number"] for o in orx.observables(
+                "PR #536 merged; https://github.com/o/r/pull/786#1"
+            )),
+            [536, 786],
+        )
 
     def test_a_url_fragment_is_not_a_second_observable(self):
         self.assertEqual(
@@ -223,6 +235,58 @@ class NeverAClearance(unittest.TestCase):
             return MERGED
         v, _ = orx.verdict(orx.observables("PR #786 and PR #791"), probe=flaky, repo="o/r")
         self.assertEqual(v, orx._UNPROBEABLE)
+
+    def test_an_over_collected_number_only_makes_the_verdict_safer(self):
+        # "audit #4" is an ordinal, not a PR, but it IS collected — verdict() ANDs, so an
+        # extra observable can only add still-blocked or unprobeable. Here its probe
+        # fails, giving a false NEGATIVE; a false clearance is impossible by construction.
+        def probe(repo, number):
+            if number == 536:
+                return MERGED
+            raise RuntimeError("no such PR")
+        v, _ = orx.verdict(
+            orx.observables("audit #4 returns a score; PR #536 merges"), probe=probe, repo="o/r"
+        )
+        self.assertEqual(v, orx._UNPROBEABLE)
+
+    def test_a_non_string_probe_field_is_unprobeable_not_a_traceback(self):
+        # `.upper()` outside the try killed main with a traceback instead of printing the
+        # one line the caller parses.
+        for bad in ({"state": 1}, {"state": "OPEN", "reviewDecision": {"a": 1}}):
+            v, reason = orx.verdict(orx.observables("PR #786"), probe=_probe(bad), repo="o/r")
+            self.assertEqual(v, orx._UNPROBEABLE)
+            self.assertIn("probe failed", reason)
+
+
+class RealProbe(unittest.TestCase):
+    """The `gh` seam itself — the only path the verdicts rest on that stubs never reach."""
+
+    class _Done:
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def _with_run(self, stdout):
+        # Replace the MODULE REFERENCE the script holds, not `subprocess.run` itself —
+        # `orx.subprocess` is the shared module object, so patching its attribute would
+        # leak into every other test in the process.
+        original = orx.subprocess
+        orx.subprocess = types.SimpleNamespace(run=lambda *a, **k: self._Done(stdout))
+        self.addCleanup(setattr, orx, "subprocess", original)
+
+    def test_probe_pr_parses_gh_json(self):
+        self._with_run('{"state":"MERGED","reviewDecision":"APPROVED","mergeStateStatus":"CLEAN"}')
+        self.assertEqual(orx.probe_pr("o/r", 1)["state"], "MERGED")
+
+    def test_probe_pr_raises_without_a_state(self):
+        self._with_run('{"reviewDecision":"APPROVED"}')
+        with self.assertRaises(ValueError):
+            orx.probe_pr("o/r", 1)
+
+    def test_a_stateless_gh_response_is_unprobeable(self):
+        self._with_run('{"reviewDecision":"APPROVED"}')
+        v, reason = orx.verdict(orx.observables("PR #786"), repo="o/r")
+        self.assertEqual(v, orx._UNPROBEABLE)
+        self.assertIn("probe failed", reason)
 
 
 class Cli(unittest.TestCase):
