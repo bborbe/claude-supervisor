@@ -21,8 +21,10 @@ Resolution, in order:
      `~/.claude/state/worker-manager/<sid>.json` whose `subject` matches and whose
      `branch` matches the tier (`goal` / `topic` / `fleet`). The file name is the
      session id.
-  2. that session's pane — the `ps`/tty join over `wezterm cli list`, the same
-     `pane_sessions` join `jump.py` uses.
+  2. that session's pane — `jump.py`'s `wezterm_panes` / `pane_sessions`, reused
+     rather than duplicated: those two reads are already enumerated and driven by
+     `transport-read-check.py`, and a second copy here would add a transport-read
+     site nothing drives.
   3. `pane-wake-guard.py --pane-id <id>` decides whether a wake is safe:
        `wake` / `wake:suggestion` -> type the prompt
        `skip:*`                   -> print `SKIP <reason>`, type nothing
@@ -37,70 +39,25 @@ a false `wake` types into a working session, which the guard exists to prevent.
 """
 import argparse
 import glob
+import importlib.util
 import json
 import os
 import subprocess
 import sys
 
-PLUGIN_ROOT = os.environ.get("CLAUDE_PLUGIN_ROOT") or os.path.expanduser(
-    "~/.claude/plugins/marketplaces/claude-supervisor"
-)
+HERE = os.path.dirname(os.path.abspath(__file__))
+PLUGIN_ROOT = os.environ.get("CLAUDE_PLUGIN_ROOT") or os.path.dirname(HERE)
 GUARD = os.path.join(PLUGIN_ROOT, "scripts", "pane-wake-guard.py")
 MANAGER_STATE = os.path.expanduser("~/.claude/state/worker-manager")
-SESSIONS_DIR = os.path.expanduser("~/.claude/sessions")
 
 
-def wezterm_panes():
-    """{pane_id(str): pane dict}, or None when `wezterm cli list` failed.
-
-    `None`, never `{}`: a failed query cannot prove a pane is gone, so no caller may
-    read it as "no panes exist". `{}` is a real empty answer.
-    """
-    try:
-        r = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
-                           capture_output=True, text=True, timeout=5)
-        if r.returncode != 0:
-            return None
-        return {str(p["pane_id"]): p for p in json.loads(r.stdout)}
-    except Exception:
-        return None
-
-
-def pane_sessions(pmap):
-    """{pane_id: session_id} for panes whose running Claude session can be identified.
-
-    Built from ~/.claude/sessions/<pid>.json (pid -> sessionId), joined to panes
-    through the tty: `ps` gives pid -> tty, wezterm gives pane -> tty_name. A pane
-    absent from the result is simply unidentifiable — "no evidence", never "mismatch".
-    `None` when `ps` failed, distinct from `{}` (the join ran and found nothing).
-    """
-    sid_by_pid = {}
-    for f in glob.glob(os.path.join(SESSIONS_DIR, "*.json")):
-        try:
-            with open(f, encoding="utf-8") as fh:
-                d = json.load(fh)
-            sid_by_pid[str(d["pid"])] = d["sessionId"]
-        except Exception:
-            continue
-    if not sid_by_pid:
-        return {}
-    try:
-        ps = subprocess.run(["ps", "-axo", "pid=,tty="],
-                            capture_output=True, text=True, timeout=5).stdout
-    except Exception:
-        return None
-    tty_by_pid = {}
-    for line in ps.splitlines():
-        parts = line.split()
-        if len(parts) == 2:
-            tty_by_pid[parts[0]] = parts[1]
-    sid_by_tty = {tty_by_pid[pid]: sid for pid, sid in sid_by_pid.items() if pid in tty_by_pid}
-    out = {}
-    for pane, p in pmap.items():
-        tty = (p.get("tty_name") or "").replace("/dev/", "")
-        if tty and tty in sid_by_tty:
-            out[pane] = sid_by_tty[tty]
-    return out
+def _jump():
+    """`jump.py`'s pane reads, imported by path (hyphenated filename)."""
+    path = os.path.join(PLUGIN_ROOT, "scripts", "jump.py")
+    spec = importlib.util.spec_from_file_location("supervisor_jump", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def resolve_manager_session(subject, tier):
@@ -136,11 +93,19 @@ def resolve_manager_session(subject, tier):
 
 
 def resolve_pane(session_id):
-    """The pane id whose tty belongs to `session_id`, or None."""
-    pmap = wezterm_panes()
-    if not pmap:
+    """The pane id whose tty belongs to `session_id`, or None.
+
+    A failed `wezterm cli list` (`None`) and an unreadable registry are both
+    `None` — never collapsed into "no pane", which would read as "nothing to wake".
+    """
+    jump = _jump()
+    pmap = jump.wezterm_panes()
+    if pmap is None:
         return None
-    for pane, sid in (pane_sessions(pmap) or {}).items():
+    sessions = jump.pane_sessions(pmap)
+    if not sessions:
+        return None
+    for pane, sid in sessions.items():
         if sid == session_id:
             return pane
     return None
@@ -158,7 +123,12 @@ def guard(pane_id):
 
 
 def wake(pane_id, prompt, dry_run):
-    """Type the wake prompt into the pane (or say what it would do)."""
+    """Type the wake prompt into the pane (or say what it would do).
+
+    An ACTION, not a read: it reports its own failure rather than collapsing one
+    into an empty result. Enumerated in `transport-read-check.py` for mechanism/list
+    agreement, deliberately not driven into the three states.
+    """
     if dry_run:
         return f"WOULD-WAKE pane={pane_id} prompt={prompt!r}"
     try:
