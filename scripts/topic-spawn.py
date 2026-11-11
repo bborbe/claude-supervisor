@@ -40,7 +40,7 @@ Exit 0 = allowed (prints `spawn-ok: <goal>` and, with `--print`, the `/superviso
 line to run). Exit 2 = usage error, which is never a verdict.
 
 ⚠️ **The fleet ceiling always wins over N.** N = 3 is a per-topic share; the fleet-wide
-`spawn.maxManagers` is the outer bound, and six topics at N = 3 would want eighteen
+`spawn.maxManagersSoft` is the outer bound, and six topics at N = 3 would want eighteen
 managers against a ceiling of ten. The cap is never raised to make room.
 
 ⚠️ **Startability is the operator's approval, read from disk, never inferred.** A goal at
