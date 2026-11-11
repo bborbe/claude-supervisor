@@ -300,6 +300,30 @@ class NeverAClearance(unittest.TestCase):
             self.assertIn("probe failed", reason)
 
 
+    def test_an_open_pr_with_no_review_decision_uses_the_fallbacks(self):
+        # The common real payload: a freshly opened PR carries no reviewDecision and no
+        # mergeStateStatus. Every other fixture supplies them, so this branch was untested.
+        v, reason = orx.verdict(
+            orx.observables("PR #786"), probe=_probe({"state": "OPEN"}), repo="o/r"
+        )
+        self.assertEqual(v, orx._STILL)
+        self.assertIn("review none", reason)
+        self.assertIn("merge unknown", reason)
+
+    def test_a_probe_failure_appends_the_stderr(self):
+        # CalledProcessError.__str__ carries only argv + exit status, so the cause
+        # ("does not exist" vs "not authenticated") would otherwise be unreadable.
+        class Boom(Exception):
+            stderr = "GraphQL: Could not resolve to a PullRequest\n"
+
+        v, reason = orx.verdict(
+            orx.observables("PR #786"), probe=_raising(Boom("returned non-zero exit status 1")),
+            repo="o/r",
+        )
+        self.assertEqual(v, orx._UNPROBEABLE)
+        self.assertIn("Could not resolve to a PullRequest", reason)
+
+
 class RealProbe(unittest.TestCase):
     """The `gh` seam itself — the only path the verdicts rest on that stubs never reach."""
 

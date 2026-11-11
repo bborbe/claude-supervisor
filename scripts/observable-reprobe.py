@@ -201,7 +201,15 @@ def _one(obs, probe, repo):
         review = _field(data, "reviewDecision") or "none"
         merge = _field(data, "mergeStateStatus") or "unknown"
     except Exception as exc:  # every failure is the same verdict, and never a clearance
-        return _UNPROBEABLE, f"{ref}: probe failed ({exc})"
+        # `CalledProcessError.__str__` carries only the argv and the exit status, so
+        # "PR does not exist", "not authenticated" and "wrong repo" read identically —
+        # and the argv is noise in the one line the operator sees. `gh` puts the cause
+        # on stderr; append it when the exception has one.
+        detail = str(exc)
+        stderr = getattr(exc, "stderr", None)
+        if stderr:
+            detail = f"{detail}: {str(stderr).strip()}"
+        return _UNPROBEABLE, f"{ref}: probe failed ({detail})"
 
     if state == "MERGED":
         return _RESUMED, f"{ref} MERGED"
