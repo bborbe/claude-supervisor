@@ -7,9 +7,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
-## v0.274.2
+## Unreleased
 
 - feat: **`manager-wake.py` wakes a subject's manager pane on change only — the pane-wake half of the sweep-gate wake wiring.** Resolves the subject's manager session from `~/.claude/state/worker-manager/` (subject + tier, newest `resolved_at`), its pane via the `ps`/tty join over `wezterm cli list`, gates with `pane-wake-guard.py`, and types one `/supervisor:<tier>-drive --interval <N>m` prompt via `wezterm cli send-text` only when the guard returns `wake`/`wake:suggestion`. `skip:*` types nothing and exits 0, so an unchanged tick costs zero model rounds; every decision (woken, skipped, no manager, no pane) exits 0 so a quiet tick never reads as FAILED. Operator pick: pane wake over headless resume (attention card 1803ce3c). `scripts/manager-wake.py`.
+## v0.274.2
+
 - fix: **a row whose task carries a future `defer_date` is no longer classified `nudge`.** `fleet-board.py`'s `unblocks_for` suppressed the nudge only for a session that DECLARED a wait (`⏰ Ends:`, via `declared-wait.py`), and a `defer_date` is a task-file field that reader never sees — so a worker correctly parked on the clock reached the nudge test, passed it, and carried an empty `details` (that map is populated only for `needs-input` and `operator-keystroke` rows). Measured 2026-11-10 on a live board: 2 of 6 `nudge` rows carried a future `defer_date`. `build_task_index` now carries `defer_date` in `meta`, and `unblocks_for` parses it through `scripts/defer-date.py` — the tree's single reader — so only `deferred` suppresses the nudge: a `defer_date` that has passed leaves the row `nudge` again (the defer parks work, it does not mute it), an absent one is unaffected, and an unparseable one falls through to the normal rule and is named in `details` as `defer_date invalid: …` rather than silently parking a row forever. `unblocks_for` takes an optional `now` so the deferred and expired cases are testable without waiting.
 - fix: **`build_task_index` now exposes the stamped task's `defer_date` alongside `status`, `phase` and `open_boxes`.** Raw and unquoted — parsing stays in `defer-date.py`, because a second parser here is the drift that reader was extracted to remove.
 
