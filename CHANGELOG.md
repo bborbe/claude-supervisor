@@ -7,7 +7,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
-## Unreleased
+## v0.287.4
 
 - fix: **the `dead-manager` class is routed to the Fleet Manager too, because it is the same defect reached through a different hop.** `spawner_verdict` emitted when the pane's spawner IS a manager that is no longer live, on the reasoning that "a dead manager cannot act on its own gate, so nothing duplicates this wake" — right about duplication, wrong about cost: it hands the gate to **every** manager. Measured 2026-11-11 in SC1's after-window on a goal manager's ledger: after the `unowned` class was routed, **this branch was the only foreign wake left** — 11 records of a single orphaned worker pane (`088ab282`, spawned 2026-11-07, ledger row still `running`, spawner `837b471a` not live). `route_to_fleet()` now takes the reason as an argument and appends `-fleet`, so `unowned` → `unowned-fleet` and `dead-manager` → `dead-manager-fleet`: the routed row still says WHICH class it was, while the counts line buckets them together as `dropped(fleet-routed)` — one field answering "how much left this feed for the Fleet Manager" rather than "which hop found it", with the specific reason kept on the row for `--explain`, `--json` and the ledger. The fail-open limb is per class: with no live Fleet Manager each reason keeps its own spelling, so a routed row is never confused with an un-routed one. Change set: `scripts/gate-owner-filter.py`, `scripts/tests/test_gate_owner_filter.py`, `CHANGELOG.md`.
 
