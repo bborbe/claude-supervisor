@@ -177,7 +177,8 @@ STALE WAITS — verbatim from drive-escalate.py (step 0c); a wait unchanged for 
   (none)
 ESCALATION — grouped by cause
   <cause>
-    <name> [<sid8>] · pane <id|—> · <link|no pane — <reason>> · manager <resolved|fleet> — <probe> → <result>   (mark unverified causes "unverified")
+    <name> [<sid8>] · pane <id|—> · <link|no pane — <reason>> — <probe> → <result>   (mark unverified causes "unverified")
+      blocked rows only: append · manager <resolved|fleet>  before the em dash
 UNVERIFIABLE BLOCK — replace with handle's output, verbatim (step 6b)
 REAPS
   TO: <exact roster name> | <evidence message text>
@@ -216,9 +217,12 @@ the caller prints what you hand it.
 
 **`manager` makes a blocked escalation reachable, and on a `blocked` row it always resolves.** It
 exists for the row whose closer named no owner. Resolve through `docs/fleet-surface.md` § *Which
-manager owns a subject*, **reusing the existing resolver** — `approved-not-started.py`'s
-`manager_for` (tiers 1–2), `fleet-board.py`'s `manager_on_chain` / `topics_of` (tier 3) — never by
-reading the chain again here. The chain ends at the Fleet Manager, so render `fleet` for that
+manager owns a subject*, **reusing the existing resolver** — never by reading the chain again here.
+⚠️ **No CLI exposes it, so load the module by path**, the same way `closer-gate-lint.py` loads
+`reap-closer.py`: `importlib.util.spec_from_file_location` on `scripts/fleet-board.py`, then call
+its `manager_on_chain` / `topics_of` for tier 3 and `scripts/approved-not-started.py`'s
+`manager_for(goals, live_by_name, managed_by)` for tiers 1–2, with `live_by_name` built from
+`session-liveness.py --list --json`. The chain ends at the Fleet Manager, so render `fleet` for that
 fallback and never `—` or `unresolved`. ⚠️ **Scope is `blocked` rows only:**
 `scripts/drive-unverifiable.py` is the OTHER producer of `ESCALATION` rows (step 6b) and does not
 emit this field — an `unverifiable` row is carded, not routed, so it carries no `manager` and is
