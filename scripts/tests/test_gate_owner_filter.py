@@ -308,16 +308,41 @@ class UnownedIsRoutedToTheFleetManager(unittest.TestCase):
     FLEET = "fleet-live"
     ME = "manager-x"
 
-    def call(self, session_id=None, spawner=None, me=_UNSET, fleet=_UNSET, claims=None):
+    def call(self, session_id=None, spawner=None, me=_UNSET, fleet=_UNSET, claims=None,
+             ledger=_UNSET):
         return gf.verdict(
             session_id,
             spawner,
-            self.LEDGER,
+            self.LEDGER if ledger is _UNSET else ledger,
             self.LIVE,
             self.ME if me is _UNSET else me,
             claims,
             None,
             self.FLEET if fleet is _UNSET else fleet,
+        )
+
+    def test_a_dead_spawners_gate_is_routed_too(self):
+        """The OTHER emit that means "nobody can act on this".
+
+        `dead-manager` fires when the pane's spawner IS a manager that is no longer live.
+        Measured 2026-11-11 in SC1's after-window: after the unowned class was routed, this
+        branch was the ONLY foreign wake left — one orphaned worker pane from 2026-11-07.
+        Routing one class and not the other fixes half the defect.
+        """
+        ledger = {"w-dead": {"session_id": "w-dead", "parent_session": "mgr-dead"}}
+        self.assertEqual(
+            self.call("w-dead", "mgr-dead", ledger=ledger),
+            (gf.DROP, "dead-manager-fleet"),
+        )
+        self.assertEqual(
+            self.call("w-dead", "mgr-dead", ledger=ledger, me=self.FLEET),
+            (gf.EMIT, "dead-manager-fleet"),
+        )
+        # Fail-open is per-class: the reason keeps its own spelling, so a routed row is
+        # never confused with an un-routed one in the ledger.
+        self.assertEqual(
+            self.call("w-dead", "mgr-dead", ledger=ledger, fleet=None),
+            (gf.EMIT, "dead-manager"),
         )
 
     def test_a_goal_manager_drops_an_unowned_gate(self):
