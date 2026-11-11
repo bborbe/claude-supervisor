@@ -845,6 +845,10 @@ class Cli(unittest.TestCase):
         # A stale launcher by default, so the fixture — never the real vault config or
         # a real launcher's mtime — decides the case.
         env["SUPERVISOR_LAUNCHER"] = launcher or self.stale(self.touch("cc-default"))
+        # Same seam as `run_cli`, and for the same reason: `main()` resolves wezterm before
+        # the kill and refuses when it cannot, and a CI runner has none. `setdefault` so a
+        # test that deliberately points the override at a missing path keeps its value.
+        env.setdefault("SUPERVISOR_WEZTERM", sys.executable)
         out = subprocess.run(
             [sys.executable, SCRIPT, sid, "--sessions-dir", self.reg, "--dry-run"],
             capture_output=True, text=True, env=env,
