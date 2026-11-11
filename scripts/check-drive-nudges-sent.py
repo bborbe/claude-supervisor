@@ -330,6 +330,15 @@ def main(argv=None):
     if parse_error:
         print("check-drive-nudges-sent: refused -- %s" % parse_error, file=sys.stderr)
         return REFUSED
+    if sent_path and not drive_path:
+        # `--sent` alone would fall through to the static-only run and exit 0 with the
+        # round unmeasured -- the same green-over-nothing the valueless-flag guard closes.
+        print(
+            "check-drive-nudges-sent: refused -- --sent requires --drive: a sent record "
+            "cannot be measured against a payload it was not given",
+            file=sys.stderr,
+        )
+        return REFUSED
 
     line = ""
     refused = False

@@ -89,6 +89,25 @@ class Parser(unittest.TestCase):
         payload = "fleet-drive — 1 candidates\nWaiting on your keystroke\n  TO: nobody | x\nNUDGES\n  TO: somebody | y\n"
         self.assertEqual(check.drafted_recipients(payload), ["somebody"])
 
+    def test_every_counted_block_is_counted(self):
+        """`REAPS` is a counted block too -- a reap draft is a drafted line."""
+        payload = "REAPS\n  TO: reaped-one | evidence\nNUDGES\n  TO: nudged-one | context\n"
+        self.assertEqual(check.drafted_recipients(payload), ["reaped-one", "nudged-one"])
+
+    def test_the_unverifiable_nudges_head_wins_over_the_bare_unverifiable_head(self):
+        """Longest-first ordering: the block must open, not be swallowed by its parent."""
+        payload = (
+            "UNVERIFIABLE — a session unverifiable 2+ rounds\n"
+            "  somebody [aaaaaaaa] · streak 2 · pane 1 · nudge\n"
+            "UNVERIFIABLE NUDGES — paste each line into NUDGES\n"
+            "  TO: only-in-the-unverifiable-block | context\n"
+            "UNVERIFIABLE ESCALATIONS — paste into ESCALATION\n"
+            "  (none)\n"
+        )
+        self.assertEqual(
+            check.drafted_recipients(payload), ["only-in-the-unverifiable-block"]
+        )
+
     def test_the_sent_path_is_derived_from_the_payload(self):
         self.assertEqual(
             check.sent_path_for("/tmp/2026-11-11T08-51-29Z.drive"),
@@ -154,6 +173,7 @@ class Artifacts(unittest.TestCase):
         """A peer that moved to busy is skipped and reported -- also not a miss."""
         self.write_sent(["skipped\t" + RECIPIENTS[0]])
         rc, out, _ = run_main(["--drive", str(self.drive)])
+        self.assertEqual(rc, 1)
         self.assertIn("nudges: drafted 5 · sent 0 · missing 4", out)
 
     def test_a_fully_actioned_round_has_no_deficit_and_counts_only_real_sends(self):
@@ -187,6 +207,13 @@ class Artifacts(unittest.TestCase):
         rc, _, err = run_main(["--digest", "x"])
         self.assertEqual(rc, check.REFUSED)
         self.assertIn("unknown flag --digest", err)
+
+    def test_a_sent_record_without_a_payload_is_refused(self):
+        """`--sent` alone would otherwise fall through to the static run and exit 0."""
+        self.write_sent(RECIPIENTS)
+        rc, _, err = run_main(["--sent", str(self.sent)])
+        self.assertEqual(rc, check.REFUSED)
+        self.assertIn("--sent requires --drive", err)
 
 
 class StaticOnTheTree(unittest.TestCase):
