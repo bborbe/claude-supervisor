@@ -14,7 +14,7 @@ So this check asserts three things:
 
   (a) the home exists and still names the default — the anchor is a pointer, and a
       pointer into a section that no longer states the value points at nothing
-  (b) every `commands/` and `agents/` file that names `maxConcurrent` carries the
+  (b) every `commands/` and `agents/` file that names `maxWorkerSoft` carries the
       **pointer** to the home rather than its own copy of the number
   (c) the prose default in the home and `DEFAULT_MAX_CONCURRENT` in the code **agree**
 
@@ -73,7 +73,7 @@ HARD_MARKER = "The hard default is {}"
 #: Directories whose files may *reference* the constant but must never restate it.
 REFERENCING_DIRS = ("commands", "agents")
 #: The name that makes a file a referencing site at all.
-CONSTANT_NAME = "maxConcurrent"
+CONSTANT_NAME = "maxWorkerSoft"
 #: The two read commands a tick needs to compare live against target. A file that runs one
 #: and not the other is measuring one side of the comparison and remembering the other,
 #: which is check (d)'s whole subject.
