@@ -17,9 +17,7 @@ half — a goal or topic page whose `status` is terminal, joined to the session 
 it — is `commands/steps/manager-reap.md`, and its reader is `scripts/subject-reap.py`. Two
 populations, one rule: the reap is evidence plus the session's own close.
 
-⚠️ **The one carve-out is a finished headless (`sdk-cli`) row.** It has no self-close path —
-vault-cli `session-self-exit.py` proves a controlling tty and always answers `SELF-EXIT: stay`
-for it — so the round closes it through `scripts/close-worker.py`. ⚠️ **The tier read is the
+⚠️ **The carve-outs are the two round-run closes: a finished or deferred tab row, and a finished headless (`sdk-cli`) row.** The headless one has no self-close path — vault-cli `session-self-exit.py` proves a controlling tty and always answers `SELF-EXIT: stay` for it. The tab one has a self-close path the session never takes: a worker whose task is terminal sits waiting for an operator click, and that wait is the gap this close removes. Both are closed by the round through `scripts/close-worker.py`. ⚠️ **The tier read is the
 caller's** (`commands/steps/drive.md`), not the drive agent's: that agent's `allowed-tools`
 grants no `Bash(python3:*)`, so `agents/fleet-drive.md` step 1b only points at the caller and
 drafts the message for every finished row. That is not a kill by hand: it is the same guarded
