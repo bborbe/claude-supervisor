@@ -406,8 +406,9 @@ and one that ran and found nothing must never print the same.
   other procedures normally. One absent instrument never stops the leg.
 - **`topic-keepalive.py` / `worker-keepalive.py` refuses or exits non-zero** → that is a
   verdict, not a crash to paper over: report the line verbatim and leave the row alone.
-- **`/supervisor:open` or `/supervisor:restart` is refused** → report the refusal and record no
-  resume. A refused act is not a resume that took, and the cap must not arm on it.
+- **`/supervisor:open` or `/supervisor:restart` is refused** → report the FULL session id, the
+  token and task name (never an 8-char prefix), and record no resume: a refused act is not a
+  resume that took, and the cap must not arm.
 - **A `SendMessage` fails, or the session has no roster name** → `undelivered: <id8>`, counted,
   never retried this tick (the ledger already counts it).
 - **Producing your mandated output seems to need a command outside your `Bash`** → that is a
