@@ -1428,8 +1428,8 @@ async function concurrentLimitError({ operatorNamed = false } = {}) {
   // `spawn-mode.mjs` — pure, and therefore unit-testable, which this module is not, because
   // importing it starts an MCP server. Only the two side-effectful reads stay in this file.
   const limits = resolveMaxConcurrent({
-    env: config.maxWorkerSoft,
-    envHard: config.maxWorkerHard,
+    env: config.maxConcurrent,
+    envHard: config.maxConcurrentHard,
     file: config.configFileContents,
     path: config.configFile,
   })
@@ -1466,7 +1466,7 @@ async function concurrentLimitError({ operatorNamed = false } = {}) {
 // hand-started managers the spawn ledger never records. See `manager-sessions.mjs`.
 // ⚠️ The limits come from `liveConfig`, NOT `config.configFileContents`. The boot snapshot is
 // frozen for the process's life, so a spawn decided against it ignores every edit until the
-// operator reconnects — observed 2026-10-14, `spawn.maxManagersSoft` raised to 10 and still refused
+// operator reconnects — observed 2026-10-14, `spawn.maxManagers` raised to 10 and still refused
 // as 5. `liveConfig` re-reads the file when its mtime moves; see `config-reload.mjs`.
 const liveConfig = mtimeReloadedConfig({ path: config.configFile })
 

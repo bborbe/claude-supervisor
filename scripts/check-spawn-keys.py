@@ -31,6 +31,7 @@ looks green while measuring nothing is the failure mode this repo keeps hitting.
 import os
 import pathlib
 import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -40,23 +41,45 @@ SPAWN_MODE = ROOT / "server" / "spawn-mode.mjs"
 NON_AXIS_KEYS = ("mode", "maxStartsPerMinute")
 
 PAIR = re.compile(r'\{"([A-Za-z0-9]+)",\s*"([A-Za-z0-9]+)"\}')
+JSON_TAG = re.compile(r'json:"([A-Za-z0-9]+)"')
 JS_LIST = re.compile(r"const KNOWN_SPAWN_KEYS = \[(.*?)\]", re.S)
 JS_STRING = re.compile(r"'([^']+)'")
 
 
 def wrapper_root():
-    """The claude-wrapper checkout, or None when this machine has none."""
-    for candidate in (
-        os.environ.get("CLAUDE_WRAPPER_SRC"),
-        pathlib.Path.home() / "Documents" / "workspaces" / "claude-wrapper",
-        ROOT.parent / "claude-wrapper",
-    ):
-        if not candidate:
-            continue
+    """The claude-wrapper checkout, or None when this machine has none.
+
+    Deterministic on purpose: `$CLAUDE_WRAPPER_SRC`, else the main checkout. A glob over
+    `claude-wrapper-*` siblings is tempting during a coordinated two-repo change and is
+    wrong — there are two dozen of them here, so it would silently measure whichever
+    sorted first rather than the one under test. Set the env var instead.
+    """
+    candidates = []
+    if os.environ.get("CLAUDE_WRAPPER_SRC"):
+        candidates.append(os.environ["CLAUDE_WRAPPER_SRC"])
+    candidates.append(str(pathlib.Path.home() / "Documents" / "workspaces" / "claude-wrapper"))
+    candidates.append(str(ROOT.parent / "claude-wrapper"))
+    for candidate in candidates:
         path = pathlib.Path(candidate)
         if (path / "pkg" / "spawn_axes.go").is_file():
             return path
     return None
+
+
+def describe(root):
+    """The checkout's branch and short revision, so a green run says WHAT it measured."""
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+        sha = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return f"{root} (revision unknown)"
+    return f"{root} @ {head or '?'} {sha or '?'}"
 
 
 def block(text, marker):
@@ -95,6 +118,30 @@ def derived_keys(root):
     if not legacy_keys:
         raise SystemExit("  spawn-keys FAIL: pkg/spawn_limits.go yielded no legacy keys")
 
+    # ⚠️ `axisKeys` is the DISPLAY of the key set; the STRUCT TAGS are what the JSON parser
+    # actually matches on. Renaming one without the other leaves a key that reads correctly
+    # in every refusal message and parses nothing — so the tags are derived too, and both
+    # tables must agree with them.
+    struct_block = block(limits_src, "type SpawnConfigFile struct")
+    if struct_block is None:
+        raise SystemExit("  spawn-keys FAIL: pkg/spawn_limits.go has no `type SpawnConfigFile struct`")
+    tags = set(JSON_TAG.findall(struct_block))
+    missing_from_struct = sorted((axis_keys | legacy_keys) - tags)
+    if missing_from_struct:
+        raise SystemExit(
+            f"  spawn-keys FAIL: pkg/spawn_limits.go declares no json tag for {missing_from_struct} — "
+            f"the wrapper would not parse those keys"
+        )
+
+    # And the fold has to be WIRED, not merely defined: without the call every pre-rename key
+    # silently resolves to its default while this check still passes. Two occurrences is the
+    # definition plus at least one call — counting on either side of the definition is
+    # order-dependent and gets this wrong in one direction or the other.
+    if limits_src.count("applyLegacySpawnKeys(") < 2:
+        raise SystemExit(
+            "  spawn-keys FAIL: pkg/spawn_limits.go defines applyLegacySpawnKeys but never calls it"
+        )
+
     return axis_keys, legacy_keys
 
 
@@ -116,7 +163,16 @@ def main():
         )
         return
 
-    axis_keys, legacy_keys = derived_keys(root)
+    try:
+        axis_keys, legacy_keys = derived_keys(root)
+    except SystemExit as exc:
+        # Name WHAT was measured. A main checkout still on `master` has no
+        # `renamedSpawnKeys` yet, and a bare "no such block" reads as a parse bug rather
+        # than "the wrapper change is not on this branch" — which is the actual fix.
+        raise SystemExit(
+            f"{exc}\n  spawn-keys: measured {describe(root)}. During a coordinated two-repo "
+            f"change set CLAUDE_WRAPPER_SRC to the wrapper's feature worktree."
+        )
     expected = axis_keys | legacy_keys | set(NON_AXIS_KEYS)
     actual = js_keys()
 
@@ -145,7 +201,7 @@ def main():
 
     print(
         f"  spawn-keys ok: {len(expected)} keys — {len(axis_keys)} axis, {len(legacy_keys)} pre-rename, "
-        f"{len(NON_AXIS_KEYS)} non-axis — derived from {root.name}/pkg"
+        f"{len(NON_AXIS_KEYS)} non-axis — derived from {describe(root)}"
     )
 
 
