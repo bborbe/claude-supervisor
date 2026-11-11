@@ -111,7 +111,7 @@ LEGS = {
             # resumed none is distinguishable from one that saw none — the same reason
             # `parked-due` is emitted beside `resumed`, applied to a population the clock
             # leg cannot reach.
-            "decision-candidates", "decision-resumed", "decision-unread",
+            "decision-candidates", "decision-resumed-a", "decision-resumed-d", "decision-unread",
             # one count per truncatable row list: the caller's reconciliation is
             # `rows printed + that list's dropped count == this count`, so a list without
             # its count has no arithmetic to check and a row dropped in transit is invisible

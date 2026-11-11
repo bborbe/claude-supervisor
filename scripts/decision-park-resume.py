@@ -322,7 +322,7 @@ def main(argv: list[str]) -> int:
     result = decide(args.vault, args.tasks_dir, now)
     if not result["ok"]:
         print(f"unread — {result['reason']}")
-        print("decision-candidates=0 · decision-resumed=0 · decision-unread=1")
+        print("decision-candidates=0 · decision-resumed-a=0 · decision-resumed-d=0 · decision-unread=1")
         return 1
     if args.json:
         print(json.dumps(result))
@@ -336,8 +336,12 @@ def main(argv: list[str]) -> int:
             print(f"resume kind={row['kind']} {row['task']} {row['sid']} — {row['detail']}")
     for row in result["unread"]:
         print(f"unread {row['task']} — {row['reason']}")
+    # Per wait kind, never one total: SC5 grades each kind on its own, and a single number
+    # cannot say which wait cleared — nor reconcile against the `--record` store by kind.
+    by_kind = {k: sum(1 for r in resumed if r["kind"] == k) for k in ("a", "d")}
     print(f"decision-candidates={result['candidates']} · "
-          f"decision-resumed={len(resumed)} · decision-unread={len(result['unread'])}")
+          f"decision-resumed-a={by_kind['a']} · decision-resumed-d={by_kind['d']} · "
+          f"decision-unread={len(result['unread'])}")
     return 0
 
 
