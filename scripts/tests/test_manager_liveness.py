@@ -24,6 +24,10 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 
 def load(state_dir):
     os.environ["MANAGER_LIVENESS_STATE_DIR"] = state_dir
+    # Isolate the gate heartbeat read from the real detached loop, so a live loop on the
+    # host can never make a synthetic stale subject read OK. Not created here: the
+    # unreadable-state-dir test relies on the path staying absent.
+    os.environ["MANAGER_GATE_LOOP_STATE_DIR"] = os.path.join(state_dir, "gate-loop")
     spec = importlib.util.spec_from_file_location(
         "manager_liveness", os.path.join(os.path.dirname(_HERE), "manager-liveness.py")
     )
@@ -1412,3 +1416,135 @@ class StoodDownPast(unittest.TestCase):
                 rc = m.stood_down_past(60)
         self.assertEqual(2, rc)
         self.assertIn("state dir unreadable", err.getvalue())
+
+
+class GateDrivenLiveness(unittest.TestCase):
+    """A goal manager whose only wake source is the detached sweep gate.
+
+    Removing the model cadence leaves `.cadence` ageing between gate wakes. The gate's
+    own per-subject heartbeat is then the liveness signal, so a watched manager reads
+    OK instead of STALE — the reading that makes `topic-keepalive.py` restart it.
+    """
+
+    SUBJECT = "Gate Driven Subject"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name)
+        self.s = self.m.slug(self.SUBJECT, "goal")
+        self.gate_dir = os.path.join(self.m.GATE_LOOP_STATE_DIR, "private-personal")
+        os.makedirs(self.gate_dir, exist_ok=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+        os.environ.pop("MANAGER_GATE_LOOP_STATE_DIR", None)
+
+    def stale_arm(self, branch="goal", age=5000):
+        with redirect_stdout(io.StringIO()):
+            self.m.arm(self.SUBJECT, branch, 900)
+        p = self.m.path(self.m.slug(self.SUBJECT, branch), "cadence")
+        t = time.time() - age
+        os.utime(p, (t, t))
+
+    def heartbeat(self, name, age):
+        p = os.path.join(self.gate_dir, name)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("0 x rc=0\n")
+        t = time.time() - age
+        os.utime(p, (t, t))
+
+    def test_a_watched_goal_with_a_stale_cadence_reads_ok(self):
+        self.stale_arm()
+        now = time.time()
+        self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 5)
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        state, detail = self.m.classify(self.s, now)
+        self.assertEqual("OK", state)
+        self.assertIn("gate-driven", detail)
+
+    def test_a_stale_cadence_without_any_heartbeat_stays_stale(self):
+        self.stale_arm()
+        self.assertEqual("STALE", self.m.classify(self.s, time.time())[0])
+
+    def test_a_dead_gate_reads_ok_gate_down_not_stale(self):
+        """A dead gate must not turn into an uncapped restart storm across the tier."""
+        self.stale_arm()
+        self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 4000)
+        self.heartbeat("some-other-subject.heartbeat", 4000)
+        state, detail = self.m.classify(self.s, time.time())
+        self.assertEqual("OK", state)
+        self.assertIn("gate-down", detail)
+
+    def test_an_expired_sleep_with_a_fresh_gate_heartbeat_stays_stale(self):
+        """The gate cannot see a `defer_date` arrive, so the expired-sleep STALE that
+        `topic-keepalive.py` recovers off must survive the gate-driven fallback."""
+        self.stale_arm()
+        with redirect_stdout(io.StringIO()):
+            self.m.sleep(
+                self.SUBJECT,
+                "goal",
+                (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat(),
+            )
+        now = time.time()
+        self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 5)
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        self.assertEqual("STALE", self.m.classify(self.s, now)[0])
+
+    def test_a_dropped_subject_is_not_gate_driven(self):
+        self.stale_arm()
+        self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 8000)
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        self.assertEqual("STALE", self.m.classify(self.s, time.time())[0])
+
+    def test_the_topic_tier_is_not_gate_driven(self):
+        self.stale_arm(branch="topic")
+        now = time.time()
+        self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 5)
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        self.assertEqual(
+            "STALE", self.m.classify(self.m.slug(self.SUBJECT, "topic"), now)[0]
+        )
+
+    def test_check_does_not_report_a_gate_driven_goal(self):
+        """`--check` goes through `classify()`, so it must not flag a watched goal."""
+        self.stale_arm()
+        now = time.time()
+        self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 5)
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.m.check(now)
+        self.assertEqual((rc, out.getvalue()), (0, ""))
+
+    def test_a_same_named_heartbeat_in_another_vault_masks_the_subject(self):
+        """Known limitation, pinned: the heartbeat match is by bare filename across
+        vaults (the liveness namespace is deliberately flat)."""
+        self.stale_arm()
+        other = os.path.join(self.m.GATE_LOOP_STATE_DIR, "another-vault")
+        os.makedirs(other, exist_ok=True)
+        now = time.time()
+        p = os.path.join(other, f"{self.m.base_slug(self.SUBJECT)}.heartbeat")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("0 x rc=0\n")
+        os.utime(p, (now, now))
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        self.assertEqual("OK", self.m.classify(self.s, now)[0])
+
+    def test_an_unparseable_sleep_marker_with_a_fresh_gate_stays_stale(self):
+        """A corrupt `.sleeping` file still records a sleep; the gate cannot wake it, so
+        the fallback must not return OK."""
+        self.stale_arm()
+        with open(self.m.path(self.s, "sleeping"), "w", encoding="utf-8") as fh:
+            fh.write("someday\n")
+        now = time.time()
+        self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 5)
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        self.assertEqual("STALE", self.m.classify(self.s, now)[0])
+
+    def test_an_absent_gate_tree_stays_stale(self):
+        """A fresh install has no gate tree; the safe direction is STALE, not OK."""
+        self.stale_arm()
+        os.rmdir(self.gate_dir)
+        os.rmdir(self.m.GATE_LOOP_STATE_DIR)
+        self.assertEqual("STALE", self.m.classify(self.s, time.time())[0])
