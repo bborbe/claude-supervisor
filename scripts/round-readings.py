@@ -754,6 +754,16 @@ def worst_state(*states):
     return max(states, key=lambda s: _STATE_RANK.get(s, 2))
 
 
+def _under(path, root):
+    """Is `path` at or below `root`?
+
+    The separator on the prefix is load-bearing: without it `/a/bc` reads as "under"
+    `/a/b`, and a session in a sibling vault would be swept into the wrong round.
+    """
+    root = root.rstrip(os.sep)
+    return path == root or path.startswith(root + os.sep)
+
+
 def compute(subject, tracked_path, vault, interval, now=None,
             endpoint=None, registry_dir=None, attention_dir=None,
             sessions_dir=None, projects_dir=None, feed=None):
@@ -843,6 +853,71 @@ def compute(subject, tracked_path, vault, interval, now=None,
             "resolved": False,
         }
 
+    # A live session whose id appears on NO page is outside the derivation above: `rows`
+    # is built from resolved task files, and a session stamped on none of them enters no
+    # row's id set — so no `parked` row can be emitted for it however parked it is.
+    # Measured 2026-11-11: session `1c05c414` sat `waiting` on the fleet while the round
+    # rendered `parked=0`, because no page carried it. The failure direction is what makes
+    # this load-bearing: an unrecorded park silently dropped, or read as `quiet`, renders a
+    # clean fleet while a worker waits on a gate.
+    #
+    # ⚠️ These rows are NOT the synthesised placeholders refused above — each carries a
+    # real registry id, so every family on it is an observation rather than a default.
+    # ⚠️ The id set is NOT re-derived here. `row["sessions"]` is `read_task`'s output from
+    # `manager-predispatch.session_id_set` — the one home for "which fields are a session
+    # id" — and this block only READS that set to learn which sessions a page already
+    # accounts for. Nothing is added to any row, so a manager id arriving through
+    # `metrics_sessions` stays exactly where it was: this does not widen that
+    # contamination, it reuses the same set so a covered session is never double-reported.
+    covered = set()
+    for rec in out_rows.values():
+        covered.update(rec.get("ids") or [])
+    unrecorded = []
+    vault_root = os.path.realpath(vault) if vault else None
+    if vault_root and registry:
+        for sid, rec in sorted(registry.items()):
+            if sid in covered:
+                continue
+            cwd = rec.get("cwd")
+            # Scope: this round reads THIS vault. A session parked in another vault is
+            # that vault's round to report; sweeping every cwd in would make each round
+            # carry every other vault's fleet and drown the one park it exists to show.
+            if not cwd or not _under(os.path.realpath(cwd), vault_root):
+                continue
+            # `alive` is three-state, and only an explicit `False` is a dead session: the
+            # pid is gone or is held by a process that is not this record's. Emitting a
+            # `parked` row for one would be the false positive this whole path exists to
+            # avoid, so it is skipped. `None` is "cannot tell" and is kept — reading it as
+            # death is the silent direction.
+            if rec.get("alive") is False:
+                continue
+            unrecorded.append(sid)
+
+    for sid in unrecorded:
+        ids = [sid]
+        live = liveness(ids, endpoint, registry_dir)
+        fl, limb = in_flight(ids, registry, attention_dir, now, wnm.session_transcript_age)
+        fv = feed_verdict(ids, gated, feed_state)
+        ew = external_wait(ids, attention_dir)
+        sv, sreason = stuck_verdict({"mtime": None}, ids, live, fv, interval, now,
+                                    attention_dir, projects_dir or PROJECTS_DIR,
+                                    in_flight_verdict=fl)
+        out_rows[f"unrecorded:{sid[:8]}"] = {
+            "ids": ids,
+            "liveness": live,
+            "in_flight": fl,
+            "in_flight_limb": f"{limb} (no page records this session)",
+            "feed": fv,
+            "external_wait": ew,
+            "task_mtime": None,
+            "stuck": sv,
+            "stuck_reason": sreason,
+            # No page carries this session — the same marker an unresolved member row
+            # carries, and here it names WHY rather than reading as a lost task.
+            "resolved": False,
+            "unrecorded": True,
+        }
+
     # Counted from the rows themselves, not accumulated beside them, so the
     # document cannot carry a total that disagrees with its own table:
     # `gated + clear + unread == len(rows)` is structural, not asserted.
@@ -891,6 +966,11 @@ def compute(subject, tracked_path, vault, interval, now=None,
             "matched_members": len(matched),
             "resolved_rows": len(rows),
             "unresolved": unresolved,
+            # Live sessions in this vault that no page records. They carry rows of their
+            # own above, so the document's row count is `resolved_rows` plus
+            # `len(unresolved)` plus `len(unrecorded)` — the reader's invariant, widened
+            # here so an unrecorded park cannot be reconciled away as a caller bug.
+            "unrecorded": unrecorded,
         },
         # Every probe that failed this round, with its own error. Empty on a clean
         # read; a transient store fault and a genuinely gate-free fleet are then
