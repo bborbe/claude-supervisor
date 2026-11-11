@@ -492,6 +492,25 @@ class ConsumeTests(unittest.TestCase):
 
         self.assertEqual(got, name, "resolved to the path fragment instead of the name")
 
+    def test_an_escape_that_survived_the_shell_is_unwrapped(self):
+        """The outer quoting is stripped but `shlex.quote`'s apostrophe escape stays.
+
+        Measured 2026-11-12 on store item `1127462d`: that payload splits into 14
+        tokens, so the single-token branch never fires and every apostrophe-carrying
+        row was refused. The escape appears in the path too, exactly as here.
+        """
+        name = "A Worker's Gate Cannot Reach Its Spawner"
+        page = self.vault / "25 Tasks" / f"{name}.md"
+        page.write_text("---\nstatus: next\n---\n\nbody\n", encoding="utf-8")
+        escaped = (f"{name} — priority: 1, in no current plan — {page}:1"
+                   ).replace("'", "'\"'\"'")
+
+        consumed, notes = self.run_consume([self.card("add it to the plan", payload=escaped)])
+
+        self.assertEqual(consumed[0]["name"], name, "the escape was not unwrapped")
+        self.assertEqual(notes, [])
+        self.assertIn(f"**Task:** [[{name}]]", self.weekly.read_text(encoding="utf-8"))
+
     def test_notes_render_on_an_empty_round(self):
         """A round that could not look must not read like a round that found nothing."""
         rendered = answer.render([], ["k: unhandled answer 'x' — not consumed"], 2, 1)

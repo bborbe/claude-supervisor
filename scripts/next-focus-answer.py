@@ -362,20 +362,27 @@ def unquote_payload(payload):
     """The raw payload text, un-shell-quoted when the store kept the quoted form.
 
     `next-focus.py` shell-quotes the payload (`shlex.quote`) so the round can paste it
-    bare into a command line, and the store sometimes keeps that quoted text. Reading
-    it raw left the leading `'` and the `'"'"'` escape in the row name — 33 of 110
-    live blocks named no page and the rows kept re-proposing.
+    bare into a command line. Two shapes reach the store, and they need different
+    handling:
 
-    A quoted payload is ONE `shlex` token; an unquoted one splits into many (or raises
-    on an apostrophe). Only the single-token case is unquoted — anything else is
-    returned verbatim rather than guessed at.
+      * the WHOLE payload still quoted — one `shlex` token, so `shlex.split` returns
+        it unquoted;
+      * the outer quoting stripped by the shell while `shlex.quote`'s own apostrophe
+        escape survives literally — measured 2026-11-12 on item `1127462d`, whose
+        payload begins `A Worker'"'"'s Gate …` and splits into 14 tokens. Every row
+        carrying an apostrophe was refused because of this.
+
+    So the escape is also unwrapped directly. `'"'"'` is the only form `shlex.quote`
+    emits, so the substitution is exact rather than a guess.
     """
     text = str(payload or "")
     try:
         parts = shlex.split(text)
     except ValueError:
-        return text
-    return parts[0] if len(parts) == 1 else text
+        parts = None
+    if parts and len(parts) == 1:
+        return parts[0]
+    return text.replace('\'"\'"\'', "'")
 
 
 def _name_from_payload(payload, vault, tasks_dir, kind=""):
