@@ -95,6 +95,8 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 
    ⚠️ **No new tool grant is needed** — the sweep already holds `Bash(python3:*)` and already runs `who-needs-me.py` (step 1). Never query the pane list directly; that lookup belongs to `who-needs-me.py`'s `pane_for()`, which owns the session-registry + pane-list join.
 
+7c. **Unclaimable tasks (Step 2e).** `python3 $P/unclaimable-tasks.py --since 2026-11-01 --limit 5`. A task with an empty `target_vault` is claimed by no controller, so no pod is scheduled and nothing reports it; since v0.26.12 the create path refuses it, so **a recent hit means a producer still omits the field** and the historical count is legacy. ⚠️ Session-independent on purpose — the defect case has no session to key a row on. ⚠️ Never window on mtime (the clone date; measured 9,624 false "recent" against a true 0). Non-zero exit → `UNKNOWN (pass not run)`.
+
 8. **Classify (Step 3).**
 
    | Signal | Reading |
@@ -146,7 +148,7 @@ The caller forwards this path verbatim to `agents/fleet-drive.md`, which reads i
 
 ⚠️ **Sanitize the timestamp into the filename, and treat this clause as its single home.** Replace every character outside `[0-9A-Za-z._-]` with `-`, so a caller passing `2026-10-11T18:09:40Z` yields `2026-10-11T18-09-40Z.digest`. The round timestamp's format is the caller's and is not fixed anywhere, so the sanitization is what keeps the path printable and re-readable — and it is what keeps this file's name aligned with the drive leg's, which applies the same rule by pointing here rather than copying it. The caller never recomputes the path; it forwards your `payload=` value verbatim.
 
-Return **≤ 40 lines for the fixed sections plus one `CLOSERS` row per live session** — the fixed allowance is 40 plus the `LEGS` block as seeded here (header + two `not run` lines = three) — exactly these sections, each printed as `(none)` rather than dropped. ⚠️ **`CLOSERS` is exempt from that allowance and is never collapsed to a count summary**: its rows are bounded by fleet size, not candidate count, and a summary hides every captured `routine`/`none` closer from `agents/fleet-drive.md` step 4a, which reads this render and fail-closes a missing row to `unverifiable`.
+Return **≤ 48 lines for the fixed sections plus one `CLOSERS` row per live session** — the fixed allowance is 48 plus the `LEGS` block as seeded here (header + two `not run` lines = three) — exactly these sections, each printed as `(none)` rather than dropped. The eight over 40 are `UNCLAIMABLE`'s header, its five recent rows, its counts line and its status line. ⚠️ **`CLOSERS` is exempt from that allowance and is never collapsed to a count summary**: its rows are bounded by fleet size, not candidate count, and a summary hides every captured `routine`/`none` closer from `agents/fleet-drive.md` step 4a, which reads this render and fail-closes a missing row to `unverifiable`.
 
 ```
 DIGEST <round timestamp> · <N> sessions · snapshot written: <swept_at from fleet-snapshot.py>
@@ -164,6 +166,10 @@ COLLISION CANDIDATES
   <name A> ↔ <name B> · <shared artifact>
 UNMANAGED TOPICS
   <topic> · <workers> · page present|absent
+UNCLAIMABLE (empty target_vault, agent runtime vaults)  — or: UNKNOWN (pass not run)
+  <task id> · <task_type> · <status> · <file> · blocks <pr|—>     ← recent only, max 5
+  recent: <n> (since <date>) · historical: <n> · undated: <n> [· unreadable: <n>]   ← last field only when non-zero
+  ⚠️ recently minted — the mint is still producing the empty field   — or: no recent emissions
 CONTEXT ≥70% (idle, not in tool)
   <name> · <pct>
 LEDGER (open)

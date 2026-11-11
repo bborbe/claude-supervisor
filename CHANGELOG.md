@@ -7,6 +7,9 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
+## Unreleased
+
+- feat: add a session-independent `UNCLAIMABLE` digest section to `fleet-sweep-reader`. A task whose `target_vault` is empty or absent is claimed by no controller — the non-owning one drops it as cross-vault traffic and the legacy-default one cannot recreate a file already at the title path — so no pod is scheduled and nothing reports it, which is why the row cannot hang off the session roster. `scripts/unclaimable-tasks.py` scans the agent runtime vaults and prints recent rows, a historical count and an undated bucket; since `agent-task-controller` v0.26.12 the create path refuses the empty field outright, so a **recent** hit means a producer still omits it and its PR is stalling silently. ⚠️ The window is `created_date` else `job_started_at`, never file mtime — measured 2026-11-11, an mtime window read 9,624 "recent" when the true number was 0, because mtime is the clone date on most of these files.
 
 
 ## v0.289.0
