@@ -7,7 +7,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
-## Unreleased
+## v0.276.1
 
 - fix: **the digest renders one `CLOSERS` row per live session instead of a count summary.** The 43-line payload cap applied to the whole render, so the reader collapsed `CLOSERS` to `5 ask, 33 routine/none` and the 33 captured `routine`/`none` rows never reached `agents/fleet-drive.md` step 4a — which reads the rendered digest and fail-closes a missing row to `unverifiable`. A captured closer therefore looked absent, no interactive-close candidate reached `revive`, and `0 closed` was the symptom (measured `2026-11-11T07-16-47Z`: 38 rows captured for 38 sessions, 5 rendered). The cap is now a fixed 40-line body plus one `CLOSERS` row per live session — bounded by fleet size, not candidate count — and the section is explicitly exempt from the fixed allowance. Change set: `agents/fleet-sweep-reader.md`, `commands/steps/sweep.md`, `CHANGELOG.md`.
 
