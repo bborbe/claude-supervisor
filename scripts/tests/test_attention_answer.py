@@ -664,7 +664,7 @@ class MirrorCardLookup(unittest.TestCase):
     the bug rather than catch it.
     """
 
-    SID = "prod-1"
+    SID = "3f9c1a2b-4d5e-4f60-8a7b-1c2d3e4f5a6b"
 
     def setUp(self):
         self.state = tempfile.mkdtemp()
@@ -726,6 +726,50 @@ class MirrorCardLookup(unittest.TestCase):
         rc, text, _ = self._answer("mirror-1")
         self.assertEqual(rc, 1, text)
         self.assertNotIn("TARGET:", text)
+
+    def test_a_close_in_another_log_file_still_closes_the_card(self):
+        # The fold is global, not per-file — `who-needs-me.load_events()` folds per file,
+        # so a "harmonize with load_events" refactor would restore the routed-closed-card
+        # bug with every other test still green. This pins the cross-file case.
+        other = "8d2e4c3a-5f61-4a72-9b83-2d3e4f5a6b7c"
+        self._write(self._open())
+        with open(os.path.join(self.state, f"{other}.events.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"item_id": "mirror-1", "session_id": other,
+                                "closed_by": "UserPromptSubmit", "ts": 3}) + "\n")
+        rc, text, _ = self._answer("mirror-1")
+        self.assertEqual(rc, 1, text)
+        self.assertNotIn("TARGET:", text)
+
+    def test_an_undeliverable_producer_writes_no_marker(self):
+        # The marker asserts an answer landed. A session that has exited cannot receive
+        # one, so writing it would attribute a question nobody answered.
+        self._write(self._open())
+        out = io.StringIO()
+        not_found = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        with mock.patch.object(aa, "fetch_item", side_effect=not_found), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", self.state), \
+             mock.patch.object(aa, "write_answer_marker") as marked:
+            rc = aa.cmd_answer("mirror-1", "operator", [], out)
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertIn("UNDELIVERABLE:", out.getvalue())
+        marked.assert_not_called()
+
+    def test_a_mirror_attempt_404_reports_the_delivery_not_a_failure(self):
+        # The command runs this step unconditionally after a delivery, so a 404 here
+        # would report a delivery that happened as a failed attempt.
+        out = io.StringIO()
+        not_found = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        with mock.patch.object(aa, "post_attempt", side_effect=not_found):
+            rc = aa.cmd_attempt("mirror-1", "operator", "delivered", out)
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertIn("ATTEMPT: mirror-1 delivered", out.getvalue())
+
+    def test_a_non_404_attempt_error_still_raises(self):
+        out = io.StringIO()
+        boom = urllib.error.HTTPError("u", 500, "Server Error", {}, None)
+        with mock.patch.object(aa, "post_attempt", side_effect=boom):
+            with self.assertRaises(urllib.error.HTTPError):
+                aa.cmd_attempt("x", "operator", "delivered", out)
 
     def test_an_id_in_neither_store_nor_log_fails_loudly(self):
         self._write(self._open(item_id="other"))

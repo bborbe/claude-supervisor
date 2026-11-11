@@ -260,10 +260,12 @@ def mirror_gate(item_id, state_dir=None):
     `MirrorCardLookup`).
 
     ⚠️ **The log is FOLDED, not scanned for a first match.** A record is a live card only
-    when an `open` line names it (`type: "open"`) and no later `close` does (`closed_by`,
-    which the close line carries instead of a `type`). A first-match scan would route an
-    answer for a card that already closed, and the store path has a compare-and-set that
-    catches exactly that — the mirror path has none, so the fold is the only guard.
+    when an `open` line names it (`type: "open"`) and no `close` line does anywhere
+    (`closed_by`, which the close line carries instead of a `type`). The test is
+    order-independent — any close wins, in any file — which is sound on an append-only log
+    where a close always follows its open. A first-match scan would route an answer for a
+    card that already closed, and the store path has a compare-and-set that catches
+    exactly that — the mirror path has none, so the fold is the only guard.
 
     `kind` is returned because the caller MUST NOT treat a `permission` card as a
     message: a session cannot release another session's parked gate, and relaying a
@@ -509,11 +511,16 @@ def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None,
             # line names no ask — so there is nothing to answer.
             print(f"FAILED: {item_id} is a {kind or 'typeless'} record, not a card", file=out)
             return 1
-        print(f"ANSWERED: {item_id} (mirror card — no store record)", file=out)
-        # The same marker the store path writes, so the hook's close line carries WHO
-        # answered instead of `no_answerer`.
-        write_answer_marker(producer, "", "operator")
-        print(target_line(producer, registry), file=out)
+        # ⚠️ The marker goes down only for a card that can actually be DELIVERED to. The
+        # store path writes it after the store accepted the answer, for the same reason it
+        # states: "a marker for an answer that failed to land would attribute a question
+        # nobody answered". A mirror has no store write to wait on, so deliverability —
+        # `resolve_target` returning a name — is the equivalent gate.
+        name, reason = resolve_target(producer, registry)
+        if name:
+            write_answer_marker(producer, "", "operator")
+        print(f"ANSWERED: {item_id} (no store record)", file=out)
+        print(f"TARGET: {name}" if name else f"UNDELIVERABLE: {reason}", file=out)
         return 0
     mech = item.get("answer_mechanism")
     if mech == "permission":
