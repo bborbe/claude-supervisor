@@ -441,10 +441,10 @@ class TestCliRefusals(unittest.TestCase):
         """The tab arm closes, and the round reads `✅ closed pane …`, never `would close`.
 
         This line is the round's close record — the one a caller quotes to prove a tab
-        row was closed rather than messaged. `jump.py` resolves the pane join against
-        `~/.claude/sessions` (not the script's own registry env var), so `HOME` is
-        redirected too; the pid sits above macOS's ceiling so the liveness wait is a
-        no-op and the line always reads `dead`.
+        row was closed rather than messaged. `jump.py` resolves the pane join from the
+        session registry under the home directory, not the script's own registry env
+        var, so `HOME` is redirected too; the pid sits above macOS's ceiling so the
+        liveness wait is a no-op and the line always reads `dead`.
         """
         pid = 999999
         self._registry(pid=pid)
