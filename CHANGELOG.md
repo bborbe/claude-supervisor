@@ -9,7 +9,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * PATCH version when you make backwards-compatible bug fixes.
 
 
-## Unreleased
+## v0.289.0
 
 - fix: **the frozen-tree predicate's second conjunct actually reads the ledger.** `OPEN_ITEMS_DIR` was derived as `os.path.join(STATE_DIR, "open-items")`, and `STATE_DIR` is `~/.claude/state/manager-predispatch` — this script's own store, which has no `open-items` directory and never did. So `open_asked_of_you()` returned `[]` on **every** call and the predicate silently collapsed to mtime-only, which is precisely the failure the gate exists to prevent: an mtime-only predicate answers FROZEN on a tree that still carries an unanswered operator question. It failed silently because a missing ledger is a legitimate empty answer, so nothing distinguished "the operator owes nothing" from "I looked in the wrong directory". The path is now its own constant at the ledger's real home (`~/.claude/state/open-items`, overridable via `SUPERVISOR_OPEN_ITEMS_DIR`), and `LedgerPathDefault` pins the default — the earlier tests passed only because `setUp` overrode the attribute with a tempdir, which is why the defect shipped. Change set: `scripts/manager-predispatch.py`, `scripts/tests/test_manager_predispatch.py`, `CHANGELOG.md`.
 
