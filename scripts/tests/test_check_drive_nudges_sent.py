@@ -172,9 +172,16 @@ class Artifacts(unittest.TestCase):
         self.assertIn("missing 0", out)
 
     def test_an_unreadable_payload_is_refused_not_measured(self):
+        """A broken read says nothing about the send -- it must never exit 1 as a deficit."""
         rc, out, err = run_main(["--drive", str(self.tmp / "absent.drive")])
-        self.assertEqual(rc, 1)
+        self.assertEqual(rc, check.REFUSED)
         self.assertIn("payload unreadable", err)
+
+    def test_an_unreadable_action_record_is_refused_not_measured(self):
+        self.sent.mkdir()
+        rc, out, err = run_main(["--drive", str(self.drive)])
+        self.assertEqual(rc, check.REFUSED)
+        self.assertIn("action record unreadable", err)
 
     def test_a_malformed_invocation_is_refused(self):
         rc, _, err = run_main(["--digest", "x"])

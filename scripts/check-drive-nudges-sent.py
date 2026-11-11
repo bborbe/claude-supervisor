@@ -246,16 +246,22 @@ def static_failures():
 
 
 def artifact_failures(drive_path, sent_path):
-    """(failures, line) for one round's payload plus its sent record."""
+    """(failures, line, refused) for one round's payload plus its action record.
+
+    `refused` is True when the round cannot be MEASURED -- an unreadable payload or action
+    record. It is deliberately distinct from a deficit: a refusal says nothing about whether
+    the nudges went out, so collapsing it into exit 1 made a broken read render as a missing
+    send, which is the one conclusion this gate must never reach by accident.
+    """
     try:
         text = Path(drive_path).read_text(encoding="utf-8")
     except OSError as exc:
-        return ["payload unreadable: %s" % exc], ""
+        return ["payload unreadable: %s" % exc], "", True
 
     drafted = drafted_recipients(text)
     actions = recorded_actions(sent_path)
     if actions is None:
-        return ["action record unreadable: %s" % sent_path], ""
+        return ["action record unreadable: %s" % sent_path], "", True
 
     # Only a drafted recipient can be actioned. A recorded name outside the drafted set is
     # an over-send -- reported, never counted, because it would mask a deficit.
@@ -278,8 +284,9 @@ def artifact_failures(drive_path, sent_path):
                 "5b closes the row" % (missing, len(drafted))
             ],
             line,
+            False,
         )
-    return [], line
+    return [], line, False
 
 
 def _parse(argv):
@@ -325,15 +332,22 @@ def main(argv=None):
         return REFUSED
 
     line = ""
+    refused = False
     if drive_path:
-        artifact_failure, line = artifact_failures(
+        artifact_failure, line, refused = artifact_failures(
             drive_path, sent_path or sent_path_for(drive_path)
         )
         failures.extend(artifact_failure)
         if line:
             print(line)
-        elif failures:
+        elif refused:
             print("nudges: refused -- see the failures below")
+
+    if refused:
+        print("check-drive-nudges-sent: REFUSED", file=sys.stderr)
+        for failure in failures:
+            print("  - %s" % failure, file=sys.stderr)
+        return REFUSED
 
     if failures:
         print("check-drive-nudges-sent: FAIL", file=sys.stderr)
