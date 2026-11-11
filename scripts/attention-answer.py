@@ -238,6 +238,41 @@ def fetch_item(item_id):
         return json.load(resp)
 
 
+def mirror_producer(item_id, state_dir=None):
+    """The session that produced an EVENT-LOG-only item, or "" when no record names it.
+
+    ⚠️ **A Stop-hook mirror card is not in the store.** The hook mints a card for a
+    closer and writes it to the event log; the store never carries it, which is exactly
+    the class `who-needs-me.py`'s `board_missing_gates()` returns as *"open gates the
+    EVENT LOG holds and the STORE did not return"*. So `fetch_item()` 404s on a mirror's
+    id, and before this fallback that 404 escaped `cmd_answer` before any `TARGET:` line
+    was printed — the operator's approve reached nobody and the session kept waiting
+    (measured 2026-11-11: `urllib.error.HTTPError: HTTP Error 404`, fixture
+    `MirrorCardLookup`).
+
+    The record's `session_id` is the producing session — `open_item()` writes it on every
+    item it mints — so it is the same key `producer_id` carries for a store item, and the
+    registry resolves it the same way.
+    """
+    base = state_dir or ATTENTION_STATE_DIR
+    for path in glob.glob(os.path.join(base, "*.events.jsonl")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue  # a torn final line is expected, not fatal
+                    if isinstance(rec, dict) and rec.get("item_id") == item_id:
+                        return rec.get("session_id") or ""
+        except OSError:
+            continue
+    return ""
+
+
 def fetch_delivery(item_id, timeout=None):
     """Return the store's delivery report for `item_id` (`GET …/attempt`)."""
     with urllib.request.urlopen(
@@ -420,7 +455,22 @@ def cmd_next(registry, out=sys.stdout):
 
 
 def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None, decision=""):
-    item = fetch_item(item_id)
+    try:
+        item = fetch_item(item_id)
+    except urllib.error.HTTPError as err:
+        if err.code != 404:
+            print(f"FAILED: store returned {err.code} for {item_id}", file=out)
+            return 1
+        # A Stop-hook MIRROR card: the event log holds it and the store never did. There
+        # is no store record to answer, so nothing is POSTed — the caller delivers the
+        # answer straight to the producing session, which is what the TARGET line is for.
+        producer = mirror_producer(item_id)
+        if not producer:
+            print(f"FAILED: {item_id} is neither a store item nor an event-log card", file=out)
+            return 1
+        print(f"ANSWERED: {item_id} (mirror card — no store record)", file=out)
+        print(target_line(producer, registry), file=out)
+        return 0
     mech = item.get("answer_mechanism")
     if mech == "permission":
         return cmd_answer_permission(item, answered_by, resolved_by, decision, out)

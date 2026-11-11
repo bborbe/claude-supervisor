@@ -648,5 +648,46 @@ class FetchDeliveryTest(unittest.TestCase):
         self.assertEqual(report["status"], "delivered")
 
 
+class MirrorCardLookup(unittest.TestCase):
+    """An answer given on a Stop-hook MIRROR card must reach the waiting session.
+
+    A mirror is a gate the EVENT LOG holds and the STORE never carried — the class
+    `who-needs-me.py`'s `board_missing_gates()` returns. So `fetch_item()` 404s on the
+    mirror's id, and on unfixed code that exception escapes `cmd_answer` before any
+    TARGET is printed: the operator's approve lands nowhere and the session keeps
+    waiting. This pins the event-log fallback.
+    """
+
+    def setUp(self):
+        self.state = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.state, True)
+
+    def _log(self, record):
+        with open(os.path.join(self.state, "sess.events.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+
+    def test_answering_a_mirror_id_routes_to_the_producing_session(self):
+        self._log({"item_id": "mirror-1", "session_id": "prod-1", "kind": "question"})
+        registry = [{"sessionId": "prod-1", "name": "claude-1f"}]
+        out = io.StringIO()
+        not_found = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        with mock.patch.object(aa, "fetch_item", side_effect=not_found), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", self.state):
+            rc = aa.cmd_answer("mirror-1", "operator", registry, out)
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertIn("TARGET: claude-1f", out.getvalue())
+
+    def test_an_id_in_neither_store_nor_log_fails_loudly(self):
+        self._log({"item_id": "other", "session_id": "prod-1", "kind": "question"})
+        registry = [{"sessionId": "prod-1", "name": "claude-1f"}]
+        out = io.StringIO()
+        not_found = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        with mock.patch.object(aa, "fetch_item", side_effect=not_found), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", self.state):
+            rc = aa.cmd_answer("nowhere", "operator", registry, out)
+        self.assertEqual(rc, 1, out.getvalue())
+        self.assertIn("FAILED:", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
