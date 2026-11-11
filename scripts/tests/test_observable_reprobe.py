@@ -8,9 +8,11 @@ and is wrong:
     the case the caller splits on, so a probe that answered "is it still open" would
     resume neither — or both. `test_merged_and_unmerged_differ` is that discriminator,
     and it asserts the two rows differ in BOTH the verdict and the reason.
+  * **A declaration naming two PRs clears only when BOTH have cleared.** Probing the
+    first match alone reports `resumed` off a merged PR while a second is still open —
+    a clearance on partial evidence, the same false positive by a different route.
   * **A failed probe is not a clearance.** `gh` raising, a missing repo, or an
-    unrecognised observable must all leave the row standing. Folding any of them into
-    `resumed` resumes a session on no evidence.
+    unrecognised observable must all leave the row standing.
   * **A bare `PR #<n>` with no repo is unprobeable, never a guess.** A wrong repo's
     PR #786 is a real PR, and its state would be reported as this row's evidence.
   * **`CLOSED` is a clearance but not a merge.** It re-drives the session; it must not
@@ -31,6 +33,7 @@ orx = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(orx)
 
 MERGED = {"state": "MERGED", "reviewDecision": "APPROVED", "mergeStateStatus": "UNKNOWN"}
+CLOSED = {"state": "CLOSED", "reviewDecision": "", "mergeStateStatus": ""}
 OPEN_APPROVED = {"state": "OPEN", "reviewDecision": "APPROVED", "mergeStateStatus": "CLEAN"}
 OPEN_IN_REVIEW = {"state": "OPEN", "reviewDecision": "REVIEW_REQUIRED", "mergeStateStatus": "BLOCKED"}
 
@@ -38,6 +41,11 @@ OPEN_IN_REVIEW = {"state": "OPEN", "reviewDecision": "REVIEW_REQUIRED", "mergeSt
 def _probe(payload):
     """A probe stub returning `payload`, so no test touches the network."""
     return lambda repo, number: payload
+
+
+def _by_number(payloads):
+    """A probe stub answering per PR number, for the multi-PR cases."""
+    return lambda repo, number: payloads[number]
 
 
 def _raising(exc):
@@ -49,48 +57,54 @@ def _raising(exc):
 class ObservableParsing(unittest.TestCase):
     def test_url_shape(self):
         self.assertEqual(
-            orx.observable("https://github.com/bborbe/claude-supervisor/pull/786 merged"),
-            {"kind": orx.PR, "repo": "bborbe/claude-supervisor", "number": 786},
+            orx.observables("https://github.com/bborbe/claude-supervisor/pull/786 merged"),
+            [{"kind": orx.PR, "repo": "bborbe/claude-supervisor", "number": 786}],
         )
 
     def test_qualified_shape(self):
         self.assertEqual(
-            orx.observable("bborbe/claude-supervisor#786 MERGED"),
-            {"kind": orx.PR, "repo": "bborbe/claude-supervisor", "number": 786},
+            orx.observables("bborbe/claude-supervisor#786 MERGED"),
+            [{"kind": orx.PR, "repo": "bborbe/claude-supervisor", "number": 786}],
         )
 
     def test_bare_shape_carries_no_repo(self):
         self.assertEqual(
-            orx.observable("PR #786 merged and the release cut"),
-            {"kind": orx.PR, "repo": None, "number": 786},
+            orx.observables("PR #786 merged and the release cut"),
+            [{"kind": orx.PR, "repo": None, "number": 786}],
         )
 
     def test_pull_request_spelling(self):
-        self.assertEqual(orx.observable("pull request 12")["number"], 12)
+        self.assertEqual(orx.observables("pull request 12")[0]["number"], 12)
+
+    def test_two_prs_are_both_collected(self):
+        self.assertEqual([o["number"] for o in orx.observables("PR #786 and PR #791")], [786, 791])
+
+    def test_a_bare_repeat_of_a_qualified_pr_is_not_probed_twice(self):
+        # Probing it again would add a second call for one PR, and an unresolvable
+        # duplicate would fail a declaration the qualified reference had settled.
+        self.assertEqual(len(orx.observables("o/r#1 and PR #1")), 1)
 
     def test_a_clock_is_not_an_observable(self):
-        self.assertIsNone(orx.observable("2026-11-12T09:00:00+01:00"))
+        self.assertEqual(orx.observables("2026-11-12T09:00:00+01:00"), [])
 
     def test_a_person_is_not_an_observable(self):
-        self.assertIsNone(orx.observable("a reply from the vendor"))
+        self.assertEqual(orx.observables("a reply from the vendor"), [])
 
     def test_empty_and_non_string(self):
-        self.assertIsNone(orx.observable(""))
-        self.assertIsNone(orx.observable(None))
+        self.assertEqual(orx.observables(""), [])
+        self.assertEqual(orx.observables(None), [])
 
 
 class Verdicts(unittest.TestCase):
     def test_merged_resumes(self):
-        v, reason = orx.verdict(orx.observable("PR #786"), probe=_probe(MERGED), repo="o/r")
+        v, reason = orx.verdict(orx.observables("PR #786"), probe=_probe(MERGED), repo="o/r")
         self.assertEqual(v, orx._RESUMED)
         self.assertIn("MERGED", reason)
         self.assertIn("o/r#786", reason)
 
     def test_closed_is_a_clearance_but_not_a_merge(self):
         v, reason = orx.verdict(
-            orx.observable("PR #786"),
-            probe=_probe({"state": "CLOSED", "reviewDecision": "", "mergeStateStatus": ""}),
-            repo="o/r",
+            orx.observables("PR #786"), probe=_probe(CLOSED), repo="o/r"
         )
         self.assertEqual(v, orx._RESUMED)
         self.assertIn("CLOSED", reason)
@@ -98,7 +112,7 @@ class Verdicts(unittest.TestCase):
 
     def test_approved_but_unmerged_stays_blocked_and_quotes_the_merge_state(self):
         v, reason = orx.verdict(
-            orx.observable("PR #786"), probe=_probe(OPEN_APPROVED), repo="o/r"
+            orx.observables("PR #786"), probe=_probe(OPEN_APPROVED), repo="o/r"
         )
         self.assertEqual(v, orx._STILL)
         self.assertIn("OPEN", reason)
@@ -110,48 +124,77 @@ class Verdicts(unittest.TestCase):
         # row and silently break the other. Both fields are asserted so a change that
         # made them share a verdict could not pass.
         merged_v, merged_r = orx.verdict(
-            orx.observable("o/r#1"), probe=_probe(MERGED), repo=None
+            orx.observables("o/r#1"), probe=_probe(MERGED), repo=None
         )
         open_v, open_r = orx.verdict(
-            orx.observable("o/r#2"), probe=_probe(OPEN_APPROVED), repo=None
+            orx.observables("o/r#2"), probe=_probe(OPEN_APPROVED), repo=None
         )
         self.assertNotEqual(merged_v, open_v)
         self.assertNotEqual(merged_r, open_r)
 
     def test_still_blocked_does_not_hide_an_unreviewed_pr(self):
         v, reason = orx.verdict(
-            orx.observable("PR #786"), probe=_probe(OPEN_IN_REVIEW), repo="o/r"
+            orx.observables("PR #786"), probe=_probe(OPEN_IN_REVIEW), repo="o/r"
         )
         self.assertEqual(v, orx._STILL)
         self.assertIn("review REVIEW_REQUIRED", reason)
+
+    def test_one_open_pr_blocks_the_whole_declaration(self):
+        # The defect this guards: probing the FIRST match alone reports `resumed` off
+        # the merged one while the second is still open.
+        v, reason = orx.verdict(
+            orx.observables("PR #786 and PR #791"),
+            probe=_by_number({786: MERGED, 791: OPEN_APPROVED}),
+            repo="o/r",
+        )
+        self.assertEqual(v, orx._STILL)
+        self.assertIn("o/r#791", reason)
+
+    def test_all_prs_cleared_resumes_and_names_each(self):
+        v, reason = orx.verdict(
+            orx.observables("PR #786 and PR #791"),
+            probe=_by_number({786: MERGED, 791: CLOSED}),
+            repo="o/r",
+        )
+        self.assertEqual(v, orx._RESUMED)
+        self.assertIn("o/r#786", reason)
+        self.assertIn("o/r#791", reason)
 
 
 class NeverAClearance(unittest.TestCase):
     """Every unreadable input leaves the row standing. The safe direction."""
 
     def test_no_observable_is_unprobeable(self):
-        v, _ = orx.verdict(None)
+        v, _ = orx.verdict([])
         self.assertEqual(v, orx._UNPROBEABLE)
 
     def test_bare_pr_without_repo_is_unprobeable(self):
-        v, reason = orx.verdict(orx.observable("PR #786"), probe=_probe(MERGED))
+        v, reason = orx.verdict(orx.observables("PR #786"), probe=_probe(MERGED))
         self.assertEqual(v, orx._UNPROBEABLE)
         self.assertIn("names no repo", reason)
 
     def test_probe_error_is_unprobeable_not_resumed(self):
         v, reason = orx.verdict(
-            orx.observable("PR #786"), probe=_raising(RuntimeError("gh: not authenticated")),
+            orx.observables("PR #786"), probe=_raising(RuntimeError("gh: not authenticated")),
             repo="o/r",
         )
         self.assertEqual(v, orx._UNPROBEABLE)
         self.assertIn("probe failed", reason)
         self.assertIn("gh: not authenticated", reason)
 
+    def test_one_failed_probe_in_a_pair_is_unprobeable(self):
+        def flaky(repo, number):
+            if number == 791:
+                raise RuntimeError("gh: boom")
+            return MERGED
+        v, _ = orx.verdict(orx.observables("PR #786 and PR #791"), probe=flaky, repo="o/r")
+        self.assertEqual(v, orx._UNPROBEABLE)
+
     def test_a_verdict_is_never_both_resumed_and_unprobeable(self):
         # The one pairing that would make the caller resume on a failed read.
         for payload in (MERGED, OPEN_APPROVED):
             v, _ = orx.verdict(
-                orx.observable("PR #786"), probe=_probe(payload), repo="o/r"
+                orx.observables("PR #786"), probe=_probe(payload), repo="o/r"
             )
             self.assertIn(v, (orx._RESUMED, orx._STILL))
 
