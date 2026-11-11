@@ -69,7 +69,7 @@ nothing new, while opening one decides who supervises. Four rules follow:
    `approved_by: operator`. **Which legs read the flag alone and which read `flag_set_by` has
    one home — `docs/fleet-surface.md` § Approval provenance; read the split there.** A flag on
    a page no leg reads is inert, which is the defect `--topic-open` was added to remove.
-3. **An approved worker is opened automatically**, up to `spawn.maxConcurrent`.
+3. **An approved worker is opened automatically**, up to `spawn.maxWorkerSoft`.
 4. **A manager is never opened fresh on the operator's behalf** — not by a loop, not by a
    round, not to fill a gap. Only restarted, or opened because it was flagged.
 

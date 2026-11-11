@@ -44,7 +44,7 @@ test('a ceiling beneath its floor is refused rather than reordered', () => {
 test('a non-integer is refused and named as a manager limit, not a worker one', () => {
   const { error } = limits({ maxManagers: true })
   assert.match(error, /concurrent-manager limit/)
-  assert.match(error, /spawn\.maxManagers/)
+  assert.match(error, /spawn\.maxManagersSoft/)
 })
 
 test('both new keys are known — an unregistered key warns "ignored" on every boot', () => {
@@ -66,7 +66,7 @@ test('SC1 — at the hard cap a 6th manager is refused, naming spawn.maxManagers
 
 test('SC2 — at the soft cap an ordinary open is refused WITHOUT the fleet-full phrase the card keys on', () => {
   const msg = decide(3)
-  assert.match(msg, /spawn\.maxManagers"/)
+  assert.match(msg, /spawn\.maxManagersSoft"/)
   assert.ok(!msg.includes(MANAGER_FLEET_FULL), 'a soft refusal must not trigger the hard-cap card')
 })
 

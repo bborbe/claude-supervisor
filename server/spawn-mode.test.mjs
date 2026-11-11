@@ -237,10 +237,28 @@ test('resolveMaxConcurrent: the file decides when the env is silent', () => {
   assert.deepEqual(resolveMaxConcurrent({ file: { spawn: { maxConcurrent: '6' } } }), expected)
 })
 
+test('resolveMaxConcurrent: the pre-rename keys still resolve, and the current name wins', () => {
+  // The Go wrapper folds `maxConcurrent` into `maxWorkerSoft` with a warning; this server has
+  // to read the same two spellings or a config the wrapper honours would fall back to the
+  // built-in defaults here — a fleet capped at 20 while the file says 90, with nothing red.
+  assert.deepEqual(
+    resolveMaxConcurrent({ file: { spawn: { maxWorkerSoft: 6, maxWorkerHard: 40 } } }),
+    { limit: 6, hardLimit: 40, source: 'config', hardSource: 'config' },
+  )
+  assert.deepEqual(
+    resolveMaxConcurrent({ file: { spawn: { maxWorkerSoft: 6, maxConcurrent: 9 } } }),
+    { limit: 6, hardLimit: 50, source: 'config', hardSource: 'default' },
+  )
+  assert.deepEqual(
+    resolveMaxConcurrent({ file: { spawn: { maxWorkerHard: 40, maxConcurrentHard: 70 } } }),
+    { limit: 20, hardLimit: 40, source: 'default', hardSource: 'config' },
+  )
+})
+
 test('resolveMaxConcurrent: the hard cap resolves on its own key, env over file', () => {
   // The two thresholds are independent keys: a hard cap set alone leaves the soft cap at its
   // default, and vice versa. Asserted because a resolver that read one key for both would
-  // make `maxConcurrentHard` silently inert — the failure this module exists to stop.
+  // make `maxWorkerHard` silently inert — the failure this module exists to stop.
   assert.deepEqual(
     resolveMaxConcurrent({ file: { spawn: { maxConcurrentHard: 80 } } }),
     { limit: 20, hardLimit: 80, source: 'default', hardSource: 'config' },
@@ -257,7 +275,7 @@ test('resolveMaxConcurrent: the env wins over the file, and the loser is still v
   // discipline: a bad value in the file must not stay invisible because this spawn happened
   // to be decided by the environment.
   const { error } = resolveMaxConcurrent({ env: '3', file: { spawn: { maxConcurrent: 'lots' } } })
-  assert.match(error, /spawn\.maxConcurrent/)
+  assert.match(error, /spawn\.maxWorkerSoft/)
   assert.match(error, /"lots"/)
 })
 
@@ -286,7 +304,7 @@ test('resolveMaxConcurrent: a hard cap below the soft one refuses rather than re
   // meant is not ours to guess, so the pair is refused and both are named.
   const { error } = resolveMaxConcurrent({ file: { spawn: { maxConcurrent: 30, maxConcurrentHard: 20 } } })
   assert.match(error, /below the soft one/)
-  assert.match(error, /spawn\.maxConcurrentHard/)
+  assert.match(error, /spawn\.maxWorkerHard/)
   assert.match(error, /30/)
   assert.match(error, /20/)
   // Equal is NOT below: it is degenerate but coherent — no band, the soft count enforced for all.
@@ -302,10 +320,10 @@ test('resolveMaxConcurrent: an unusable value refuses rather than coercing', () 
   for (const bad of ['-1', '2.5', 'many', true, {}, []]) {
     const { error } = resolveMaxConcurrent({ file: { spawn: { maxConcurrent: bad } } })
     assert.ok(error, `expected ${JSON.stringify(bad)} to be refused`)
-    assert.match(error, /spawn\.maxConcurrent/)
+    assert.match(error, /spawn\.maxWorkerSoft/)
     const hard = resolveMaxConcurrent({ file: { spawn: { maxConcurrentHard: bad } } })
     assert.ok(hard.error, `expected hard ${JSON.stringify(bad)} to be refused`)
-    assert.match(hard.error, /spawn\.maxConcurrentHard/)
+    assert.match(hard.error, /spawn\.maxWorkerHard/)
   }
   assert.match(resolveMaxConcurrent({ env: 'lots' }).error, new RegExp(MAX_CONCURRENT_ENV))
   assert.match(resolveMaxConcurrent({ envHard: 'lots' }).error, new RegExp(MAX_CONCURRENT_HARD_ENV))
@@ -326,7 +344,7 @@ test('resolveMaxConcurrent: 0 on the HARD key is refused, unlike on the soft one
   // which is the "a limit that silently governs nothing" failure this module refuses. The
   // fallback is never 0, so a null here can only have come from an explicit 0.
   const { error } = resolveMaxConcurrent({ file: { spawn: { maxConcurrentHard: 0 } } })
-  assert.match(error, /spawn\.maxConcurrentHard/)
+  assert.match(error, /spawn\.maxWorkerHard/)
   assert.match(error, /is 0/)
   assert.match(error, /disables/)
   assert.match(resolveMaxConcurrent({ envHard: '0' }).error, new RegExp(MAX_CONCURRENT_HARD_ENV))
