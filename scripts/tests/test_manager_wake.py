@@ -58,6 +58,13 @@ class ResolveManagerSession(unittest.TestCase):
     def test_no_match_is_none(self):
         self.assertEqual((None, None), self.mod.resolve_manager_session("Nope", "auto"))
 
+    def test_offsets_are_compared_as_instants(self):
+        # 05:00Z vs 04:00-02:00 (= 06:00Z). A raw-string compare picks A; an instant
+        # compare picks B, which is the newer registration.
+        self._write(self.A, "Goal X", "goal", "2026-01-01T05:00:00+00:00")
+        self._write(self.B, "Goal X", "goal", "2026-01-01T04:00:00-02:00")
+        self.assertEqual((self.B, "goal"), self.mod.resolve_manager_session("Goal X", "auto"))
+
 
 class MainValidation(unittest.TestCase):
     def setUp(self):
@@ -153,6 +160,59 @@ class WakeConfirmation(unittest.TestCase):
     def test_always_swallowed_is_failed(self):
         out = self._wake_with(["❯ /supervisor:goal-drive --interval 15m"] * 20)
         self.assertIn("FAILED", out)
+
+
+class Guard(unittest.TestCase):
+    def setUp(self):
+        self.mod = load()
+        self._real_run = self.mod.subprocess.run
+
+    def tearDown(self):
+        self.mod.subprocess.run = self._real_run
+
+    def _run_returning(self, stdout):
+        class R:
+            returncode = 0
+            stderr = ""
+            def __init__(self, out):
+                self.stdout = out
+        self.mod.subprocess.run = lambda *a, **k: R(stdout)
+
+    def test_wake_verdict_passes_through(self):
+        self._run_returning("wake\n")
+        self.assertEqual("wake", self.mod.guard(1))
+
+    def test_empty_stdout_is_error(self):
+        self._run_returning("")
+        self.assertEqual("error:no-verdict", self.mod.guard(1))
+
+
+class ResolvePane(unittest.TestCase):
+    def setUp(self):
+        self.mod = load()
+
+    def _fake_jump(self, panes, sessions):
+        class J:
+            @staticmethod
+            def wezterm_panes():
+                return panes
+
+            @staticmethod
+            def pane_sessions(_pmap):
+                return sessions
+        self.mod._jump = lambda: J
+
+    def test_match(self):
+        self._fake_jump({"7": {}}, {"7": "sid-1"})
+        self.assertEqual("7", self.mod.resolve_pane("sid-1"))
+
+    def test_no_match_is_none(self):
+        self._fake_jump({"7": {}}, {"7": "other"})
+        self.assertIsNone(self.mod.resolve_pane("sid-1"))
+
+    def test_failed_read_is_none(self):
+        self._fake_jump(None, {})
+        self.assertIsNone(self.mod.resolve_pane("sid-1"))
 
 
 if __name__ == "__main__":

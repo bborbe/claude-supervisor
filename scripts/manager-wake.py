@@ -53,11 +53,10 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime
 
-PLUGIN_ROOT = os.environ.get("CLAUDE_PLUGIN_ROOT") or os.path.expanduser(
-    "~/.claude/plugins/marketplaces/claude-supervisor"
-)
-GUARD = os.path.join(PLUGIN_ROOT, "scripts", "pane-wake-guard.py")
+HERE = os.path.dirname(os.path.abspath(__file__))
+GUARD = os.path.join(HERE, "pane-wake-guard.py")
 MANAGER_STATE = os.path.expanduser("~/.claude/state/worker-manager")
 VALID_BRANCHES = ("goal", "topic", "fleet")
 SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -97,11 +96,26 @@ def composer_line(text):
 
 def _jump():
     """`jump.py`'s pane reads, imported by path (hyphenated filename)."""
-    path = os.path.join(PLUGIN_ROOT, "scripts", "jump.py")
+    path = os.path.join(HERE, "jump.py")
     spec = importlib.util.spec_from_file_location("supervisor_jump", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _ts(value):
+    """Parse an RFC3339 `resolved_at`; `None` when absent or unparseable."""
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _newer(a, b):
+    """True when datetime `a` is strictly newer than `b` (None sorts oldest)."""
+    if a is None:
+        return False
+    return b is None or a > b
 
 
 def resolve_manager_session(subject, tier):
@@ -130,8 +144,8 @@ def resolve_manager_session(subject, tier):
         sid = os.path.splitext(os.path.basename(f))[0]
         if not SESSION_ID_RE.match(sid):
             continue  # `last-<vault>.json` and other non-session records in this dir
-        ts = d.get("resolved_at") or ""
-        if best is None or ts > best[0]:
+        ts = _ts(d.get("resolved_at"))
+        if best is None or _newer(ts, best[0]):
             best = (ts, sid, branch)
     if not best:
         return None, None
