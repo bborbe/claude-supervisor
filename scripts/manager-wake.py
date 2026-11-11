@@ -59,6 +59,38 @@ PLUGIN_ROOT = os.environ.get("CLAUDE_PLUGIN_ROOT") or os.path.expanduser(
 GUARD = os.path.join(PLUGIN_ROOT, "scripts", "pane-wake-guard.py")
 MANAGER_STATE = os.path.expanduser("~/.claude/state/worker-manager")
 VALID_BRANCHES = ("goal", "topic", "fleet")
+PROMPT_GLYPH = "❯"
+QUEUED_HINTS = ("queued message", "queued messages", "press up to edit queued")
+
+_GUARD_MOD = None
+
+
+def _guard_mod():
+    """`pane-wake-guard.py` imported once, for its `read_pane` and ANSI helpers."""
+    global _GUARD_MOD
+    if _GUARD_MOD is None:
+        spec = importlib.util.spec_from_file_location("supervisor_pane_wake_guard", GUARD)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _GUARD_MOD = mod
+    return _GUARD_MOD
+
+
+def _pane_text(pane_id):
+    """The pane's visible text (ANSI included), or None on a failed read."""
+    return _guard_mod().read_pane(pane_id)
+
+
+def composer_line(text):
+    """The last line carrying the prompt glyph, ANSI/box stripped, or None."""
+    if text is None:
+        return None
+    gw = _guard_mod()
+    for line in reversed(text.splitlines()):
+        s = gw._lead_stripped(gw.strip_ansi(line))
+        if s.startswith(PROMPT_GLYPH):
+            return s
+    return None
 
 
 def _jump():
@@ -105,8 +137,10 @@ def resolve_manager_session(subject, tier):
 def resolve_pane(session_id):
     """The pane id whose tty belongs to `session_id`, or None.
 
-    A failed `wezterm cli list` (`None`) and an unreadable registry are both
-    `None` — never collapsed into "no pane", which would read as "nothing to wake".
+    `None` means EITHER the pane read failed OR no pane matched — the caller types
+    nothing in both cases, so a transient read failure costs one skipped wake (the
+    next tick retries) and never a wrong one. The distinction is not carried because
+    the only consequence is "no wake this tick".
     """
     jump = _jump()
     pmap = jump.wezterm_panes()
@@ -133,34 +167,48 @@ def guard(pane_id):
 
 
 def wake(pane_id, prompt, dry_run):
-    """Type the wake prompt and CONFIRM the submit; never report WOKEN unverified.
+    """Type the wake prompt and CONFIRM it left the composer; never report WOKEN unverified.
 
-    The repo has measured the swallowed-submit defect: a `send-text` that reaches
-    the pty can strand the Enter while the TUI is mid-turn. So after typing, the
-    pane is re-read — `wake` (composer cleared) or `skip:spinner` (the session
-    started working) means the submit landed; a composer that still holds the
-    prompt means the Enter was swallowed. This is an ACTION, not a read: it reports
-    its own outcome rather than collapsing a failure into an empty result, and it is
-    enumerated in `transport-read-check.py` for mechanism/list agreement, deliberately
-    not driven into the three states.
+    Mirrors `server/tab.mjs` `confirmSubmission`: read the composer line, treat our
+    text still sitting there as a swallowed Enter and RE-PRESS it, and report WOKEN
+    only when the composer cleared AND the prompt is visible in the transcript — so a
+    send that never landed is UNVERIFIED, not a false success. This is an ACTION, not
+    a read: it reports its own outcome rather than collapsing a failure into an empty
+    result, and it is enumerated in `transport-read-check.py` for mechanism/list
+    agreement, deliberately not driven into the three states.
     """
     if dry_run:
         return f"WOULD-WAKE pane={pane_id} prompt={prompt!r}"
-    try:
-        r = subprocess.run(["wezterm", "cli", "send-text", "--pane-id", str(pane_id),
-                            "--no-paste", prompt + "\r"],
-                           capture_output=True, text=True, timeout=10)
-    except Exception as exc:  # noqa: BLE001
-        return f"WAKE-FAILED pane={pane_id} {exc}"
-    if r.returncode != 0:
-        return f"WAKE-FAILED pane={pane_id} {(r.stderr or '').strip()}"
-    last = "error:no-verdict"
-    for _ in range(8):
-        time.sleep(0.5)
-        last = guard(pane_id)
-        if last.startswith("wake") or last == "skip:spinner":
-            return f"WOKEN pane={pane_id} prompt={prompt!r}"
-    return f"UNVERIFIED pane={pane_id} prompt={prompt!r} (last verdict: {last})"
+    head = prompt.split("\n")[0].strip()[:40]
+    for attempt in range(3):
+        payload = prompt + "\r" if attempt == 0 else "\r"
+        try:
+            r = subprocess.run(["wezterm", "cli", "send-text", "--pane-id", str(pane_id),
+                                "--no-paste", payload],
+                               capture_output=True, text=True, timeout=10)
+        except Exception as exc:  # noqa: BLE001
+            return f"WAKE-FAILED pane={pane_id} {exc}"
+        if r.returncode != 0:
+            return f"WAKE-FAILED pane={pane_id} {(r.stderr or '').strip()}"
+        for _ in range(5):
+            time.sleep(0.5)
+            text = _pane_text(pane_id)
+            line = composer_line(text)
+            if line is None:
+                continue
+            composer = line[len(PROMPT_GLYPH):].strip()
+            if composer == "":
+                if head in text:
+                    return f"WOKEN pane={pane_id} prompt={prompt!r}"
+                return (f"UNVERIFIED pane={pane_id} prompt={prompt!r} "
+                        "— composer empty but the prompt never reached it")
+            if head in composer:
+                break  # our text is still in the composer: the Enter was swallowed
+            if any(h in composer.lower() for h in QUEUED_HINTS):
+                return f"WOKEN pane={pane_id} prompt={prompt!r} (queued)"
+            return (f"UNVERIFIED pane={pane_id} prompt={prompt!r} "
+                    "— composer holds text this send did not write")
+    return f"FAILED pane={pane_id} prompt={prompt!r} — the Enter was swallowed"
 
 
 def main(argv=None):
