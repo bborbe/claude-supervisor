@@ -7,7 +7,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
-## Unreleased
+## v0.287.1
 
 - docs: **`session-liveness.py`'s docstring names the one class of live session the `mcp-timer` poster never re-stamps, and pins its verdict as UNKNOWN.** The stamp is posted by `claude-wrapper`'s heartbeat poster (`pkg/heartbeat.go`) every 30 s for every session the session registry lists with a live pid, and it deliberately skips any session id the spawn ledger records terminal (`done`/`error`) so a finished worker does not read live. A session id reused by a later resume inherits that terminal row — a resume writes no new ledger row — so the poster never posts for it again and its row freezes at the last POST while its process runs. Measured 2026-11-11: `1c05c414` registry-alive on pid 81794 with its endpoint row frozen at `2026-11-09T22:09:51Z`, its ledger row `done` since `2026-11-07T08:49:12Z`. The verdict for the class is UNKNOWN, never ABSENT, and the registry read in `_absent_licensed` is what keeps it there. Docstring only — no behaviour change; the verdict fix itself shipped in v0.275.0. Change set: `scripts/session-liveness.py`, `CHANGELOG.md`.
 
