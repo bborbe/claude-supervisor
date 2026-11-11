@@ -38,7 +38,9 @@ import io
 import json
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "fleet-board.py")
@@ -702,9 +704,9 @@ class TestUnblocks(unittest.TestCase):
     silently collapse them back into the default.
     """
 
-    def meta(self, status="in_progress", phase="execution", open_boxes=1):
+    def meta(self, status="in_progress", phase="execution", open_boxes=1, defer_date=""):
         return {"title": "T", "path": "/x/T.md", "status": status, "phase": phase,
-                "open_boxes": open_boxes}
+                "open_boxes": open_boxes, "defer_date": defer_date}
 
     def test_a_rendered_panel_is_operator_keystroke(self):
         self.assertEqual(fb.unblocks_for(_sid(1), 5.0, self.meta(), {_sid(1)}),
@@ -762,11 +764,120 @@ class TestUnblocks(unittest.TestCase):
             fb.unblocks_for(_sid(1), 5.0, self.meta(status="completed"), {_sid(1)}),
             fb.UNBLOCKS_OPERATOR)
 
+    # --- `defer_date`: the second inactive-by-design shape --------------------
+
+    def test_a_future_defer_date_is_working_not_nudge(self):
+        """A row parked on the clock is not idle. `declared_wait` cannot see a
+        `defer_date` — it reads the closer's `⏰ Ends:` slot — so before this
+        rule a deferred row reached the nudge test and passed it."""
+        self.assertEqual(
+            fb.unblocks_for(_sid(1), fb.NUDGE_SECONDS,
+                            self.meta(defer_date="2999-01-01T00:00:00+01:00"), set()),
+            fb.UNBLOCKS_WORKING)
+
+    def test_a_past_defer_date_is_nudge_again(self):
+        """The defer parks the row, it does not mute it. Once the date passes the
+        ordinary rule applies again — otherwise a stale `defer_date` would
+        silence a genuinely stalled row forever."""
+        self.assertEqual(
+            fb.unblocks_for(_sid(1), fb.NUDGE_SECONDS,
+                            self.meta(defer_date="2000-01-01T00:00:00+01:00"), set()),
+            fb.UNBLOCKS_NUDGE)
+
+    def test_no_defer_date_is_nudge(self):
+        """The control: the fix must not disarm `nudge` for the population it is
+        not about."""
+        self.assertEqual(
+            fb.unblocks_for(_sid(1), fb.NUDGE_SECONDS, self.meta(), set()),
+            fb.UNBLOCKS_NUDGE)
+
+    def test_a_bare_date_defer_is_working_until_local_midnight(self):
+        """A day-granular defer means start-of-local-day, so the row is parked
+        the day BEFORE the date and due ON it — the semantics `defer-date.py`
+        exists to pin, and the one the `[:10]` slices it replaced got wrong."""
+        now = "2026-11-10T12:00:00+01:00"
+        self.assertEqual(
+            fb.unblocks_for(_sid(1), fb.NUDGE_SECONDS,
+                            self.meta(defer_date="2026-11-11"), set(), now=now),
+            fb.UNBLOCKS_WORKING)
+        self.assertEqual(
+            fb.unblocks_for(_sid(1), fb.NUDGE_SECONDS,
+                            self.meta(defer_date="2026-11-10"), set(), now=now),
+            fb.UNBLOCKS_NUDGE)
+
+    def test_an_invalid_defer_date_falls_through_to_nudge(self):
+        """A typo must not park a row forever: an unreadable value is treated as
+        no defer, and `build_rows` reports it in `details` so the vault value
+        gets corrected rather than silently ignored."""
+        self.assertEqual(
+            fb.unblocks_for(_sid(1), fb.NUDGE_SECONDS, self.meta(defer_date="2026-11-2"), set()),
+            fb.UNBLOCKS_NUDGE)
+
+    def test_a_deferred_row_still_yields_to_operator_and_reap(self):
+        """The defer is a nudge suppressor, not a top-priority class: a keystroke
+        is the operator's to press and a finished task wants closing, whatever
+        the defer says."""
+        self.assertEqual(
+            fb.unblocks_for(_sid(1), fb.NUDGE_SECONDS,
+                            self.meta(defer_date="2999-01-01"), {_sid(1)}),
+            fb.UNBLOCKS_OPERATOR)
+        self.assertEqual(
+            fb.unblocks_for(_sid(1), fb.NUDGE_SECONDS,
+                            self.meta(status="completed", defer_date="2999-01-01"), set()),
+            fb.UNBLOCKS_REAP)
+
     def test_every_row_carries_a_value_from_the_fixed_set(self):
         rows, _ = fb.build_rows(REGISTRY, GATES, STUCK, TITLES, AGES)
         self.assertTrue(rows)
         for r in rows:
             self.assertIn(r["unblocks"], fb.UNBLOCKS_VALUES)
+
+
+class TestTaskIndexDeferDate(unittest.TestCase):
+    """`build_task_index` must carry `defer_date` through to the board.
+
+    The change spans two files and this is the half that fails quietly: the
+    classification lives in `fleet-board.py`, the field it reads is built here.
+    A rule with no field to read looks exactly like a rule that works, because
+    `working` is also the default.
+    """
+
+    def _index_for(self, frontmatter_extra=""):
+        with tempfile.TemporaryDirectory() as root:
+            tasks = Path(root) / "v" / "25 Tasks"
+            tasks.mkdir(parents=True)
+            (tasks / "T.md").write_text(
+                "---\n"
+                f"claude_session_id: {_sid(9)}\n"
+                "status: in_progress\n"
+                "phase: execution\n"
+                f"{frontmatter_extra}"
+                "---\n\n- [ ] open\n",
+                encoding="utf-8",
+            )
+            saved = os.environ.get("OBSIDIAN_DIR")
+            os.environ["OBSIDIAN_DIR"] = root
+            try:
+                return fb.fs.build_task_index()[1]
+            finally:
+                if saved is None:
+                    os.environ.pop("OBSIDIAN_DIR", None)
+                else:
+                    os.environ["OBSIDIAN_DIR"] = saved
+
+    def test_a_quoted_defer_date_is_carried_unquoted(self):
+        meta = self._index_for('defer_date: "2026-11-11T07:00:00+01:00"\n')
+        self.assertEqual(meta[_sid(9)]["defer_date"], "2026-11-11T07:00:00+01:00")
+
+    def test_a_bare_defer_date_is_carried_verbatim(self):
+        meta = self._index_for("defer_date: 2026-11-11\n")
+        self.assertEqual(meta[_sid(9)]["defer_date"], "2026-11-11")
+
+    def test_a_task_without_a_defer_date_carries_an_empty_string(self):
+        """Empty, never absent: every row then has the same shape, and
+        `_defer_reading` answers `none` for it rather than raising a KeyError."""
+        meta = self._index_for()
+        self.assertEqual(meta[_sid(9)]["defer_date"], "")
 
     def test_a_gated_row_keeps_its_pane_detail(self):
         """The two sets overlap — a session holding an open gate has also ended

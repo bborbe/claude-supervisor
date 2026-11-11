@@ -199,6 +199,13 @@ SITE_LIST = {
     # predicate. Same shape as `restart-worker.py`'s `worker_argv` above.
     ("fleet-reset.py", "own_pids"), ("fleet-reset.py", "pid_alive"),
     ("fleet-reset.py", "proc_comm"),
+    # added 2026-11-10 — `fleet-reset.py`'s `_pid_alive`, the strip guard's corroboration:
+    # it asks whether the identity registry's recorded pid is still running, and answers
+    # True when the read fails, so a task link is KEPT rather than stripped over a process
+    # that may still be alive. Same fail-closed predicate shape as the three above —
+    # enumerated for mechanism/list agreement, deliberately NOT driven into the three
+    # states, because its broken answer is a conservative refusal, not an empty read.
+    ("fleet-reset.py", "_pid_alive"),
 }
 
 
