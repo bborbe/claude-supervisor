@@ -8,8 +8,12 @@ tick). This script is the pane-wake half of wiring that verdict into the wake pa
 nothing and costs zero model rounds; a changed tick types exactly one wake prompt
 into the manager's pane, costing one model turn.
 
-    manager-wake.py --vault <path> --subject <name> [--tier goal|topic|fleet]
+    manager-wake.py --vault <path> --subject <name> [--tier auto|goal|topic|fleet]
                     [--interval 15] [--dry-run]
+
+`--tier auto` (the default) matches any branch and derives the drive prompt from
+the resolved manager's own `branch`, so a caller that enumerates subjects without
+knowing their tier (the detached loop) need not know it.
 
 Resolution, in order:
 
@@ -100,12 +104,12 @@ def pane_sessions(pmap):
 
 
 def resolve_manager_session(subject, tier):
-    """The subject's manager session id, or None. Newest `resolved_at` wins.
+    """(session_id, branch) for the subject's manager, or (None, None).
 
-    Matched on `subject` (case-insensitive) and `branch` == tier. The `vault` field
-    is deliberately NOT a filter: the state files carry the old vault name
-    (`Personal`) while the live vault is `private-personal`, so a vault match would
-    refuse every manager. Subject + tier is the identity that is stable.
+    Newest `resolved_at` wins. `tier` may be `auto` to match any branch; otherwise
+    it must equal the registration's `branch`. The `vault` field is deliberately NOT
+    a filter: the state files carry the old vault name (`Personal`) while the live
+    vault is `private-personal`, so a vault match would refuse every manager.
     """
     want = (subject or "").strip().lower()
     best = None
@@ -117,13 +121,18 @@ def resolve_manager_session(subject, tier):
             continue
         if (d.get("subject") or "").strip().lower() != want:
             continue
-        if (d.get("branch") or "").strip().lower() != tier:
+        branch = (d.get("branch") or "").strip().lower()
+        if not branch:
+            continue
+        if tier != "auto" and branch != tier:
             continue
         sid = os.path.splitext(os.path.basename(f))[0]
         ts = d.get("resolved_at") or ""
         if best is None or ts > best[0]:
-            best = (ts, sid)
-    return best[1] if best else None
+            best = (ts, sid, branch)
+    if not best:
+        return None, None
+    return best[1], best[2]
 
 
 def resolve_pane(session_id):
@@ -168,14 +177,14 @@ def main(argv=None):
     ap.add_argument("--vault", default=None,
                     help="vault path or name (context only; not a resolution filter)")
     ap.add_argument("--subject", required=True, help="goal / topic / 'Fleet Manager'")
-    ap.add_argument("--tier", choices=["goal", "topic", "fleet"], default="goal")
+    ap.add_argument("--tier", choices=["auto", "goal", "topic", "fleet"], default="auto")
     ap.add_argument("--interval", default="15",
                     help="minutes for the drive round's --interval (default 15)")
     ap.add_argument("--dry-run", action="store_true",
                     help="resolve and guard, but type nothing")
     args = ap.parse_args(argv)
 
-    sid = resolve_manager_session(args.subject, args.tier)
+    sid, branch = resolve_manager_session(args.subject, args.tier)
     if not sid:
         print(f"NO-MANAGER subject={args.subject!r} tier={args.tier}")
         return 0
@@ -190,7 +199,7 @@ def main(argv=None):
         print(f"SKIP {verdict} pane={pane} session={sid[:8]}")
         return 0
 
-    prompt = f"/supervisor:{args.tier}-drive --interval {args.interval}m"
+    prompt = f"/supervisor:{branch}-drive --interval {args.interval}m"
     print(wake(pane, prompt, args.dry_run))
     return 0
 
