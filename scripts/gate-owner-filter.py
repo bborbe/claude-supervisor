@@ -379,10 +379,19 @@ WORKER_MANAGER_DIR = os.path.expanduser(
 )
 FLEET_BRANCH = "fleet"
 UNOWNED = "unowned"
-#: The routed spelling. A distinct reason so `--explain` and the counts line can say
-#: "routed to the Fleet Manager" rather than reusing `unowned`, which after this change
-#: means "no destination resolved, emitted to everyone".
-UNOWNED_FLEET = "unowned-fleet"
+#: The pane's spawner IS a manager, but that manager is no longer live. The old rule emitted
+#: on the reasoning that "a dead manager cannot act on its own gate, so nothing duplicates
+#: this wake" -- right about duplication, wrong about cost: it hands the gate to EVERY
+#: manager instead of the one whose job is unowned work. Measured 2026-11-11 in SC1's
+#: after-window: one orphaned worker pane (`088ab282`, spawned 2026-11-07, ledger still
+#: `running`) was the only foreign wake left, and it arrived through this branch.
+DEAD_MANAGER = "dead-manager"
+#: Appended to a routed reason, so `--explain` and the ledger keep WHICH class was routed
+#: while the counts line can bucket them together. `unowned` -> `unowned-fleet`.
+FLEET_SUFFIX = "-fleet"
+#: The routed spelling of `unowned`, kept as its own name because it is the one the SC2
+#: criterion quotes.
+UNOWNED_FLEET = UNOWNED + FLEET_SUFFIX
 
 #: One manager's per-decision ledger. Shares the per-session root the tracked-set arm
 #: writes its `events.jsonl` into, so both arms of the same manager sit together.
@@ -662,13 +671,13 @@ def fleet_manager(live, directory=None):
     return best
 
 
-def route_unowned(self_id, fleet):
-    """`(verdict, reason)` for a gate whose owner could not be resolved.
+def route_to_fleet(self_id, fleet, reason):
+    """`(verdict, reason)` for a gate no manager can act on, so exactly one should see it.
 
-    The routing rule, in one place because it has two call sites (`:789` via
-    `spawner_verdict`, and `:816` for a gate with no session id at all) and the two must
-    not drift: a manager that routes one class and emits the other is the flood again,
-    at half the rate.
+    Every class the caller routes here shares one property: the reader cannot answer it and
+    no other manager owns it, so leaving it in every feed is cost without work. The reason
+    is preserved with `FLEET_SUFFIX` appended, so a routed row still says WHICH class it was
+    while the counts line buckets them together.
 
     Four answers, and every one of them is deliberate:
 
@@ -678,13 +687,19 @@ def route_unowned(self_id, fleet):
       * no live Fleet Manager — emit. The fail-open limb: an unresolvable destination is
         not a licence to silence a gate.
       * this watcher IS the Fleet Manager — emit. It is the destination.
-      * anything else — drop, named `unowned-fleet`, so the row says where it went.
+      * anything else — drop, so the row says where it went.
     """
     if not self_id or not fleet:
-        return EMIT, UNOWNED
+        return EMIT, reason
+    routed = reason + FLEET_SUFFIX
     if self_id == fleet:
-        return EMIT, UNOWNED_FLEET
-    return DROP, UNOWNED_FLEET
+        return EMIT, routed
+    return DROP, routed
+
+
+def route_unowned(self_id, fleet):
+    """The `unowned` class, routed. Kept as its own name because SC2 quotes it."""
+    return route_to_fleet(self_id, fleet, UNOWNED)
 
 
 def log_items(state_dir=STATE):
@@ -905,7 +920,9 @@ def spawner_verdict(spawner, ledger, live):
     if live is None:
         return EMIT, "liveness-unknown"
     if spawner not in live:
-        return EMIT, "dead-manager"
+        # Routed by `verdict()` via `route_to_fleet`, for the same reason `unowned` is: the
+        # spawner is gone, so nobody can act on this gate and every manager would inherit it.
+        return EMIT, DEAD_MANAGER
     return DROP, "peer-manager"
 
 
@@ -1028,8 +1045,8 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None, scope=None,
             return DROP, "claimed"
     # Nothing above resolved this pane, so the routed limb decides — LAST, for the reason
     # in the comment above hop 3b.
-    if reason == UNOWNED:
-        return route_unowned(self_id, fleet)
+    if reason in (UNOWNED, DEAD_MANAGER):
+        return route_to_fleet(self_id, fleet, reason)
     return call, reason
 
 
@@ -1486,7 +1503,10 @@ def counts_line(rows):
     dropped_own = [r for r in dropped if r["reason"] == "peer-manager-own"]
     dropped_claimed = [r for r in dropped if r["reason"] == "claimed"]
     dropped_not_open = [r for r in dropped if r["reason"] == NOT_OPEN_REASON]
-    dropped_unowned = [r for r in dropped if r["reason"] == UNOWNED_FLEET]
+    # ONE bucket for every routed class, because the bucket answers "how much left this
+    # feed for the Fleet Manager", not "which hop found it". The specific reason stays on
+    # the row (`--explain`, `--json`, and the ledger's `reason`), so nothing is lost.
+    dropped_fleet = [r for r in dropped if r["reason"].endswith(FLEET_SUFFIX)]
     excluded = [r for r in rows if r["verdict"] == EXCLUDE]
     excluded_goal = [r for r in excluded if r["reason"].startswith("foreign-goal:")]
     excluded_unknown = [r for r in excluded if r["reason"] == "owner-unknown"]
@@ -1497,7 +1517,7 @@ def counts_line(rows):
         f"dropped(peer-manager-own): {len(dropped_own)}  "
         f"dropped(claimed): {len(dropped_claimed)}  "
         f"dropped(not-open): {len(dropped_not_open)}  "
-        f"dropped(unowned-fleet): {len(dropped_unowned)}  "
+        f"dropped(fleet-routed): {len(dropped_fleet)}  "
         f"excluded(foreign-goal): {len(excluded_goal)}  "
         f"excluded(owner-unknown): {len(excluded_unknown)}  "
         f"excluded(role-human): {len(excluded_human)}"
