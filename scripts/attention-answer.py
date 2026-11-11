@@ -653,6 +653,36 @@ def post_attempt(item_id, carrier, outcome):
         return json.load(resp)
 
 
+def mirror_known(item_id, state_dir=None):
+    """True when the EVENT LOG has ever named this id — open OR closed.
+
+    ⚠️ **The attempt leg must not ask `mirror_gate()`.** By the time a delivery is
+    reported the card has usually ALREADY CLOSED — the session's next turn clears it —
+    so requiring a still-open gate there would re-raise `FAILED` for a delivery that
+    succeeded, which is the opposite of what the branch exists for. "The log knows this
+    id" is the discriminator that does not depend on card state, and it still separates a
+    mirror from a store id: the two id spaces are disjoint, so a store id is never in the
+    log and an older store's missing `/attempt` endpoint keeps its `FAILED:` signal.
+    """
+    base = state_dir or ATTENTION_STATE_DIR
+    for path in glob.glob(os.path.join(base, "*.events.jsonl")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(rec, dict) and rec.get("item_id") == item_id:
+                        return True
+        except OSError:
+            continue
+    return False
+
+
 def cmd_attempt(item_id, carrier, outcome, out=sys.stdout):
     """Record the outcome of a delivery this arm attempted.
 
@@ -675,8 +705,12 @@ def cmd_attempt(item_id, carrier, outcome, out=sys.stdout):
         # other cause: against a store older than attention-controller v0.30.0 the `/attempt`
         # endpoint does not exist, and that is "a missing endpoint, not a failed delivery".
         # Swallowing every 404 would delete that documented `FAILED:` signal and mislabel it
-        # as a mirror card. The id must actually BE a mirror.
-        if err.code != 404 or mirror_gate(item_id) is None:
+        # as a mirror card.
+        #
+        # ⚠️ And the test is `mirror_known`, NOT `mirror_gate`: by the time this leg runs the
+        # card has usually already closed, so asking for a still-open gate would re-raise
+        # FAILED for a delivery that succeeded.
+        if err.code != 404 or not mirror_known(item_id):
             raise
         # A mirror card has no store record, so there is no attempt trail to append to.
         # Reporting that as a failure would turn a delivery that DID happen into a failed

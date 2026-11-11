@@ -759,9 +759,12 @@ class MirrorCardLookup(unittest.TestCase):
 
     def test_a_mirror_attempt_404_reports_the_delivery_not_a_failure(self):
         # The command runs this step unconditionally after a delivery, so a 404 here
-        # would report a delivery that happened as a failed attempt. A real log record is
-        # required: the handler only treats a 404 as the mirror case when the id IS one.
-        self._write(self._open())
+        # would report a delivery that happened as a failed attempt.
+        #
+        # ⚠️ The record is CLOSED, which is the normal case: the session's next turn
+        # clears the card before this leg runs. A gate-only check would re-raise FAILED
+        # for a delivery that succeeded.
+        self._write(self._open(), self._close())
         out = io.StringIO()
         not_found = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
         with mock.patch.object(aa, "post_attempt", side_effect=not_found), \
