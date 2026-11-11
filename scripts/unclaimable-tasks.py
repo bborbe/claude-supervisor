@@ -93,10 +93,14 @@ def rows(since, roots=None):
                 candidate = os.path.join(path, sub)
                 if os.path.isdir(candidate):
                     roots.append(candidate)
+        # No fallback path list. A hardcoded home-directory guess is wrong on any
+        # other machine and, worse, silently scans a directory that is not the
+        # fleet's — so an empty resolution is a failed read, never an empty result.
         if not roots:
-            for path in ("~/Documents/Obsidian/private-agent/tasks",
-                         "~/Documents/Obsidian/seibert-agent/tasks"):
-                roots.append(os.path.expanduser(path))
+            raise SystemExit(
+                "unclaimable-tasks: no agent runtime vault resolved from vault-cli config; "
+                "refusing to report 'none' for a pass that scanned nothing"
+            )
 
     found = []
     for root in roots:
@@ -154,10 +158,13 @@ def main():
         )
     if len(recent) > args.limit:
         print(f"  … and {len(recent) - args.limit} more")
+    # Undated rows are subtracted from `historical`, not counted in both. They are
+    # a row set with no window date, so leaving them inside `historical` made the
+    # three numbers exceed the total.
     print(
         f"  recent: {len(recent)} (since {args.since})"
-        f"   historical: {len(found) - len(recent)}"
-        f"   undated: {len(undated)}"
+        f" · historical: {len(found) - len(recent) - len(undated)}"
+        f" · undated: {len(undated)}"
     )
     if recent:
         print("  ⚠️ recently minted — the mint is still producing the empty field")

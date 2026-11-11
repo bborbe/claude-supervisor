@@ -148,7 +148,7 @@ The caller forwards this path verbatim to `agents/fleet-drive.md`, which reads i
 
 ⚠️ **Sanitize the timestamp into the filename, and treat this clause as its single home.** Replace every character outside `[0-9A-Za-z._-]` with `-`, so a caller passing `2026-10-11T18:09:40Z` yields `2026-10-11T18-09-40Z.digest`. The round timestamp's format is the caller's and is not fixed anywhere, so the sanitization is what keeps the path printable and re-readable — and it is what keeps this file's name aligned with the drive leg's, which applies the same rule by pointing here rather than copying it. The caller never recomputes the path; it forwards your `payload=` value verbatim.
 
-Return **≤ 46 lines for the fixed sections plus one `CLOSERS` row per live session** — the fixed allowance is 46 plus the `LEGS` block as seeded here (header + two `not run` lines = three) — exactly these sections, each printed as `(none)` rather than dropped. The six over 40 are `UNCLAIMABLE`'s header, five recent rows and its counts line. ⚠️ **`CLOSERS` is exempt from that allowance and is never collapsed to a count summary**: its rows are bounded by fleet size, not candidate count, and a summary hides every captured `routine`/`none` closer from `agents/fleet-drive.md` step 4a, which reads this render and fail-closes a missing row to `unverifiable`.
+Return **≤ 48 lines for the fixed sections plus one `CLOSERS` row per live session** — the fixed allowance is 48 plus the `LEGS` block as seeded here (header + two `not run` lines = three) — exactly these sections, each printed as `(none)` rather than dropped. The eight over 40 are `UNCLAIMABLE`'s header, its five recent rows, its counts line and its status line. ⚠️ **`CLOSERS` is exempt from that allowance and is never collapsed to a count summary**: its rows are bounded by fleet size, not candidate count, and a summary hides every captured `routine`/`none` closer from `agents/fleet-drive.md` step 4a, which reads this render and fail-closes a missing row to `unverifiable`.
 
 ```
 DIGEST <round timestamp> · <N> sessions · snapshot written: <swept_at from fleet-snapshot.py>
@@ -169,6 +169,7 @@ UNMANAGED TOPICS
 UNCLAIMABLE (empty target_vault, agent runtime vaults)  — or: UNKNOWN (pass not run)
   <task id> · <task_type> · <status> · <file> · blocks <pr|—>     ← recent only, max 5
   recent: <n> (since <date>) · historical: <n> · undated: <n>
+  ⚠️ recently minted — the mint is still producing the empty field   — or: no recent emissions
 CONTEXT ≥70% (idle, not in tool)
   <name> · <pct>
 LEDGER (open)
