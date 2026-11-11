@@ -66,12 +66,35 @@ _QUALIFIED = re.compile(r"\b([\w.-]+)/([\w.-]+)#(\d+)\b")
 #: reported as this row's evidence.
 _BARE = re.compile(r"\b(?:PR|pull\s+request)\s*#?\s*(\d+)\b", re.IGNORECASE)
 
+#: Any `#<n>`. Used ONLY to pick up an unprefixed second PR (`nuke #939`) after a PR
+#: token has appeared — see `observables()`. A commit SHA (`ee0fd9c`) and a date
+#: (`2026-11-11`) carry no `#`, and a fragment like `#issuecomment-1` is not numeric, so
+#: none of them match.
+_HASH = re.compile(r"#(\d+)\b")
+
+#: The token that licenses an unprefixed `#<n>` as a PR reference.
+_PR_TOKEN = re.compile(r"\b(?:PR|pull\s+request)\b", re.IGNORECASE)
+
 
 def observables(text):
     """Every DISTINCT PR this `⏰ Ends:` text names.
 
     Returns `[{"kind", "repo", "number"}, …]`, empty when the text names no PR at all —
     a clock, a person, a vendor reply. An empty list is `unprobeable`, never "cleared".
+
+    ⚠️ **An UNPREFIXED `#<n>` counts as a PR only AFTER a `PR` / `pull request` token has
+    appeared.** The fleet writes mixed shapes — *"bot verdict on PR #119 head `ee0fd9c`
+    or nuke #939 head `2ed9c4c`"* — and a prefix-only matcher probed #119 and never saw
+    #939, so a merged #119 cleared a declaration whose second PR was still open. That is
+    the same false clearance this module's second invariant forbids, reached through the
+    parser instead of the AND logic. The position rule is what keeps the widening safe:
+    a *counter* rather than a PR — *"audit #4 returns a score; PR #536 merges"* — sits
+    before any PR token and is therefore not collected, where a blanket `#<n>` matcher
+    would have probed it as a PR and could clear on it.
+
+    A text with no `PR` token at all (*"a review appears on #89 or #92"*) yields `[]` and
+    is `unprobeable`. That is the safe direction: the declaration is not identified, so
+    it is not cleared.
 
     ⚠️ **The list is grouped by SHAPE, not by position in the text** — URLs first, then
     `owner/repo#n`, then bare numbers. `verdict()` is order-independent (it ANDs the
@@ -91,19 +114,42 @@ def observables(text):
             seen.add((repo, number))
             found.append({"kind": PR, "repo": repo, "number": number})
 
+    url_spans = []
+
+    def inside(spans, pos):
+        return any(start <= pos < end for start, end in spans)
+
     for m in _URL.finditer(text):
         add(f"{m.group(1)}/{m.group(2)}", int(m.group(3)))
+        url_spans.append(m.span())
+
     for m in _QUALIFIED.finditer(text):
+        # A URL's own path/fragment is not a second observable: without this, a link
+        # ending `…#1` yielded a phantom `pull/786#1` whose probe failure turned a
+        # genuinely merged PR into `unprobeable`.
+        if inside(url_spans, m.start()):
+            continue
         add(f"{m.group(1)}/{m.group(2)}", int(m.group(3)))
-    # A bare number is only worth its own entry when nothing above resolved it — probing
-    # it again would add a second call for one PR, and an un-resolvable duplicate would
-    # fail the whole declaration that a qualified reference had already settled.
-    resolved = {n for (r, n) in seen if r}
+
+    prefixed_spans = []
     for m in _BARE.finditer(text):
-        number = int(m.group(1))
-        if number not in resolved:
-            add(None, number)
-    return found
+        add(None, int(m.group(1)))
+        prefixed_spans.append(m.span())
+
+    first_token = _PR_TOKEN.search(text)
+    if first_token is not None:
+        for m in _HASH.finditer(text):
+            pos = m.start()
+            if pos < first_token.start():
+                continue  # a counter before any PR token ("audit #4") is not a PR
+            if inside(prefixed_spans, pos) or inside(url_spans, pos):
+                continue  # already collected, or a URL fragment
+            add(None, int(m.group(1)))
+
+    # A bare number that a qualified reference already resolved adds nothing, and an
+    # unresolvable duplicate would fail a declaration the qualified form had settled.
+    resolved = {number for (repo, number) in seen if repo}
+    return [o for o in found if o["repo"] or o["number"] not in resolved]
 
 
 def probe_pr(repo, number):

@@ -81,6 +81,38 @@ class ObservableParsing(unittest.TestCase):
     def test_two_prs_are_both_collected(self):
         self.assertEqual([o["number"] for o in orx.observables("PR #786 and PR #791")], [786, 791])
 
+    def test_an_unprefixed_second_pr_after_a_pr_token_is_collected(self):
+        # The shape the fleet actually writes, measured in live declarations. A
+        # prefix-only matcher probed #119 and never saw #939, so a merged #119 cleared a
+        # declaration whose second PR was still open.
+        self.assertEqual(
+            [o["number"] for o in orx.observables(
+                "bot verdict on PR #119 head `ee0fd9c` or nuke #939 head `2ed9c4c`"
+            )],
+            [119, 939],
+        )
+
+    def test_a_counter_before_any_pr_token_is_not_a_pr(self):
+        # "audit #4" is an ordinal, not a PR. A blanket `#<n>` matcher would probe it as
+        # one and could clear on it; the position rule drops it.
+        self.assertEqual(
+            [o["number"] for o in orx.observables(
+                "audit #4 returns a score → I flip the phase; PR #536 merges → I rebase"
+            )],
+            [536],
+        )
+
+    def test_a_text_with_no_pr_token_is_unprobeable(self):
+        # Nothing identifies these as PRs, so the declaration is not cleared — the safe
+        # direction, stated in the docstring.
+        self.assertEqual(orx.observables("a review appears on #89 or #92"), [])
+
+    def test_a_url_fragment_is_not_a_second_observable(self):
+        self.assertEqual(
+            orx.observables("https://github.com/bborbe/claude-supervisor/pull/786#1"),
+            [{"kind": orx.PR, "repo": "bborbe/claude-supervisor", "number": 786}],
+        )
+
     def test_a_bare_repeat_of_a_qualified_pr_is_not_probed_twice(self):
         # Probing it again would add a second call for one PR, and an unresolvable
         # duplicate would fail a declaration the qualified reference had settled.
