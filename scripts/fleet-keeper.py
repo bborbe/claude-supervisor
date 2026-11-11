@@ -592,8 +592,17 @@ def restart_fresh_session(sid):
     stderr = (out.stderr or "").strip()
     if out.returncode == 0:
         return True, lines[-1].strip() if lines else "restarted fresh"
-    reason = lines[0] if lines else (stderr.splitlines()[-1] if stderr else "no output")
-    return False, f"exit {out.returncode}: {reason}"
+    # ⚠️ The ERROR line, never `lines[0]`. restart-worker prints a header first and its
+    # `❌ error:` / `   killing-pid` lines after it, so `lines[0]` is always the header and
+    # reporting it hides the cause completely. Measured 2026-11-11: the keeper logged
+    # "exit 1: 🔄 restart-worker · session ac24db61 · pid 21437 · 'Fleet Manager'" for a
+    # failure whose real cause was a bare `wezterm` missing from launchd's PATH — the header
+    # was reported as the finding and the actual error sat one line lower.
+    errors = [ln for ln in lines if ln.lstrip().startswith("❌")]
+    reason = (errors[-1] if errors
+              else lines[-1] if lines
+              else (stderr.splitlines()[-1] if stderr else "no output"))
+    return False, f"exit {out.returncode}: {reason.strip()}"
 
 
 def act_on_fresh_answer(sid, lapse, now):

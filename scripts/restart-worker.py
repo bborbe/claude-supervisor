@@ -779,7 +779,8 @@ def parse_started(rec):
         return None
 
 
-def resume_command(sid, title, chip, cwd, launcher, fresh_prompt=None):
+def resume_command(sid, title, chip, cwd, launcher, fresh_prompt=None,
+                   wezterm="wezterm"):
     """The resume recipe, copied from `commands/open.md` Step 3.1.
 
     ``fresh_prompt`` set → a NEW session is started through the same launcher, cwd and exit
@@ -787,6 +788,13 @@ def resume_command(sid, title, chip, cwd, launcher, fresh_prompt=None):
     `fleet-keeper.py`'s answer-gated `restart fresh` (operator ruling 2026-11-10): a lapsed
     manager whose context is exhausted comes back exhausted on ``--resume``. The colour chip is
     not applied on this path — the launcher takes one initial prompt, and it carries the loop.
+
+    ``wezterm`` must be the RESOLVED binary, never a bare name. Under launchd the keeper's
+    `PATH` is `/usr/bin:/bin:/usr/sbin:/sbin`, which does not contain wezterm, so a bare
+    `"wezterm"` raises FileNotFoundError there. Measured 2026-11-11: the keeper's
+    `restart fresh` killed the Fleet Manager and then could not spawn the replacement,
+    leaving the fleet dead for 14 minutes until the separate `--absent` resume path (which
+    already used `find_wezterm()`) recovered it.
 
     A markdown command is not executable, so this is a deliberate copy — see the module
     docstring. The `unset` list matters: a resumed session that inherits the parent's
@@ -844,7 +852,7 @@ def resume_command(sid, title, chip, cwd, launcher, fresh_prompt=None):
         + (f'"{script}" -n "{title}" "{fresh_prompt}"' if fresh_prompt
            else f'"{script}" --resume {sid} -n "{title}" "/color {chip}"')
     )
-    argv = ["wezterm", "cli", "spawn"]
+    argv = [wezterm, "cli", "spawn"]
     if cwd:
         argv += ["--cwd", cwd]
     return argv + ["--", "env", f"SESSION_EXIT_RECORD={RECORD_SCRIPT}", "bash", "-lc", inner]
@@ -1556,6 +1564,17 @@ def main():
         return 1
     print(f"   launcher: {launcher} ({launcher_source})")
 
+    # ⚠️ Resolved BEFORE the kill, for the same reason the launcher and cwd are: a spawn that
+    # cannot happen must not leave a killed pid behind it. The keeper runs under launchd, whose
+    # PATH holds no wezterm, so a bare `"wezterm"` fails there while the `--absent` path (which
+    # already calls `find_wezterm()`) succeeds — the asymmetry that produced the 2026-11-11
+    # destructive-without-restorative failure.
+    wezterm = find_wezterm()
+    if wezterm is None:
+        print("❌ error: no wezterm found on PATH or at a known install location "
+              f"({', '.join(WEZTERM_LOCATIONS)}) — refusing before the kill, nothing signalled")
+        return 1
+
     # Checked before the dry-run report and before the kill: an unresumable session must not be
     # signalled, and a dry-run that skipped this guard would report a resume that the real run
     # then refuses.
@@ -1610,7 +1629,7 @@ def main():
     # the caller branches on this exit code to decide whether the worker is back.
     try:
         spawned = subprocess.run(
-            resume_command(sid, title, chip, cwd, launcher, args.fresh_prompt),
+            resume_command(sid, title, chip, cwd, launcher, args.fresh_prompt, wezterm),
             capture_output=True, text=True, timeout=30,
         )
     except Exception as error:
