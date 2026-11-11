@@ -169,6 +169,13 @@ SITE_LIST = {
     # failed `get-text`: the guard maps it to `error:unreadable` and the wake skips the pane,
     # so a failed read can never read as an empty, wakeable composer.
     ("pane-wake-guard.py", "read_pane"), ("pane-wake.py", "read_pane"),
+    # added 2026-11-11 — `manager-wake.py`'s `wake`, the `wezterm cli send-text` the
+    # pane-wake half of "Wire the Sweep Gate Verdict Into the Manager Wake" types with.
+    # ⚠️ It is an ACTION, not a read: it reports its own failure and types nothing when
+    # the guard refuses, so it is enumerated for mechanism/list agreement and
+    # deliberately not driven into the three states. The pane JOIN it uses is `jump.py`'s
+    # `wezterm_panes` / `pane_sessions`, already enumerated and driven.
+    ("manager-wake.py", "wake"),
     # added 2026-10-22 — `manager-attention-watch.py`'s pane-title read, the join that
     # gives a re-registered park card its jump target. It returns `None` for a failed
     # query, never `""`: a `wezterm cli list` that never answered cannot prove a pane is
