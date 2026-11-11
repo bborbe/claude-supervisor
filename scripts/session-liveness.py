@@ -395,7 +395,7 @@ def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
         ), None
 
 
-def _absent_licensed(sid, registry_dir=None):
+def _absent_licensed(sid, registry_dir=None, endpoint_state="holds no row for it"):
     """`(verdict, message, None)` for an id the endpoint holds NO row for — the ABSENT licence.
 
     ⚠️ **The three-tuple is `_check`'s contract, and the `None` row is part of it.** `_check`
@@ -450,8 +450,8 @@ def _absent_licensed(sid, registry_dir=None):
     if non_dead:
         return UNKNOWN, (
             "%s is held by the identity registry as non-dead while the session-heartbeat "
-            "endpoint holds no row for it — the endpoint's coverage of live sessions is "
-            "incomplete, so ABSENT cannot be licensed" % non_dead[0]
+            "endpoint %s — the endpoint's coverage of live sessions is "
+            "incomplete, so ABSENT cannot be licensed" % (non_dead[0], endpoint_state)
         ), None
     return ABSENT, "no session id matches %s" % sid, None
 
@@ -587,7 +587,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
     # The exact-match fast path: a full id is one dict lookup, and the prefix scan is skipped.
     exact = next((k for k in by_id if k.lower() == sid), None)
     if exact is not None:
-        return _verdict_for(by_id[exact], sid)
+        return _verdict_for(by_id[exact], sid, registry_dir)
     matches = sorted(sid_ for sid_ in by_id if sid_.lower().startswith(sid))
     if len(matches) > 1:
         # 12 chars, not 8: the caller already passed a prefix long enough to collide, so
@@ -598,7 +598,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
             ", ".join(m[:12] for m in matches),
         ), None
     if len(matches) == 1:
-        return _verdict_for(by_id[matches[0]], sid)
+        return _verdict_for(by_id[matches[0]], sid, registry_dir)
 
     # The list was readable and matched nothing. Confirm against the per-id route before
     # licensing ABSENT — the one verdict a caller acts on by starting a second writer.
@@ -621,7 +621,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
             _describe_read_failure(exc),
         ), None
     if status == 200 and isinstance(row, dict):
-        return _verdict_for(row, sid)
+        return _verdict_for(row, sid, registry_dir)
     if status == 404:
         return _absent_licensed(sid, registry_dir)
     return UNKNOWN, "session-heartbeat endpoint returned HTTP %s for %s after %d ms" % (
@@ -631,7 +631,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
     ), None
 
 
-def _verdict_for(row, sid):
+def _verdict_for(row, sid, registry_dir=None):
     """`(verdict, message, row)` for a single heartbeat row. UNKNOWN when `live` is unusable.
 
     ⚠️ **A not-live CLUSTER row is UNKNOWN while the local reachability marker is stale.** The
@@ -640,8 +640,10 @@ def _verdict_for(row, sid):
     `_cluster_reachable`. A cluster worker whose stamp has gone stale because the mirror lost the
     cluster is a worker that may be ALIVE behind a network fault; folding that into ABSENT would
     authorise a resume onto it. `UNKNOWN` never authorises a resume, so it is the safe direction.
-    A cluster row with a FRESH marker, and any non-cluster row, keep their ABSENT: there the
-    staleness is the ordinary death case.
+    A cluster row with a FRESH marker, and any non-cluster row, then have their death decided by
+    the identity registry rather than by the row — see `_absent_licensed`. A row that says
+    `live: false` for a session whose process is still running is exactly the stale-row case this
+    gate exists to catch, and it is the same predicate the no-row path already pays.
     """
     full = row.get("session_id") or sid
     live = row.get("live")
@@ -665,7 +667,10 @@ def _verdict_for(row, sid):
                     "%s is a cluster session and %s — the cluster could not be read, so this "
                     "row's staleness proves nothing" % (full, why)
                 ), row
-        return ABSENT, full, row
+        verdict, why, _ = _absent_licensed(
+            full, registry_dir, "serves a stale `live: false` row for it"
+        )
+        return verdict, why, row
     return UNKNOWN, (
         "%s has a heartbeat row with no usable `live` flag — cannot decide liveness" % full
     ), row
