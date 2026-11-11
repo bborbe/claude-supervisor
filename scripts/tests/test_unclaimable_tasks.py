@@ -10,11 +10,15 @@ The defect this change removes is a task no controller claims that nothing repor
 defect it could easily introduce is the opposite: a sweep that reports a clean `none` for
 a pass that scanned nothing, which reads exactly like a healthy fleet.
 """
+import contextlib
 import importlib.util
+import io
 import os
 import pathlib
+import sys
 import tempfile
 import unittest
+import unittest.mock
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "unclaimable-tasks.py"
 
@@ -117,6 +121,47 @@ class SweepTest(unittest.TestCase):
             unclaimable.UNREADABLE, [path],
             "an unreadable file is recorded, never swallowed",
         )
+
+
+    def test_literal_empty_string_is_the_same_defect(self):
+        # `target_vault: ""` is what the wire format actually carries when a producer
+        # omits the field; treating only an absent key as empty would miss it.
+        write(self.tmp, "quoted-empty.md", EMPTY.replace(
+            'task_type: pr-review', 'target_vault: ""\ntask_type: pr-review'))
+        found, recent, _ = self.sweep()
+        self.assertEqual([row["file"] for row in found], ["quoted-empty.md"])
+        self.assertEqual([row["file"] for row in recent], ["quoted-empty.md"])
+
+    def test_clean_render_is_unknown_when_a_file_could_not_be_read(self):
+        # The failure class this change exists to remove: a partial scan that renders
+        # like a healthy fleet. `none` may only be printed when everything was read.
+        path = os.path.join(self.tmp, "unreadable.md")
+        write(self.tmp, "unreadable.md", EMPTY)
+        os.chmod(path, 0o000)
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out), \
+                    unittest.mock.patch.object(sys, "argv", [
+                        "unclaimable-tasks.py", "--root", self.tmp,
+                        "--since", "2026-11-01"]):
+                unclaimable.main()
+        finally:
+            os.chmod(path, 0o644)
+        self.assertIn("UNKNOWN (partial scan)", out.getvalue())
+        self.assertNotIn("none —", out.getvalue())
+
+    def test_no_runtime_vault_is_a_failure_not_a_clean_scan(self):
+        # "scanned nothing" must never render as "found nothing". The guard lives on
+        # the resolution path, so the stub is the vault-cli config coming back empty.
+        class Empty:
+            @staticmethod
+            def vault_dirs_from_cli():
+                return {}
+
+        with unittest.mock.patch.object(unclaimable, "_load", lambda *a: Empty):
+            with self.assertRaises(SystemExit) as raised:
+                unclaimable.rows("2026-11-01")
+        self.assertIn("no agent runtime vault", str(raised.exception))
 
 
 if __name__ == "__main__":

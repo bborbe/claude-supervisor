@@ -157,6 +157,15 @@ def main():
 
     print("unclaimable:")
     if not found:
+        # A clean result is only clean if the scan could read what it swept. With an
+        # unreadable file in the tree, "none" would read exactly like a healthy fleet —
+        # the failure class this whole change exists to remove.
+        if UNREADABLE:
+            print(
+                f"  UNKNOWN (partial scan) — {len(UNREADABLE)} file(s) unreadable, "
+                "so an empty result cannot be asserted"
+            )
+            return 0
         print("  none — no agent-minted task carries an empty target_vault")
         return 0
     for row in recent[: args.limit]:

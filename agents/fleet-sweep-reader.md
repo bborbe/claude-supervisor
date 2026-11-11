@@ -168,7 +168,7 @@ UNMANAGED TOPICS
   <topic> · <workers> · page present|absent
 UNCLAIMABLE (empty target_vault, agent runtime vaults)  — or: UNKNOWN (pass not run)
   <task id> · <task_type> · <status> · <file> · blocks <pr|—>     ← recent only, max 5
-  recent: <n> (since <date>) · historical: <n> · undated: <n>
+  recent: <n> (since <date>) · historical: <n> · undated: <n> [· unreadable: <n>]   ← last field only when non-zero
   ⚠️ recently minted — the mint is still producing the empty field   — or: no recent emissions
 CONTEXT ≥70% (idle, not in tool)
   <name> · <pct>
