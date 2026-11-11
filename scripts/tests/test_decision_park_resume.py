@@ -191,6 +191,27 @@ class TestTheWaits(Base):
         self.assertEqual("d", self.resumed(out)[0]["kind"])
 
 
+class TestTheSummaryLine(Base):
+    def text(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = dpr.main(["--vault", self.vault, "--tasks-dir", self.tasks, "--now", str(NOW)])
+        return rc, out.getvalue().strip().splitlines()[-1]
+
+    def test_resumes_are_counted_per_wait_kind(self):
+        """SC5 grades each kind on its own; a single total cannot say which wait cleared."""
+        self.parked(name="Approved Row", sid="sid-a", approved_at=APPROVED_AFTER)
+        self.task("Dep Done", status="completed", claude_session_id="",
+                  completed_date=COMPLETED_AFTER)
+        self.parked(name="Blocked Row", sid="sid-d", blocked_by="'[[Dep Done]]'")
+        rc, line = self.text()
+        self.assertEqual(0, rc)
+        self.assertIn("decision-resumed-a=1", line)
+        self.assertIn("decision-resumed-d=1", line)
+        self.assertIn("decision-candidates=2", line)
+        self.assertNotIn("decision-resumed=", line, "the old single total must not survive")
+
+
 class TestTheCap(Base):
     def test_the_cap_is_read_from_the_store_the_record_writes(self):
         name = self.parked(approved_at=APPROVED_AFTER)
