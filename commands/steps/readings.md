@@ -6,7 +6,21 @@ user-invocable: false
 
 # Readings
 
-When: every tick — take all six readings (commands in the step)
+When: every tick — take all seven readings (commands in the step)
+
+## The plugin staleness reading — who is executing an old body
+
+Every tick prints the fleet's spread across plugin versions:
+
+    plugin-stale: 21 of 43 live (8 versions · installed 0.274.1)
+
+Read the counts from the script's default render — `installed: <X> · live: <N> · stale: <S>` (plus `· unknown: <U>` when any live session carries no marker) — and the per-session rows from `python3 $P/plugin-version-census.py --json`, whose shape is `{"installed": …, "rows": [{"sid8", "name", "loaded", "state", "pane"}]}`. ⚠️ **`live` and `stale` are render counts, not JSON keys** — derive them from `rows[]` (`state == "stale"`) only if you need them programmatically, and never cite a key the payload does not carry.
+
+⚠️ **This is the only reading whose observer is not its subject, and that is the whole point.** A rule that lives inside a step body cannot detect that its own body is stale: the session holding an old body is exactly the one that never prints the new rule. Measured 2026-11-10: eight plugin versions in flight across one fleet, with the in-body staleness rules shipped in every one of them — the fleet was still spread over all eight. So the fleet round reports the spread from a session that can see it, rather than asking each session to notice itself.
+
+⚠️ **The lever is `--reload`, and this reading never runs it.** It types `/reload-plugins` into every stale session whose pane resolves — a production-touching act on live sessions, several of them mid-turn — so the round **reports the number and names the lever**; pulling it is the operator's call, not the round's.
+
+⚠️ **`unknown` is never `stale`.** A headless worker and a cluster worker may hold no local `.in_use` marker, and reporting them stale would name a fix for a session the lever cannot reach. The script draws that line itself; never re-derive it here.
 
 ## The saturation reading — the ratio, not tok/s
 
