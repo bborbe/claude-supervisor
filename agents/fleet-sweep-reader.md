@@ -95,7 +95,7 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 
    ⚠️ **No new tool grant is needed** — the sweep already holds `Bash(python3:*)` and already runs `who-needs-me.py` (step 1). Never query the pane list directly; that lookup belongs to `who-needs-me.py`'s `pane_for()`, which owns the session-registry + pane-list join.
 
-7b. **Unclaimable tasks (Step 2e).** `python3 $P/unclaimable-tasks.py --since 2026-11-01 --limit 5`. A task with an empty `target_vault` is claimed by no controller, so no pod is scheduled and nothing reports it; since v0.26.12 the create path refuses it, so **a recent hit means a producer still omits the field** and the historical count is legacy. ⚠️ Session-independent on purpose — the defect case has no session to key a row on. ⚠️ Never window on mtime (the clone date; measured 9,624 false "recent" against a true 0). Non-zero exit → `UNKNOWN (pass not run)`.
+7c. **Unclaimable tasks (Step 2e).** `python3 $P/unclaimable-tasks.py --since 2026-11-01 --limit 5`. A task with an empty `target_vault` is claimed by no controller, so no pod is scheduled and nothing reports it; since v0.26.12 the create path refuses it, so **a recent hit means a producer still omits the field** and the historical count is legacy. ⚠️ Session-independent on purpose — the defect case has no session to key a row on. ⚠️ Never window on mtime (the clone date; measured 9,624 false "recent" against a true 0). Non-zero exit → `UNKNOWN (pass not run)`.
 
 8. **Classify (Step 3).**
 
