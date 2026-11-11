@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.287.6
 
 - fix: **every close refusal names the session id, and the resume guard's token is the first line again.** A live round on v0.287.5 produced four close-refusal lines of which two could not be joined to any close line: `task-unresolved` already carried the id (`no page carries <id>`), but `task-not-terminal` and the page verdicts named only a task or page path. The refusal site now prefixes the id when the detail does not already carry it. Separately, `restart-worker.py`'s terminal-task guard had been placed after the header print, so its `task-terminal` token was the sixth line rather than the first — every other refusal in that script prints its token first, and callers branch on the first line. Measured 2026-11-11. Change set: `scripts/close-worker.py`, `scripts/restart-worker.py`, `scripts/tests/test_close_worker.py`, `scripts/tests/test_restart_worker.py`, `CHANGELOG.md`.
 
