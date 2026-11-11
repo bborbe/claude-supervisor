@@ -364,11 +364,39 @@ class TestBatchMarker(Base):
             "flagged-open: unactioned: 3 operator-flagged (batch not invoked)", self.read()
         )
 
+    LEGS_ALL = (
+        "DIGEST 2026-11-06T19:10Z\nLEGS\n"
+        "  keep-alive: unactioned: 0 lapsed-managers\n"
+        "  keep-alive: unactioned: 0 topicless-goal-managers\n"
+        "  keep-alive: unactioned: 0 dead-workers\n"
+    )
+
     def test_the_marker_is_refused_on_a_key_with_no_batch(self):
         self.write(digest_with_legs())
         self.assertNotEqual(
             self.run_legs("--leg", "lapsed-managers", "--count", "3", "--invoked"), 0
         )
+
+    def test_check_accepts_a_labelled_flagged_line(self):
+        self.write(
+            self.LEGS_ALL
+            + "  flagged-open: unactioned: 3 operator-flagged (batch not invoked)\n"
+        )
+        self.assertEqual(self.run_legs("--check"), 0)
+
+    def test_check_rejects_a_bare_operator_flagged_line(self):
+        self.write(self.LEGS_ALL + "  flagged-open: unactioned: 3 operator-flagged\n")
+        self.assertEqual(self.run_legs("--check"), 1)
+
+    def test_check_rejects_a_marker_on_a_key_with_no_batch(self):
+        self.write(
+            "DIGEST 2026-11-06T19:10Z\nLEGS\n"
+            "  keep-alive: unactioned: 0 lapsed-managers (batch invoked)\n"
+            "  keep-alive: unactioned: 0 topicless-goal-managers\n"
+            "  keep-alive: unactioned: 0 dead-workers\n"
+            "  flagged-open: unactioned: 3 operator-flagged (batch invoked)\n"
+        )
+        self.assertEqual(self.run_legs("--check"), 1)
 
 
 if __name__ == "__main__":

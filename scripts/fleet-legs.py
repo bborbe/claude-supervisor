@@ -124,12 +124,22 @@ def parse(body):
             continue
         m = COUNT_RE.match(text)
         if m:
+            key, batch = m.group("key"), m.group("batch") or ""
+            # The same invariant the writer enforces, read back: a bare operator-flagged count
+            # is ambiguous, and a marker on a key with no batch is a line nobody wrote on purpose.
+            # A digest carrying either is not a complete reading, which is what --check reports.
+            if key == BATCH_KEY and not batch:
+                errors.append(text)
+                continue
+            if key != BATCH_KEY and batch:
+                errors.append(text)
+                continue
             entries.append(
                 (
                     m.group("leg"),
                     "count",
-                    (int(m.group("n")), bool(m.group("floor")), m.group("batch") or ""),
-                    [m.group("key")],
+                    (int(m.group("n")), bool(m.group("floor")), batch),
+                    [key],
                 )
             )
             continue
