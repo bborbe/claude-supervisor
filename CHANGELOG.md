@@ -7,6 +7,11 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
+
+## Unreleased
+
+- fix: **every close refusal names the session id, and the resume guard's token is the first line again.** A live round on v0.287.5 produced four close-refusal lines of which two could not be joined to any close line: `task-unresolved` already carried the id (`no page carries <id>`), but `task-not-terminal` and the page verdicts named only a task or page path. The refusal site now prefixes the id when the detail does not already carry it. Separately, `restart-worker.py`'s terminal-task guard had been placed after the header print, so its `task-terminal` token was the sixth line rather than the first — every other refusal in that script prints its token first, and callers branch on the first line. Measured 2026-11-11. Change set: `scripts/close-worker.py`, `scripts/restart-worker.py`, `scripts/tests/test_close_worker.py`, `scripts/tests/test_restart_worker.py`, `CHANGELOG.md`.
+
 ## v0.287.5
 
 - fix: **both halves of a close/refusal pair now name the full session id, so the round can join them.** `close-worker.py`'s header printed `session <sid[:8]>` and `commands/steps/drive.md` prints that header as the round's close record; on the other side, `restart-worker.py`'s `task-terminal` refusal named no session id at all (only a task basename and status), and its own `--absent` and normal-path headers printed `sid[:8]`. Neither line could be joined to the other, so a refusal read as an unrelated event rather than the sequel to a close. All four sites now carry the full id. Measured 2026-11-11 on session `2e540d65`: closed at 07:18:34Z, refused at 07:33:55Z. Tests pin the full id on the close header, the refusal detail, and both resume headers. Change set: `scripts/close-worker.py`, `scripts/restart-worker.py`, `scripts/tests/test_close_worker.py`, `scripts/tests/test_restart_worker.py`, `CHANGELOG.md`.
