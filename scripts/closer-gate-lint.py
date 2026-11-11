@@ -256,6 +256,12 @@ def pane_only_ask(body, environ):
         return None
     if not GATE_OR_HANDLE_RE.match(body):
         return None
+    # ⚠️ A closer that names a full store card id is an ask the operator CAN answer on the
+    # board — exactly the `approve-run.py` route `_paneless_message` prescribes. Mentioning
+    # Shift+Tab as context there ("unavailable here") must not re-block the fix.
+    # Whether that card exists is the absent-card check's job, which runs next.
+    if FULL_CARD_RE.search(body):
+        return None
     found = PANE_ONLY_ASK_RE.search(body)
     return found.group(0) if found else None
 

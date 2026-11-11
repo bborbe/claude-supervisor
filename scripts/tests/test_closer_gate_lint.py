@@ -186,6 +186,16 @@ class CloserGateLintTest(unittest.TestCase):
         self.assertEqual(2, code)
         self.assertEqual("paneless-pane-only-ask", record["reason"])
 
+    def test_a_card_routed_ask_mentioning_shift_tab_passes_when_paneless(self):
+        # The route `_paneless_message` prescribes must not be re-blocked by the check
+        # that prescribed it: a full store card id is an ask the operator can answer.
+        text = ("review: card 0123456789abcdef0123456789abcdef — the merge, posted via "
+                "approve-run.py (Shift+Tab unavailable here)")
+        code, _t, record = self._closer(text, card_probe=lambda _id, _env: True,
+                                        environ=PANELESS_ENV)
+        self.assertEqual(0, code)
+        self.assertNotEqual("paneless-pane-only-ask", record["reason"])
+
     def test_paneless_block_is_bounded_by_the_loop_guard(self):
         state = {"SUPERVISOR_CLOSER_GATE_LINT_STATE_DIR": self.dir, **PANELESS_ENV}
         payload = self.payload("41-paneless-shift-tab-recorded.jsonl")
