@@ -572,6 +572,37 @@ def read_gated(s: str) -> list:
         return []
 
 
+def render_cached(topic: str, branch: str = "", now: float = None) -> int:
+    """Print the cached sweep payload with a FRESH marker for this tick.
+
+    The operator's rulings require the table on every tick, including a gated one where
+    the reader never ran. The cached payload's own first line carries the tick that
+    produced it, so replaying it verbatim prints a header claiming a time this tick did
+    not run — and that makes a dead loop and a gated one look identical, which is the
+    ambiguity the marker exists to remove. The first line is therefore replaced, never
+    kept.
+    """
+    s = slug(topic, branch)
+    path = os.path.join(STATE_DIR, f"{s}.sweep")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        print(f"no cached sweep payload for {s} — nothing to render", file=sys.stderr)
+        return 1
+    if not lines:
+        print(f"cached sweep payload for {s} is empty", file=sys.stderr)
+        return 1
+    stamp = time.strftime("%H:%M", time.localtime(time.time() if now is None else now))
+    # The marker names the gate explicitly: a reader comparing ticks must be able to
+    # tell "the table is here because nothing changed" from "the table is here and the
+    # round ran". Never claim the goal/slot counts — this tick did not read them.
+    print(f"{stamp} ✓ {topic} — sweep gated this tick, table from cache")
+    for line in lines[1:]:
+        print(line)
+    return 0
+
+
 def gate(topic: str, branch: str, step: str) -> int:
     """Record that the frozen-tree predicate suppressed `step` for this round.
 
@@ -1217,6 +1248,11 @@ def main() -> int:
                            "carrying debt for a leg it never owed. A different claim from "
                            "--abandon: that one pays an owed leg, this one records that the "
                            "leg was not owed. Only the predicate may call it")
+    mode.add_argument("--render-cached", action="store_true",
+                      help="print the cached sweep payload with a FRESH timestamped marker "
+                           "for this tick — the gated tick's table, per the operator's "
+                           "2026-09-15 and 2026-09-20 rulings. The payload's own first line "
+                           "is stale and is replaced, never replayed")
     mode.add_argument("--record-verdict", action="store_true",
                       help="topic tier: a `resume`/`restart` keep-alive verdict the round now "
                            "owes an outcome for (needs --goal --vault --verdict --session); "
@@ -1290,6 +1326,8 @@ def main() -> int:
         if not a.step:
             ap.error("--gate needs --step")
         return gate(subject, a.branch, a.step)
+    if a.render_cached:
+        return render_cached(subject, a.branch)
     if a.record_verdict or a.record_outcome:
         # Goal verdicts ride the goal/topic receipt only; the fleet tier owes none.
         if a.branch:

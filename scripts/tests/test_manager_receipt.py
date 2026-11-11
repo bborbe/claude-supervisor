@@ -15,6 +15,7 @@ the shortcut is actually caught.
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
 import io
 import json
@@ -1871,6 +1872,48 @@ class GatedState(unittest.TestCase):
         with open(self.m.gated_path("t"), "w", encoding="utf-8") as fh:
             fh.write("inf readings\n")
         self.assertIn("readings", self._skips(now - 1, now))
+
+
+class RenderCached(unittest.TestCase):
+    """A gated tick still prints the table — with a marker that says THIS tick.
+
+    Replaying the cached payload verbatim prints a header claiming a time the tick did
+    not run, which makes a dead loop and a gated one look identical. The marker is part
+    of the frame (`docs/sweep-output.md`), so it is replaced, never kept.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.m = load(self.tmp, self.tmp)
+
+    def payload(self, text):
+        with open(os.path.join(self.tmp, "t.sweep"), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def render(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = self.m.render_cached("T")
+        return rc, buf.getvalue()
+
+    def test_the_stale_marker_is_replaced(self):
+        self.payload("22:12 ✓ T — 53 goals\n┌────┐\n│ row│\n└────┘\n")
+        rc, out = self.render()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("22:12", out)
+        self.assertIn("sweep gated this tick", out)
+
+    def test_the_box_survives(self):
+        self.payload("22:12 ✓ T\n┌────┐\n│ row│\n└────┘\n")
+        _, out = self.render()
+        self.assertIn("│ row│", out)
+        self.assertIn("└────┘", out)
+
+    def test_a_missing_payload_is_an_error_not_an_empty_table(self):
+        # An empty render would read as "the table printed and had no rows".
+        rc, out = self.render()
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, "")
 
 
 if __name__ == "__main__":
