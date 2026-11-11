@@ -7,7 +7,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
-## Unreleased
+## v0.282.1
 
 - fix: **`decision-park-resume.py` kind (d) fires only when the last `blocked_by` dependency completed after the worker's last turn.** It read status alone, and a completed dependency stays completed, so a worker resumed on it was re-resumed every time the reaper closed it again — close → resume → idle → close with nothing consuming the wait, which the resume cap's 30-minute window does not bound against a 15-minute reap cycle. Kind (d) now uses the same ordering rule as kind (a): the latest dependency `completed_date` must be later than the session's last transcript message, so the resumed worker's first turn consumes the wait. A dependency with no `completed_date` reads `unread` (reported, never resumed); measured 2026-11-11, 2133 of 2388 recently touched completed tasks carry one. Tests: `test_a_resumed_worker_that_speaks_consumes_its_wait` (fails on v0.281.0), `test_a_dependency_completed_before_the_last_turn_does_not_fire`, `test_a_dependency_with_no_completed_date_is_unread`, and the SC2 four-round guard. Change set: `scripts/decision-park-resume.py`, `scripts/tests/test_decision_park_resume.py`, `CHANGELOG.md`.
 
