@@ -275,7 +275,9 @@ test('resolveMaxConcurrent: the env wins over the file, and the loser is still v
   // discipline: a bad value in the file must not stay invisible because this spawn happened
   // to be decided by the environment.
   const { error } = resolveMaxConcurrent({ env: '3', file: { spawn: { maxConcurrent: 'lots' } } })
-  assert.match(error, /spawn\.maxWorkerSoft/)
+  // Named as the spelling the FILE carries, not the current one — a refusal pointing at a
+  // key the operator does not have sends them to edit a line that is not there.
+  assert.match(error, /spawn\.maxConcurrent/)
   assert.match(error, /"lots"/)
 })
 
@@ -320,10 +322,10 @@ test('resolveMaxConcurrent: an unusable value refuses rather than coercing', () 
   for (const bad of ['-1', '2.5', 'many', true, {}, []]) {
     const { error } = resolveMaxConcurrent({ file: { spawn: { maxConcurrent: bad } } })
     assert.ok(error, `expected ${JSON.stringify(bad)} to be refused`)
-    assert.match(error, /spawn\.maxWorkerSoft/)
+    assert.match(error, /spawn\.maxConcurrent/)
     const hard = resolveMaxConcurrent({ file: { spawn: { maxConcurrentHard: bad } } })
     assert.ok(hard.error, `expected hard ${JSON.stringify(bad)} to be refused`)
-    assert.match(hard.error, /spawn\.maxWorkerHard/)
+    assert.match(hard.error, /spawn\.maxConcurrentHard/)
   }
   assert.match(resolveMaxConcurrent({ env: 'lots' }).error, new RegExp(MAX_CONCURRENT_ENV))
   assert.match(resolveMaxConcurrent({ envHard: 'lots' }).error, new RegExp(MAX_CONCURRENT_HARD_ENV))

@@ -44,7 +44,7 @@ test('a ceiling beneath its floor is refused rather than reordered', () => {
 test('a non-integer is refused and named as a manager limit, not a worker one', () => {
   const { error } = limits({ maxManagers: true })
   assert.match(error, /concurrent-manager limit/)
-  assert.match(error, /spawn\.maxManagersSoft/)
+  assert.match(error, /spawn\.maxManagers/)
 })
 
 test('both new keys are known — an unregistered key warns "ignored" on every boot', () => {

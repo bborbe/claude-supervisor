@@ -358,6 +358,20 @@ export const DEFAULT_MAX_CONCURRENT_HARD = 50
 
 // One threshold, resolved from the environment and the config file, in that precedence.
 //
+// Which spelling of a key supplied the config value, and that value.
+//
+// The refusal text names `spawn.<key>`, so it must name the key the operator's file actually
+// contains. Reporting the current name for a legacy-keyed file sends them to edit a line that
+// is not there — the same "a refusal that names the wrong place" failure the hard-key branch
+// below calls out by name.
+function fileKey(file, current, legacy) {
+  const spawn = file?.spawn
+  const present = (v) => v !== undefined && v !== null && v !== ''
+  if (present(spawn?.[current])) return { value: spawn[current], key: current }
+  if (present(spawn?.[legacy])) return { value: spawn[legacy], key: legacy }
+  return { value: undefined, key: current }
+}
+
 // Extracted so the soft and hard halves cannot drift in how they validate — the same reason
 // the header gives for checking every source rather than only the winner: a rule restated
 // per key is a second rule a reader cannot tell from the first.
@@ -412,11 +426,12 @@ function resolveThreshold({ env, fileValue, envName, key, path, fallback, noun =
 // the off switch a syntax error, and after the 2026-10-01 reversal it is the only way back
 // to the previous behaviour.
 export function resolveMaxConcurrent({ env, envHard, file, path = 'the supervisor config' } = {}) {
+  const softFile = fileKey(file, 'maxWorkerSoft', 'maxConcurrent')
   const soft = resolveThreshold({
     env,
-    fileValue: file?.spawn?.maxWorkerSoft ?? file?.spawn?.maxConcurrent,
+    fileValue: softFile.value,
     envName: MAX_CONCURRENT_ENV,
-    key: 'maxWorkerSoft',
+    key: softFile.key,
     path,
     fallback: DEFAULT_MAX_CONCURRENT,
   })
@@ -431,11 +446,12 @@ export function resolveMaxConcurrent({ env, envHard, file, path = 'the superviso
     return { limit: null, hardLimit: null, source: soft.source, hardSource: soft.source }
   }
 
+  const hardFile = fileKey(file, 'maxWorkerHard', 'maxConcurrentHard')
   const hard = resolveThreshold({
     env: envHard,
-    fileValue: file?.spawn?.maxWorkerHard ?? file?.spawn?.maxConcurrentHard,
+    fileValue: hardFile.value,
     envName: MAX_CONCURRENT_HARD_ENV,
-    key: 'maxWorkerHard',
+    key: hardFile.key,
     path,
     fallback: DEFAULT_MAX_CONCURRENT_HARD,
   })
@@ -596,9 +612,10 @@ export const DEFAULT_MAX_MANAGERS_HARD = 5
 // `spawn.maxManagersSoft` / `spawn.maxManagersHard` and no environment variable.
 export function resolveMaxManagers({ file, path = 'the supervisor config' } = {}) {
   const noun = 'concurrent-manager'
+  const softFile = fileKey(file, 'maxManagersSoft', 'maxManagers')
   const soft = resolveThreshold({
-    fileValue: file?.spawn?.maxManagersSoft ?? file?.spawn?.maxManagers,
-    key: 'maxManagersSoft',
+    fileValue: softFile.value,
+    key: softFile.key,
     path,
     fallback: DEFAULT_MAX_MANAGERS,
     noun,

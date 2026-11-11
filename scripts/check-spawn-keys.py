@@ -40,6 +40,10 @@ SPAWN_MODE = ROOT / "server" / "spawn-mode.mjs"
 # Keys that are not cap axes, so they live in neither Go table.
 NON_AXIS_KEYS = ("mode", "maxStartsPerMinute")
 
+# The seven axes × two thresholds. Raised deliberately when the wrapper gains an axis —
+# never quietly re-derived, so a key set that grew is a decision rather than a surprise.
+EXPECTED_AXIS_KEYS = 14
+
 PAIR = re.compile(r'\{"([A-Za-z0-9]+)",\s*"([A-Za-z0-9]+)"\}')
 JSON_TAG = re.compile(r'json:"([A-Za-z0-9]+)"')
 JS_LIST = re.compile(r"const KNOWN_SPAWN_KEYS = \[(.*?)\]", re.S)
@@ -106,10 +110,29 @@ def derived_keys(root):
     axis_keys = set()
     for soft, hard in PAIR.findall(axes_block):
         axis_keys.update((soft, hard))
-    if len(axis_keys) != 14:
+    # ⚠️ Two distinct failures, deliberately not one message. A count that moved because the
+    # wrapper gained an axis is a KEY-SET change and the fix is to raise EXPECTED_AXES; a
+    # count that moved because the regex stopped matching is a parser regression. Telling a
+    # reader "the parse no longer matches" for the first sends them to debug a parser that
+    # is fine.
+    if len(axis_keys) % 2 != 0:
         raise SystemExit(
-            f"  spawn-keys FAIL: pkg/spawn_axes.go yielded {len(axis_keys)} axis keys, expected 14 — "
-            f"the parse no longer matches the source. Found: {sorted(axis_keys)}"
+            f"  spawn-keys FAIL: pkg/spawn_axes.go yielded {len(axis_keys)} axis keys, which is odd — "
+            f"every axis contributes exactly two (soft and hard), so the parse no longer matches the "
+            f"source. Found: {sorted(axis_keys)}"
+        )
+    if len(axis_keys) < EXPECTED_AXIS_KEYS:
+        raise SystemExit(
+            f"  spawn-keys FAIL: pkg/spawn_axes.go yielded {len(axis_keys)} axis keys, expected "
+            f"{EXPECTED_AXIS_KEYS} — the parse no longer matches the source and has silently missed "
+            f"keys. Found: {sorted(axis_keys)}"
+        )
+    if len(axis_keys) > EXPECTED_AXIS_KEYS:
+        raise SystemExit(
+            f"  spawn-keys FAIL: pkg/spawn_axes.go yielded {len(axis_keys)} axis keys, more than the "
+            f"{EXPECTED_AXIS_KEYS} this check knows about. If the wrapper genuinely gained an axis, "
+            f"raise EXPECTED_AXIS_KEYS and add the new keys to KNOWN_SPAWN_KEYS; otherwise the parse "
+            f"is over-matching. Found: {sorted(axis_keys)}"
         )
 
     legacy_keys = set()
