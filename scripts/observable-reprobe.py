@@ -54,10 +54,12 @@ _STILL = "still-blocked"
 _UNPROBEABLE = "unprobeable"
 
 #: `https://github.com/<owner>/<repo>/pull/<n>` — the shape a closer carries when the
-#: session pasted a link rather than a reference. The optional trailing fragment/query is
-#: part of the span, so `…#1` and `?diff=split#5` are not re-read as a second observable.
+#: session pasted a link rather than a reference. The scheme is optional because a
+#: scheme-less `github.com/o/r/pull/786` is a common copy shape. The trailing
+#: fragment/query is part of the span, so `…#1` and `?diff=split#5` are not re-read as a
+#: second observable — the class includes `#` precisely so a query+fragment is absorbed.
 _URL = re.compile(
-    r"https?://(?:www\.)?github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)(?:[#?][\w=&.-]*)?"
+    r"(?:https?://)?(?:www\.)?github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)(?:[#?][\w=&.#-]*)?"
 )
 
 #: `<owner>/<repo>#<n>` — the shape a session writes when it names the repo inline.
@@ -75,7 +77,7 @@ _BARE = re.compile(r"\b(?:PR|pull\s+request)\s*#?\s*(\d+)\b", re.IGNORECASE)
 _HASH = re.compile(r"#(\d+)\b")
 
 
-def observables(text):
+def observables(text, repo=None):
     """Every DISTINCT PR this `⏰ Ends:` text names.
 
     Returns `[{"kind", "repo", "number"}, …]`, empty when the text names no PR at all —
@@ -83,31 +85,38 @@ def observables(text):
 
     ⚠️ **EVERY `#<n>` in the text is collected, wherever it sits.** The fleet writes mixed
     shapes — *"bot verdict on PR #119 head `ee0fd9c` or nuke #939 head `2ed9c4c`"*, and
-    the same two PRs in the other order — so any matcher that recognises only some of
-    them probes a subset and can clear on the rest. Two earlier drafts gated on a `PR`
-    prefix, then on a `PR` token appearing *before* the number; both were false-clearance
-    bugs, because under-collection is the only unsafe direction here: `verdict()` ANDs,
-    so an extra observable can only add a `still-blocked` or an `unprobeable`, never
-    remove one. A `#<n>` that turns out not to be a PR therefore costs a false NEGATIVE
-    (the row stays blocked), which is the direction this module always prefers.
+    the same two PRs in the other order — so a matcher that recognises only some of them
+    probes a subset and can clear on the rest. Under-collection is the only unsafe
+    direction: `verdict()` ANDs, so an extra observable can only add a `still-blocked` or
+    an `unprobeable`, never remove one. A `#<n>` that turns out not to be a PR therefore
+    costs a false NEGATIVE (the row stays blocked), which is the direction this module
+    always prefers.
+
+    ⚠️ **That rule binds the dedup too, not only the matcher.** Two references are the
+    same observable only when their RESOLVED targets match — `repo or <the caller's
+    --repo>` — never when their numbers merely coincide. `PR #536` and `bborbe/nuke#536`
+    are different PRs in different repos, and dropping either would clear on partial
+    evidence. A bare number with no `--repo` resolves to nothing, so it is never deduped
+    against a qualified reference: it stays, and makes the declaration `unprobeable`.
 
     ⚠️ **The list is grouped by SHAPE, not by position in the text** — URLs first, then
     `owner/repo#n`, then bare numbers. `verdict()` is order-independent (it ANDs the
     results), so this only matters to a reader of the reason string.
 
-    `repo` is None when a number appears with no repo — the caller supplies one with
-    `--repo`. A number that a URL or `owner/repo#n` already identified is not repeated
-    as a bare entry, so `o/r#1 and PR #1` probes once rather than twice.
+    `repo` is the caller's `--repo`, used to resolve a bare `PR #<n>`.
     """
     if not isinstance(text, str) or not text.strip():
         return []
     found = []
     seen = set()
 
-    def add(repo, number):
-        if (repo, number) not in seen:
-            seen.add((repo, number))
-            found.append({"kind": PR, "repo": repo, "number": number})
+    def add(obs_repo, number):
+        # Dedup on the EFFECTIVE target. A bare reference resolves through the caller's
+        # `--repo`; with none it resolves to nothing and is kept as its own entry.
+        key = (obs_repo or repo, number)
+        if key not in seen:
+            seen.add(key)
+            found.append({"kind": PR, "repo": obs_repo, "number": number})
 
     url_spans = []
 
@@ -118,12 +127,14 @@ def observables(text):
         add(f"{m.group(1)}/{m.group(2)}", int(m.group(3)))
         url_spans.append(m.span())
 
+    qualified_spans = []
     for m in _QUALIFIED.finditer(text):
         # A URL's own path is not a second observable: without this, a link yielded a
         # phantom `pull/786#1` whose probe failure turned a merged PR into `unprobeable`.
         if inside(url_spans, m.start()):
             continue
         add(f"{m.group(1)}/{m.group(2)}", int(m.group(3)))
+        qualified_spans.append(m.span())
 
     prefixed_spans = []
     for m in _BARE.finditer(text):
@@ -131,14 +142,15 @@ def observables(text):
         prefixed_spans.append(m.span())
 
     for m in _HASH.finditer(text):
-        if inside(prefixed_spans, m.start()) or inside(url_spans, m.start()):
-            continue  # already collected, or a URL fragment
+        # Skip a `#<n>` that a richer pattern already collected — re-adding it as a bare
+        # entry would duplicate one reference, and with no `--repo` the duplicate cannot
+        # be deduped away and would make the whole declaration `unprobeable`.
+        if (inside(prefixed_spans, m.start()) or inside(qualified_spans, m.start())
+                or inside(url_spans, m.start())):
+            continue
         add(None, int(m.group(1)))
 
-    # A bare number that a qualified reference already resolved adds nothing, and an
-    # unresolvable duplicate would fail a declaration the qualified form had settled.
-    resolved = {number for (repo, number) in seen if repo}
-    return [o for o in found if o["repo"] or o["number"] not in resolved]
+    return found
 
 
 def probe_pr(repo, number):
@@ -232,7 +244,7 @@ def main(argv=None):
         print(f"not an owner/repo: {args.repo}", file=sys.stderr)
         return 2
 
-    v, reason = verdict(observables(args.ends), repo=args.repo)
+    v, reason = verdict(observables(args.ends, repo=args.repo), repo=args.repo)
     print(f"{v}\t{reason}")
     return 0
 

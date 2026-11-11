@@ -126,9 +126,52 @@ class ObservableParsing(unittest.TestCase):
         )
 
     def test_a_bare_repeat_of_a_qualified_pr_is_not_probed_twice(self):
-        # Probing it again would add a second call for one PR, and an unresolvable
-        # duplicate would fail a declaration the qualified reference had settled.
-        self.assertEqual(len(orx.observables("o/r#1 and PR #1")), 1)
+        # Same RESOLVED target, so it is one observable — but only when the caller's
+        # --repo makes the bare reference resolve to the same place.
+        self.assertEqual(len(orx.observables("o/r#1 and PR #1", repo="o/r")), 1)
+
+    def test_a_bare_pr_in_another_repo_is_not_dropped(self):
+        # Dedup keys on the RESOLVED target, never the bare number. Dropping this entry
+        # would clear a declaration whose second PR is still open.
+        obs = orx.observables(
+            "PR #536 merged; bborbe/nuke#536 still open", repo="bborbe/claude-supervisor"
+        )
+        self.assertEqual(
+            sorted((o["repo"] or "bborbe/claude-supervisor", o["number"]) for o in obs),
+            [("bborbe/claude-supervisor", 536), ("bborbe/nuke", 536)],
+        )
+
+    def test_a_cross_repo_pair_stays_blocked(self):
+        # The Must-Fix this guards: the nuke PR merged, the same-numbered PR in the
+        # caller's own repo is still open, and the declaration must not clear.
+        obs = orx.observables(
+            "PR #536 merged; bborbe/nuke#536 still open", repo="bborbe/claude-supervisor"
+        )
+
+        def probe(repo, number):
+            return MERGED if repo == "bborbe/nuke" else OPEN_IN_REVIEW
+
+        v, _ = orx.verdict(obs, probe=probe, repo="bborbe/claude-supervisor")
+        self.assertEqual(v, orx._STILL)
+
+    def test_a_bare_reference_with_no_repo_is_kept_and_unprobeable(self):
+        # With no --repo the bare reference resolves to nothing, so it is NOT deduped
+        # against the qualified one — it stays, and makes the declaration unprobeable.
+        obs = orx.observables("o/r#1 and PR #1")
+        self.assertEqual(len(obs), 2)
+        self.assertEqual(orx.verdict(obs, probe=_probe(MERGED))[0], orx._UNPROBEABLE)
+
+    def test_a_query_and_fragment_are_absorbed(self):
+        self.assertEqual(
+            orx.observables("https://github.com/o/r/pull/786?diff=split#5 merged"),
+            [{"kind": orx.PR, "repo": "o/r", "number": 786}],
+        )
+
+    def test_a_scheme_less_link_is_recognised(self):
+        self.assertEqual(
+            orx.observables("github.com/o/r/pull/786 merged"),
+            [{"kind": orx.PR, "repo": "o/r", "number": 786}],
+        )
 
     def test_a_clock_is_not_an_observable(self):
         self.assertEqual(orx.observables("2026-11-12T09:00:00+01:00"), [])
@@ -236,8 +279,7 @@ class NeverAClearance(unittest.TestCase):
         v, _ = orx.verdict(orx.observables("PR #786 and PR #791"), probe=flaky, repo="o/r")
         self.assertEqual(v, orx._UNPROBEABLE)
 
-    def test_an_over_collected_number_only_makes_the_verdict_safer(self):
-        # "audit #4" is an ordinal, not a PR, but it IS collected — verdict() ANDs, so an
+    def test_an_over_collected_number_only_makes_the_verdict_safer(self):        # "audit #4" is an ordinal, not a PR, but it IS collected — verdict() ANDs, so an
         # extra observable can only add still-blocked or unprobeable. Here its probe
         # fails, giving a false NEGATIVE; a false clearance is impossible by construction.
         def probe(repo, number):
