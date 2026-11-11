@@ -1224,7 +1224,7 @@ def task_terminal_refusal(sid, cwd):
     defer = fm.get("defer_date")
     return (
         "task-terminal",
-        f"{os.path.basename(path)} is status {status or '(none)'!r} with "
+        f"session {sid} · {os.path.basename(path)} is status {status or '(none)'!r} with "
         f"defer_date {defer or '(unset)'!r}; its work is finished, so resuming would "
         "restart a session for a closed task and undo the close",
     )
@@ -1313,7 +1313,7 @@ def resume_absent(sid, sessions_dir, dry_run):
         return 1
 
     chip = fb.MANAGER_COLOUR
-    header = (f"🔄 restart-worker --absent · session {sid[:8]} · {subject!r}"
+    header = (f"🔄 restart-worker --absent · session {sid} · {subject!r}"
               f"{' · dry-run' if dry_run else ''}")
     if dry_run:
         print(header)
@@ -1535,7 +1535,7 @@ def main():
             )
 
     print(
-        f"🔄 restart-worker · session {sid[:8]} · pid {pid} · {name!r}"
+        f"🔄 restart-worker · session {sid} · pid {pid} · {name!r}"
         f"{' · dry-run' if args.dry_run else ''}"
     )
     print(
