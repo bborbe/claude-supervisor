@@ -706,6 +706,10 @@ class TestCliRefusals(unittest.TestCase):
         self._task(**{"claude_session_id": SID, "status": "in_progress"})
         done = self._run()
         self.assertEqual(done.stdout.splitlines()[0], "task-not-terminal")
+        # The round joins this refusal to the close line that follows it on the full id, so
+        # a detail naming only the task path cannot be joined. Measured 2026-11-11: two of
+        # four refusal lines in a live round were unjoinable for exactly this reason.
+        self.assertIn(SID, done.stdout)
 
     def test_dry_run_passes_every_guard_and_closes_nothing(self):
         """A terminal task passes every guard; `--dry-run` must stop before the close."""

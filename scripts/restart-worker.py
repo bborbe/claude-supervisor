@@ -1534,6 +1534,20 @@ def main():
                 "code and config",
             )
 
+    # The cwd the session must resume INTO. Read here, before the kill: a session
+    # resumed without its own cwd lands in wezterm's default working directory and
+    # stalls on Claude Code's workspace-trust dialog, registering no pid at all — so
+    # this is checked BEFORE signalling, never after. An unresumable session must not
+    # be killed, which is the whole reason the guard sits above `os.kill`.
+    cwd = (rec.get("cwd") or "").strip()
+
+    # The terminal-task guard runs before ANY output: every other refusal in this script
+    # prints its token as the first line a caller reads, and an unresumable session must not
+    # be signalled. It sits above the header for that reason, not by accident.
+    token, detail = task_terminal_refusal(sid, cwd)
+    if token is not None:
+        return refuse(token, detail)
+
     print(
         f"🔄 restart-worker · session {sid} · pid {pid} · {name!r}"
         f"{' · dry-run' if args.dry_run else ''}"
@@ -1545,13 +1559,6 @@ def main():
     print(f"   changed: {describe_changed(changed)}")
     for line, _ in describe_source(*mcp_source(argv)):
         print(line)
-
-    # The cwd the session must resume INTO. Read here, before the kill: a session
-    # resumed without its own cwd lands in wezterm's default working directory and
-    # stalls on Claude Code's workspace-trust dialog, registering no pid at all — so
-    # this is checked BEFORE signalling, never after. An unresumable session must not
-    # be killed, which is the whole reason the guard sits above `os.kill`.
-    cwd = (rec.get("cwd") or "").strip()
 
     # The launcher the session resumes THROUGH — resolved above, checked here, before the
     # kill: a session resumed through the wrong launcher comes back on a reduced MCP
@@ -1574,13 +1581,6 @@ def main():
         print("❌ error: no wezterm found on PATH or at a known install location "
               f"({', '.join(WEZTERM_LOCATIONS)}) — refusing before the kill, nothing signalled")
         return 1
-
-    # Checked before the dry-run report and before the kill: an unresumable session must not be
-    # signalled, and a dry-run that skipped this guard would report a resume that the real run
-    # then refuses.
-    token, detail = task_terminal_refusal(sid, cwd)
-    if token is not None:
-        return refuse(token, detail)
 
     if args.dry_run:
         print("   ✅ would kill the pid above and "
