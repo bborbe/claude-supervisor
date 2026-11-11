@@ -752,17 +752,36 @@ class MirrorCardLookup(unittest.TestCase):
             rc = aa.cmd_answer("mirror-1", "operator", [], out)
         self.assertEqual(rc, 0, out.getvalue())
         self.assertIn("UNDELIVERABLE:", out.getvalue())
+        # Nothing was recorded and nothing will be delivered, so the branch must not
+        # claim the card was answered.
+        self.assertNotIn("ANSWERED:", out.getvalue())
         marked.assert_not_called()
 
     def test_a_mirror_attempt_404_reports_the_delivery_not_a_failure(self):
         # The command runs this step unconditionally after a delivery, so a 404 here
-        # would report a delivery that happened as a failed attempt.
+        # would report a delivery that happened as a failed attempt. A real log record is
+        # required: the handler only treats a 404 as the mirror case when the id IS one.
+        self._write(self._open())
         out = io.StringIO()
         not_found = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
-        with mock.patch.object(aa, "post_attempt", side_effect=not_found):
+        with mock.patch.object(aa, "post_attempt", side_effect=not_found), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", self.state):
             rc = aa.cmd_attempt("mirror-1", "operator", "delivered", out)
         self.assertEqual(rc, 0, out.getvalue())
-        self.assertIn("ATTEMPT: mirror-1 delivered", out.getvalue())
+        # The suffix, not the prefix: "ATTEMPT: mirror-1 delivered" is a prefix of BOTH
+        # messages, so it would pass on a handler that swallowed the 404 and fell through.
+        self.assertIn("mirror card — no store record", out.getvalue())
+
+    def test_a_404_for_an_id_that_is_not_a_mirror_still_raises(self):
+        # An older store has no /attempt endpoint; `commands/attention-next.md` documents
+        # that as "a missing endpoint, not a failed delivery" and expects FAILED. Only a
+        # real mirror card may be swallowed.
+        out = io.StringIO()
+        not_found = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        with mock.patch.object(aa, "post_attempt", side_effect=not_found), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", self.state):
+            with self.assertRaises(urllib.error.HTTPError):
+                aa.cmd_attempt("not-a-mirror", "operator", "delivered", out)
 
     def test_a_non_404_attempt_error_still_raises(self):
         out = io.StringIO()

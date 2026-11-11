@@ -262,10 +262,14 @@ def mirror_gate(item_id, state_dir=None):
     ⚠️ **The log is FOLDED, not scanned for a first match.** A record is a live card only
     when an `open` line names it (`type: "open"`) and no `close` line does anywhere
     (`closed_by`, which the close line carries instead of a `type`). The test is
-    order-independent — any close wins, in any file — which is sound on an append-only log
-    where a close always follows its open. A first-match scan would route an answer for a
-    card that already closed, and the store path has a compare-and-set that catches
-    exactly that — the mirror path has none, so the fold is the only guard.
+    order-independent — any close wins, in any file. ⚠️ **That matches
+    `who-needs-me.load_events()`, and it inherits its limitation:** `item_id` is
+    `sha256(sid:kind:detail)`, so a byte-identical ask re-parked AFTER its card closed
+    appends a second `open` for the same id, and any-close-wins then refuses a live card.
+    The two surfaces agree, so this is consistent rather than novel — but it is a real
+    edge, not a soundness guarantee. A first-match scan would be worse: it would route an
+    answer for a card that closed, and the store path has a compare-and-set for exactly
+    that, while the mirror path has none.
 
     `kind` is returned because the caller MUST NOT treat a `permission` card as a
     message: a session cannot release another session's parked gate, and relaying a
@@ -517,10 +521,15 @@ def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None,
         # nobody answered". A mirror has no store write to wait on, so deliverability —
         # `resolve_target` returning a name — is the equivalent gate.
         name, reason = resolve_target(producer, registry)
-        if name:
-            write_answer_marker(producer, "", "operator")
+        if not name:
+            # Nothing was recorded and nothing will be delivered, so `ANSWERED:` would be a
+            # state claim this branch has not established — the store path earns that line
+            # from a successful POST.
+            print(f"UNDELIVERABLE: {reason}", file=out)
+            return 0
+        write_answer_marker(producer, "", "operator")
         print(f"ANSWERED: {item_id} (no store record)", file=out)
-        print(f"TARGET: {name}" if name else f"UNDELIVERABLE: {reason}", file=out)
+        print(f"TARGET: {name}", file=out)
         return 0
     mech = item.get("answer_mechanism")
     if mech == "permission":
@@ -662,7 +671,12 @@ def cmd_attempt(item_id, carrier, outcome, out=sys.stdout):
     try:
         post_attempt(item_id, carrier, outcome)
     except urllib.error.HTTPError as err:
-        if err.code != 404:
+        # ⚠️ A 404 alone does NOT mean "mirror". `commands/attention-next.md` documents the
+        # other cause: against a store older than attention-controller v0.30.0 the `/attempt`
+        # endpoint does not exist, and that is "a missing endpoint, not a failed delivery".
+        # Swallowing every 404 would delete that documented `FAILED:` signal and mislabel it
+        # as a mirror card. The id must actually BE a mirror.
+        if err.code != 404 or mirror_gate(item_id) is None:
             raise
         # A mirror card has no store record, so there is no attempt trail to append to.
         # Reporting that as a failure would turn a delivery that DID happen into a failed
