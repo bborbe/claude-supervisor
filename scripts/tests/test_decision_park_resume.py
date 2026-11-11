@@ -29,6 +29,8 @@ NOW = 1_800_000_000.0
 TURN = "2026-11-05T00:00:00Z"
 APPROVED_AFTER = "2026-11-06T00:00:00Z"
 APPROVED_BEFORE = "2026-11-04T00:00:00Z"
+COMPLETED_AFTER = "2026-11-06T00:00:00Z"
+COMPLETED_BEFORE = "2026-11-04T00:00:00Z"
 
 
 class Base(unittest.TestCase):
@@ -110,7 +112,8 @@ class TestTheWaits(Base):
         self.assertFalse(self.resumed(out), "'every name is terminal' is vacuously true of {}")
 
     def test_a_non_empty_blocked_by_all_terminal_fires(self):
-        self.task("Dep Done", status="completed", claude_session_id="")
+        self.task("Dep Done", status="completed", claude_session_id="",
+                  completed_date=COMPLETED_AFTER)
         self.parked(blocked_by="'[[Dep Done]]'")
         rc, out = self.decide()
         self.assertEqual("d", self.resumed(out)[0]["kind"])
@@ -129,6 +132,50 @@ class TestTheWaits(Base):
         rc, out = self.decide()
         self.assertFalse(self.resumed(out), "aborted is not completed")
 
+    def test_a_dependency_completed_before_the_last_turn_does_not_fire(self):
+        """SC2: completion is not the event, ordering is. A dependency that finished before the
+        worker last spoke is a wait the worker already saw — resuming on it is a timer."""
+        self.task("Dep Old", status="completed", claude_session_id="",
+                  completed_date=COMPLETED_BEFORE)
+        self.parked(blocked_by="'[[Dep Old]]'")
+        rc, out = self.decide()
+        self.assertFalse(self.resumed(out))
+
+    def test_a_dependency_with_no_completed_date_is_unread(self):
+        self.task("Dep Undated", status="completed", claude_session_id="")
+        self.parked(blocked_by="'[[Dep Undated]]'")
+        rc, out = self.decide()
+        self.assertFalse(self.resumed(out))
+        self.assertEqual(1, len(out["unread"]))
+
+    def test_an_unchanged_wait_never_resumes_over_four_rounds_then_a_change_resumes_once(self):
+        """SC2 verbatim: four consecutive rounds with the wait unchanged produce zero resumes,
+        and the round on which the wait changes produces exactly one. Four, not one, because a
+        timer with a two- or three-round period returns the same one-round result as no timer."""
+        self.task("Dep", status="in_progress", claude_session_id="")
+        self.parked(blocked_by="'[[Dep]]'")
+        for _ in range(4):
+            rc, out = self.decide()
+            self.assertEqual(0, rc)
+            self.assertFalse(self.resumed(out))
+        self.task("Dep", status="completed", claude_session_id="", completed_date=COMPLETED_AFTER)
+        rc, out = self.decide()
+        self.assertEqual(1, len(self.resumed(out)))
+        self.assertEqual("d", self.resumed(out)[0]["kind"])
+
+    def test_a_resumed_worker_that_speaks_consumes_its_wait(self):
+        """The consumption rule: once the resumed worker writes a turn, the same completed
+        dependency is no longer later than the last turn, so the next round does not resume it
+        again — the close → resume → close loop has nothing to fire on."""
+        self.task("Dep Done", status="completed", claude_session_id="",
+                  completed_date=COMPLETED_AFTER)
+        self.parked(blocked_by="'[[Dep Done]]'")
+        rc, out = self.decide()
+        self.assertEqual(1, len(self.resumed(out)))
+        self.transcript("sid-1", last_message="2026-11-07T00:00:00Z")
+        rc, out = self.decide()
+        self.assertFalse(self.resumed(out))
+
     def test_a_non_terminal_dependency_does_not_fire(self):
         self.task("Dep Open", status="in_progress", claude_session_id="")
         self.parked(blocked_by="'[[Dep Open]]'")
@@ -137,10 +184,32 @@ class TestTheWaits(Base):
 
     def test_one_unreadable_wait_does_not_strand_the_other(self):
         """Round seven's all-or-nothing rule: (a) unreadable must not suppress a cleared (d)."""
-        self.task("Dep Done", status="completed", claude_session_id="")
+        self.task("Dep Done", status="completed", claude_session_id="",
+                  completed_date=COMPLETED_AFTER)
         self.parked(approved_at="not-a-date", blocked_by="'[[Dep Done]]'")
         rc, out = self.decide()
         self.assertEqual("d", self.resumed(out)[0]["kind"])
+
+
+class TestTheSummaryLine(Base):
+    def text(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = dpr.main(["--vault", self.vault, "--tasks-dir", self.tasks, "--now", str(NOW)])
+        return rc, out.getvalue().strip().splitlines()[-1]
+
+    def test_resumes_are_counted_per_wait_kind(self):
+        """SC5 grades each kind on its own; a single total cannot say which wait cleared."""
+        self.parked(name="Approved Row", sid="sid-a", approved_at=APPROVED_AFTER)
+        self.task("Dep Done", status="completed", claude_session_id="",
+                  completed_date=COMPLETED_AFTER)
+        self.parked(name="Blocked Row", sid="sid-d", blocked_by="'[[Dep Done]]'")
+        rc, line = self.text()
+        self.assertEqual(0, rc)
+        self.assertIn("decision-resumed-a=1", line)
+        self.assertIn("decision-resumed-d=1", line)
+        self.assertIn("decision-candidates=2", line)
+        self.assertNotIn("decision-resumed=", line, "the old single total must not survive")
 
 
 class TestTheCap(Base):

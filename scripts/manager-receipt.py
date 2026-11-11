@@ -177,7 +177,7 @@ def steps_for(branch: str, tier: str = "goal") -> tuple:
 #
 # Measured 2026-11-08 on a topic manager (session eab58671, ticks 15:55 and 16:15):
 # `topic-keepalive.py` answered `resume` for three goal managers on two consecutive ticks
-# and the round executed none, attributing the skip first to `spawn.maxConcurrent` and then
+# and the round executed none, attributing the skip first to `spawn.maxWorkerSoft` and then
 # to the per-topic N = 3 — neither of which gates a resume. Every field above resolved, so
 # `--check` reported a full round while three managers stayed down.
 #
@@ -207,7 +207,7 @@ OWING_VERDICTS = ("resume", "restart")
 #             `dirty-worktree`.
 #
 # ⚠️ **No cap token on either path, by design.** The resume path never reaches Step 1.5's
-# Gate 3, so `spawn.maxConcurrent` and the per-topic N cannot refuse it — and they are
+# Gate 3, so `spawn.maxWorkerSoft` and the per-topic N cannot refuse it — and they are
 # exactly the excuses the 2026-11-08 round gave. A vocabulary carrying them would let that
 # round pass.
 #

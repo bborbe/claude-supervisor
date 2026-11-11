@@ -372,6 +372,23 @@ class FreshRestartPinTest(unittest.TestCase):
                     holders.append(getattr(top, "name", type(top).__name__))
         self.assertEqual([self.CALLER], holders)
 
+    def test_the_failure_detail_is_the_error_line_not_the_header(self):
+        """Regression 2026-11-11: the keeper reported `lines[0]` — restart-worker's header —
+        as the cause, so the real `❌ error:` line one line lower was never surfaced."""
+        import types
+        saved = fk.subprocess.run
+        self.addCleanup(lambda: setattr(fk.subprocess, "run", saved))
+        fk.subprocess.run = lambda *a, **k: types.SimpleNamespace(
+            returncode=1,
+            stdout=("🔄 restart-worker · session ab12 · pid 1 · 'Fleet Manager'\n"
+                    "   role: manager · status: idle\n"
+                    "❌ error: no wezterm found on PATH — refusing before the kill\n"),
+            stderr="")
+        ok, detail = fk.restart_fresh_session("ab12")
+        self.assertFalse(ok)
+        self.assertIn("no wezterm found", detail)
+        self.assertNotIn("restart-worker · session", detail)
+
     def test_the_gate_requires_the_fresh_answer(self):
         _src, tree, _node = self.parsed()
         gate = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == self.CALLER][0]

@@ -197,6 +197,13 @@ class ResumeCommand(unittest.TestCase):
     def test_fresh_prompt_is_allowlisted(self):
         self.assertEqual(("/supervisor:fleet-loop",), rw.FRESH_PROMPTS)
 
+    def test_resume_command_uses_the_resolved_wezterm_not_a_bare_name(self):
+        """Regression 2026-11-11: a bare `"wezterm"` is not on launchd's PATH, so the keeper's
+        `restart fresh` killed the Fleet Manager and could not spawn the replacement."""
+        argv = rw.resume_command("sid", "title", "pink", "/d", "/l/cc",
+                                 wezterm="/Applications/WezTerm.app/Contents/MacOS/wezterm")
+        self.assertEqual("/Applications/WezTerm.app/Contents/MacOS/wezterm", argv[0])
+
     def test_no_exec_so_the_exit_status_survives(self):
         """`exec` makes a SIGKILLed worker leave no record anywhere — the whole point.
 
@@ -773,6 +780,13 @@ class Cli(unittest.TestCase):
         env = dict(os.environ)
         env["SUPERVISOR_LOAD_PATH"] = self.load
         env["SUPERVISOR_LAUNCHER"] = os.path.join(self.dir, "loadpath")
+        # `main()` resolves the wezterm binary BEFORE the kill, and refuses with exit 1 when
+        # it cannot — deliberately, so a spawn that cannot happen never leaves a killed pid
+        # behind it. A CI runner has no wezterm, so without this every success-path test
+        # would take that refusal. `setdefault`, never an assignment: the tests that PROVE
+        # the refusal (and the ones that point the override at a missing path) set it
+        # themselves and must keep what they set.
+        env.setdefault("SUPERVISOR_WEZTERM", sys.executable)
         out = subprocess.run(
             [sys.executable, SCRIPT, sid, "--sessions-dir", self.reg, "--dry-run", *extra],
             capture_output=True, text=True, env=env,
@@ -831,6 +845,10 @@ class Cli(unittest.TestCase):
         # A stale launcher by default, so the fixture — never the real vault config or
         # a real launcher's mtime — decides the case.
         env["SUPERVISOR_LAUNCHER"] = launcher or self.stale(self.touch("cc-default"))
+        # Same seam as `run_cli`, and for the same reason: `main()` resolves wezterm before
+        # the kill and refuses when it cannot, and a CI runner has none. `setdefault` so a
+        # test that deliberately points the override at a missing path keeps its value.
+        env.setdefault("SUPERVISOR_WEZTERM", sys.executable)
         out = subprocess.run(
             [sys.executable, SCRIPT, sid, "--sessions-dir", self.reg, "--dry-run"],
             capture_output=True, text=True, env=env,
@@ -906,6 +924,27 @@ class Cli(unittest.TestCase):
         self.assertEqual(out.returncode, 1, out.stdout)
         self.assertIn("no launcher could be resolved", out.stdout)
         self.assertNotIn("killed pid", out.stdout)
+
+    def test_missing_wezterm_refuses_before_the_kill(self):
+        """Regression 2026-11-11: the fresh restart killed the manager, then could not spawn.
+
+        `find_wezterm()` honours SUPERVISOR_WEZTERM, so pointing it at a missing path proves
+        the refusal fires on the same code path the keeper takes — and that it fires BEFORE
+        anything is signalled, which is what makes the failure non-destructive.
+        """
+        self.write(1, entry("nowez", name="Fleet Manager"))
+        env = dict(os.environ)
+        env["SUPERVISOR_LOAD_PATH"] = self.load
+        env["SUPERVISOR_LAUNCHER"] = os.path.join(self.dir, "loadpath")
+        env["SUPERVISOR_WEZTERM"] = os.path.join(self.dir, "no-such-wezterm")
+        out = subprocess.run(
+            [sys.executable, SCRIPT, "nowez", "--sessions-dir", self.reg,
+             "--reason", "lapse", "--fresh-prompt", "/supervisor:fleet-loop"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("no wezterm found", out.stdout)
+        self.assertNotIn("killing-pid", out.stdout)
 
     def _run_with_vault_cli(self, sid, vault_cli):
         """Run the CLI with NO config override, so `vault-cli` itself must be resolved."""

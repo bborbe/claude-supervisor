@@ -1409,9 +1409,13 @@ CAUSE_STATE_PATH = os.path.join(CAUSE_STATE_DIR, "causes.json")
 OWNER_TASK_THRESHOLD = 3
 
 # The supervisor's spawn-cap refusal, as the manager's own transcript records it.
-# `maxManagersHard` is the manager cap (`docs/fleet-surface.md` § Spawn a worker
-# item 5); `maxConcurrent` is the fleet one.
-_CAP_REFUSAL = re.compile(r"maxManagersHard|maxConcurrent", re.I)
+# The manager pair (`docs/fleet-surface.md` § Spawn a worker item 5) and the worker pair
+# (`maxWorker*`). ⚠️ BOTH spellings of each axis, because the pre-rename names still parse
+# and a refusal can name either: matching only the current names drops a relayed
+# worker-cap refusal to `unknown`, which reads as "no cause found" rather than "capped".
+_CAP_REFUSAL = re.compile(
+    r"maxWorker(Soft|Hard)|maxManagers(Soft|Hard)|maxConcurrent(Hard)?", re.I
+)
 
 _TRIGGER = re.compile(r"later\s*\(on\s+([^)]+)\)", re.I)
 
