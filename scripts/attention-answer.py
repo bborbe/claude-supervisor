@@ -251,13 +251,21 @@ def mirror_gate(item_id, state_dir=None):
     """`(session_id, kind)` for an EVENT-LOG-only card that is still OPEN, else None.
 
     ⚠️ **A Stop-hook mirror card is not in the store.** The hook mints a card for a
-    closer and writes it to the event log; the store never carries it, which is exactly
-    the class `who-needs-me.py`'s `board_missing_gates()` returns as *"open gates the
-    EVENT LOG holds and the STORE did not return"*. So `fetch_item()` 404s on a mirror's
-    id, and before this fallback that 404 escaped `cmd_answer` before any `TARGET:` line
-    was printed — the operator's approve reached nobody and the session kept waiting
-    (measured 2026-11-11: `urllib.error.HTTPError: HTTP Error 404`, fixture
-    `MirrorCardLookup`).
+    closer and writes it to the event log; the store never carries it. So `fetch_item()`
+    404s on a mirror's id, and before this fallback that 404 escaped `cmd_answer` before
+    any `TARGET:` line was printed — the operator's approve reached nobody and the
+    session kept waiting (measured 2026-11-11: `urllib.error.HTTPError: HTTP Error 404`,
+    fixture `MirrorCardLookup`).
+
+    ⚠️ **This is a SUPERSET of what `board_missing_gates()` offers, deliberately.** That
+    function applies further gates (`STORE_OK`, `is_superseded`, and `is_open_gate()`'s
+    `is_parked_verb` / `is_reapable` / `names_peer_gate` / `is_rendered_panel`), and those
+    exclude exactly the record this branch exists for: a `Stop`-sourced closer panel is
+    `event: "Stop"`, `kind: "question"`, and a **rendered panel** — which `is_open_gate()`
+    filters out as a card that raises no ask. A mirror card IS that panel, so narrowing
+    this to `board_missing_gates()`' class would make the branch answer nothing at all.
+    The gates that DO matter here are enforced: the card must be open (the fold) and its
+    kind must be `question` (a `permission` card is refused as laundering).
 
     ⚠️ **The log is FOLDED, not scanned for a first match.** A record is a live card only
     when an `open` line names it (`type: "open"`) and no `close` line does anywhere
