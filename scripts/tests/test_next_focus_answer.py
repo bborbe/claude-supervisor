@@ -511,6 +511,36 @@ class ConsumeTests(unittest.TestCase):
         self.assertEqual(notes, [])
         self.assertIn(f"**Task:** [[{name}]]", self.weekly.read_text(encoding="utf-8"))
 
+    def test_the_escape_unwrap_round_trips_a_name_containing_the_escape(self):
+        """The replace is safe only because `shlex.quote` DOUBLES a literal escape.
+
+        A name legitimately containing `'"'"'` always gets quoted (the sequence holds
+        a `"`), so the half-stripped shape carries it doubled and one pass restores it
+        exactly. This pins that invariant against a "simplify the replace" refactor.
+        """
+        name = "A Worker's '\"'\"' literal Gate"
+        page = self.vault / "25 Tasks" / f"{name}.md"
+        page.write_text("---\nstatus: next\n---\n\nbody\n", encoding="utf-8")
+        escaped = (f"{name} — priority: 1, in no current plan — {page}:1"
+                   ).replace("'", "'\"'\"'")
+
+        consumed, _ = self.run_consume([self.card("add it to the plan", payload=escaped)])
+
+        self.assertEqual(consumed[0]["name"], name)
+
+    def test_the_escape_unwrap_keeps_an_em_dash_name_intact(self):
+        """The `stem.count(" — ")` branch must still see the separator after unwrapping."""
+        name = "Brogrammers Dies Mid-Request — claude process ended"
+        page = self.vault / "25 Tasks" / f"{name}.md"
+        page.write_text("---\nstatus: next\n---\n\nbody\n", encoding="utf-8")
+        escaped = (f"{name} — priority: 1, in no current plan — {page}:1"
+                   ).replace("'", "'\"'\"'")
+
+        got, _ = answer._name_from_payload(
+            answer.unquote_payload(escaped), str(self.vault), "25 Tasks", "task")
+
+        self.assertEqual(got, name)
+
     def test_notes_render_on_an_empty_round(self):
         """A round that could not look must not read like a round that found nothing."""
         rendered = answer.render([], ["k: unhandled answer 'x' — not consumed"], 2, 1)

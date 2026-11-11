@@ -374,6 +374,11 @@ def unquote_payload(payload):
 
     So the escape is also unwrapped directly. `'"'"'` is the only form `shlex.quote`
     emits, so the substitution is exact rather than a guess.
+
+    ⚠️ The replace is not injective, and it is safe only because of one invariant: the
+    escape sequence itself contains `"`, so a payload that legitimately carries the
+    literal `'"'"'` is ALWAYS quoted by `shlex.quote`, which doubles the escape — one
+    pass restores it byte-for-byte. A bare, never-quoted literal cannot reach here.
     """
     text = str(payload or "")
     try:
