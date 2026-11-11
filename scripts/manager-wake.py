@@ -176,7 +176,8 @@ def resolve_pane(session_id):
 def guard(pane_id):
     """`pane-wake-guard.py`'s verdict line for the pane."""
     try:
-        r = subprocess.run([sys.executable, GUARD, "--pane-id", str(pane_id)],
+        r = subprocess.run([sys.executable, GUARD, "--pane-id", str(pane_id),
+                            "--allow-machine-wait"],
                            capture_output=True, text=True, timeout=20)
     except Exception as exc:  # noqa: BLE001 — any failure is a skip, never a wake
         return f"error:{exc}"
