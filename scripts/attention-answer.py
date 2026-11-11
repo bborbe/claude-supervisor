@@ -12,6 +12,15 @@ Order matters in `answer`: the store's open -> answered compare-and-set runs
 first, and a caller that loses it (409) must NOT route its answer -- another arm
 already did. Only the winner prints a TARGET.
 
+⚠️ **A Stop-hook MIRROR card is the one exception, and it has NO compare-and-set.**
+Such a card lives in the event log and never in the store (`who-needs-me.py`'s
+`board_missing_gates()`), so there is nothing to POST: the branch resolves the
+card through the folded log, prints a TARGET, and the caller delivers. Because
+no CAS exists there, two arms answering one mirror id will BOTH deliver — the
+operator should answer a mirror card once. A mirror whose card has closed, or
+whose kind is `permission`, is refused rather than routed: a relay cannot release
+another session's parked gate.
+
 The answer carries two identities: `answered_by` names the arm, and `resolved_by`
 names the session that ran it. The session id is read from the environment, so a
 resolution is attributable without the caller passing a flag -- and the invoking
@@ -238,8 +247,8 @@ def fetch_item(item_id):
         return json.load(resp)
 
 
-def mirror_producer(item_id, state_dir=None):
-    """The session that produced an EVENT-LOG-only item, or "" when no record names it.
+def mirror_gate(item_id, state_dir=None):
+    """`(session_id, kind)` for an EVENT-LOG-only card that is still OPEN, else None.
 
     ⚠️ **A Stop-hook mirror card is not in the store.** The hook mints a card for a
     closer and writes it to the event log; the store never carries it, which is exactly
@@ -250,11 +259,19 @@ def mirror_producer(item_id, state_dir=None):
     (measured 2026-11-11: `urllib.error.HTTPError: HTTP Error 404`, fixture
     `MirrorCardLookup`).
 
-    The record's `session_id` is the producing session — `open_item()` writes it on every
-    item it mints — so it is the same key `producer_id` carries for a store item, and the
-    registry resolves it the same way.
+    ⚠️ **The log is FOLDED, not scanned for a first match.** A record is a live card only
+    when an `open` line names it (`type: "open"`) and no later `close` does (`closed_by`,
+    which the close line carries instead of a `type`). A first-match scan would route an
+    answer for a card that already closed, and the store path has a compare-and-set that
+    catches exactly that — the mirror path has none, so the fold is the only guard.
+
+    `kind` is returned because the caller MUST NOT treat a `permission` card as a
+    message: a session cannot release another session's parked gate, and relaying a
+    verdict to it is permission laundering.
     """
     base = state_dir or ATTENTION_STATE_DIR
+    opened = None
+    closed = False
     for path in glob.glob(os.path.join(base, "*.events.jsonl")):
         try:
             with open(path, encoding="utf-8") as f:
@@ -266,11 +283,17 @@ def mirror_producer(item_id, state_dir=None):
                         rec = json.loads(line)
                     except ValueError:
                         continue  # a torn final line is expected, not fatal
-                    if isinstance(rec, dict) and rec.get("item_id") == item_id:
-                        return rec.get("session_id") or ""
+                    if not isinstance(rec, dict) or rec.get("item_id") != item_id:
+                        continue
+                    if rec.get("closed_by") is not None:
+                        closed = True
+                    elif rec.get("type") == "open":
+                        opened = rec
         except OSError:
             continue
-    return ""
+    if opened is None or closed:
+        return None
+    return (opened.get("session_id") or "", opened.get("kind") or "")
 
 
 def fetch_delivery(item_id, timeout=None):
@@ -464,11 +487,32 @@ def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None,
         # A Stop-hook MIRROR card: the event log holds it and the store never did. There
         # is no store record to answer, so nothing is POSTed — the caller delivers the
         # answer straight to the producing session, which is what the TARGET line is for.
-        producer = mirror_producer(item_id)
+        gate = mirror_gate(item_id)
+        if gate is None:
+            print(f"FAILED: {item_id} is neither a store item nor an open event-log card", file=out)
+            return 1
+        producer, kind = gate
         if not producer:
-            print(f"FAILED: {item_id} is neither a store item nor an event-log card", file=out)
+            print(f"FAILED: {item_id} carries no producing session", file=out)
+            return 1
+        if kind == "permission":
+            # ⚠️ Never relay a verdict for another session's parked gate. The store path
+            # routes these through `answer_permission`, which the spawning server polls;
+            # a SendMessage carrying `--decision allow` is permission laundering even when
+            # the action looks small, and this arm cannot record a verdict anywhere.
+            print(f"REFUSED: {item_id} is a permission card; a relay cannot release "
+                  "another session's parked gate", file=out)
+            return 2
+        if kind != "question":
+            # Only `question` is a card here, which is also what `board_missing_gates()`
+            # offers (`is_open_gate()`). Every other kind is a turn record — an `idle`
+            # line names no ask — so there is nothing to answer.
+            print(f"FAILED: {item_id} is a {kind or 'typeless'} record, not a card", file=out)
             return 1
         print(f"ANSWERED: {item_id} (mirror card — no store record)", file=out)
+        # The same marker the store path writes, so the hook's close line carries WHO
+        # answered instead of `no_answerer`.
+        write_answer_marker(producer, "", "operator")
         print(target_line(producer, registry), file=out)
         return 0
     mech = item.get("answer_mechanism")
@@ -608,7 +652,20 @@ def cmd_attempt(item_id, carrier, outcome, out=sys.stdout):
             file=out,
         )
         return 1
-    post_attempt(item_id, carrier, outcome)
+    try:
+        post_attempt(item_id, carrier, outcome)
+    except urllib.error.HTTPError as err:
+        if err.code != 404:
+            raise
+        # A mirror card has no store record, so there is no attempt trail to append to.
+        # Reporting that as a failure would turn a delivery that DID happen into a failed
+        # attempt — the command runs this step unconditionally after every delivery.
+        print(
+            f"ATTEMPT: {item_id} {outcome} by {carrier} (mirror card — no store record, "
+            "nothing recorded)",
+            file=out,
+        )
+        return 0
     print(f"ATTEMPT: {item_id} {outcome} by {carrier}", file=out)
     return 0
 
