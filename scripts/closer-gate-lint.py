@@ -417,6 +417,55 @@ def session_bound_class(line):
     return None
 
 
+# ⚠️ A PR reference is only a re-probeable observable when it names its REPOSITORY. The
+# round's probe (`scripts/observable-reprobe.py`) resolves `owner/repo#N` and a
+# `github.com/owner/repo/pull/N` URL; a bare `PR #N` or `PR N` leaves it a number with no
+# repo, so it renders `unprobeable` and the wait is never re-checked — measured 2026-11-11:
+# 36 of 324 declarations named a PR, 4 were qualified, and the other 32 could not be probed.
+#
+# ⚠️ **Both bare shapes are real, and they are not the same string.** The attention store
+# carries `PR #516` and `PR 738`; the no-hash form is not a typo for the hashed one, so a
+# matcher built to `PR #N` alone passes a declaration that is just as unprobeable.
+#
+# ⚠️ **This mirrors `observable-reprobe.py`'s `_BARE`, and it must stay mirrored.** That
+# pattern is the one that decides `unprobeable`, and it also accepts `pull request <n>` —
+# a form this matcher would otherwise let through while the probe refused it, which is a
+# closer that blocks nothing and is still never re-checked.
+PR_BARE = re.compile(r"\b(?:PR|pull\s+request)\s*#?\s*\d+", re.IGNORECASE)
+
+# A `repo#N` with no owner (`nuke#567`) is NOT qualified — the owner would have to be
+# guessed, and guessing it is how a probe lands on another org's identically numbered PR.
+# The lookbehind is what separates it from the tail of a qualified `owner/repo#N`, whose
+# only candidate match is preceded by `/`.
+PR_REPO_ONLY = re.compile(r"(?<!/)\b[A-Za-z0-9_.-]+#\d+")
+
+# What the re-probe can actually resolve — `observable-reprobe.py`'s `_QUALIFIED` plus its
+# `_URL`. The scheme is optional there because a scheme-less `github.com/o/r/pull/N` is a
+# common copy shape, and this matcher must accept exactly what the probe resolves: a
+# reference the probe can read but this check rejects is a false block on a compliant
+# closer, and the reverse is a wait that passes here and renders `unprobeable` there.
+PR_QUALIFIED = re.compile(
+    r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+"
+    r"|(?:https?://)?(?:www\.)?github\.com/[\w.-]+/[\w.-]+/pull/\d+")
+
+# ⚠️ Deliberately NOT covered: a bare `#N` with no `PR` word (`the verdict lands on #973`).
+# It is a PR reference in context, but `#` also introduces issue numbers and headings, and
+# the measured population spells its PR references with the word. Widening later is cheap;
+# a false block on a compliant closer is not. The task that shipped this records the
+# residual in its own `# Progress`.
+
+
+def unqualified_pr(line):
+    """The bare PR reference in an `⏰ Ends:` slot that no qualified one resolves, or `None`."""
+    body = ends_body(line)
+    if not body:
+        return None
+    if PR_QUALIFIED.search(body):
+        return None
+    match = PR_BARE.search(body) or PR_REPO_ONLY.search(body)
+    return match.group(0) if match else None
+
+
 def state_dir():
     """The record's directory, read at call time so a test can redirect it."""
     return (os.environ.get(STATE_DIR_ENV)
@@ -644,6 +693,19 @@ def evaluate(payload, environ=None, card_probe=None):
             code, _text, record = verdict(2, "session-bound-ends", closer=line,
                                           cls=cls, phrase=ends_body(ends))
             return code, _ends_message(cls, ends_body(ends)), record
+    # ⚠️ Independent of the session-bound check above, not a branch of it: `PR #12` matches
+    # the `external-probe` durable class, so `session_bound_class` returns `None` for it and
+    # the wait passes every existing check while staying unprobeable. Fail-open — a matcher
+    # error skips this check, never blocks a closer.
+    if ends:
+        try:
+            bare = unqualified_pr(ends)
+        except Exception:
+            bare = None
+        if bare:
+            code, _text, record = verdict(2, "unqualified-pr-reference", closer=line,
+                                          phrase=bare)
+            return code, _pr_message(bare), record
     body = closer_body(line)
     # ⚠️ Before the card and gate checks: a pane-only ask is unanswerable whatever card it
     # carries, and `you run:` is not a verb the allow-list path ever reaches. Fail-open.
@@ -703,6 +765,18 @@ def _ends_message(cls, phrase):
         "id, a `defer_date` / ISO date, or an external probe (PR, CI, `gh`, `kubectl`, a "
         "pod) — and keep the watcher in the `(mechanism, id)` slot as the wake. If nothing "
         "durable exists yet, make the producer write one, or set `defer_date` and exit.\n"
+    )
+
+
+def _pr_message(phrase):
+    return (
+        f"closer-gate-lint: `⏰ Ends: …{phrase}…` names a pull request with no repository, "
+        "so the round's re-probe cannot resolve it and renders `unprobeable` — a wait "
+        "nobody can re-check. Write the reference QUALIFIED, in the same `⏰ Ends:` slot: "
+        "`owner/repo#N` (e.g. `bborbe/nuke#698`) or a "
+        "`https://github.com/owner/repo/pull/N` URL. ⚠️ `repo#N` without an owner is not "
+        "enough — the owner would have to be guessed, and the probe would land on another "
+        "org's identically numbered PR.\n"
     )
 
 

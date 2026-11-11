@@ -107,6 +107,16 @@ EXPECTED = {
     "43-paneless-pick-shift-tab.jsonl": 0,
     "44-paneless-prose-mention-only.jsonl": 0,
     "45-paneless-path-not-a-slash-command.jsonl": 0,
+    # ⚠️ The unqualified-PR-reference check: a wait on a PR is only re-probeable when it
+    # names its repository. Both bare shapes are recorded in the attention store —
+    # `PR #516` and `PR 738` (no hash) — and `repo#N` without an owner is not resolvable
+    # either. The two qualified shapes pass, so a lint that rejects every PR-bearing
+    # closer fails here rather than shipping.
+    "46-ends-pr-bare-hash.jsonl": 2,
+    "47-ends-pr-bare-nohash.jsonl": 2,
+    "48-ends-pr-repo-only.jsonl": 2,
+    "49-ends-pr-qualified.jsonl": 0,
+    "50-ends-pr-url.jsonl": 0,
 }
 
 PANELESS_ENV = {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}
@@ -295,10 +305,13 @@ class CloserGateLintTest(unittest.TestCase):
     def test_a_blocked_closer_naming_a_separate_line_ends_observable_passes(self):
         # ⚠️ The conventional layout: the observable is its OWN line below the verb. A
         # body-scoped owner search refused exactly this shape (bot finding on #778).
+        # ⚠️ The PR reference is QUALIFIED on purpose: this test is about the owner check,
+        # and a bare `PR #480` would now be refused by the unqualified-reference check
+        # first — masking the property under test rather than exercising it.
         code, _text, _record = self._closer(
             "nothing",
             prefix="🔴 BLOCKED · nothing running · needs intervention\n"
-                   "⏰ Ends: PR #480 merged\n")
+                   "⏰ Ends: bborbe/nuke#480 merged\n")
         self.assertEqual(0, code)
 
     def test_an_absent_card_probe_does_not_run_on_a_non_gate_closer(self):
@@ -654,6 +667,68 @@ class CloserGateLintTest(unittest.TestCase):
                 self.assertEqual("", text)
                 self.assertIsNone(record["class"])
                 self.assertIsNone(record["phrase"])
+
+    def test_an_unqualified_pr_reference_is_blocked(self):
+        # ⚠️ Both recorded bare shapes, verbatim: `PR #516` and `PR 738` (no hash). A
+        # matcher built to `PR #N` alone passes the second, which is just as unprobeable.
+        for name, phrase in (
+            ("46-ends-pr-bare-hash.jsonl", "PR #516"),
+            ("47-ends-pr-bare-nohash.jsonl", "PR 738"),
+            ("48-ends-pr-repo-only.jsonl", "nuke#567"),
+        ):
+            with self.subTest(fixture=name):
+                code, text, record = self.mod.evaluate(self.payload(name), environ={})
+                self.assertEqual(2, code)
+                self.assertEqual("unqualified-pr-reference", record["reason"])
+                self.assertEqual("block", record["decision"])
+                self.assertEqual(phrase, record["phrase"])
+                self.assertIn(phrase, text)
+                self.assertIn("owner/repo#N", text)
+
+    def test_a_qualified_pr_reference_passes_the_same_check(self):
+        # ⚠️ The positive control. A matcher that blocked every PR-bearing closer would
+        # satisfy the negative test above and refuse every compliant closer on the machine.
+        for name in ("36-ends-pr-watch-compliant.jsonl", "49-ends-pr-qualified.jsonl",
+                     "50-ends-pr-url.jsonl"):
+            with self.subTest(fixture=name):
+                code, text, record = self.mod.evaluate(self.payload(name), environ={})
+                self.assertEqual(0, code)
+                self.assertEqual("", text)
+                self.assertIsNone(record["phrase"])
+
+    def test_unqualified_pr_matches_the_recorded_shapes(self):
+        # The four shapes the attention store actually carries, plus the two negatives
+        # that must never be flagged.
+        for body, expected in (
+            ("⏰ Ends:   PR #516 bot verdict at d706efbc", "PR #516"),
+            ("⏰ Ends:   PR 738 approved on its head SHA", "PR 738"),
+            ("⏰ Ends:   PR#42 merged", "PR#42"),
+            ("⏰ Ends:   nuke#567's current commit gets a verdict", "nuke#567"),
+            # ⚠️ `pull request <n>` is bare too — `observable-reprobe.py`'s `_BARE` accepts
+            # it, so a matcher that missed it would pass a closer the probe refuses.
+            ("⏰ Ends:   pull request 12 gets a verdict", "pull request 12"),
+        ):
+            with self.subTest(body=body):
+                self.assertEqual(expected, self.mod.unqualified_pr(body))
+        for body in (
+            # Qualified: `owner/repo#N` and a `/pull/N` URL both clear.
+            "⏰ Ends:   bborbe/nuke#698 merged",
+            "⏰ Ends:   https://github.com/bborbe/nuke/pull/698 reaches MERGED",
+            # Scheme-less is a common copy shape and the probe resolves it, so it counts.
+            "⏰ Ends:   github.com/bborbe/nuke/pull/698 reaches MERGED",
+            # A bare `#N` with no `PR` word is deliberately out of scope — `#` also
+            # introduces issue numbers and headings.
+            "⏰ Ends:   the verdict lands on #973",
+            "⏰ Ends:   ~/.claude/state/batch/7a.json exists",
+        ):
+            with self.subTest(body=body):
+                self.assertIsNone(self.mod.unqualified_pr(body))
+
+    def test_a_qualified_reference_clears_a_bare_one_in_the_same_slot(self):
+        # The rule is "no qualified reference appears in the SAME slot", not "no bare
+        # mention anywhere" — a closer that names both is resolvable.
+        self.assertIsNone(self.mod.unqualified_pr(
+            "⏰ Ends:   PR #516 on bborbe/claude-supervisor#516 gets a verdict"))
 
     def test_a_watcher_timeout_is_not_a_clock_observable(self):
         # ⚠️ `times out ~18:40` dies with the watcher; only defer_date / an ISO date count.
