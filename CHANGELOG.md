@@ -7,7 +7,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
-## Unreleased
+## v0.283.0
 
 - feat: **the decision-park leg counts its resumes per wait kind.** `decision-park-resume.py` printed one `decision-resumed=` total, which cannot say which wait cleared nor reconcile against the `--record` store kind by kind; the summary and the keep-alive actor's hand-back now carry `decision-resumed-a=` (approval landed) and `decision-resumed-d=` (`blocked_by` completed) instead, and `check-handback-keys.py` requires both. To stay inside the agent's 30 KB body budget, the `<output_format>` sentence saying `park-nudge:` never truncates is dropped — the next sentence already states that `crash-loop:` and `cannot-tell:` are the only lines that truncate, and `commands/steps/keepalive.md` carries the same rule. Test: `test_resumes_are_counted_per_wait_kind`. Change set: `scripts/decision-park-resume.py`, `scripts/tests/test_decision_park_resume.py`, `agents/fleet-keepalive-actor.md`, `commands/steps/keepalive.md`, `commands/steps/keepalive-decision-parks.md`, `scripts/check-handback-keys.py`, `CHANGELOG.md`.
 
