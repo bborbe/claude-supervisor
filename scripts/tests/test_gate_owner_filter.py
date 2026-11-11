@@ -279,6 +279,160 @@ class Verdict(unittest.TestCase):
         )
 
 
+class UnownedIsRoutedToTheFleetManager(unittest.TestCase):
+    """The unowned class goes to ONE destination, and the fail-open limb is the safety property.
+
+    Measured 2026-11-11: >10 foreign wakes in ~2 h on one goal manager, every one from a
+    producer with no spawner and no session id. `unowned` used to emit to every manager, so
+    the class had no destination and every manager inherited all of it. These four cases pin
+    all four answers, because three of them are wrong in opposite directions: emitting to
+    everyone is the flood, dropping everywhere is a black hole, and routing to a dead
+    session is a black hole with extra steps.
+    """
+
+    LEDGER = {"worker-1": {"session_id": "worker-1", "parent_session": "manager-x"}}
+    LIVE = {"worker-1", "fleet-live", "manager-x", "manager-y"}
+    FLEET = "fleet-live"
+    ME = "manager-x"
+
+    def call(self, session_id=None, spawner=None, me=_UNSET, fleet=_UNSET):
+        return gf.verdict(
+            session_id,
+            spawner,
+            self.LEDGER,
+            self.LIVE,
+            self.ME if me is _UNSET else me,
+            None,
+            None,
+            self.FLEET if fleet is _UNSET else fleet,
+        )
+
+    def test_a_goal_manager_drops_an_unowned_gate(self):
+        """The fix: the class leaves every goal manager's feed."""
+        self.assertEqual(self.call("worker-1", None), (gf.DROP, gf.UNOWNED_FLEET))
+
+    def test_the_fleet_manager_emits_the_same_gate(self):
+        """The destination: exactly one manager receives it, so it is routed, not silenced."""
+        self.assertEqual(
+            self.call("worker-1", None, me=self.FLEET),
+            (gf.EMIT, gf.UNOWNED_FLEET),
+        )
+
+    def test_no_live_fleet_manager_falls_open_to_every_manager(self):
+        """An unresolvable destination is not a licence to silence a gate."""
+        self.assertEqual(self.call("worker-1", None, fleet=None), (gf.EMIT, gf.UNOWNED))
+
+    def test_a_diagnostic_run_with_no_self_still_emits(self):
+        """`--pane` with no `--self` has no reader to route FOR, and a silent probe reads
+        as "this pane is fine"."""
+        self.assertEqual(self.call("worker-1", None, me=None), (gf.EMIT, gf.UNOWNED))
+
+    def test_the_routed_drop_never_reaches_a_resolved_drop(self):
+        """A peer-manager drop is a resolved fact and must not be re-routed.
+
+        The new branch may only re-route an `unowned` emit; a claim may add a drop and never
+        remove one, and the same asymmetry holds here in the other direction.
+        """
+        self.assertEqual(
+            self.call("worker-1", "manager-y", fleet=self.FLEET),
+            (gf.DROP, "peer-manager"),
+        )
+
+    def test_fleet_resolution_skips_a_dead_registration(self):
+        """A registration whose session is not live resolves nothing.
+
+        Routing the class to a dead session would take the gate out of every goal manager's
+        feed and deliver it nowhere — strictly worse than the flood.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            for sid, at in (("fleet-dead", "2026-11-11T10:00:00+00:00"),
+                            ("fleet-live", "2026-11-11T09:00:00+00:00")):
+                with open(os.path.join(directory, f"{sid}.json"), "w", encoding="utf-8") as h:
+                    json.dump({"branch": "fleet", "resolved_at": at}, h)
+            self.assertEqual(gf.fleet_manager(self.LIVE, directory), "fleet-live")
+            self.assertIsNone(gf.fleet_manager({"nobody"}, directory))
+            self.assertIsNone(gf.fleet_manager(None, directory))
+
+    def test_fleet_resolution_prefers_the_newest_registration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for sid, at in (("fleet-old", "2026-11-10T10:00:00+00:00"),
+                            ("fleet-live", "2026-11-11T09:00:00+00:00")):
+                with open(os.path.join(directory, f"{sid}.json"), "w", encoding="utf-8") as h:
+                    json.dump({"branch": "fleet", "resolved_at": at}, h)
+            self.assertEqual(
+                gf.fleet_manager({"fleet-old", "fleet-live"}, directory), "fleet-live"
+            )
+
+
+class EmissionsLedger(unittest.TestCase):
+    """One record per decision, with a `ts` so a window can be cut out of the file.
+
+    ⚠️ The `ts` is the whole point: the ledger lives as long as the manager session, so
+    without a timestamp every count is a whole-file count and a `0` could come from before
+    the fix it is meant to certify.
+    """
+
+    def rows(self):
+        return [
+            {"pane": "1", "verdict": gf.EMIT, "reason": "own-worker",
+             "session_id": "w-own", "spawner": "me"},
+            {"pane": "2", "verdict": gf.DROP, "reason": gf.UNOWNED_FLEET,
+             "session_id": "w-foreign", "spawner": None},
+        ]
+
+    def test_one_line_per_decision_carrying_ts_and_the_resolved_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = gf.emissions_path("me", directory)
+            self.assertIsNone(gf.log_emissions(self.rows(), [], _Scope(), "me", root=directory))
+            with open(path, encoding="utf-8") as handle:
+                records = [json.loads(line) for line in handle if line.strip()]
+            self.assertEqual(len(records), 2)
+            for record in records:
+                self.assertTrue(record["ts"])
+            emitted = [r for r in records if r["decision"] == gf.EMIT]
+            self.assertEqual(len(emitted), 1)
+            self.assertEqual(emitted[0]["task"], "A Task")
+            self.assertEqual(emitted[0]["goal"], "A Goal")
+            dropped = [r for r in records if r["decision"] == gf.DROP]
+            self.assertEqual(dropped[0]["reason"], gf.UNOWNED_FLEET)
+
+    def test_an_unattributed_session_records_no_task_and_no_goal(self):
+        """A gate whose session resolves to no page is recorded as unattributed, never
+        silently attributed to whatever page happened to be first."""
+        with tempfile.TemporaryDirectory() as directory:
+            rows = [{"pane": "9", "verdict": gf.EMIT, "reason": gf.UNOWNED,
+                     "session_id": "nobody", "spawner": None}]
+            gf.log_emissions(rows, [], _Scope(), "me", root=directory)
+            with open(gf.emissions_path("me", directory), encoding="utf-8") as handle:
+                record = json.loads(handle.readline())
+            self.assertIsNone(record["task"])
+            self.assertIsNone(record["goal"])
+
+    def test_no_self_id_writes_nothing(self):
+        """No manager, no ledger — a diagnostic run must not invent one."""
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertIsNone(gf.emissions_path(None, directory))
+            self.assertIsNone(gf.log_emissions(self.rows(), [], _Scope(), None, root=directory))
+            self.assertEqual(os.listdir(directory), [])
+
+
+class _Entry:
+    def __init__(self, title, goals):
+        self.title = title
+        self.kind = "task"
+        self.goals = goals
+
+
+class _Scope:
+    """The two sessions the ledger tests use: one attributed, one not."""
+
+    def __init__(self):
+        self.sessions = {
+            "w-own": [_Entry("A Task", ["A Goal"])],
+            "w-foreign": [_Entry("B Task", ["B Goal"])],
+        }
+
+
 class IsManager(unittest.TestCase):
     def test_parent_with_no_own_record_is_a_manager(self):
         self.assertTrue(gf.is_manager("1217e759", {}))
