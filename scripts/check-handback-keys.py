@@ -73,6 +73,12 @@ LEGS = {
             # refusal — a document that observed nothing must not reach the caller as a
             # quiet fleet, and the caller cannot tell without these two keys.
             "resolution", "tracked", "unresolved",
+            # live sessions in this vault that NO page records. They carry rows of their
+            # own, so `rows=` already counts them — but a round that saw an unrecorded
+            # park must say so in the hand-back, and without this key the only place it
+            # could appear is the payload nobody forwards. Measured 2026-11-11: session
+            # `1c05c414` sat `waiting` while the round rendered `parked=0`.
+            "unrecorded",
             # liveness
             "live", "absent", "unknown",
             # in-flight — all four values, the `unread` under its own key

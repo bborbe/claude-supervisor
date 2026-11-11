@@ -185,7 +185,7 @@ this leg** — a fourth key is an output-shape change, not a side effect of a sp
   line that says which. ⚠️ **`refused=0` belongs here as much as the other three** — the four act
   counts are reconciled as `opened + resumed + jumped + refused == selected` on every round, and
   the one branch with no refusals is the one a dropped key would silently leave unreconciled. ⚠️ **`target
-  unlimited` is the `spawn.maxConcurrent: 0` config and the leg opens nothing there on purpose**
+  unlimited` is the `spawn.maxWorkerSoft: 0` config and the leg opens nothing there on purpose**
   (`docs/fleet-surface.md` § Spawn a worker item 5 owns the constant and its cap) — `0` removes
   the server's cap, and the cap is the only bound this leg ranks against; admitting every eligible
   row because the bound was removed is the bulk opening the 2026-10-01 ruling forbids. It is a

@@ -116,7 +116,7 @@ class WorkerTargetTest(unittest.TestCase):
         path = self.write("twelve.json", '{"spawn": {"maxConcurrent": 12}}')
         _, out, _ = self.run_script(path)
         self.assertEqual(out, "12\n")
-        self.assertNotIn("maxConcurrent", out)
+        self.assertNotIn("maxWorkerSoft", out)
 
     def test_source_names_the_decider(self):
         """A bare `18` cannot be told from a bare `12`; `--source` is how it is told."""
@@ -189,7 +189,7 @@ class WorkerTargetTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(out.strip(), "")
         self.assertIn("UNKNOWN", err)
-        self.assertIn("maxConcurrentHard", err)
+        self.assertIn("maxWorkerHard", err)
 
 
 if __name__ == "__main__":

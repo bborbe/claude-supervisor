@@ -11,7 +11,7 @@ When: every `resume` or `restart` verdict the topic round's keep-alive reads —
 
 ## Why
 
-Measured 2026-11-08 (topic manager `eab58671`, ticks 15:55 and 16:15): `topic-keepalive.py` read `resume` for three goal managers on two consecutive ticks, the round resumed none, and blamed first `spawn.maxConcurrent`, then N = 3. `manager-receipt.py --check` stayed green — every field it knew resolved, and nothing recorded that a verdict had been read at all.
+Measured 2026-11-08 (topic manager `eab58671`, ticks 15:55 and 16:15): `topic-keepalive.py` read `resume` for three goal managers on two consecutive ticks, the round resumed none, and blamed first `spawn.maxWorkerSoft`, then N = 3. `manager-receipt.py --check` stayed green — every field it knew resolved, and nothing recorded that a verdict had been read at all.
 
 ## The verdict is owed — the probe records it
 
@@ -49,4 +49,4 @@ python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervis
 
 ## N never gates a resume
 
-N gates a start and never a resume — the rule's single home is `docs/session-tiers.md` § Keep-alive. Its consequence here: neither N nor `spawn.maxConcurrent` (its home: `docs/fleet-surface.md` § Spawn a worker item 5) is ever a `refused:` reason, so the vocabulary above carries no token for either — those are the excuses the measured round gave.
+N gates a start and never a resume — the rule's single home is `docs/session-tiers.md` § Keep-alive. Its consequence here: neither N nor `spawn.maxWorkerSoft` (its home: `docs/fleet-surface.md` § Spawn a worker item 5) is ever a `refused:` reason, so the vocabulary above carries no token for either — those are the excuses the measured round gave.
