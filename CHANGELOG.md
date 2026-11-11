@@ -7,7 +7,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
-## Unreleased
+## v0.277.0
 
 - feat: **every `blocked` `ESCALATION` row now carries the manager it belongs to, so a blocked session whose closer named no owner still reaches someone.** The round resolved a blocked row's jump link but never its owner: `agents/fleet-drive.md`'s `ESCALATION` format gains a `manager <resolved|fleet>` field, resolved by a new `scripts/escalation-manager.py <task title>`, which is the one implementation of `docs/fleet-surface.md` § *Which manager owns a subject*: it reuses `fleet-board.py`'s grouping (`build_grouping` → `manager_on_chain`) rather than re-deriving the tiers, prints `fleet` for tier 4's fallback, and **exits non-zero when the registry cannot be read**. ⚠️ A failed read renders `UNKNOWN`, never `fleet` — `fleet` claims the Fleet Manager owns a row it may not own, which is the `A Wait Needs a Performer` defect the field exists to close. Three rounds of prose naming the resolver functions failed before this because the drive leg is handed a prompt, not a board; a script is the thing a reader can actually run. `commands/steps/drive.md` carries the field through unchanged and is forbidden from re-resolving it, so two tiers cannot end up owning one subject. `agents/fleet-drive.md`, `commands/steps/drive.md`, `scripts/budget-baseline.json`.
 
