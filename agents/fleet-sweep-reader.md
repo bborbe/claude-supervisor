@@ -95,6 +95,8 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 
    ⚠️ **No new tool grant is needed** — the sweep already holds `Bash(python3:*)` and already runs `who-needs-me.py` (step 1). Never query the pane list directly; that lookup belongs to `who-needs-me.py`'s `pane_for()`, which owns the session-registry + pane-list join.
 
+7b. **Unclaimable tasks (Step 2e).** `python3 $P/unclaimable-tasks.py --since 2026-11-01 --limit 5`. A task whose `target_vault` is empty or absent is claimed by no controller: the non-owning one drops it as cross-vault traffic and the legacy-default one cannot recreate a file already at the title path, so no pod is scheduled and nothing reports it. Since `agent-task-controller` v0.26.12 the create path refuses such a command outright, so **a recent hit means a producer still omits the field and its PR is stalling silently**; the historical count is legacy and needs no action. ⚠️ This section is **session-independent on purpose** — the defect case has no pod and no session to key a row on, which is why it is not a column on the roster. ⚠️ Never window it on file mtime: mtime is the clone date on most of these files (measured 2026-11-11, an mtime window read 9,624 "recent" when the true number was 0). ⚠️ On a non-zero exit print `UNKNOWN (pass not run)`, never `(none)`.
+
 8. **Classify (Step 3).**
 
    | Signal | Reading |
@@ -146,7 +148,7 @@ The caller forwards this path verbatim to `agents/fleet-drive.md`, which reads i
 
 ⚠️ **Sanitize the timestamp into the filename, and treat this clause as its single home.** Replace every character outside `[0-9A-Za-z._-]` with `-`, so a caller passing `2026-10-11T18:09:40Z` yields `2026-10-11T18-09-40Z.digest`. The round timestamp's format is the caller's and is not fixed anywhere, so the sanitization is what keeps the path printable and re-readable — and it is what keeps this file's name aligned with the drive leg's, which applies the same rule by pointing here rather than copying it. The caller never recomputes the path; it forwards your `payload=` value verbatim.
 
-Return **≤ 43 lines** in the payload, exactly these sections, each printed as `(none)` rather than dropped — the cap is 40 plus the `LEGS` block as seeded here (header + two `not run` lines = three):
+Return **≤ 49 lines** in the payload, exactly these sections, each printed as `(none)` rather than dropped — the cap is 46 plus the `LEGS` block as seeded here (header + two `not run` lines = three), the extra six being `UNCLAIMABLE`'s header, five recent rows and its counts line:
 
 ```
 DIGEST <round timestamp> · <N> sessions · snapshot written: <swept_at from fleet-snapshot.py>
@@ -164,6 +166,9 @@ COLLISION CANDIDATES
   <name A> ↔ <name B> · <shared artifact>
 UNMANAGED TOPICS
   <topic> · <workers> · page present|absent
+UNCLAIMABLE (empty target_vault, agent runtime vaults)  — or: UNKNOWN (pass not run)
+  <task id> · <task_type> · <status> · <file> · blocks <pr|—>     ← recent only, max 5
+  recent: <n> (since <date>) · historical: <n> · undated: <n>
 CONTEXT ≥70% (idle, not in tool)
   <name> · <pct>
 LEDGER (open)
