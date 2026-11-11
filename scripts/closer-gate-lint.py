@@ -431,7 +431,10 @@ def session_bound_class(line):
 # pattern is the one that decides `unprobeable`, and it also accepts `pull request <n>` —
 # a form this matcher would otherwise let through while the probe refused it, which is a
 # closer that blocks nothing and is still never re-checked.
-PR_BARE = re.compile(r"\b(?:PR|pull\s+request)\s*#?\s*\d+", re.IGNORECASE)
+# ⚠️ The plural is included because the probe does not resolve it either: measured
+# 2026-11-11, `observables("pull requests 12")` returns `[]`, so a slot written that way is
+# `unprobeable` while a singular-only matcher let it through.
+PR_BARE = re.compile(r"\b(?:PR|pull\s+requests?)\s*#?\s*\d+", re.IGNORECASE)
 
 # A `repo#N` with no owner (`nuke#567`) is NOT qualified — the owner would have to be
 # guessed, and guessing it is how a probe lands on another org's identically numbered PR.
@@ -456,14 +459,30 @@ PR_QUALIFIED = re.compile(
 
 
 def unqualified_pr(line):
-    """The bare PR reference in an `⏰ Ends:` slot that no qualified one resolves, or `None`."""
+    """The bare PR reference in an `⏰ Ends:` slot that no qualified span covers, or `None`.
+
+    ⚠️ **A qualified reference elsewhere in the slot does NOT excuse a bare one.** The
+    obvious implementation — return `None` as soon as `PR_QUALIFIED` matches anywhere —
+    is wrong, and was measured wrong on review: `observable-reprobe.observables()` is
+    called by `wait-reprobe.py` with **no repo**, and it only merges a bare `PR #N` into a
+    qualified one when a repo resolves (`add()`'s key is `(obs_repo or repo, number)`).
+    With none, `PR #516 on bborbe/claude-supervisor#516` yields TWO observables, one of
+    them `repo: None`, and `verdict()` ANDs it to `unprobeable` — so a presence-based
+    short-circuit passes exactly the declaration this rule exists to refuse.
+    """
     body = ends_body(line)
     if not body:
         return None
-    if PR_QUALIFIED.search(body):
-        return None
-    match = PR_BARE.search(body) or PR_REPO_ONLY.search(body)
-    return match.group(0) if match else None
+    spans = [m.span() for m in PR_QUALIFIED.finditer(body)]
+
+    def covered(match):
+        return any(start <= match.start() and match.end() <= end for start, end in spans)
+
+    for pattern in (PR_BARE, PR_REPO_ONLY):
+        for match in pattern.finditer(body):
+            if not covered(match):
+                return match.group(0)
+    return None
 
 
 def state_dir():

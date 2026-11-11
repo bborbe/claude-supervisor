@@ -117,6 +117,9 @@ EXPECTED = {
     "48-ends-pr-repo-only.jsonl": 2,
     "49-ends-pr-qualified.jsonl": 0,
     "50-ends-pr-url.jsonl": 0,
+    # ⚠️ A slot naming BOTH a bare and a qualified PR is still unprobeable: the probe is
+    # called with no repo, so the bare reference stays its own `repo: None` observable.
+    "51-ends-pr-mixed-slot.jsonl": 2,
 }
 
 PANELESS_ENV = {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}
@@ -707,6 +710,9 @@ class CloserGateLintTest(unittest.TestCase):
             # ⚠️ `pull request <n>` is bare too — `observable-reprobe.py`'s `_BARE` accepts
             # it, so a matcher that missed it would pass a closer the probe refuses.
             ("⏰ Ends:   pull request 12 gets a verdict", "pull request 12"),
+            # ⚠️ The plural too: `observables("pull requests 12")` returns `[]`, so the
+            # probe resolves nothing and the wait is unprobeable either way.
+            ("⏰ Ends:   pull requests 12 get a verdict", "pull requests 12"),
         ):
             with self.subTest(body=body):
                 self.assertEqual(expected, self.mod.unqualified_pr(body))
@@ -724,11 +730,15 @@ class CloserGateLintTest(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIsNone(self.mod.unqualified_pr(body))
 
-    def test_a_qualified_reference_clears_a_bare_one_in_the_same_slot(self):
-        # The rule is "no qualified reference appears in the SAME slot", not "no bare
-        # mention anywhere" — a closer that names both is resolvable.
-        self.assertIsNone(self.mod.unqualified_pr(
+    def test_a_qualified_reference_does_not_excuse_a_bare_one_in_the_same_slot(self):
+        # ⚠️ Measured: `observables("PR #516 on bborbe/claude-supervisor#516")` returns TWO
+        # entries, the second `repo: None`, and `verdict()` ANDs it to `unprobeable` — so
+        # naming both leaves the wait unprobeable. A presence-based short-circuit passed
+        # exactly this shape and would have shipped the defect the rule exists to remove.
+        self.assertEqual("PR #516", self.mod.unqualified_pr(
             "⏰ Ends:   PR #516 on bborbe/claude-supervisor#516 gets a verdict"))
+        self.assertEqual("PR #516", self.mod.unqualified_pr(
+            "⏰ Ends:   PR #516 and bborbe/nuke#698 both land"))
 
     def test_a_watcher_timeout_is_not_a_clock_observable(self):
         # ⚠️ `times out ~18:40` dies with the watcher; only defer_date / an ISO date count.
