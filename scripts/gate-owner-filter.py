@@ -389,6 +389,14 @@ UNOWNED_FLEET = "unowned-fleet"
 EMISSIONS_ROOT = os.environ.get("GATE_EMISSIONS_DIR") or os.path.expanduser(
     "~/.claude/state/manager-attention-watch"
 )
+#: ⚠️ The ledger is append-only and lives for the life of the manager session, so it needs a
+#: bound. Measured 2026-11-11 on a live manager: 276 records in 15.6 minutes, i.e. ~25 k
+#: records/day (~6 MB/day) with no rotation at all — the sibling `gate-feed/<sid>.json` is
+#: pruned by `emit_decisions`, this file is not. Rotation is by SIZE and keeps the newest
+#: lines, so a window cut after a rotation still reads the recent past and only loses history
+#: older than the bound.
+EMISSIONS_MAX_BYTES = int(os.environ.get("GATE_EMISSIONS_MAX_BYTES") or 5_000_000)
+EMISSIONS_KEEP_LINES = int(os.environ.get("GATE_EMISSIONS_KEEP_LINES") or 20000)
 
 
 _SPAWN_LEDGER = None
@@ -965,16 +973,19 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None, scope=None,
     call, reason = spawner_verdict(spawner, ledger, live)
     if call == DROP:
         return call, reason
-    # The routed limb. Applied here rather than inside `spawner_verdict` so BOTH unowned
-    # sites (this one and the no-session early return above) share one rule. A drop
-    # returns immediately -- the claim block below can only ADD a drop, so there is
-    # nothing left for it to say. An emit falls THROUGH deliberately: a pane with a
-    # session but no spawner can still be held by a live peer's claim, and `claimed` /
-    # `own-claim` must keep working for it.
-    if reason == UNOWNED:
-        call, reason = route_unowned(self_id, fleet)
-        if call == DROP:
-            return call, reason
+    # ⚠️ The routed limb is applied LAST, after hop 3b and after the claim block, and the
+    # placement is load-bearing rather than tidy. An earlier cut returned the routed drop
+    # HERE, and that silently broke the adoption contract: a goal manager that adopted a
+    # spawnerless pane (`own-claim`) lost the gate the moment a Fleet Manager was live,
+    # because the routed drop outranked the claim. That is the same hazard the
+    # `adopted_by_self` guards exist to prevent, reached through a new door. The file's own
+    # asymmetry is "a claim may only ADD a drop, never remove one" -- so a new drop must
+    # never be inserted AHEAD of the claim either, or the two rules contradict.
+    #
+    # Sitting here, every prior hop has already had its say: `peer-manager`, `own-worker`,
+    # `self`, the scope exclusion, `peer-manager-own`, `claimed` and `own-claim` all return
+    # before this line. What reaches it is a pane nobody owns -- which is exactly the class
+    # to route.
 
     # HOP 3b -- the GATED SESSION is itself the manager. Hop 3 reads the spawn
     # edge, and a manager's own gate has none: an operator-started manager was
@@ -1015,6 +1026,10 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None, scope=None,
             if holder not in live:
                 return EMIT, "claim-dead"
             return DROP, "claimed"
+    # Nothing above resolved this pane, so the routed limb decides — LAST, for the reason
+    # in the comment above hop 3b.
+    if reason == UNOWNED:
+        return route_unowned(self_id, fleet)
     return call, reason
 
 
@@ -1584,6 +1599,29 @@ def gate_owner(scope, session_id):
     return entry.title, (entry.goals[0] if entry.goals else None)
 
 
+def trim_emissions(path, keep=None):
+    """Keep only the newest `keep` lines. Called when the file passes its size bound.
+
+    Trim IN PLACE rather than rotate to a sibling: the window is cut by `ts` from one
+    path, so a second file would make the operator join two to answer one question. The
+    cost of losing the oldest history is bounded and stated; an unbounded file's is not.
+
+    The rewrite goes through a temp file and `os.replace`, matching every other state
+    writer here — a plain truncating write would leave the ledger half-empty if the
+    process died mid-rewrite.
+    """
+    limit = keep or EMISSIONS_KEEP_LINES
+    with open(path, encoding="utf-8") as handle:
+        lines = handle.readlines()
+    if len(lines) <= limit:
+        return False
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.writelines(lines[-limit:])
+    os.replace(tmp, path)
+    return True
+
+
 def log_emissions(rows, items, scope, self_id, now=None, root=None):
     """Append one record per DECISION to this manager's `feed-emissions.jsonl`.
 
@@ -1627,8 +1665,17 @@ def log_emissions(rows, items, scope, self_id, now=None, root=None):
                     )
                     + "\n"
                 )
+        # Cheap stat, not a read: the trim only pays its cost once per bound crossing.
+        if os.path.getsize(path) > EMISSIONS_MAX_BYTES:
+            trim_emissions(path)
         return None
-    except OSError as exc:
+    except (OSError, TypeError, ValueError) as exc:
+        # ⚠️ Wider than `OSError` on purpose. A ledger record is built from parsed store
+        # data (`newest_item_for_pane` sorts on `ts`, `json.dumps` serialises whatever the
+        # store returned), so a malformed record raises `TypeError`/`ValueError` — and this
+        # call sits on the wake path, where a raise kills the arm instead of costing one
+        # line of instrumentation. The docstring promises the ledger cannot take the wake
+        # path down; this is what makes that true.
         return exc
 
 
@@ -1741,10 +1788,24 @@ def poll(args, items, scope=None):
 
         render(rows, args, new_panes=new_panes)
 
-        # ⚠️ Written per poll, not per wake: the ledger records DECISIONS, and a suppressed
-        # gate is exactly the decision this row exists to make visible. A ledger written
-        # only on emit would read `0` on a quiet hour against a completely unfixed filter —
-        # the failure the criterion's candidate floor was added for.
+        # ⚠️ Written BEFORE the sleep, so its age is the arm's last heartbeat and
+        # a stalled producer reads as a gap rather than as a quiet poll.
+        state = "change" if new_panes else "no change"
+        print(
+            f"LIVENESS  {counts_line(rows)}  new: {len(new_panes)}  {state}",
+            file=sys.stderr,
+        )
+        sys.stderr.flush()
+        sys.stdout.flush()
+
+        # ⚠️ AFTER the heartbeat, deliberately. The ledger is instrumentation: if building a
+        # record raises despite `log_emissions`'s own catch, the poll's LIVENESS line must
+        # already be on disk so the arm reads as alive-with-a-gap rather than as dead.
+        #
+        # Written per poll, not per wake: the ledger records DECISIONS, and a suppressed gate
+        # is exactly the decision this row exists to make visible. A ledger written only on
+        # emit would read `0` on a quiet hour against a completely unfixed filter — the
+        # failure the criterion's candidate floor was added for.
         # Attempted EVERY poll, reported ONCE: a transient failure that clears must resume
         # the ledger rather than leave a permanent hole the window cannot see.
         emissions_error = log_emissions(rows, poll_items, scope, args.self_id)
@@ -1755,16 +1816,6 @@ def poll(args, items, scope=None):
                 f"window's counts will be unavailable",
                 file=sys.stderr,
             )
-
-        # ⚠️ Written BEFORE the sleep, so its age is the arm's last heartbeat and
-        # a stalled producer reads as a gap rather than as a quiet poll.
-        state = "change" if new_panes else "no change"
-        print(
-            f"LIVENESS  {counts_line(rows)}  new: {len(new_panes)}  {state}",
-            file=sys.stderr,
-        )
-        sys.stderr.flush()
-        sys.stdout.flush()
 
         # ⚠️ The bound is checked BEFORE the sleep, so `--max-polls 1` is a real
         # single poll rather than one poll plus an interval of dead waiting. It

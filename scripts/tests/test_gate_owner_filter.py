@@ -49,6 +49,19 @@ from endpoint_fixture import FixtureEndpoint, dead_url, ledger_row  # noqa: E402
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "gate-owner-filter.py")
 
+# ⚠️ Isolate the two state roots this suite can WRITE and READ, before the module is
+# imported so the constants pick them up and before any subprocess inherits them.
+#
+# Without this, every subprocess test that passes `--self` appends to the operator's live
+# `~/.claude/state/manager-attention-watch/<fixture id>/feed-emissions.jsonl` — measured
+# 2026-11-11, one suite run left 67 KB there — and every `evaluate_panes` call reads the
+# real `~/.claude/state/worker-manager/`, so a real fleet registration colliding with a
+# fixture id would flip a verdict. That is the same machine-dependence `OwnerStub` below
+# exists to remove, reached through a second door.
+_TEST_STATE = tempfile.mkdtemp(prefix="gate-owner-filter-tests-")
+os.environ["GATE_EMISSIONS_DIR"] = os.path.join(_TEST_STATE, "emissions")
+os.environ["SUPERVISOR_WORKER_MANAGER_DIR"] = os.path.join(_TEST_STATE, "worker-manager")
+
 _spec = importlib.util.spec_from_file_location("gate_owner_filter", _SCRIPT)
 gf = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gf)
@@ -295,14 +308,14 @@ class UnownedIsRoutedToTheFleetManager(unittest.TestCase):
     FLEET = "fleet-live"
     ME = "manager-x"
 
-    def call(self, session_id=None, spawner=None, me=_UNSET, fleet=_UNSET):
+    def call(self, session_id=None, spawner=None, me=_UNSET, fleet=_UNSET, claims=None):
         return gf.verdict(
             session_id,
             spawner,
             self.LEDGER,
             self.LIVE,
             self.ME if me is _UNSET else me,
-            None,
+            claims,
             None,
             self.FLEET if fleet is _UNSET else fleet,
         )
@@ -310,6 +323,53 @@ class UnownedIsRoutedToTheFleetManager(unittest.TestCase):
     def test_a_goal_manager_drops_an_unowned_gate(self):
         """The fix: the class leaves every goal manager's feed."""
         self.assertEqual(self.call("worker-1", None), (gf.DROP, gf.UNOWNED_FLEET))
+
+    def test_a_gate_with_no_session_id_is_routed_too(self):
+        """The OTHER unowned site, and the highest-volume producer class.
+
+        `sweep-gate` / `fleet-keeper` / `drive-escalate` post with no session id at all,
+        which is the early return at the top of `verdict()` rather than the spawner path.
+        Without this case a change that routed only the spawnerless site passes every other
+        test in this class.
+        """
+        self.assertEqual(self.call(None, None), (gf.DROP, gf.UNOWNED_FLEET))
+        self.assertEqual(
+            self.call(None, None, me=self.FLEET), (gf.EMIT, gf.UNOWNED_FLEET)
+        )
+
+    def test_an_adopted_pane_keeps_its_gate(self):
+        """A goal manager that ADOPTED a spawnerless pane must still see it.
+
+        The adoption contract (`commands/steps/adopt.md`): `ownership-claim.py` records the
+        adoption precisely so the adopting manager keeps seeing a spawnerless pane. An
+        earlier cut of this fix returned the routed drop before the claim block, which broke
+        that silently — the routed drop outranked the claim.
+        """
+        self.assertEqual(
+            self.call("worker-1", None, claims={"worker-1": self.ME}),
+            (gf.EMIT, "own-claim"),
+        )
+
+    def test_a_peer_claim_still_owns_the_pane(self):
+        """A claim a live peer holds drops the pane as `claimed`, not `unowned-fleet`.
+
+        The routed limb sits below the claim block for this reason: the file's asymmetry is
+        that a claim may ADD a drop, so a new drop must not be inserted ahead of one.
+        """
+        self.assertEqual(
+            self.call("worker-1", None, claims={"worker-1": "manager-y"}),
+            (gf.DROP, "claimed"),
+        )
+
+    def test_a_peer_managers_own_gate_is_not_relabelled(self):
+        """Hop 3b still wins: a live peer manager's own gate drops as `peer-manager-own`.
+
+        Same verdict, different bucket — and the bucket is what `counts_line` and
+        `--explain` report, so relabelling it would misattribute the drop.
+        """
+        self.assertEqual(
+            self.call("manager-y", None), (gf.DROP, "peer-manager-own")
+        )
 
     def test_the_fleet_manager_emits_the_same_gate(self):
         """The destination: exactly one manager receives it, so it is routed, not silenced."""
@@ -414,6 +474,26 @@ class EmissionsLedger(unittest.TestCase):
             self.assertIsNone(gf.emissions_path(None, directory))
             self.assertIsNone(gf.log_emissions(self.rows(), [], _Scope(), None, root=directory))
             self.assertEqual(os.listdir(directory), [])
+
+    def test_the_ledger_is_bounded(self):
+        """Append-only for the life of a session, so it needs a bound.
+
+        Measured 2026-11-11 on a live manager: ~25 k records/day with no rotation at all.
+        The trim keeps the NEWEST lines, so a window cut after a rotation still reads the
+        recent past and loses only history older than the bound.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            path = gf.emissions_path("me", directory)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("".join('{"n": %d}\n' % i for i in range(50)))
+            self.assertTrue(gf.trim_emissions(path, keep=10))
+            with open(path, encoding="utf-8") as handle:
+                lines = handle.readlines()
+            self.assertEqual(len(lines), 10)
+            self.assertIn('"n": 49', lines[-1])
+            # A file already inside the bound is left untouched rather than rewritten.
+            self.assertFalse(gf.trim_emissions(path, keep=10))
 
 
 class _Entry:
