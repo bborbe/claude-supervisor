@@ -145,8 +145,11 @@ def main():
 
     if args.json:
         json.dump(
+            # `unreadable` is carried here too: the comment on UNREADABLE promises the
+            # evidence is surfaced, and a JSON consumer that lost it would read a
+            # partial scan as a complete one.
             {"since": args.since, "all_time": len(found), "recent": len(recent),
-             "undated": len(undated), "rows": recent},
+             "undated": len(undated), "unreadable": len(UNREADABLE), "rows": recent},
             sys.stdout, indent=2,
         )
         print()
