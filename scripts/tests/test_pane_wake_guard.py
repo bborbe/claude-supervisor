@@ -214,6 +214,27 @@ class VerdictTest(unittest.TestCase):
     def test_unreadable_is_an_error(self):
         self.assertEqual(guard.verdict(None), "error:unreadable")
 
+    def test_sleeping_subject_skips_an_otherwise_wakeable_pane(self):
+        # A date-gated sleeper is idle BY DEFINITION — empty composer, no `👤 You:` ask,
+        # nothing on screen that tells it from a lapse. Only the state does.
+        self.assertEqual(guard.verdict(IDLE, subject_state="SLEEPING"), "skip:sleeping")
+
+    def test_sleeping_subject_skips_a_dirty_composer_too(self):
+        self.assertEqual(guard.verdict(DIRTY_COMPOSER, subject_state="SLEEPING"), "skip:sleeping")
+
+    def test_sleeping_subject_skips_even_an_unreadable_pane(self):
+        # The state is authoritative and independent of the screen: a failed pane read
+        # must not turn a correct sleep into a wakeable target.
+        self.assertEqual(guard.verdict(None, subject_state="SLEEPING"), "skip:sleeping")
+
+    def test_awake_subject_still_wakes_the_same_pane(self):
+        # The negative direction, named for itself: the SAME screen with any non-sleeping
+        # state must still wake, or the new arm would have swallowed every wake while
+        # reading as success.
+        for state in ("OK", "STALE", "STOPPED", "UNARMED", "INVALID", None):
+            with self.subTest(state=state):
+                self.assertEqual(guard.verdict(IDLE, subject_state=state), "wake")
+
 
 class ExitStatusTest(unittest.TestCase):
     def _run(self, text, tmp):
@@ -229,6 +250,16 @@ class ExitStatusTest(unittest.TestCase):
             self.assertEqual(self._run(IDLE, tmp), 0)
             self.assertEqual(self._run(SPINNER, tmp), 1)
             self.assertEqual(guard.main(["--text-file", str(pathlib.Path(tmp) / "missing.txt")]), 2)
+
+    def test_subject_state_flag_skips_an_idle_pane(self):
+        import tempfile
+        from contextlib import redirect_stdout
+        import io
+        with tempfile.TemporaryDirectory() as tmp, redirect_stdout(io.StringIO()):
+            p = pathlib.Path(tmp) / "pane.txt"
+            p.write_text(IDLE, encoding="utf-8")
+            self.assertEqual(guard.main(["--text-file", str(p), "--subject-state", "SLEEPING"]), 1)
+            self.assertEqual(guard.main(["--text-file", str(p), "--subject-state", "OK"]), 0)
 
 
 if __name__ == "__main__":
