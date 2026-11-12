@@ -314,13 +314,23 @@ class CloserGateLintTest(unittest.TestCase):
                 self.assertEqual(0, code)
 
     def test_a_blocked_closer_saying_only_later_still_names_no_owner(self):
-        # The negative control for the arm above: `later` on its own is not the parked form,
-        # and widening the arm to any `later` would silently disable this check.
-        code, text, record = self._closer(
-            "later",
-            prefix="🔴 BLOCKED · nothing running · needs intervention\n")
-        self.assertEqual(2, code)
-        self.assertEqual("ownerless-blocked", record["reason"])
+        # The negative controls for the arm above. ⚠️ The mid-sentence case is the load
+        # bearing one: the arm keys on the closer VERB at body start, and dropping the `^`
+        # anchor would accept "we can do it later (on Monday)" — which names no owner. A
+        # bare `later` alone does NOT catch that, so both are pinned.
+        for body in ("later",
+                     "later on",
+                     "later on the trigger",
+                     "later(",
+                     "later (once the PR lands)",
+                     "nothing — we can do it later (on Monday)",
+                     "approved later (on X)"):
+            with self.subTest(body=body):
+                code, text, record = self._closer(
+                    body,
+                    prefix="🔴 BLOCKED · nothing running · needs intervention\n")
+                self.assertEqual(2, code, body)
+                self.assertEqual("ownerless-blocked", record["reason"], body)
 
     def test_the_recorded_e4fd1919_blocked_closer_passes(self):
         # ⚠️ The exact shape that made the bot request changes on #778. `fixtures/
