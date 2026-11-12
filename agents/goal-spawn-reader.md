@@ -87,8 +87,8 @@ not carry.
    | cap | live workers **at or above** the target | `held: <task> · limit (<n>/<target>)` |
 
    ⚠️ **`flag: true` is not a parked marker** — it marks a row the operator wants picked up,
-   and **provenance is not read here**: any setter counts, an absent one is no bar
-   (`docs/fleet-surface.md` § Approval provenance — the ownership statement's single home).
+   and **only an operator-set flag counts here**: an agent-set or absent `flag_set_by` is
+   refused (`docs/fleet-surface.md` § Approval provenance — the ownership statement's single home).
    ⚠️ **`backlog` sits beside `hold` for the same reason, and `human_review` is that answer one
    layer up:** the sweep treats both statuses as definitive dispositions it never offers, and a
    row already with the operator is not a spawn target either — so all three hold.

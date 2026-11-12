@@ -9,13 +9,12 @@ Two halves, and both are needed:
     with the shared predicate on today's fixtures while carrying its own copy of the rule
     (`flagged-rows.refusals()` did exactly that, and agreed with it on tasks).
 
-⚠️ **`commands/open.md` is covered by a different mechanism, on purpose.**
-Its § Step 0.5 selector is executable prose an agent runs, not an importable module, so it
-cannot call a Python function. `scripts/check-resume-flag-clause.py` is the guard: it
-parses that selector's own `OPENING_ACTORS=` line and asserts it equals the shared
-constant, and `test_check_resume_flag_clause.py` runs it against the real tree. That is
-coverage of the sixth path, not an omission — and it is why the checker was repaired
-rather than retired when the constant moved.
+⚠️ **`commands/open.md` is the sixth path, asserted here directly.** Its § Step 0.5
+selector is executable prose an agent runs, not an importable module, so it cannot call a
+Python function — but it does carry an `OPENING_ACTORS=` literal, and this file parses it
+and compares it to the shared constant. `scripts/check-resume-flag-clause.py` guards the
+same agreement from the command side; asserting it here too means a repoint of any of the
+six paths turns THIS file red, which is what the positive control needs.
 
 ⚠️ **The positive control is run by hand at execution time:** repoint each path in turn and
 watch this file go red — six repoints, six reds. A claim quantified over six paths is not
@@ -26,6 +25,8 @@ Run: python3 -m unittest discover -s scripts/tests -p 'test_flag_opens_callers.p
 
 import importlib.util
 import os
+import re
+import tempfile
 import unittest
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -112,6 +113,50 @@ class EveryPathReachesTheOnePredicate(unittest.TestCase):
         self.assertEqual(admitted, {"task": True, "goal": True, "topic": True})
         self.assertEqual(refused, {"task": False, "goal": False, "topic": False})
         self.assertEqual(absent, {"task": False, "goal": False, "topic": False})
+
+    def test_flagged_subjects_agrees_on_the_verdict(self):
+        """The selection leg, exercised through its own entry — not only structurally.
+
+        `subjects()` reads a vault directory, so the three shapes go to disk and the
+        function is asked directly: the operator-set goal is selected, the agent-set and
+        bare ones are not.
+        """
+        subjects_mod = _load("flagged_subjects", "flagged-subjects.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, body in (("operator-set", ADMITTED["goal"]),
+                               ("agent-set", REFUSED["goal"]),
+                               ("bare", ABSENT["goal"])):
+                with open(os.path.join(tmp, name + ".md"), "w", encoding="utf-8") as handle:
+                    handle.write("---\nstatus: in_progress\n" + body + "---\n")
+            picked = [row["name"] for row in
+                      subjects_mod.subjects({"name": "probe", "goals_dir": tmp}, "goal")]
+        self.assertEqual(picked, ["operator-set"])
+
+    def test_a_legacy_row_opens_at_all_three_tiers(self):
+        """⚠️ 270 rows carry `flag_set_by: legacy` after the 2026-09-30 disposition.
+
+        A build admitting `operator` alone passes every other criterion in this file while
+        all of them stop opening, so the third actor needs its own assertion at every tier.
+        """
+        shared = _load("flag_provenance", "flag_provenance.py")
+        for kind, body in (("task", "flag: true"), ("goal", "flag: 'true'"), ("topic", "flag: on")):
+            with self.subTest(kind=kind):
+                self.assertTrue(shared.flag_admits(body + "\nflag_set_by: legacy\n", kind))
+
+    def test_the_task_batch_selector_matches_the_shared_constant(self):
+        """`commands/open.md` § Step 0.5 — the sixth path, an executable-prose selector.
+
+        Parsed rather than imported: the command file's `OPENING_ACTORS=` literal is what
+        an agent actually runs, so that literal is the thing that must agree.
+        """
+        shared = _load("flag_provenance", "flag_provenance.py")
+        path = os.path.join(os.path.dirname(_SCRIPTS), "commands", "open.md")
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+        match = re.search(r"^OPENING_ACTORS=\((.*)\)$", text, re.MULTILINE)
+        self.assertIsNotNone(match, "commands/open.md carries no OPENING_ACTORS= selector")
+        parsed = tuple(part.strip().strip("'\"") for part in match.group(1).split(","))
+        self.assertEqual(parsed, shared.OPENING_ACTORS)
 
 
 if __name__ == "__main__":

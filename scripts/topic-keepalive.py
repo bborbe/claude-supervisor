@@ -184,6 +184,33 @@ def state_path(vault: str, subject: str, branch: str = "goal") -> str:
     return p
 
 
+def flagged_path(vault: str, subject: str, branch: str = "goal") -> str:
+    """Where the "this subject was flagged while running" marker lives. Pure — creates nothing.
+
+    Keyed on the vault's real path for the same reason `resume_path` is: one vault is one
+    store however it is spelled. `MANAGER_FLAGGED_STATE_DIR` relocates it for tests.
+    """
+    name = os.path.basename(os.path.realpath(os.path.expanduser(vault)).rstrip(os.sep)) or "vault"
+    root = os.environ.get("MANAGER_FLAGGED_STATE_DIR") or "~/.claude/state/manager-flagged"
+    return os.path.join(os.path.expanduser(root), name, f"{branch}--{base_slug(subject)}.flagged")
+
+
+def _remember_flagged(marker: str) -> None:
+    try:
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        with open(marker, "w", encoding="utf-8") as fh:
+            fh.write(time.strftime("%Y-%m-%dT%H:%M:%S%z") + "\n")
+    except OSError:
+        pass
+
+
+def _forget_flagged(marker: str) -> None:
+    try:
+        os.remove(marker)
+    except OSError:
+        pass
+
+
 _RECEIPT_MOD = None
 
 
@@ -355,6 +382,26 @@ def main(argv: list[str]) -> int:
               + (f" ({loop_detail})" if loop_detail else ""))
         return 0
 
+    # ⚠️ **Unflagging IS the stand-down — but only a flag that was SET and then cleared.**
+    # Nothing else reads a flag going *off*, so an operator who clears the flag keeps the
+    # manager they were retiring — M1's gap in `Session Lifecycle`. The rule cannot be
+    # "unflagged plus a session id": measured 2026-11-12 in `private-personal`, of 84 goal
+    # pages carrying a `claude_session_id`, **64 carry no flag at all**, so that predicate
+    # would stand down 83 of 84 live managers. This is a TRANSITION detector instead — an
+    # admitted flag writes a marker, and a later round that finds the page no longer
+    # admitted consumes it and stands the manager down. A subject never seen flagged is
+    # untouched, which is what makes the rule safe against the live corpus.
+    marker = flagged_path(a.vault, a.subject, a.branch)
+    if flagged(fm):
+        _remember_flagged(marker)
+    elif sid and os.path.exists(marker):
+        _forget_flagged(marker)
+        print("stand-down")
+        print(f'python3 scripts/manager-liveness.py --stop --subject "{a.subject}" '
+              f'--branch {a.branch}  (the flag was cleared — the manager is retired and '
+              f'never resumed; the page keeps its status)')
+        return 0
+
     if not sid:
         # ⚠️ No recorded id is an OPEN, not a resume — a resume continues a session that
         # already has a subject and an id. Rule 4 makes opening the operator's act, so the
@@ -368,7 +415,7 @@ def main(argv: list[str]) -> int:
         else:
             print("open-unflagged")
             print(f"{a.subject} has no session id and does not carry the flag "
-                  f"(`flag: true`, whoever set it) — rule 4 forbids opening a manager for "
+                  f"(`flag: true` set by the operator) — rule 4 forbids opening a manager for "
                   f"it; the fleet round's open leg still opens its workers, so the work "
                   f"moves without one")
         return 0

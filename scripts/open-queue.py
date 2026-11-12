@@ -64,7 +64,7 @@ the round itself, which prints the opened set in order.
 
 The gate: the flag, and only the flag
 -------------------------------------
-`flag: true` — **whoever set it** — is the ADMISSION predicate, not a ranking hint. A row
+`flag: true`, **set by an opening actor**, is the ADMISSION predicate, not a ranking hint. A row
 that is approved, eligible and un-flagged is **never** selected, at any position: it is
 skipped with reason `not flagged`, so the round reports it rather than silently dropping
 it.
@@ -77,12 +77,14 @@ cap. The flag is the bound. `docs/session-tiers.md` § rule 2 states the same ru
 up: *"A flagged page is opened automatically by the tier above it … the only bound after
 the flag is capacity."*
 
-⚠️ **The 2026-10-30 provenance ruling is narrower than it was read.** *"in the end it
-should not matter how set the flag"* governs WHICH flagged row may be opened —
-`flag_set_by` is a note, never a gate — and it does not admit an unflagged row. Provenance
-is not read here; the flag itself is. ⚠️ **This remains deliberately wider than
-`commands/open.md` Step 0.5's batch selector on provenance**, which keeps its gate because
-that batch writes `approved_by: operator`; `docs/session-tiers.md` § rule 2 owns the split.
+⚠️ **Provenance is read here, and at every tier.** The 2026-10-30 ruling (*"in the end it
+should not matter how set the flag"*) governs WHICH flagged row may be opened once it is
+admitted; it never made an agent-set flag an approval. The 2026-09-28 rule — *"an agent-set
+`flag: true` is never an approval and opens nothing"* — was generalised to every tier on
+2026-11-10 (attention card `f8cd8b41`), so a `flag_set_by` outside `OPENING_ACTORS`, absent
+included, is refused here exactly as `commands/open.md` § Step 0.5 refuses it. The one
+decision is `scripts/flag_provenance.py`; `docs/fleet-surface.md` § Approval provenance owns
+the statement.
 
 Rank — among the admitted rows
 ------------------------------

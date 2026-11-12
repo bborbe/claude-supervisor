@@ -136,15 +136,11 @@ open_queue = _load_open_queue()
 # ---------------------------------------------------------------- eligibility
 
 
-def flag_admits(block, kind):
-    """Delegates to the one shared predicate — `scripts/flag_provenance.py`.
-
-    Kept as a thin re-export because `eligible()` below and the test suite import this
-    name. The decision itself lives in exactly one place: before the 2026-11-10 ruling
-    this function answered "is the flag set" and `refusals()` answered "did the operator
-    set it", for tasks only. Both questions are now one predicate, at every tier.
-    """
-    return flag_provenance.flag_admits(block, kind)
+#: The one predicate, re-exported — `eligible()` below and the test suite import this
+#: name. ⚠️ A plain alias, never a `def`: a wrapper here would be a second decision site
+#: that agrees with `flag_provenance.flag_admits` until the day it does not, and the
+#: one-definition probe could not tell the difference.
+flag_admits = flag_provenance.flag_admits
 
 
 def eligible(block, kind, today):

@@ -73,15 +73,15 @@ without it the command falls back to the wezterm route, which opens a tab whatev
 - **Never open a manager.** Operator ruling 2026-10-30, verbatim: *"we dont want to auto open
   topic-manager, goal-manager ... but flag are fine"*. A goal with ready rows gets its **workers**
   opened; its manager state is unchanged by this leg.
-- **The flag is the GATE, and whoever set it counts.** Only a row with `flag: true`
-  (`true`/`yes`/`on`) is admitted — an approved, eligible, un-flagged row is skipped with reason
-  `not flagged`, never opened at any position. Operator requirement 2026-11-10, verbatim: *"we only
-  want auto open for flagged items"*. `flag_set_by` is a note, not a gate (operator ruling
-  2026-10-30: *"it should not matter how set the flag"*), and the approval is `approved_at`, which
-  every admitted row already carries. ⚠️ **This predicate is deliberately wider than
-  `commands/open.md` § Step 0.5's on PROVENANCE** — that selector keeps
-  `OPENING_ACTORS = ('operator', 'legacy')` because it writes `approved_by: operator`; this leg
-  reads the flag alone. `docs/session-tiers.md` § rule 2 owns the split.
+- **The flag is the GATE, and it must be operator-set.** Only a row with `flag: true`
+  (`true`/`yes`/`on`) whose `flag_set_by` is in `OPENING_ACTORS` (`operator`, `legacy`) is
+  admitted — an approved, eligible, un-flagged row is skipped with reason `not flagged`, and an
+  agent-set or absent setter is skipped as `agent-set-flag`, never opened at any position.
+  Operator requirement 2026-11-10, verbatim: *"we only want auto open for flagged items"*, with
+  the 2026-09-28 provenance rule generalised to every tier on 2026-11-10 (attention card
+  `f8cd8b41`). ⚠️ **The predicate is the shared one** — `scripts/flag_provenance.py`, reached
+  through `open-queue.is_flagged()` — so this leg cannot diverge from `commands/open.md`
+  § Step 0.5; `docs/fleet-surface.md` § Approval provenance owns the statement.
 - **Your only writes are this round's block payload and, only when the hand-back must be
   truncated, the refusal payload `<output_format>` names.** Nothing else on disk. ⚠️ **A command
   you invoke writes its own page** — `/supervisor:open` approves and stamps the task pages it

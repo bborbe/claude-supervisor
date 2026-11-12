@@ -99,7 +99,7 @@ The **first line is the verdict**:
 | verdict | meaning | what this round does |
 |---|---|---|
 | `jump` | live session, loop `OK` **or `UNARMED`** | render the row. ⚠️ `UNARMED` = never armed, not lost; lever is `/supervisor:goal-loop "<goal>"`, never `restart` |
-| `open` | no recorded id, **and the goal carries the flag** (any setter) | run `/supervisor:open --goal "<goal>"`. This is an **open**, and the flag is what licenses it |
+| `open` | no recorded id, **and the goal carries an operator-set flag** | run `/supervisor:open --goal "<goal>"`. This is an **open**, and the flag is what licenses it |
 | `open-unflagged` | no recorded id, **no flag** | ⚠️ **Report, never open.** Render the row with its rank and say it is held for a flag. Rule 4: a manager is opened only for a flagged page, so a round may not create one |
 | `resume` | a recorded `claude_session_id` whose session is `ABSENT` | run `/supervisor:open --goal "<goal>"`, then `topic-keepalive.py --vault "<vault>" --subject "<goal>" --record-resume <the id>` **once the liveness instrument shows it live** |
 | `restart` | live session, `STALE`/`INVALID` cadence | `/supervisor:restart <session-id>`; its `busy-target` refusal means mid-turn — wait a tick, never kill in-flight work |
@@ -122,8 +122,8 @@ flag, and `goal-spawn`'s own flag clause no longer excludes it.
 
 A goal is **startable for this row** when all hold:
 
-- `flag: true` in its frontmatter — **any setter**, because provenance is not read (operator
-  ruling 2026-10-30: *"it should not matter how set the flag"*);
+- `flag: true` in its frontmatter, **operator-set or `legacy`** — an agent-set or absent setter
+  is refused (`docs/fleet-surface.md` § Approval provenance);
 - the phase gate below passes (`goal-not-startable` is still the operator's approval boundary);
 - a keep-alive slot is free (`resume`/`restart` did not consume it).
 

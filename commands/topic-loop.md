@@ -180,8 +180,8 @@ code edits, no repo/PR/k8s verification, no investigation, no real debugging.
   then report them as a table line. The modal is reserved for operator-only decisions
   (`phase: todo` approval, a production-touching or irreversible action, a TDR), and even
   those reach the operator as an attention-board card carrying a `--dedup-key`.
-- **No goal manager → start one, under the ranking, and only for a FLAGGED goal
-  (whoever set the flag).** `/supervisor:topic-spawn` is the only route; it holds no spawn tool and
+- **No goal manager → start one, under the ranking, and only for a goal the operator FLAGGED
+  (an agent-set flag is refused).** `/supervisor:topic-spawn` is the only route; it holds no spawn tool and
   delegates to `/supervisor:open --goal`. ⚠️ **Rule 4 — restart is not open:** a goal
   carrying no flag **and no recorded `claude_session_id`** is **reported and
   held**, never opened, however free the slots are. `commands/topic-drive.md` § Start states

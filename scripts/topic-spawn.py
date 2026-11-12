@@ -23,11 +23,11 @@ on it without parsing prose, and the exit code is non-zero for every one of them
                            open question this gate does not decide. Stated here because a
                            docstring that claimed `hold` was terminal would describe
                            behaviour the code does not implement.
-  goal-unflagged         the goal does not carry `flag: true`. A flag is an intent signal
-                           whoever set it (operator ruling 2026-10-30), so provenance is
-                           not read — but an unflagged goal is reported with its rank and
-                           never started; its WORKERS are still opened by the fleet round's
-                           open leg.
+  goal-unflagged         the goal does not carry a `flag: true` the operator set. An
+                           agent-set or absent `flag_set_by` is refused (the 2026-09-28
+                           provenance rule, generalised to every tier 2026-11-10) — an
+                           unadmitted goal is reported with its rank and never started;
+                           its WORKERS are still opened by the fleet round's open leg.
   topic-unflagged        `--topic-open` only: the TOPIC page does not carry `flag: true`.
                            Same rule one tier up — a flagged topic is opened when the fleet
                            manager ceiling admits another manager.
@@ -520,9 +520,9 @@ def main(argv: list[str]) -> int:
         return 0
 
     # (2c) `--topic-open` answers the TOPIC tier's own question: may a manager be opened for
-    # this topic page? Operator ruling 2026-10-30 — a flag is an intent signal whoever set it,
-    # so the only two questions are whether the flag is present and whether the ceiling admits
-    # another manager. ⚠️ Without this, a flag on a topic page is read by nothing: `open.md`'s
+    # this topic page? The flag must be operator-set (2026-11-10, attention card f8cd8b41)
+    # and the ceiling must admit another manager. ⚠️ Without this, a flag on a topic page is
+    # read by nothing: `open.md`'s
     # topic branch gates on `phase: todo` alone, so the ruling had no executable leg one tier
     # up from where it was already enforced.
     if a.topic_open:

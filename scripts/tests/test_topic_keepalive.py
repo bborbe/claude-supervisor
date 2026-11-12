@@ -58,14 +58,22 @@ class KeepAliveTest(unittest.TestCase):
         self.k = load()
         self.state = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(self.state, ignore_errors=True))
-        self._orig = (self.k.session_verdict, self.k.cadence, self.k.state_path)
+        self._orig = (self.k.session_verdict, self.k.cadence, self.k.state_path,
+                      self.k.flagged_path)
         self.k.state_path = lambda vault, subject, branch="goal": str(
             self.state / f"{branch}--{self.k.base_slug(subject)}.json"
+        )
+        # ⚠️ The stand-down marker must never reach the REAL store: an unpatched
+        # `flagged_path` writes `~/.claude/state/manager-flagged/…`, and a marker left
+        # there makes an unrelated later run stand a live manager down.
+        self.k.flagged_path = lambda vault, subject, branch="goal": str(
+            self.state / f"{branch}--{self.k.base_slug(subject)}.flagged"
         )
         self.addCleanup(self._restore)
 
     def _restore(self):
-        self.k.session_verdict, self.k.cadence, self.k.state_path = self._orig
+        (self.k.session_verdict, self.k.cadence, self.k.state_path,
+         self.k.flagged_path) = self._orig
 
     def page(self, sid="sid-1", extra=""):
         (self.vault / "24 Goals" / "A Goal.md").write_text(
@@ -158,6 +166,40 @@ class KeepAliveTest(unittest.TestCase):
         rc, out = self.run_keepalive(live="LIVE")
         self.assertEqual(0, rc)
         self.assertEqual("open", out[0])
+
+    # ------------------------------------------------ unflag → stand-down (M1)
+
+    def _marker(self):
+        return self.state / "goal--a-goal.flagged"
+
+    def test_an_admitted_flag_writes_the_stand_down_marker(self):
+        """The marker is what makes "cleared" distinguishable from "never flagged"."""
+        self.page(sid="sid-1", extra="flag: true\nflag_set_by: operator\n")
+        rc, out = self.run_keepalive(live="LIVE")
+        self.assertEqual(0, rc)
+        self.assertEqual("jump", out[0])
+        self.assertTrue(self._marker().exists())
+
+    def test_clearing_the_flag_stands_the_manager_down(self):
+        """M1 — unflagging retires the live manager at the next round, once."""
+        self._marker().write_text("2026-11-12T00:00:00+0100\n", encoding="utf-8")
+        self.page(sid="sid-1")  # the flag was cleared
+        rc, out = self.run_keepalive(live="LIVE")
+        self.assertEqual(0, rc)
+        self.assertEqual("stand-down", out[0])
+        self.assertIn("--stop", out[1])
+        self.assertFalse(self._marker().exists(),
+                         "the marker is consumed, so a subject stands down once")
+
+    def test_a_never_flagged_subject_is_not_stood_down(self):
+        """⚠️ The regression guard, measured 2026-11-12: of 84 live goal pages carrying a
+        `claude_session_id`, **64 carry no flag at all**. An absolute "unflagged + session
+        id" rule would stand down 83 of 84 live managers; only a flag that was SET and then
+        cleared may retire one."""
+        self.page(sid="sid-1")
+        rc, out = self.run_keepalive(live="LIVE")
+        self.assertEqual(0, rc)
+        self.assertEqual("jump", out[0])
 
     def test_the_flag_predicate_agrees_with_topic_spawn(self):
         """⚠️ The predicate is duplicated because both scripts run standalone out of the
