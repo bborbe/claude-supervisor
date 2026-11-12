@@ -6,9 +6,16 @@
 # only job is to read the first one's heartbeat and say so when it ages.
 #
 # WHY THE HEARTBEAT AND NOT `launchctl list`: measured 2026-11-12, the tick ran for ~35 minutes
-# with the launchd PATH missing `wezterm`. Every tick exited 0 and woke nothing, so the job
-# looked perfectly healthy in `launchctl list` while doing no work at all. Only the heartbeat —
-# which is written by the tick itself — distinguishes "running" from "running and succeeding".
+# with the launchd PATH missing `wezterm`. Every tick exited 0 and woke nothing. `launchctl list`
+# cannot tell that from a working tick — and neither can the heartbeat alone. What the heartbeat
+# DOES answer is whether the tick is still being STARTED at all, which is the failure this job
+# owns; a tick that starts and then fails is a different question, answered below.
+#
+# WHAT THIS DOES NOT DETECT, stated so it is not assumed: a tick that RUNS AND FAILS. The
+# heartbeat is written before any work, so a tick that dies mid-pass still leaves a fresh stamp
+# and this watchdog stays quiet. That failure surfaces in `launchctl list` as a non-zero last
+# exit and in the log as a `TERMINAL:` line — a running-and-failing cadence is a different
+# question from a stopped one, and it is answered by those two reads, not here.
 #
 # Threshold is 2x the tick's StartInterval (900s), so one slow tick does not raise a card.
 #
@@ -28,15 +35,24 @@ ASK="$HERE/attention-ask.py"
 HB="$HOME/.claude/state/fleet-pusher/heartbeat"
 MAX_AGE=1800
 
+# Post one card, and FAIL LOUDLY when the post itself fails. The previous form sent every post
+# through `>/dev/null 2>&1` and ignored the exit status, so a broken `attention-ask.py` made the
+# watchdog silent in exactly the situation it exists for — a dead cadence, reported to nobody.
+post() {
+  if ! python3 "$ASK" post \
+      --dedup-key "$1" \
+      --producer-kind cron \
+      --mechanism ack \
+      --interrupt-class routine \
+      --payload "$2" >/dev/null 2>&1; then
+    echo "TERMINAL: attention-ask.py post failed for '$1' — the card was NOT posted"
+    exit 1
+  fi
+}
+
 if [ ! -f "$HB" ]; then
   echo "$(date +%H:%M:%S) heartbeat missing — posting"
-  python3 "$ASK" post \
-    --dedup-key fleet-pusher-heartbeat-missing \
-    --producer-kind cron \
-    --mechanism ack \
-    --interrupt-class routine \
-    --payload "Fleet pusher cadence: the heartbeat file ${HB} does not exist, so the wake cadence has never run on this machine. launchd may report the job as loaded and healthy while nothing ticks." \
-    >/dev/null 2>&1
+  post fleet-pusher-heartbeat-missing "Fleet pusher cadence: the heartbeat file ${HB} does not exist, so the wake cadence has never run on this machine. launchd may report the job as loaded and healthy while nothing ticks."
   exit 0
 fi
 
@@ -57,13 +73,7 @@ except Exception:
 
 if [ -z "${EPOCH:-}" ]; then
   echo "$(date +%H:%M:%S) unparseable heartbeat '${STAMP}' — posting"
-  python3 "$ASK" post \
-    --dedup-key fleet-pusher-heartbeat-unparseable \
-    --producer-kind cron \
-    --mechanism ack \
-    --interrupt-class routine \
-    --payload "Fleet pusher cadence: the heartbeat file holds '${STAMP}', which is not an ISO-8601 UTC timestamp. The watchdog cannot tell whether the cadence is alive." \
-    >/dev/null 2>&1
+  post fleet-pusher-heartbeat-unparseable "Fleet pusher cadence: the heartbeat file holds '${STAMP}', which is not an ISO-8601 UTC timestamp. The watchdog cannot tell whether the cadence is alive."
   exit 0
 fi
 
@@ -72,13 +82,7 @@ AGE=$((NOW - EPOCH))
 
 if [ "$AGE" -gt "$MAX_AGE" ]; then
   echo "$(date +%H:%M:%S) STALE age=${AGE}s > ${MAX_AGE}s — posting"
-  python3 "$ASK" post \
-    --dedup-key fleet-pusher-heartbeat-stale \
-    --producer-kind cron \
-    --mechanism ack \
-    --interrupt-class routine \
-    --payload "Fleet pusher cadence: the heartbeat is ${AGE}s old (threshold ${MAX_AGE}s), so the cheap wake layer has stopped. launchd may still list com.bborbe.fleet-pusher as loaded — that is exactly the state that looks healthy and wakes nothing. Check ~/Library/Logs/fleet-pusher.log." \
-    >/dev/null 2>&1
+  post fleet-pusher-heartbeat-stale "Fleet pusher cadence: the heartbeat is ${AGE}s old (threshold ${MAX_AGE}s), so the cheap wake layer has stopped. launchd may still list com.bborbe.fleet-pusher as loaded — that is exactly the state that looks healthy and wakes nothing. Check ~/Library/Logs/fleet-pusher.log."
   exit 0
 fi
 

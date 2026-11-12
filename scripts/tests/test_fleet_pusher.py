@@ -50,11 +50,13 @@ def _write(path, body, executable=False):
 
 
 def _version(root, version, *, sessions='[{"sessionId": "s1", "alive": true}]',
-             wake='print(\'{"sessionId": "s1", "outcome": "delivered"}\')'):
+             wake='print(\'{"sessionId": "s1", "outcome": "delivered"}\')',
+             liveness_body=None):
     """Lay down one installed supervisor version, with a stub for each callee."""
     scripts = os.path.join(root, version, "scripts")
     _write(
         os.path.join(scripts, "session-liveness.py"),
+        liveness_body if liveness_body is not None else
         "#!/usr/bin/env python3\n"
         "import sys\n"
         "if '--list' in sys.argv:\n"
@@ -79,29 +81,35 @@ class TickSyntax(unittest.TestCase):
     def test_watch_parses(self):
         self.assertEqual(subprocess.run(["bash", "-n", _WATCH]).returncode, 0)
 
-    def test_tick_calls_pane_wake_on_an_executable_line(self):
-        """SC3's probe: a comment mentioning pane-wake.py is not a call to it."""
+    def test_tick_invokes_pane_wake_with_send(self):
+        """A diagnostic echo mentioning pane-wake.py is not an invocation of it: require the
+        interpreter, the resolved path and the send flag on one non-comment line."""
+        import re
         live = [
             line for line in _TICK_SOURCE.splitlines()
-            if "pane-wake.py" in line and not line.lstrip().startswith("#")
+            if not line.lstrip().startswith("#")
+            and re.search(r'python3\s+"\$S/pane-wake\.py".*--send', line)
         ]
-        self.assertTrue(live, "no executable line invokes pane-wake.py")
+        self.assertTrue(live, "no executable line invokes pane-wake.py with --send")
 
 
 class TickResolution(unittest.TestCase):
-    """SC2 — the tick resolves the NEWEST installed supervisor, and a pinned path is observably
+    """The tick resolves the NEWEST installed supervisor, and a pinned path is observably
     stale. The mutation runs in the same test as the real script, so a hardcoded path cannot
     satisfy it."""
 
     def setUp(self):
         self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         self.root = os.path.join(
             self.home, ".claude", "plugins", "cache", "claude-supervisor", "supervisor"
         )
-        # 0.1.0 sorts BEFORE 0.10.0 under `sort -V` and after it under a plain lexicographic
-        # sort — which is the point: a version string is not a number, and only `sort -V` gets
-        # the ordering right.
+        # `sort -V` orders 0.1.0 BEFORE 0.10.0 because it compares 1 with 10 as numbers. A plain
+        # byte-wise sort puts them in the same order here ('.' < '0'), which is why the version
+        # fixture also carries a 0.9.0 — under `sort -V` 0.9.0 < 0.10.0, byte-wise "0.9.0" >
+        # "0.10.0". That difference is what makes this a test of `sort -V` rather than of luck.
         _version(self.root, "0.1.0")
+        _version(self.root, "0.9.0")
         _version(self.root, "0.10.0")
         self.marker = os.path.join(self.home, "marker")
 
@@ -149,6 +157,7 @@ class TickResolution(unittest.TestCase):
 
     def test_missing_install_is_terminal(self):
         empty = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, empty, ignore_errors=True)
         env = dict(os.environ, HOME=empty)
         result = subprocess.run(
             ["bash", _TICK], env=env, capture_output=True, text=True, timeout=120
@@ -162,6 +171,7 @@ class TickEnvironment(unittest.TestCase):
 
     def setUp(self):
         self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         self.root = os.path.join(
             self.home, ".claude", "plugins", "cache", "claude-supervisor", "supervisor"
         )
@@ -183,7 +193,7 @@ class TickEnvironment(unittest.TestCase):
 
     def test_zero_sessions_still_writes_the_heartbeat_and_exits_zero(self):
         """Documents the trap rather than guarding against it: a fresh heartbeat is NOT proof
-        of a delivery. SC1 of the shipping task reads a `delivered=N` log line instead."""
+        of a delivery. The pusher's acceptance criterion reads a `delivered=N` log line."""
         _version(self.root, "1.0.0", sessions="[]")
         result = self._run()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -192,12 +202,62 @@ class TickEnvironment(unittest.TestCase):
         self.assertIn("0 live session(s)", result.stdout)
 
 
-class Watchdog(unittest.TestCase):
-    """SC5 — both directions, against a stub poster so the real board is never touched."""
+class TickLiveness(unittest.TestCase):
+    """A failed liveness read must never render as an empty fleet.
+
+    This was a blocking review finding, and it is the same class of defect the cadence exists to
+    remove: `session-liveness.py` failing collapsed into "0 live session(s)", the tick exited 0
+    with a fresh heartbeat, and the watchdog — which reads only the heartbeat — stayed silent. A
+    broken read and an idle fleet must not look alike.
+    """
 
     def setUp(self):
         self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
+        self.root = os.path.join(
+            self.home, ".claude", "plugins", "cache", "claude-supervisor", "supervisor"
+        )
+
+    def _run(self):
+        env = dict(os.environ, HOME=self.home)
+        return subprocess.run(
+            ["bash", _TICK], env=env, capture_output=True, text=True, timeout=120
+        )
+
+    def test_a_non_zero_liveness_exit_is_terminal(self):
+        _version(
+            self.root, "1.0.0",
+            liveness_body="#!/usr/bin/env python3\nimport sys\nsys.exit(1)\n",
+        )
+        result = self._run()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("session-liveness.py unreadable", result.stdout)
+
+    def test_unparseable_liveness_output_is_terminal(self):
+        _version(
+            self.root, "1.0.0",
+            liveness_body="#!/usr/bin/env python3\nprint('not json')\n",
+        )
+        result = self._run()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("session-liveness.py unreadable", result.stdout)
+
+    def test_an_empty_but_valid_read_is_not_terminal(self):
+        """The negative control: a genuinely idle fleet must still exit 0."""
+        _version(self.root, "1.0.0", sessions="[]")
+        result = self._run()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("TERMINAL:", result.stdout)
+
+
+class Watchdog(unittest.TestCase):
+    """Both directions, against a stub poster so the real board is never touched."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, ignore_errors=True)
         self.script_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.script_dir, ignore_errors=True)
         self.calls = os.path.join(self.home, "calls")
         shutil.copy(_WATCH, os.path.join(self.script_dir, "fleet-pusher-watch.sh"))
         _write(

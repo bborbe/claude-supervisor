@@ -221,7 +221,7 @@ launchd/com.bborbe.fleet-pusher.plist    the CHEAP wake cadence — StartInterva
 launchd/com.bborbe.fleet-pusher-watch.plist  its watchdog — StartInterval 300, reports a dead cadence
 scripts/fleet-pusher-tick.sh             one pusher pass, exits; resolves the NEWEST installed supervisor, never a pinned version
 scripts/fleet-pusher-watch.sh            reads the pusher's heartbeat, posts one `ack` card once it ages past 1800 s
-docs/fleet-pusher.md                     the pusher's two layers, its install, and the four things that look healthy and are not
+docs/fleet-pusher.md                     the pusher's two layers, its install, and the five things that look healthy and are not
 ```
 
 ## Changelog fold guard

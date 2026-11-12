@@ -54,10 +54,11 @@ Three dedup keys, one per failure mode:
 | `fleet-pusher-heartbeat-unparseable` | the file holds something that is not an ISO-8601 UTC stamp |
 | `fleet-pusher-heartbeat-stale` | the stamp is older than 1800 s — the cadence has stopped |
 
-## Four things that look healthy and are not
+## Five things that look healthy and are not
 
-Every one of these was measured on this machine, and each is now pinned by a test in
-`scripts/tests/test_fleet_pusher.py`.
+Every one of these was measured on this machine. Items 1, 2, 4 and 5 are each pinned by a named
+test in `scripts/tests/test_fleet_pusher.py`; item 3 is not a defect a test can catch — it is a
+rule the tick enforces at runtime.
 
 1. **`launchctl list` showing exit `0` does not mean the cadence works.** Measured 2026-11-12:
    with `wezterm` missing from the launchd PATH, every tick exited **0** and woke nothing for ~35
@@ -81,6 +82,16 @@ Every one of these was measured on this machine, and each is now pinned by a tes
    `date -j -f "%Y-%m-%dT%H:%M:%SZ"`, whose `%Z` does not accept a literal trailing `Z`; it
    returned a bogus epoch and posted a card claiming a valid timestamp was unparseable — for a
    heartbeat eight minutes old. It parses with `datetime.strptime` now.
+
+5. **A failed liveness read is not an empty fleet.** The tick originally discarded
+   `session-liveness.py`'s stderr and exit status and parsed `[]` out of the failure, so a broken
+   read rendered as "0 live session(s)", the tick exited 0 with a fresh heartbeat, and the
+   watchdog — which reads only the heartbeat — stayed silent. It now separates the two: a
+   non-zero exit or unparseable output is `TERMINAL:` and exit 1.
+
+⚠️ **What the watchdog does not cover.** It detects a cadence that has *stopped*, not one that
+runs and fails — the heartbeat is written before any work. A running-and-failing tick shows up in
+`launchctl list` as a non-zero last exit and in the log as a `TERMINAL:` line.
 
 ## Why launchd and not a loop
 
