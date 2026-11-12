@@ -1093,12 +1093,14 @@ class UnrecordedSessions(Tmp):
         self.assertEqual(doc["rows"][key]["stuck"], "none")
 
     def test_the_limb_names_the_tracked_set_never_the_whole_vault(self):
-        """SC: the limb must not claim no page records a session a page DOES record.
+        """The limb names the tracked set, so it cannot be read as "no page at all".
 
-        `covered` is built from `out_rows`, i.e. this round's tracked set, so a session
-        recorded on a page outside that set lands here as well. Measured 2026-11-12: 18 of
-        33 rows carrying the bare claim named a session a page under `25 Tasks/` records —
-        the bare wording sends a reader looking for a page that already exists.
+        `covered` is built from `out_rows` — this round's tracked set — so a session
+        recorded on a page OUTSIDE that set lands here exactly as one recorded nowhere
+        does. The script can only speak from its own tracked set, so the two are
+        indistinguishable at this layer by design; what this test pins is the WORDING,
+        which must not claim more than the script can know. Measured 2026-11-12: 18 of 33
+        rows carrying the bare claim named a session a page under `25 Tasks/` records.
         """
         self.session(self.COVERED, "idle")
         self.session(self.PARKED, "waiting")
