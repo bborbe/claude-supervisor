@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.293.1
 
 - fix: **`closer-gate-lint` accepts a `🔴 BLOCKED` line over a `parked-wait` closer — `👤 You: later (on <trigger>): …`.** That is the form in which the operator has deferred to a named trigger, and `docs/closer-classes.md` calls it `parked-wait`; it names an owner exactly as `pick` does, and the Async State Closer treats the verb as a legal closer. `OWNER_RE` listed only the four operator verbs, so a blocked line over one was refused as `ownerless-blocked`: a false positive on a legal shape, firing on live sessions. One arm added, `|^\s*later\s*\(on\b`. ⚠️ **The false positive is specifically the PROSE-trigger `parked-wait` closer.** Recorded shapes whose trigger is a 32-hex card id (`later (on card b07ee746…): re-run the same approve-run command`) already passed, because the first arm matches hex; the records the old regex actually refused carry prose triggers — `later (on the \`CHANGES_REQUESTED\` gate shipping)`, `later (on either blocker landing)`, `later (on accept edits granted)`, `later (on a free interactive worker slot)`, `later (on \`sun.hm.benjamin-borbe.de\` reachable)` — six records over five distinct closers. ⚠️ **A bare `later`, or the phrase mid-sentence, still names no owner** — the negative controls pin that, so the arm cannot be widened into disabling the check. Change set: `scripts/closer-gate-lint.py`, `scripts/tests/test_closer_gate_lint.py`, `CHANGELOG.md`.
 
