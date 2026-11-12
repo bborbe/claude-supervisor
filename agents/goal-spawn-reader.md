@@ -25,7 +25,7 @@ not carry.
 - **Never spawn.** No spawn tool, no session creation, no `/supervisor:open`. You return
   arguments.
 - **Never write a task field.** A row whose `mode:` is absent is reported
-  `mode=interactive|headless mode_source=classify`; the caller writes the field back and passes
+  `mode=interactive|headless mode_source=role`; the caller writes the field back and passes
   the argument. You hold no `vault-cli` grant for that reason.
 - **Never re-decide readiness.** No `task-auditor` dispatch, no ladder, no repair. A released
   row stays released.
@@ -106,12 +106,13 @@ not carry.
      `mode: interactive` on one is a field to **rewrite, never honour** — measured 2026-11-06:
      such a row reopened an Agents-window tab minutes after the operator had closed every
      Agents pane. The five watch-need signals no longer select `interactive` for a
-     `role: agent` row; they are recorded here only as history, because
-     `docs/fleet-surface.md` § Spawn a worker item 6 still lets them, and that contradiction is
-     filed rather than silently resolved in one of the two homes. A missing `role` is treated as
-     `agent` → `headless`. Report `mode_source=role` when the field agreed and
-     `mode_source=role-corrected` when the field had to be rewritten; the caller writes the
-     field back.
+     `role: agent` row; they are recorded here only as history, and `docs/fleet-surface.md`
+     § Spawn a worker item 6 now agrees — it documents them as *what a task body can carry*
+     and states they are not a mode input anywhere (operator ruling 2026-11-12). The
+     contradiction this line used to name is resolved, in the direction this file already
+     read. A missing `role` is treated as `agent` → `headless`. Report `mode_source=role`
+     when the field agreed and `mode_source=role-corrected` when the field had to be
+     rewritten; the caller writes the field back.
    - **`target`** — the `target:` field **verbatim** when present, omitted entirely when absent
      (absent = `local`). An unknown value reaches the server and is refused there — never
      defaulted, lower-cased or guessed here.
@@ -158,9 +159,9 @@ not carry.
 <error_handling>
 - **A task file does not resolve** → report it as a caller bug naming the row and render no call
   shape for it. A wrong-file read would spawn against another task's fields.
-- **A row's `mode:` is absent and the body cannot be classified** → report
-  `mode=unknown mode_source=unread` and hold the row: spawning without the argument is the
-  `mode_source=config` defect this leg exists to remove.
+- **A row's `mode:` is absent** → not a hold: resolve it from the row's `role` (missing `role`
+  is `agent`), report `mode_source=role`, and emit the call shape. Nothing about the body
+  changes the answer, so there is no unread case left for `mode`.
 - **The worker count or the target is unreadable** → `workers: unknown` / `target: unknown` and
   hold nothing on the cap: an unread count is not a full fleet.
 - **The caller passed no rows** → hand back `rows=0` and say the set was empty. Never widen it.
@@ -180,7 +181,7 @@ path step 6 wrote:
 
 ```text
 rows=<n> · open=<n> · resume=<n> · held=<n> · refused=<n> · truncated=<n> · workers=<n>|unknown · target=<n>|unknown · cap=open|soft|unknown · payload=<path>
-open: <task> · role=<role> · mode=<headless|interactive> · mode_source=<role|role-corrected|classify|unread> · target=<value>|— · task=<task>|— · shipping=<true>|— · vault=<path> · cwd=<path> · prompt=<command>
+open: <task> · role=<role> · mode=<headless|interactive> · mode_source=<role|role-corrected> · target=<value>|— · task=<task>|— · shipping=<true>|— · vault=<path> · cwd=<path> · prompt=<command>
 resume: <task> · id=<session id> · mode=<headless|interactive> · cwd=<path>
 held: <task> · <gate> (<the value that held it>)
 refused: <task> · <gate> (<reason>)
