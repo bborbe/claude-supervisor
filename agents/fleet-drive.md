@@ -124,9 +124,9 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
    | verdict | condition | action |
    |---|---|---|
-   | **revive** | both probes ran, neither found a blocker, **and** its `CLOSERS` row is classed `routine` **or** its text passed the routine-continue table | draft a nudge |
+   | **revive** | both probes ran, neither found a blocker, **and** its `CLOSERS` row is classed `routine`, its text passed the routine-continue table, **or** it is classed `parked-wait` with an **expired** `⏰ Ends:` declaration | draft a nudge |
    | **blocked** | a probe found a live blocker | escalate, with the probe and its result |
-   | **unverifiable** | a probe could not run, no task resolved, no `CLOSERS` row, or a row classed `parked-wait` / `none` | observation only — except at streak 2 (6b): a resolving pane acts, a pane-less row is observed |
+   | **unverifiable** | a probe could not run, no task resolved, no `CLOSERS` row, a row classed `none`, or a `parked-wait` row whose `⏰ Ends:` declaration is live or unreadable | observation only — except at streak 2 (6b): a resolving pane acts, a pane-less row is observed |
    | **finished** | from step 1, disk facts hold (1b) | reap message drafted |
    | **closed** | a `revive` row whose previous ledger entry carries `nudge: drafted` and whose bucket, open-box count and blocker state are all unchanged this round, and `close-idle-tab.py` exited 0 (5b) | pane closed — render a `CLOSED` line |
    | **wrote-nothing** | from step 1a — ledger row records `ended_at`, task page not modified since `spawned_at`, past the 15-minute grace window, task `execution` with open boxes | report as a failure; draft no nudge |
