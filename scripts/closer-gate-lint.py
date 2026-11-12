@@ -187,7 +187,17 @@ OWNER_RE = re.compile(
     r"\b[0-9a-f]{8,32}\b"                        # card id, or a session-id prefix
     r"|\bmanager\b|\bsupervisor\b"               # a role that can actually be reached
     r"|⏰\s*Ends:"                                # a declared, re-checkable observable
-    r"|^\s*(?:approve|review|you run|pick)\b",   # an operator verb names the operator
+    r"|^\s*(?:approve|review|you run|pick)\b"    # an operator verb names the operator
+    # ⚠️ `later (on <trigger>):` is the PARKED form, which the Async State Closer treats as
+    # a legal closer — the operator has deliberately deferred to a named trigger, so it
+    # names an owner exactly as `pick` does. Without this arm the lint refused a `🔴 BLOCKED`
+    # line over one, which is a false positive on a legal shape.
+    #
+    # ⚠️ The arm is needed even though some recorded parkeds carry a 32-hex card id (the
+    # first arm already matches those). The ones that were refused carry a PROSE trigger —
+    # `later (on [[Some Task]] completing)`, `later (on #413 merging)`, `later (on the three
+    # account reads being supplied)` — and none of those is hex, a role, or an `⏰ Ends:`.
+    r"|^\s*later\s*\(on\b",
     re.IGNORECASE | re.MULTILINE)
 
 STORE_PROBE_ENV = "SUPERVISOR_CLOSER_GATE_LINT_STORE"

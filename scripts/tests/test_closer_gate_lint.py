@@ -296,6 +296,32 @@ class CloserGateLintTest(unittest.TestCase):
                     prefix="🔴 BLOCKED · nothing running · needs intervention\n")[0]
                 self.assertEqual(0, code)
 
+    def test_a_blocked_closer_over_a_parked_later_on_closer_passes(self):
+        # `later (on <trigger>):` is the PARKED form, which the Async State Closer treats as
+        # a legal closer — the operator has deferred to a named trigger, so it names an owner
+        # exactly as `pick` does. These are RECORDED shapes from
+        # `~/.claude/state/closer-gate-lint/`: every one carries a PROSE trigger, so none is a
+        # 32-hex card id, a role, or an `⏰ Ends:` — and before this arm the lint refused a
+        # `🔴 BLOCKED` line over one, which is a false positive on a legal closer.
+        for body in ("later (on [[Add a BUILD_TARGET Arm to the Trading Makefile]] completing)",
+                     "later (on #413 merging)",
+                     "later (on the three account reads being supplied)"):
+            with self.subTest(body=body):
+                code = self._closer(
+                    body,
+                    card_probe=lambda _item, _env: True,
+                    prefix="🔴 BLOCKED · nothing running · needs intervention\n")[0]
+                self.assertEqual(0, code)
+
+    def test_a_blocked_closer_saying_only_later_still_names_no_owner(self):
+        # The negative control for the arm above: `later` on its own is not the parked form,
+        # and widening the arm to any `later` would silently disable this check.
+        code, text, record = self._closer(
+            "later",
+            prefix="🔴 BLOCKED · nothing running · needs intervention\n")
+        self.assertEqual(2, code)
+        self.assertEqual("ownerless-blocked", record["reason"])
+
     def test_the_recorded_e4fd1919_blocked_closer_passes(self):
         # ⚠️ The exact shape that made the bot request changes on #778. `fixtures/
         # e4fd1919-transcript.jsonl` is a RECORDED real closer: an operator verb IS an
