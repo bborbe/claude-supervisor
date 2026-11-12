@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.296.2
 
 - fix: **a present-but-blank `role:` or `mode:` is defaulted, not used verbatim.** `commands/open.md` § Step 0.6 resolved `role:` by key *presence* — branch 1 read "`role:` present → use it" — so a row carrying `role: ""` opened with no role at all, and `vault-cli task set "<task>" role ""` writes exactly that. `docs/fleet-surface.md` § Spawn a worker item 6 had the same shape for `mode:`, passing the argument "whenever the field is present". Both now treat a blank value as absent: branch 2 re-classifies from the body per matrix Rule 1, the `mode` paragraph resolves per Rule 2, and item 6 passes the argument only for a non-blank value. `scripts/check-open-role-defaults.py` gains three clauses pinning the blank-value arm, with `scripts/tests/test_check_open_role_defaults.py` carrying the pre-change negative controls. Change set: `commands/open.md`, `docs/fleet-surface.md`, `scripts/check-open-role-defaults.py`, `scripts/tests/test_check_open_role_defaults.py`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
 
