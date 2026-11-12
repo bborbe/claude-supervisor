@@ -45,6 +45,10 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
                                     cadence and cannot be filtered at read time, which is
                                     why the reset is its own file rather than something
                                     inferred from the marker the arm must now preserve.
+                                    ⚠️ `is_subject_stopped()` is the ONE reader of that
+                                    marker, imported by `open-queue.py` and
+                                    `adopt-orphans.py`; the manager tier reads it through
+                                    `--state` / `--check`, which classify STOPPED.
   --sleep --subject T --branch B --until ISO
                                   <slug>.sleeping = the ISO instant. A date-gated
                                     subject whose remaining work is all future
@@ -268,6 +272,33 @@ def resolve(s: str, ext: str):
         if os.path.exists(legacy):
             return legacy, True
     return prefixed, False
+
+
+def stopped_marker(subject: str, branch: str):
+    """The marker file that stands this subject down, or None — THE one marker read.
+
+    `open-queue.py` (the goal and topic tiers) and `adopt-orphans.py` call this rather
+    than re-deriving the path: a second copy would drift from `stop()`'s writer, and the
+    drift is silent in the worst direction — the fleet round would keep reopening a
+    subject the operator had deliberately ended.
+
+    ⚠️ **Existence, not the timestamp.** Later stops rewrite the marker's content, so the
+    file existing is the load-bearing fact; `--arm --resume` is the one verb that clears
+    it. The RESOLVED path is returned, never a re-composed `<branch>--<slug>`: a legacy
+    pre-split record (`<slug>.stopped`, no branch prefix) counts too, through `resolve()`,
+    and a caller that re-derived the name would report a file that does not exist.
+
+    A branch outside `BRANCHES` raises rather than answering None: the caller named a tier
+    that does not exist, and a silent "not stopped" would hide that bug behind a reopened
+    row.
+    """
+    marker, _legacy = resolve(slug(subject, branch), "stopped")
+    return marker if os.path.exists(marker) else None
+
+
+def is_subject_stopped(subject: str, branch: str) -> bool:
+    """Is `stopped_marker()` non-None? The boolean form every consumer reads."""
+    return stopped_marker(subject, branch) is not None
 
 
 def write_atomic(p: str, text: str) -> None:
