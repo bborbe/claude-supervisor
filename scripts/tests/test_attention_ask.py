@@ -1041,6 +1041,72 @@ class PollTest(unittest.TestCase):
         self.assertIn("NOT_OPERATOR_ANSWERED", text)
         self.assertNotIn("OPEN", text)
 
+    # --- `--answered-at` is opt-in and the default output is byte-identical ---
+    #
+    # The flag exists for `fleet-keeper.py`, which bounds how long an answered
+    # resume may wait from when the OPERATOR answered rather than from when the
+    # keeper first noticed. Every existing consumer (`pod-attention.py`,
+    # `answered-attribution.py`, the hooks) reads the default output, so the
+    # contract is that `ANSWERED_AT:` appears only when the flag is passed.
+    #
+    # The pair below is what makes a regression visible, and neither assertion
+    # pins the gate alone: the first fails if the flag is made the default (a
+    # line where none is expected), the second fails if the flag is ignored
+    # (zero lines where one is expected).
+
+    ANSWERED_ITEM = {
+        "item_id": STORE_ITEM_ID,
+        "state": "answered",
+        "answer": {"kind": "option", "value": "the board"},
+        "answered_by": "attention-board",
+        "answered_client": {
+            "user_agent": "Mozilla/5.0 (Macintosh) Chrome/153.0.0.0",
+            "remote_addr": "127.0.0.1:63415",
+            "automation": False,
+        },
+        "answered_at": "2026-11-11T21:52:03+01:00",
+    }
+
+    def poll_with_answered_at(self, item):
+        with mock.patch.object(
+            ask.urllib.request, "urlopen", lambda req, timeout=None, **kwargs: FakeResponse(item)
+        ):
+            out = io.StringIO()
+            rc = ask.cmd_poll(STORE_ITEM_ID, out=out, answered_at=True)
+        return rc, out.getvalue()
+
+    def test_default_poll_prints_no_answered_at_line(self):
+        # The contract the opt-in gate exists to keep: an answered item polled
+        # without the flag renders exactly as it did before the flag existed.
+        rc, text = self.poll(dict(self.ANSWERED_ITEM))
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED: option: the board", text)
+        self.assertEqual(
+            [line for line in text.splitlines() if line.startswith("ANSWERED_AT:")],
+            [],
+        )
+
+    def test_answered_at_flag_prints_exactly_one_rfc3339_line(self):
+        # And with the flag, exactly one line -- not zero (flag ignored) and not
+        # two (a duplicated print).
+        rc, text = self.poll_with_answered_at(dict(self.ANSWERED_ITEM))
+        self.assertEqual(rc, 0)
+        lines = [line for line in text.splitlines() if line.startswith("ANSWERED_AT:")]
+        self.assertEqual(len(lines), 1, text)
+        self.assertEqual(lines[0], "ANSWERED_AT: 2026-11-11T21:52:03+01:00")
+
+    def test_answered_at_flag_prints_nothing_when_the_item_carries_no_timestamp(self):
+        # The flag gates a field, not the terminal: an answered item with no
+        # `answered_at` must not gain an empty `ANSWERED_AT:` line.
+        item = dict(self.ANSWERED_ITEM)
+        item.pop("answered_at")
+        rc, text = self.poll_with_answered_at(item)
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            [line for line in text.splitlines() if line.startswith("ANSWERED_AT:")],
+            [],
+        )
+
     def poll_error(self, code, body=b""):
         # fetch_item passes a Request to urlopen (it carries the auth header), so
         # the fake takes one and hands it straight back as the HTTPError's url.
