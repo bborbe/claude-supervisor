@@ -815,6 +815,48 @@ does not answer it. Resuming with an empty prompt, or with "continue", leaves th
 unanswered and the worker parked again at the same gate; the continuation prompt must carry the
 operator's actual answer, exactly as `answer_permission` would have.
 
+## A decision-parked worker is resumed when its wait clears — not on a clock
+
+The keep-alive leg (`agents/fleet-keepalive-actor.md` § 2b) resumes a **closed** headless worker
+whose recorded wait has cleared. It reads two wait kinds, both from the task file:
+
+| Kind | The read | Why it fires |
+|---|---|---|
+| (a) approval | `approved_at` is **later than the session's last transcript message** | the approval landed while the worker was already closed |
+| (d) `blocked_by` | non-empty, every member `completed`, and the latest `completed_date` is **later than that last message** | the dependency finished after the worker last spoke |
+
+⚠️ **Ordering, never mere presence.** Every candidate in the population carries `approved_at`,
+and a completed dependency stays completed forever — so a read of the field alone resumes the
+same row on every round, for as long as it stays closed. The comparison against the transcript's
+last message is what makes the wait a **consumable event**: the resumed worker's first turn moves
+that timestamp past the approval or the completion, and the row stops being a candidate. Measured
+2026-11-12: a row resumed at 23:39:17Z took a turn at 23:50:26Z and disappeared from the next
+round's candidates.
+
+⚠️ **Kind (c) — a `defer_date` coming due — is not this leg.** `agents/fleet-keepalive-actor.md`
+§ 2 *Resume the park watches whose re-check has passed* reads it from `park-event.py due`. Kind (b),
+an answered attention card, ships as its own task. Neither is re-implemented here.
+
+⚠️ **An empty `blocked_by` is not a cleared wait**, and `hold` is not a finished dependency:
+"every name is terminal" is vacuously true of an empty set, and `hold` marks a block of unknown
+length. Both read as "no wait of this kind", never as "cleared".
+
+⚠️ **Unread is a third answer.** An unreadable transcript, an unparseable `approved_at`, a
+dependency with no `completed_date`, or an unresolvable `blocked_by` name is `unread` — reported,
+never resumed, and never folded into "not cleared".
+
+The counts are `decision-candidates` / `decision-resumed-a` / `decision-resumed-d` /
+`decision-unread`, emitted on the leg's hand-back. ⚠️ **They are not digest keys and they are not
+written to any payload file** — measured 2026-11-12, `grep -rl decision-candidates
+~/.claude/state/fleet-handback/` returns nothing — so a round's decision readings are recoverable
+only from the manager's hand-back message.
+
+⚠️ **The close is not this leg's.** `scripts/reap-idle-headless.py`, on its own
+`com.bborbe.idle-reaper` launchd tick, closes the process; this leg only resumes. The resume bound
+is the script's own `--record` counter (three per 30 minutes), because `worker-keepalive.py`'s
+verdict returns `jump` for exactly these rows and never reaches its `crash-loop` branch.
+
+
 ## The session roster — `fleet-sessions.py`
 
 `scripts/fleet-sessions.py` prints one row per session transcript on the machine, newest
