@@ -799,6 +799,10 @@ class CloserGateLintTest(unittest.TestCase):
             "⏰ Ends:   bborbe/nuke#698 merged",
             "⏰ Ends:   https://github.com/bborbe/nuke/pull/698 reaches MERGED",
             "⏰ Ends:   PR #516 bot verdict",
+            # ⚠️ Lower case: the probe's `_BARE` carries `re.IGNORECASE`, so `pr 12` is an
+            # observable. A case-sensitive mirror here would refuse a slot the probe can
+            # resolve — the false block this file's doctrine forbids.
+            "⏰ Ends:   the pr 12 verdict lands",
             "⏰ Ends:   the verdict lands on #973",
             # No PR word at all: a clock, a file, a person.
             "⏰ Ends:   ~/.claude/state/batch/7a.json exists",

@@ -480,7 +480,7 @@ PR_WORD = re.compile(r"\bPR\b|\bpull\s+requests?\b", re.IGNORECASE)
 # ⚠️ `_HASH` is what keeps `the verdict lands on #973` passing; dropping it would widen this
 # arm into the gap the comment below deliberately left open.
 PR_OBSERVABLE = re.compile(
-    r"\b(?:PR|pull\s+requests?)\s*#?\s*\d+"
+    r"(?i:\b(?:PR|pull\s+requests?)\s*#?\s*\d+)"
     r"|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+"
     r"|(?:https?://)?(?:www\.)?github\.com/[\w.-]+/[\w.-]+/pull/\d+"
     r"|#\d+")
