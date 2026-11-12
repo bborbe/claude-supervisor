@@ -8,7 +8,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { ANSWER_PATH_REMEDY, answerPathRefusal, runProbe } from './answer-path.mjs'
+import { ANSWER_PATH_REMEDY, ANSWER_PATH_REMEDY_AGENT, answerPathRefusal, runProbe } from './answer-path.mjs'
 
 const refused = (detail = 'no manager registration') => ({ ok: false, detail })
 const allowed = { ok: true, detail: "goal 'X' loop is OK" }
@@ -31,17 +31,53 @@ test('a headless spawn with a proven answer path proceeds', () => {
   assert.equal(answerPathRefusal({ opensInteractive: false, sessionId: 'sid', probe: () => allowed }), null)
 })
 
-test('a headless spawn without one is refused, naming the probe and the remedy', () => {
+test('a headless spawn without one is refused, naming the probe and the agent remedy', () => {
   const out = answerPathRefusal({
     opensInteractive: false,
     sessionId: 'sid',
+    role: 'agent',
     probe: () => refused("this session's manager loop on goal 'X' reads STALE, not OK"),
   })
   assert.match(out, /^refusing a headless spawn:/)
   assert.match(out, /reads STALE, not OK/)
   assert.match(out, /scripts\/answer-path-check\.py/)
   assert.match(out, /15 minutes/)
-  assert.ok(out.includes(ANSWER_PATH_REMEDY))
+  assert.ok(out.includes(ANSWER_PATH_REMEDY_AGENT))
+  // The defect this change closes: an agent row must never be told to open a tab, because
+  // that is the cheaper remedy and the one a refused spawner actually takes.
+  assert.ok(!out.includes('Open the worker interactive'))
+})
+
+test('a human or manager row gets the interactive remedy — a tab is what it is for', () => {
+  for (const role of ['human', 'manager']) {
+    const out = answerPathRefusal({
+      opensInteractive: false,
+      sessionId: 'sid',
+      role,
+      probe: () => refused(),
+    })
+    assert.ok(out.includes(ANSWER_PATH_REMEDY), role)
+    assert.ok(!out.includes(ANSWER_PATH_REMEDY_AGENT), role)
+  }
+})
+
+test('an absent or unknown role defaults to the agent shape — never the tab', () => {
+  for (const role of [undefined, '', 'worker']) {
+    const out = answerPathRefusal({
+      opensInteractive: false,
+      sessionId: 'sid',
+      role,
+      probe: () => refused(),
+    })
+    assert.ok(out.includes(ANSWER_PATH_REMEDY_AGENT), String(role))
+  }
+})
+
+test('the cannot-name-the-session branch carries the role-aware remedy too', () => {
+  const agent = answerPathRefusal({ opensInteractive: false, sessionId: '', role: 'agent', probe: () => allowed })
+  assert.ok(agent.includes(ANSWER_PATH_REMEDY_AGENT))
+  const human = answerPathRefusal({ opensInteractive: false, sessionId: '', role: 'human', probe: () => allowed })
+  assert.ok(human.includes(ANSWER_PATH_REMEDY))
 })
 
 test('a session id the server cannot name refuses without consulting the probe', () => {
