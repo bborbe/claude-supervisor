@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPTS = os.path.dirname(_HERE)
@@ -31,9 +32,15 @@ def load():
 
 
 def load_probe(manager_dir):
-    """The REAL consumer, pointed at the same registration dir."""
+    """The REAL consumer, pointed at the same registration dir.
+
+    ⚠️ The reach dir is pinned to a tempdir for the same reason the registration dir is:
+    the probe resolves it at import, so an ambient `SUPERVISOR_ANSWER_REACH_DIR` would let a
+    real reach on this machine satisfy a test that means to prove the *registration* shape.
+    """
     os.environ["WORKER_MANAGER_STATE_DIR"] = manager_dir
     os.environ.pop("SUPERVISOR_WORKER_MANAGER_DIR", None)
+    os.environ["SUPERVISOR_ANSWER_REACH_DIR"] = os.path.join(manager_dir, "reach")
     spec = importlib.util.spec_from_file_location("answer_path_check", _PROBE)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -108,6 +115,18 @@ class FleetRegister(unittest.TestCase):
                  "--branch", "fleet", "--interval", "900"],
                 check=True, capture_output=True,
             )
+            # ⚠️ Since stage 2 the loop state alone is not enough: the probe also requires a
+            # fresh wrapper reach, so this seam has to seed one or it proves the registration
+            # by failing at a check the registration was never about.
+            reach_dir = os.environ["SUPERVISOR_ANSWER_REACH_DIR"]
+            os.makedirs(reach_dir, exist_ok=True)
+            with open(os.path.join(reach_dir, "sid-1.wrapper.json"), "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "session_id": "sid-1",
+                    "leg": "wrapper",
+                    "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "outcome": "http-404",
+                }))
             ok, subject, branch, detail = probe.check("sid-1")
             self.assertTrue(ok, detail)
             self.assertEqual((subject, branch), ("Fleet Manager", "fleet"))
