@@ -697,6 +697,28 @@ def live_session_ids(sessions_dir=None):
     return None if registry is None else set(registry)
 
 
+def _transcript_age_read(sid):
+    """`(age, failed)` — `age` is `inf` when the transcript is absent, `None` on a failed read.
+
+    The two are different facts and only one of them is a reading. An absent transcript
+    means nothing has ever been written for this session, which is honestly stale; a
+    glob or stat that raised means the read did not happen, and reporting that as
+    `quiet` is the same defect this module refuses one level up — an unreadable source
+    rendered as a verdict. `session_transcript_age` keeps its `inf`-for-both contract
+    for every existing caller; `--ages` reads the flag and reports `unknown`.
+    """
+    try:
+        hits = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{sid}.jsonl"))
+    except Exception:
+        return None, True
+    if not hits:
+        return float("inf"), False
+    try:
+        return time.time() - max(os.path.getmtime(h) for h in hits), False
+    except Exception:
+        return None, True
+
+
 def session_transcript_age(sid):
     """Seconds since the session's transcript was last written; `inf` if absent.
 
@@ -713,12 +735,8 @@ def session_transcript_age(sid):
     """
     if sid in _AGE_CACHE:
         return _AGE_CACHE[sid]
-    age = float("inf")
-    try:
-        hits = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{sid}.jsonl"))
-        if hits:
-            age = time.time() - max(os.path.getmtime(h) for h in hits)
-    except Exception:
+    age, failed = _transcript_age_read(sid)
+    if failed:
         age = float("inf")
     _AGE_CACHE[sid] = age
     return age
@@ -747,6 +765,28 @@ def _resolve_session_id(sid):
     if len(hits) == 1:
         return hits.pop(), False
     return sid, len(hits) > 1
+
+
+def ages_row(sid):
+    """One `--ages` row: `(sid8, seconds, human, quiet|active|ambiguous|unknown)`.
+
+    Split out of `main` so each verdict is reachable from a test. The two failure
+    shapes — an unresolvable id and a failed transcript read — must both be asserted
+    as *not* `quiet`, and a subprocess test cannot make a read fail.
+    """
+    full, ambiguous = _resolve_session_id(sid)
+    if ambiguous:
+        # Never `quiet`: an unresolvable id read as quiet would render a live
+        # session as stalled, the very defect this flag exists to remove.
+        return sid[:8], "?", "?", "ambiguous"
+    age, failed = _transcript_age_read(full)
+    if failed:
+        return sid[:8], "?", "?", "unknown"
+    if math.isfinite(age):
+        secs, human = str(int(age)), _fleet_sessions().human_age(age)
+    else:
+        secs, human = "inf", "no transcript"
+    return sid[:8], secs, human, "quiet" if age >= STALL_TRANSCRIPT_SECONDS else "active"
 
 
 def quiet_session_ids(records, live_ids):
@@ -2478,11 +2518,12 @@ def main():
         "--ages",
         nargs="+",
         metavar="SESSION_ID",
-        help="print '<sid8>\\t<seconds>\\t<human>\\t<quiet|active|ambiguous>' per id and "
-        "exit — the transcript clock the fleet digest renders its age from, and the "
+        help="print '<sid8>\\t<seconds>\\t<human>\\t<quiet|active|ambiguous|unknown>' per id "
+        "and exit — the transcript clock the fleet digest renders its age from, and the "
         "quiet test its `stalled` class needs. `inf` when the session has no "
-        "transcript; `ambiguous` when a prefix matches more than one transcript, or the "
-        "argument is not an id fragment at all.",
+        "transcript; `unknown` when the transcript read itself failed; `ambiguous` when a "
+        "prefix matches more than one transcript, or the argument is not an id fragment "
+        "at all.",
     )
     ap.add_argument("--jump", metavar="PANE", help="activate this WezTerm pane and exit")
     ap.add_argument(
@@ -2493,21 +2534,8 @@ def main():
     )
     a = ap.parse_args()
     if a.ages:
-        human_age = _fleet_sessions().human_age
         for sid in a.ages:
-            full, ambiguous = _resolve_session_id(sid)
-            if ambiguous:
-                # Never `quiet`: an unresolvable id read as quiet would render a live
-                # session as stalled, the very defect this flag exists to remove.
-                print(f"{sid[:8]}\t?\t?\tambiguous")
-                continue
-            age = session_transcript_age(full)
-            if math.isfinite(age):
-                secs, human = str(int(age)), human_age(age)
-            else:
-                secs, human = "inf", "no transcript"
-            print(f"{sid[:8]}\t{secs}\t{human}\t"
-                  f"{'quiet' if age >= STALL_TRANSCRIPT_SECONDS else 'active'}")
+            print("\t".join(ages_row(sid)))
         sys.exit(0)
     if a.jump:
         sys.exit(subprocess.call(["wezterm", "cli", "activate-pane", "--pane-id", a.jump]))

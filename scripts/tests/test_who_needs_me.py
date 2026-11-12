@@ -2938,7 +2938,24 @@ class AgesFlagTest(unittest.TestCase):
     def test_a_session_writing_its_transcript_is_active_whatever_its_task_file_says(self):
         sid = "01234567-cccc-4ccc-8ccc-cccccccccccc"
         self.transcript(sid, 120)
-        self.assertEqual(["01234567", "120", "2m ago", "active"], self.ages("01234567")[0])
+        row = self.ages("01234567")[0]
+        self.assertEqual("01234567", row[0])
+        self.assertEqual("active", row[3])
+        # The elapsed second is deliberately not pinned: the subprocess starts after
+        # `utime` stamped the fixture, so an exact `120` is a race the test loses on a
+        # loaded machine. The band still fails on a wrong clock (the task-file mtime
+        # this replaced reads hours) and on a wrong formatter (`120` vs `2m ago`).
+        self.assertGreaterEqual(int(row[1]), 120)
+        self.assertLess(int(row[1]), 180)
+        self.assertEqual("2m ago", row[2])
+
+    def test_a_failed_transcript_read_is_unknown_never_quiet(self):
+        # `inf` is reserved for "no transcript"; a read that raised did not happen, and
+        # reporting it as `quiet` is the failure this flag exists to prevent — a live
+        # session rendered as stalled and nudged.
+        sid = "01234567-1111-4111-8111-111111111111"
+        with mock.patch.object(wnm.glob, "glob", side_effect=OSError("boom")):
+            self.assertEqual(("01234567", "?", "?", "unknown"), wnm.ages_row(sid))
 
     def test_a_transcript_past_the_bound_reads_quiet(self):
         sid = "01234567-dddd-4ddd-8ddd-dddddddddddd"
