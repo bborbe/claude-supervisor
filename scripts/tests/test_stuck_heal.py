@@ -234,7 +234,10 @@ class MainTest(unittest.TestCase):
     def test_an_open_card_refuses_the_restart_with_its_token(self):
         # SC3: the token is the FIRST line, the card id is named on the second, and
         # nothing is resumed — the session is waiting on a person.
-        self.cards = [{"session_id": SID8, "item_id": "a3e612d9908f0dba269a950b18f3e90f"}]
+        # ⚠️ **The WIRE shape, and a FULL producer id against an 8-char --session.** The
+        # first version of this fixture used `session_id` (the normalised spelling) and an
+        # 8-char id, so it passed against a gate that could never match a live item.
+        self.cards = [{"producer_id": SID, "item_id": "a3e612d9908f0dba269a950b18f3e90f"}]
         rc, out = self.run_main("--session", SID8, "--task", TASK, "--kind", "stream-closed")
         self.assertEqual(rc, 1)
         first, second = out.splitlines()

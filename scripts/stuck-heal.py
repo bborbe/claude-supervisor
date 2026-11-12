@@ -128,7 +128,20 @@ def open_card(session_id, endpoint=None):
     for item in items:
         if not isinstance(item, dict):
             continue
-        if item.get("session_id") == session_id or item.get("sessionId") == session_id:
+        # ⚠️ **`producer_id` is the store's own field for the asking session.** Reading
+        # `session_id` here was the defect: that name exists only on `who-needs-me.py`'s
+        # NORMALISED rows (`normalize_store_item`), while `store_items()` hands back the
+        # raw wire shape, so the gate matched nothing and refused nothing — a no-op that
+        # its own fixture could not catch, because the fixture invented the normalised
+        # spelling. `session_id` stays as a fallback for a caller that passes normalised
+        # rows.
+        producer = str(item.get("producer_id") or item.get("session_id") or "")
+        if not producer:
+            continue
+        # ⚠️ **A PREFIX, not equality.** `--session` is an 8-char display handle — the
+        # form the watcher prints and the manager holds — while `producer_id` is a full
+        # uuid. Equality would never match, which is the second half of the same no-op.
+        if producer == session_id or producer.startswith(session_id):
             return item.get("item_id") or item.get("id"), None
     return None, None
 
