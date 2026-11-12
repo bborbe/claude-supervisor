@@ -522,19 +522,21 @@ def main(argv=None):
                 "so the reason would be read as keys"
             )
 
+    if args.status:
+        # BEFORE the shared read, not after it: `status()` owns its own read precisely so an
+        # unreadable digest renders `legs: UNKNOWN — <reason>` instead of dying on the common
+        # read with no verdict at all. Placed after it, the UNKNOWN branch is unreachable and
+        # a failed read prints nothing — the state the verdict exists to name.
+        line, code = status(args.digest)
+        print(line)
+        return code
+
     try:
         with open(args.digest, encoding="utf-8") as fh:
             text = fh.read()
     except OSError as exc:
         print("fleet-legs: cannot read %s: %s" % (args.digest, exc), file=sys.stderr)
         return EXIT_FAILED
-
-    if args.status:
-        # Deliberately after the read above: an unreadable digest must report UNKNOWN from
-        # `status()` too, and reaching it twice is cheaper than two spellings of the verdict.
-        line, code = status(args.digest)
-        print(line)
-        return code
 
     lines = text.splitlines()
     before, body, after = split_section(lines)

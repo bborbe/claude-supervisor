@@ -450,11 +450,17 @@ class TestStatus(Base):
         self.assertIn("no LEGS section", line)
 
     def test_an_unreadable_digest_is_unknown_not_incomplete(self):
-        """A failed read and a suppressed leg must not print the same verdict."""
+        """A failed read and a suppressed leg must not print the same verdict — or nothing.
+
+        The line is asserted, not only the exit code: `--status` must run BEFORE the shared
+        digest read, because a verdict that never prints is indistinguishable from one that
+        said nothing, and an exit code alone cannot tell the two apart.
+        """
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             code = legs.main(["--digest", "/nope/x.digest", "--status"])
         self.assertEqual(code, legs.EXIT_FAILED)
+        self.assertTrue(buf.getvalue().strip().startswith("legs: UNKNOWN — "))
 
     def test_status_takes_no_write_flag(self):
         self.write(digest_with_legs())
