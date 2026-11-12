@@ -685,32 +685,39 @@ def prev_file(subject: str, tier: str = "goal") -> str:
     return payload_file(subject, tier) + ".prev"
 
 
-def _sweep_rows(text: str) -> dict:
-    """`{goal: (status, phase, met)}` from a rendered sweep payload.
+def _sweep_rows(text: str):
+    """`{row name: (status, phase, met)}`, or `None` when no header is recognised.
 
-    The table's columns are `Goal | Status | Phase | Met | Manager`. The header line
-    and the Manager column are excluded: both churn on ticks where no tracked goal
-    moved (`STALE → OK` flips are liveness, not change), and the metric is the
-    table's goal cells. A payload that does not parse yields `{}` — the caller
-    treats that as "nothing comparable", never as "nothing moved".
+    **Two frames are real, and both must parse.** The topic tier renders
+    `Goal | Status | Phase | Met | Manager`; the goal tier renders
+    `Topic / Goal / Task | Session | Status | Phase | Met`. Recognising only the
+    first made a goal-tier `--count` read `0` on every tick — the denominator could
+    never fire, which is the defect the metric exists to expose. Columns are found
+    by NAME, so a frame with a different first column still works.
+
+    The header line and the `Manager` / `Session` column are excluded: both churn on
+    ticks where no tracked goal moved (`STALE → OK` flips are liveness, not change),
+    and the metric is the table's goal cells.
+
+    `None` is a SHAPE FAILURE, never "no rows". A caller that read it as `0 moved`
+    would restore the silent zero; `count_moved` refuses instead.
     """
     rows = {}
-    lines = [OSC8_RE.sub("", ln) for ln in text.splitlines()]
-    header_seen = False
-    for ln in lines:
-        stripped = ln.strip()
+    header = None
+    for ln in text.splitlines():
+        stripped = OSC8_RE.sub("", ln).strip()
         if not (stripped.startswith("│") and stripped.endswith("│")):
             continue
         cells = [c.strip() for c in stripped.strip("│").split("│")]
-        if len(cells) < 5:
+        if header is None:
+            if "Status" in cells and "Phase" in cells and "Met" in cells:
+                header = cells
             continue
-        if cells[0] == "Goal" and cells[1] == "Status":
-            header_seen = True
+        if len(cells) < len(header):
             continue
-        if not header_seen:
-            continue
-        rows[cells[0]] = (cells[1], cells[2], cells[3])
-    return rows
+        rows[cells[0]] = tuple(cells[header.index(name)]
+                               for name in ("Status", "Phase", "Met"))
+    return rows if header is not None else None
 
 
 def snapshot(topic: str, branch: str = "", tier: str = "goal") -> int:
@@ -753,6 +760,13 @@ def count_moved(topic: str, branch: str = "", tier: str = "goal") -> int:
             after = _sweep_rows(fh.read())
     except OSError as e:
         print(f"cannot read the sweep payload for {s}: {e}", file=sys.stderr)
+        return 2
+    if before is None or after is None:
+        # A frame we cannot parse must not read as `0 moved` — that is the silent
+        # zero this counter exists to avoid, and it would let the criterion pass
+        # forever on a shape change.
+        print(f"cannot parse the sweep frame for {s}: no Status/Phase/Met header — "
+              f"refusing to report 0 moved", file=sys.stderr)
         return 2
     moved = sum(1 for goal, cells in after.items()
                 if goal in before and before[goal] != cells)
@@ -808,9 +822,16 @@ def spend_tokens(topic: str, branch: str = "", session: str = "", now: float = N
               file=sys.stderr)
         return 2
     now = time.time() if now is None else now
+    files = _transcript_files(session)
+    if not files:
+        # A missing transcript must not read as "the round spent nothing" — that is a
+        # silent zero, and the numerator would then never fail.
+        print(f"no transcript files for session {session} — refusing to report 0 tokens",
+              file=sys.stderr)
+        return 2
     seen = set()
     total = 0
-    for fn in _transcript_files(session):
+    for fn in files:
         try:
             with open(fn, encoding="utf-8") as fh:
                 for line in fh:
@@ -1587,8 +1608,6 @@ def main() -> int:
         if not a.step:
             ap.error("--gate needs --step")
         return gate(subject, a.branch, a.step)
-    if a.render_cached:
-        return render_cached(subject, a.branch)
     if a.record_verdict or a.record_outcome:
         # Goal verdicts ride the goal/topic receipt only; the fleet tier owes none.
         if a.branch:

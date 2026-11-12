@@ -2001,6 +2001,24 @@ class SpendReadout(unittest.TestCase):
             fh.write("\n".join(out) + "\n")
         return p
 
+    def goal_payload(self, rows):
+        """A GOAL-tier payload: `Topic / Goal / Task | Session | Status | Phase | Met`.
+
+        The exact frame `manager-predispatch --write-payload` renders for the goal
+        tier — different columns from the topic tier's, which is the shape the first
+        `_sweep_rows` missed.
+        """
+        out = ["┌────┬────┬────┬────┬────┐",
+               "│ Topic / Goal / Task │ Session │ Status │ Phase │ Met │",
+               "├────┼────┼────┼────┼────┤"]
+        for name, sess, status, phase, met in rows:
+            out.append("│ %s │ %s │ %s │ %s │ %s │" % (name, sess, status, phase, met))
+        out.append("└────┴────┴────┴────┴────┘")
+        p = os.path.join(self.tmp.name, self.slug + ".table")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(out) + "\n")
+        return p
+
     # --- the numerator ---------------------------------------------------------
 
     def test_tokens_sums_parent_and_subagent_files(self):
@@ -2040,6 +2058,13 @@ class SpendReadout(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertEqual(out, "")
 
+    def test_tokens_with_no_transcript_files_refuses(self):
+        # A missing transcript must not read as "spent nothing".
+        self.open_round()
+        rc, out = self.cli("--tokens", "--topic", self.topic, "--session", self.session)
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "")
+
     # --- the denominator -------------------------------------------------------
 
     def test_count_prints_baseline_when_no_prev(self):
@@ -2073,6 +2098,31 @@ class SpendReadout(unittest.TestCase):
         self.payload(rows)
         _, out = self.cli("--count", "--topic", self.topic)
         self.assertEqual(out.strip(), "0")
+
+    def test_count_reads_the_goal_tiers_own_frame(self):
+        # The goal tier renders `Topic / Goal / Task | Session | Status | Phase | Met`,
+        # not the topic tier's `Goal | Status | Phase | Met | Manager`. Recognising
+        # only the latter made a goal-tier `--count` read 0 on every tick, so the
+        # headline criterion could never fire.
+        name = "Manager Rounds Cost What They Change"
+        self.goal_payload([(name, "—", "progressing", "—", "0/3")])
+        self.cli("--snapshot", "--topic", self.topic)
+        self.goal_payload([(name, "—", "progressing", "—", "1/3")])
+        rc, out = self.cli("--count", "--topic", self.topic)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "1")
+
+    def test_count_refuses_an_unparseable_frame(self):
+        # A shape change must error, never read as `0 moved` — the silent zero this
+        # counter exists to avoid.
+        self.payload([("A", "done", "done", "SC 2/2", "OK")])
+        self.cli("--snapshot", "--topic", self.topic)
+        with open(os.path.join(self.tmp.name, self.slug + ".table"),
+                  "w", encoding="utf-8") as fh:
+            fh.write("not a table\n")
+        rc, out = self.cli("--count", "--topic", self.topic)
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "")
 
     def test_count_does_not_re_snapshot_before_diffing(self):
         # The load-bearing order: snapshot → sweep → diff. A `--count` that
