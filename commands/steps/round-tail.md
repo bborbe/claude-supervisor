@@ -40,4 +40,13 @@ When: end of every tick
 
    ⚠️ **Flag, never refuse: re-arm regardless of the verdict.** A manager that refused to re-arm on a skipped round would convert a visible defect into a dead loop — the exact failure this check is meant to make *less* likely, not more. ⚠️ **Surface every `skipped:` line in the tick's render**, under the marker, so a skip is visible on the tick it happened and not only in an exit code nobody reads.
 
+   ⚠️ **Then print the round's spend-per-change line — after `--check`, beside the census.** `--tokens` reads the transcripts, `--count` diffs the sweep payload against the copy the sweep leg's head snapshotted; neither may stand in for the other:
+
+   ```bash
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-receipt.py --tokens --topic "<subject>"
+   python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-receipt.py --count --topic "<subject>" --tier <goal|topic>
+   ```
+
+   Print `tokens spent ÷ cells moved = <tokens> ÷ <moved rows> (round window: <round_started_at> → now) · census tok 15m manager=<n> worker=<m> (15-min rolling)`. ⚠️ **`--count` takes the round's own `--tier`** — the goal tier's payload is `~/.claude/state/manager-predispatch/<slug>.table`, the topic tier's is `~/.claude/state/manager-receipts/<slug>.sweep`, and the snapshot must have been taken from the same file at the sweep leg's head. ⚠️ **The census figure is the last `tok 15m manager=` line in `~/Library/Logs/claude-session-census.log`, never the numerator** — echoing it fails the criterion. ⚠️ **`--count` prints `n/a (baseline)` on the first tick**, never `0`; a no-change tick prints `0 cells moved`, never omits the line. ⚠️ **On the topic tier the sweep reader takes no prior snapshot**, so `--count` is the only producer of this denominator.
+
 9. **The tick's last write — a second liveness beat, after step 8.** Row 0a arms at the head only, so a long round arrives here `STALE`. Re-run row 0a's `--state` allow-list block, unchanged, **not restated here**: same `--subject` / `--branch` / `--interval` / `--vault`, never `--resume`, plus **`--beat tail`** — that marker keeps this beat out of `observed_period()`, which measures round-to-round. ⚠️ A liveness **RECORD**, not a wakeup arm (step 7 removed the only one the goal tier had). ⚠️ **Last, after step 8's check.** Rule: `round-liveness.md` § *A second beat at the tail*.
