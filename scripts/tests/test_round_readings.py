@@ -1092,6 +1092,24 @@ class UnrecordedSessions(Tmp):
         # And the park is not double-reported as stuck.
         self.assertEqual(doc["rows"][key]["stuck"], "none")
 
+    def test_the_limb_names_the_tracked_set_never_the_whole_vault(self):
+        """SC: the limb must not claim no page records a session a page DOES record.
+
+        `covered` is built from `out_rows`, i.e. this round's tracked set, so a session
+        recorded on a page outside that set lands here as well. Measured 2026-11-12: 18 of
+        33 rows carrying the bare claim named a session a page under `25 Tasks/` records —
+        the bare wording sends a reader looking for a page that already exists.
+        """
+        self.session(self.COVERED, "idle")
+        self.session(self.PARKED, "waiting")
+        doc = self.document({"Covered task": [self.COVERED]})
+        limb = doc["rows"]["unrecorded:" + self.PARKED[:8]]["in_flight_limb"]
+
+        self.assertIn("no tracked page records this session", limb)
+        # The bare overclaim must not survive anywhere in the limb — including as the
+        # substring the qualified form would otherwise contain.
+        self.assertNotIn("(no page records this session)", limb)
+
     def test_an_unrecorded_session_that_is_not_parked_fabricates_no_park(self):
         """SC2: the negative control — the path discriminates, it is not a catch-all."""
         self.session(self.COVERED, "idle")
