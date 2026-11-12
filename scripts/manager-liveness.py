@@ -283,9 +283,12 @@ def parse_arm_lines(text: str) -> list:
 
     Three formats are on disk and all keep working: the original single column, the
     `<epoch> <interval>` written since per-arm recording, and `<epoch> <interval> tail`
-    written by the round's closing beat. A line carrying no interval is LEGACY and
-    reads as None rather than a guess — a guessed value would either floor a subject
-    that never lengthened its interval or hide a real lapse.
+    written by the round's closing beat before the marker moved to `<slug>.tail`. That
+    third column is now READ-ONLY legacy — `arm()` no longer writes it, because a
+    pre-upgrade session rebuilds the ring from two-tuples and erases it. A line
+    carrying no interval is LEGACY and reads as None rather than a guess — a guessed
+    value would either floor a subject that never lengthened its interval or hide a
+    real lapse.
 
     `is_tail` is what lets `observed_period` measure ROUND-to-round. A tail beat is the
     same round's closing write, so the gap ending on one is intra-round and must stay
@@ -311,14 +314,56 @@ def parse_arm_lines(text: str) -> list:
     return out
 
 
+def tail_store_path(s: str) -> str:
+    """`<slug>.tail` — the tail-marker store, the `<slug>.arms` ring's sibling."""
+    return path(s, "tail")
+
+
+def read_tail_epochs(s: str) -> set:
+    """Epoch keys marked as tail beats, one per line, formatted like the ring column."""
+    try:
+        with open(tail_store_path(s), encoding="utf-8") as fh:
+            return {line.strip() for line in fh if line.strip()}
+    except OSError:
+        return set()
+
+
+def write_tail_epochs(s: str, epochs) -> None:
+    """Rewrite the store; an empty set removes the file rather than leaving it blank."""
+    p = tail_store_path(s)
+    if not epochs:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+        return
+    write_atomic(p, "".join(f"{e}\n" for e in sorted(epochs)))
+
+
 def read_arm_pairs(s: str) -> list:
-    """(epoch, interval-or-None) pairs from the subject's `<slug>.arms` ring."""
+    """(epoch, interval-or-None, is_tail) from the ring, marker from its own store.
+
+    The tail marker lives in `<slug>.tail`, NOT in a third column of the ring: a
+    session still running a pre-upgrade copy of this script rebuilds the ring from
+    two-tuples and writes `{epoch} {interval}`, which erases a column marker on every
+    arm it takes. A separate file is the one home that writer never touches.
+
+    A third column is still honoured when present. Rings written before the move carry
+    `tail` there, and dropping it would silently turn every one of those tail beats
+    into a head — collapsing the median and manufacturing the false STALE the marker
+    exists to prevent.
+    """
     p, _ = resolve(s, "arms")
     try:
         with open(p, encoding="utf-8") as fh:
-            return parse_arm_lines(fh.read())
+            text = fh.read()
     except OSError:
         return []
+    stored = read_tail_epochs(s)
+    return [
+        (epoch, interval, column_tail or f"{epoch:.0f}" in stored)
+        for epoch, interval, column_tail in parse_arm_lines(text)
+    ]
 
 
 def read_arms(s: str) -> list:
@@ -901,15 +946,26 @@ def arm(subject: str, branch: str, interval: int, resume: bool = False,
     reset_path, _ = resolve(s, "reset")
     has_reset = os.path.exists(reset_path)
     prior = [] if has_reset else read_arm_pairs(s)
-    arms = (prior + [(time.time(), interval, beat)])[-ARMS_KEEP:]
-    # A tail marker survives the rebuild — dropping it would silently turn every tail
-    # beat into a head on the next arm, which is the period corruption this marker
-    # exists to prevent. A legacy line (no interval) keeps its single-column shape.
+    now = time.time()
+    arms = (prior + [(now, interval, beat)])[-ARMS_KEEP:]
+    # The ring keeps TWO columns: the tail marker moved to `<slug>.tail`, because a
+    # session still running a pre-upgrade copy rebuilds this ring from two-tuples and
+    # erases a third-column marker on every arm it takes. A legacy line (no interval)
+    # keeps its single-column shape.
+    #
+    # The store keeps only epochs still present in the ring, so it stays bounded by
+    # ARMS_KEEP — and those epochs SURVIVE the two-tuple rebuild, which is what makes
+    # the marker outlive it. Deriving the store from the ring's own markers instead
+    # would erase it on the first arm after such a rebuild.
+    ring_keys = {f"{epoch:.0f}" for epoch, _, _ in arms}
+    tail_keys = {k for k in read_tail_epochs(s) if k in ring_keys}
+    if beat == "tail":
+        tail_keys.add(f"{now:.0f}")
     write_atomic(path(s, "arms"), "".join(
-        f"{epoch:.0f}\n" if iv is None else
-        (f"{epoch:.0f} {iv}\n" if b != "tail" else f"{epoch:.0f} {iv} tail\n")
-        for epoch, iv, b in arms
+        f"{epoch:.0f}\n" if iv is None else f"{epoch:.0f} {iv}\n"
+        for epoch, iv, _ in arms
     ))
+    write_tail_epochs(s, tail_keys)
     # BEFORE the reset is consumed, so a pre-split `.reset` is migrated (and reported)
     # rather than silently deleted by the consumption a line below.
     migrate_legacy(subject, s)
