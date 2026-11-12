@@ -66,7 +66,7 @@ test('SC1 — at the hard cap a 6th manager is refused, naming spawn.maxManagers
 
 test('SC2 — at the soft cap an ordinary open is refused WITHOUT the fleet-full phrase the card keys on', () => {
   const msg = decide(3)
-  assert.match(msg, /spawn\.maxManagers"/)
+  assert.match(msg, /spawn\.maxManagersSoft"/)
   assert.ok(!msg.includes(MANAGER_FLEET_FULL), 'a soft refusal must not trigger the hard-cap card')
 })
 

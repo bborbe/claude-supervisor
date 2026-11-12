@@ -45,6 +45,20 @@ topic round, `fleet` is the fleet round, whose slug carries the branch exactly a
                                 and exits 0 on a full round. Run at the tail re-arm,
                                 validating the round that just ran.
 
+Two more verbs carry the topic round's keep-alive, a CONDITIONAL step owed only for a
+verdict the round actually read:
+
+  --record-verdict --topic T --goal G --vault V --verdict resume|restart --session ID
+                                written by `topic-keepalive.py --receipt T` as it
+                                prints the verdict, never by hand.
+  --record-outcome --topic T --goal G --outcome O
+                                what the round did: `executed`, `refused:<token>` or
+                                `deferred:busy-target`. `executed` resolves only
+                                against the work's own record inside the round window
+                                — the `--record-resume` stamp for a resume, a
+                                `kind=spawn` exit record for a restart — so writing
+                                the word alone does not clear the step.
+
 **A field resolves only when its artifact proves the step RAN, not that a path
 exists.** The file must sit inside the round window AND carry the producer's own
 shape: a `touch`ed empty file, an arbitrary non-empty string and a round-written
@@ -98,7 +112,23 @@ SENTINEL = "INCOMPLETE ROUND"
 # verdict families to `<slug>.readings`. It is the step the 12:17 round skipped while
 # still rendering a complete-looking table, so it is the one this receipt most needs
 # to name.
-STEPS = ("needs-you", "sweep", "watcher", "readings")
+STEPS = ("needs-you", "sweep", "watcher", "readings", "drive")
+
+# The steps a TOPIC round owes, and the reason this tuple exists at all.
+#
+# `steps_for()` used to return `STEPS` for every non-fleet round, so one list judged a
+# goal round and a topic round alike. The two are not alike: a topic round has no drive
+# row at all (`commands/topic-drive.md` row 5 is *Keep alive*), so adding `drive` to
+# `STEPS` alone would print `skipped: drive` on every topic round forever — a permanent
+# false red, the same failure mode the `FLEET_STEPS` comment below names for the fleet
+# tier.
+#
+# `sweep` stays IN this tuple even though the topic sweep leg records nothing yet. The
+# topic round does sweep every tick (`commands/topic-drive.md` row 3), so dropping the
+# step would let a round that skips its sweep report complete — this check's own defect,
+# one tier over. The missing record call is the topic sweep's to add, not this tuple's
+# to excuse.
+TOPIC_STEPS = ("needs-you", "readings", "sweep", "watcher")
 
 # The fleet round's own two load-bearing steps, in their own tuple rather than appended
 # to STEPS. A goal or topic round owes no digest, so a shared tuple would make every such
@@ -107,6 +137,12 @@ STEPS = ("needs-you", "sweep", "watcher", "readings")
 # that owes both a per-round arm and a per-round digest.
 FLEET_STEPS = ("re-arm", "digest")
 ALL_STEPS = STEPS + FLEET_STEPS
+
+# The tiers a round can belong to. This is NOT `BRANCHES`: `branch` is interpolated into
+# the state slug by `slug()`, so a third branch value would re-key every receipt already
+# on disk from `<base>` to `topic--<base>` and orphan it. The tier therefore selects the
+# step tuple only, and never reaches `slug()`.
+TIERS = ("goal", "topic")
 
 # The branches this receipt knows: `""` (the goal/topic tier, which carries no prefix) and
 # `fleet`. `manager-liveness.py:110-112` validates its own set before building the same
@@ -125,9 +161,199 @@ ALL_STEPS = STEPS + FLEET_STEPS
 BRANCHES = ("", "fleet")
 
 
-def steps_for(branch: str) -> tuple:
-    """The steps a round of `branch` owes. No branch is the goal/topic tier."""
-    return FLEET_STEPS if branch == "fleet" else STEPS
+def steps_for(branch: str, tier: str = "goal") -> tuple:
+    """The steps a round of `branch`/`tier` owes.
+
+    No branch is the goal/topic tier, and `tier` separates those two: a goal round owes
+    `STEPS` (which carries `drive`), a topic round owes `TOPIC_STEPS` (which does not).
+    `tier` is deliberately NOT a `branch` value — see `TIERS`.
+    """
+    if branch == "fleet":
+        return FLEET_STEPS
+    return TOPIC_STEPS if tier == "topic" else STEPS
+
+
+# --- the keep-alive verdicts --------------------------------------------------
+#
+# Measured 2026-11-08 on a topic manager (session eab58671, ticks 15:55 and 16:15):
+# `topic-keepalive.py` answered `resume` for three goal managers on two consecutive ticks
+# and the round executed none, attributing the skip first to `spawn.maxWorkerSoft` and then
+# to the per-topic N = 3 — neither of which gates a resume. Every field above resolved, so
+# `--check` reported a full round while three managers stayed down.
+#
+# ⚠️ **A CONDITIONAL step, never a member of `STEPS` or `TOPIC_STEPS`.** A round owes a
+# keep-alive outcome only for a verdict it actually read: a goal round reads none, and a
+# topic round whose goals all read `jump` / `leave` reads none either. A fixed tuple entry
+# would print `skipped: keepalive` on those rounds forever — the permanent false red this
+# file refuses elsewhere. The verdict list is what makes the debt: no verdict, nothing owed.
+#
+# ⚠️ **The verdict is written by the probe, the outcome by the round.** `topic-keepalive.py
+# --receipt <topic>` appends the entry the moment it prints `resume` / `restart`, so a
+# round cannot omit a verdict by forgetting to record it; the round then records what it
+# did with `--record-outcome`.
+KEEPALIVE = "keepalive"
+OWING_VERDICTS = ("resume", "restart")
+
+# `refused:<token>` must name a refusal the verdict's OWN command can emit — a free-form
+# token, or one borrowed from another path, would let a round label an unexecuted resume
+# and pass. So the vocabulary is per verdict:
+#
+#   resume  → `/supervisor:open --goal`, Step 2B item 3 → Step 3. That path's refusals:
+#             `⌛ waiting-approval` (item 0), the registry read's "cannot tell" (item 1),
+#             `start-rate.mjs` exit 1 (Step 3.1) and `resolve-launcher.py` non-zero (3.1).
+#   restart → `/supervisor:restart`: `restart-worker.py`'s first-line tokens (its module
+#             docstring, plus `environment-fault` and `hold-unreadable`, which it returns
+#             when the hold store cannot be read), and `restart-precheck.py`'s
+#             `dirty-worktree`.
+#
+# ⚠️ **No cap token on either path, by design.** The resume path never reaches Step 1.5's
+# Gate 3, so `spawn.maxWorkerSoft` and the per-topic N cannot refuse it — and they are
+# exactly the excuses the 2026-11-08 round gave. A vocabulary carrying them would let that
+# round pass.
+#
+# `busy-target` is a restart deferral (`deferred:busy-target`), never a refusal and never
+# valid on a resume: the round is told to wait a tick for a mid-turn session, and a resume
+# targets a session that is ABSENT, so it cannot be mid-turn.
+REFUSAL_TOKENS = {
+    "resume": ("waiting-approval", "cannot-tell", "start-rate", "launcher-refused"),
+    "restart": ("unknown-session-id", "ambiguous-pid", "headless-target", "held-session",
+                "hold-unreadable", "role-undetermined", "stale-load-path",
+                "environment-fault", "dirty-worktree"),
+}
+DEFER_TOKENS = {"resume": (), "restart": ("busy-target",)}
+
+
+def outcome_valid(outcome: str, verdict: str) -> bool:
+    """`executed`, or a refusal / deferral token the verdict's own command emits."""
+    if outcome == "executed":
+        return True
+    kind, _, token = (outcome or "").partition(":")
+    if kind == "refused":
+        return token in REFUSAL_TOKENS.get(verdict, ())
+    if kind == "deferred":
+        return token in DEFER_TOKENS.get(verdict, ())
+    return False
+
+
+def _same_session(recorded: str, seen: str) -> bool:
+    """Equal, or one an 8+-char prefix of the other — `/supervisor:restart` takes a prefix."""
+    if not recorded or not seen:
+        return False
+    if recorded == seen:
+        return True
+    short, long_ = sorted((recorded, seen), key=len)
+    return len(short) >= 8 and long_.startswith(short)
+
+
+_KEEPALIVE_MOD = None
+
+
+def keepalive_module():
+    """`topic-keepalive.py`, imported — the ONE definition of where a resume is recorded."""
+    global _KEEPALIVE_MOD
+    if _KEEPALIVE_MOD is None:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "topic-keepalive.py")
+        spec = importlib.util.spec_from_file_location("topic_keepalive", p)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _KEEPALIVE_MOD = mod
+    return _KEEPALIVE_MOD
+
+
+def session_exit_dir() -> str:
+    # Same override and default as `scripts/session-exit-record.py:state_dir()`.
+    return os.path.expanduser(
+        os.environ.get("SUPERVISOR_SESSION_EXIT_DIR") or "~/.claude/state/session-exit"
+    )
+
+
+def resume_recorded(vault: str, goal: str, session: str, started: float, now: float) -> bool:
+    """A `--record-resume` stamp for this goal AND the verdict's session, in the round window.
+
+    `topic-keepalive.py --record-resume` writes it only once `session-liveness.py` reads the
+    resumed id `LIVE`, so the stamp is the resume's own proof — not the round's say-so.
+    ⚠️ **Matched on the session too.** A stamp alone proves only that SOME live id was
+    handed over — the round's own session would do — so the stamp must name the id the
+    verdict said was `ABSENT`.
+    """
+    if not vault:
+        return False
+    km = keepalive_module()
+    rows = km.load_sessions(km.resume_path(vault, goal, "goal"))
+    return any(int(started) <= t <= now + 1 and _same_session(session, s) for t, s in rows)
+
+
+def restart_spawned(session: str, started: float, now: float) -> bool:
+    """A `kind=spawn` line for `session` in the exit-record store, inside the round window.
+
+    `restart-worker.py` wires `session-exit-record.py append --kind spawn --session <id>`
+    into the relaunched pane before the launcher runs, so the line exists only when the
+    restart actually spawned the session. Timestamps are UTC, second resolution.
+    """
+    if not session:
+        return False
+    directory = session_exit_dir()
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return False
+    for name in names:
+        if not (name.startswith("pane-") and name.endswith(".log")):
+            continue
+        p = os.path.join(directory, name)
+        try:
+            # The store is append-only, so a log last written before the round opened
+            # cannot hold an in-window line — skip it rather than read the whole history.
+            if os.path.getmtime(p) < int(started):
+                continue
+            with open(p, encoding="utf-8") as fh:
+                lines = fh.readlines()
+        except OSError:
+            continue
+        for line in lines:
+            fields = line.rstrip("\n").split("\t")
+            if "kind=spawn" not in fields:
+                continue
+            seen = next((f[len("session="):] for f in fields if f.startswith("session=")), "")
+            if not _same_session(session, seen):
+                continue
+            try:
+                ts = datetime.datetime.strptime(fields[0], "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=datetime.timezone.utc).timestamp()
+            except ValueError:
+                continue
+            if int(started) <= ts <= now + 1:
+                return True
+    return False
+
+
+def keepalive_skips(d: dict, started: float, now: float) -> list:
+    """`[(KEEPALIVE, why), …]` — one per verdict the round read and did not account for."""
+    out = []
+    for entry in d.get(KEEPALIVE) or []:
+        if not isinstance(entry, dict):
+            continue
+        goal = entry.get("goal") or "?"
+        verdict = entry.get("verdict") or "?"
+        outcome = entry.get("outcome") or ""
+        if not outcome:
+            out.append((KEEPALIVE, f"{goal}: `{verdict}` verdict has no outcome"))
+            continue
+        if not outcome_valid(outcome, verdict):
+            out.append((KEEPALIVE, f"{goal}: `{outcome}` is not a known outcome for `{verdict}`"))
+            continue
+        if outcome != "executed":
+            continue
+        if verdict == "resume":
+            ok = resume_recorded(entry.get("vault") or "", goal, entry.get("session") or "",
+                                 started, now)
+            proof = "no --record-resume stamp for its session"
+        else:
+            ok = restart_spawned(entry.get("session") or "", started, now)
+            proof = "no kind=spawn exit record for its session"
+        if not ok:
+            out.append((KEEPALIVE, f"{goal}: `{verdict}` marked executed but {proof} inside the round window"))
+    return out
 
 # OSC 8 hyperlink: ESC ] 8 ; params ; URI ST. The payload `--write-payload` stores is
 # already link-free, but a frame captured from the screen carries them, and they are
@@ -311,6 +537,87 @@ def read_abandoned(s: str) -> list:
         return []
 
 
+def gated_path(s: str) -> str:
+    return os.path.join(STATE_DIR, f"{s}.gated")
+
+
+def read_gated(s: str) -> list:
+    """`[(epoch, step), …]` — which steps the frozen-tree predicate suppressed, and when.
+
+    A **different claim** from `.abandoned`, and kept in its own file for that reason: an
+    abandonment is a recovery (a human or manager decided a leg was owed and waived), while
+    a gate is the predicate deciding the leg was never owed this tick. Collapsing the two
+    would make "the round skipped a leg by design" indistinguishable from "the round
+    skipped a leg it owed", which is exactly the distinction the criteria grade on.
+
+    Same tamper guards as `read_abandoned`: a non-finite epoch would excuse the step on
+    every later round, the permanent green the round-scoping exists to prevent.
+    """
+    try:
+        with open(gated_path(s), encoding="utf-8") as fh:
+            out = []
+            for line in fh:
+                parts = line.split()
+                if len(parts) != 2:
+                    continue
+                try:
+                    ts = float(parts[0])
+                except ValueError:
+                    continue
+                if not math.isfinite(ts):
+                    continue
+                out.append((ts, parts[1]))
+            return out
+    except OSError:
+        return []
+
+
+def render_cached(topic: str, branch: str = "", now: float = None) -> int:
+    """Print the cached sweep payload with a FRESH marker for this tick.
+
+    The operator's rulings require the table on every tick, including a gated one where
+    the reader never ran. The cached payload's own first line carries the tick that
+    produced it, so replaying it verbatim prints a header claiming a time this tick did
+    not run — and that makes a dead loop and a gated one look identical, which is the
+    ambiguity the marker exists to remove. The first line is therefore replaced, never
+    kept.
+    """
+    s = slug(topic, branch)
+    path = os.path.join(STATE_DIR, f"{s}.sweep")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        print(f"no cached sweep payload for {s} — nothing to render", file=sys.stderr)
+        return 1
+    if not lines:
+        print(f"cached sweep payload for {s} is empty", file=sys.stderr)
+        return 1
+    stamp = time.strftime("%H:%M", time.localtime(time.time() if now is None else now))
+    # The marker names the gate explicitly: a reader comparing ticks must be able to
+    # tell "the table is here because nothing changed" from "the table is here and the
+    # round ran". Never claim the goal/slot counts — this tick did not read them.
+    print(f"{stamp} ✓ {topic} — sweep gated this tick, table from cache")
+    for line in lines[1:]:
+        print(line)
+    return 0
+
+
+def gate(topic: str, branch: str, step: str) -> int:
+    """Record that the frozen-tree predicate suppressed `step` for this round.
+
+    ⚠️ **Only the predicate may call this.** A leg recorded here is excused from the
+    round's `--check` with no artifact, so writing it for a leg that was owed would let a
+    round report complete while skipping work — the failure the receipt exists to catch.
+    The caller states the predicate's verdict; this function does not re-derive it.
+    """
+    s = slug(topic, branch)
+    with open(gated_path(s), "a", encoding="utf-8") as fh:
+        fh.write(f"{time.time():.3f} {step}\n")
+    print(f"gated {s}: {step}")
+    return 0
+
+
 def start(topic: str, branch: str = "") -> int:
     s = slug(topic, branch)
     # Fields are CLEARED, not carried: a receipt that survived its own round would
@@ -332,6 +639,79 @@ def record(topic: str, branch: str, step: str, artifact: str) -> int:
     fields[step] = artifact
     write_atomic(path(s), json.dumps(d) + "\n")
     print(f"recorded {s} {step}")
+    return 0
+
+
+def record_verdict(topic: str, goal: str, vault: str, verdict: str, session: str) -> int:
+    """Append one keep-alive verdict the round now owes an outcome for.
+
+    Called by `topic-keepalive.py --receipt` at the moment it prints the verdict. Lives in
+    the receipt rather than the round's `fields`, under its own key, because a round can
+    read several verdicts and every one of them is owed separately.
+    """
+    if verdict not in OWING_VERDICTS:
+        print(f"verdict must be one of {OWING_VERDICTS}, got {verdict!r}", file=sys.stderr)
+        return 2
+    if not session:
+        # `executed` is proved against this id; an entry without one could never be paid.
+        print("--record-verdict needs the verdict's --session id", file=sys.stderr)
+        return 2
+    s = slug(topic)
+    d = read_receipt(s)
+    if not d.get("round_started_at"):
+        print(f"no round in progress for {s} — run --start first", file=sys.stderr)
+        return 2
+    entries = d.setdefault(KEEPALIVE, [])
+    # A probe re-run in the same round reads the same verdict again; one owed entry per
+    # (goal, verdict, session) while it is open, or one outcome would leave a twin red.
+    for e in entries:
+        if (isinstance(e, dict) and not e.get("outcome")
+                and base_slug(e.get("goal") or "") == base_slug(goal)
+                and e.get("verdict") == verdict and e.get("session") == session):
+            print(f"already owed {s} {KEEPALIVE} {goal} {verdict}")
+            return 0
+    entries.append({
+        "goal": goal, "vault": vault, "verdict": verdict, "session": session,
+        "read_at": time.time(), "outcome": "",
+    })
+    write_atomic(path(s), json.dumps(d) + "\n")
+    print(f"recorded {s} {KEEPALIVE} {goal} {verdict}")
+    return 0
+
+
+def record_outcome(topic: str, goal: str, outcome: str, verdict: str = "") -> int:
+    """Account for the newest open verdict on `goal`: `executed`, `refused:<t>`, `deferred:<t>`.
+
+    Refuses an outcome outside that verdict's vocabulary here, at the write, so the round
+    learns of a bad token while it can still correct it — `--check` would only report it at
+    the tail. The goal is matched on its slug, as the probe matches goal pages
+    case-insensitively.
+    """
+    s = slug(topic)
+    d = read_receipt(s)
+    if not d.get("round_started_at"):
+        print(f"no round in progress for {s} — run --start first", file=sys.stderr)
+        return 2
+    open_entries = [e for e in d.get(KEEPALIVE) or []
+                    if isinstance(e, dict) and not e.get("outcome")
+                    and base_slug(e.get("goal") or "") == base_slug(goal)
+                    and (not verdict or e.get("verdict") == verdict)]
+    if not open_entries:
+        which = f" `{verdict}`" if verdict else ""
+        print(f"no open{which} keep-alive verdict for {goal!r} on {s}", file=sys.stderr)
+        return 2
+    entry = open_entries[-1]
+    verdict = entry.get("verdict") or ""
+    if not outcome_valid(outcome, verdict):
+        refusals = ", ".join(REFUSAL_TOKENS.get(verdict, ())) or "none"
+        defers = ", ".join(DEFER_TOKENS.get(verdict, ())) or "none"
+        print(f"unknown outcome {outcome!r} for a `{verdict}` verdict: use `executed`, "
+              f"`refused:<token>` ({refusals}) or `deferred:<token>` ({defers})",
+              file=sys.stderr)
+        return 2
+    entry["outcome"] = outcome
+    write_atomic(path(s), json.dumps(d) + "\n")
+    print(f"recorded {s} {KEEPALIVE} {goal} {outcome}")
     return 0
 
 
@@ -440,7 +820,7 @@ def sweep_shape(text: str) -> bool:
 
 READINGS_VERDICTS = {
     "liveness": {"LIVE", "ABSENT", "UNKNOWN"},
-    "in_flight": {"in-flight", "quiet", "unread"},
+    "in_flight": {"in-flight", "parked", "quiet", "unread"},
     "feed": {"gated", "clear", "unread"},
     "external_wait": {"external", "none", "unread"},
 }
@@ -470,7 +850,12 @@ def readings_shape(text: str) -> bool:
         return False
     if not isinstance(doc.get("recorded_at"), (int, float)):
         return False
-    if doc.get("feed_state") not in ("read", "unread"):
+    # `partial` is a read that RAN but could not attribute every gate it saw: the
+    # rows it did resolve keep their verdict and only the rest are `unread`. It is a
+    # completed reading, not a skipped step — rejecting it here flagged every such
+    # round `INCOMPLETE ROUND — skipped: readings` and recorded false debt for work
+    # the round actually did.
+    if doc.get("feed_state") not in ("read", "partial", "unread"):
         return False
     rows = doc.get("rows")
     if not isinstance(rows, dict):
@@ -482,6 +867,28 @@ def readings_shape(text: str) -> bool:
             if row.get(key) not in allowed:
                 return False
     return True
+
+
+def drive_shape(text: str) -> bool:
+    """The drive leg's own report: the action lines it hands back.
+
+    `commands/steps/goal-drive.md` requires the manager to "reproduce them under the
+    table, including `Not resumed` and `Escalated`", so a real drive report carries at
+    least one of the leg's action headers. The test is therefore a POSITIVE token test
+    rather than non-emptiness: a `touch`ed file, an arbitrary string and a round-written
+    stub must all fail, exactly as they do for every other step.
+
+    ⚠️ The predicate is deliberately loose about WHICH header, because a leg that found
+    nothing still reports — it says so under `To open` / `To resume` with no rows. A
+    predicate requiring a non-empty row set would report `skipped: drive` on a healthy
+    round that had nothing to do, which is the permanent-false-red this whole file
+    exists to avoid.
+    """
+    body = text.strip()
+    if not body:
+        return False
+    markers = ("To open", "To resume", "Not resumed", "Escalated", "Nudged", "Reaped")
+    return any(marker in body for marker in markers)
 
 
 def record_ts(value):
@@ -548,11 +955,16 @@ def rearm_shape(artifact: str, started: float, now: float) -> bool:
     `manager-liveness.py:345` at the first arm after a stand-down, would pass an
     existence test and prove nothing about THIS round. The newest epoch must fall inside
     it — the same rule `watcher_shape` applies to its own log.
+
+    ⚠️ Parsed through `manager-liveness.parse_arm_lines`, never `fh.read().split()`.
+    Each line carries `<epoch> <interval>` now, and a flat split puts the interval on
+    the epoch list — where a small number lands inside a narrow window and reports an
+    arm that never happened. This file asks only *when*, so it wants the epochs.
     """
     try:
         with open(artifact, encoding="utf-8") as fh:
-            vals = [float(x) for x in fh.read().split()]
-    except (OSError, ValueError):
+            vals = [epoch for epoch, _, _ in liveness().parse_arm_lines(fh.read())]
+    except OSError:
         return False
     # The ring stores WHOLE seconds, so both bounds are floored to that resolution: an arm
     # stamped in the same wall-clock second as `round_started_at` can round *below* it, and
@@ -582,7 +994,8 @@ def digest_shape(text: str) -> bool:
     return False
 
 
-def _skips(s: str, branch: str, d: dict, started: float, limit: float, now: float) -> list:
+def _skips(s: str, branch: str, d: dict, started: float, limit: float, now: float,
+           tier: str = "goal") -> list:
     """`[(step, why), …]` for the round in progress. Pure — writes nothing.
 
     Shared by `--check` (the tail's verdict) and `--debt` (the legs' gate), because
@@ -613,10 +1026,14 @@ def _skips(s: str, branch: str, d: dict, started: float, limit: float, now: floa
     # fails whenever the operator is fast. A record dated a minute or a day ahead
     # still fails, which is what the guard is for.
     abandoned = {step for ts, step in read_abandoned(s) if int(started) <= ts <= now + 1}
+    # A gated step is excused on the same round-scoped window as a paid one: the gate
+    # applies to the round that took the verdict, never to a later round that must
+    # re-evaluate the predicate for itself.
+    gated = {step for ts, step in read_gated(s) if int(started) <= ts <= now + 1}
     fields = d.get("fields") or {}
     skipped = []
-    for step in steps_for(branch):
-        if step in abandoned:
+    for step in steps_for(branch, tier):
+        if step in abandoned or step in gated:
             continue
         artifact = fields.get(step)
         if not artifact:
@@ -650,10 +1067,15 @@ def _skips(s: str, branch: str, d: dict, started: float, limit: float, now: floa
             ok = readings_shape(text)
         elif step == "digest":
             ok = digest_shape(text)
+        elif step == "drive":
+            ok = drive_shape(text)
         else:
             ok = sweep_shape(text)
         if not ok:
             skipped.append((step, f"not the producer's shape ({artifact})"))
+    # The fleet tier reads no goal verdicts; only the goal/topic receipt can carry them.
+    if branch != "fleet":
+        skipped.extend(keepalive_skips(d, started, now))
     return skipped
 
 
@@ -681,7 +1103,7 @@ def _write_debt_for(s: str, branch: str, skipped: list) -> bool:
         return False
 
 
-def check(topic: str, branch: str = "", now: float = None) -> int:
+def check(topic: str, branch: str = "", now: float = None, tier: str = "goal") -> int:
     now = time.time() if now is None else now
     s = slug(topic, branch)
     d = read_receipt(s)
@@ -701,7 +1123,7 @@ def check(topic: str, branch: str = "", now: float = None) -> int:
         print(f"{SENTINEL} — skipped: receipt — round started {int(now - started)}s ago, limit {math.ceil(limit)}s {basis}")
         return EXIT_SKIPPED
 
-    skipped = _skips(s, branch, d, started, limit, now)
+    skipped = _skips(s, branch, d, started, limit, now, tier)
     _write_debt_for(s, branch, skipped)
 
     for step, why in skipped:
@@ -819,10 +1241,40 @@ def main() -> int:
                       help="pay ONE skipped step (needs --step): removes it from the debt "
                            "and records it in <slug>.abandoned, which --check honours for "
                            "the round it was paid in and no later one")
+    mode.add_argument("--gate", action="store_true",
+                      help="record that the frozen-tree predicate suppressed ONE step "
+                           "(needs --step): writes <slug>.gated, which --check honours for "
+                           "THIS round only, so the round reports complete instead of "
+                           "carrying debt for a leg it never owed. A different claim from "
+                           "--abandon: that one pays an owed leg, this one records that the "
+                           "leg was not owed. Only the predicate may call it")
+    mode.add_argument("--render-cached", action="store_true",
+                      help="print the cached sweep payload with a FRESH timestamped marker "
+                           "for this tick — the gated tick's table, per the operator's "
+                           "2026-09-15 and 2026-09-20 rulings. The payload's own first line "
+                           "is stale and is replaced, never replayed")
+    mode.add_argument("--record-verdict", action="store_true",
+                      help="topic tier: a `resume`/`restart` keep-alive verdict the round now "
+                           "owes an outcome for (needs --goal --vault --verdict --session); "
+                           "topic-keepalive.py --receipt writes it")
+    mode.add_argument("--record-outcome", action="store_true",
+                      help="topic tier: what the round did with --goal's open verdict "
+                           "(needs --goal --outcome)")
+    ap.add_argument("--goal", help="with --record-verdict/--record-outcome: the goal")
+    ap.add_argument("--vault", help="with --record-verdict: the vault root the probe read")
+    ap.add_argument("--verdict", choices=OWING_VERDICTS, help="with --record-verdict")
+    ap.add_argument("--session", default="", help="with --record-verdict: the recorded id")
+    ap.add_argument("--outcome",
+                    help="with --record-outcome: `executed`, `refused:<token>` or "
+                         "`deferred:busy-target`")
     ap.add_argument("--topic")
     ap.add_argument("--subject", help="alias for --topic; the fleet tier's name for it")
     ap.add_argument("--branch", default="",
                     help="the session tier; `fleet` selects the fleet round's steps")
+    ap.add_argument("--tier", default="goal", choices=TIERS,
+                    help="which round owes which steps: `goal` (the default, owes `drive`) "
+                         "or `topic` (owes no drive leg). Selects the step tuple only and "
+                         "never reaches the state slug, so it cannot orphan a receipt")
     ap.add_argument("--step", choices=ALL_STEPS)
     ap.add_argument("--path", help="the artifact the step produced")
     ap.add_argument("--only", action="append", choices=FLEET_STEPS, metavar="STEP",
@@ -836,14 +1288,20 @@ def main() -> int:
     # `steps_for()` would never look for it.
     if a.branch not in BRANCHES:
         ap.error(f"--branch must be one of {BRANCHES}, got {a.branch!r}")
-    if a.step and a.step not in steps_for(a.branch):
-        ap.error(f"--step {a.step!r} is not a {a.branch or 'goal/topic'} step")
+    # `--tier` selects the goal/topic step tuple and nothing else, so pairing it with the
+    # fleet branch is a silent no-op — the fleet round is the only tier that owes neither
+    # tuple. Refuse rather than accept a flag that changes nothing: a caller that passes
+    # it believes it selected something.
+    if a.tier != "goal" and a.branch == "fleet":
+        ap.error("--tier selects the goal/topic tuple and means nothing with --branch fleet")
+    if a.step and a.step not in steps_for(a.branch, a.tier):
+        ap.error(f"--step {a.step!r} is not a {a.branch or a.tier} step")
     if not subject:
         ap.error("--topic or --subject is required with every mode")
     if a.only and not a.debt:
         ap.error("--only scopes the --debt gate and means nothing with any other mode")
     if a.check:
-        return check(subject, a.branch)
+        return check(subject, a.branch, tier=a.tier)
     # `--debt` and `--abandon` are fleet-only by construction: `check()` writes the
     # file only for `--branch fleet`, so the goal/topic tier would read an empty file
     # and exit 0 — a gate that always passes. Refusing is the only honest answer; a
@@ -860,6 +1318,29 @@ def main() -> int:
         if not a.step:
             ap.error("--abandon needs --step")
         return abandon(subject, a.branch, a.step)
+    if a.gate:
+        # Deliberately NOT fleet-scoped, unlike `--abandon`. The predicate applies to
+        # every tier, and the goal/topic tier is where it is most needed — `--abandon`
+        # refuses there because no debt file is written, but `--gate` writes a state
+        # `--check` honours directly, so it is that tier's only recovery path.
+        if not a.step:
+            ap.error("--gate needs --step")
+        return gate(subject, a.branch, a.step)
+    if a.render_cached:
+        return render_cached(subject, a.branch)
+    if a.record_verdict or a.record_outcome:
+        # Goal verdicts ride the goal/topic receipt only; the fleet tier owes none.
+        if a.branch:
+            ap.error("--record-verdict/--record-outcome are topic-tier: pass no --branch")
+        if not a.goal:
+            ap.error("--record-verdict/--record-outcome need --goal")
+        if a.record_verdict:
+            if not a.vault or not a.verdict:
+                ap.error("--record-verdict needs --vault and --verdict")
+            return record_verdict(subject, a.goal, a.vault, a.verdict, a.session)
+        if not a.outcome:
+            ap.error("--record-outcome needs --outcome")
+        return record_outcome(subject, a.goal, a.outcome, a.verdict or "")
     if a.start:
         return start(subject, a.branch)
     if not a.step or not a.path:

@@ -30,6 +30,7 @@ allowed-tools:
   - mcp__tts__say
   - mcp__supervisor__list_agents
   - mcp__supervisor__agent_status
+  - mcp__supervisor__answer_permission
 argument-hint: "[topic] [--interval <N>m] (topic detected when omitted)"
 ---
 ⚠️ **A voiced question is also a board card** — any `mcp__tts__say` containing `?` is paired with an `attention-ask.py post` within 60 s. [`docs/voice-asks.md`](../docs/voice-asks.md).
@@ -57,7 +58,7 @@ tiers). A worker row is reported downward.
 | 4c | Closure — close what the evidence already finished | every tick, after the sweep | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` |
 | 5 | Keep alive — resume, restart or leave, per goal | every tick, after the sweep | *inline — § Keep alive below* |
 | 6 | Start — the ranking, then `topic-spawn` | the keep-alive left a slot free **and a flagged startable goal is held** | *inline — § Start below* |
-| 12 | Tail — `noop` and re-arm | end of every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-tail.md` |
+| 12 | Tail — re-arm the `Monitor` channels | end of every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-tail.md` |
 | 13 | Self-improvement | before the session ends, or a sweep exposes a gap | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-self-improvement.md` |
 
 ⚠️ **The rules do not live here, and that is deliberate.** Every always-hold invariant and
@@ -71,12 +72,12 @@ arm or the step file — do not act from memory of a previous round.
 - **`$1` (optional — resolved from the session when omitted):** the **topic name**. A goal
   name is the wrong tier — print `❌ "<name>" is a goal, not a topic — use
   /supervisor:goal-drive.` and stop.
-- **`--interval <N>m`** is the **arm's**, not this command's: it is accepted solely so the
-  wakeup's prompt parses. Step 12 still makes one `ScheduleWakeup` call to correct `noop`.
+- **`--interval <N>m`** is the **arm's**, not this command's: accepted so the wakeup's
+  prompt parses. Step 12 re-arms only the `Monitor` channels (no `noop` correction).
 
 ## Keep alive — inline, because it runs every tick
 
-⚠️ **Row 0a — this topic manager's own liveness record — runs here, once per round, before the per-goal loop.** It records the **topic's** cadence, not a goal's, so a subject taken from the loop would arm a goal under the topic branch. Rule: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-liveness.md` — `--branch topic`, `--subject` the topic name.
+⚠️ **Row 0a — this topic manager's own liveness record — runs here each round, before the per-goal loop.** It records the **topic's** cadence, not a goal's; a loop-sourced subject would arm a goal under the topic branch. Rule: `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-liveness.md` — `--branch topic`.
 
 ⚠️ **First, drop every goal whose page reads a terminal `status`.** Row 4c may have just closed
 one, and `topic-keepalive.py` reads `claude_session_id` liveness and the armed-loop state, never
@@ -87,8 +88,11 @@ For **each remaining goal this topic declares**, one call decides:
 
 ```bash
 python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/topic-keepalive.py \
-  --vault "<vault-root>" --goal "<goal>"
+  --vault "<vault-root>" --goal "<goal>" --receipt "<topic>"
 ```
+
+Record each outcome per `${CLAUDE_PLUGIN_ROOT}/commands/steps/topic-keepalive-outcome.md`.
+N gates a start, never a resume.
 
 The **first line is the verdict**:
 
@@ -99,7 +103,7 @@ The **first line is the verdict**:
 | `open-unflagged` | no recorded id, **no flag** | ⚠️ **Report, never open.** Render the row with its rank and say it is held for a flag. Rule 4: a manager is opened only for a flagged page, so a round may not create one |
 | `resume` | a recorded `claude_session_id` whose session is `ABSENT` | run `/supervisor:open --goal "<goal>"`, then `topic-keepalive.py --vault "<vault>" --subject "<goal>" --record-resume <the id>` **once the liveness instrument shows it live** |
 | `restart` | live session, `STALE`/`INVALID` cadence | `/supervisor:restart <session-id>`; its `busy-target` refusal means mid-turn — wait a tick, never kill in-flight work |
-| `leave` | `STOPPED` — a deliberate stand-down | nothing; the operator stood it down |
+| `leave` | `STOPPED` (stood down) or `SLEEPING` (date-gated wait) | nothing; a sleep expires on its own |
 | `cannot-tell` | the probe could not decide | render `UNVERIFIED` and name the input; **never act** |
 | `crash-loop` | 3 resumes in 30 min already spent | print `⚠️ MANAGER CRASH-LOOP: <goal>` and escalate **once** to the operator |
 
@@ -112,11 +116,9 @@ reported as a dead manager is how a working session gets a second writer.
 ## Start — inline, because it is this tier's whole product
 
 ⚠️ **This tier opens a goal manager only for a goal the operator FLAGGED.** Operator ruling
-2026-10-30: *"we dont want to auto open topic-manager, goal-manager ... but flag are fine"* —
-**restart is not open.** A restart resumes a session that already has a subject and a recorded
-id; an open creates supervision where none existed, and deciding who supervises is the
-operator's act. So the Start row is gated on the flag, and `goal-spawn`'s own flag clause no
-longer excludes it.
+2026-10-30: *"we dont want to auto open topic-manager, goal-manager ... but flag are fine"*.
+Restart is not open (`docs/session-tiers.md` § Keep-alive), so the Start row is gated on the
+flag, and `goal-spawn`'s own flag clause no longer excludes it.
 
 A goal is **startable for this row** when all hold:
 

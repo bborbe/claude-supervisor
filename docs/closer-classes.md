@@ -23,16 +23,41 @@ closed)`.
 and `who-needs-me.py --section last-closers` prints it. The section is **opt-in**: the
 no-flag render keeps its six sections byte-for-byte, so no existing consumer changes.
 
+## The channel is pane-free
+
+A row's class is read from the **session transcript**, never from a pane. The
+population is the **session registry** — an entry is deleted when its session exits,
+so presence means live — unioned with the attention store's own records. That union is
+load-bearing: a headless worker owns no pane by construction and often raises no gate,
+so it has no store record at all, and a `CLOSERS` section built from the store alone
+carried no row for it. Step 4a then fail-closed it to `unverifiable` on **every** round,
+forever. Measured 2026-11-07: 237 of 242 drive candidates carried no pane, 232 landed
+`unverifiable`, and only 14 rows reached the closer probe at all.
+
+⚠️ **Registry presence is not liveness — `alive` is the verdict.** A crashed session
+leaves its `<pid>.json` behind, and a stale transcript whose last line reads `nothing`
+would then revive a dead worker. A store row is vouched server-side, which is why
+`read_registry()` skips `alive` for those; a synthetic row has no voucher, so only
+`alive is True` admits one. `None` (cannot tell) is excluded too — fail closed, which
+is the pre-change behaviour.
+
+A pane-less row renders `hst` in the pane column and prints
+`Last closers (<N>, headless=<H>)` in the section header. `hst` means *no pane resolved
+for this session* — not unroutable, and not an exited session. The drive leg carries the
+same count as `headless=<H>` on its payload header and counts line.
+
 ## The classes
 
 | class | the turn ended on | drive-leg verdict |
 |---|---|---|
 | `ask` | any closer that is neither a routine turn end nor a clock-bound park — a real `pick` / `review:` / `you run:` / `approve:`, **or a plain status line** (`done — all green`, `waiting for CI`) | **blocked**, unless the routine-continue table below passes on its text |
 | `routine` | `👤 You: nothing …` — the session asked nothing | **revive** — a read-only nudge is allowed |
-| `parked-wait` | `later (on …)` — names the event that resumes the work | **unverifiable** — nothing to nudge until it fires |
+| `parked-wait` | `later (on …)` — names the event that resumes the work | **unverifiable** while the declaration is live — nothing to nudge until it fires; **revive** once `scripts/declared-wait.py` rates the declaration `expired` |
 | `none` | no **readable** closer line — a missing or unreadable transcript reads the same as a turn that rendered none | **unverifiable** — captured, and there is no closer |
 
 `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/closer-verdict.py --class <class>` prints the verdict and its reason. The table above and that script's `VERDICTS` are two copies of one mapping, and `scripts/tests/test_closer_verdict.py` pins them together (`set(CLOSER_CLASSES) == set(VERDICTS)`) so a class added to one cannot silently miss the other.
+
+⚠️ **`parked-wait` carries a second input, so the class alone is not its verdict.** Pass the session id — `--class parked-wait --session <id or 8-char prefix>` — and the script resolves the session's newest `⏰ Ends:` declaration through `scripts/declared-wait.py`. The static `VERDICTS` map is the existing path and is resolved first; the declaration may only **widen** it, and only for `parked-wait`: `expired` → `revive`, everything else (live, absent, unreadable, ambiguous prefix) → the static `unverifiable`. That is why `test_only_routine_revives` still pins exactly one reviving class — the widening is dynamic and is pinned separately by `test_closer_verdict.py`'s `ExpiredDeclaration` class.
 
 ⚠️ **A `nothing …` closer that still names a destructive verb is classed `ask`, not `routine`.** No later test can catch it: a `nothing …` closer is never promoted to a `BLOCKED` row, so step 4a test 4 never fires, and the routine-continue table's test 3 would be skipped entirely. The capture therefore applies that blacklist itself, before it will call a row routine.
 
@@ -73,6 +98,12 @@ entries stay in test 3 regardless: a `gh pr merge --admin` closer and any sessio
 lint does not match are still real gates, and classifying one as a routine continue would
 resume a session straight past it. The lint narrows what reaches the sweep; it does not
 change what the sweep must treat as a gate.
+
+The lint also blocks a closer from a **paneless** session (`CLAUDE_CODE_ENTRYPOINT=sdk-cli`)
+that asks the operator for a pane-only action: Shift+Tab, `/reload-plugins`, `/exit`,
+`/rename`. Nobody can take that action, so the stop is refused and the worker is told to
+route it (an `approve-run.py` card for one command, its manager otherwise). The same
+closer from a tab still reaches the sweep as an ordinary gate.
 
 ⚠️ Test 4 must exclude the closer itself. The attention feed lists a rendered
 `approve:` closer under `BLOCKED` as well as `CLOSERS`, so "not in `BLOCKED` at all"

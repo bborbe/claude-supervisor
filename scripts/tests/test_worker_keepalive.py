@@ -50,17 +50,30 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.vault = pathlib.Path(self.tmp.name) / "vault"
         (self.vault / "25 Tasks").mkdir(parents=True)
         self.k = load()
+        # The crash-loop card is injected, never left to post a real one to the board.
+        self.cards = []
+        self.k.post_card = lambda task, spent: self.cards.append((task, spent))
         self.kp = self.k._keepalive()
         self.state = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(lambda: __import__("shutil").rmtree(self.state, ignore_errors=True))
-        self._orig = (self.kp.session_verdict, self.kp.state_path)
+        self._orig = (self.kp.session_verdict, self.kp.state_path,
+                      self.kp.cadence_state_detail)
         self.kp.state_path = lambda vault, subject, branch="goal": str(
             self.state / f"{branch}--{self.kp.base_slug(subject)}.json"
         )
+        # ⚠️ The loop probe is injected, never left to read this machine's
+        # `~/.claude/state/sweep-gate` tree: a test whose verdict depends on whether a real
+        # goal happens to be armed asserts nothing about the code.
+        self.kp.cadence_state_detail = lambda subject, branch="goal": ("UNARMED", "")
         self.addCleanup(self._restore)
 
     def _restore(self):
-        self.kp.session_verdict, self.kp.state_path = self._orig
+        (self.kp.session_verdict, self.kp.state_path,
+         self.kp.cadence_state_detail) = self._orig
+
+    def goal_loop(self, state):
+        """Give every goal page this test reads one loop state."""
+        self.kp.cadence_state_detail = lambda subject, branch="goal": (state, "detail")
 
     def page(self, sid="sid-1", body=None):
         (self.vault / "25 Tasks" / "A Task.md").write_text(
@@ -118,6 +131,39 @@ class WorkerKeepAliveTest(unittest.TestCase):
         rc, out = self.run_it(live="ABSENT")
         self.assertEqual(1, rc)
         self.assertEqual("cannot-tell", out[0])
+
+    def test_every_spelling_of_no_id_is_one_fact(self):
+        """Absent, empty and literal `null` must be the same fact: nothing recorded.
+
+        The `null` shape is the measured defect (2026-11-08). `scalar()` returns the four
+        characters `null`, which is truthy, and `session-liveness.py` admits any lowercase
+        prefix as a legal argument — so the probe answered ABSENT and this script printed
+        `resume` for a session that was never named. The assertion is on the probe NOT being
+        called, which is the state-independent form: a version that folded the id but still
+        probed it would pass an output-only check on a day the registry read failed.
+        """
+        shapes = {
+            "absent": TASK_PAGE.format(sid="sid-1").replace(
+                "claude_session_id: sid-1\n", ""),
+            "empty": TASK_PAGE.format(sid=""),
+            "literal null": TASK_PAGE.format(sid="null"),
+        }
+        for name, body in shapes.items():
+            with self.subTest(shape=name):
+                self.page(body=body)
+                probed = []
+
+                def boom(sid):
+                    probed.append(sid)
+                    raise AssertionError(f"session_verdict({sid!r}) must not be called")
+
+                self.kp.session_verdict = boom
+                out = io.StringIO()
+                with redirect_stdout(out):
+                    rc = self.k.main(["--vault", str(self.vault), "--task", "A Task"])
+                self.assertEqual(1, rc)
+                self.assertEqual("cannot-tell", out.getvalue().splitlines()[0])
+                self.assertEqual([], probed)
 
     # --- a park is not a death ------------------------------------------------
 
@@ -179,13 +225,53 @@ class WorkerKeepAliveTest(unittest.TestCase):
         (self.vault / "24 Goals" / "A Goal.md").write_text(
             "---\nclaude_session_id: gm-1\n---\n# Success Criteria\n", encoding="utf-8")
         self.kp.session_verdict = lambda sid: "LIVE" if sid == "gm-1" else "ABSENT"
+        self.goal_loop("OK")
         out = io.StringIO()
         with redirect_stdout(out):
             rc = self.k.main(["--vault", str(self.vault), "--task", "A Task"])
         self.assertEqual(0, rc)
         lines = out.getvalue().splitlines()
         self.assertEqual("jump", lines[0])
-        self.assertIn("owns this task", lines[1])
+        # ⚠️ The reason must CARRY the evidence, not just the verdict: the round log is the
+        # only durable record that this jump rested on a live-and-armed manager.
+        self.assertIn("goal manager gm-1 is an owner (session LIVE, loop OK)", lines[1])
+
+    def test_a_goal_manager_stopped_with_its_loop_is_not_an_owner(self):
+        """THE BOUNDARY this task was filed for.
+
+        A goal manager that ran `/supervisor:stop` keeps its session and its loop marker says
+        `STOPPED`. Reading the session alone made it an owner, the fleet leg deferred to it,
+        and the goal round that would resume the worker is exactly what stopped — so the
+        worker had no keeper. It must fall through to the fleet leg's own resume.
+        """
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution", "phase: execution\ngoals:\n    - '[[A Goal]]'"))
+        (self.vault / "24 Goals").mkdir(parents=True)
+        (self.vault / "24 Goals" / "A Goal.md").write_text(
+            "---\nclaude_session_id: gm-1\n---\n", encoding="utf-8")
+        self.kp.session_verdict = lambda sid: "LIVE" if sid == "gm-1" else "ABSENT"
+        self.goal_loop("STOPPED")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.k.main(["--vault", str(self.vault), "--task", "A Task"])
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out.getvalue().splitlines()[0])
+
+    def test_an_unreadable_owner_probe_never_hands_the_worker_to_the_fleet(self):
+        # `not-owner` is what licenses a resume. A probe that could not answer is
+        # `cannot-tell`, and resuming on it is the second writer this whole tier avoids.
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution", "phase: execution\ngoals:\n    - '[[A Goal]]'"))
+        (self.vault / "24 Goals").mkdir(parents=True)
+        (self.vault / "24 Goals" / "A Goal.md").write_text(
+            "---\nclaude_session_id: gm-1\n---\n", encoding="utf-8")
+        self.kp.session_verdict = lambda sid: "UNKNOWN"
+        self.goal_loop("OK")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.k.main(["--vault", str(self.vault), "--task", "A Task"])
+        self.assertEqual(1, rc)
+        self.assertEqual("cannot-tell", out.getvalue().splitlines()[0])
 
     def test_a_mixed_goal_page_resolves_claude_session_id_first(self):
         # A re-armed legacy page carries both keys. Reading the retired one first
@@ -197,13 +283,14 @@ class WorkerKeepAliveTest(unittest.TestCase):
             "---\nmanager_session_id: gm-old\nclaude_session_id: gm-new\n---\n",
             encoding="utf-8")
         self.kp.session_verdict = lambda sid: "LIVE" if sid == "gm-new" else "ABSENT"
+        self.goal_loop("OK")
         out = io.StringIO()
         with redirect_stdout(out):
             rc = self.k.main(["--vault", str(self.vault), "--task", "A Task"])
         self.assertEqual(0, rc)
         lines = out.getvalue().splitlines()
         self.assertEqual("jump", lines[0])
-        self.assertIn("owns this task", lines[1])
+        self.assertIn("goal manager gm-new is an owner", lines[1])
 
     def test_a_task_whose_goal_manager_is_dead_is_still_resumed(self):
         self.page(body=TASK_PAGE.format(sid="sid-1").replace(
@@ -260,13 +347,21 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.assertEqual("resume", out[0])
         self.assertIn("attempt 3 of 3", out[1])
 
-    def test_a_resume_outside_the_window_does_not_count(self):
+    def test_no_progress_cycles_spaced_beyond_the_old_window_still_stop(self):
+        # SC1: for a migrated store the cap is cycles since the last progress, not a time
+        # window. Three cycles ~40 min apart with no progress must still stop the loop,
+        # and exactly one card is posted.
         self.page()
         now = 1_800_000_000.0
-        self.seed([now - 3600, now - 3700, now - 3800])
+        sig = self.k.progress_signature(TASK_PAGE.format(sid="sid-1"))
+        with open(self.k.state_path(str(self.vault), "A Task"), "w", encoding="utf-8") as fh:
+            json.dump({"resumes": [now - 2400, now - 4800, now - 7200],
+                       "progress": {"open_boxes": sig[0], "progress_hash": sig[1],
+                                    "head_sha": ""}}, fh)
         rc, out = self.run_it(live="ABSENT", argv=("--now", str(now)))
-        self.assertEqual(0, rc)
-        self.assertEqual("resume", out[0])
+        self.assertEqual(1, rc)
+        self.assertEqual("crash-loop", out[0])
+        self.assertEqual([("A Task", 3)], self.cards)
 
     def test_a_resume_that_did_not_take_does_not_arm_the_cap(self):
         self.page()
@@ -291,6 +386,122 @@ class WorkerKeepAliveTest(unittest.TestCase):
         self.assertEqual("recorded", out.getvalue().splitlines()[0])
         self.assertTrue(os.path.exists(
             self.k.state_path(str(self.vault), "A Task")))
+    # --- a stop is not a death ------------------------------------------------
+
+    def test_a_stopped_task_is_not_resumed(self):
+        """SC3(b): the restart half of the crash-vs-stop distinction.
+
+        Paired with the control below, which runs the identical page minus one line. An
+        implementation that jumped every row would pass this case alone — and before this
+        read existed the marker was on the page and nothing here looked at it, so a worker
+        the operator stopped was resumed after its process died.
+        """
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution", "phase: execution\nstopped: true"))
+        rc, out = self.run_it(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("jump", out[0])
+        self.assertIn("stopped", out[1])
+
+    def test_the_same_task_without_the_marker_resumes(self):
+        """The control: one line removed, the verdict flips to `resume`."""
+        self.page()
+        rc, out = self.run_it(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out[0])
+
+    def test_a_stop_outranks_a_defer(self):
+        """A stopped and deferred row reports the stop, not the defer.
+
+        Same ordering rule `open-queue.guards()` applies: the operator's own act outranks
+        a derived state, so the reason names what actually ended the row.
+        """
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution",
+            "phase: execution\nstopped: true\ndefer_date: \"2999-01-01\""))
+        rc, out = self.run_it(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("jump", out[0])
+        self.assertIn("stopped", out[1])
+
+    def test_a_false_stop_marker_still_resumes(self):
+        """The control for the truthy set: `stopped: false` is not a stop."""
+        self.page(body=TASK_PAGE.format(sid="sid-1").replace(
+            "phase: execution", "phase: execution\nstopped: false"))
+        rc, out = self.run_it(live="ABSENT")
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out[0])
+
+    def test_progress_resets_the_cycle_count(self):
+        # SC2: three resumes are on record, but the task advanced since the last one
+        # (a box ticked / Progress changed). The next record resets the count, so the
+        # following probe resumes instead of refusing.
+        self.page()
+        now = 1_800_000_000.0
+        with open(self.k.state_path(str(self.vault), "A Task"), "w", encoding="utf-8") as fh:
+            json.dump({"resumes": [now - 60, now - 120, now - 180],
+                       "progress": {"open_boxes": 9, "progress_hash": "stale", "head_sha": ""}},
+                      fh)
+        self.kp.session_verdict = lambda sid: "LIVE"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.k.main(["--vault", str(self.vault), "--task", "A Task",
+                              "--record-resume", "sid-1", "--now", str(now)])
+        self.assertEqual(0, rc)
+        rc, out = self.run_it(live="ABSENT", argv=("--now", str(now)))
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out[0])
+        self.assertIn("attempt 2 of 3", out[1])
+
+    def test_progress_before_the_next_resume_is_not_a_crash_loop(self):
+        # A worker that advanced and then died must not be refused for the cycles it ran
+        # before it advanced, even though no --record-resume has happened yet.
+        self.page()
+        now = 1_800_000_000.0
+        with open(self.k.state_path(str(self.vault), "A Task"), "w", encoding="utf-8") as fh:
+            json.dump({"resumes": [now - 60, now - 120, now - 180],
+                       "progress": {"open_boxes": 9, "progress_hash": "stale", "head_sha": ""}},
+                      fh)
+        rc, out = self.run_it(live="ABSENT", argv=("--now", str(now)))
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out[0])
+
+    def test_a_new_commit_counts_as_progress(self):
+        # The commit signal: a changed HEAD on the task's repo: branch is progress.
+        prev = {"open_boxes": 1, "progress_hash": "h", "head_sha": "aaa"}
+        self.assertTrue(self.k.made_progress(prev, (1, "h"), "bbb"))
+        self.assertFalse(self.k.made_progress(
+            {"open_boxes": 1, "progress_hash": "h", "head_sha": "bbb"}, (1, "h"), "bbb"))
+
+    def test_legacy_store_counts_only_the_old_window_on_the_first_probe(self):
+        # A pre-progress store has no baseline. Its old resumes must not read as a live
+        # crash loop: the first probe falls back to the retired 30-minute window.
+        self.page()
+        now = 1_800_000_000.0
+        self.seed([now - 3600, now - 7200, now - 10800])
+        rc, out = self.run_it(live="ABSENT", argv=("--now", str(now)))
+        self.assertEqual(0, rc)
+        self.assertEqual("resume", out[0])
+
+    def test_legacy_store_inside_the_window_still_stops(self):
+        self.page()
+        now = 1_800_000_000.0
+        self.seed([now - 60, now - 120, now - 180])
+        rc, out = self.run_it(live="ABSENT", argv=("--now", str(now)))
+        self.assertEqual(1, rc)
+        self.assertEqual("crash-loop", out[0])
+
+    def test_a_record_with_no_task_page_still_counts(self):
+        # No page to measure progress against: the resume is recorded with no marker.
+        self.kp.session_verdict = lambda sid: "LIVE"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.k.main(["--vault", str(self.vault), "--task", "A Task",
+                              "--record-resume", "sid-1", "--now", "1800000000"])
+        self.assertEqual(0, rc)
+        self.assertEqual("recorded", out.getvalue().splitlines()[0])
+        with open(self.k.state_path(str(self.vault), "A Task"), encoding="utf-8") as fh:
+            self.assertEqual(1, len(json.load(fh)["resumes"]))
 
 
 if __name__ == "__main__":

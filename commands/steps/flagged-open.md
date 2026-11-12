@@ -1,6 +1,6 @@
 ---
 # Read by the router, never invoked — without this key Claude Code
-# registers this file as /<plugin>:steps:<name>.
+# registers this file as /<plugin>:steps/<name>.
 user-invocable: false
 ---
 
@@ -11,7 +11,7 @@ When: every tick
 ⚠️ **This leg acts, and a read-only execution is not a run of it.** It opens each admitted row; a
 run that only reports `unactioned: <n> operator-flagged` without invoking the command has measured
 nothing — `opened=0` because the leg was told to print it is a failure, not a quiet round. It is one
-of the round's two acting legs, so the round's delegate rule carves it out — a sub-agent may run it
+of the round's three acting legs, so the round's delegate rule carves it out — a sub-agent may run it
 only with write tools (`commands/fleet-drive.md`, the delegate rule's carve-out).
 
 ⚠️ **Gate this leg on the round's debt — chain it, do not merely read it:**
@@ -23,51 +23,14 @@ python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --debt --subject "Fle
 
 Exit **12** = a step is still owed: print the `debt:` lines, skip this leg, and **carry on with the round — the tail still runs**, because the tail's `--check` is what reports the round's verdict to the operator. Exit **0** = no debt, run it. ⚠️ **Exit 2 = the gate could not read or write the debt file** — it prints nothing to stdout, only a reason to stderr; skip the leg and print that reason, never read 2 as "no debt". ⚠️ **`--debt` judges the round in progress**, re-reading the receipt, so a round that already swept is not blocked by a debt it has paid. ⚠️ **The exit code is the gate, never the printed line** — a leg that reads only the text is satisfied by an empty read. ⚠️ **An operator's flag is not a licence to run ahead of the sweep** — the 13:27 round on 2026-10-31 opened three flagged rows and never swept, and nothing in its render said so. Opening the row is one round's delay; sweeping is what makes the next round's opening decision correct.
 
-## Step 5c — Open what the operator already marked
+1. **Dispatch the leg — this step no longer carries its procedure.** Dispatch:
 
-`/supervisor:open --flagged` has been specified since before the `flag_set_by` field existed and
-had **no caller**: `commands/open.md` defines the batch, `commands/steps/goal-spawn.md`
-excluded the very rows it selects, and three rule files said the loop must never invoke it.
-This leg is the caller. The operator's mark is their decision; opening it executes that
-decision and decides nothing new (`docs/session-tiers.md` § The four tiers, rule 2).
+   `Task(subagent_type: "supervisor:fleet-flagged-open-actor", prompt: <this round's digest path + round timestamp>)`
 
-**Invoke the command. Do not re-implement its selector** — `commands/open.md` § the
-`--flagged` batch owns the vault scan, the due-date rule, the `OPENING_ACTORS` gate and the
-`REFUSED` line, and a second copy here would drift from it:
+   The plugin prefix is required — a bare `fleet-flagged-open-actor` resolves to a personal `~/.claude/agents/` copy. The agent (Sonnet) invokes `/supervisor:open --flagged` for the task batch, runs `scripts/flagged-subjects.py` for the flagged goals and topics that have no live manager, and records the `operator-flagged` digest count itself. It owns the `flag_set_by` safety rule, the blast-radius note and every manager-opening rule; read them in `agents/fleet-flagged-open-actor.md` — this step does not restate them.
 
-```
-/supervisor:open --flagged
-```
+2. **What this step does with the hand-back.** Print `opened=<n>` as the round's report — the batch's own tally, and the one number that separates a leg which opened nothing from a leg that was told to print nothing. Then print every `refused:` line **verbatim** — that is the operator's own `REFUSED | <vault> | <name> | flag_set_by=<who> | not the operator — not opened, not approved` line, and a count cannot be reconciled against a list of names. ⚠️ **Open nothing a refusal names.** ⚠️ **A `truncated=<n>` greater than zero means `n` refusals ride `payload=` only** — read that file, print the remainder verbatim, and reconcile it against `refused=` as `docs/handback-contract.md` § The shape — the truncation exception — states. ⚠️ **The `operator-flagged` reading is the digest's, rendered from `commands/steps/output-shape.md` item 14, never from the hand-back.** ⚠️ **A failed write is reported, never swallowed.** `legs=UNKNOWN` means `fleet-legs.py` exited 2 and the digest could not be read or written (the sweep may not have written it yet); render `legs: UNKNOWN — <reason>` for this round, with `<reason>` taken from the hand-back's `legs-reason=`, and retry the record once the digest exists. ⚠️ **The reason comes from `legs-reason=`, never from the agent's prose** — the hand-back is the only channel that crosses the delegation boundary, and a `legs=UNKNOWN` with no `legs-reason=` leaves the dash empty. A reading that never landed must not read as a leg that never ran.
 
-**Act on what it prints, and nothing else.** It opens each admitted row and prints the rest as
-`REFUSED | <vault> | <name> | flag_set_by=<who> | not the operator — not opened, not approved`.
-**Print every `REFUSED` line verbatim and open nothing it names.**
+   ⚠️ **When the delegation returns no usable hand-back** — it errored, came back empty, or resolved to something that returned no hand-back — **do not re-invoke the batch and do not run it by hand.** `/supervisor:open --flagged` is not idempotent across a lost hand-back: the lost run may already have spawned a worker whose `claude_session_id` had not landed, and a second run would spawn a second worker onto that task — unrecoverable, where one round's delay is not. Trigger on the missing hand-back, never on a matched error string. ⚠️ **A hand-back carrying a count but no invocation is the read-only failure this leg exists to remove** — treat it as no usable hand-back and refuse it, never read it as a completed leg. ⚠️ **No signal this step can read is sound for that population, so the fallback refuses rather than guards.** A headless worker never binds `claude_session_id` and leaves no transcript, so the roster (`fleet-sessions.py`) cannot see a just-spawned one; the digest's `operator-flagged` line proves only that the leg recorded, never what it opened; and the spawn ledger records that a spawn happened, not that this batch made it — the same manager spawns on other rows in the same round, so a ledger row cannot be attributed to this leg. ⚠️ **Refuse in writing, at key granularity:** `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-legs.py" --digest "<digest>" --leg operator-flagged --not-run "<reason>"`, with `<reason>` naming the lost hand-back, and report `operator-flagged: not run — <reason>` for the round. The operator's flags stand and the next round's batch opens them.
 
-⚠️ **`flag_set_by` is the safety rule, not a detail.** Only `operator` and `legacy` are
-admitted; an agent-set value is refused, and so is an **absent** one — after the disposition no
-row should carry one, so an absent value means a writer that did not declare itself, which is
-the bypass. Never widen the admitted set to make a row openable, and never "fix" a refusal by
-writing `flag_set_by` on the row.
-
-⚠️ **This leg removes the human from the loop, and that is a real change in blast radius.**
-Before it, the batch ran only when the operator typed the command; now it runs every tick
-unattended. `legacy` is a plain frontmatter value with no enforcement behind it, so under the
-fleet's cooperative-agent trust model an agent that writes `flag: true` +
-`flag_set_by: legacy` can get its own task opened without the operator. The same assumption
-underlies `keepalive.md` resuming a page-supplied `claude_session_id`. **That is the accepted
-model, not a defect — but it is named here so nobody reads the `flag_set_by` check as an
-authentication control.** If the model ever changes, this leg and the keep-alive are the two
-places that must change with it.
-
-⚠️ **This leg opens work, never a manager — and not because rule 4 forbids it.** Rule 4
-explicitly permits a manager opened *because it was flagged*; what stops this leg is that
-`/supervisor:open --flagged` selects **tasks** only (`commands/open.md` § the batch). A flagged
-manager is rule 2's subject and opens through `/supervisor:open --goal` or `--topic`. ⚠️ **No
-fleet-tier leg opens a flagged goal manager today** — `fleet-drive.md` removed the
-manager-proposal row on 2026-10-29, so the tier table's *"a goal manager only when that goal is
-flagged"* has no fleet executor; the operator opens one, or the topic tier's ranking does on
-their instruction (`commands/topic-drive.md` § Start). Say that plainly rather than implying
-this leg covers it.
-
-**Report the count.** Print `unactioned: <n> operator-flagged` with the rows this leg left
-unopened — the `# Regression metric` reads it.
+3. ⚠️ **A leg that does not execute records WHY.** When the debt gate skips this leg (exit 12 = a step is still owed, exit 2 = the gate could not read the debt file), write `fleet-legs.py --leg flagged-open --not-run "<reason>"` rather than leaving the sweep's seeded `not run — no reading recorded this round` standing — `--check` reads that seed as "nobody has spoken for this key". ⚠️ **Never render `unactioned: 0` for a leg that did not run** — a suppressed leg and a leg that opened nothing must never print the same, which is the whole reason the count is written to the digest instead of spoken into chat. The line's format and its not-run form have their **single home in `commands/steps/output-shape.md` item 14** — read it there and never restate it here.

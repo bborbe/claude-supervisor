@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """The fleet tier's keep-alive: is the fleet ROUND still running?
 
-The other tiers already have one — `worker-keepalive.py` for workers, `topic-keepalive.py`
-for goal and topic managers. The fleet tier had **nothing**, so a dead fleet round was
-restarted by no one and noticed only when a human looked.
+Which tier keeps which session alive is `docs/session-tiers.md` § Keep-alive; this script is
+the fleet row's detector. Before it, a dead fleet round was noticed only when a human looked.
 
 ⚠️ **The signal is the digest, NOT the heartbeat.** `manager-liveness.py` answers
 `OK age=71s` for a fleet manager whose model has not run in two hours, because the heartbeat

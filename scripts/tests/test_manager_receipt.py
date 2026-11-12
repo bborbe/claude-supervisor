@@ -15,6 +15,7 @@ the shortcut is actually caught.
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
 import io
 import json
@@ -82,6 +83,16 @@ def iso_ts(epoch):
 # `box-table.py` printed. A JSON fixture here would re-encode the very defect this task
 # repairs — the old predicate accepted exactly the shape the producer never writes.
 SWEEP_OK = render_table(["Topic", "Status"], [["Recurring Operator Gates", "running"]])
+
+# The drive leg's own report, as `commands/steps/goal-drive.md` requires it to be
+# reproduced under the table. The headers are the producer's vocabulary; a summary the
+# caller wrote in its own words is what `drive_shape()` must refuse.
+DRIVE_OK = "To open\n  none\nTo resume\n  none\nNot resumed\n  none\nEscalated\n  none\n"
+
+# The same report from a leg that found nothing to do — still a real report, and still
+# green. A predicate demanding a non-empty row set would fail here and report a healthy
+# quiet round as `skipped: drive`, which is the permanent false red this file avoids.
+DRIVE_QUIET = "To open\nTo resume\n"
 
 
 class Receipt(unittest.TestCase):
@@ -153,7 +164,9 @@ class Receipt(unittest.TestCase):
         sw = self.artifact("sweep.json", SWEEP_OK)
         ev = self.events_log("events.jsonl", [time.time()])
         rd = self.artifact("readings.json", READINGS_OK)
-        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev), ("readings", rd)):
+        dv = self.artifact("drive.txt", DRIVE_OK)
+        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev),
+                        ("readings", rd), ("drive", dv)):
             self.record(step, p)
 
     # --- the red/green property ------------------------------------------------
@@ -180,6 +193,123 @@ class Receipt(unittest.TestCase):
         rc, out = self.check()
         self.assertEqual(rc, 0)
         self.assertEqual(out, "")
+
+    # --- the drive leg ---------------------------------------------------------
+
+    def test_a_round_that_sweeps_and_skips_the_drive_leg_is_red(self):
+        # The measured incident: readings, needs-you, sweep and watcher all present and
+        # real, five sweep readers after the last drive dispatch, and `--check` green
+        # because the tuple had no field for the leg that never ran.
+        self.start()
+        for step, p in (("needs-you", self.artifact("needs-you.txt", NEEDS_YOU_OK)),
+                        ("sweep", self.artifact("sweep.json", SWEEP_OK)),
+                        ("watcher", self.events_log("events.jsonl", [time.time()])),
+                        ("readings", self.artifact("readings.json", READINGS_OK))):
+            self.record(step, p)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: drive", out)
+
+    def test_a_quiet_drive_report_is_green(self):
+        # A leg that found nothing still reports — it says so under `To open` / `To resume`
+        # with no rows. A predicate demanding a non-empty row set would call this round
+        # skipped, which is the permanent false red the tuple exists to avoid.
+        self.full_round()
+        self.record("drive", self.artifact("quiet-drive.txt", DRIVE_QUIET))
+        rc, out = self.check()
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+
+    def test_a_stub_drive_artifact_is_red(self):
+        # The shortcut this check exists to catch: record a path, write nothing real.
+        self.full_round()
+        self.record("drive", self.artifact("stub-drive.txt", "done\n"))
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: drive", out)
+
+    def test_an_empty_drive_artifact_is_red(self):
+        self.full_round()
+        self.record("drive", self.artifact("empty-drive.txt", "   \n\n"))
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: drive", out)
+
+    # --- the topic tier --------------------------------------------------------
+
+    def topic_check(self):
+        return self.cli("--check", "--topic", self.topic, "--tier", "topic")
+
+    def test_a_topic_round_owes_no_drive_leg(self):
+        # A topic round has no drive row at all (`commands/topic-drive.md` row 5 is
+        # *Keep alive*), so it must not be asked for one. Without the tier split this
+        # round would print `skipped: drive` forever — the permanent false red that
+        # `FLEET_STEPS`' own comment names.
+        self.full_round()
+        rc, out = self.topic_check()
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+
+    def test_a_topic_round_still_owes_its_sweep(self):
+        # `sweep` stays in the topic tuple: the topic round does sweep every tick, so
+        # dropping the step would let a round that skipped its sweep report complete —
+        # this check's own defect, one tier over.
+        self.full_round()
+        rc, out = self.topic_check()
+        self.assertEqual(rc, 0)
+        d = self.m.read_receipt(self.m.slug(self.topic))
+        d["fields"].pop("sweep")
+        self.m.write_atomic(self.m.path(self.m.slug(self.topic)), json.dumps(d) + "\n")
+        rc, out = self.topic_check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: sweep", out)
+        self.assertNotIn("skipped: drive", out)
+
+    def test_the_tier_selects_the_tuple_and_never_the_slug(self):
+        # A `--tier` that reached `slug()` would re-key every receipt already on disk
+        # from `<base>` to `topic--<base>` and orphan it.
+        self.assertEqual(self.m.steps_for("", "goal"), self.m.STEPS)
+        self.assertEqual(self.m.steps_for("", "topic"), self.m.TOPIC_STEPS)
+        self.assertIn("drive", self.m.STEPS)
+        self.assertNotIn("drive", self.m.TOPIC_STEPS)
+        self.assertEqual(self.m.slug(self.topic, ""), self.m.slug(self.topic))
+        self.assertNotIn("topic", self.m.BRANCHES)
+
+    def test_record_drive_is_accepted_on_the_goal_tier_and_refused_on_topic(self):
+        self.start()
+        p = self.artifact("drive.txt", DRIVE_OK)
+        rc, _ = self.record("drive", p)
+        self.assertEqual(rc, 0)
+        with self.assertRaises(SystemExit):
+            self.cli("--record", "--topic", self.topic, "--tier", "topic",
+                     "--step", "drive", "--path", p)
+
+    def test_a_partial_feed_read_is_a_completed_reading(self):
+        """`partial` is a read that RAN, so it must not be flagged as a skipped step.
+
+        The rows it resolved keep their verdict and only the rest are `unread`, so the
+        round did its work. Rejecting the value here flagged every such round
+        `INCOMPLETE ROUND — skipped: readings` and recorded false debt for a reading
+        that exists.
+        """
+        self.full_round()
+        partial = json.loads(READINGS_OK)
+        partial["feed_state"] = "partial"
+        rd = self.artifact("readings.json", json.dumps(partial))
+        self.record("readings", rd)
+        rc, out = self.check()
+        self.assertEqual(rc, 0, out)
+
+    def test_an_unknown_feed_state_is_flagged(self):
+        """The negative control: the vocabulary is still closed."""
+        self.full_round()
+        bad = json.loads(READINGS_OK)
+        bad["feed_state"] = "partial-ish"
+        rd = self.artifact("readings.json", json.dumps(bad))
+        self.record("readings", rd)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: readings", out)
 
     # --- fabricated receipts: the four cases subtask 4 names --------------------
 
@@ -379,7 +509,9 @@ class Receipt(unittest.TestCase):
             fh.write("\n")                             # blank line
             fh.write(json.dumps({"kind": "LIVENESS", "ts": time.time()}) + "\n")
         rd = self.artifact("readings.json", READINGS_OK)
-        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev), ("readings", rd)):
+        dv = self.artifact("drive.txt", DRIVE_OK)
+        for step, p in (("needs-you", ny), ("sweep", sw), ("watcher", ev),
+                        ("readings", rd), ("drive", dv)):
             self.record(step, p)
         rc, out = self.check()
         self.assertEqual(rc, 0, out)
@@ -1240,6 +1372,548 @@ class FleetDebt(unittest.TestCase):
         self.assertEqual(rc, 11, out)
         self.assertIn("INCOMPLETE ROUND", out)
         self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "some-goal.debt")))
+
+
+class KeepAliveVerdicts(unittest.TestCase):
+    """A topic round that reads `resume` / `restart` owes an outcome for each verdict.
+
+    The incident (2026-11-08, topic manager eab58671): three `resume` verdicts read on two
+    consecutive ticks, none executed, and `--check` green because every field resolved. The
+    load-bearing pair is (a) verdict with no outcome → red and (c) `executed` backed by the
+    resume's own stamp → green; (b) is what keeps the word `executed` alone from clearing it.
+    """
+
+    VAULT = "/vaults/private-personal"
+    GOAL = "Auto-Merge Trust-Gated PRs"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.live = tempfile.TemporaryDirectory()
+        self.arts = tempfile.TemporaryDirectory()
+        self.resumes = tempfile.TemporaryDirectory()
+        self.exits = tempfile.TemporaryDirectory()
+        os.environ["MANAGER_RESUMES_STATE_DIR"] = self.resumes.name
+        os.environ["SUPERVISOR_SESSION_EXIT_DIR"] = self.exits.name
+        self.m = load(self.tmp.name, self.live.name)
+        self.topic = "Development Pipeline Throughput"
+
+    def tearDown(self):
+        for t in (self.tmp, self.live, self.arts, self.resumes, self.exits):
+            t.cleanup()
+        for k in ("MANAGER_RECEIPT_STATE_DIR", "MANAGER_LIVENESS_STATE_DIR",
+                  "MANAGER_RESUMES_STATE_DIR", "SUPERVISOR_SESSION_EXIT_DIR"):
+            os.environ.pop(k, None)
+
+    # --- helpers ---------------------------------------------------------------
+
+    def cli(self, *argv):
+        out, err, old = io.StringIO(), io.StringIO(), sys.argv
+        sys.argv = ["manager-receipt.py", *argv]
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        return rc, out.getvalue()
+
+    def artifact(self, name, text):
+        p = os.path.join(self.arts.name, name)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return p
+
+    def full_round(self):
+        """Every STEPS field resolves — so any red below is the keep-alive's alone."""
+        self.cli("--start", "--topic", self.topic)
+        ev = os.path.join(self.arts.name, "events.jsonl")
+        with open(ev, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"kind": "LIVENESS", "ts": iso_ts(time.time())}) + "\n")
+        for step, p in (("needs-you", self.artifact("needs-you.txt", NEEDS_YOU_OK)),
+                        ("sweep", self.artifact("sweep.txt", SWEEP_OK)),
+                        ("watcher", ev),
+                        ("readings", self.artifact("readings.json", READINGS_OK))):
+            self.cli("--record", "--topic", self.topic, "--step", step, "--path", p)
+
+    def verdict(self, verdict="resume", goal=GOAL, session="sid-1"):
+        return self.cli("--record-verdict", "--topic", self.topic, "--goal", goal,
+                        "--vault", self.VAULT, "--verdict", verdict, "--session", session)
+
+    def outcome(self, outcome, goal=GOAL):
+        return self.cli("--record-outcome", "--topic", self.topic, "--goal", goal,
+                        "--outcome", outcome)
+
+    def check(self):
+        # A topic round owes TOPIC_STEPS (no `drive`), so it is judged with `--tier topic`.
+        return self.cli("--check", "--topic", self.topic, "--tier", "topic")
+
+    def resume_stamp(self, epoch, session="sid-1"):
+        """The stamp `topic-keepalive.py --record-resume` writes — via its own `record()`."""
+        km = self.m.keepalive_module()
+        p = km.state_path(self.VAULT, self.GOAL, "goal")
+        km.record(p, [], epoch, session)
+
+    def spawn_line(self, session, epoch):
+        """The `kind=spawn` line `session-exit-record.py` writes for a relaunched pane."""
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+        with open(os.path.join(self.exits.name, "pane-42.log"), "a", encoding="utf-8") as fh:
+            fh.write("\t".join((ts, "kind=spawn", "pane=42", f"session={session}", "pid=1",
+                                "rc=-", "signal=-", "sender=-", "writer=-")) + "\n")
+
+    # --- the four pinned fixtures ------------------------------------------------
+
+    def test_a_verdict_with_no_outcome_is_red(self):
+        self.full_round()
+        self.assertEqual(self.verdict()[0], 0)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("INCOMPLETE ROUND — skipped: keepalive", out)
+        self.assertIn(self.GOAL, out)
+
+    def test_b_executed_without_the_resume_stamp_is_red(self):
+        self.full_round()
+        self.verdict()
+        self.assertEqual(self.outcome("executed")[0], 0)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: keepalive", out)
+        self.assertIn("no --record-resume stamp", out)
+
+    def test_c_executed_with_an_in_window_resume_stamp_is_green(self):
+        self.full_round()
+        self.verdict()
+        self.outcome("executed")
+        self.resume_stamp(time.time())
+        rc, out = self.check()
+        self.assertEqual((rc, out), (0, ""))
+
+    def test_d_a_round_with_no_verdict_owes_no_keepalive(self):
+        # The goal round and the topic round whose goals all read `jump` / `leave`: the step
+        # is conditional, so a full round stays green and never names `keepalive`.
+        self.full_round()
+        rc, out = self.check()
+        self.assertEqual((rc, out), (0, ""))
+        self.assertNotIn("keepalive", self.m.STEPS)
+
+    # --- the edges -----------------------------------------------------------------
+
+    def test_a_stamp_for_another_live_session_does_not_count(self):
+        # The round's own session is live too; stamping it must not prove the ABSENT one ran.
+        self.full_round()
+        self.verdict(session="sid-1")
+        self.outcome("executed")
+        self.resume_stamp(time.time(), session="the-rounds-own-session-id")
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("no --record-resume stamp for its session", out)
+
+    def test_a_bare_stamp_without_a_session_does_not_count(self):
+        # A stamp file in the pre-change shape carries the cap's floats only.
+        self.full_round()
+        self.verdict()
+        self.outcome("executed")
+        p = self.m.keepalive_module().state_path(self.VAULT, self.GOAL, "goal")
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({"resumes": [time.time()]}, fh)
+        self.assertEqual(self.check()[0], self.m.EXIT_SKIPPED)
+
+    def test_the_cap_still_reads_the_resumes_list(self):
+        km = self.m.keepalive_module()
+        p = km.state_path(self.VAULT, self.GOAL, "goal")
+        km.record(p, [], time.time() - 10, "a")
+        km.record(p, km.load_resumes(p), time.time(), "b")
+        self.assertEqual(len(km.load_resumes(p)), 2)
+        self.assertEqual([s for _t, s in km.load_sessions(p)], ["a", "b"])
+
+    def test_a_stamp_from_before_the_round_does_not_count(self):
+        self.full_round()
+        self.verdict()
+        self.outcome("executed")
+        self.resume_stamp(time.time() - 3600)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("skipped: keepalive", out)
+
+    def test_restart_executed_needs_its_spawn_record(self):
+        self.full_round()
+        self.verdict("restart", session="sid-r")
+        self.outcome("executed")
+        self.assertEqual(self.check()[0], self.m.EXIT_SKIPPED)
+        self.spawn_line("other-sid", time.time())
+        self.assertEqual(self.check()[0], self.m.EXIT_SKIPPED)
+        self.spawn_line("sid-r", time.time())
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_each_verdicts_own_tokens_clear_it(self):
+        for verdict, outcome in (("resume", "refused:start-rate"),
+                                 ("resume", "refused:waiting-approval"),
+                                 ("restart", "refused:held-session"),
+                                 ("restart", "refused:dirty-worktree"),
+                                 ("restart", "deferred:busy-target")):
+            with self.subTest(verdict=verdict, outcome=outcome):
+                self.full_round()
+                self.verdict(verdict)
+                self.assertEqual(self.outcome(outcome)[0], 0)
+                self.assertEqual(self.check(), (0, ""))
+
+    def test_an_unknown_token_is_refused_at_the_write(self):
+        self.full_round()
+        self.verdict()
+        for bad in ("refused", "refused:whatever", "deferred:cap", "refused:busy-target", "done"):
+            with self.subTest(outcome=bad):
+                self.assertEqual(self.outcome(bad)[0], 2)
+        self.assertEqual(self.check()[0], self.m.EXIT_SKIPPED)
+
+    def test_the_incidents_own_excuses_are_not_tokens(self):
+        # The 2026-11-08 round blamed the fleet cap, then N. The resume path never reaches
+        # either gate, so no spelling of them may clear a resume verdict.
+        self.full_round()
+        self.verdict("resume")
+        for excuse in ("refused:concurrency-limit", "refused:fleet-full", "refused:manager-cap",
+                       "refused:n-cap", "deferred:busy-target", "refused:held-session"):
+            with self.subTest(outcome=excuse):
+                self.assertEqual(self.outcome(excuse)[0], 2)
+        self.assertEqual(self.check()[0], self.m.EXIT_SKIPPED)
+
+    def test_a_token_from_the_other_verdict_reads_red_when_written_around_the_verb(self):
+        self.full_round()
+        self.verdict("resume")
+        p = self.m.path(self.m.slug(self.topic))
+        with open(p, encoding="utf-8") as fh:
+            d = json.load(fh)
+        d["keepalive"][0]["outcome"] = "deferred:busy-target"
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump(d, fh)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("not a known outcome for `resume`", out)
+
+    def test_a_reread_verdict_is_owed_once(self):
+        self.full_round()
+        self.verdict()
+        self.verdict()
+        self.outcome("refused:start-rate")
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_two_open_verdicts_on_one_goal_are_paid_separately(self):
+        self.full_round()
+        self.verdict("resume", session="sid-1")
+        self.verdict("restart", session="sid-2")
+        # Unprefixed, the outcome answers the NEWEST open entry — the restart — so a
+        # resume token there is refused rather than silently applied to the wrong verdict.
+        self.assertEqual(self.outcome("refused:start-rate", goal=self.GOAL)[0], 2)
+        self.assertEqual(self.outcome("refused:held-session", goal=self.GOAL)[0], 0)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("`resume` verdict has no outcome", out)
+        self.assertNotIn("`restart` verdict has no outcome", out)
+        # `--verdict` names the older open entry.
+        self.assertEqual(self.cli("--record-outcome", "--topic", self.topic, "--goal", self.GOAL,
+                                  "--verdict", "resume", "--outcome", "refused:start-rate")[0], 0)
+        self.assertEqual(self.check(), (0, ""))
+        # Nothing is open for `resume` now, so the same call is refused.
+        self.assertEqual(self.cli("--record-outcome", "--topic", self.topic, "--goal", self.GOAL,
+                                  "--verdict", "resume", "--outcome", "refused:start-rate")[0], 2)
+
+    def test_two_open_verdicts_of_the_same_type_are_owed_separately(self):
+        # A goal can be read twice in one round with two different recorded ids (a resume
+        # that landed and then a second one). Dedupe keys on (goal, verdict, session), so
+        # both stay open and each needs its own outcome and its own stamp.
+        self.full_round()
+        self.verdict("resume", session="sid-a")
+        self.verdict("resume", session="sid-b")
+        self.outcome("executed")
+        self.resume_stamp(time.time(), session="sid-b")
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertEqual(out.count("skipped: keepalive"), 1)
+        self.outcome("executed")
+        self.resume_stamp(time.time(), session="sid-a")
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_the_outcome_matches_the_goal_by_slug(self):
+        self.full_round()
+        self.verdict(goal="Auto-Merge Trust-Gated PRs")
+        self.assertEqual(self.outcome("refused:start-rate", goal="auto-merge trust-gated prs")[0], 0)
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_a_restart_by_prefix_matches_its_spawn_record(self):
+        full = "0123456789abcdef-0000-1111"
+        self.full_round()
+        self.verdict("restart", session=full)
+        self.outcome("executed")
+        self.spawn_line(full[:8], time.time())
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_a_too_short_prefix_does_not_match(self):
+        self.full_round()
+        self.verdict("restart", session="0123456789abcdef")
+        self.outcome("executed")
+        self.spawn_line("0123", time.time())
+        self.assertEqual(self.check()[0], self.m.EXIT_SKIPPED)
+
+    def test_an_unknown_token_written_around_the_verb_still_reads_red(self):
+        self.full_round()
+        self.verdict()
+        p = self.m.path(self.m.slug(self.topic))
+        with open(p, encoding="utf-8") as fh:
+            d = json.load(fh)
+        d["keepalive"][0]["outcome"] = "refused:whatever"
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump(d, fh)
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("not a known outcome", out)
+
+    def test_each_verdict_is_owed_separately(self):
+        self.full_round()
+        self.verdict(goal="Goal A")
+        self.verdict(goal="Goal B")
+        self.outcome("refused:start-rate", goal="Goal A")
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("Goal B", out)
+        self.assertNotIn("Goal A", out)
+
+    def test_start_clears_the_previous_rounds_verdicts(self):
+        self.full_round()
+        self.verdict()
+        self.full_round()
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_a_verdict_needs_a_round_in_progress(self):
+        self.assertEqual(self.verdict()[0], 2)
+
+    def test_a_verdict_without_a_session_is_refused(self):
+        # `executed` is proved against the session id, so an id-less entry is unpayable.
+        self.full_round()
+        self.assertEqual(self.verdict(session="")[0], 2)
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_a_spawn_log_last_written_before_the_round_is_not_read(self):
+        self.full_round()
+        self.verdict("restart", session="sid-r")
+        self.outcome("executed")
+        self.spawn_line("sid-r", time.time())
+        p = os.path.join(self.exits.name, "pane-42.log")
+        old = time.time() - 3600
+        os.utime(p, (old, old))
+        self.assertEqual(self.check()[0], self.m.EXIT_SKIPPED)
+
+    def test_the_verbs_are_topic_tier_only(self):
+        self.full_round()
+        with self.assertRaises(SystemExit):
+            self.cli("--record-verdict", "--subject", "Fleet Manager", "--branch", "fleet",
+                     "--goal", "g", "--vault", "/v", "--verdict", "resume")
+
+    # --- the producer ------------------------------------------------------------
+
+    def test_the_probe_writes_the_verdict_onto_the_receipt(self):
+        self.full_round()
+        k = load_module("topic_keepalive", os.path.join(SCRIPTS, "topic-keepalive.py"))
+        err = io.StringIO()
+        with redirect_stderr(err):
+            k.record_on_receipt(self.topic, self.GOAL, self.VAULT, "resume", "sid-1")
+        self.assertEqual(err.getvalue(), "")
+        rc, out = self.check()
+        self.assertEqual(rc, self.m.EXIT_SKIPPED)
+        self.assertIn("`resume` verdict has no outcome", out)
+
+    def test_a_receipt_fault_warns_and_never_raises(self):
+        # No `--start`: the write is refused, and the probe must still answer its verdict.
+        k = load_module("topic_keepalive", os.path.join(SCRIPTS, "topic-keepalive.py"))
+        err = io.StringIO()
+        with redirect_stderr(err):
+            k.record_on_receipt(self.topic, self.GOAL, self.VAULT, "resume", "sid-1")
+        self.assertIn("not recorded", err.getvalue())
+
+    def test_probe_and_receipt_agree_on_the_resume_path(self):
+        k = load_module("topic_keepalive", os.path.join(SCRIPTS, "topic-keepalive.py"))
+        self.assertEqual(k.state_path(self.VAULT, self.GOAL, "goal"),
+                         self.m.keepalive_module().resume_path(self.VAULT, self.GOAL, "goal"))
+
+    def test_a_symlinked_vault_spelling_is_the_same_store(self):
+        k = load_module("topic_keepalive", os.path.join(SCRIPTS, "topic-keepalive.py"))
+        real = os.path.join(self.arts.name, "private-personal")
+        os.makedirs(real)
+        link = os.path.join(self.arts.name, "Personal")
+        os.symlink(real, link)
+        self.assertEqual(k.resume_path(link, self.GOAL), k.resume_path(real, self.GOAL))
+
+    # --- the probe's own CLI, end to end in-process ----------------------------------
+
+    def probe(self, liveness, loop, stamps=0, sid="sid-9"):
+        """Run `topic-keepalive.py main(... --receipt)` against a one-goal vault."""
+        k = load_module("topic_keepalive", os.path.join(SCRIPTS, "topic-keepalive.py"))
+        vault = os.path.join(self.arts.name, "vault")
+        os.makedirs(os.path.join(vault, "24 Goals"), exist_ok=True)
+        with open(os.path.join(vault, "24 Goals", f"{self.GOAL}.md"), "w", encoding="utf-8") as fh:
+            fh.write(f"---\nclaude_session_id: {sid}\n---\nbody\n")
+        if stamps:
+            p = k.state_path(vault, self.GOAL)
+            with open(p, "w", encoding="utf-8") as fh:
+                json.dump({"resumes": [time.time() - 60] * stamps}, fh)
+        k.session_verdict = lambda _sid: liveness
+        k.cadence_state_detail = lambda _subject, _branch="goal", _vault="": (loop, "")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = k.main(["--vault", vault, "--goal", self.GOAL, "--receipt", self.topic])
+        return rc, out.getvalue().splitlines()
+
+    def owed(self):
+        return self.m.read_receipt(self.m.slug(self.topic)).get("keepalive") or []
+
+    def test_the_probe_owes_a_resume_and_keeps_its_two_line_output(self):
+        self.full_round()
+        rc, lines = self.probe("ABSENT", "STALE")
+        self.assertEqual((rc, lines[0], len(lines)), (0, "resume", 2))
+        self.assertEqual([(e["verdict"], e["session"]) for e in self.owed()], [("resume", "sid-9")])
+        self.assertEqual(self.check()[0], self.m.EXIT_SKIPPED)
+
+    def test_the_probe_owes_a_restart(self):
+        self.full_round()
+        rc, lines = self.probe("LIVE", "STALE")
+        self.assertEqual((lines[0], len(lines)), ("restart", 2))
+        self.assertEqual([e["verdict"] for e in self.owed()], ["restart"])
+
+    def test_jump_leave_and_crash_loop_owe_nothing(self):
+        for liveness, loop, stamps, verdict in (("LIVE", "OK", 0, "jump"),
+                                               ("ABSENT", "STOPPED", 0, "leave"),
+                                               ("ABSENT", "STALE", 3, "crash-loop")):
+            with self.subTest(verdict=verdict):
+                self.full_round()
+                _rc, lines = self.probe(liveness, loop, stamps)
+                self.assertEqual(lines[0], verdict)
+                self.assertEqual(self.owed(), [])
+                self.assertEqual(self.check(), (0, ""))
+
+
+class RearmShapeReadsEpochsOnly(unittest.TestCase):
+    """SC3 — `rearm_shape` reads epochs, never the interval column.
+
+    `manager-liveness.py --arm` writes `<epoch> <interval>` per line now, because the
+    conditional floor that keeps a lengthened interval from reading STALE needs the
+    interval each gap was armed under. `rearm_shape` only asks whether an arm landed
+    inside the round window, so it must go through the shared epoch reader: the old
+    `fh.read().split()` put the interval on the epoch list, and any small interval
+    falls inside a narrow window and reports an arm that never happened.
+
+    The shape that discriminates: `started=0, now=4000` against a line carrying a real
+    wall-clock epoch — the interval 3600 sits inside `[0, 4001]`, the epoch does not.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.live = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name, self.live.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        self.live.cleanup()
+        os.environ.pop("MANAGER_RECEIPT_STATE_DIR", None)
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def arms(self, text):
+        p = os.path.join(self.live.name, "fleet--fleet-manager.arms")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return p
+
+    def test_an_interval_is_not_read_as_an_epoch(self):
+        p = self.arms("1794141605 3600\n")
+        self.assertFalse(self.m.rearm_shape(p, 0, 4000))
+
+    def test_a_real_in_window_arm_is_still_found(self):
+        p = self.arms("1794141605 3600\n")
+        self.assertTrue(self.m.rearm_shape(p, 1794141600, 1794141700))
+
+    def test_a_legacy_single_column_ring_still_reads(self):
+        p = self.arms("1794141605\n")
+        self.assertTrue(self.m.rearm_shape(p, 1794141600, 1794141700))
+
+
+class GatedState(unittest.TestCase):
+    """A step the frozen-tree predicate suppressed is excused for THAT round only.
+
+    `.gated` is a different claim from `.abandoned`: an abandonment pays a leg that was
+    owed, a gate records that the leg was never owed this tick. Both are round-scoped,
+    because a gate that survived every later round would let a round skip a leg it owed
+    — the permanent-green failure the round window exists to prevent.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.m = load(self.tmp, self.tmp)
+
+    def _skips(self, started, now):
+        d = {"topic": "T", "round_started_at": started, "fields": {}}
+        return [step for step, _ in self.m._skips("t", "", d, started, 600, now, "topic")]
+
+    def test_a_gated_step_is_excused_this_round(self):
+        now = time.time()
+        self.m.gate("T", "", "readings")
+        self.assertNotIn("readings", self._skips(now - 1, now))
+
+    def test_an_ungated_step_still_reads_as_skipped(self):
+        # The negative control: the excuse must be per-step, not a blanket pass.
+        now = time.time()
+        self.m.gate("T", "", "readings")
+        self.assertIn("sweep", self._skips(now - 1, now))
+
+    def test_a_gate_from_a_previous_round_does_not_excuse(self):
+        now = time.time()
+        with open(self.m.gated_path("t"), "w", encoding="utf-8") as fh:
+            fh.write(f"{now - 3600:.3f} readings\n")
+        self.assertIn("readings", self._skips(now - 1, now))
+
+    def test_a_non_finite_epoch_is_ignored(self):
+        # Same tamper guard as `read_abandoned`: one `inf` line would excuse the step on
+        # every later round.
+        now = time.time()
+        with open(self.m.gated_path("t"), "w", encoding="utf-8") as fh:
+            fh.write("inf readings\n")
+        self.assertIn("readings", self._skips(now - 1, now))
+
+
+class RenderCached(unittest.TestCase):
+    """A gated tick still prints the table — with a marker that says THIS tick.
+
+    Replaying the cached payload verbatim prints a header claiming a time the tick did
+    not run, which makes a dead loop and a gated one look identical. The marker is part
+    of the frame (`docs/sweep-output.md`), so it is replaced, never kept.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.m = load(self.tmp, self.tmp)
+
+    def payload(self, text):
+        with open(os.path.join(self.tmp, "t.sweep"), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def render(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = self.m.render_cached("T")
+        return rc, buf.getvalue()
+
+    def test_the_stale_marker_is_replaced(self):
+        self.payload("22:12 ✓ T — 53 goals\n┌────┐\n│ row│\n└────┘\n")
+        rc, out = self.render()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("22:12", out)
+        self.assertIn("sweep gated this tick", out)
+
+    def test_the_box_survives(self):
+        self.payload("22:12 ✓ T\n┌────┐\n│ row│\n└────┘\n")
+        _, out = self.render()
+        self.assertIn("│ row│", out)
+        self.assertIn("└────┘", out)
+
+    def test_a_missing_payload_is_an_error_not_an_empty_table(self):
+        # An empty render would read as "the table printed and had no rows".
+        rc, out = self.render()
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, "")
 
 
 if __name__ == "__main__":

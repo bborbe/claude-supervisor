@@ -51,9 +51,13 @@ file reaches you, it is a caller bug — say so and render no row for it.
       **You must not read the clock yourself.**
    5. **The manager verdicts**, as `<goal> → LIVE | ABSENT | UNKNOWN`, from the caller's
       `session-liveness.py --check` over each goal page's `claude_session_id`, for every goal the topic declares.
-   6. **The cadence verdicts**, as `<goal> → OK | STALE | STOPPED | INVALID`, from the
-      caller's `manager-liveness.py --state --subject <goal> --branch goal`.
+   6. **The cadence verdicts**, as `<goal> → OK | STALE | STOPPED | SLEEPING | UNARMED | INVALID | WRONG-BRANCH`, from the
+      caller's `manager-liveness.py --state --subject <goal> --branch goal --vault <vault-root>`.
    7. **`today`** — ISO `YYYY-MM-DD`, for the deferred overlay on goal rows.
+   8. **The payload path** — where to write the rendered table. Your one write goes there and
+      nowhere else. ⚠️ **A caller that passes none has left your only granted write without a
+      destination** — name that as the missing input in your report rather than choosing a
+      path of your own, because a path you invented is one no gate reads.
 
    ⚠️ **A missing input is named, never defaulted.** An absent verdict renders the cell
    `UNVERIFIED` and says which input was missing; a defaulted one reads exactly like a taken
@@ -97,7 +101,7 @@ file reaches you, it is a caller bug — say so and render no row for it.
 
    **Manager cell** — the delimiter is the liveness verdict: `[<sid8>]` live, `(<sid8>)` not
    live, `—` no id recorded, `UNVERIFIED` when the probe could not decide. The word after it
-   is the cadence (`OK` / `STALE` / `STOPPED` / `INVALID`).
+   is the cadence (`OK` / `STALE` / `STOPPED` / `SLEEPING` / `INVALID`).
 
 6. **Return one compact report** — the bucket counts, the goals with no manager (named, with
    their rank position), any `UNVERIFIED` row with the missing input named, and the payload

@@ -49,9 +49,14 @@ plugin. A hook that blocks, crashes, or prompts degrades the session it observes
 failure path here exits 0 having done nothing. The cost of a missed lint is one operator
 gate; the cost of a fail-closed hook is a broken turn in every session on the machine.
 
-⚠️ **`stop_hook_active` is a loop guard, not a courtesy.** Exit 2 continues the turn; a
-model that ends the continued turn on the same closer would re-block forever without it.
-When the harness says a Stop hook is already active, this allows the stop unconditionally.
+⚠️ **`stop_hook_active` is a loop guard, not a courtesy — and it is bounded, not
+unconditional.** Exit 2 continues the turn; a model that ends the continued turn on the
+same closer would re-block forever without a guard. So the retry is allowed — with ONE
+exception: when the previous `Stop` blocked this same closer and the closer is unchanged,
+it is blocked once more (`blocked-retry`), and only a third identical stop is allowed.
+The bound is read from this hook's own record, so the worst case is two consecutive
+blocks, never a loop. Measured 2026-11-08: on the deciding 7-day window the unconditional
+allow released **21** re-emitted closers naming already-authorised verbs.
 
 Usage (from `hooks/hooks.json`, `Stop`):
 
@@ -60,8 +65,37 @@ Usage (from `hooks/hooks.json`, `Stop`):
     exit 2: block the stop; stderr is shown to the model, which continues the turn
 
 ⚠️ **The record is written on ALLOW and BLOCK alike**, so an absent record means the hook
-did not run rather than that nothing happened. The write is fail-open and never changes
-the verdict: a lost record is preferred to a wrong verdict.
+did not run rather than that nothing happened. The write is fail-open, and the record is
+read by exactly one thing — the bounded retry above — where a lost record can only cost
+the extra block, never a stuck turn.
+
+SECOND CHECK — A WAIT ON SOMETHING THAT DIES WITH THE SESSION. A `🟡 WAITING` closer whose
+`⏰ Ends:` names a session-bound mechanism — a background sub-agent, a Monitor, a
+`run_in_background` shell, a `ScheduleWakeup`, a `CronCreate` — and no durable observable
+waits on a notice that can never arrive once the session ends. Measured 2026-11-08, pane
+619 (session `e6807caf`):
+
+    ⏰ Ends:   chunk 7a and 7c completion notices (background agents)
+
+The previous session had ended, both agents died with it, and the worker sat 23 minutes at
+an empty prompt on a task unmoved for 28 hours — found only by a human reading the pane.
+Nobody keeps a background sub-agent, by design (operator decision 2026-11-08: forbid it as
+a wait rather than build a keeper), so `~/.claude/CLAUDE.md` § Async State Closer requires
+the observable to outlive the session.
+
+⚠️ **The observable is banned, not the mechanism.** The same rule REQUIRES the in-session
+watcher in the `(mechanism, id)` slot — `/github-pr-watch` is itself a background shell — so
+a closer naming a session-bound class passes whenever it also names a durable observable:
+a file, a 32-hex card id, a `defer_date` / ISO date, or an external probe (a PR, CI, `gh`,
+`kubectl`, a pod, a URL). Operator decision 2026-11-08 ("Observable only", card
+`3d9c0b310909dc8ca406169621673957`). A literal ban would exit 2 on every compliant PR-watch
+closer, which is a broken rule rather than a strict one.
+
+⚠️ **It runs before the gate checks**, because the shape it exists for ends `👤 You: nothing`,
+which the gate checks return `not-a-gate` on. It reads the `⏰ Ends:` line from the same
+message `last_closer` reads, through `reap-closer.py`'s one scanner. The record carries
+`class` (the matched mechanism) and `phrase` (the `⏰ Ends:` text) on every invocation —
+`null` when nothing was flagged.
 
 Kill switch: `SUPERVISOR_CLOSER_GATE_LINT=off`. State dir override:
 `SUPERVISOR_CLOSER_GATE_LINT_STATE_DIR`.
@@ -72,6 +106,8 @@ import json
 import os
 import re
 import sys
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 
 KILL_SWITCH_ENV = "SUPERVISOR_CLOSER_GATE_LINT"
@@ -87,6 +123,10 @@ RECORD_KEEP = 200
 UNKNOWN_SESSION = "unknown-session"
 
 DECISION_ALLOW, DECISION_BLOCK = "allow", "block"
+
+# ⚠️ The one reason that is not a fresh decision: a closer the lint already blocked, seen
+# again on the continued turn's `Stop`. Bounded — see `_retry_verdict`.
+RETRY_REASON = "blocked-retry"
 
 # `approve:` / `review:` are the two gate verbs the closer contract defines. `you run:` is
 # deliberately not here — a command the operator must execute is not a step the model may
@@ -120,13 +160,153 @@ def unpollable_handles(body):
     return [h for h in CARD_HANDLE_RE.findall(body)
             if len(h) != STORE_ITEM_ID_LEN and _HEX_LETTER_RE.search(h)]
 
+
+# ⚠️ ANY 32-hex run, deliberately not keyed on the word `card`/`item`/`poll` the way
+# `CARD_HANDLE_RE` is. That one refuses a handle `poll` cannot ADDRESS; this one refuses
+# one it can address but the store does not HOLD. The word in front of the id is not what
+# makes the second defect wrong, so keying on it would miss `answered 3f2a…` shapes.
+FULL_CARD_RE = re.compile(r"\b[0-9a-f]{32}\b", re.IGNORECASE)
+
+# The `🔴 BLOCKED` state line of `~/.claude/CLAUDE.md` § Async State Closer. ⚠️ Anchored to
+# a line that carries the `·` separator, so a message that merely DISCUSSES a blocked row
+# in prose (a manager rendering a table, a docstring) is not read as a state line.
+BLOCKED_LINE_RE = re.compile(r"^[\s>*#-]*🔴\s*BLOCKED\b.*·", re.MULTILINE)
+
+# What a BLOCKED closer may name as its owner: a card id, a manager / supervisor role, a
+# re-checkable `⏰ Ends:` observable, or — the case the first draft missed — an
+# operator-directed VERB, which names the operator as the owner by construction.
+#
+# ⚠️ That last arm is not a convenience. `fixtures/e4fd1919-transcript.jsonl` is a RECORDED
+# real closer whose `👤 You:` reads `you run: switch this tab to accept edits (Shift+Tab),
+# then reply go` — a legitimate block on a step only the operator can take. Refusing it is
+# the false positive that made the bot request changes on #778.
+#
+# ⚠️ A bare "waiting on someone" still names none of these, which is the shape this check
+# exists to refuse.
+OWNER_RE = re.compile(
+    r"\b[0-9a-f]{8,32}\b"                        # card id, or a session-id prefix
+    r"|\bmanager\b|\bsupervisor\b"               # a role that can actually be reached
+    r"|⏰\s*Ends:"                                # a declared, re-checkable observable
+    r"|^\s*(?:approve|review|you run|pick)\b",   # an operator verb names the operator
+    re.IGNORECASE | re.MULTILINE)
+
+STORE_PROBE_ENV = "SUPERVISOR_CLOSER_GATE_LINT_STORE"
+STORE_TIMEOUT_SECONDS = 1.5
+
+
+def card_in_store(item_id, environ=None):
+    """`True` / `False` when the store answers, `None` when it cannot be asked.
+
+    ⚠️ Fail-open is part of the contract, not a nicety: `None` must never block. A `Stop`
+    hook that refuses a session because the store is down would break every session on the
+    machine, and a missed lint costs one operator gate.
+    """
+    environ = os.environ if environ is None else environ
+    if (environ.get(STORE_PROBE_ENV) or "").strip().lower() == "off":
+        return None
+    base = (environ.get("ATTENTION_STORE_URL") or "http://localhost:18080").rstrip("/")
+    try:
+        request = urllib.request.Request(f"{base}/api/1.0/attention/{item_id}")
+        with urllib.request.urlopen(request, timeout=STORE_TIMEOUT_SECONDS) as response:
+            return 200 <= response.status < 300
+    except urllib.error.HTTPError as exc:
+        return False if exc.code == 404 else None
+    except Exception:
+        return None
+
+
+# The operator-verb closers an absent-card probe may run on. ⚠️ `pick` is here but not in
+# `GATE_RE`: it asks the operator to choose, so a card nobody can answer is the same defect,
+# even though it is not a gate the lint releases.
+GATE_OR_HANDLE_RE = re.compile(r"^(?:approve|review|you run|pick)\b", re.IGNORECASE)
+
+# A `⏰ Ends:` line carrying an observable. ⚠️ Matched over the whole message, never the
+# `👤 You:` body alone — the conventional layout puts it on its own line.
+ENDS_OWNER_RE = re.compile(r"^[\s>*#-]*⏰\s*Ends:\s*\S", re.MULTILINE)
+
+# PANE-ONLY ASKS FROM A SESSION WITH NO PANE. A headless supervisor worker has nobody at
+# its keyboard, so a closer asking the operator to press Shift+Tab or to type a harness
+# slash command into "this tab" names an action no one can take: the attention board
+# shows a card, the worker waits out its timeout, and nothing moves. Measured 2026-11-05..11
+# in the attention store: 131 Shift+Tab and 279 `/reload-plugins` closer lines in 7 days.
+#
+# ⚠️ Headless is read from `CLAUDE_CODE_ENTRYPOINT`, never from `WEZTERM_PANE`. Measured
+# 2026-11-11 across 42 live session records: every tab session reported `cli` and every
+# headless worker `sdk-cli`, while `WEZTERM_PANE` is inherited from the spawner (so a
+# headless worker can carry one) and was measured unset in a genuine tab session.
+# ⚠️ The SAME closer from a tab is legitimate — the recorded `e4fd1919` fixture
+# (`you run: switch this tab to accept edits (Shift+Tab), then reply go`) is a real block
+# on a step only the operator can take there — so this check fires on the headless
+# entrypoint ONLY, and an absent or unknown value is treated as a tab (fail-open).
+PANELESS_ENTRYPOINT_ENV = "CLAUDE_CODE_ENTRYPOINT"
+PANELESS_ENTRYPOINT = "sdk-cli"
+PANE_ONLY_ASK_RE = re.compile(
+    r"\bshift\s*[-+]?\s*tab\b"                   # the permission-mode switch
+    # ⚠️ `(?![\w./-])`, NOT `\b`: `\b` holds between `t` and `-`, so `/exit-codes.md`,
+    # `~/exit` and `./rename-notes.md` all matched and a paneless closer merely CITING a
+    # path was refused. The lookbehind also excludes `~` and `.`, or a home-relative
+    # `~/exit` still matched — the second half of the same bot finding. Measured by the PR bot on #794 — the first draft shipped `\b` and
+    # its own path fixture used forms without a leading slash, so it passed.
+    r"|(?<![\w/.~-])/(?:reload-plugins|exit|rename)(?![\w./-])",  # harness-only slash commands
+    re.IGNORECASE)
+
+
+def pane_only_ask(body, environ):
+    """The pane-only phrase a paneless session's operator-verb closer asks for, or `None`.
+
+    Scoped to operator-verb closers (`GATE_OR_HANDLE_RE`): a `👤 You: nothing` line that
+    merely mentions Shift+Tab in prose asks the operator for nothing.
+    """
+    if (environ.get(PANELESS_ENTRYPOINT_ENV) or "").strip() != PANELESS_ENTRYPOINT:
+        return None
+    if not GATE_OR_HANDLE_RE.match(body):
+        return None
+    # ⚠️ A closer that names a full store card id is an ask the operator CAN answer on the
+    # board — exactly the `approve-run.py` route `_paneless_message` prescribes. Mentioning
+    # Shift+Tab as context there ("unavailable here") must not re-block the fix.
+    # Whether that card exists is the absent-card check's job, which runs next.
+    if FULL_CARD_RE.search(body):
+        return None
+    found = PANE_ONLY_ASK_RE.search(body)
+    return found.group(0) if found else None
+
+
+def owner_named(body, text=""):
+    """Whether a BLOCKED closer names an owner the fleet can route to.
+
+    ⚠️ Two haystacks on purpose: the `👤 You:` body carries the card id / role / operator
+    verb, while a `⏰ Ends:` observable is conventionally its OWN line below it. A
+    body-only search refused the very shape this task exists to accept.
+    """
+    if OWNER_RE.search(body):
+        return True
+    return bool(text and ENDS_OWNER_RE.search(text))
+
+
+def absent_card_handles(body, environ=None, card_probe=None, max_probes=3):
+    """Full-width card ids in `body` the store does not hold. Fail-open: unknown is not absent.
+
+    ⚠️ Deduped and capped. A `Stop` hook that probed every token in a pathological body at
+    `STORE_TIMEOUT_SECONDS` each would outlive the hook's own timeout and be killed — which
+    is not the same as allowing the stop, so the cap is a correctness bound, not a nicety.
+    """
+    probe = card_probe or card_in_store
+    absent = []
+    for handle in list(dict.fromkeys(FULL_CARD_RE.findall(body)))[:max_probes]:
+        try:
+            if probe(handle, environ) is False:
+                absent.append(handle)
+        except Exception:
+            continue
+    return absent
+
 # Derived from `~/.claude/CLAUDE.md` § After Opening a PR and § Execution Phase No Re-Ask
 # § Named No-Ask Actions. ⚠️ Order is irrelevant; the name is what the record carries.
 ALLOW = (
     ("github-pr-watch", re.compile(r"/github-pr-watch\b", re.IGNORECASE)),
     ("coding-local-review", re.compile(r"/coding:local-review\b", re.IGNORECASE)),
     ("coding-pr-review", re.compile(r"/coding:pr-review\b", re.IGNORECASE)),
-    ("gh-pr-ready", re.compile(r"\bgh\s+pr\s+ready\b", re.IGNORECASE)),
+    ("gh-pr-ready", re.compile(r"\bgh\b.*\bpr\s+ready\b", re.IGNORECASE)),
     ("dark-factory-prompt-approve", re.compile(r"\bdark-factory\s+prompt\s+approve\b", re.IGNORECASE)),
     ("dark-factory-spec-approve", re.compile(r"\bdark-factory\s+spec\s+approve\b", re.IGNORECASE)),
     ("vault-cli-session-close", re.compile(r"/vault-cli:session-close\b", re.IGNORECASE)),
@@ -161,6 +341,150 @@ WHEN = {
 }
 
 
+ENDS_MARKER = "⏰ Ends:"
+
+# The five session-bound classes. ⚠️ `Monitor` is case-sensitive and must stand alone: a
+# lowercase `monitor` inside a path (`~/.claude/state/monitor-check/…`) is a file, which is
+# the opposite of what this class names. A Kubernetes CronJob is external, so the cron
+# class is the `CronCreate` tool only.
+SESSION_BOUND = (
+    ("background-sub-agent", re.compile(
+        r"\b(?:background\s+(?:sub-?)?agents?|sub-?agents?|agent\s+tasks?)\b", re.IGNORECASE)),
+    ("monitor", re.compile(r"(?<![\w/.-])Monitor(?![\w/.-])")),
+    ("run-in-background-shell", re.compile(
+        r"\brun_in_background\b|\bbackground\s+(?:bash|shell)s?\b", re.IGNORECASE)),
+    ("schedule-wakeup", re.compile(r"\bScheduleWakeup\b", re.IGNORECASE)),
+    ("cron-create", re.compile(r"\bCronCreate\b", re.IGNORECASE)),
+)
+
+# Anything a keeper can read after the session is gone. ⚠️ A watcher's own timeout
+# (`times out ~18:40`) is NOT a clock observable — it dies with the watcher — so a bare
+# HH:MM never counts; only a `defer_date`, an ISO date, or an ISO datetime does.
+#
+# ⚠️ Two boundary rules, each bought with a measured regression:
+#
+#  1. The terminator is `(?!\w)`, never `\b`. A `Z` suffix is a WORD character, so `\b`
+#     after the final digit can never match `2026-11-09T15:30Z`. `(?!\w)` also rejects
+#     every trailing word run (`2026-11-09T15`, `2026-11-09T15:30abc`, `2026-11-09123`).
+#  2. It must NOT include `-`. `\b` matched between `9` and `-`, so `(?![\w-])` newly
+#     blocked `2026-11-09-15:30` — which `datetime.fromisoformat` accepts, with `-` as
+#     the separator — and `2026-11-09-rollout`. A narrowing that blocks a compliant
+#     closer is the exact false positive this class exists to remove.
+#
+# The separators are `[Tt ]` and the suffix `[Zz]`, because `parse_defer_date` accepts
+# both cases: it rewrites a lowercase `z` to `+00:00`, and `fromisoformat` takes any
+# single separator character. Hours may stand alone (`2026-11-09T15`), which the parser
+# also accepts.
+#
+# The arm remains a SHAPE-subset of `defer-date.py`'s `parse_defer_date`, not a range
+# subset: `2026-11-09T99:99` matches here and the parser calls it invalid. That
+# looseness is pre-existing on the date-only arm (`2026-13-45` already matched) and is
+# deliberately NOT tightened — a narrowing would newly block closers that pass today,
+# and a range-invalid clock is the writer's typo, not a reason to block a compliant
+# closer.
+DURABLE = (
+    ("file", re.compile(
+        r"(?:^|[\s`(\"'])(?:~|\.{0,2})/[\w.-]+|\b[\w-]+\.(?:md|jsonl?|log|ya?ml|txt|out|csv)\b"
+        r"|\b(?:files?|mtime)\b", re.IGNORECASE)),
+    ("card-id", re.compile(r"\b[0-9a-f]{32}\b", re.IGNORECASE)),
+    ("clock", re.compile(
+        r"\bdefer_date\b|\b\d{4}-\d{2}-\d{2}"
+        r"(?:[Tt ]\d{2}(?::\d{2}(?::\d{2}(?:\.\d+)?)?)?(?:[Zz]|[+-]\d{2}:?\d{2})?)?"
+        r"(?!\w)")),
+    ("external-probe", re.compile(
+        r"\bPR\b|#\d+\b|\bCI\b|\bgh\s|\bkubectl\w*\b|https?://|\bpods?\b|\bcontainer\b"
+        r"|\brelease\b|\btag\s+v\d|\bworkflow\b|\bdeploy(?:ment)?\b", re.IGNORECASE)),
+)
+
+
+def ends_body(line):
+    """Everything after `⏰ Ends:`, entities and backticks stripped."""
+    body = line.split(ENDS_MARKER, 1)[1] if ENDS_MARKER in line else line
+    return body.replace("&nbsp;", " ").strip().strip("`").strip()
+
+
+def session_bound_class(line):
+    """The session-bound class an `⏰ Ends:` waits on with no durable observable, or `None`."""
+    body = ends_body(line)
+    if not body:
+        return None
+    for _name, pattern in DURABLE:
+        if pattern.search(body):
+            return None
+    for name, pattern in SESSION_BOUND:
+        if pattern.search(body):
+            return name
+    return None
+
+
+# ⚠️ A PR reference is only a re-probeable observable when it names its REPOSITORY. The
+# round's probe (`scripts/observable-reprobe.py`) resolves `owner/repo#N` and a
+# `github.com/owner/repo/pull/N` URL; a bare `PR #N` or `PR N` leaves it a number with no
+# repo, so it renders `unprobeable` and the wait is never re-checked — measured 2026-11-11:
+# 36 of 324 declarations named a PR, 4 were qualified, and the other 32 could not be probed.
+#
+# ⚠️ **Both bare shapes are real, and they are not the same string.** The attention store
+# carries `PR #516` and `PR 738`; the no-hash form is not a typo for the hashed one, so a
+# matcher built to `PR #N` alone passes a declaration that is just as unprobeable.
+#
+# ⚠️ **This mirrors `observable-reprobe.py`'s `_BARE`, and it must stay mirrored.** That
+# pattern is the one that decides `unprobeable`, and it also accepts `pull request <n>` —
+# a form this matcher would otherwise let through while the probe refused it, which is a
+# closer that blocks nothing and is still never re-checked.
+# ⚠️ The plural is included because the probe does not resolve it either: measured
+# 2026-11-11, `observables("pull requests 12")` returns `[]`, so a slot written that way is
+# `unprobeable` while a singular-only matcher let it through.
+PR_BARE = re.compile(r"\b(?:PR|pull\s+requests?)\s*#?\s*\d+", re.IGNORECASE)
+
+# A `repo#N` with no owner (`nuke#567`) is NOT qualified — the owner would have to be
+# guessed, and guessing it is how a probe lands on another org's identically numbered PR.
+# The lookbehind is what separates it from the tail of a qualified `owner/repo#N`, whose
+# only candidate match is preceded by `/`.
+PR_REPO_ONLY = re.compile(r"(?<!/)\b[A-Za-z0-9_.-]+#\d+")
+
+# What the re-probe can actually resolve — `observable-reprobe.py`'s `_QUALIFIED` plus its
+# `_URL`. The scheme is optional there because a scheme-less `github.com/o/r/pull/N` is a
+# common copy shape, and this matcher must accept exactly what the probe resolves: a
+# reference the probe can read but this check rejects is a false block on a compliant
+# closer, and the reverse is a wait that passes here and renders `unprobeable` there.
+PR_QUALIFIED = re.compile(
+    r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+"
+    r"|(?:https?://)?(?:www\.)?github\.com/[\w.-]+/[\w.-]+/pull/\d+")
+
+# ⚠️ Deliberately NOT covered: a bare `#N` with no `PR` word (`the verdict lands on #973`).
+# It is a PR reference in context, but `#` also introduces issue numbers and headings, and
+# the measured population spells its PR references with the word. Widening later is cheap;
+# a false block on a compliant closer is not. A closer written as `#973` alone therefore
+# still passes — a known gap, not an oversight.
+
+
+def unqualified_pr(line):
+    """The bare PR reference in an `⏰ Ends:` slot that no qualified span covers, or `None`.
+
+    ⚠️ **A qualified reference elsewhere in the slot does NOT excuse a bare one.** The
+    obvious implementation — return `None` as soon as `PR_QUALIFIED` matches anywhere —
+    is wrong, and was measured wrong on review: `observable-reprobe.observables()` is
+    called by `wait-reprobe.py` with **no repo**, and it only merges a bare `PR #N` into a
+    qualified one when a repo resolves (`add()`'s key is `(obs_repo or repo, number)`).
+    With none, `PR #516 on bborbe/claude-supervisor#516` yields TWO observables, one of
+    them `repo: None`, and `verdict()` ANDs it to `unprobeable` — so a presence-based
+    short-circuit passes exactly the declaration this rule exists to refuse.
+    """
+    body = ends_body(line)
+    if not body:
+        return None
+    spans = [m.span() for m in PR_QUALIFIED.finditer(body)]
+
+    def covered(match):
+        return any(start <= match.start() and match.end() <= end for start, end in spans)
+
+    for pattern in (PR_BARE, PR_REPO_ONLY):
+        for match in pattern.finditer(body):
+            if not covered(match):
+                return match.group(0)
+    return None
+
+
 def state_dir():
     """The record's directory, read at call time so a test can redirect it."""
     return (os.environ.get(STATE_DIR_ENV)
@@ -171,6 +495,23 @@ def record_path(session_id, directory=None):
     """The record's path for one session. ⚠️ Fixed and documented: a reader depends on it."""
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(session_id or UNKNOWN_SESSION)) or UNKNOWN_SESSION
     return os.path.join(directory or state_dir(), f"{safe}.jsonl")
+
+
+def previous_record(session_id, environ=None):
+    """The last record written for this session, or `{}`. Never raises.
+
+    ⚠️ The ONE place this hook's own record is consulted by a verdict, and only by the
+    bounded retry below. A missing, empty or unreadable file is a fail-open path like any
+    other: the retry is allowed exactly as it was before this existed.
+    """
+    try:
+        directory = (environ or {}).get(STATE_DIR_ENV) or state_dir()
+        with open(record_path(session_id, directory), encoding="utf-8",
+                  errors="replace") as fh:
+            lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+        return json.loads(lines[-1]) if lines else {}
+    except Exception:
+        return {}
 
 
 def trim_records(path, cap=RECORD_CAP_BYTES, keep=RECORD_KEEP):
@@ -230,6 +571,24 @@ def last_closer(transcript_path):
     return _reap_closer().last_closer(transcript_path)
 
 
+def last_closer_and_ends(transcript_path):
+    """`(timestamp, you_line, ends_line_or_None)` from one scan, or `None` with no closer.
+
+    Delegates to `reap-closer.py` like `last_closer` — one scanner, one message.
+    """
+    return _reap_closer().last_closer_and_ends(transcript_path)
+
+
+def last_closer_scan(transcript_path):
+    """`(timestamp, you_line, ends_line_or_None, message_text_or_None)` from ONE scan.
+
+    Same single scan as `last_closer_and_ends`, plus the message text the owner test
+    needs. ⚠️ Two separate calls could straddle a write and decide on a closer the
+    operator never saw, which is the defect `last_closer_and_ends` exists to avoid.
+    """
+    return _reap_closer().last_closer_scan(transcript_path)
+
+
 def closer_body(line):
     """Everything after `👤 You: `, with the entities and backticks a closer carries stripped."""
     body = line.split("👤 You:", 1)[1] if "👤 You:" in line else line
@@ -256,12 +615,62 @@ def match_allow(body):
     return None
 
 
-def evaluate(payload, environ=None):
-    """`(exit_code, stderr_text, record)` — the whole decision, pure but for the transcript read."""
+def _retry_verdict(payload, environ, verdict, card_probe=None):
+    """The `stop_hook_active` branch: ONE re-block of a re-emitted closer, then allow.
+
+    ⚠️ The loop guard exists so a continued turn ending on the same closer cannot re-block
+    forever, and an unconditional allow is not the only way to keep that promise. A model
+    that re-emits the closer it was just told to perform gets told once more; a model that
+    re-emits it a third time is stuck, and blocking again would loop without end. The bound
+    is read from this hook's own record — the file the docstring already promises is
+    written on ALLOW and BLOCK alike — so it survives across the separate `Stop`
+    invocations, and the worst case is two consecutive blocks, never a loop.
+
+    ⚠️ Every uncertainty allows. A missing transcript, an unreadable record, a different
+    closer, or a previous record that was already a retry all fall back to the old
+    unconditional allow, so a broken read can only cost the extra block, never a stuck turn.
+    """
+    inner = dict(payload)
+    inner["stop_hook_active"] = False
+    code, text, record = evaluate(inner, environ, card_probe)
+    closer = record.get("closer")
+    if code != 2:
+        return verdict(0, "stop-hook-active", closer=closer)
+    previous = previous_record(payload.get("session_id"), environ)
+    if not closer or previous.get("decision") != DECISION_BLOCK:
+        return verdict(0, "stop-hook-active", closer=closer)
+    if previous.get("reason") == RETRY_REASON:
+        # ⚠️ The retry already happened once. This is the third identical stop, which is
+        # the state the guard exists for — allowing it is what keeps the bound finite.
+        return verdict(0, "stop-hook-active", closer=closer)
+    if previous.get("closer") != closer:
+        return verdict(0, "stop-hook-active", closer=closer)
+    code2, _unused, retry = verdict(2, RETRY_REASON, verb=record.get("verb"),
+                                    matched=record.get("matched"), closer=closer,
+                                    cls=record.get("class"), phrase=record.get("phrase"))
+    return code2, _retry_message(text), retry
+
+
+def _retry_message(text):
+    """The re-block's stderr: says it is a retry, then repeats the original reason."""
+    return (
+        "closer-gate-lint: this closer was blocked on the previous stop and has been "
+        "re-emitted unchanged. Blocking once more instead of releasing it through the loop "
+        "guard; perform the step now. (A third identical stop is allowed, so this cannot "
+        "loop.)\n" + text
+    )
+
+
+def evaluate(payload, environ=None, card_probe=None):
+    """`(exit_code, stderr_text, record)` — the whole decision, pure but for the transcript read.
+
+    `card_probe(item_id, environ) -> True|False|None` is injectable so the store read is
+    testable without a live service; `None` means "cannot tell" and never blocks.
+    """
     environ = os.environ if environ is None else environ
     session_id = payload.get("session_id") if isinstance(payload, dict) else None
 
-    def verdict(code, reason, verb=None, matched=None, closer=None):
+    def verdict(code, reason, verb=None, matched=None, closer=None, cls=None, phrase=None):
         return code, _message(reason, verb, matched) if code else "", {
             "ts": datetime.now(timezone.utc).isoformat(),
             "session_id": session_id,
@@ -270,26 +679,63 @@ def evaluate(payload, environ=None):
             "verb": verb,
             "matched": matched,
             "closer": (closer or "")[:200] or None,
+            "class": cls,
+            "phrase": (phrase or "")[:200] or None,
         }
 
     if (environ.get(KILL_SWITCH_ENV) or "").strip().lower() == "off":
         return verdict(0, "kill-switch")
     if payload.get("stop_hook_active") is True:
-        # ⚠️ A loop guard, not a courtesy — see the module docstring.
-        return verdict(0, "stop-hook-active")
+        # ⚠️ A loop guard, not a courtesy — see the module docstring. Bounded, not
+        # unconditional: one re-block, then the stop is allowed.
+        return _retry_verdict(payload, environ, verdict, card_probe)
 
     transcript = payload.get("transcript_path")
     if not transcript:
         return verdict(0, "no-transcript-path")
     try:
-        found = last_closer(transcript)
+        found = last_closer_scan(transcript)
     except Exception:
         return verdict(0, "transcript-unreadable")
     if not found:
         return verdict(0, "no-closer")
 
-    _ts, line = found
+    _ts, line, ends, text = found
+    # ⚠️ Before the gate checks: the shape this catches ends `👤 You: nothing`, which they
+    # return `not-a-gate` on. Fail-open — a matcher error skips this check, never blocks.
+    if ends:
+        try:
+            cls = session_bound_class(ends)
+        except Exception:
+            cls = None
+        if cls:
+            code, _text, record = verdict(2, "session-bound-ends", closer=line,
+                                          cls=cls, phrase=ends_body(ends))
+            return code, _ends_message(cls, ends_body(ends)), record
+    # ⚠️ Independent of the session-bound check above, not a branch of it: `PR #12` matches
+    # the `external-probe` durable class, so `session_bound_class` returns `None` for it and
+    # the wait passes every existing check while staying unprobeable. Fail-open — a matcher
+    # error skips this check, never blocks a closer.
+    if ends:
+        try:
+            bare = unqualified_pr(ends)
+        except Exception:
+            bare = None
+        if bare:
+            code, _text, record = verdict(2, "unqualified-pr-reference", closer=line,
+                                          phrase=bare)
+            return code, _pr_message(bare), record
     body = closer_body(line)
+    # ⚠️ Before the card and gate checks: a pane-only ask is unanswerable whatever card it
+    # carries, and `you run:` is not a verb the allow-list path ever reaches. Fail-open.
+    try:
+        pane_only = pane_only_ask(body, environ)
+    except Exception:
+        pane_only = None
+    if pane_only:
+        code, _text, record = verdict(2, "paneless-pane-only-ask", closer=line,
+                                      phrase=pane_only)
+        return code, _paneless_message(pane_only), record
     handle_gate = HANDLE_GATE_RE.match(body)
     if handle_gate:
         bad = unpollable_handles(body)
@@ -297,6 +743,27 @@ def evaluate(payload, environ=None):
             code, _text, record = verdict(2, "unpollable-handle",
                                           verb=handle_gate.group(1).lower(), closer=line)
             return code, _handle_message(bad), record
+
+    # ⚠️ THE SHARP SHAPES ONLY — operator decision 2026-11-10, card
+    # `f5b085a591e5a5d7ca130860fabc6cc0`. A card-less `pick` closer is RECORDED for the
+    # fleet round, never blocked: the closer-mirror mint became opt-in on 2026-10-17
+    # because Stop-hook mirrors were 58.3% of board volume, so blocking every card-less
+    # `pick` would reverse that decision and refuse most sessions on the machine.
+    # ⚠️ GATE closers only. `FULL_CARD_RE` matches ANY 32-hex run, so probing every closer
+    # would refuse a session that merely CITES an md5 or a uuid in prose. The defect this
+    # refuses — an operator gate nobody can answer — only exists on a gate closer.
+    if GATE_OR_HANDLE_RE.match(body):
+        absent = absent_card_handles(body, environ, card_probe)
+        if absent:
+            code, _text, record = verdict(2, "absent-card", closer=line)
+            return code, _absent_card_message(absent), record
+    # ⚠️ The owner test searches the WHOLE message, not just the `👤 You:` body: the
+    # conventional Async State Closer layout puts `⏰ Ends:` on its own line below the
+    # verb, so a body-scoped search refused exactly the shape this task exists to accept.
+    if text and BLOCKED_LINE_RE.search(text) and not owner_named(body, text):
+        code, _text, record = verdict(2, "ownerless-blocked", closer=line)
+        return code, _blocked_owner_message(), record
+
     gate = GATE_RE.match(body)
     if not gate:
         return verdict(0, "not-a-gate", closer=line)
@@ -305,6 +772,68 @@ def evaluate(payload, environ=None):
     if matched is None:
         return verdict(0, "not-allow-listed", verb=verb, closer=line)
     return verdict(2, "allow-listed", verb=verb, matched=matched, closer=line)
+
+
+def _ends_message(cls, phrase):
+    return (
+        f"closer-gate-lint: `⏰ Ends: {phrase}` waits on a {cls} — a mechanism that runs "
+        "inside this session and dies with it, so its notice can never arrive once the "
+        "session ends and no keeper can probe it. CLAUDE.md § Async State Closer: the "
+        "observable must outlive the session. Rewrite `⏰ Ends:` to lead with something "
+        "readable after this session is gone — a file (path or mtime), a full 32-hex card "
+        "id, a `defer_date` / ISO date, or an external probe (PR, CI, `gh`, `kubectl`, a "
+        "pod) — and keep the watcher in the `(mechanism, id)` slot as the wake. If nothing "
+        "durable exists yet, make the producer write one, or set `defer_date` and exit.\n"
+    )
+
+
+def _pr_message(phrase):
+    return (
+        f"closer-gate-lint: `⏰ Ends: …{phrase}…` names a pull request with no repository, "
+        "so the round's re-probe cannot resolve it and renders `unprobeable` — a wait "
+        "nobody can re-check. Write the reference QUALIFIED, in the same `⏰ Ends:` slot: "
+        "`owner/repo#N` (e.g. `bborbe/nuke#698`) or a "
+        "`https://github.com/owner/repo/pull/N` URL. ⚠️ `repo#N` without an owner is not "
+        "enough — the owner would have to be guessed, and the probe would land on another "
+        "org's identically numbered PR.\n"
+    )
+
+
+def _paneless_message(phrase):
+    return (
+        f"closer-gate-lint: this session has no pane ({PANELESS_ENTRYPOINT_ENV}="
+        f"{PANELESS_ENTRYPOINT}), and the closer asks the operator for `{phrase}` — a "
+        "keystroke or harness command nobody can perform here, so the card it mints cannot "
+        "be answered. CLAUDE.md § Permission Mode Precheck and § Deploy Then Verify "
+        "Plugins: route it instead. One risky or production-touching command → post it with "
+        "`~/.claude/scripts/approve-run.py` (a card the operator answers; the helper runs the command). "
+        "Routine shipping steps blocked by the classifier → `SendMessage` your manager to "
+        "switch this worker's mode or respawn it with `shipping: true`, and close "
+        "`🔴 BLOCKED` naming that manager. A plugin reload → tell your manager (a restart, "
+        "same session id) or the Fleet Manager, or finish without it. Never put the "
+        "keystroke to the operator.\n"
+    )
+
+
+def _absent_card_message(handles):
+    named = ", ".join(f"`{h}`" for h in handles)
+    return (
+        f"closer-gate-lint: the closer names card {named}, which the attention store does "
+        "not hold. An operator answering that id has nothing to answer, so the gate never "
+        "reaches anyone. Post the ask with `attention-ask.py post`, name the `ITEM_ID:` it "
+        "prints, then end the turn.\n"
+    )
+
+
+def _blocked_owner_message():
+    return (
+        "closer-gate-lint: this closer reports `🔴 BLOCKED` but names no owner. A block "
+        "nobody owns is invisible: the fleet round can only route it to a manager or "
+        "re-check an observable if the closer names one. CLAUDE.md § Async State Closer — "
+        "name the owner in the `👤 You:` line: the full 32-hex card id the operator must "
+        "answer, the manager or supervisor that owns it, or a re-checkable `⏰ Ends:` "
+        "observable. `waiting on someone` is not an owner.\n"
+    )
 
 
 def _handle_message(handles):
@@ -350,7 +879,7 @@ def _bare_record(reason):
     """
     return {"ts": datetime.now(timezone.utc).isoformat(), "session_id": None,
             "decision": DECISION_ALLOW, "reason": reason,
-            "verb": None, "matched": None, "closer": None}
+            "verb": None, "matched": None, "closer": None, "class": None, "phrase": None}
 
 
 def main():

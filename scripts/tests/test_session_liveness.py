@@ -897,16 +897,45 @@ class SessionLiveness(unittest.TestCase):
         self.assertEqual(rc, ABSENT)
         self.assertIn("no session id matches", out)
 
-    def test_an_endpoint_row_reporting_not_live_is_absent_even_when_the_registry_holds_it(self):
-        # SC2. Here the endpoint POSITIVELY answered about this id — `live: false` is a dead
-        # session the store can see and is reporting on, not a rollout gap. The guard is scoped
-        # to the no-row case, so this keeps its ABSENT even with a registry record present; a
-        # fix that widened to every ABSENT would lose the death verdict.
+    def test_an_endpoint_row_reporting_not_live_is_absent_when_the_registry_holds_it_dead(self):
+        # SC2's second half, and the half a careless fix loses: a not-live row for a session the
+        # registry ALSO holds as dead is the genuine death verdict the whole instrument exists to
+        # give. The gate narrows ABSENT, it does not erase it — a fix that answered UNKNOWN for
+        # every not-live row would destroy the verdict in the opposite direction from the defect.
+        #
+        # ⚠️ **The pid is beyond this OS's range on purpose.** `alive` is `False` only when the pid
+        # is gone or held by another process; planting a live pid here would make the registry read
+        # non-dead and this case would assert the opposite of its own name.
         sid = "57a1e111-1111-2222-3333-444455556666"
-        self.plant(sid)
+        self.plant(sid, pid=4194303)
         with self.fixture([row(sid, live=False)]) as fx:
             rc, out = self.check(sid, fx.url)
         self.assertEqual(rc, ABSENT)
+
+    def test_a_not_live_row_for_a_registry_live_session_is_unknown_not_absent(self):
+        # SC3's regression, and the defect itself: `4295ddac` read ABSENT for hours while its
+        # process ran, because a stale `live: false` heartbeat row reached the verdict without the
+        # identity registry ever being read. The endpoint POSITIVELY reporting not-live is not
+        # evidence of death — the mcp-timer heartbeat lapses while the process lives.
+        #
+        # ⚠️ **Fails on the pre-fix code**, where `_verdict_for` returned ABSENT for this row
+        # without consulting the registry: that is the whole point of the case.
+        sid = "57a1e111-1111-2222-3333-444455556666"
+
+        class _RegistryHoldsItLive:
+            @staticmethod
+            def read_registry(directory=None):
+                return {sid: {"alive": True}}
+
+        prior = self.m._IDENTITY
+        self.m._IDENTITY = _RegistryHoldsItLive()
+        try:
+            with self.fixture([row(sid, live=False)]) as fx:
+                rc, out = self.check(sid, fx.url)
+        finally:
+            self.m._IDENTITY = prior
+        self.assertEqual(rc, UNKNOWN)
+        self.assertIn("non-dead", out)
 
     def test_an_unreadable_registry_is_unknown_not_absent(self):
         # "Could not measure the precondition" is not "the precondition holds". `read_registry`

@@ -106,6 +106,11 @@ KIND_FROM_MECHANISM = {"permission": "permission", "message": "question"}
 # failed to report. `--all` lifts the cap.
 CAP = 20
 
+# The header line that says the store did not answer and the event log carried the
+# read. Exported as a constant because a consumer that must not treat a fallback as
+# a healthy empty queue matches THIS value, never the prose around it.
+STORE_FALLBACK_NOTE = "store unreachable — reading event log"
+
 # Which source answered the last `needs_source()` call: None for the store, or
 # the one-line note printed when the fallback carried the read. A silent
 # fallback would read as a working store and hide the outage.
@@ -314,7 +319,7 @@ def needs_source():
     except StoreUnreachable:
         STORE_OK = False
         STORE_EVENTS = None
-        SOURCE_NOTE = "store unreachable — reading event log"
+        SOURCE_NOTE = STORE_FALLBACK_NOTE
         # Stamp every row this fallback produced, so the ROW says where it came from.
         # The note above is printed once, before any row, and every row then renders
         # through the same `row()` a live read uses — so a manager could not tell a
@@ -450,21 +455,86 @@ def load_events():
     return out
 
 
+#: The budget for one `wezterm cli list`, and for its single retry. Measured on this
+#: machine with the exact command below:
+#:
+#:   2026-11-08, load 21–102 on 18 cores, 51–52 panes — 0.05, 0.09, 2.10, 6.20, 88.78 s
+#:   2026-11-09, load 54.76 on 18 cores, 19 panes — 0.05–0.39 s over 12 runs
+#:
+#: The distribution is bimodal: a quiet mux answers in well under a second, a contended
+#: one answers in tens of seconds. The old 5 s budget sat *inside* that tail, so a
+#: healthy mux read as a dead one — measured three watcher deaths in 15 minutes on
+#: 2026-11-08, every one printing "the mux socket is not answering" while direct probes
+#: answered. 120 s clears the observed 88.78 s maximum by 35 %. The retry is deliberately
+#: shorter: a read that has already burned 120 s is unlikely to need another 120 s, and
+#: the 60 s poll loop should not stall for four minutes.
+PANE_LIST_TIMEOUT = 120
+PANE_LIST_RETRY_TIMEOUT = 30
+
+#: Why the last `wezterm_panes()` returned `None`. `None` alone cannot say which failure
+#: happened, and the two want different words: a timed-out read is a mux that is ALIVE and
+#: slow, a non-zero exit is a socket that is NOT answering. The refusal in `main()` is the
+#: one place a human reads that difference, and before this it asserted "not answering"
+#: for both — a claim a timeout cannot support, and one that sends the operator to
+#: restart a GUI that is running.
+PANE_FAIL_TIMEOUT = "timeout"
+PANE_FAIL_UNREADABLE = "unreadable"
+_pane_read_failure = None
+
+
+def pane_read_failure():
+    """Why the last `wezterm_panes()` returned `None`, or `None` if it did not fail."""
+    return _pane_read_failure
+
+
 def wezterm_panes():
     """The live panes as `pane id -> the wezterm record`, or `None` if the query failed.
 
     `None` is a distinct answer from `{}` — a failed `wezterm cli list` cannot prove
     a pane is gone any more than it can prove one is live, so no caller may read it
     as "no panes exist". Same convention as `read_registry()` below, same reason.
+
+    A timeout is a third answer again, and it is why this retries: the measured tail
+    includes single reads of 6.20 s and 88.78 s, and one such outlier must not kill a
+    60 s poll loop. Two attempts are made — the second at the shorter budget — and
+    `pane_read_failure()` names which failure ended the read, so the refusal can say
+    "slow" instead of asserting a dead socket.
+
+    ⚠️ **Read `pane_read_failure()` on the statement right after a `None` return.** This
+    resets it on ENTRY, so any intervening call silently flips the verdict — and
+    `panes()` is exactly such an intervening caller.
+
+    ⚠️ **Worst case is 150 s, not 120 s** — 2.5× the 60 s poll interval this exists to
+    protect. That is deliberate: one skipped tick is cheap, a dead push channel is not.
     """
-    try:
-        r = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
-                           capture_output=True, text=True, timeout=5)
+    global _pane_read_failure
+    _pane_read_failure = None
+    failure = PANE_FAIL_UNREADABLE
+    for budget in (PANE_LIST_TIMEOUT, PANE_LIST_RETRY_TIMEOUT):
+        try:
+            r = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
+                               capture_output=True, text=True, timeout=budget)
+        except subprocess.TimeoutExpired:
+            # The one failure a retry can fix: a contended mux answers late, and the
+            # next attempt may well answer in time.
+            failure = PANE_FAIL_TIMEOUT
+            continue
+        except Exception:
+            # Deterministic — a missing binary, a permission error. A second attempt
+            # cannot help, and `break` keeps the refusal honest: the timeout wording
+            # is then only reachable when EVERY attempt timed out.
+            failure = PANE_FAIL_UNREADABLE
+            break
         if r.returncode != 0:
-            return None
-        return {str(p["pane_id"]): p for p in json.loads(r.stdout)}
-    except Exception:
-        return None
+            failure = PANE_FAIL_UNREADABLE
+            break
+        try:
+            return {str(p["pane_id"]): p for p in json.loads(r.stdout)}
+        except (ValueError, KeyError, TypeError):
+            failure = PANE_FAIL_UNREADABLE
+            break
+    _pane_read_failure = failure
+    return None
 
 
 def live_pane_ids():
@@ -891,9 +961,42 @@ def last_assistant_text(rec):
 _TAIL_WINDOWS = (200_000, 2_000_000, 20_000_000)
 
 
+_PATH_CACHE = {}
+
+
+def transcript_path(session_id):
+    """The session's transcript file, or `None`. One resolver for every caller.
+
+    Reads `PROJECTS_DIR`, the same root `session_transcript_age()` uses, so a
+    `PROJECTS_DIR` override cannot make the closer read and the age probe consult
+    different trees. Memoized: the synthetic `CLOSERS` pass asks once per session and
+    the reader asks again per record.
+    """
+    if not session_id:
+        return None
+    if session_id in _PATH_CACHE:
+        return _PATH_CACHE[session_id]
+    path = next(iter(glob.glob(os.path.join(
+        PROJECTS_DIR, "*", f"{session_id}.jsonl"))), None)
+    path = path if path and os.path.exists(path) else None
+    _PATH_CACHE[session_id] = path
+    return path
+
+
+def _transcript_mtime(session_id):
+    """The transcript's mtime as epoch seconds, or now when it cannot be read.
+
+    Used only as a row's age. A session with no readable transcript is still live —
+    the registry says so — so an unreadable mtime must not drop the row.
+    """
+    try:
+        return os.path.getmtime(transcript_path(session_id))
+    except (TypeError, OSError):
+        return time.time()
+
+
 def _read_last_assistant_text(rec):
-    path = rec.get("transcript") or next(iter(glob.glob(os.path.expanduser(
-        f"~/.claude/projects/*/{rec['session_id']}.jsonl"))), None)
+    path = rec.get("transcript") or transcript_path(rec.get("session_id"))
     if not path or not os.path.exists(path):
         return ""
     try:
@@ -1306,9 +1409,13 @@ CAUSE_STATE_PATH = os.path.join(CAUSE_STATE_DIR, "causes.json")
 OWNER_TASK_THRESHOLD = 3
 
 # The supervisor's spawn-cap refusal, as the manager's own transcript records it.
-# `maxManagersHard` is the manager cap (`docs/fleet-surface.md` § Spawn a worker
-# item 5); `maxConcurrent` is the fleet one.
-_CAP_REFUSAL = re.compile(r"maxManagersHard|maxConcurrent", re.I)
+# The manager pair (`docs/fleet-surface.md` § Spawn a worker item 5) and the worker pair
+# (`maxWorker*`). ⚠️ BOTH spellings of each axis, because the pre-rename names still parse
+# and a refusal can name either: matching only the current names drops a relayed
+# worker-cap refusal to `unknown`, which reads as "no cause found" rather than "capped".
+_CAP_REFUSAL = re.compile(
+    r"maxWorker(Soft|Hard)|maxManagers(Soft|Hard)|maxConcurrent(Hard)?", re.I
+)
 
 _TRIGGER = re.compile(r"later\s*\(on\s+([^)]+)\)", re.I)
 
@@ -1856,9 +1963,109 @@ def answer_handover(rec):
     return cmd + " --decision allow|deny" if rec.get("kind") == "permission" else cmd
 
 
+def one_line(text, limit):
+    """One rendered field, collapsed to a single line and clipped to `limit`.
+
+    The feed is a LINE-oriented format: `feed_rows`, `headless_key` and `owner_of` all
+    find a row's continuation block by scanning until the next `[...]` marker. A value
+    carrying a newline therefore forges lines — a gate detail containing
+    `\\nowner: <session>` would hand `owner_of` an owner the row never had, and the
+    readings leg would mark a tracked row gated on a stranger's gate. Collapsing all
+    whitespace first makes the injection impossible regardless of what the producer
+    put in the payload.
+    """
+    return " ".join(str(text).split())[:limit]
+
+
+LIVENESS_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "session-liveness.py")
+
+
+def liveness_rows():
+    """Every row the heartbeat store lists, or `None` when the read failed.
+
+    The plugin's one liveness reader, and the only population that includes an
+    in-process SDK headless worker — such a session holds **no** session-registry
+    entry, so `read_registry()` cannot see it. `--list --json` also lists
+    endpoint-only rows, which the registry cannot name at all.
+
+    `None` (refused, timed out, unparseable) is deliberately not `[]`: it means the
+    population could not be read, and the caller must add nothing rather than
+    presenting a failed read as an empty fleet.
+    """
+    try:
+        out = subprocess.run([sys.executable, LIVENESS_SCRIPT, "--list", "--json"],
+                             capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        rows = json.loads(out.stdout)
+    except ValueError:
+        return None
+    return rows if isinstance(rows, list) else None
+
+
+def pane_free_closer_rows(rows, by_session, pmap, registry):
+    """`CLOSERS` records for live sessions the attention store never saw.
+
+    A headless worker raises no gate, so it has no store record and — before this —
+    no `CLOSERS` row at all, which `agents/fleet-drive.md` step 4a fail-closes to
+    `unverifiable` on every round. Its closer is read from the transcript, so the row
+    needs no pane.
+
+    ⚠️ **`alive is True` is the admission test, not presence.** A crashed session can
+    leave a stale row behind, and a transcript whose last line reads `nothing` would
+    then revive a dead worker — the fail-open this channel must not introduce. `False`
+    and `None` both fail closed, which is the pre-change behaviour.
+    """
+    out = []
+    covered = {str(k) for k in by_session}
+    for row in rows or []:
+        sid = row.get("sessionId") or row.get("session_id")
+        if not sid or row.get("alive") is not True:
+            continue
+        s = str(sid)
+        # A store record may key on an 8-char prefix while the heartbeat row carries
+        # the full id, so the dedup runs both directions — an exact test alone would
+        # render one session twice, once from each source.
+        if any(s == c or s.startswith(c) or c.startswith(s) for c in covered):
+            continue
+        rec = {
+            "session_id": sid,
+            "pane": "",
+            "cwd": row.get("cwd") or "",
+            "kind": "idle",
+            "detail": "",
+            "ts": _transcript_mtime(sid),
+            "state": "open",
+            "event": "LastCloser",
+            "session_name": row.get("name") or "",
+        }
+        resolve_missing_panes([rec], pmap, registry)
+        # A resolved pane is proof the session owns one; an unresolved one keeps the
+        # marker `row()` renders as `hst`.
+        rec["headless"] = not rec.get("pane")
+        out.append(rec)
+    return out
+
+
+def renders_headless(rec):
+    """True when this row will render `hst` — no pane, and known live or answerable.
+
+    One predicate for the render and for the `headless=<H>` count, so the header can
+    never disagree with the rows beneath it. A synthetic `CLOSERS` row carries
+    `headless: True` from the registry-live pass; a store row reaches the same state
+    through `answer_handover()`. `?` — this column's marker for "may be an exited
+    session" — would be a claim either record disproves.
+    """
+    return not rec.get("pane") and bool(rec.get("headless") or answer_handover(rec))
+
+
 def row(rec, pmap, what, registry=None):
     pane = rec.get("pane")
-    headless = False
+    headless = renders_headless(rec)
     if pane and is_routable(rec, pmap, registry):
         jump = f"wezterm cli activate-pane --pane-id {pane}"
     else:
@@ -1866,6 +2073,11 @@ def row(rec, pmap, what, registry=None):
             # Present but unvalidatable. Never rendered as a route: the id may now
             # belong to a different session entirely.
             jump = f"unroutable — pane {pane} does not resolve to this session"
+        elif headless:
+            # Not "by construction": an interactive session whose registry name no
+            # longer matches a pane title lands here too, so the claim is what the
+            # record proves — no pane resolved — not how the session was spawned.
+            jump = "headless — no pane resolved for this session"
         else:
             jump = "unroutable — no pane recorded for this item"
         # This branch is where the dead end used to be: no jump to hand over, and the
@@ -1896,10 +2108,22 @@ def row(rec, pmap, what, registry=None):
     # headless worker there would be the same overstatement this change removes
     # one branch up. Column width is unchanged, so the table does not shift.
     pane_col = pane if pane else ("hst" if headless else "?")
+    # A pane-less row carries its OWNER on the row, because no pane-based join can
+    # reach it. `round-readings.py` needs the session behind every gate to say
+    # whether a tracked row is gated, and without this line its only route to the
+    # owner of an `hst:` key was a SECOND attention-store read — one 3 s timeout
+    # there blanked every row's feed verdict for a whole manager round (measured
+    # 2026-11-08 05:06:29Z: `gated=0 · clear=0 · unread=11` for 11 rows, while the
+    # feed itself was answering). This row already knows the owner; rendering it
+    # removes that read and the failure with it. Scoped to pane-less rows so a
+    # routable row keeps the three lines it has always rendered.
+    owner_line = ""
+    if not pane and rec.get("session_id"):
+        owner_line = f"\n         owner: {rec['session_id']}"
     return (f"  [{pane_col:>4}] {age(rec['ts']):>6}  {mark}"
-            f"{name_of(rec, pmap, registry)[:50]:<50}  {what[:60]}\n"
+            f"{one_line(name_of(rec, pmap, registry), 50):<50}  {one_line(what, 60)}\n"
             f"         {provenance_of(rec)}\n"
-            f"         {jump}")
+            f"         {jump}{owner_line}")
 
 
 def capped(rows, show_all):
@@ -1967,7 +2191,11 @@ def pane_for(session_id):
 
     pmap = wezterm_panes()
     if pmap is None:
-        sys.stderr.write("pane-for: WezTerm pane list unreadable\n")
+        # The same distinction `main()` makes, and for the same reason: `--pane-for` is
+        # the per-row lookup every fleet sweep takes, so it is the path most likely to
+        # meet a contended mux — and it used to report that as an unreadable socket.
+        sys.stderr.write("pane-for: " + pane_read_refusal(
+            subject="pane can be proven live", consequence="answer") + "\n")
         return 1
 
     # A session holds several records at once — the store returns one item per open
@@ -2081,6 +2309,44 @@ def refuse(reason):
     sys.exit(1)
 
 
+def pane_read_refusal(subject="record can be proven live",
+                      consequence="print a feed that would read as an empty queue"):
+    """The refusal text for a failed pane read, naming WHICH failure happened.
+
+    A timed-out read and an unanswering socket both yield `None`, and this site used to
+    report both as "the mux socket is not answering" — a claim a timeout cannot support,
+    and one that sends the operator to restart a GUI that is running. Measured
+    2026-11-08: three watcher deaths in 15 minutes on a healthy mux whose worst read was
+    88.78 s against a 5 s budget, every one of them asserting the socket was down.
+
+    `subject` and `consequence` are the only parts that differ between callers — the
+    sentence itself is one definition, so a wording fix cannot leave a sibling asserting
+    the claim this exists to retire. `who-needs-my-help.py` and `manager-menu-footer.py`
+    both call this rather than carrying a copy.
+    """
+    kind = pane_read_failure()
+    if kind == PANE_FAIL_TIMEOUT:
+        # Reached only when EVERY attempt timed out — `wezterm_panes()` breaks out on a
+        # deterministic failure — so "neither attempt answered" is a fact, not a guess.
+        return (
+            f"WezTerm pane list slow — neither attempt answered within "
+            f"{PANE_LIST_TIMEOUT} s then {PANE_LIST_RETRY_TIMEOUT} s, so no {subject}. "
+            "The socket is not proven dead; it is too slow to certify. "
+            f"Refusing to {consequence}."
+        )
+    if kind in (None, PANE_FAIL_UNREADABLE):
+        return (
+            f"WezTerm pane list unreadable — the mux socket is not answering, so no "
+            f"{subject}. Refusing to {consequence}."
+        )
+    # A kind this renderer does not know must not silently borrow the socket wording —
+    # that would be the same defect one level up, introduced by adding a third kind.
+    return (
+        f"WezTerm pane list unreadable ({kind}) — the read failed for a reason this "
+        f"message does not model, so no {subject}. Refusing to {consequence}."
+    )
+
+
 def pane_table_implausible(pmap, registry):
     """True when a READABLE socket's pane table cannot be this machine's.
 
@@ -2186,11 +2452,7 @@ def main():
     # same distinction `wezterm_panes()` documents.
     pmap = wezterm_panes()
     if pmap is None:
-        refuse(
-            "WezTerm pane list unreadable — the mux socket is not answering, so no "
-            "record can be proven live. Refusing to print a feed that would read as "
-            "an empty queue."
-        )
+        refuse(pane_read_refusal())
     # One registry read serves both questions: which sessions are live (the `quiet`
     # pass) and what each is called now (the ownership check). Reading it twice would
     # let the two disagree about which entries exist.
@@ -2263,6 +2525,17 @@ def main():
     _by_session = {}
     for r in sorted([r for r in needs if not answered(r)], key=lambda r: r["ts"]):
         _by_session[r.get("session_id") or id(r)] = r
+    # ⚠️ **A live session that never raised a gate has no store record at all**, so
+    # building this map from `needs` alone left it with no `CLOSERS` row — and step 4a
+    # fail-closes a candidate with no row to `unverifiable`, so a headless worker was
+    # unverifiable in every round, forever. Measured 2026-11-07: 237 of 242 drive
+    # candidates carried no pane, 232 landed `unverifiable`, and only 14 rows reached
+    # the closer probe at all. The registry is the population authority for liveness
+    # (an entry is deleted when its session exits), and the closer is read from the
+    # **transcript** — never from a pane — so the row can be built for a session that
+    # owns no pane. `resolve_missing_panes()` fills a pane where the registry's current
+    # name matches a live pane title, and leaves it empty otherwise; `row()` renders
+    # that as headless rather than as an exited session.
     last_closers = list(_by_session.values())
 
     # Say which source answered, once, before any row. A silent fallback would
@@ -2312,7 +2585,22 @@ def main():
     # sections byte-for-byte. A consumer that asks for it gets every live session's
     # last-turn closer and its class — the digest's `CLOSERS` source.
     if a.section and wanted("last-closers"):
-        print(f"\nLast closers ({len(last_closers)})"
+        # ⚠️ **The registry is not the population — the heartbeat store is.** An
+        # in-process SDK headless worker holds no registry entry at all (this file's
+        # own `current_session_name()` says so: "0 of 21 in the registry"), so a
+        # `CLOSERS` section built from the registry alone still carried no row for
+        # exactly the sessions this channel exists for. `session-liveness.py --list`
+        # is the plugin's one reader over that store and lists endpoint-only rows
+        # too, so it is the population source. Paid only here, inside the opt-in
+        # section: the default render must not buy a subprocess and an HTTP read.
+        last_closers.extend(pane_free_closer_rows(liveness_rows(), _by_session,
+                                                  pmap, registry))
+        # The headless count is printed, not implied: it is the population the
+        # pane-free channel classified, and the drive leg's own `headless=<H>` count
+        # is checked against it (a printed 0 and a genuinely empty set must not read
+        # the same).
+        headless_n = sum(1 for r in last_closers if renders_headless(r))
+        print(f"\nLast closers ({len(last_closers)}, headless={headless_n})"
               f"  — last-turn closer and class (ask | routine | parked-wait | none)")
         for r in last_closers:
             print(row(r, pmap, f"{closer_class(r)}: "

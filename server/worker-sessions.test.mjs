@@ -20,7 +20,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { workerSessions } from './worker-sessions.mjs'
+import { invalidateCountCache, workerPopulations, workerSessions } from './worker-sessions.mjs'
 
 // A fixed base URL: it is never dialled, because `fetchImpl` is always injected, but passing it
 // explicitly keeps a forgotten argument from falling back to `config.attentionStoreUrl` and
@@ -36,8 +36,13 @@ function fixture() {
 
 // A store row in the wire shape attention-controller serves: snake_case `session_id`, and
 // `live` as the ONLY field that grants liveness.
-function row(sessionId, { live = true, source = 'mcp-timer' } = {}) {
-  const out = { session_id: sessionId, source, at: '2026-10-09T00:00:00Z', age_seconds: 3 }
+//
+// ⚠️ `state` defaults to `'idle'`, not absent, because every real stamp carries one. A
+// `live: true` row with no `state` is a GHOST — a placeholder the store keeps serving after
+// its session exited (measured 2026-11-07: the cap read 51 against 49 processes) — and a
+// fixture that omitted it would model a row the store never writes.
+function row(sessionId, { live = true, source = 'mcp-timer', state = 'idle' } = {}) {
+  const out = { session_id: sessionId, source, state, at: '2026-10-09T00:00:00Z', age_seconds: 3 }
   if (live !== undefined) out.live = live
   return out
 }
@@ -77,6 +82,10 @@ async function count(dir, rows, opts = {}) {
     endpoint: FIXTURE,
     fetchImpl: endpoint(rows, { ledgerRows: dir.ledgerRows }),
     stateDir: dir.root,
+    // ⚠️ Hermetic: the counter unions the pid registry in, and a suite that read the
+    // machine's real `~/.claude/sessions` would make every case depend on whatever this
+    // laptop happens to be running.
+    registry: [],
     ...opts,
   })
   return workers
@@ -153,16 +162,15 @@ test('a malformed row does not crash the count', async () => {
   assert.equal((await count(dir, rows)).length, 1)
 })
 
-test('an auto-resumed worker is not counted', async () => {
-  // Auto-resumes answer to the auto-resume gate's own 30-min crash-loop cap, not this one:
-  // counting them would leave a sweep that revived two dead workers unable to open a new one.
-  // ⚠️ The marker is the ledger's `resumed_from`, and this exclusion used to hold by ACCIDENT —
-  // every auto-resume is headless, and a headless worker held no registry entry under the old
-  // registry-only count. Reading a channel that CAN see headless workers removes that accident.
+test('a resumed worker IS counted — the exclusion that used to sit here was the defect', async () => {
+  // A resumed worker is a live process consuming exactly the load the cap exists to bound.
+  // Until 2026-11-10 this test asserted the opposite, and the rule it pinned made the cap blind
+  // to every session the keep-alive leg revived: measured 2026-11-10, 22 counted against 78 live
+  // worker sessions. The crash-loop cap on the resume path is a separate control and is not this.
   const dir = fixture()
   const sid = 'ffffffff-0000-0000-0000-000000000004'
   ledger(dir, sid, 'auto-resumed', { resumed_from: 'aaaaaaaa-0000-0000-0000-000000000009' })
-  assert.equal((await count(dir, [row(sid)])).length, 0)
+  assert.equal((await count(dir, [row(sid)])).length, 1)
 })
 
 test('a manager record is not counted against the worker cap', async () => {
@@ -295,6 +303,32 @@ test('a successful count is written to the cache', async () => {
   assert.deepEqual(cached, { count: 1, at: '2026-10-20T00:00:00.000Z' })
 })
 
+test('a spawn invalidates the cache, so a failed read after it has no fallback', async () => {
+  // ⚠️ THE CASE THE CACHE COULD NOT SURVIVE. A count taken before a spawn is not a count that
+  // includes it; releasing the next spawn on it is how a burst during a store outage ran past the
+  // ceiling. Deleting the cache on spawn turns that into a refusal, which is the safe direction.
+  const dir = fixture()
+  writeFileSync(
+    join(dir.root, 'last-worker-count.json'),
+    JSON.stringify({ count: 29, at: new Date().toISOString() }),
+  )
+  await invalidateCountCache({ stateDir: dir.root })
+  const counted = await workerSessions({
+    endpoint: FIXTURE,
+    fetchImpl: deadEndpoint(),
+    stateDir: dir.root,
+  })
+  assert.equal(counted.workers, null)
+  assert.equal(counted.stale, null, 'a post-spawn failed read must refuse, not decide on a pre-spawn count')
+})
+
+test('invalidating an absent cache is not an error', async () => {
+  // The normal case: nothing was written yet, and `ENOENT` must not fail the spawn.
+  const dir = fixture()
+  await invalidateCountCache({ stateDir: dir.root })
+  await invalidateCountCache({ stateDir: dir.root })
+})
+
 test('a failed read falls back to a fresh cached count, labelled', async () => {
   const dir = fixture()
   const now = Date.parse('2026-10-20T00:00:00Z')
@@ -366,4 +400,166 @@ test('a body that is not a row array returns null', async () => {
   const dir = fixture()
   ledger(dir, 'ffffffff-0000-0000-0000-000000000009', 'worker')
   assert.equal(await count(dir, { error: 'nope' }), null)
+})
+
+// ⚠️ THE OVER-COUNT CASE, measured 2026-11-07. The store kept stamping `b3d743ea`
+// (`source: a2a`, `location: pod`) with `state: ''` after its session closed, and the row
+// survived the close — so the cap read 51 against 49 real processes. A `live: true` row that
+// carries no `state` is a placeholder, not a session: every real stamp reports what it is
+// doing. The ledger record alone must not make it a worker.
+test('a ghost row is not a live session', async () => {
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-000000000020'
+  ledger(dir, sid, 'exited, row still stamped')
+
+  const workers = await count(dir, [row(sid, { state: '' })])
+  assert.deepEqual(workers, [])
+})
+
+// The control for the ghost exclusion: without it the case above passes on a counter that
+// returns 0 for everything.
+test('a ghost row does not hide a real worker', async () => {
+  const dir = fixture()
+  const ghost = 'ffffffff-0000-0000-0000-000000000021'
+  const real = 'ffffffff-0000-0000-0000-000000000022'
+  ledger(dir, ghost, 'ghost')
+  ledger(dir, real, 'real')
+
+  const workers = await count(dir, [row(ghost, { state: '' }), row(real)])
+  assert.equal(workers.length, 1)
+  assert.equal(workers[0].sessionId, real)
+})
+
+// ⚠️ THE UNDER-COUNT CASE. A headless local worker (`claude --print …`) writes a ledger
+// record and holds a live pid, but never stamps a heartbeat — so its row reads `live: false`.
+// The registry is the only channel that answers for it; measured 2026-11-07, 22 of 44 live
+// sessions were exactly this shape and the count read 10.
+test('a heartbeat-less worker with a live pid is counted', async () => {
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-000000000023'
+  ledger(dir, sid, 'headless --print worker')
+
+  const workers = await count(dir, [row(sid, { live: false })], {
+    registry: [{ sessionId: sid, pid: process.pid }],
+  })
+  assert.equal(workers.length, 1)
+  assert.equal(workers[0].status, 'registry')
+})
+
+// The control: a registry entry whose pid is gone is not a live session.
+test('a registry entry with a dead pid is not counted', async () => {
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-000000000024'
+  ledger(dir, sid, 'exited headless worker')
+
+  const workers = await count(dir, [], { registry: [{ sessionId: sid, pid: 999999999 }] })
+  assert.deepEqual(workers, [])
+})
+
+// The three populations the caps act on. A manager, an interactive worker, a headless worker
+// and an auto-resume that belongs to none of them.
+test('populations split the fleet by role and mode', async () => {
+  const dir = fixture()
+  const manager = 'ffffffff-0000-0000-0000-000000000030'
+  const interactive = 'ffffffff-0000-0000-0000-000000000031'
+  const headless = 'ffffffff-0000-0000-0000-000000000032'
+  const resumed = 'ffffffff-0000-0000-0000-000000000033'
+  ledger(dir, manager, 'topic manager', { role: 'manager', mode: 'interactive' })
+  ledger(dir, interactive, 'tab worker', { mode: 'interactive' })
+  ledger(dir, headless, 'headless worker', { mode: 'headless' })
+  ledger(dir, resumed, 'auto-resumed', {
+    mode: 'headless',
+    resumed_from: 'aaaaaaaa-0000-0000-0000-000000000009',
+  })
+
+  const { populations } = await workerPopulations({
+    endpoint: FIXTURE,
+    fetchImpl: endpoint([row(manager), row(interactive), row(headless), row(resumed)], {
+      ledgerRows: dir.ledgerRows,
+    }),
+    stateDir: dir.root,
+    registry: [],
+  })
+  // The resumed headless worker counts in the headless column like any other: a resume is load,
+  // not a separate species. Until 2026-11-10 this read `headless: 1, total: 2` — the exclusion
+  // that made the cap blind to every session the keep-alive leg revived.
+  assert.deepEqual(populations, { managers: 1, interactive: 1, headless: 2, cluster: 0, a2a: 0, total: 3 })
+})
+
+// `mode` decides the split, and an absent one reads as interactive — the same rule `role`
+// follows. Defaulting a pre-`mode` record to headless would move the whole pre-field
+// population into the wrong column.
+test('a pre-mode record reads as interactive', async () => {
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-000000000034'
+  ledger(dir, sid, 'pre-field worker', { role: '', mode: '' })
+
+  const { populations } = await workerPopulations({
+    endpoint: FIXTURE,
+    fetchImpl: endpoint([row(sid)], { ledgerRows: dir.ledgerRows }),
+    stateDir: dir.root,
+    registry: [],
+  })
+  assert.equal(populations.interactive, 1)
+  assert.equal(populations.headless, 0)
+})
+
+// The ghost rule applies to the populations too, not only to the count.
+test('populations exclude a ghost row', async () => {
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-000000000035'
+  ledger(dir, sid, 'exited', { mode: 'headless' })
+
+  const { populations } = await workerPopulations({
+    endpoint: FIXTURE,
+    fetchImpl: endpoint([row(sid, { state: '' })], { ledgerRows: dir.ledgerRows }),
+    stateDir: dir.root,
+    registry: [],
+  })
+  assert.equal(populations.total, 0)
+})
+
+// ⚠️ THE READER-DIVERGENCE CASE. `resumed_from` is checked BEFORE `role`, so a record that is
+// both a manager and an auto-resume is dropped from every population rather than counted as a
+// manager. Measured 2026-11-08, the Python twin had the opposite order and disagreed on exactly
+// this record — the divergence this consolidation exists to remove.
+test('a manager that is an auto-resume is still a manager', async () => {
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-000000000036'
+  ledger(dir, sid, 'resumed manager', {
+    role: 'manager',
+    mode: 'interactive',
+    resumed_from: 'aaaaaaaa-0000-0000-0000-000000000009',
+  })
+
+  const { populations } = await workerPopulations({
+    endpoint: FIXTURE,
+    fetchImpl: endpoint([row(sid)], { ledgerRows: dir.ledgerRows }),
+    stateDir: dir.root,
+    registry: [],
+  })
+  // `role` is the only exclusion, so a resumed manager IS a manager — and managers are still
+  // outside `total`, which is the cap's unit. Until 2026-11-10 `resumed_from` was checked first
+  // and this record was dropped from every population.
+  assert.equal(populations.managers, 1)
+  assert.equal(populations.total, 0)
+})
+
+// The split's SHAPE is part of its contract: four integer keys, `total` being the cap's unit.
+// A caller that renders this line would otherwise have to trust the field names.
+test('the split is exactly four integer keys', async () => {
+  const dir = fixture()
+  const sid = 'ffffffff-0000-0000-0000-000000000037'
+  ledger(dir, sid, 'headless worker', { mode: 'headless' })
+
+  const { populations } = await workerPopulations({
+    endpoint: FIXTURE,
+    fetchImpl: endpoint([row(sid)], { ledgerRows: dir.ledgerRows }),
+    stateDir: dir.root,
+    registry: [],
+  })
+  assert.deepEqual(Object.keys(populations).sort(), ['a2a', 'cluster', 'headless', 'interactive', 'managers', 'total'])
+  for (const [key, value] of Object.entries(populations)) {
+    assert.equal(Number.isInteger(value), true, `${key} is not an integer`)
+  }
 })

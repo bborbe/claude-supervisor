@@ -54,6 +54,19 @@ the same predicate `coverage()` and `unstamped()` already use, so they cannot di
     for a session whose registry entry said `busy`, whose transcript had been written a minute
     earlier, and whose pane rendered with a live status bar.
 
+⚠️ **ONE CLASS OF LIVE SESSION IS NEVER RE-STAMPED, and it is why a stale row is not death.**
+The `mcp-timer` stamp is written by `claude-wrapper`'s heartbeat poster (`pkg/heartbeat.go`), which
+posts every 30 s for each session the session registry lists with a live pid — and **deliberately
+skips any session id the spawn ledger records terminal** (`done`/`error`), so a finished worker
+does not read live. A session id reused by a later resume of the same id inherits that terminal
+row — a resume writes no new ledger row — so the poster never posts for it again and its row
+freezes at the last POST while its process runs. Measured 2026-11-11: `1c05c414` was
+registry-alive on pid 81794 with its endpoint row frozen at `2026-11-09T22:09:51Z`, because its
+ledger row has read `done` since `2026-11-07T08:49:12Z`. The verdict for this class is
+**UNKNOWN**, never ABSENT, and the registry read in `_absent_licensed` is what keeps it there —
+so that read must never be shortened to "the row says not-live, that is death". The poster's own
+cadence and the ledger's terminal vocabulary are audited in `bborbe/claude-wrapper`, not here.
+
 ⚠️ **AMBIGUOUS is a fourth answer, and it is not a liveness verdict.** Two sessions sharing an
 8-char prefix means the ARGUMENT did not identify one session; answering LIVE or ABSENT either
 way would be a guess. Exit 3 names it and prints the candidates, so the caller can pass the
@@ -395,7 +408,7 @@ def check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
         ), None
 
 
-def _absent_licensed(sid, registry_dir=None):
+def _absent_licensed(sid, registry_dir=None, endpoint_state="holds no row for it"):
     """`(verdict, message, None)` for an id the endpoint holds NO row for — the ABSENT licence.
 
     ⚠️ **The three-tuple is `_check`'s contract, and the `None` row is part of it.** `_check`
@@ -450,8 +463,8 @@ def _absent_licensed(sid, registry_dir=None):
     if non_dead:
         return UNKNOWN, (
             "%s is held by the identity registry as non-dead while the session-heartbeat "
-            "endpoint holds no row for it — the endpoint's coverage of live sessions is "
-            "incomplete, so ABSENT cannot be licensed" % non_dead[0]
+            "endpoint %s — the endpoint's coverage of live sessions is "
+            "incomplete, so ABSENT cannot be licensed" % (non_dead[0], endpoint_state)
         ), None
     return ABSENT, "no session id matches %s" % sid, None
 
@@ -587,7 +600,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
     # The exact-match fast path: a full id is one dict lookup, and the prefix scan is skipped.
     exact = next((k for k in by_id if k.lower() == sid), None)
     if exact is not None:
-        return _verdict_for(by_id[exact], sid)
+        return _verdict_for(by_id[exact], sid, registry_dir)
     matches = sorted(sid_ for sid_ in by_id if sid_.lower().startswith(sid))
     if len(matches) > 1:
         # 12 chars, not 8: the caller already passed a prefix long enough to collide, so
@@ -598,7 +611,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
             ", ".join(m[:12] for m in matches),
         ), None
     if len(matches) == 1:
-        return _verdict_for(by_id[matches[0]], sid)
+        return _verdict_for(by_id[matches[0]], sid, registry_dir)
 
     # The list was readable and matched nothing. Confirm against the per-id route before
     # licensing ABSENT — the one verdict a caller acts on by starting a second writer.
@@ -621,7 +634,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
             _describe_read_failure(exc),
         ), None
     if status == 200 and isinstance(row, dict):
-        return _verdict_for(row, sid)
+        return _verdict_for(row, sid, registry_dir)
     if status == 404:
         return _absent_licensed(sid, registry_dir)
     return UNKNOWN, "session-heartbeat endpoint returned HTTP %s for %s after %d ms" % (
@@ -631,7 +644,7 @@ def _check(session_id, endpoint=None, timeout=_HTTP_TIMEOUT, registry_dir=None):
     ), None
 
 
-def _verdict_for(row, sid):
+def _verdict_for(row, sid, registry_dir=None):
     """`(verdict, message, row)` for a single heartbeat row. UNKNOWN when `live` is unusable.
 
     ⚠️ **A not-live CLUSTER row is UNKNOWN while the local reachability marker is stale.** The
@@ -640,8 +653,10 @@ def _verdict_for(row, sid):
     `_cluster_reachable`. A cluster worker whose stamp has gone stale because the mirror lost the
     cluster is a worker that may be ALIVE behind a network fault; folding that into ABSENT would
     authorise a resume onto it. `UNKNOWN` never authorises a resume, so it is the safe direction.
-    A cluster row with a FRESH marker, and any non-cluster row, keep their ABSENT: there the
-    staleness is the ordinary death case.
+    A cluster row with a FRESH marker, and any non-cluster row, then have their death decided by
+    the identity registry rather than by the row — see `_absent_licensed`. A row that says
+    `live: false` for a session whose process is still running is exactly the stale-row case this
+    gate exists to catch, and it is the same predicate the no-row path already pays.
     """
     full = row.get("session_id") or sid
     live = row.get("live")
@@ -665,7 +680,10 @@ def _verdict_for(row, sid):
                     "%s is a cluster session and %s — the cluster could not be read, so this "
                     "row's staleness proves nothing" % (full, why)
                 ), row
-        return ABSENT, full, row
+        verdict, why, _ = _absent_licensed(
+            full, registry_dir, "serves a stale `live: false` row for it"
+        )
+        return verdict, why, row
     return UNKNOWN, (
         "%s has a heartbeat row with no usable `live` flag — cannot decide liveness" % full
     ), row

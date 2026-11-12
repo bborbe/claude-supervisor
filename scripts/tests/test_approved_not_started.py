@@ -22,6 +22,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 
 # Side effect only: points the start-time cache at an isolated per-run store, in one shared
@@ -46,12 +47,13 @@ def task_file(directory, name, frontmatter, body=""):
     return path
 
 
-def row(name, age_minutes, manager=None):
+def row(name, age_minutes, manager=None, cls="never_started"):
     return {
         "name": name,
         "approved_at": (NOW - timedelta(minutes=age_minutes)).isoformat(),
         "age_seconds": age_minutes * 60,
         "manager": manager,
+        "class": cls,
     }
 
 
@@ -224,7 +226,10 @@ class Collect(unittest.TestCase):
 
 class Render(unittest.TestCase):
     def test_empty_is_a_zero_line(self):
-        self.assertEqual(ans.render([], ans.TICK_MINUTES), "approved, not started: 0")
+        self.assertEqual(
+            ans.render([], ans.TICK_MINUTES),
+            "approved, not started: 0\n  never started: 0 → open · orphaned: 0 → reopen",
+        )
 
     def test_head_line_shape(self):
         """The head is the first line — the row is also over the tick, so it repeats below."""
@@ -256,6 +261,99 @@ class Render(unittest.TestCase):
 
     def test_tick_is_thirty_minutes(self):
         self.assertEqual(ans.TICK_MINUTES, 30)
+
+
+class Split(unittest.TestCase):
+    """The class split — never started vs orphaned, each counted on its own predicate.
+
+    The fixture holds one row per state the split must separate: never started (no id),
+    orphaned (an id the live set does not hold), running (an id it does hold), and a
+    terminal row. Only the first two may be counted, once each, and they must sum to the
+    total the head line prints — the running row is the negative control, because a split
+    that reclassified running work would still sum if it also inflated the total.
+    """
+
+    LIVE = [{"sessionId": "live-1", "name": "Running", "alive": True}]
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        task_file(self.dir, "Never started", "approved_at: 2026-10-01T20:00:00Z\nstatus: next")
+        task_file(
+            self.dir,
+            "Orphaned",
+            "approved_at: 2026-10-01T19:00:00Z\nstatus: in_progress\nclaude_session_id: dead-1",
+        )
+        task_file(
+            self.dir,
+            "Running",
+            "approved_at: 2026-10-01T18:00:00Z\nstatus: in_progress\nclaude_session_id: live-1",
+        )
+        task_file(
+            self.dir,
+            "Done",
+            "approved_at: 2026-10-01T17:00:00Z\nstatus: completed\nclaude_session_id: dead-2",
+        )
+
+    def test_each_row_carries_its_class(self):
+        rows = ans.collect(self.dir, self.LIVE, NOW)
+        self.assertEqual(
+            {r["name"]: r["class"] for r in rows},
+            {"Never started": "never_started", "Orphaned": "orphaned"},
+        )
+
+    def test_split_counts_one_of_each_and_sums_to_the_total(self):
+        rows = ans.collect(self.dir, self.LIVE, NOW)
+        never, orphaned = ans.split(rows)
+        self.assertEqual((never, orphaned), (1, 1))
+        self.assertEqual(never + orphaned, len(rows))
+        self.assertEqual(len(rows), 2)
+
+    def test_a_live_id_counts_in_neither(self):
+        """Negative control: the running row must not reach either class."""
+        rows = ans.collect(self.dir, self.LIVE, NOW)
+        self.assertNotIn("Running", [r["name"] for r in rows])
+        # And the same row, once its session is gone, IS orphaned — the control can fire.
+        rows = ans.collect(self.dir, [], NOW)
+        self.assertEqual(
+            {r["name"]: r["class"] for r in rows}["Running"], "orphaned"
+        )
+        self.assertEqual(ans.split(rows), (1, 2))
+
+    def test_a_row_without_a_class_is_counted_in_neither(self):
+        """No remainder arithmetic — an unclassified row breaks the sum instead of hiding."""
+        rows = [row("A", 10), row("B", 10, cls="orphaned"), row("C", 10, cls=None)]
+        never, orphaned = ans.split(rows)
+        self.assertEqual((never, orphaned), (1, 1))
+        self.assertNotEqual(never + orphaned, len(rows))
+
+    def test_an_unclassified_over_tick_row_is_labelled_not_dropped(self):
+        text = ans.render([row("Odd", 45, cls=None)], ans.TICK_MINUTES)
+        self.assertIn("· Odd — 45m — unclassified — manager unmanaged", text)
+        self.assertIn("never started: 0 → open · orphaned: 0 → reopen", text)
+
+    def test_render_prints_both_numbers_with_their_levers(self):
+        rows = ans.collect(self.dir, self.LIVE, NOW)
+        lines = ans.render(rows, ans.TICK_MINUTES).splitlines()
+        self.assertTrue(lines[0].startswith("approved, not started: 2 · oldest "))
+        self.assertEqual(lines[1], "  never started: 1 → open · orphaned: 1 → reopen")
+
+    def test_over_tick_rows_name_their_class(self):
+        rows = ans.collect(self.dir, self.LIVE, NOW)
+        text = ans.render(rows, ans.TICK_MINUTES)
+        self.assertIn("· Orphaned — ", text)
+        self.assertIn(" — orphaned — manager ", text)
+        self.assertIn(" — never started — manager ", text)
+
+    def test_json_carries_both_counts(self):
+        stdout = io.StringIO()
+        with mock.patch.object(ans, "read_live", return_value=self.LIVE), \
+                contextlib.redirect_stdout(stdout):
+            code = ans.main(["--tasks-dir", self.dir, "--json", "--now", NOW.isoformat()])
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual(payload["never_started"], 1)
+        self.assertEqual(payload["orphaned"], 1)
 
 
 class UnreadableRegistry(unittest.TestCase):
@@ -300,7 +398,13 @@ class UnreadableRegistry(unittest.TestCase):
         self.assertNotEqual(code, 0)
         # The line reaches stdout so a caller that captured only stdout renders a failed
         # read rather than a clean round; the explanation lands on stderr. It is never a count.
-        self.assertEqual(stdout.getvalue().strip(), "approved, not started: unknown")
+        self.assertEqual(
+            stdout.getvalue().strip().splitlines(),
+            [
+                "approved, not started: unknown",
+                "  never started: unknown → open · orphaned: unknown → reopen",
+            ],
+        )
         self.assertIn("unreadable", stderr.getvalue())
         self.assertNotIn("approved, not started: 0", stdout.getvalue() + stderr.getvalue())
 

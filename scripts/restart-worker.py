@@ -64,6 +64,13 @@ The resume recipe is a copy of `commands/open.md` Step 3.1's. A markdown command
 executable, so the two are kept in lockstep by hand; that is the second place this
 mechanism lives, and the reason `commands/worker-restart.md` is scoped to call THIS
 script rather than reimplement kill+resume.
+
+⚠️ **The launcher is not part of that copy.** `resolve_launcher` is the single home of the
+rule, and `commands/open.md` § 3.1 calls `scripts/resolve-launcher.py` — a thin CLI over it
+that also prints the chip — rather than restating the precedence in prose. Prose there let
+whichever session ran the resume pick the launcher: measured 2026-11-07, two `role: agent`
+rows came back as `cc-private-claude --resume … /color cyan` because their resumer ran on
+Opus.
 """
 import argparse
 import datetime
@@ -421,8 +428,8 @@ def vault_configs():
     return data if isinstance(data, list) else None
 
 
-def _launcher_field(path):
-    """The `launcher:` frontmatter value of one page, or `''`."""
+def _page_field(path, key):
+    """One frontmatter scalar from a vault page, or `''` when absent or unreadable."""
     # Read whole: a long-lived task's `metrics_sessions` can push the closing `---` past
     # any fixed head, and a truncated read would drop `launcher:` without a word.
     try:
@@ -434,8 +441,140 @@ def _launcher_field(path):
         return ""
     end = head.find("\n---", 3)
     fm = head[3:end] if end != -1 else ""
-    match = re.search(r"^launcher:[ \t]*['\"]?([^'\"\n]*?)['\"]?[ \t]*$", fm, re.M)
+    match = re.search(rf"^{re.escape(key)}:[ \t]*['\"]?([^'\"\n]*?)['\"]?[ \t]*$", fm, re.M)
     return match.group(1).strip() if match else ""
+
+
+def _launcher_field(path):
+    """The `launcher:` frontmatter value of one page, or `''`."""
+    return _page_field(path, "launcher")
+
+
+def _role_field(path):
+    """The `role:` frontmatter value of one page, or `''` when it carries none.
+
+    `''` is not `agent`: the matrix's Rule 1 default belongs to the caller, and this
+    helper reporting `agent` for a page that says nothing would make "absent" and
+    "declared agent" indistinguishable one layer up.
+    """
+    return _page_field(path, "role")
+
+
+def vault_for_cwd(cwd, configs):
+    """`(root, vault_entry)` for the configured vault whose path holds `cwd`, else None.
+
+    Longest root wins: a vault nested inside another must not be shadowed by its parent.
+    """
+    real_cwd = os.path.realpath(cwd) if cwd else ""
+    best = None
+    for vault in configs:
+        # Guard each element, inside the loop: a payload that parses to a list holding a
+        # non-dict must refuse cleanly, never raise — `resolve-task-file.py` learned this.
+        if not isinstance(vault, dict):
+            continue
+        # Guard the RAW path: `realpath("")` is the process cwd, never `""`, so an entry
+        # with no path would otherwise claim this script's own cwd as a vault root.
+        raw = str(vault.get("path") or "").strip()
+        if not raw:
+            continue
+        root = os.path.realpath(os.path.expanduser(raw))
+        if root and (real_cwd == root or real_cwd.startswith(root + os.sep)):
+            if best is None or len(root) > len(best[0]):
+                best = (root, vault)
+    return best
+
+
+def session_claimant(sid, root, fb):
+    """`(claimant, error)` — the task page claiming `sid`, or `(None, None)` for none.
+
+    `claimant` is `(path, frontmatter)`. Matched on the row's WHOLE id set —
+    `claude_session_id` plus every `metrics_sessions[].session_id`, read through
+    `manager-predispatch.py`'s `session_id_set`, never re-derived. Many tasks carry the
+    id only in `metrics_sessions`, and a single-field match would drop their `launcher:`.
+
+    Two claimants is an error, not a first-match: picking one would resume the session
+    under a launcher chosen by page ordering.
+    """
+    session_id_set = load_sibling("manager-predispatch.py").session_id_set
+    claimants = []
+    for path in fb._pages(root, fb.TASK_SUBDIRS):
+        text = fb._read(path)
+        if sid not in text:
+            continue
+        fm = fb.frontmatter(text)
+        if sid in session_id_set(fm):
+            claimants.append((path, fm))
+    if len(claimants) > 1:
+        names = ", ".join(os.path.basename(p)[:-3] for p, _ in claimants)
+        return None, f"{len(claimants)} task pages claim session {sid} ({names})"
+    return (claimants[0] if claimants else None), None
+
+
+def session_subject(sid, root, fb):
+    """`(subject, error)` — the goal or topic page claiming `sid`, or `(None, None)`.
+
+    Scanned from the PAGES, never from the live session registry, and that is the whole
+    point: the registry is deleted when a session exits, and a manager only reaches the
+    resume path once it has exited — so a registry-based lookup answers "not a manager"
+    exactly where the resume happens. Caught in review on the first cut of `resume_role`,
+    which read the registry and therefore left the bug it claimed to fix in place.
+    `commands/open.md` reads the same page field to decide the resume, so the two agree.
+
+    ⚠️ **The id is matched on the page's WHOLE id set**, exactly as `session_claimant`
+    does — `claude_session_id` plus every `metrics_sessions[].session_id`. Matching only
+    the scalar field drops a page whose manager id was recorded the other way, and the
+    asymmetry was caught in review on this function while its sibling already had it right.
+
+    Two pages claiming one id is an error, not a first-match, for the same reason: picking
+    one would resume the session under a subject chosen by page ordering.
+    """
+    session_id_set = load_sibling("manager-predispatch.py").session_id_set
+    claims = []
+    for kind, subdirs in (("topic", fb.TOPIC_SUBDIRS), ("goal", fb.GOAL_SUBDIRS)):
+        for path in fb._pages(root, subdirs):
+            text = fb._read(path)
+            if sid not in text:
+                continue
+            if sid in session_id_set(fb.frontmatter(text)):
+                claims.append((kind, os.path.basename(path)[:-3]))
+    if len(claims) > 1:
+        names = ", ".join(f"{k} {t}" for k, t in claims)
+        return None, f"{len(claims)} pages claim session {sid} ({names})"
+    return (claims[0] if claims else None), None
+
+
+def resume_role(sid, cwd, fb):
+    """`(role, subject, error)` a resume must launch and colour by.
+
+    `role` is `manager`, `human` or `agent`. A MANAGER is checked first: a manager session
+    usually carries no task page, so the claimant lookup alone would read it as a worker
+    and resume it on the worker default — the same defect the prose rule had, one layer
+    down. `subject` is passed straight to `resolve_launcher`.
+
+    ⚠️ **The manager arm is page-keyed, so a manager with no goal or topic page reads as
+    `agent` here** — the root manager is the live case. Its LAUNCHER still matches (the
+    worker chain resolves the same script), but its chip comes out `pink` rather than
+    `orange`. The page is the only source that survives an exited session, which is the
+    case this function exists for; the registry could cover the page-less root but only
+    while it is live, when no resume is happening.
+
+    An unreadable vault config is not a refusal here: there is no kill to authorise and
+    the row still has to open, so it answers `agent` and the chip follows.
+    """
+    configs = vault_configs()
+    best = vault_for_cwd(cwd, configs) if configs is not None else None
+    if best is None:
+        return "agent", None, None
+    root = best[0]
+    subject, error = session_subject(sid, root, fb)
+    if error:
+        return "agent", None, error
+    if subject is not None:
+        return "manager", subject, None
+    claimant, claimant_error = session_claimant(sid, root, fb)
+    if claimant_error:
+        return "agent", None, claimant_error
+    return (_role_field(claimant[0]) if claimant else "") or "agent", None, None
 
 
 def resolve_launcher(sid, cwd, fb, subject=None):
@@ -465,6 +604,10 @@ def resolve_launcher(sid, cwd, fb, subject=None):
     instead, mirroring `resolveManagerLauncher` in `server/spawn-cwd.mjs`: the subject page's
     `manager_launcher:`, else the vault's configured `manager_launcher` (`manager-default`),
     else the `-claude` sibling for a vault-cli too old to emit that key, else `claude_script`.
+
+    A `role: human` task takes the Claude launcher (`_human_launcher`), mirroring
+    `applyHumanLauncherRule` in `server/spawn-cwd.mjs` — the operator's own session is not a
+    delegate. Its own `launcher:` still wins.
     """
     override = os.environ.get("SUPERVISOR_LAUNCHER")
     if override:
@@ -479,22 +622,7 @@ def resolve_launcher(sid, cwd, fb, subject=None):
     configs = vault_configs()
     if configs is None:
         return None, "vault-cli config could not be read"
-    real_cwd = os.path.realpath(cwd) if cwd else ""
-    best = None
-    for vault in configs:
-        # Guard each element, inside the loop: a payload that parses to a list holding a
-        # non-dict must refuse cleanly, never raise — `resolve-task-file.py` learned this.
-        if not isinstance(vault, dict):
-            continue
-        # Guard the RAW path: `realpath("")` is the process cwd, never `""`, so an entry
-        # with no path would otherwise claim this script's own cwd as a vault root.
-        raw = str(vault.get("path") or "").strip()
-        if not raw:
-            continue
-        root = os.path.realpath(os.path.expanduser(raw))
-        if root and (real_cwd == root or real_cwd.startswith(root + os.sep)):
-            if best is None or len(root) > len(best[0]):
-                best = (root, vault)
+    best = vault_for_cwd(cwd, configs)
     if best is None:
         return None, f"cwd {cwd or '(none)'} is under no configured vault"
     root, vault = best
@@ -519,30 +647,15 @@ def resolve_launcher(sid, cwd, fb, subject=None):
             manager_default = os.path.join(os.path.dirname(vault_launcher), manager_default)
         return load_sibling("manager-launcher.py").resolve(manager_default, page, "manager-default")
 
-    # The task bound to this session, matched on the row's WHOLE id set —
-    # `claude_session_id` plus every `metrics_sessions[].session_id`, read through
-    # `manager-predispatch.py`'s `session_id_set`, never re-derived. Many tasks carry the
-    # id only in `metrics_sessions`, and a single-field match would drop their `launcher:`.
-    session_id_set = load_sibling("manager-predispatch.py").session_id_set
-    claimants = []
-    for path in fb._pages(root, fb.TASK_SUBDIRS):
-        text = fb._read(path)
-        if sid not in text:
-            continue
-        fm = fb.frontmatter(text)
-        if sid in session_id_set(fm):
-            claimants.append((path, fm))
-    if len(claimants) > 1:
-        names = ", ".join(os.path.basename(p)[:-3] for p, _ in claimants)
-        return None, f"{len(claimants)} task pages claim session {sid} ({names})"
+    claimant, claimant_error = session_claimant(sid, root, fb)
+    if claimant_error:
+        return None, claimant_error
 
     # Only the task's OWN `launcher:` is read. Its goals are deliberately not consulted: a
     # goal's `launcher:` describes its manager, and inheriting it resumed every worker under
     # such a goal on the manager's Opus launcher (measured 2026-10-22, 12 private-personal
     # goals). The worker default comes from the vault config instead.
-    own = ""
-    if claimants:
-        own = _launcher_field(claimants[0][0])
+    own = _launcher_field(claimant[0]) if claimant else ""
 
     worker_default = str(vault.get("worker_launcher") or "").strip()
     for value in [own, worker_default]:
@@ -557,9 +670,53 @@ def resolve_launcher(sid, cwd, fb, subject=None):
     if "/" not in name:
         name = os.path.join(os.path.dirname(vault_launcher), name)
     name = os.path.expanduser(name)
+
+    # A `role: human` row takes the vault's CLAUDE launcher, never the worker default — the
+    # operator's own session is not a delegate (operator ruling 2026-11-06, matrix Rule 4).
+    # Mirrors `applyHumanLauncherRule` in `server/spawn-cwd.mjs`, including its ordering: the
+    # `-claude` sibling sits AHEAD of a configured `manager_launcher`, because private-personal
+    # and seibert-brogrammers both point that key at a `-deepseek` script and taking it first
+    # would leave a human row on the worker model while the rule reported success. A task's
+    # own `launcher:` still wins — it is the operator's explicit choice for that row.
+    if claimant and source != "task" and _role_field(claimant[0]) == "human":
+        name, source = _human_launcher(vault_launcher, vault)
+        if name is None:
+            return None, source
+
     if not os.path.isfile(name):
         return None, f"launcher {name} ({source}) does not exist"
     return name, source
+
+
+def _human_launcher(vault_launcher, vault):
+    """`(name, source)` for a `role: human` row: the `-claude` sibling, else the manager chain.
+
+    Reuses `manager-launcher.py`'s `sibling()` and `resolve()` rather than restating the
+    naming convention, so the compatibility rung has one home.
+
+    ⚠️ **The last rung is the vault's `claude_script`, never the worker default.** That is
+    what matrix Rule 4 states and what `applyHumanLauncherRule` does (it falls through to
+    `resolveManagerLauncher`, whose final arm is `vaultLauncher`). Returning the worker
+    resolution here would put a `role: human` row on the `-deepseek` worker launcher in a
+    vault that configures `worker_launcher` but has neither a `-claude` sibling nor a
+    `manager_launcher` — the very outcome this rule exists to prevent. Caught in review.
+
+    `(None, reason)` when the configured `manager_launcher` is unsafe or missing: the
+    reason is `manager-launcher.py`'s own sentence and the caller refuses with it, rather
+    than turning it into a second, misleading "does not exist".
+    """
+    ml = load_sibling("manager-launcher.py")
+    sibling = os.path.expanduser(ml.sibling(vault_launcher))
+    if sibling == vault_launcher:
+        return vault_launcher, "vault"
+    if os.path.isfile(sibling):
+        return sibling, "claude-sibling"
+    manager_default = str(vault.get("manager_launcher") or "").strip()
+    if not manager_default:
+        return vault_launcher, "vault"
+    if "/" not in manager_default:
+        manager_default = os.path.join(os.path.dirname(vault_launcher), manager_default)
+    return ml.resolve(manager_default, None, "manager-default")
 
 
 def changed_inputs(load_path, load_mtime, argv, launcher, started):
@@ -622,8 +779,22 @@ def parse_started(rec):
         return None
 
 
-def resume_command(sid, title, chip, cwd, launcher):
+def resume_command(sid, title, chip, cwd, launcher, fresh_prompt=None,
+                   wezterm="wezterm"):
     """The resume recipe, copied from `commands/open.md` Step 3.1.
+
+    ``fresh_prompt`` set → a NEW session is started through the same launcher, cwd and exit
+    trap, with that prompt as its first turn, instead of ``--resume <sid>``. Used by
+    `fleet-keeper.py`'s answer-gated `restart fresh` (operator ruling 2026-11-10): a lapsed
+    manager whose context is exhausted comes back exhausted on ``--resume``. The colour chip is
+    not applied on this path — the launcher takes one initial prompt, and it carries the loop.
+
+    ``wezterm`` must be the RESOLVED binary, never a bare name. Under launchd the keeper's
+    `PATH` is `/usr/bin:/bin:/usr/sbin:/sbin`, which does not contain wezterm, so a bare
+    `"wezterm"` raises FileNotFoundError there. Measured 2026-11-11: the keeper's
+    `restart fresh` killed the Fleet Manager and then could not spawn the replacement,
+    leaving the fleet dead for 14 minutes until the separate `--absent` resume path (which
+    already used `find_wezterm()`) recovered it.
 
     A markdown command is not executable, so this is a deliberate copy — see the module
     docstring. The `unset` list matters: a resumed session that inherits the parent's
@@ -678,12 +849,18 @@ def resume_command(sid, title, chip, cwd, launcher):
         "unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN "
         "CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; "
         + trap
-        + f'"{script}" --resume {sid} -n "{title}" "/color {chip}"'
+        + (f'"{script}" -n "{title}" "{fresh_prompt}"' if fresh_prompt
+           else f'"{script}" --resume {sid} -n "{title}" "/color {chip}"')
     )
-    argv = ["wezterm", "cli", "spawn"]
+    argv = [wezterm, "cli", "spawn"]
     if cwd:
         argv += ["--cwd", cwd]
     return argv + ["--", "env", f"SESSION_EXIT_RECORD={RECORD_SCRIPT}", "bash", "-lc", inner]
+
+
+#: The only prompts `--fresh-prompt` accepts. The value lands inside `bash -lc '…'`, so it is
+#: an allowlist, never free text.
+FRESH_PROMPTS = ("/supervisor:fleet-loop",)
 
 
 HOLDS_PATH = os.path.expanduser(
@@ -722,6 +899,174 @@ def held_reason(session_id):
     return entry.get("reason") or "held"
 
 
+# --------------------------------------------------------------------------- #
+# the Hold window -- the second source of heldness
+# --------------------------------------------------------------------------- #
+#
+# A pane parked in the WezTerm role map's Hold window is held with no store entry
+# at all: the operator's statement is the pane's POSITION, not a `hold` call. It is
+# resolved at read time from the map's `Hold.window_id` plus `wezterm cli list`, and
+# never persisted -- a stored entry would outlive the pane leaving the window.
+# Inlined, like `read_holds` above: the plugin's scripts do not import each other.
+
+# The WezTerm role map. Same variable the server reads (`server/config.mjs`) and
+# `session-holds.py` reads.
+ROLE_MAP = os.environ.get("SUPERVISOR_ROLE_MAP") or os.path.expanduser(
+    "~/.cache/wezterm-role-map.json"
+)
+
+
+def panes():
+    """Every WezTerm pane, or `None` when the query FAILED.
+
+    ⚠️ `None`, never `[]`: a failed `wezterm cli list` cannot prove a pane is gone
+    any more than it can prove one is live. `[]` is reserved for a transport that
+    answered with zero panes, and for a machine with no `wezterm` BINARY -- an
+    absent transport has no panes, and the Hold window is a WezTerm concept. Only
+    `FileNotFoundError` reads that way; any other `OSError` is a genuine failure and
+    stays `None`. See `docs/pane-reads.md`.
+    """
+    try:
+        result = subprocess.run(
+            ["wezterm", "cli", "list", "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return []
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        listing = json.loads(result.stdout)
+    except ValueError:
+        return None
+    return listing if isinstance(listing, list) else None
+
+
+# The activity glyph WezTerm puts in front of a pane title (`✳` active, `◑`/`◐`
+# otherwise). Decoration on the title, never part of the name.
+_GLYPH = re.compile(r"^[^\w\s]{1,2}\s+")
+
+
+def registry_names():
+    """name -> session id, for the pane join. Later entries win on a clash."""
+    names = {}
+    for path in glob.glob(os.path.join(SESSIONS_DIR, "*.json")):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        sid = data.get("sessionId") or data.get("session_id")
+        name = data.get("name")
+        if sid and name:
+            names[name] = sid
+    return names
+
+
+def session_pane(session_id, listing):
+    """The pane currently showing this session, or None when the listing has none.
+
+    The registry carries no pane id, so a session id joins to its pane through the
+    registry `name`, which is what the tab TITLE carries.
+    """
+    names = registry_names()
+    for pane in listing:
+        title = pane.get("title") or ""
+        name = title if title in names else _GLYPH.sub("", title)
+        if names.get(name) == session_id:
+            return pane.get("pane_id")
+    return None
+
+
+def pane_window(pane_id, listing):
+    """The WezTerm window id owning this pane, or None when the listing has none.
+
+    Read straight off the pane record, with no name join, so it answers for a
+    Hold-window pane whose title the registry does not know.
+    """
+    for pane in listing:
+        if str(pane.get("pane_id")) == str(pane_id):
+            window = pane.get("window_id")
+            if isinstance(window, bool) or not isinstance(window, int):
+                return None
+            return window
+    return None
+
+
+def hold_window_id():
+    """The role map's Hold window id, or None when it cannot be read.
+
+    Read directly from the map's `Hold.window_id`, never through the server's role
+    map: its `ROLES` deliberately excludes Hold, because the Hold window is a
+    parking lot rather than a role and is never spawned into.
+    """
+    try:
+        with open(ROLE_MAP, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    entry = data.get("Hold") if isinstance(data, dict) else None
+    window = entry.get("window_id") if isinstance(entry, dict) else None
+    if isinstance(window, bool) or not isinstance(window, int):
+        return None
+    return window
+
+
+def in_hold_window(target):
+    """Whether session `target` sits in the role map's Hold window.
+
+    Three states, per `docs/pane-reads.md`: `True` in the window, `False` not in
+    it, `None` when the pane listing could NOT be read, so the question is
+    unanswered. A missing role map, an unreadable one, or one carrying no `Hold`
+    key is NOT that third state -- it is the documented fallback to explicit holds
+    only, and it answers `False`.
+    """
+    window = hold_window_id()
+    if window is None:
+        return False
+    listing = panes()
+    if listing is None:
+        return None
+    pane = target if str(target).isdigit() else session_pane(target, listing)
+    if pane is None:
+        return False
+    return pane_window(pane, listing) == window
+
+
+def hold_refusal(session_id):
+    """The refusal a hold warrants for `session_id`, or `(None, None)` when free.
+
+    Returns `(token, detail)`. A hold -- store entry OR a pane in the WezTerm Hold
+    window -- returns `held-session`. ⚠️ A FAILED pane read returns a distinct
+    `hold-unreadable` refusal rather than `(None, None)`, and that is the decision
+    for THIS caller: a restart KILLS a process, so a broken transport must never be
+    read as "not held" -- that is the direction that restarts a session the operator
+    parked. `docs/pane-reads.md` prescribes *refuse non-zero, naming the transport*
+    for a caller that already exits non-zero, which this one does on every refusal.
+    """
+    reason = held_reason(session_id)
+    if reason is not None:
+        return "held-session", (
+            f"session {session_id} carries an operator hold ({reason}); only the "
+            "operator releases it -- see the /supervisor:hold skill"
+        )
+    verdict = in_hold_window(session_id)
+    if verdict is None:
+        return "hold-unreadable", (
+            f"the WezTerm pane list could not be read, so whether session "
+            f"{session_id} sits in the operator's Hold window is unknown; refusing "
+            "rather than restarting a session the operator may have parked"
+        )
+    if verdict:
+        return "held-session", (
+            f"session {session_id} sits in the operator's WezTerm Hold window; only "
+            "the operator releases it -- see the /supervisor:hold skill"
+        )
+    return None, None
 #: The manager registration `fleet-register.py` writes — `{subject, branch, vault}` keyed on
 #: the session id. It is the one record that outlives the process: the registry entry
 #: (`~/.claude/sessions/<pid>.json`) is deleted on death, this is not. Same override chain
@@ -846,6 +1191,45 @@ def read_registration(sid):
     return rec if isinstance(rec, dict) else None
 
 
+def task_terminal_refusal(sid, cwd):
+    """`(token, detail)` when this session's anchored task is already finished, else `None`.
+
+    Every resume leg starts from "the process is gone", never from "the work is done", so a
+    reaped worker whose task reads `completed` is handed a spawn slot again and the close is
+    undone — measured 2026-11-11: session 2e540d65 was closed at 07:18:34Z and its id was live
+    again at 07:33:55Z. The status is read from disk **here, at resume time**, not from a
+    census or digest taken earlier in the round: a task that flips between the candidate
+    enumeration and this call must be refused, and a snapshot read would start it.
+
+    The terminal set and the task lookup are `close-worker.py`'s, not a second copy — the
+    close side and the resume side have to agree on what "finished" means, or the two drift
+    and a task the close refuses to reap is a task the resume happily restarts.
+
+    `(None, None)` is returned in three cases, and only the middle one is an oversight risk:
+      * no task anchor — a manager, or a worker that never entered its task. Refusing here
+        would stop every manager resume.
+      * handed off — the session no longer owns the task; terminality is the successor's.
+      * `task-not-terminal` — the ordinary case, the resume may proceed.
+    """
+    cw = load_sibling("close-worker.py")
+    task = cw.find_task(sid, cwd)
+    if task is None:
+        return None, None
+    path, fm, handed_off = task
+    if handed_off:
+        return None, None
+    if cw.task_verdict(task, cw.defer_date.as_now()) is not None:
+        return None, None
+    status = (fm.get("status") or "").strip()
+    defer = fm.get("defer_date")
+    return (
+        "task-terminal",
+        f"session {sid} · {os.path.basename(path)} is status {status or '(none)'!r} with "
+        f"defer_date {defer or '(unset)'!r}; its work is finished, so resuming would "
+        "restart a session for a closed task and undo the close",
+    )
+
+
 def resume_absent(sid, sessions_dir, dry_run):
     """Resume a session whose process is GONE. Signals nothing; exits 0 only on a resume.
 
@@ -900,6 +1284,14 @@ def resume_absent(sid, sessions_dir, dry_run):
               f"workspace-trust dialog")
         return 1
 
+    # A resume must not start a process for a task that is already finished. This is the only
+    # resume this script can perform for a headless worker, and the incident that motivated the
+    # guard was exactly that shape: a reaped headless worker whose task read `completed` came
+    # back as a live process fifteen minutes later.
+    token, detail = task_terminal_refusal(sid, cwd)
+    if token is not None:
+        return refuse(token, detail)
+
     fb = load_sibling("fleet-board.py")
     subject = str(reg.get("subject") or "").strip() or sid[:8]
     branch = str(reg.get("branch") or "").strip() or "fleet"
@@ -921,7 +1313,7 @@ def resume_absent(sid, sessions_dir, dry_run):
         return 1
 
     chip = fb.MANAGER_COLOUR
-    header = (f"🔄 restart-worker --absent · session {sid[:8]} · {subject!r}"
+    header = (f"🔄 restart-worker --absent · session {sid} · {subject!r}"
               f"{' · dry-run' if dry_run else ''}")
     if dry_run:
         print(header)
@@ -991,11 +1383,34 @@ def main():
                     help="resume a session whose process is GONE: refuses unless no registry "
                          "entry carries the id, signals nothing, and takes cwd and launcher from "
                          "the manager registration")
+    ap.add_argument("--fresh-prompt", choices=FRESH_PROMPTS, default=None,
+                    help="kill the session and start a NEW one (fresh context) through the same "
+                         "launcher and cwd, with this prompt as its first turn, instead of "
+                         "resuming the same id. Allowlisted: the value is typed into a shell")
+    ap.add_argument("--task-guard", action="store_true",
+                    help="read-only: run ONLY the terminal-task guard and exit. Exit 1 with the "
+                         "`task-terminal` token when the session's anchored task is finished, 0 "
+                         "when a resume may proceed. Signals nothing and spawns nothing, so a "
+                         "resume leg that does its own spawn (`commands/open.md` § 3) can route "
+                         "the check through this one implementation instead of copying it")
+    ap.add_argument("--cwd", help="with --task-guard: the directory the task lookup starts "
+                                  "from, normally the session's vault")
     args = ap.parse_args()
+    if args.fresh_prompt and args.absent:
+        ap.error("--fresh-prompt and --absent are exclusive")
 
     sid = args.session_id.strip()
     if not sid:
         ap.error("session id must not be empty")  # exits 2
+
+    if args.task_guard:
+        # The one implementation of the terminal-task guard, exposed so a resume leg that
+        # spawns on its own (`commands/open.md` § 3's wezterm `--resume`) can route the check
+        # here instead of copying it. Read-only: it signals nothing and spawns nothing.
+        token, detail = task_terminal_refusal(sid, args.cwd or os.getcwd())
+        if token is not None:
+            return refuse(token, detail)
+        return 0
 
     if args.absent:
         return resume_absent(sid, args.sessions_dir, args.dry_run)
@@ -1024,14 +1439,12 @@ def main():
     # ⚠️ A held session is never restarted. Checked BEFORE the status and kind gates
     # because a hold is the stronger statement: `busy` says the moment is wrong, a hold says the session
     # is not yours to touch at all, and it outranks every other consideration here.
-    # Restarting is exactly the act the operator held the session to prevent.
-    held = held_reason(sid)
-    if held is not None:
-        return refuse(
-            "held-session",
-            f"session {sid} carries an operator hold ({held}); only the operator "
-            "releases it -- see the /supervisor:hold skill",
-        )
+    # Restarting is exactly the act the operator held the session to prevent. A hold is
+    # either a store entry or a pane parked in the WezTerm Hold window; an UNREADABLE
+    # pane list refuses too (`hold-unreadable`) rather than reading as "not held".
+    token, detail = hold_refusal(sid)
+    if token is not None:
+        return refuse(token, detail)
 
     pid = rec.get("pid")
     if not isinstance(pid, int):
@@ -1121,8 +1534,22 @@ def main():
                 "code and config",
             )
 
+    # The cwd the session must resume INTO. Read here, before the kill: a session
+    # resumed without its own cwd lands in wezterm's default working directory and
+    # stalls on Claude Code's workspace-trust dialog, registering no pid at all — so
+    # this is checked BEFORE signalling, never after. An unresumable session must not
+    # be killed, which is the whole reason the guard sits above `os.kill`.
+    cwd = (rec.get("cwd") or "").strip()
+
+    # The terminal-task guard runs before ANY output: every other refusal in this script
+    # prints its token as the first line a caller reads, and an unresumable session must not
+    # be signalled. It sits above the header for that reason, not by accident.
+    token, detail = task_terminal_refusal(sid, cwd)
+    if token is not None:
+        return refuse(token, detail)
+
     print(
-        f"🔄 restart-worker · session {sid[:8]} · pid {pid} · {name!r}"
+        f"🔄 restart-worker · session {sid} · pid {pid} · {name!r}"
         f"{' · dry-run' if args.dry_run else ''}"
     )
     print(
@@ -1132,13 +1559,6 @@ def main():
     print(f"   changed: {describe_changed(changed)}")
     for line, _ in describe_source(*mcp_source(argv)):
         print(line)
-
-    # The cwd the session must resume INTO. Read here, before the kill: a session
-    # resumed without its own cwd lands in wezterm's default working directory and
-    # stalls on Claude Code's workspace-trust dialog, registering no pid at all — so
-    # this is checked BEFORE signalling, never after. An unresumable session must not
-    # be killed, which is the whole reason the guard sits above `os.kill`.
-    cwd = (rec.get("cwd") or "").strip()
 
     # The launcher the session resumes THROUGH — resolved above, checked here, before the
     # kill: a session resumed through the wrong launcher comes back on a reduced MCP
@@ -1151,8 +1571,21 @@ def main():
         return 1
     print(f"   launcher: {launcher} ({launcher_source})")
 
+    # ⚠️ Resolved BEFORE the kill, for the same reason the launcher and cwd are: a spawn that
+    # cannot happen must not leave a killed pid behind it. The keeper runs under launchd, whose
+    # PATH holds no wezterm, so a bare `"wezterm"` fails there while the `--absent` path (which
+    # already calls `find_wezterm()`) succeeds — the asymmetry that produced the 2026-11-11
+    # destructive-without-restorative failure.
+    wezterm = find_wezterm()
+    if wezterm is None:
+        print("❌ error: no wezterm found on PATH or at a known install location "
+              f"({', '.join(WEZTERM_LOCATIONS)}) — refusing before the kill, nothing signalled")
+        return 1
+
     if args.dry_run:
-        print("   ✅ would kill the pid above and resume the same session id")
+        print("   ✅ would kill the pid above and "
+              + (f"start a fresh session with {args.fresh_prompt}" if args.fresh_prompt
+                 else "resume the same session id"))
         if cwd:
             print(f"   ↪ would resume into {cwd}")
         return 0
@@ -1196,7 +1629,7 @@ def main():
     # the caller branches on this exit code to decide whether the worker is back.
     try:
         spawned = subprocess.run(
-            resume_command(sid, title, chip, cwd, launcher),
+            resume_command(sid, title, chip, cwd, launcher, args.fresh_prompt, wezterm),
             capture_output=True, text=True, timeout=30,
         )
     except Exception as error:
@@ -1208,6 +1641,12 @@ def main():
         )
 
     pane = (spawned.stdout or "").strip().splitlines()
+    if args.fresh_prompt:
+        print(
+            f"   ✅ killed pid {pid}; started a FRESH session (not {sid}) in a new tab "
+            f"(pane {pane[-1] if pane else '?'}) with first turn {args.fresh_prompt}"
+        )
+        return 0
     print(
         f"   ✅ killed pid {pid}; resumed session {sid} in a new tab "
         f"(pane {pane[-1] if pane else '?'})"

@@ -51,7 +51,48 @@ function stringSources({ env, file }) {
 // told them to set is ignored. A key that is read while being reported as unread is worse
 // than an unknown key, because it argues the operator out of a working configuration.
 const KNOWN_TOP_LEVEL = ['spawn', 'cluster']
-const KNOWN_SPAWN_KEYS = ['mode', 'maxConcurrent', 'maxConcurrentHard', 'maxStartsPerMinute', 'maxManagers', 'maxManagersHard']
+
+// The authoritative list is `axisKeys` in bborbe/claude-wrapper `pkg/spawn_axes.go` — that
+// is the program that resolves and validates these caps. This copy exists only so an unknown
+// key can be warned about, and it went stale once already: it was missing maxSessions,
+// maxHeadless, maxInteractive, maxTopicManagers and maxGoalManagers, so a config using any of
+// them was told the key was ignored while the wrapper honoured it. `scripts/check-spawn-keys.py`
+// now derives the expected set from the Go source and fails `make precommit` on a mismatch.
+//
+// The eight pre-rename names are listed too, and that is load-bearing rather than tidiness:
+// the wrapper still accepts them (folded into their current fields with a deprecation
+// warning), so warning "ignored" about one would be exactly the false-warning failure the
+// `cluster` note above describes — an operator following it would rename a key that already
+// worked.
+const KNOWN_SPAWN_KEYS = [
+  // Not cap axes — they keep their names.
+  'mode',
+  'maxStartsPerMinute',
+  // The seven axes, soft and hard.
+  'maxWorkerSoft',
+  'maxWorkerHard',
+  'maxManagersSoft',
+  'maxManagersHard',
+  'maxSessionsSoft',
+  'maxSessionsHard',
+  'maxHeadlessSoft',
+  'maxHeadlessHard',
+  'maxInteractiveSoft',
+  'maxInteractiveHard',
+  'maxTopicManagersSoft',
+  'maxTopicManagersHard',
+  'maxGoalManagersSoft',
+  'maxGoalManagersHard',
+  // Pre-rename spellings the wrapper still parses.
+  'maxConcurrent',
+  'maxConcurrentHard',
+  'maxManagers',
+  'maxSessions',
+  'maxHeadless',
+  'maxInteractive',
+  'maxTopicManagers',
+  'maxGoalManagers',
+]
 const KNOWN_CLUSTER_KEYS = ['url', 'token']
 
 export function unknownKeyWarnings(file, path) {
@@ -299,7 +340,7 @@ export const MAX_CONCURRENT_HARD_ENV = 'SUPERVISOR_MAX_CONCURRENT_HARD'
 // restated copy is a second counter a grep cannot tell from the real one.
 export const DEFAULT_MAX_CONCURRENT = 20
 
-// The HARD ceiling, and the value an absent `spawn.maxConcurrentHard` resolves to.
+// The HARD ceiling, and the value an absent `spawn.maxWorkerHard` resolves to.
 //
 // ⚠️ TWO THRESHOLDS SINCE 2026-10-04, ON THE OPERATOR'S RULING — *"lets start with 30 =
 // soft cap and 50 = hard cap"*. `maxConcurrent` is the SOFT cap: the count at which the
@@ -311,12 +352,26 @@ export const DEFAULT_MAX_CONCURRENT = 20
 //
 // ⚠️ Both thresholds come from config, and both carry a default, deliberately: the
 // operator's numbers are reachable with no config edit at all, and this is what ships.
-// `0` on `spawn.maxConcurrent` remains the OFF SWITCH and disables BOTH — a key whose
+// `0` on `spawn.maxWorkerSoft` remains the OFF SWITCH and disables BOTH — a key whose
 // documented meaning is "no limit" must not leave a second key quietly capping at 50.
 export const DEFAULT_MAX_CONCURRENT_HARD = 50
 
 // One threshold, resolved from the environment and the config file, in that precedence.
 //
+// Which spelling of a key supplied the config value, and that value.
+//
+// The refusal text names `spawn.<key>`, so it must name the key the operator's file actually
+// contains. Reporting the current name for a legacy-keyed file sends them to edit a line that
+// is not there — the same "a refusal that names the wrong place" failure the hard-key branch
+// below calls out by name.
+function fileKey(file, current, legacy) {
+  const spawn = file?.spawn
+  const present = (v) => v !== undefined && v !== null && v !== ''
+  if (present(spawn?.[current])) return { value: spawn[current], key: current }
+  if (present(spawn?.[legacy])) return { value: spawn[legacy], key: legacy }
+  return { value: undefined, key: current }
+}
+
 // Extracted so the soft and hard halves cannot drift in how they validate — the same reason
 // the header gives for checking every source rather than only the winner: a rule restated
 // per key is a second rule a reader cannot tell from the first.
@@ -371,11 +426,12 @@ function resolveThreshold({ env, fileValue, envName, key, path, fallback, noun =
 // the off switch a syntax error, and after the 2026-10-01 reversal it is the only way back
 // to the previous behaviour.
 export function resolveMaxConcurrent({ env, envHard, file, path = 'the supervisor config' } = {}) {
+  const softFile = fileKey(file, 'maxWorkerSoft', 'maxConcurrent')
   const soft = resolveThreshold({
     env,
-    fileValue: file?.spawn?.maxConcurrent,
+    fileValue: softFile.value,
     envName: MAX_CONCURRENT_ENV,
-    key: 'maxConcurrent',
+    key: softFile.key,
     path,
     fallback: DEFAULT_MAX_CONCURRENT,
   })
@@ -390,11 +446,12 @@ export function resolveMaxConcurrent({ env, envHard, file, path = 'the superviso
     return { limit: null, hardLimit: null, source: soft.source, hardSource: soft.source }
   }
 
+  const hardFile = fileKey(file, 'maxWorkerHard', 'maxConcurrentHard')
   const hard = resolveThreshold({
     env: envHard,
-    fileValue: file?.spawn?.maxConcurrentHard,
+    fileValue: hardFile.value,
     envName: MAX_CONCURRENT_HARD_ENV,
-    key: 'maxConcurrentHard',
+    key: hardFile.key,
     path,
     fallback: DEFAULT_MAX_CONCURRENT_HARD,
   })
@@ -411,13 +468,13 @@ export function resolveMaxConcurrent({ env, envHard, file, path = 'the superviso
     // file otherwise. The same rule `resolveThreshold` follows above, and for the same reason:
     // a refusal that names the wrong place sends the operator to edit a file that is not the
     // one governing the spawn.
-    const where = hard.source === 'env' ? MAX_CONCURRENT_HARD_ENV : `"spawn.maxConcurrentHard" in ${path}`
+    const where = hard.source === 'env' ? MAX_CONCURRENT_HARD_ENV : `"spawn.maxWorkerHard" in ${path}`
     return {
       error:
         `${where} is 0, which is not a hard concurrent-worker limit — refusing to spawn rather than ` +
         `removing the ceiling while the soft cap stays in force, because a fleet that looks capped and is ` +
         `not is discovered only by the load it was meant to bound. Set a non-negative integer above the ` +
-        `soft cap, or use the off switch: "spawn.maxConcurrent": 0 disables BOTH thresholds.`,
+        `soft cap, or use the off switch: "spawn.maxWorkerSoft": 0 disables BOTH thresholds.`,
     }
   }
 
@@ -427,11 +484,11 @@ export function resolveMaxConcurrent({ env, envHard, file, path = 'the superviso
   if (hard.limit < soft.limit) {
     return {
       error:
-        `the hard concurrent-worker limit is below the soft one: "spawn.maxConcurrent" resolves to ` +
-        `${soft.limit} (source: ${soft.source}) but "spawn.maxConcurrentHard" resolves to ${hard.limit} ` +
+        `the hard concurrent-worker limit is below the soft one: "spawn.maxWorkerSoft" resolves to ` +
+        `${soft.limit} (source: ${soft.source}) but "spawn.maxWorkerHard" resolves to ${hard.limit} ` +
         `(source: ${hard.source}) — refusing to spawn rather than running under a ceiling beneath its own ` +
         `floor, which would empty the operator-named band and refuse every spawn at the soft count. Raise ` +
-        `spawn.maxConcurrentHard in ${path} to at least ${soft.limit}, or lower spawn.maxConcurrent.`,
+        `spawn.maxWorkerHard in ${path} to at least ${soft.limit}, or lower spawn.maxWorkerSoft.`,
     }
   }
 
@@ -461,6 +518,7 @@ export function concurrentLimitRefusal({
   staleAgeMs = null,
   operatorNamed = false,
   configFile,
+  populations = null,
 }) {
   if (limits.error) return limits.error
   // `null` is unlimited — the soft key's off switch, which disables the pair.
@@ -473,6 +531,15 @@ export function concurrentLimitRefusal({
   // never synthesised: no cache means no fallback, and the refusal below stands.
   const stale = liveCount === null && Number.isInteger(staleCount)
   const count = liveCount === null ? (stale ? staleCount : null) : liveCount
+  // ⚠️ **The number the caps act on is printed WITH what it is made of.** A refusal that says
+  // only "32 live" cannot be acted on: 32 tabs and 32 headless workers are different problems,
+  // and the operator reading a fleet-full card is deciding which to close. The split comes from
+  // the same count pass, so it cannot describe a different instant than the number beside it.
+  const splitNote = populations
+    ? ` The fleet splits: ${populations.managers} managers (not counted against this cap),` +
+      ` ${populations.interactive} interactive, ${populations.headless} headless,` +
+      ` ${populations.cluster} cluster, ${populations.a2a} a2a (${populations.total} workers).`
+    : ''
   const staleNote = stale
     ? ` This decision uses the last successful count, ${Math.round((staleAgeMs ?? 0) / 1000)} s old` +
       ` — the live read failed: ${countError || 'cause unknown'}.`
@@ -506,8 +573,9 @@ export function concurrentLimitRefusal({
     return (
       `the fleet is FULL: ${count} live workers against a hard cap of ${limits.hardLimit} ` +
       `(source: ${limits.hardSource}), so nothing opens — not even an operator-named task. The soft ` +
-      `cap is ${limits.limit} (source: ${limits.source}). Raise spawn.maxConcurrentHard in ` +
-      `${configFile} to open past ${limits.hardLimit}, or set spawn.maxConcurrent to 0 for unlimited.` +
+      `cap is ${limits.limit} (source: ${limits.source}). Raise spawn.maxWorkerHard in ` +
+      `${configFile} to open past ${limits.hardLimit}, or set spawn.maxWorkerSoft to 0 for unlimited.` +
+      splitNote +
       staleNote
     )
   }
@@ -517,8 +585,9 @@ export function concurrentLimitRefusal({
       `the fleet-wide concurrent-worker limit is reached: ${count} live, ${limits.limit} ` +
       `allowed (source: ${limits.source}). Open nothing further and report the remainder as ` +
       `held-on-limit; it is picked up next sweep. An OPERATOR-NAMED task may still open here — this one was ` +
-      `not named, so it is refused. Raise spawn.maxConcurrent in ${configFile}, or ` +
+      `not named, so it is refused. Raise spawn.maxWorkerSoft in ${configFile}, or ` +
       `set it to 0 for unlimited.` +
+      splitNote +
       staleNote
     )
   }
@@ -540,12 +609,13 @@ export const DEFAULT_MAX_MANAGERS_HARD = 5
 // The manager pair, resolved and validated as a pair — same rules as `resolveMaxConcurrent`:
 // every source checked, `0` on the soft key switches BOTH off, `0` on the hard key refused, and
 // a ceiling beneath its floor refused. Config file only: the operator's design names
-// `spawn.maxManagers` / `spawn.maxManagersHard` and no environment variable.
+// `spawn.maxManagersSoft` / `spawn.maxManagersHard` and no environment variable.
 export function resolveMaxManagers({ file, path = 'the supervisor config' } = {}) {
   const noun = 'concurrent-manager'
+  const softFile = fileKey(file, 'maxManagersSoft', 'maxManagers')
   const soft = resolveThreshold({
-    fileValue: file?.spawn?.maxManagers,
-    key: 'maxManagers',
+    fileValue: softFile.value,
+    key: softFile.key,
     path,
     fallback: DEFAULT_MAX_MANAGERS,
     noun,
@@ -569,17 +639,17 @@ export function resolveMaxManagers({ file, path = 'the supervisor config' } = {}
       error:
         `"spawn.maxManagersHard" in ${path} is 0, which is not a hard concurrent-manager limit — refusing ` +
         `to spawn rather than removing the ceiling while the soft cap stays in force. Set a non-negative ` +
-        `integer above the soft cap, or use the off switch: "spawn.maxManagers": 0 disables BOTH thresholds.`,
+        `integer above the soft cap, or use the off switch: "spawn.maxManagersSoft": 0 disables BOTH thresholds.`,
     }
   }
 
   if (hard.limit < soft.limit) {
     return {
       error:
-        `the hard concurrent-manager limit is below the soft one: "spawn.maxManagers" resolves to ` +
+        `the hard concurrent-manager limit is below the soft one: "spawn.maxManagersSoft" resolves to ` +
         `${soft.limit} (source: ${soft.source}) but "spawn.maxManagersHard" resolves to ${hard.limit} ` +
         `(source: ${hard.source}) — refusing to spawn rather than running under a ceiling beneath its own ` +
-        `floor. Raise spawn.maxManagersHard in ${path} to at least ${soft.limit}, or lower spawn.maxManagers.`,
+        `floor. Raise spawn.maxManagersHard in ${path} to at least ${soft.limit}, or lower spawn.maxManagersSoft.`,
     }
   }
 
@@ -619,15 +689,15 @@ export function managerLimitRefusal({ limits, liveCount, countError = null, oper
       `${MANAGER_FLEET_FULL}: ${liveCount} live managers (Fleet Manager excluded) against a hard cap of ` +
       `${limits.hardLimit} — "spawn.maxManagersHard" (source: ${limits.hardSource}) — so nothing opens, not ` +
       `even an operator-named manager. Raise spawn.maxManagersHard in ${configFile}, or set ` +
-      `spawn.maxManagers to 0 for unlimited.`
+      `spawn.maxManagersSoft to 0 for unlimited.`
     )
   }
 
   if (liveCount >= limits.limit && !operatorNamed) {
     return (
       `the concurrent-manager limit is reached: ${liveCount} live managers (Fleet Manager excluded), ` +
-      `${limits.limit} allowed — "spawn.maxManagers" (source: ${limits.source}). An OPERATOR-NAMED manager ` +
-      `may still open here — this one was not named, so it is refused. Raise spawn.maxManagers in ` +
+      `${limits.limit} allowed — "spawn.maxManagersSoft" (source: ${limits.source}). An OPERATOR-NAMED manager ` +
+      `may still open here — this one was not named, so it is refused. Raise spawn.maxManagersSoft in ` +
       `${configFile}, or set it to 0 for unlimited.`
     )
   }
