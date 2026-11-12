@@ -171,8 +171,8 @@ The count is a property of the day, not of the command — **never hardcode it a
 
 Resolve the task in this order — each selected row on the batch path, the single resolved task otherwise:
 
-1. **`role:` present** → use it. Never re-derive over a value already on disk; the field exists so the decision is made once. **`role: manager` is never a spawn target** — render `👤 YOURS` and skip the row (see the manager guard below).
-2. **`role:` absent** → classify it now from the task's **body** per matrix Rule 1, then write the result.
+1. **`role:` present and non-blank** → use it. Never re-derive over a value already on disk; the field exists so the decision is made once. **`role: manager` is never a spawn target** — render `👤 YOURS` and skip the row (see the manager guard below).
+2. **`role:` absent, or present but blank** → classify it now from the task's **body** per matrix Rule 1, then write the result. A key holding `""` is the same state as no key — `vault-cli task set "<task>" role ""` writes one, and using it would open the row with no role at all.
 3. **Body gives no basis to decide** → the default (below) — never a refusal.
 
 **The classifying question and the three `human` signals are matrix Rule 1** — read them there, never restated here.
@@ -185,7 +185,7 @@ Resolve the task in this order — each selected row on the batch path, the sing
 
 **The mapping is not restated here.** `role` → `mode` is matrix Rule 2 ([`docs/role-mode-matrix.md`](../docs/role-mode-matrix.md)); the five watch-need signals live in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker **item 6** as documentation of what a task body can carry — **they no longer select `mode`.** ⚠️ **This line previously described item 6 as carrying *"the asymmetry that makes `interactive` a floor rather than a tie-break"*, and before that as carrying a classifier** — both are recorded rather than quietly dropped, because a reader following either would classify backwards at the one section that decides `mode`.
 
-What this file owns is the **storage and the write**: resolve `mode` per that rule, write the field, and read it back at Step 3.
+What this file owns is the **storage and the write**: resolve `mode` per that rule, write the field, and read it back at Step 3. **A blank `mode:` is absent, not a value** — resolve it per Rule 2 and write the result.
 
 ```bash
 vault-cli --vault "<vault>" task set "<task>" mode <interactive|headless>
