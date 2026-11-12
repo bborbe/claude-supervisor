@@ -577,11 +577,21 @@ def restart_fresh_session(sid):
 
     Reached from exactly one place — `act_on_fresh_answer`, behind the operator's
     `restart fresh` answer to that lapse's own card. Returns `(ok, detail)`.
+
+    `--allow-busy-lapse` (operator ruling 2026-11-12): a lapsed manager is very often still
+    BUSY — the 4.4 h stall on 2026-11-10 was a live manager answering messages with its
+    context exhausted and no digest, and `busy-target` refuses exactly that shape. Measured
+    2026-11-12: 30 of 30 direct attempts refused `busy-target` because the manager runs
+    fleet rounds continuously and never presents `idle`. The operator's answer on this card
+    is the judgement that separates a lapse from a slow round, so the blanket refusal would
+    override a decision the human has already made. The flag is confined to
+    `--reason lapse --fresh-prompt` by restart-worker's own argument check, so it cannot
+    widen any other restart.
     """
     script = os.path.join(HERE, "restart-worker.py")
     try:
         out = subprocess.run([sys.executable, script, sid, "--reason", "lapse",
-                              "--fresh-prompt", FRESH_PROMPT],
+                              "--fresh-prompt", FRESH_PROMPT, "--allow-busy-lapse"],
                              capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
         return False, ("outcome UNKNOWN — restart-worker did not finish within 120 s, so the "
