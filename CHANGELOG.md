@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.295.3
 
 - feat: **`blocked-row-routing.py` decides whether a `🔴 BLOCKED` row needs a manager at all, and emits the routing record when it does.** `agents/fleet-drive.md` renders an `ESCALATION` row for every blocked session and `scripts/escalation-manager.py` resolves which manager owns it — but *whether to route* was still prose. Measured 2026-11-10: 4 of 8 blocked sessions named no recipient, so those rows were escalated to nobody, while 4 that already named an owner would have been double-routed. ⚠️ **It composes two shipped scripts and re-derives neither:** `closer-gate-lint.py`'s `owner_named()` owns "does this closer name an owner" — including the two-haystack split where `⏰ Ends:` sits on its own line — and `escalation-manager.py`'s `resolve()` owns "which manager", including the four-tier chain. A second copy of either is the drift `docs/fleet-surface.md` forbids. ⚠️ **`waiting on someone` is not an owner** — it names a wait, not a recipient — so it routes. ⚠️ **An unresolvable manager exits 2 rather than printing nothing**: silence would read as "an owner was found", the exact failure this ends. Change set: `scripts/blocked-row-routing.py`, `scripts/tests/test_blocked_row_routing.py`, `CHANGELOG.md`.
 
