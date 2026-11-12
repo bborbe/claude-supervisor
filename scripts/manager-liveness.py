@@ -947,18 +947,22 @@ def arm(subject: str, branch: str, interval: int, resume: bool = False,
     has_reset = os.path.exists(reset_path)
     prior = [] if has_reset else read_arm_pairs(s)
     now = time.time()
-    arms = (prior + [(now, interval, beat)])[-ARMS_KEEP:]
+    # `beat` arrives as a string ("head" / "tail"); store a bool so every entry in the
+    # ring carries the same shape and `if b` cannot read "head" as marked.
+    arms = (prior + [(now, interval, beat == "tail")])[-ARMS_KEEP:]
     # The ring keeps TWO columns: the tail marker moved to `<slug>.tail`, because a
     # session still running a pre-upgrade copy rebuilds this ring from two-tuples and
     # erases a third-column marker on every arm it takes. A legacy line (no interval)
     # keeps its single-column shape.
     #
-    # The store keeps only epochs still present in the ring, so it stays bounded by
+    # The store is rebuilt from `arms`' own beat flags, so it stays bounded by
     # ARMS_KEEP — and those epochs SURVIVE the two-tuple rebuild, which is what makes
-    # the marker outlive it. Deriving the store from the ring's own markers instead
-    # would erase it on the first arm after such a rebuild.
-    ring_keys = {f"{epoch:.0f}" for epoch, _, _ in arms}
-    tail_keys = {k for k in read_tail_epochs(s) if k in ring_keys}
+    # the marker outlive it. `read_arm_pairs` already ORs a stored marker into the
+    # flag, so this is the union of store-marked and legacy column-marked arms,
+    # pruned to the ring. Seeding from the store alone would be wrong: this writer
+    # drops the legacy third column, so a pre-move marker not carried over here would
+    # be erased by the very arm meant to preserve it.
+    tail_keys = {f"{epoch:.0f}" for epoch, _, b in arms if b}
     if beat == "tail":
         tail_keys.add(f"{now:.0f}")
     write_atomic(path(s, "arms"), "".join(

@@ -518,6 +518,26 @@ class Liveness(unittest.TestCase):
             newest = fh.read().splitlines()[-1]
         self.assertEqual(len(newest.split()), 2)
 
+    def test_a_legacy_column_marker_migrates_into_the_store_on_the_next_arm(self):
+        # This writer drops the third column. A marker left only there must be carried
+        # into the store by the same arm that strips it, or the migration is itself the
+        # erasure — the defect this task closes, one surface in.
+        s = self.m.slug("Manager Layer", "goal")
+        now = time.time()
+        with open(self.m.path(s, "arms"), "w") as fh:
+            fh.write("".join([
+                f"{now - 1800:.0f} 900\n",
+                f"{now - 900:.0f} 900 tail\n",
+                f"{now:.0f} 900\n",
+            ]))
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", "goal", 900)
+        self.assertEqual(self.m.read_tail_epochs(s), {f"{now - 900:.0f}"})
+        p, _ = self.m.resolve(s, "arms")
+        with open(p) as fh:
+            lines = fh.read().splitlines()
+        self.assertTrue(all(len(line.split()) == 2 for line in lines))
+
     def test_observed_period_reads_tail_beats_from_the_store(self):
         # SC2. The fixture carries the marker ONLY in `<ring>.tail`; its `.arms` lines
         # have no third column. The post-change reader must still measure the
