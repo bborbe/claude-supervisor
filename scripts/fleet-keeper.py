@@ -437,6 +437,15 @@ def parse_rfc3339(stamp):
 #: operator's answer-gating forbids.
 RESUME_DEFER_MAX = 1800
 
+#: How long either restart-worker call may take before the keeper reports an UNKNOWN outcome.
+#: ⚠️ 120 s was too short: `restart-worker.py` resolves the session's role through
+#: `fleet-board.vault_index()`, which walks every vault's topic/goal/task pages and reads each
+#: task's frontmatter — measured 2026-11-12 at **170.6 s**, on its own, before the kill or the
+#: spawn. Every restart therefore timed out, and because the hang sits BEFORE the kill it
+#: aborted harmlessly while never actually recovering anything. Operator ruling 2026-11-12:
+#: raise the budget above the index cost rather than optimise the index here.
+RESTART_WORKER_TIMEOUT = 400
+
 
 def death_corroborated(sid, now):
     """`(ok, why, retryable)` — `ok` only when every independent read agrees the session is gone.
@@ -496,10 +505,11 @@ def resume_absent_session(sid):
     script = os.path.join(HERE, "restart-worker.py")
     try:
         out = subprocess.run([sys.executable, script, sid, "--absent"],
-                             capture_output=True, text=True, timeout=120)
+                             capture_output=True, text=True, timeout=RESTART_WORKER_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return False, ("outcome UNKNOWN — restart-worker did not finish within 120 s, so a pane "
-                       "may have been spawned; check for one before starting it again")
+        return False, (f"outcome UNKNOWN — restart-worker did not finish within "
+                       f"{RESTART_WORKER_TIMEOUT} s, so a pane may have been spawned; check for "
+                       f"one before starting it again")
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"could not run restart-worker, nothing was spawned: {exc}"
     lines = [ln for ln in (out.stdout or "").splitlines() if ln.strip()]
@@ -577,15 +587,26 @@ def restart_fresh_session(sid):
 
     Reached from exactly one place — `act_on_fresh_answer`, behind the operator's
     `restart fresh` answer to that lapse's own card. Returns `(ok, detail)`.
+
+    `--allow-busy-lapse` (operator ruling 2026-11-12): a lapsed manager is very often still
+    BUSY — the 4.4 h stall on 2026-11-10 was a live manager answering messages with its
+    context exhausted and no digest, and `busy-target` refuses exactly that shape. Measured
+    2026-11-12: 30 of 30 direct attempts refused `busy-target` because the manager runs
+    fleet rounds continuously and never presents `idle`. The operator's answer on this card
+    is the judgement that separates a lapse from a slow round, so the blanket refusal would
+    override a decision the human has already made. The flag is confined to
+    `--reason lapse --fresh-prompt` by restart-worker's own argument check, so it cannot
+    widen any other restart.
     """
     script = os.path.join(HERE, "restart-worker.py")
     try:
         out = subprocess.run([sys.executable, script, sid, "--reason", "lapse",
-                              "--fresh-prompt", FRESH_PROMPT],
-                             capture_output=True, text=True, timeout=120)
+                              "--fresh-prompt", FRESH_PROMPT, "--allow-busy-lapse"],
+                             capture_output=True, text=True, timeout=RESTART_WORKER_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return False, ("outcome UNKNOWN — restart-worker did not finish within 120 s, so the "
-                       "manager may be stopped and a pane spawned; check before answering again")
+        return False, (f"outcome UNKNOWN — restart-worker did not finish within "
+                       f"{RESTART_WORKER_TIMEOUT} s, so the manager may be stopped and a pane "
+                       f"spawned; check before answering again")
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"could not run restart-worker, nothing was signalled: {exc}"
     lines = [ln for ln in (out.stdout or "").splitlines() if ln.strip()]

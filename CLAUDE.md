@@ -200,6 +200,7 @@ scripts/keeper-census.py                         the sixth reading (router row 1
 scripts/declared-wait.py                         the shared `⏰ Ends:` reader — one home for the slot `fleet-board.py`, `manager-predispatch.py` and the fleet sweep all key on (the "fourth definition of idle" guard)
 scripts/observable-reprobe.py                    the `⏰ Ends:` observable probe — parses every PR a declaration names, asks `gh` whether each cleared, and prints `resumed` / `still-blocked` / `unprobeable`; clears only when EVERY named PR has, and never on an unreadable input
 scripts/wait-reprobe.py                          the round's join of declared waits to that probe — one row per declaring session, rendered as a `REPROBED` block; renders only, never resumes
+scripts/round-detectors.py                       the round's SC1/SC2 detectors in ONE call — `NO-CARD` (a parked ask with no live store card) and `ROUTING` (an ownerless `🔴 BLOCKED` closer → the subject's manager); builds the manager chain once, and only when a row needs routing
 agents/goal-wrangler.md                routine approval loop over headless workers
 agents/topic-sweep-reader.md            the TOPIC sweep's read half — goal rows and their managers (called by topic-loop/topic-status)
 agents/topic-drive.md                   the TOPIC sweep's act leg — keep-alive and the ranked start hand-over
@@ -213,6 +214,15 @@ agents/gate-relay-read.md                the manager's gate relay, read leg — 
 agents/gate-relay-send.md                the manager's gate relay, send leg — the operator's answer into a tab worker's pane; never drives a selection modal
 server/supervisor.mjs                    the DEPRECATED MCP server — drill scripts only; the live tool is the Go claude-wrapper daemon
 server/policy.json                       bundled approval rules (see README § The approval policy)
+launchd/com.bborbe.fleet-keeper.plist    the fleet keeper — one tick a minute, no Claude session as its parent
+launchd/com.bborbe.idle-reaper.plist     the idle reaper
+launchd/com.bborbe.rebase-agent.plist    the rebase agent
+launchd/com.bborbe.session-exit-daily.plist  the daily session exit
+launchd/com.bborbe.fleet-pusher.plist    the CHEAP wake cadence — StartInterval 900, no model turn (docs/fleet-pusher.md)
+launchd/com.bborbe.fleet-pusher-watch.plist  its watchdog — StartInterval 300, reports a dead cadence
+scripts/fleet-pusher-tick.sh             one pusher pass, exits; resolves the NEWEST installed supervisor, never a pinned version
+scripts/fleet-pusher-watch.sh            reads the pusher's heartbeat, posts one `ack` card once it ages past 1800 s
+docs/fleet-pusher.md                     the pusher's two layers, its install, and the five things that look healthy and are not
 ```
 
 ## Changelog fold guard

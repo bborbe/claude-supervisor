@@ -61,6 +61,7 @@ tier down. The sweep is the product; everything else is delegated.
    | `open-unflagged` | `Held: <goal> — no manager and no flag; report it, open nothing` |
    | `resume` | `To resume: <goal> — /supervisor:open --goal "<goal>"` |
    | `restart` | `To restart: <goal> [<sid8>] — /supervisor:restart <sid>` |
+   | `stand-down` | `To stand down: <goal> — python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-liveness.py" --stop --subject "<goal>" --branch goal` |
    | `leave` | `Stopped: <goal> — deliberate stand-down, no action` |
    | `cannot-tell` | `Unverified: <goal> — <the reason the script printed>` |
    | `crash-loop` | `Crash-loop: <goal> — 3 resumes in 30 min; escalate once` |
@@ -68,7 +69,9 @@ tier down. The sweep is the product; everything else is delegated.
    ⚠️ **`open` and `open-unflagged` are the two arms of an absent `claude_session_id`.**
    `open` → run the open; `open-unflagged` → report and hold, and the goal's workers are
    opened by the fleet round's open leg regardless. `resume` and `restart` are keep-alive
-   arms, never gated on the flag — `docs/session-tiers.md` § Keep-alive.
+   arms, never gated on the flag — `docs/session-tiers.md` § Keep-alive. `stand-down` is the
+   one arm that IS flag-gated, in the other direction: it fires when a flag that was SET has
+   been cleared, and running its `--stop` is what makes the next tick read `leave`.
 
    ⚠️ **This call carries no `--receipt`, on purpose.** The topic round's own inline keep-alive
    (`commands/topic-drive.md` router row 5) is the one path that records owed verdicts on the

@@ -131,10 +131,10 @@ def _load(name, filename):
 pm = _load("propose_managers", "propose-managers.py")
 board = pm._board()
 
-
-def truthy(raw):
-    """A frontmatter flag is `true`, `"true"`, `'true'` — all of them mean the same."""
-    return (raw or "").strip().strip('"').strip("'").lower() in ("true", "yes", "1")
+#: The one flag predicate — see `scripts/flag_provenance.py`. Before the operator's
+#: 2026-11-10 ruling this module read `flag` with no provenance at all, so an agent-set
+#: goal flag opened a manager here while the same write on a task was refused.
+flag_provenance = _load("flag_provenance", "flag_provenance.py")
 
 
 def live_sessions():
@@ -216,7 +216,7 @@ def subjects(vault, kind):
         return None
     out = []
     for name, block in rows:
-        if not truthy(pm.field(block, "flag")):
+        if not flag_provenance.flag_admits(block, kind):
             continue
         status = (pm.field(block, "status") or "").strip().lower()
         if status in TERMINAL_STATUSES:

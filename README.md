@@ -245,7 +245,7 @@ The same boundary applies the other way: a tool the worker's own settings alread
 | `agent_status(agent_id)` | one worker: status, last message, **the current tool call and how long it has been held**, result, plus `session_status` / `awaiting_input`. `result.total_cost_usd` appears **only when the worker reached Anthropic itself** — under a router the SDK still prices from Anthropic's list, so the figure would describe a billing model the traffic never touched and it is omitted rather than disclaimed. It also carries `status_messages` — the `docker` / `k8s` worker's **pushed** A2A status entries (`{worker_id, state, text, ts}`, oldest first) — and `last_status`, the newest of those plus `age_s`. Both are always present and empty for every worker that is not an A2A one, so an empty array means the channel is quiet rather than unwired |
 | `pending_permissions()` | prompts awaiting an answer, across all workers |
 | `await_permission(timeout_ms?)` | block until any worker asks — one call instead of polling |
-| `answer_permission(request_id, behavior, message?)` | `allow` / `deny` — this unblocks the worker. ⚠️ Only for a park **this** server holds: a request parked by another manager's server is refused, and the refusal names the worker, its spawning session, and the `attention-answer.py` route that manager's server settles it by — a cross-session `answer_permission` cannot release another server's park. ⚠️ Gated by **your own session's** permission mode, not the worker's: under `auto` the classifier can refuse the outgoing call (measured 2026-09-19). Fix with Shift+Tab → `accept edits`, then retry — never by changing the worker's mode |
+| `answer_permission(agent_id, request_id, behavior, message?)` | `allow` / `deny` — this unblocks the worker. ⚠️ Only for a park **this** server holds: a request parked by another manager's server is refused, and the refusal names the worker, its spawning session, and the `attention-answer.py` route that manager's server settles it by — a cross-session `answer_permission` cannot release another server's park. ⚠️ Gated by **your own session's** permission mode, not the worker's: under `auto` the classifier can refuse the outgoing call (measured 2026-09-19). Fix with Shift+Tab → `accept edits`, then retry — never by changing the worker's mode |
 
 ## Adopting an existing session
 
@@ -274,6 +274,7 @@ spawn_agent({ prompt, resume: "<session-id>", interactive: false })
 ## Documentation
 
 - [Fleet surface](docs/fleet-surface.md) — the spawn shape and the table render spec (canonical)
+- [Fleet pusher](docs/fleet-pusher.md) — the cheap wake cadence: two launchd agents, and the five things that look healthy and are not
 - [Session tiers](docs/session-tiers.md) — which commands each session tier may run
 - [Subject resolution](docs/subject-resolution.md) — the four-source subject chain the manager commands share
 - [Pane reads](docs/pane-reads.md) — reading a worker's pane

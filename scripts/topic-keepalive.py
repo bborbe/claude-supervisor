@@ -136,21 +136,26 @@ def session_id(fm: str) -> str:
     return _owner().page_session_id(fm)
 
 
-FLAG_TRUTHY = ("true", "yes", "on")
+#: The one flag predicate — see `scripts/flag_provenance.py`. Loaded by path because this
+#: script runs standalone out of the plugin cache, where `scripts/` is not on `sys.path`.
+_FLAG_SPEC = importlib.util.spec_from_file_location(
+    "flag_provenance", os.path.join(HERE, "flag_provenance.py"))
+flag_provenance = importlib.util.module_from_spec(_FLAG_SPEC)
+_FLAG_SPEC.loader.exec_module(flag_provenance)
+
+FLAG_TRUTHY = flag_provenance.FLAG_TRUTHY
 
 
-def flagged(fm: str) -> bool:
-    """The same predicate as `scripts/topic-spawn.py`'s `flagged` — flag present, provenance
-    not read.
+def flagged(fm: str, kind: str = "goal") -> bool:
+    """Delegates to `flag_provenance.flag_admits()` — the same predicate topic-spawn uses.
 
-    Operator ruling 2026-10-30: *"in the end it should not matter how set the flag … if flag,
-    should be open if claude session limit allow it"*. `flag_set_by` is a note, not a gate.
-
-    ⚠️ Duplicated deliberately — both scripts run standalone out of the plugin cache, so
-    there is no shared module to import. A split verdict between them would open exactly
-    the goal the spawn gate refuses, so `test_topic_keepalive.py` asserts the two agree.
+    ⚠️ **Provenance is read.** Until the operator's 2026-11-10 ruling (attention card
+    `f8cd8b41…`) this read the flag and ignored `flag_set_by`, so a keep-alive would
+    restart a manager for a subject an agent had flagged. Both scripts now call the one
+    shared predicate, so a split verdict is structurally impossible rather than merely
+    asserted by a test.
     """
-    return scalar(fm, "flag").lower() in FLAG_TRUTHY
+    return flag_provenance.flag_admits(fm, kind)
 
 
 def base_slug(text: str) -> str:
@@ -177,6 +182,33 @@ def state_path(vault: str, subject: str, branch: str = "goal") -> str:
     p = resume_path(vault, subject, branch)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     return p
+
+
+def flagged_path(vault: str, subject: str, branch: str = "goal") -> str:
+    """Where the "this subject was flagged while running" marker lives. Pure — creates nothing.
+
+    Keyed on the vault's real path for the same reason `resume_path` is: one vault is one
+    store however it is spelled. `MANAGER_FLAGGED_STATE_DIR` relocates it for tests.
+    """
+    name = os.path.basename(os.path.realpath(os.path.expanduser(vault)).rstrip(os.sep)) or "vault"
+    root = os.environ.get("MANAGER_FLAGGED_STATE_DIR") or "~/.claude/state/manager-flagged"
+    return os.path.join(os.path.expanduser(root), name, f"{branch}--{base_slug(subject)}.flagged")
+
+
+def _remember_flagged(marker: str) -> None:
+    """Record that this subject was flagged while running.
+
+    ⚠️ **A write fault warns and does not fail the probe** — the verdict is what the round
+    acts on, and a receipt-style fault must not cost it. But it must not be silent either:
+    without the marker the subject can never be stood down, so an unwritable state dir
+    would turn the whole retire path into a no-op that reports nothing at all.
+    """
+    try:
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        with open(marker, "w", encoding="utf-8") as fh:
+            fh.write(time.strftime("%Y-%m-%dT%H:%M:%S%z") + "\n")
+    except OSError as exc:
+        print(f"flagged marker not written ({marker}): {exc}", file=sys.stderr)
 
 
 _RECEIPT_MOD = None
@@ -350,6 +382,37 @@ def main(argv: list[str]) -> int:
               + (f" ({loop_detail})" if loop_detail else ""))
         return 0
 
+    # ⚠️ **Unflagging IS the stand-down — but only a flag that was SET and then cleared.**
+    # Nothing else reads a flag going *off*, so an operator who clears the flag keeps the
+    # manager they were retiring — M1's gap in `Session Lifecycle`. The rule cannot be
+    # "unflagged plus a session id": measured 2026-11-12 in `private-personal`, of 84 goal
+    # pages carrying a `claude_session_id`, **64 carry no flag at all**, so that predicate
+    # would stand down 83 of 84 live managers. This is a TRANSITION detector instead — an
+    # admitted flag writes a marker, and a later round that finds the page no longer
+    # admitted prints the stand-down. A subject never seen flagged is untouched, which is
+    # what makes the rule safe against the live corpus.
+    #
+    # ⚠️ **The marker is NOT consumed.** This script only PRINTS the stop command; the
+    # round runs it. Consuming on print would lose the signal for good if that run is
+    # skipped, and the subject would never stand down. Keeping it makes the stand-down
+    # retry each round — and it terminates on its own, because once `--stop` lands the loop
+    # reads `STOPPED` and the `loop-stopped` arm above returns before reaching here.
+    marker = flagged_path(a.vault, a.subject, a.branch)
+    if flagged(fm):
+        _remember_flagged(marker)
+    elif sid and os.path.exists(marker):
+        print("stand-down")
+        print(f'python3 scripts/manager-liveness.py --stop --subject "{a.subject}" '
+              f'--branch {a.branch}  (the flag was cleared — the manager is retired and '
+              f'never resumed; the page keeps its status)')
+        # ⚠️ Deliberately NOT recorded on `--receipt`. `manager-receipt.py`'s owed-verdict
+        # machinery exists for verdicts whose execution is otherwise unprovable, and it
+        # refuses a verdict outside `OWING_VERDICTS`; adding `stand-down` there would make
+        # every round owe an outcome it is not wired to pay, and an unpaid debt STOPS the
+        # round. A stand-down needs none: its execution is proved by the next tick reading
+        # the loop `STOPPED` and taking the `loop-stopped` arm.
+        return 0
+
     if not sid:
         # ⚠️ No recorded id is an OPEN, not a resume — a resume continues a session that
         # already has a subject and an id. Rule 4 makes opening the operator's act, so the
@@ -363,7 +426,7 @@ def main(argv: list[str]) -> int:
         else:
             print("open-unflagged")
             print(f"{a.subject} has no session id and does not carry the flag "
-                  f"(`flag: true`, whoever set it) — rule 4 forbids opening a manager for "
+                  f"(`flag: true` set by the operator) — rule 4 forbids opening a manager for "
                   f"it; the fleet round's open leg still opens its workers, so the work "
                   f"moves without one")
         return 0

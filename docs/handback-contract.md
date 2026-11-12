@@ -13,9 +13,9 @@ The shape a sweep's **read half** and **act half** return to their caller. Ten a
   - the **drive leg** returns the **drive verdicts** — one per row it decided, with the decision.
   - the **readings leg** returns the **four verdict families' counts** — every value of every
     family, including the ones at zero, plus the `stuck` rows named, plus `unrecorded` (live
-    sessions in the vault that no page records — they carry rows of their own, so they are
-    already inside `rows=` and the family counts, and the key exists so an unrecorded park
-    reaches the caller instead of only the payload);
+    sessions in the vault that no **tracked** page records — they carry rows of their own, so
+    they are already inside `rows=` and the family counts, and the key exists so an unrecorded
+    park reaches the caller instead of only the payload);
   - the **spawn leg** returns the **per-row call shape** — one line per handed-over row under
     exactly one of `open` / `resume` / `held` / `refused`, the four counts summing to the rows —
     truncating only under the size-cap exception below, with the remainder in the payload.

@@ -127,10 +127,10 @@ rule 4.** Rule 4 forbids opening a manager *on the operator's behalf*; a flagged
 operator's own mark, so opening it executes their decision and decides nothing new
 (`docs/session-tiers.md` § The four tiers, rule 2). `/supervisor:open --flagged` selects
 **tasks** only (`commands/open.md` § the batch), so the manager tiers have their own caller here
-— the operator's ruling is that a flag means *open me* at every tier. `flag_set_by` is **not**
-read on this half (operator ruling 2026-10-30, *"it should not matter how set the flag"*), so the
-manager cap is the only bound; the task batch keeps its provenance gate because it writes
-`approved_by: operator`. That split has one home in `docs/fleet-surface.md` § Approval
+— the operator's ruling is that a flag means *open me* at every tier. `flag_set_by` **is** read
+on this half too: the manager tier routes through `scripts/flag_provenance.py`, so an agent-set
+or absent setter refuses exactly as the task batch refuses it, and the manager cap is the only
+bound after an admitted flag. That rule has one home in `docs/fleet-surface.md` § Approval
 provenance.
 
 ## 3. Open the flagged managers

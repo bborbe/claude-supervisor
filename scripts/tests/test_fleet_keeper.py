@@ -352,7 +352,7 @@ class FreshRestartPinTest(unittest.TestCase):
                 and ast.unparse(c.func) == "subprocess.run"]
         self.assertEqual(1, len(runs))
         self.assertEqual(["sys.executable", "script", "sid", "'--reason'", "'lapse'",
-                          "'--fresh-prompt'", "FRESH_PROMPT"],
+                          "'--fresh-prompt'", "FRESH_PROMPT", "'--allow-busy-lapse'"],
                          [ast.unparse(e) for e in runs[0].args[0].elts])
         assigns = [a for a in ast.walk(node) if isinstance(a, ast.Assign)
                    and any(isinstance(t, ast.Name) and t.id == "script" for t in a.targets)]
@@ -388,6 +388,21 @@ class FreshRestartPinTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("no wezterm found", detail)
         self.assertNotIn("restart-worker · session", detail)
+
+    def test_the_restart_budget_exceeds_the_measured_index_cost(self):
+        """Regression 2026-11-12: a 120 s budget against a 170.6 s `vault_index()`.
+
+        `restart-worker.py` resolves the role through `fleet-board.vault_index()`, measured at
+        170.6 s. At 120 s every restart reported `outcome UNKNOWN` and never recovered
+        anything — and because the hang sits before the kill it failed safely, so nothing
+        flagged it. The budget must stay above the index cost with headroom.
+        """
+        self.assertGreaterEqual(fk.RESTART_WORKER_TIMEOUT, 300)
+        src = (_SCRIPTS / "fleet-keeper.py").read_text(encoding="utf-8")
+        # Both restart-worker call sites share the budget: the fresh restart and the --absent
+        # resume pay the same index cost, so a literal left behind on either is a live defect.
+        self.assertNotIn("timeout=120", src)
+        self.assertEqual(2, src.count("timeout=RESTART_WORKER_TIMEOUT"))
 
     def test_the_gate_requires_the_fresh_answer(self):
         _src, tree, _node = self.parsed()

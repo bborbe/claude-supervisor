@@ -36,7 +36,16 @@ fs = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(fs)
 
 
-def write_page(directory, title, frontmatter):
+def write_page(directory, title, frontmatter, provenance="operator"):
+    """A page whose `flag:` carries provenance by default.
+
+    Under the operator's 2026-11-10 ruling an absent `flag_set_by` opens nothing at any
+    tier, so a fixture that omitted it would model a refused page rather than the
+    ordinary admitted one these tests are about. Pass `provenance=None` for the refusal
+    shape.
+    """
+    if provenance and "flag:" in frontmatter and "flag_set_by" not in frontmatter:
+        frontmatter = frontmatter.strip() + "\nflag_set_by: %s" % provenance
     os.makedirs(directory, exist_ok=True)
     with open(os.path.join(directory, title + ".md"), "w", encoding="utf-8") as handle:
         handle.write("---\n" + frontmatter.strip() + "\n---\n\nbody\n")

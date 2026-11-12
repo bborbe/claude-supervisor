@@ -153,11 +153,9 @@ The count is a property of the day, not of the command — **never hardcode it a
 
 **`mode` is derived per row and written, and the table carries a `mode` column.**
 
-✅ **Per-task mode is its own `mode:` field, never folded into `role:`** — a `role: agent` row with none of item 6's five watch-need signals is `headless`. Step 0.6 decides and writes it.
+✅ **`role` answers the mode question — `mode:` is its stored result, never an independent input.** A `role: agent` row is `headless` always; only `human` and `manager` open as tabs (matrix Rule 2, `docs/role-mode-matrix.md`). Step 0.6 resolves and writes the field.
 
-⚠️ **Two fields, not one: `role` cannot answer the mode question.** The mapping is matrix Rule 2 (`docs/role-mode-matrix.md`).
-
-**The asymmetry that justifies the fleet default staying `interactive` is owned by item 6 of § Spawn a worker**, together with the measurement behind it — stated once there rather than restated here.
+**The measurement behind that rule is owned by item 6 of § Spawn a worker** — stated once there rather than restated here.
 
 **No ordering is computed — but blocked rows are surfaced.** It **holds** every row the CLI reports `blocked=True`: mark it `⛔ HOLD`, print its blockers, skip it with a stated reason.
 
@@ -173,8 +171,8 @@ The count is a property of the day, not of the command — **never hardcode it a
 
 Resolve the task in this order — each selected row on the batch path, the single resolved task otherwise:
 
-1. **`role:` present** → use it. Never re-derive over a value already on disk; the field exists so the decision is made once. **`role: manager` is never a spawn target** — render `👤 YOURS` and skip the row (see the manager guard below).
-2. **`role:` absent** → classify it now from the task's **body** per matrix Rule 1, then write the result.
+1. **`role:` present and non-blank** → use it. Never re-derive over a value already on disk; the field exists so the decision is made once. **`role: manager` is never a spawn target** — render `👤 YOURS` and skip the row (see the manager guard below).
+2. **`role:` absent, or present but blank** → classify it now from the task's **body** per matrix Rule 1, then write the result. A key holding `""` is the same state as no key — `vault-cli task set "<task>" role ""` writes one, and using it would open the row with no role at all.
 3. **Body gives no basis to decide** → the default (below) — never a refusal.
 
 **The classifying question and the three `human` signals are matrix Rule 1** — read them there, never restated here.
@@ -185,9 +183,9 @@ Resolve the task in this order — each selected row on the batch path, the sing
 
 ### Then decide `mode` — the rule lives in one place, and this is not it
 
-**The classifier is not restated here.** The `role` → `mode` mapping is matrix Rule 2 ([`docs/role-mode-matrix.md`](../docs/role-mode-matrix.md)); the five watch-need signals it reads live in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker **item 6**. ⚠️ **This line previously described item 6 as carrying *"the asymmetry that makes `interactive` a floor rather than a tie-break"* — the rule this change flipped** — and that wording is recorded rather than quietly dropped, because a reader following it would classify exactly backwards at the one section that decides `mode`.
+**The mapping is not restated here.** `role` → `mode` is matrix Rule 2 ([`docs/role-mode-matrix.md`](../docs/role-mode-matrix.md)); the five watch-need signals live in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker **item 6** as documentation of what a task body can carry — **they no longer select `mode`.** ⚠️ **This line previously described item 6 as carrying *"the asymmetry that makes `interactive` a floor rather than a tie-break"*, and before that as carrying a classifier** — both are recorded rather than quietly dropped, because a reader following either would classify backwards at the one section that decides `mode`.
 
-What this file owns is the **storage and the write**: resolve `mode` per that rule, write the field, and read it back at Step 3.
+What this file owns is the **storage and the write**: resolve `mode` per that rule, write the field, and read it back at Step 3. **A blank `mode:` is absent, not a value** — resolve it per Rule 2 and write the result.
 
 ```bash
 vault-cli --vault "<vault>" task set "<task>" mode <interactive|headless>
@@ -204,7 +202,7 @@ vault-cli --vault "<vault>" task set "<task>" mode <interactive|headless>
 
 Writing them is the point, not a side effect. The next batch reads the fields instead of re-deciding, so one task cannot be classified one way today and the other way tomorrow. It also makes the call reviewable — a wrong value is visible on disk and the operator corrects it with that same one-line command.
 
-⚠️ **`role: agent` overrides a stored `mode: interactive`.** An agent row carrying none of item 6's five watch-need signals opens `headless` even when the field on disk says `interactive` (operator ruling 2026-11-07; matrix Rule 2 carries the narrowing). Rewrite the field and print `normalised mode interactive -> headless`. Every other case keeps item 6's both-ways carve-out — `human`, `manager`, and an `agent` row that *does* carry a signal all honour what is on disk.
+⚠️ **`role: agent` overrides a stored `mode: interactive` — always, with no signal test.** An agent row opens `headless` even when the field on disk says `interactive` (operator ruling 2026-11-12; matrix Rule 2 carries the rule). Rewrite the field and print `normalised mode interactive -> headless`. `human` and `manager` honour what is on disk, which is always `interactive`.
 
 **`shipping:` is read here and passed at Step 3 — never inferred.** Pass `shipping: true` to `spawn_agent` only when the field reads `true`; omit it otherwise. Rule: § Spawn a worker item 9.
 
@@ -220,7 +218,7 @@ This is the same probe `server/supervisor.mjs`'s `spawnAgent` enforces, so a spa
 
 ⚠️ **A machine-written role is indistinguishable from an operator-written one on disk.** Nothing in the frontmatter records who decided. So **print every auto-filled row distinctly** (`🏷️ filled now` if classified, `🏷️ defaulted <field>=<value>` per defaulted field, nothing if on disk) instead of folding it into the opened count. That report line is the only provenance this decision has, and it exists for exactly one read — the first one, while objecting is still cheap.
 
-⚠️ **A body that carries no signal takes the default — there is no refusal branch.** Write `role: agent` and print `🏷️ defaulted role=agent`; `mode` then resolves per matrix Rule 2 (an `agent` body with none of item 6's five watch-need signals is `headless`) and prints `🏷️ defaulted mode=headless`.
+⚠️ **A body that carries no signal takes the default — there is no refusal branch.** Write `role: agent` and print `🏷️ defaulted role=agent`; `mode` then resolves per matrix Rule 2 — `role: agent` is `headless` whatever the body carries — and prints `🏷️ defaulted mode=headless`.
 
 **A `role: human` row is never opened as a WORKER — it is opened into the Direct window instead, and it is ALWAYS opened.** A previous run's "leave them closed" never carries over (matrix Rule 4).
 
@@ -244,12 +242,12 @@ approve  a routine task - 2026W39
          (a row already approved, or one not at `phase: todo`, prints nothing)
 
   #  task                                          role    mode
-  1  a monitoring task - 2026W38-sun                  agent   interactive   🏷️ filled now
-  2  a routine task (my-vault) - 2026-09-20   agent   interactive   (on disk)
+  1  a monitoring task - 2026W38-sun                  agent   headless      🏷️ filled now
+  2  a routine task (my-vault) - 2026-09-20   agent   headless      (on disk, was interactive — normalised)
   3  a routine task - 2026W39                       human   interactive   🏷️ filled now
      → DIRECT — role: human, opened as the operator's own session, never as a worker
   4  Untitled Stub - 2026-09-21                    agent   headless      🏷️ defaulted role=agent · 🏷️ defaulted mode=headless
- 10  a routine task - 2026W38-sun                   agent   interactive   (on disk)
+ 10  a routine task - 2026W38-sun                   agent   headless      (on disk)
      ⛔ HOLD — blocked by two other in-flight tasks
   ...
   Rows always carry a `mode:` by the time Step 3 reads them — § Step 0.6 resolves
@@ -568,7 +566,7 @@ The goal branch **resolves the goal's manager and delegates**; it reimplements n
 ⚠️ **The ban this replaces was right about the hazard and wrong about the remedy.** ⚠️ **The order by which an owner is resolved is stated once, in `docs/fleet-surface.md` § *Which manager owns a subject* — not restated here.**
 2. **Live → JUMP** to it, same `/supervisor:jump pane:<pane-id>` + window-id reporting as Step 2A — this covers both a registry hit and a page-field `LIVE`.
 3. **`ABSENT` → RESUME it by id.** The conversation is what is durable, not the process, so an `ABSENT` id is a resume, never a reason to spawn. ⚠️ **Do not reach item 4 on an `ABSENT` verdict** — a second manager on a live topic is precisely the outcome this step exists to prevent, and it is the failure the superseded ban above was trying to avoid by refusing the field altogether.
-4. **`UNKNOWN` or `AMBIGUOUS`, or `None` with no page id → the flag gate, then spawn a manager.** ⚠️ **`None` here means registry empty AND the page carried no session id** — a page id that resolved `ABSENT` never reaches this item (item 3). A topic that has never had a manager has no page id and no registry row, and it must spawn. ⚠️ **This is the branch's only OPEN site, so the flag is read here and nowhere earlier** — items 2 (JUMP) and 3 (RESUME) are never gated (`docs/session-tiers.md` § Keep-alive). Run `topic-spawn.py --vault "<vault-root>" --topic "<topic>" --topic-open`; the first line is the verdict — `topic-unflagged` (1) → print `⏸ held — no flag` and STOP, never set the flag yourself; `manager-cap` (1) → the second line names the bound, start nothing this tick. ⚠️ **Provenance is not read** (operator ruling 2026-10-30: *"it should not matter how set the flag"*), so the cap is the only bound after the flag. On `open-ok: <topic>` (0), spawn on `<MGR>` from `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-launcher.py" "<manager_launcher>" "<topic page>" --default-source manager-default` (prints `<MGR>\t<source>`; non-zero → stop; rule: `docs/fleet-surface.md`). `<manager_launcher>` is the vault's configured value **as the absolute path `config list` emits** — a bare name fails the script's file check — and `--default-source manager-default` tells it the value came from config rather than from `claude_script`. The script applies the subject page's override and reports `manager-default` or `subject`:
+4. **`UNKNOWN` or `AMBIGUOUS`, or `None` with no page id → the flag gate, then spawn a manager.** ⚠️ **`None` here means registry empty AND the page carried no session id** — a page id that resolved `ABSENT` never reaches this item (item 3). A topic that has never had a manager has no page id and no registry row, and it must spawn. ⚠️ **This is the branch's only OPEN site, so the flag is read here and nowhere earlier** — items 2 (JUMP) and 3 (RESUME) are never gated (`docs/session-tiers.md` § Keep-alive). Run `topic-spawn.py --vault "<vault-root>" --topic "<topic>" --topic-open`; the first line is the verdict — `topic-unflagged` (1) → print `⏸ held — no flag` and STOP, never set the flag yourself; `manager-cap` (1) → the second line names the bound, start nothing this tick. ⚠️ **Provenance IS read** via `scripts/flag_provenance.py`; an agent-set or absent setter refuses as on the task batch. On `open-ok: <topic>` (0), spawn on `<MGR>` from `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-launcher.py" "<manager_launcher>" "<topic page>" --default-source manager-default` (prints `<MGR>\t<source>`; non-zero → stop; rule: `docs/fleet-surface.md`). `<manager_launcher>` is the vault's configured value **as the absolute path `config list` emits** — a bare name fails the script's file check — and `--default-source manager-default` tells it the value came from config rather than from `claude_script`. The script applies the subject page's override and reports `manager-default` or `subject`:
 
    ```bash
    wezterm cli spawn -- env SESSION_EXIT_RECORD="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-exit-record.py" bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; _sx() { rc=$?; "$SESSION_EXIT_RECORD" append --pid $$ --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn --pid $$ || true; "$SESSION_EXIT_RECORD" observe --pid $$ || true; trap _sx EXIT; "<MGR>" -n "<topic> Manager" "/color orange"'
@@ -598,13 +596,13 @@ Effective dir = the vault's `session_project_dir`, else no `cd`.
 
 **The carve-out is both-ways: pass the argument whenever the task's frontmatter declares a `mode:`, and omit it only when the field is absent.** `mode: headless` → `interactive=false`; `mode: interactive` → `interactive=true`. An absent `mode:` still means *omit the argument entirely*, not *pass interactive*. ⚠️ **Local rows only** — on a `docker` / `k8s` row this carve-out does not apply; `§ Spawn a worker` item 7 carries that branch.
 
-The rule that *produces* the value is not restated here — its home is matrix Rule 2 (`docs/role-mode-matrix.md`), whose signals live in fleet-surface item 6; this line is only the consumption.
+The rule that *produces* the value is not restated here — its home is matrix Rule 2 (`docs/role-mode-matrix.md`), whose five signals live in fleet-surface item 6 as documentation only; this line is only the consumption. ⚠️ **`mode: interactive` reaches only a `role: human` or `role: manager` row** — a `role: agent` row is always `headless` by the time Step 0.6 has written the field.
 
 ⚠️ **A headless worker carries two standing constraints, and both are the spawner's, not the worker's** — its gates park with the session that spawned it, and its turn ends at READY rather than at completion. Both are stated in full in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6, together with the resume-path behaviour; read them there before opening one. ⚠️ **This paragraph previously concluded that `headless` was rare and never a guess**, which was the pre-2026-10-22 floor — recorded rather than quietly dropped, because it is what this file carried until the flip.
 
 **Do NOT add `policy` while `defaultMode` is `auto`** — `auto` is in `POLICY_UNREACHABLE_MODES`, so the spawn refuses a named policy. Omit it; the overlay needs `acceptEdits`.
 
-**`interactive` is the debug escape hatch.** Pass `interactive=true` to watch a worker live, `interactive=false` to force one headless worker; it overrides the fleet default for that spawn. ⚠️ **Local rows only.**
+**`interactive` is the debug escape hatch.** Pass `interactive=true` to watch a worker live, `interactive=false` to force one headless worker; it overrides the fleet default for that spawn. ⚠️ **Local rows only.** ⚠️ **Never on a `role: agent` spawn** — the server does **not** refuse the pair (a refusal in `server/supervisor.mjs` would be dead code: the live `spawn_agent` is the Go `claude-wrapper` daemon), so nothing stops it at the call boundary and the mistake reaches disk. `scripts/check-spawn-ledger.py` is what catches it, after the fact, as a `role: agent` + `mode=interactive` record.
 
 Requires `mcp__supervisor__*` in this session — its absence fails silently.
 

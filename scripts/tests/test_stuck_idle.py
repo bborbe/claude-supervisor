@@ -151,6 +151,23 @@ class TranscriptResolutionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             self.assertIsNone(probe.resolve_transcript(SID, root))
 
+    def test_a_resumed_session_resolves_to_its_newest_transcript(self):
+        # One transcript per project dir the session ran in; the live one is the newest.
+        # Returning None on the tie — the shape before this was exercised for real —
+        # makes every resumed worker permanently `unverifiable`.
+        with tempfile.TemporaryDirectory() as root:
+            old_dir = os.path.join(root, "project-old")
+            new_dir = os.path.join(root, "project-new")
+            os.makedirs(old_dir)
+            os.makedirs(new_dir)
+            old = os.path.join(old_dir, f"{SID}.jsonl")
+            new = os.path.join(new_dir, f"{SID}.jsonl")
+            open(old, "w").close()
+            open(new, "w").close()
+            os.utime(old, (1_000_000, 1_000_000))
+            os.utime(new, (2_000_000, 2_000_000))
+            self.assertEqual(probe.resolve_transcript(SID, root), new)
+
 
 if __name__ == "__main__":
     unittest.main()
