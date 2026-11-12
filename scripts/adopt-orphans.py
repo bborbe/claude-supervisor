@@ -142,7 +142,16 @@ def live_session_ids(registry_dir=None, heartbeat_dir=None, registry_out=None):
     if heartbeats is None:
         return None
     if registry_out is not None:
-        registry_out.update(registry)
+        # ⚠️ **The RAW records, not `read_registry`'s normalised dict.** That view carries
+        # only `{pid, status, name, alive}` — `entrypoint` is dropped — so a caller keying
+        # its population on `entrypoint` would read `None` on every row and report nothing
+        # while looking correct. `read_registry_entries` is the same file read as the list
+        # shape, and it keeps the field.
+        entries = identity.read_registry_entries(registry_dir) if registry_dir else identity.read_registry_entries()
+        for _path, rec in entries or []:
+            session_id = rec.get("sessionId") or rec.get("session_id")
+            if session_id:
+                registry_out[session_id] = rec
     live = set(registry)
     for stamp in heartbeats:
         session_id = stamp.get("session_id")
@@ -195,12 +204,25 @@ def parked_workers(workers, registry):
     `manager-attention-watch.py` reads for `registry:waiting`. A worker that is `busy` is
     mid-turn and a worker that is `idle` is between turns; neither is waiting on an answer
     that will never come, so neither belongs here.
+
+    ⚠️ **HEADLESS ONLY, and this is the difference between a recovery and a duplicate
+    process.** A tab worker parked on its own tab is waiting on a person looking at that
+    tab — its transport is the pane, which outlived the spawner, so nothing about its
+    prompt is orphaned. Resuming it would put a SECOND process on a live conversation.
+    E13 is specifically the headless worker, whose prompt is served by the spawner's own
+    server process and dies with it; `entrypoint: sdk-cli` is the registry's marker for
+    that kind, the same one `reap-idle-headless.py` gates its own population on.
     """
     out = []
     for worker in workers:
         record = registry.get(worker) or {}
-        if isinstance(record, dict) and record.get("status") == "waiting":
-            out.append(worker)
+        if not isinstance(record, dict):
+            continue
+        if record.get("status") != "waiting":
+            continue
+        if record.get("entrypoint") != "sdk-cli":
+            continue
+        out.append(worker)
     return out
 
 

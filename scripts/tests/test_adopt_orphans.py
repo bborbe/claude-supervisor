@@ -100,7 +100,7 @@ class Base(unittest.TestCase):
             record.pop("role", None)
         self.endpoint.add_ledger_row(record)
 
-    def live(self, session_id, status="running"):
+    def live(self, session_id, status="running", entrypoint="sdk-cli"):
         """A registry entry -- the liveness channel that answers for an interactive session.
 
         `status` is the registry's own field: `waiting` is what makes a worker PARKED, and
@@ -110,7 +110,15 @@ class Base(unittest.TestCase):
         with open(
             os.path.join(self.registry_dir, "%d.json" % self._pids), "w", encoding="utf-8"
         ) as fh:
-            json.dump({"sessionId": session_id, "pid": self._pids, "status": status}, fh)
+            json.dump(
+                {
+                    "sessionId": session_id,
+                    "pid": self._pids,
+                    "status": status,
+                    "entrypoint": entrypoint,
+                },
+                fh,
+            )
 
     def subject(self, session_id, text):
         """A subject-resolution record, as `docs/subject-resolution.md` § Recording writes it."""
@@ -486,6 +494,15 @@ class Parked(Base):
     def test_a_busy_worker_is_not_parked(self):
         self.spawn(WORKER, parent=EXITED)
         self.live(WORKER, status="busy")
+        proc = self.run_script()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("parked:", proc.stdout)
+
+    def test_a_parked_TAB_worker_is_never_resumed(self):
+        # Its transport is the pane, which outlived the spawner: nothing about its prompt
+        # is orphaned, and a resume would put a second process on a live conversation.
+        self.spawn(WORKER, parent=EXITED)
+        self.live(WORKER, status="waiting", entrypoint="cli")
         proc = self.run_script()
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertNotIn("parked:", proc.stdout)

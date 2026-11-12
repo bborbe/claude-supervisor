@@ -105,7 +105,7 @@ def in_flight_tool(path):
     a scan that reports any of them names a call the worker abandoned — the same
     rule `CLAUDE.md` § Reading a worker states for `agent_status`.
     """
-    pending = None
+    pending = None  # (id, name) of the last unmatched call
     for rec in _records(path):
         content = rec.get("message", {}).get("content") if isinstance(rec.get("message"), dict) else None
         if not isinstance(content, list):
@@ -114,10 +114,16 @@ def in_flight_tool(path):
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "tool_use":
-                pending = block.get("name") or "tool"
-            elif block.get("type") == "tool_result":
-                pending = None
-    return pending
+                pending = (block.get("id"), block.get("name") or "tool")
+            elif block.get("type") == "tool_result" and pending is not None:
+                # ⚠️ **Match the id, never "the next result clears it".** Two calls in
+                # flight answer out of order, so an id-blind clear reports the second call
+                # finished while it is still running — and an idle verdict on a working
+                # worker is the one this probe must never produce. A record with no
+                # `tool_use_id` predates the field, so it still clears.
+                if block.get("tool_use_id") in (None, pending[0]):
+                    pending = None
+    return pending[1] if pending else None
 
 
 def declared_wait(task_file, window=40):
@@ -132,7 +138,10 @@ def declared_wait(task_file, window=40):
         with open(task_file, encoding="utf-8") as handle:
             lines = handle.read().splitlines()
     except OSError:
-        return False
+        # ⚠️ **None, not False.** An unreadable task file proves nothing about whether a
+        # wait was declared, and returning False would let a missing page read as "no
+        # wait" — the clean direction — and resume a worker that is legitimately parked.
+        return None
     tail = "\n".join(lines[-window:])
     return any(marker in tail for marker in WAIT_MARKERS)
 
@@ -143,7 +152,7 @@ def decide(mtime, previous_mtime, in_flight, wait):
     `mtime` None means the transcript could not be read, which is `unverifiable`:
     an unreadable probe and a clean one must never render the same.
     """
-    if mtime is None:
+    if mtime is None or wait is None:
         return VERDICT_UNVERIFIABLE
     unchanged = 1
     if previous_mtime is not None and int(previous_mtime) == int(mtime):
@@ -190,7 +199,7 @@ def main(argv=None):
         f"STUCK {sid} task={os.path.basename(args.task)!r} "
         f"transcript={path or 'none'} mtime={mtime if mtime is not None else 'none'} "
         f"unchanged_rounds={unchanged} in_flight={tool or 'none'} "
-        f"wait={'declared' if wait else 'none'} -> {verdict}"
+        f"wait={'unknown' if wait is None else ('declared' if wait else 'none')} -> {verdict}"
     )
     return 0
 

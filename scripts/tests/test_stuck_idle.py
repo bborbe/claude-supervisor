@@ -48,6 +48,10 @@ class DecideTest(unittest.TestCase):
     def test_unreadable_transcript_is_unverifiable_not_not_stuck(self):
         self.assertEqual(probe.decide(None, None, None, False), "unverifiable")
 
+    def test_an_unreadable_task_file_is_unverifiable(self):
+        # None means "could not read", and the clean direction is the dangerous one here.
+        self.assertEqual(probe.decide(100, 100, None, None), "unverifiable")
+
 
 class InFlightTest(unittest.TestCase):
     """`in flight` is the LAST call, never any unmatched one."""
@@ -68,10 +72,22 @@ class InFlightTest(unittest.TestCase):
 
     def test_matched_tool_use_is_not_in_flight(self):
         path = self._write([
-            {"message": {"content": [{"type": "tool_use", "name": "Bash"}]}},
-            {"message": {"content": [{"type": "tool_result"}]}},
+            {"message": {"content": [{"type": "tool_use", "id": "a", "name": "Bash"}]}},
+            {"message": {"content": [{"type": "tool_result", "tool_use_id": "a"}]}},
         ])
         self.assertIsNone(probe.in_flight_tool(path))
+
+    def test_a_result_for_another_call_does_not_clear_the_pending_one(self):
+        # Two calls in flight answer out of order; an id-blind clear reports the second
+        # finished while it is still running.
+        path = self._write([
+            {"message": {"content": [
+                {"type": "tool_use", "id": "a", "name": "Bash"},
+                {"type": "tool_use", "id": "b", "name": "Read"},
+            ]}},
+            {"message": {"content": [{"type": "tool_result", "tool_use_id": "a"}]}},
+        ])
+        self.assertEqual(probe.in_flight_tool(path), "Read")
 
     def test_abandoned_earlier_call_does_not_count(self):
         # An interrupted call leaves an unmatched tool_use behind; the conversation
@@ -110,6 +126,9 @@ class DeclaredWaitTest(unittest.TestCase):
     def test_plain_progress_declares_nothing(self):
         path = self._write("# Progress\n\n- today: implemented the probe\n")
         self.assertFalse(probe.declared_wait(path))
+
+    def test_an_unreadable_task_file_reads_unknown_not_clean(self):
+        self.assertIsNone(probe.declared_wait("/nonexistent/task.md"))
 
     def test_a_wait_outside_the_tail_is_not_read(self):
         # A park the session already left must not keep reading as live.
