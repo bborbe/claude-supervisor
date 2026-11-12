@@ -100,13 +100,25 @@ class Base(unittest.TestCase):
             record.pop("role", None)
         self.endpoint.add_ledger_row(record)
 
-    def live(self, session_id):
-        """A registry entry -- the liveness channel that answers for an interactive session."""
+    def live(self, session_id, status="running", entrypoint="sdk-cli"):
+        """A registry entry -- the liveness channel that answers for an interactive session.
+
+        `status` is the registry's own field: `waiting` is what makes a worker PARKED, and
+        the parked cases below set it to pin E13's population.
+        """
         self._pids += 1
         with open(
             os.path.join(self.registry_dir, "%d.json" % self._pids), "w", encoding="utf-8"
         ) as fh:
-            json.dump({"sessionId": session_id, "pid": self._pids, "status": "running"}, fh)
+            json.dump(
+                {
+                    "sessionId": session_id,
+                    "pid": self._pids,
+                    "status": status,
+                    "entrypoint": entrypoint,
+                },
+                fh,
+            )
 
     def subject(self, session_id, text):
         """A subject-resolution record, as `docs/subject-resolution.md` § Recording writes it."""
@@ -459,6 +471,44 @@ class Counting(Base):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.count("manager %s exited" % EXITED[:8]), 1)
         self.assertIn("2 workers adopted from exited manager %s" % EXITED[:8], proc.stdout)
+
+
+class Parked(Base):
+    """E13 — a parked worker's prompt died with its spawner, so the recovery is a RESUME.
+
+    Adoption gives the worker an owner for its next gate; it cannot answer the one the
+    worker is sitting on, because that request lived in the spawner's own process. The
+    line exists so a round cannot read `adopted: 1` as `recovered`.
+    """
+
+    def test_a_waiting_worker_is_reported_as_parked(self):
+        self.spawn(WORKER, parent=EXITED)
+        self.live(WORKER, status="waiting")
+        proc = self.run_script()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(
+            "parked: %s -- its prompt died with the spawner; resume it" % WORKER[:8],
+            proc.stdout,
+        )
+
+    def test_a_busy_worker_is_not_parked(self):
+        self.spawn(WORKER, parent=EXITED)
+        self.live(WORKER, status="busy")
+        proc = self.run_script()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("parked:", proc.stdout)
+
+    def test_a_parked_TAB_worker_is_never_resumed(self):
+        # Its transport is the pane, which outlived the spawner: nothing about its prompt
+        # is orphaned, and a resume would put a second process on a live conversation.
+        self.spawn(WORKER, parent=EXITED)
+        self.live(WORKER, status="waiting", entrypoint="cli")
+        proc = self.run_script()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("parked:", proc.stdout)
+
+    def test_a_worker_with_no_registry_record_is_not_parked(self):
+        self.assertEqual(ao.parked_workers(["nobody"], {}), [])
 
 
 if __name__ == "__main__":

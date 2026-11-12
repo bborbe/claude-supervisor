@@ -120,6 +120,15 @@ EXPECTED = {
     # ⚠️ A slot naming BOTH a bare and a qualified PR is still unprobeable: the probe is
     # called with no repo, so the bare reference stays its own `repo: None` observable.
     "51-ends-pr-mixed-slot.jsonl": 2,
+    # ⚠️ The word-only shape: a slot that names a pull request but never gets as far as a
+    # number, so the two number-shaped matchers above cannot see it. Recorded twice in the
+    # store — a repo plus a branch, and a `PR` plus a commit sha. 54 is the boundary: a bare
+    # `#973` with no `PR` word stays allowed, because `#` also introduces issue numbers and
+    # widening to it is a different change (see the `Deliberately NOT covered` note in the
+    # lint). A lint that fails 54 has over-reached; one that passes 52 or 53 has not shipped.
+    "52-ends-pr-no-number.jsonl": 2,
+    "53-ends-pr-word-sha-only.jsonl": 2,
+    "54-ends-bare-hash-no-pr-word.jsonl": 0,
 }
 
 PANELESS_ENV = {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}
@@ -295,6 +304,43 @@ class CloserGateLintTest(unittest.TestCase):
                     card_probe=lambda _item, _env: True,
                     prefix="🔴 BLOCKED · nothing running · needs intervention\n")[0]
                 self.assertEqual(0, code)
+
+    def test_a_blocked_closer_over_a_parked_later_on_closer_passes(self):
+        # `later (on <trigger>):` is the `parked-wait` form (`docs/closer-classes.md`), which
+        # the Async State Closer treats as a legal closer — the operator has deferred to a
+        # named trigger, so it names an owner exactly as `pick` does. These are RECORDED
+        # shapes from
+        # `~/.claude/state/closer-gate-lint/`: every one carries a PROSE trigger, so none is a
+        # 32-hex card id, a role, or an `⏰ Ends:` — and before this arm the lint refused a
+        # `🔴 BLOCKED` line over one, which is a false positive on a legal closer.
+        for body in ("later (on [[Add a BUILD_TARGET Arm to the Trading Makefile]] completing)",
+                     "later (on #413 merging)",
+                     "later (on the three account reads being supplied)"):
+            with self.subTest(body=body):
+                code = self._closer(
+                    body,
+                    card_probe=lambda _item, _env: True,
+                    prefix="🔴 BLOCKED · nothing running · needs intervention\n")[0]
+                self.assertEqual(0, code)
+
+    def test_a_blocked_closer_saying_only_later_still_names_no_owner(self):
+        # The negative controls for the arm above. ⚠️ The mid-sentence case is the load
+        # bearing one: the arm keys on the closer VERB at body start, and dropping the `^`
+        # anchor would accept "we can do it later (on Monday)" — which names no owner. A
+        # bare `later` alone does NOT catch that, so both are pinned.
+        for body in ("later",
+                     "later on",
+                     "later on the trigger",
+                     "later(",
+                     "later (once the PR lands)",
+                     "nothing — we can do it later (on Monday)",
+                     "approved later (on X)"):
+            with self.subTest(body=body):
+                code, text, record = self._closer(
+                    body,
+                    prefix="🔴 BLOCKED · nothing running · needs intervention\n")
+                self.assertEqual(2, code, body)
+                self.assertEqual("ownerless-blocked", record["reason"], body)
 
     def test_the_recorded_e4fd1919_blocked_closer_passes(self):
         # ⚠️ The exact shape that made the bot request changes on #778. `fixtures/
@@ -729,6 +775,43 @@ class CloserGateLintTest(unittest.TestCase):
         ):
             with self.subTest(body=body):
                 self.assertIsNone(self.mod.unqualified_pr(body))
+
+    def test_pr_without_number_matches_the_word_only_shapes(self):
+        # The recorded word-only population: a PR named in words, with no number anywhere,
+        # so `unqualified_pr` above cannot see it. `observables()` returns `[]` for every
+        # one of these, which is why they are the same defect as a bare `PR #N`.
+        for body, expected in (
+            # The row that opened this: a repo AND a branch, and still no PR reference.
+            ("⏰ Ends:   `bborbe/claude-supervisor` PR for branch `fix/x` reaching green",
+             "PR"),
+            ("⏰ Ends:   PR watch reports approval on `328f7ef9` and CI green", "PR"),
+            ("⏰ Ends:   the PR watcher returns a verdict (background job bb3ta5gzx)", "PR"),
+            # ⚠️ `pull request` in words is the same defect, and `_BARE` accepts the form
+            # whenever a number follows it — so the word-only arm must catch the no-number
+            # spelling or the two matchers leave a gap between them.
+            ("⏰ Ends:   the pull request reaches green", "pull request"),
+        ):
+            with self.subTest(body=body):
+                self.assertEqual(expected, self.mod.pr_without_number(body))
+        for body in (
+            # Any number the probe can see clears the slot — including the bare `#N` gap
+            # this arm must NOT widen into.
+            "⏰ Ends:   bborbe/nuke#698 merged",
+            "⏰ Ends:   https://github.com/bborbe/nuke/pull/698 reaches MERGED",
+            "⏰ Ends:   PR #516 bot verdict",
+            # ⚠️ Lower case: the probe's `_BARE` carries `re.IGNORECASE`, so `pr 12` is an
+            # observable. A case-sensitive mirror here would refuse a slot the probe can
+            # resolve — the false block this file's doctrine forbids.
+            "⏰ Ends:   the pr 12 verdict lands",
+            "⏰ Ends:   the verdict lands on #973",
+            # No PR word at all: a clock, a file, a person.
+            "⏰ Ends:   ~/.claude/state/batch/7a.json exists",
+            "⏰ Ends:   the vendor replies",
+            # `PRs` is not `PR` — a word boundary, not a substring.
+            "⏰ Ends:   PRs reach green",
+        ):
+            with self.subTest(body=body):
+                self.assertIsNone(self.mod.pr_without_number(body))
 
     def test_a_qualified_reference_does_not_excuse_a_bare_one_in_the_same_slot(self):
         # ⚠️ Measured: `observables("PR #516 on bborbe/claude-supervisor#516")` returns TWO

@@ -45,6 +45,21 @@ topic round, `fleet` is the fleet round, whose slug carries the branch exactly a
                                 and exits 0 on a full round. Run at the tail re-arm,
                                 validating the round that just ran.
 
+The spend-per-change readout — the round's own `tokens spent ÷ cells moved` line:
+
+  --tokens  --topic T           print the round's output-token spend: the parent
+                                transcript PLUS `<session-id>/subagents/*.jsonl`,
+                                windowed `round_started_at` → now and deduped by
+                                `message.id`. The parent alone omits both legs.
+  --snapshot --topic T          copy the tier's sweep payload (`manager-predispatch/
+                                <slug>.table` on the goal tier, `manager-receipts/
+                                <slug>.sweep` on the topic tier) to `<payload>.prev` —
+                                run at the sweep leg's HEAD, BEFORE the leg rewrites it.
+  --count   --topic T           print the moved-row count: goal rows whose
+                                `Status`/`Phase`/`Met` changed since `.prev`;
+                                `n/a (baseline)` on the first tick, never `0`.
+                                Run AFTER the sweep and BEFORE the print.
+
 Two more verbs carry the topic round's keep-alive, a CONDITIONAL step owed only for a
 verdict the round actually read:
 
@@ -88,7 +103,7 @@ the defect: a manager liveness had already called stale could still have its rou
 fields judged current. The receipt now imports the rule, so agreement holds by
 construction rather than by assertion.
 """
-import argparse, datetime, importlib.util, json, math, os, re, sys, time
+import argparse, datetime, glob, importlib.util, json, math, os, re, sys, time
 
 STATE_DIR = os.path.expanduser(
     os.environ.get("MANAGER_RECEIPT_STATE_DIR", "~/.claude/state/manager-receipts")
@@ -572,7 +587,92 @@ def read_gated(s: str) -> list:
         return []
 
 
-def render_cached(topic: str, branch: str = "", now: float = None) -> int:
+_BOX_TABLE = None
+
+
+def box_table():
+    """`box-table.py`, imported — the ONE renderer, for the fallback box.
+
+    `docs/sweep-output.md` § Rendering names this script as the only renderer
+    (*"Never hand-draw the box"*), and it is also that file's documented fallback for
+    a sweep that cannot classify. Imported rather than re-implemented for the reason
+    its own docstring gives: display width, VS16 and OSC 8 are handled there, and a
+    second implementation drifts on every one of them.
+    """
+    global _BOX_TABLE
+    if _BOX_TABLE is None:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "box-table.py")
+        spec = importlib.util.spec_from_file_location("box_table", p)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _BOX_TABLE = mod
+    return _BOX_TABLE
+
+
+#: The goal tier's frame — `Topic / Goal / Task | Session | Status | Phase | Met`
+#: (`docs/sweep-output.md` § The frame). ⚠️ **NOT the topic frame:** the topic tier
+#: renders `Goal | Status | Phase | Met | Manager`. Recognising only one of them is
+#: the defect the sibling task found in `_sweep_rows`, where a goal-tier `--count`
+#: read `0` on every tick.
+GOAL_FRAME_HEADER = ("Topic / Goal / Task", "Session", "Status", "Phase", "Met")
+GOAL_FRAME_WIDTHS = (42, 10, 34, 9, 17)
+#: The topic tier's frame, measured off the payload `manager-receipts/<slug>.sweep`
+#: itself (2026-11-12): content widths 42 · 20 · 10 · 9 · 16.
+TOPIC_FRAME_HEADER = ("Goal", "Status", "Phase", "Met", "Manager")
+TOPIC_FRAME_WIDTHS = (42, 20, 10, 9, 16)
+
+
+def tracked_names(subject: str) -> list[str]:
+    """The tracked set the round resolved, names only — `[]` when it never ran.
+
+    Read from `manager-predispatch.tracked_path()` (the caller's own input file), so
+    the fallback names the rows this round is actually watching rather than a set
+    re-derived here. Names only, by design: a gated tick read no statuses, and
+    inventing them would print a table claiming reads it never made.
+    """
+    try:
+        with open(predispatch().tracked_path(subject), encoding="utf-8") as fh:
+            return [ln.strip() for ln in fh if ln.strip()]
+    except OSError:
+        return []
+
+
+def _fallback_box(subject: str, tier: str, names: list[str]) -> str:
+    """The full frame built from the tracked set, for a tick with no payload to replay.
+
+    One row per tracked name with every other cell `—` (this frame's value for
+    *nothing recorded*), and on the goal tier the subject's own row first with its
+    rows indented beneath it — the shape a real goal payload renders.
+    """
+    if tier == "topic":
+        header, widths = TOPIC_FRAME_HEADER, TOPIC_FRAME_WIDTHS
+        rows = [[n, "—", "—", "—", "—"] for n in names]
+    else:
+        header, widths = GOAL_FRAME_HEADER, GOAL_FRAME_WIDTHS
+        rows = [[subject, "—", "—", "—", "—"]]
+        rows += [["   " + n, "—", "—", "—", "—"] for n in names]
+    return box_table().render(
+        {"header": list(header), "rows": rows, "widths": list(widths)}, link=False
+    )
+
+
+def _payload_body(lines: list[str]) -> list[str]:
+    """The payload's box, with the payload's OWN leading marker dropped.
+
+    ⚠️ **Never `lines[1:]`.** The two tiers' payloads differ: the topic payload opens
+    with a marker line (`16:41 ✓ … — 53 goals`), while the goal payload — written by
+    `--write-payload` — opens with the box's own TOP BORDER. Dropping the first line
+    unconditionally removed that border, so a gated goal tick printed a box with no
+    top edge: the frame the operator's rulings require, one cell short. The marker is
+    whatever precedes the first `┌`, so the split holds for both shapes.
+    """
+    i = 0
+    while i < len(lines) and not lines[i].lstrip().startswith("┌"):
+        i += 1
+    return lines[i:]
+
+
+def render_cached(topic: str, branch: str = "", now: float = None, tier: str = "goal") -> int:
     """Print the cached sweep payload with a FRESH marker for this tick.
 
     The operator's rulings require the table on every tick, including a gated one where
@@ -581,25 +681,287 @@ def render_cached(topic: str, branch: str = "", now: float = None) -> int:
     not run — and that makes a dead loop and a gated one look identical, which is the
     ambiguity the marker exists to remove. The first line is therefore replaced, never
     kept.
+
+    ⚠️ **A tick with no payload to replay still prints a full box**, built from the
+    tracked set by `_fallback_box`, with the marker naming the absence. Before this,
+    the renderer exited 1 and printed nothing, so a subject that had never swept — or
+    whose payload path disagreed with its producer's — printed no table at all, which
+    is the failure `Manager Session` § Sweep output records from the first
+    implementation. An empty box would read as *the sweep ran and had no rows*; the
+    explicit `no cached table yet` is what keeps "no table yet" visible.
     """
     s = slug(topic, branch)
-    path = os.path.join(STATE_DIR, f"{s}.sweep")
+    path = payload_file(topic, tier)
+    stamp = time.strftime("%H:%M", time.localtime(time.time() if now is None else now))
     try:
         with open(path, encoding="utf-8") as fh:
-            lines = fh.read().splitlines()
+            body = _payload_body(fh.read().splitlines())
     except OSError:
-        print(f"no cached sweep payload for {s} — nothing to render", file=sys.stderr)
-        return 1
-    if not lines:
-        print(f"cached sweep payload for {s} is empty", file=sys.stderr)
-        return 1
-    stamp = time.strftime("%H:%M", time.localtime(time.time() if now is None else now))
+        body = []
+        why = f"no cached table yet at {path}"
+    else:
+        why = f"the cached payload for {s} carries no box"
+
+    if not body:
+        names = tracked_names(topic)
+        print(f"{stamp} ✓ {topic} — sweep gated this tick, {why} — "
+              f"{len(names)} row(s) from the tracked set, statuses not read")
+        print(_fallback_box(topic, tier, names))
+        return 0
+
     # The marker names the gate explicitly: a reader comparing ticks must be able to
     # tell "the table is here because nothing changed" from "the table is here and the
     # round ran". Never claim the goal/slot counts — this tick did not read them.
     print(f"{stamp} ✓ {topic} — sweep gated this tick, table from cache")
-    for line in lines[1:]:
+    for line in body:
         print(line)
+    return 0
+
+
+# --- the spend-per-change readout ---------------------------------------------
+#
+# The goal this serves — "a manager round costs what it changes" — needs the round to
+# print `tokens spent ÷ cells moved`. Two independent producers feed that line, and
+# neither may certify itself:
+#
+#   * `--tokens` sums `usage.output_tokens` over the round's PARENT transcript plus its
+#     `subagents/*.jsonl`. The two legs are subagent dispatches, so the parent alone
+#     omits both of them. One assistant message spans several records that repeat
+#     `usage` verbatim, so the sum is deduped by `message.id` (measured 2.33x inflation
+#     on 2026-11-11, 2.06x on an independent 40-transcript probe 2026-11-12).
+#   * `--snapshot` copies the sweep payload before the sweep leg rewrites it, and
+#     `--count` diffs the new payload against that copy afterwards. The order is
+#     load-bearing: snapshot → sweep → diff. A diff taken after re-snapshotting the
+#     same payload reads `0` forever, so the denominator could never fail.
+#
+# The residual limit, stated rather than implied: the diff removes the sweep leg's
+# self-REPORT (its `N change` first line), not its self-RENDERING. A leg that renders
+# no moved cell still yields `0`. The metric's trust boundary is the leg's render.
+
+PROJECTS_ROOT = os.path.expanduser(
+    os.environ.get("MANAGER_RECEIPT_PROJECTS_ROOT", "~/.claude/projects")
+)
+
+
+_PREDISPATCH = None
+
+
+def predispatch():
+    """`manager-predispatch.py`, imported — the ONE definition of the payload path.
+
+    ⚠️ **Imported, never restated.** The sweep reader's `--write-payload` resolves its
+    destination through `payload_path()`, so a copy of that rule here would drift from
+    the file the reader actually writes. Measured 2026-11-12: `render_cached()` opened
+    `~/.claude/state/manager-receipts/<slug>.sweep`, and no goal-tier round writes that
+    file — the payload lands at `~/.claude/state/manager-predispatch/<slug>.table`. The
+    counter and the render must read the producer's own path, not a remembered one.
+    """
+    global _PREDISPATCH
+    if _PREDISPATCH is None:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "manager-predispatch.py")
+        spec = importlib.util.spec_from_file_location("manager_predispatch", p)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _PREDISPATCH = mod
+    return _PREDISPATCH
+
+
+def payload_file(subject: str, tier: str = "goal") -> str:
+    """The sweep payload the round at this tier actually produces.
+
+    Goal tier: `manager-predispatch.payload_path` — `<predispatch>/<slug>.table`, the
+    file `--write-payload` writes. Topic tier: `~/.claude/state/manager-receipts/
+    <slug>.sweep`, the path `commands/steps/topic-sweep.md` names for its reader. The
+    two are different files by design; a single hardcoded name is what made the
+    counter read a path nothing wrote.
+    """
+    if tier == "topic":
+        return os.path.join(STATE_DIR, f"{slug(subject)}.sweep")
+    return predispatch().payload_path(subject)
+
+
+def prev_file(subject: str, tier: str = "goal") -> str:
+    """The snapshot the counter diffs against — beside the payload it snapshots."""
+    return payload_file(subject, tier) + ".prev"
+
+
+def _sweep_rows(text: str):
+    """`{row name: (status, phase, met)}`, or `None` when no header is recognised.
+
+    **Two frames are real, and both must parse.** The topic tier renders
+    `Goal | Status | Phase | Met | Manager`; the goal tier renders
+    `Topic / Goal / Task | Session | Status | Phase | Met`. Recognising only the
+    first made a goal-tier `--count` read `0` on every tick — the denominator could
+    never fire, which is the defect the metric exists to expose. Columns are found
+    by NAME, so a frame with a different first column still works.
+
+    The header line and the `Manager` / `Session` column are excluded: both churn on
+    ticks where no tracked goal moved (`STALE → OK` flips are liveness, not change),
+    and the metric is the table's goal cells.
+
+    `None` is a SHAPE FAILURE, never "no rows". A caller that read it as `0 moved`
+    would restore the silent zero; `count_moved` refuses instead.
+    """
+    rows = {}
+    header = None
+    for ln in text.splitlines():
+        stripped = OSC8_RE.sub("", ln).strip()
+        if not (stripped.startswith("│") and stripped.endswith("│")):
+            continue
+        cells = [c.strip() for c in stripped.strip("│").split("│")]
+        if header is None:
+            if "Status" in cells and "Phase" in cells and "Met" in cells:
+                header = cells
+            continue
+        if len(cells) < len(header):
+            continue
+        rows[cells[0]] = tuple(cells[header.index(name)]
+                               for name in ("Status", "Phase", "Met"))
+    return rows if header is not None else None
+
+
+def snapshot(topic: str, branch: str = "", tier: str = "goal") -> int:
+    """Copy the sweep payload to `<payload>.prev` BEFORE the sweep leg rewrites it.
+
+    Called at the sweep leg's head. The copy is what `--count` diffs against after the
+    sweep; taking it after the sweep would copy the new payload onto itself and make
+    the denominator `0` forever.
+    """
+    s = slug(topic, branch)
+    try:
+        with open(payload_file(topic, tier), encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as e:
+        # No prior payload is the first tick, not an error: `--count` will print
+        # `n/a (baseline)` because `.prev` does not exist.
+        print(f"no sweep payload to snapshot for {s}: {e}", file=sys.stderr)
+        return 0
+    write_atomic(prev_file(topic, tier), text)
+    print(f"snapshot {s}")
+    return 0
+
+
+def count_moved(topic: str, branch: str = "", tier: str = "goal") -> int:
+    """Print the moved-row count: goal rows whose Status/Phase/Met changed.
+
+    Prints `n/a (baseline)` when no `.prev` exists (the first tick), never `0` — a
+    baseline is not a measurement of no change. Otherwise prints the integer, so a
+    no-change tick prints `0`.
+    """
+    s = slug(topic, branch)
+    prev = prev_file(topic, tier)
+    if not os.path.exists(prev):
+        print("n/a (baseline)")
+        return 0
+    try:
+        with open(prev, encoding="utf-8") as fh:
+            before = _sweep_rows(fh.read())
+        with open(payload_file(topic, tier), encoding="utf-8") as fh:
+            after = _sweep_rows(fh.read())
+    except OSError as e:
+        print(f"cannot read the sweep payload for {s}: {e}", file=sys.stderr)
+        return 2
+    if before is None or after is None:
+        # A frame we cannot parse must not read as `0 moved` — that is the silent
+        # zero this counter exists to avoid, and it would let the criterion pass
+        # forever on a shape change.
+        print(f"cannot parse the sweep frame for {s}: no Status/Phase/Met header — "
+              f"refusing to report 0 moved", file=sys.stderr)
+        return 2
+    moved = sum(1 for goal, cells in after.items()
+                if goal in before and before[goal] != cells)
+    print(moved)
+    return 0
+
+
+def _record_epoch(rec: dict):
+    ts = rec.get("timestamp")
+    if not ts:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _transcript_files(session: str) -> list:
+    """Every transcript file for `session`: the parent plus each subagent file.
+
+    The parent is `<projects-root>/*/<session>.jsonl`; a session's subagent files live
+    in the sibling directory `<session>/subagents/*.jsonl`. Both are searched across
+    every project dir because a round may run from any cwd and the session id is
+    globally unique.
+    """
+    out = []
+    for project in sorted(glob.glob(os.path.join(PROJECTS_ROOT, "*"))):
+        parent = os.path.join(project, f"{session}.jsonl")
+        if os.path.isfile(parent):
+            out.append(parent)
+        sub = os.path.join(project, session, "subagents")
+        if os.path.isdir(sub):
+            out.extend(sorted(glob.glob(os.path.join(sub, "*.jsonl"))))
+    return out
+
+
+def spend_tokens(topic: str, branch: str = "", session: str = "", now: float = None) -> int:
+    """Print the round's output-token spend: parent transcript PLUS subagent files.
+
+    Windowed `round_started_at` → now and deduped by `message.id`. The parent alone
+    omits both legs (they are subagent dispatches), and one assistant message spans
+    several records that repeat `usage` verbatim, so both halves are mandatory.
+    """
+    s = slug(topic, branch)
+    d = read_receipt(s)
+    started = d.get("round_started_at")
+    if not started:
+        print(f"no round in progress for {s} — run --start first", file=sys.stderr)
+        return 2
+    session = session or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if not session:
+        print("--tokens needs a session: pass --session or set $CLAUDE_CODE_SESSION_ID",
+              file=sys.stderr)
+        return 2
+    now = time.time() if now is None else now
+    files = _transcript_files(session)
+    if not files:
+        # A missing transcript must not read as "the round spent nothing" — that is a
+        # silent zero, and the numerator would then never fail.
+        print(f"no transcript files for session {session} — refusing to report 0 tokens",
+              file=sys.stderr)
+        return 2
+    seen = set()
+    total = 0
+    for fn in files:
+        try:
+            with open(fn, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    ts = _record_epoch(rec)
+                    if ts is None or ts < started or ts > now:
+                        continue
+                    msg = rec.get("message")
+                    if not isinstance(msg, dict):
+                        continue
+                    mid = msg.get("id")
+                    if not mid or mid in seen:
+                        continue
+                    usage = msg.get("usage")
+                    if not isinstance(usage, dict):
+                        continue
+                    out = usage.get("output_tokens")
+                    if not isinstance(out, int) or isinstance(out, bool):
+                        continue
+                    seen.add(mid)
+                    total += out
+        except OSError:
+            continue
+    print(total)
     return 0
 
 
@@ -947,6 +1309,25 @@ def watcher_shape(artifact: str, started: float, now: float) -> bool:
     return newest is not None and started <= newest <= now
 
 
+def _tail_epochs_beside(artifact: str) -> set:
+    """The `<slug>.tail` store beside a `<slug>.arms` ring, as epoch keys.
+
+    `manager-liveness.py`'s `arm()` writes the ring as TWO columns and keeps the tail
+    marker in this sibling store — a session still running a pre-upgrade copy rebuilds
+    the ring from two-tuples and would erase a third-column marker on every arm it
+    takes. `parse_arm_lines` still recognises the retired column, so a reader that
+    honours only the column sees `is_tail` False on every ring this build writes and
+    silently counts tail beats as head beats.
+    """
+    if not artifact.endswith(".arms"):
+        return set()
+    try:
+        with open(artifact[: -len(".arms")] + ".tail", encoding="utf-8") as fh:
+            return {line.strip() for line in fh if line.strip()}
+    except OSError:
+        return set()
+
+
 def rearm_shape(artifact: str, started: float, now: float) -> bool:
     """An arm epoch INSIDE the round window — the step, not the file's existence.
 
@@ -960,12 +1341,28 @@ def rearm_shape(artifact: str, started: float, now: float) -> bool:
     Each line carries `<epoch> <interval>` now, and a flat split puts the interval on
     the epoch list — where a small number lands inside a narrow window and reports an
     arm that never happened. This file asks only *when*, so it wants the epochs.
+
+    ⚠️ **HEAD beats only — a tail beat is a different write and must not pay this step.**
+    Since the round grew a closing beat, a round writes an epoch at its head AND one at
+    its tail, and both land in the same ring inside the same window. Counting them alike
+    made the tail beat able to CLEAR a head arm that never ran: `--check` correctly reports
+    `skipped: re-arm` when the round's head is missing, and then `output-shape.md` item
+    13's row-20 `--debt` re-evaluation re-reads the ring, finds the tail epoch inside the
+    window, and pays the debt — so the round that skipped its head arm reads complete one
+    step later. That is the precise false green this predicate exists to prevent, and it
+    is why the tail marker has to be honoured here rather than only in `observed_period`.
     """
     try:
         with open(artifact, encoding="utf-8") as fh:
-            vals = [epoch for epoch, _, _ in liveness().parse_arm_lines(fh.read())]
+            pairs = liveness().parse_arm_lines(fh.read())
     except OSError:
         return False
+    # Both marker shapes have to be honoured. The store is the one this build writes;
+    # the third column survives only as read-only legacy on rings from before the move.
+    # Checking the column alone is a no-op against every current ring.
+    tail = _tail_epochs_beside(artifact)
+    vals = [epoch for epoch, _, column_tail in pairs
+            if not column_tail and f"{epoch:.0f}" not in tail]
     # The ring stores WHOLE seconds, so both bounds are floored to that resolution: an arm
     # stamped in the same wall-clock second as `round_started_at` can round *below* it, and
     # one stamped in the same second the check runs can read as *after* a fractional `now`.
@@ -1252,7 +1649,19 @@ def main() -> int:
                       help="print the cached sweep payload with a FRESH timestamped marker "
                            "for this tick — the gated tick's table, per the operator's "
                            "2026-09-15 and 2026-09-20 rulings. The payload's own first line "
-                           "is stale and is replaced, never replayed")
+                           "is stale and is replaced, never replayed. With no payload to "
+                           "replay it still prints the marker plus a full box built from the "
+                           "tracked set, naming the absence — never a silent empty tick")
+    mode.add_argument("--tokens", action="store_true",
+                      help="print the round's output-token spend: parent transcript plus "
+                           "subagents/*.jsonl, windowed round_started_at → now, deduped by "
+                           "message.id")
+    mode.add_argument("--snapshot", action="store_true",
+                      help="copy the tier's sweep payload to <payload>.prev — run at the "
+                           "sweep leg's HEAD, before the leg rewrites the payload")
+    mode.add_argument("--count", action="store_true",
+                      help="print the moved-row count: goal rows whose Status/Phase/Met "
+                           "changed since <payload>.prev; `n/a (baseline)` on the first tick")
     mode.add_argument("--record-verdict", action="store_true",
                       help="topic tier: a `resume`/`restart` keep-alive verdict the round now "
                            "owes an outcome for (needs --goal --vault --verdict --session); "
@@ -1263,7 +1672,9 @@ def main() -> int:
     ap.add_argument("--goal", help="with --record-verdict/--record-outcome: the goal")
     ap.add_argument("--vault", help="with --record-verdict: the vault root the probe read")
     ap.add_argument("--verdict", choices=OWING_VERDICTS, help="with --record-verdict")
-    ap.add_argument("--session", default="", help="with --record-verdict: the recorded id")
+    ap.add_argument("--session", default="",
+                    help="with --record-verdict: the recorded id; with --tokens: the "
+                         "transcript's session (defaults to $CLAUDE_CODE_SESSION_ID)")
     ap.add_argument("--outcome",
                     help="with --record-outcome: `executed`, `refused:<token>` or "
                          "`deferred:busy-target`")
@@ -1302,6 +1713,14 @@ def main() -> int:
         ap.error("--only scopes the --debt gate and means nothing with any other mode")
     if a.check:
         return check(subject, a.branch, tier=a.tier)
+    if a.render_cached:
+        return render_cached(subject, a.branch, tier=a.tier)
+    if a.tokens:
+        return spend_tokens(subject, a.branch, session=a.session or "")
+    if a.snapshot:
+        return snapshot(subject, a.branch, tier=a.tier)
+    if a.count:
+        return count_moved(subject, a.branch, tier=a.tier)
     # `--debt` and `--abandon` are fleet-only by construction: `check()` writes the
     # file only for `--branch fleet`, so the goal/topic tier would read an empty file
     # and exit 0 — a gate that always passes. Refusing is the only honest answer; a
@@ -1326,8 +1745,6 @@ def main() -> int:
         if not a.step:
             ap.error("--gate needs --step")
         return gate(subject, a.branch, a.step)
-    if a.render_cached:
-        return render_cached(subject, a.branch)
     if a.record_verdict or a.record_outcome:
         # Goal verdicts ride the goal/topic receipt only; the fleet tier owes none.
         if a.branch:

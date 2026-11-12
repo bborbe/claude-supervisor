@@ -68,6 +68,11 @@ FIELDS = (
     "unverifiable_round",
     "unverifiable_action",
     "unverifiable_observation",
+    # The stuck probe's reading, which the NEXT round's `--previous-mtime` compares
+    # against. It is a field rather than a suffix on `probe` because the 2-round count
+    # reads one integer: an entry written without it reads as a first observation every
+    # round, and the count can never be reached.
+    "transcript_mtime",
 )
 #: `closed` is the drive leg's idle-after-nudge outcome: the row was nudged in an earlier
 #: round, was unchanged this one, and its pane was closed by `close-idle-tab.py`. It is a
@@ -77,7 +82,12 @@ FIELDS = (
 #: `wrote-nothing` is the never-wrote outcome: the worker exited without modifying its
 #: task page, so the row is reported as a failure rather than nudged. Both it and
 #: `closed` are verdicts rather than `nudge` values because each leaves the candidate set.
-VERDICTS = ("revive", "blocked", "unverifiable", "finished", "closed", "wrote-nothing")
+#: `stuck` is the idle-with-no-wait outcome (agents/fleet-drive.md step 5c): a headless
+#: row that ignored its nudge, whose transcript has not moved for two rounds, with no
+#: tool in flight and no declared wait. A verdict rather than a `nudge` value for the
+#: same reason as `closed` — the row leaves the candidate set, and a later round that
+#: finds the session gone should read a recorded outcome rather than an absence.
+VERDICTS = ("revive", "blocked", "unverifiable", "finished", "closed", "wrote-nothing", "stuck")
 #: What the 2-round rule did about a row, or "" when it has not acted. The marker is what
 #: makes the action fire ONCE per silence rather than on every round at or past the
 #: threshold: a row held back by the per-round cap keeps advancing its streak, so a
@@ -156,6 +166,9 @@ def canonical(sid, raw):
         "unverifiable_round": raw.get("unverifiable_round") or "",
         "unverifiable_action": raw.get("unverifiable_action") or "",
         "unverifiable_observation": raw.get("unverifiable_observation") or "",
+        # Kept as the caller wrote it — an epoch int, or "" when the probe did not run.
+        # Coercing it here would turn "no reading" into a number the next round compares.
+        "transcript_mtime": raw.get("transcript_mtime", ""),
     }
 
 

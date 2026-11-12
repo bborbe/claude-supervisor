@@ -57,6 +57,7 @@ from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GUARD = os.path.join(HERE, "pane-wake-guard.py")
+LIVENESS = os.path.join(HERE, "manager-liveness.py")
 MANAGER_STATE = os.path.expanduser("~/.claude/state/worker-manager")
 VALID_BRANCHES = ("goal", "topic", "fleet")
 SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -173,12 +174,33 @@ def resolve_pane(session_id):
     return None
 
 
-def guard(pane_id):
-    """`pane-wake-guard.py`'s verdict line for the pane."""
+def read_state(subject, branch):
+    """`manager-liveness.py --state`'s first field for this subject, or None.
+
+    Fail-open by construction: `None` means "unknown" and the guard is called without
+    `--subject-state`, so it decides on the screen exactly as it did before this check
+    existed. Never a fabricated state — a broken liveness read must not silence the
+    wake, and a fabricated `SLEEPING` must not suppress it.
+    """
     try:
-        r = subprocess.run([sys.executable, GUARD, "--pane-id", str(pane_id),
-                            "--allow-machine-wait"],
+        r = subprocess.run([sys.executable, LIVENESS, "--state",
+                            "--subject", subject, "--branch", branch],
                            capture_output=True, text=True, timeout=20)
+    except Exception:  # noqa: BLE001 — any failure is unknown, never a state
+        return None
+    lines = (r.stdout or "").strip().splitlines()
+    if r.returncode != 0 or not lines:
+        return None
+    return lines[0].split("\t", 1)[0] or None
+
+
+def guard(pane_id, subject_state=None):
+    """`pane-wake-guard.py`'s verdict line for the pane."""
+    argv = [sys.executable, GUARD, "--pane-id", str(pane_id), "--allow-machine-wait"]
+    if subject_state:
+        argv += ["--subject-state", subject_state]
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=20)
     except Exception as exc:  # noqa: BLE001 — any failure is a skip, never a wake
         return f"error:{exc}"
     lines = (r.stdout or "").strip().splitlines()
@@ -266,7 +288,7 @@ def main(argv=None):
         print(f"NO-PANE session={sid[:8]} subject={args.subject!r}")
         return 0
 
-    verdict = guard(pane)
+    verdict = guard(pane, read_state(args.subject, branch))
     if not verdict.startswith("wake"):
         print(f"SKIP {verdict} pane={pane} session={sid[:8]}")
         return 0

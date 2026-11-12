@@ -114,7 +114,7 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
      **The channel is pane-free** — `CLOSERS` reads the transcript, so a headless row carries a row with `hst` (pane-free, still classifiable; the fail-closed rule on a genuinely missing row is unchanged). [`closer-classes.md`](../docs/closer-classes.md) § The channel is pane-free.
 
-     **The row's class decides the verdict — read it first.** `routine` → **revive**; `ask` → **blocked**; `parked-wait` / `none` → **unverifiable**. `python3 $P/closer-verdict.py --class <class>` prints it; `${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/docs/closer-classes.md` § The classes is the canonical table. ⚠️ **`routine` does not skip test 4** — the class describes the turn's LAST line, so a session whose last closer reads `nothing` but which carries another `BLOCKED` row is still blocked ([`fleet-drive-rationale.md`](../docs/fleet-drive-rationale.md) § Why `routine` does not skip the `BLOCKED` check).
+     **The row's class decides the verdict — read it first.** `routine` → **revive**; `ask` → **blocked**; `none` → **unverifiable**; `parked-wait` → **unverifiable while its `⏰ Ends:` declaration is live, `revive` once expired** — pass the session id so the script applies that join: `python3 $P/closer-verdict.py --class parked-wait --session <id or 8-char prefix>`. ⚠️ **The expiry is `scripts/declared-wait.py`'s verdict, never re-derived here** — live, absent or unreadable keeps `unverifiable`. `python3 $P/closer-verdict.py --class <class>` prints it; `${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/docs/closer-classes.md` § The classes is the canonical table. ⚠️ **`routine` does not skip test 4** — the class describes the turn's LAST line, so a session whose last closer reads `nothing` but which carries another `BLOCKED` row is still blocked ([`fleet-drive-rationale.md`](../docs/fleet-drive-rationale.md) § Why `routine` does not skip the `BLOCKED` check).
 
      **Routine continue — the one `approve:` that is not a gate.** A worker in `phase: execution` often parks on `approve: <go on with my own next step>`, which its own execution-no-reask rules already let it take — so that closer asks nothing only the operator can decide. Its four tests are `${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/docs/closer-classes.md` § The routine-continue table; apply them from there, never from memory. If that file is missing, report the gap in NOTES and treat every `ask:` closer as blocked — a missing table is never a licence to judge one from memory. Any test fails → it is a gate, **blocked**. A routine continue is not an answer: the nudge says the operator has not answered and that the worker proceeds only under its own execution rules.
    - **(b) named systems:** probe what the session's last report names — `gh pr view <n> --repo <o/r> --json state,mergeCommit`, a tag via `git ls-remote --tags`, another task's `vault-cli task show … status`. Quote each command and its result.
@@ -124,12 +124,13 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
    | verdict | condition | action |
    |---|---|---|
-   | **revive** | both probes ran, neither found a blocker, **and** its `CLOSERS` row is classed `routine` **or** its text passed the routine-continue table | draft a nudge |
+   | **revive** | both probes ran, neither found a blocker, **and** its `CLOSERS` row is classed `routine`, its text passed the routine-continue table, **or** it is classed `parked-wait` with an **expired** `⏰ Ends:` declaration | draft a nudge |
    | **blocked** | a probe found a live blocker | escalate, with the probe and its result |
-   | **unverifiable** | a probe could not run, no task resolved, no `CLOSERS` row, or a row classed `parked-wait` / `none` | observation only — except at streak 2 (6b): a resolving pane acts, a pane-less row is observed |
+   | **unverifiable** | a probe could not run, no task resolved, no `CLOSERS` row, a row classed `none`, or a `parked-wait` row whose `⏰ Ends:` declaration is live or unreadable | observation only — except at streak 2 (6b): a resolving pane acts, a pane-less row is observed |
    | **finished** | from step 1, disk facts hold (1b) | reap message drafted |
    | **closed** | a `revive` row whose previous ledger entry carries `nudge: drafted` and whose bucket, open-box count and blocker state are all unchanged this round, and `close-idle-tab.py` exited 0 (5b) | pane closed — render a `CLOSED` line |
    | **wrote-nothing** | from step 1a — ledger row records `ended_at`, task page not modified since `spawned_at`, past the 15-minute grace window, task `execution` with open boxes | report as a failure; draft no nudge |
+   | **stuck** | a `revive` row whose 5c probe returned `stuck` — transcript unchanged two rounds, no tool in flight, no declared wait | render a `RESUMES` line from `stuck-heal.py`'s action; draft no nudge |
 
 5b. **Close a nudged row still idle — the second round.** Run this **before** drafting any nudge, for every candidate step 5 marked `revive`. Read its previous-round ledger entry (loaded in step 3): when it carries `nudge: drafted` **and** this round's bucket, open-box count and blocker state are all unchanged — the same comparison step 3 suppresses on — the nudge was ignored, and the row is closed instead of nudged again.
 
@@ -143,7 +144,20 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
    - refusal → ⚠️ **report the token, never retry, and never fall back to a nudge.** `task-terminal` / `task-unresolved` / `gate-held` / `held-session` → verdict **`blocked`** (escalate, carrying the token); `busy-target` / `dirty-worktree` / `not-idle-long-enough` / `watcher-alive` / `unknown-session-id` / `ambiguous-pid` / `not-tab` → verdict **`unverifiable`** (retry next round).
    - `nudge: none`, no ledger entry, or any of the three changed → fall through to step 6 and draft the nudge.
 
-6. **Draft nudges** for `revive` only — the rows 5b did not close. Read-only context: name the peer's next unchecked subtask, state that nothing was authorised and nothing was done on its behalf, and that this is not a green light past any gate. For a revive, quote the closer and what earned it — the `routine` class, or the table rows it passed. Never a course correction ("stop that", "work on X instead").
+5c. **Restart a stuck HEADLESS row — the second unchanged round.** 5b closes a tab; a headless row has no pane, so `close-idle-tab.py` refuses it `not-tab` and the row would otherwise sit `unverifiable` for ever while its task keeps open boxes and no live owner. For every candidate step 5 marked `revive` whose row carries **no pane** (headless), probe it:
+
+   ```bash
+   python3 $P/stuck-idle.py --session "<full session id>" --task "<task file>" \
+     --previous-mtime "<the previous round's transcript mtime, or none>"
+   ```
+
+   The three conjuncts are the script's — transcript unchanged for two rounds, no tool in flight, no declared wait — and it prints `-> stuck | not-stuck | unverifiable`. ⚠️ **Never re-derive a conjunct here.** `scripts/tests/test_stuck_idle.py` pins each one; a second reading written in prose drifts from it, and the drift is silent because both readings look authoritative.
+   - `-> stuck` → run `python3 $P/stuck-heal.py --session "<full session id>" --task "<task name>" --kind idle-no-wait` and copy its `-> <action>` verbatim into a `RESUMES` line. Verdict **`stuck`**.
+   - `-> not-stuck` → the row keeps its `revive` verdict; fall through to step 6 and draft the nudge.
+   - `-> unverifiable` → verdict **`unverifiable`** (no transcript, or the ledger carried no reading), never a resume. A probe that could not run is not a worker that is fine.
+   ⚠️ **The ladder is not re-run here.** `stuck-heal.py` decides `resume-headless` / `reopen-interactive` / `report-only` and bounds the whole thing to one resume; a leg that picked an action itself would be a second ladder, which is exactly what that script's docstring exists to prevent. ⚠️ **A `report-only` action renders no `RESUMES` line** — the ladder has already spent its rung, so the row is `blocked` and its evidence is the card, not another resume.
+
+6. **Draft nudges** for `revive` only — the rows 5b did not close and 5c did not restart. Read-only context: name the peer's next unchecked subtask, state that nothing was authorised and nothing was done on its behalf, and that this is not a green light past any gate. For a revive, quote the closer and what earned it — the `routine` class, or the table rows it passed. Never a course correction ("stop that", "work on X instead").
 
    **Thresholds, numerically** — [`fleet-drive-rationale.md`](../docs/fleet-drive-rationale.md) § Thresholds.
 
@@ -151,7 +165,7 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 
 6c. **Unclaimable tasks — copy the digest's counts forward.** Read the digest's `UNCLAIMABLE` section and paste its counts line into the payload's `UNCLAIMABLE` section, with its warning line when `recent` is non-zero. This is the **only** consumer of that section: the sweep-reader renders it, but a section nothing reads never reaches the operator, so without this step the detection exists and reports to nobody. ⚠️ **Never recompute the counts here** — the sweep-reader owns the scan and its window; a second count drifts from the digest and disagrees with it in the same round. A digest with no `UNCLAIMABLE` section is a malformed handoff: print `UNKNOWN (pass not run)` — the same sentinel `agents/fleet-sweep-reader.md` renders — rather than `(none)`, because an absent section and a clean scan read identically. ⚠️ A non-zero `recent` is **not** a drive action — this leg drafts nothing for it; it is reported so the operator sees a producer still minting the empty field.
 
-7. **Persist the ledger** — `python3 $P/drive-ledger.py merge`, with **this round's entries only** on stdin as `{"round": "<ts>", "entries": [...]}`. The script owns the merge, so a round cannot shrink the ledger by omission ([`fleet-drive-rationale.md`](../docs/fleet-drive-rationale.md) § The ledger's one writer). ⚠️ **Never write the ledger yourself** — no `jq`, no `python3 -c`, no `mkdir`/`mv`, and never pass a pre-merged set. `scripts/check-drive-ledger-writes.py` fails the build if any ledger-referencing line across `agents/` and `commands/` **writes** the ledger through an inline interpreter — a read is not an offence. A refused merge (exit 2) wrote **nothing**: report the refusal in the header rather than retrying by hand. One entry per candidate of **every** verdict — revive, blocked, unverifiable, finished, closed, wrote-nothing — because step 3 compares each field against the previous round's value: session id, name, verdict, open-box count, probe + result, `nudge: drafted|none`, suppression reason, **`task_file`** — what step 0 re-reads, and an entry without one cannot be re-probed — and, for a retained row, **`reprobe_verdict`** + **`reprobe_probe`**, copied verbatim from step 0's output. Those two are step 0's dedup key on the next round; an entry written without them reads as a first observation and re-signals. Also `unverifiable_streak` + `unverifiable_round` + `unverifiable_observation`, copied from 6b's patched file — separate field, never an action. A `drafted` entry counts as nudged next round — if the caller's send fails, the next round suppresses rather than nags.
+7. **Persist the ledger** — `python3 $P/drive-ledger.py merge`, with **this round's entries only** on stdin as `{"round": "<ts>", "entries": [...]}`. The script owns the merge, so a round cannot shrink the ledger by omission ([`fleet-drive-rationale.md`](../docs/fleet-drive-rationale.md) § The ledger's one writer). ⚠️ **Never write the ledger yourself** — no `jq`, no `python3 -c`, no `mkdir`/`mv`, and never pass a pre-merged set. `scripts/check-drive-ledger-writes.py` fails the build if any ledger-referencing line across `agents/` and `commands/` **writes** the ledger through an inline interpreter — a read is not an offence. A refused merge (exit 2) wrote **nothing**: report the refusal in the header rather than retrying by hand. One entry per candidate of **every** verdict — revive, blocked, unverifiable, finished, closed, stuck, wrote-nothing — because step 3 compares each field against the previous round's value: session id, name, verdict, open-box count, probe + result, `nudge: drafted|none`, suppression reason, **`task_file`** — what step 0 re-reads, and an entry without one cannot be re-probed — and, for a retained row, **`reprobe_verdict`** + **`reprobe_probe`**, copied verbatim from step 0's output. Those two are step 0's dedup key on the next round; an entry written without them reads as a first observation and re-signals. Also `unverifiable_streak` + `unverifiable_round` + `unverifiable_observation`, copied from 6b's patched file — separate field, never an action. ⚠️ **A headless row also carries `transcript_mtime`** — the 5c reading, which is what the NEXT round's `--previous-mtime` compares against; an entry written without it reads as a first observation every round and the two-round count can never be reached. A `drafted` entry counts as nudged next round — if the caller's send fails, the next round suppresses rather than nags.
 
 </process>
 
@@ -163,7 +177,7 @@ Optional: `"dry-run: false"` — reserved and inert; no behaviour attaches to it
 Return exactly this in the payload, each section `(none)` rather than dropped:
 
 ```
-fleet-drive — <N> candidates (<L> retained from the ledger) · <F> finished (reaped) · <W> wrote-nothing · <R> revive (<C> routine continue) · <B> blocked · <X> closed · <U> unverifiable · headless=<H> · channel=pane-free-closer
+fleet-drive — <N> candidates (<L> retained from the ledger) · <F> finished (reaped) · <W> wrote-nothing · <R> revive (<C> routine continue) · <S> stuck · <B> blocked · <X> closed · <U> unverifiable · headless=<H> · channel=pane-free-closer
   <name> [<sid8>] · <bucket> · <open boxes> · <verdict>
       probe: <command → result>   |   (revive: the CLOSERS row + the four step-4a rows)
       ledger: <drafted | suppressed: <reason> | excluded>
@@ -188,6 +202,9 @@ UNCLAIMABLE — copied from the digest's UNCLAIMABLE section (step 6c); tasks no
 UNVERIFIABLE BLOCK — replace with handle's output, verbatim (step 6b)
 REAPS
   TO: <exact roster name> | <evidence message text>
+RESUMES — one line per stuck headless row (5c); the CALLER executes each, this leg only decides
+  <name> [<FULL session id>] · <stuck-heal action> · task <task name> · <the stuck-idle probe line verbatim>
+  (none)
 CLOSED — one line per pane closed by 5b
   <name> [<sid8>] · pane <id> · task stays in_progress, claude_session_id kept → resumable via /supervisor:open --task
   (none)
@@ -237,11 +254,11 @@ not a malformed handoff.
 **Hand-back** — obey `${CLAUDE_PLUGIN_ROOT}/docs/handback-contract.md` **for the form**: verdict lines and counts in `key=value` form, **≤ 1 KB**, non-empty, payload off the hand-back. ⚠️ **The contract's payload-path section does not cover this leg** — its table lists the manager store only and its keying rule is the subject slug, while the fleet loop keys on the round. The path rule that applies here is the one in this `<output_format>`. This leg's required set is the **drive verdicts — one line per candidate you decided, carrying the decision**:
 
 ```text
-candidates=<N> · finished=<F> · revive=<R> · blocked=<B> · closed=<X> · wrote-nothing=<W> · unverifiable=<U> · headless=<H> · truncated=<n> · payload=<path>
+candidates=<N> · finished=<F> · revive=<R> · stuck=<S> · blocked=<B> · closed=<X> · wrote-nothing=<W> · unverifiable=<U> · headless=<H> · truncated=<n> · payload=<path>
 <name> [<sid8>] = <verdict>
 ```
 
-⚠️ **Every candidate of every verdict gets a line** — revive, blocked, unverifiable, finished and wrote-nothing alike — because step 3's suppression compares each round against the previous one's value, and a row absent from the hand-back reads as a row that no longer exists. A row re-probed in step 0 is a candidate this round and gets its line like any other.
+⚠️ **Every candidate of every verdict gets a line** — revive, stuck, blocked, unverifiable, finished and wrote-nothing alike — because step 3's suppression compares each round against the previous one's value, and a row absent from the hand-back reads as a row that no longer exists. A row re-probed in step 0 is a candidate this round and gets its line like any other.
 
 ⚠️ **Those two requirements meet at a cap, and the counts win.** One line per candidate and ≤ 1 KB cannot both hold on a large fleet — at roughly 45 bytes a line the cap arrives near twenty candidates. When they conflict, the **counts line is authoritative and is never dropped**; trim per-candidate lines until the whole hand-back fits and add `truncated=<n>` naming how many you dropped. Nothing is lost by the trim, because the payload carries every candidate regardless — so `truncated=` is the caller's instruction to read the payload, not a report that the fleet shrank. A hand-back that silently dropped rows to stay under the cap would read as candidates that no longer exist, which is the exact failure the per-line rule exists to prevent.
 

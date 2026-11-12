@@ -26,12 +26,13 @@ Ask of the task **body** (never the title or frontmatter): *does finishing this 
 |---|---|
 | `human` | `interactive` (forced) |
 | `manager` | `interactive` (forced) |
-| `agent`, body carries one of the five watch-need signals | `interactive` |
-| `agent`, body carries none of them | **`headless` (default)** |
+| `agent` | **`headless` (forced)** |
 
-The five watch-need signals are listed exhaustively in [`docs/fleet-surface.md` § Spawn a worker](fleet-surface.md#spawn-a-worker) item 6 — the signal list stays there; this file owns only the mapping and its defaults.
+**`role: agent` is `headless` always — a task body's signals no longer select `interactive`.** Operator ruling, 2026-11-12: *"all agents should be headless … only interactive and manager should be tabs"*. An agent row never opens a tab, whatever its body carries and whatever its `mode:` field says on disk; a stale `mode: interactive` is rewritten to `headless` and the correction printed, so the next run reads the corrected value rather than re-deriving it.
 
-**An `agent` row carrying none of the signals opens `headless` even when its `mode:` on disk reads `interactive`.** Operator ruling, 2026-11-07: an agent row never opens interactive. This **narrows** the both-ways carve-out at item 6, which otherwise honours a declared `mode:` in both directions; that carve-out still governs every other case — `human`, `manager`, and an `agent` row that *does* carry a signal. The normalisation prints `normalised mode interactive -> headless` and rewrites the field, so the correction is visible on disk and the next run reads the corrected value rather than re-deriving it.
+⚠️ **This supersedes the 2026-11-07 narrowing**, which read the other way: it kept an `agent` row `interactive` when its body carried one of the five watch-need signals, and forced `headless` only for a signal-free body. The five signals are still documented in [`docs/fleet-surface.md` § Spawn a worker](fleet-surface.md#spawn-a-worker) item 6 as *what a task body can carry* — they are no longer a mode input anywhere.
+
+**Why the strict form, measured 2026-11-12:** over 24 h, **24 of the 90 `role: agent` new-worker spawns opened as tabs**, every one recording `mode_source=argument` — the spawn sites did decide, and decided `interactive`. The signals were doing the selecting, and nearly every infrastructure task carries one (an approval gate, an "ask if unsure" step, a judgement reserved to the operator), so the classifier could not separate a task that needs watching from one that merely mentions a gate. Two roles need a screen — the operator and a manager — and that is the whole set.
 
 ## Rule 3 — `phase`
 

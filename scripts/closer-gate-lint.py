@@ -187,7 +187,22 @@ OWNER_RE = re.compile(
     r"\b[0-9a-f]{8,32}\b"                        # card id, or a session-id prefix
     r"|\bmanager\b|\bsupervisor\b"               # a role that can actually be reached
     r"|⏰\s*Ends:"                                # a declared, re-checkable observable
-    r"|^\s*(?:approve|review|you run|pick)\b",   # an operator verb names the operator
+    r"|^\s*(?:approve|review|you run|pick)\b"    # an operator verb names the operator
+    # ⚠️ `later (on <trigger>):` is the `parked-wait` closer (`docs/closer-classes.md`), and
+    # the Async State Closer treats the VERB as a legal closer — the operator has deferred to
+    # a named trigger, so it names an owner exactly as `pick` does. Without this arm the lint
+    # refused a `🔴 BLOCKED` line over one, which is a false positive on a legal shape.
+    #
+    # ⚠️ **Not "the PARKED closer".** `reap-closer.py`'s `PARKED_RE` is `pick|approve` and
+    # carries an operator ruling that such a row is NOT reaped — a different, load-bearing
+    # meaning in the same repo. `parked-wait` is this shape's own class name.
+    #
+    # ⚠️ The arm is needed even though some recorded parked-waits already pass: those carry a
+    # 32-hex card id, which the first arm matches. The ones the old regex REFUSED carry a
+    # PROSE trigger — `later (on either blocker landing)`, `later (on accept edits granted)`,
+    # `later (on a free interactive worker slot)` — none of which is hex, a role, or an
+    # `⏰ Ends:`.
+    r"|^\s*later\s*\(on\b",
     re.IGNORECASE | re.MULTILINE)
 
 STORE_PROBE_ENV = "SUPERVISOR_CLOSER_GATE_LINT_STORE"
@@ -451,6 +466,25 @@ PR_QUALIFIED = re.compile(
     r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+"
     r"|(?:https?://)?(?:www\.)?github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 
+# ⚠️ A slot that names a pull request in WORDS but carries no number at all —
+# `` `bborbe/claude-supervisor` PR for branch `fix/x` reaching green `` — is `unprobeable`
+# for exactly the reason a bare `PR #N` is, and the number-shaped matchers above cannot
+# see it: there is no number to match. Measured 2026-11-11: 8 of 36 PR-bearing declarations
+# matched only on the word (`the PR watcher returns a verdict (background job …)`,
+# `PR watch reports approval on `328f7ef9` and CI green`).
+PR_WORD = re.compile(r"\bPR\b|\bpull\s+requests?\b", re.IGNORECASE)
+
+# Everything the probe CAN see in a slot — the mirror of `observable-reprobe.py`'s `_BARE`,
+# `_QUALIFIED`, `_URL` and `_HASH`. A slot carrying any of these is either resolvable or is
+# the documented bare-`#N` gap below, so the word-only arm must not fire on it.
+# ⚠️ `_HASH` is what keeps `the verdict lands on #973` passing; dropping it would widen this
+# arm into the gap the comment below deliberately left open.
+PR_OBSERVABLE = re.compile(
+    r"(?i:\b(?:PR|pull\s+requests?)\s*#?\s*\d+)"
+    r"|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+"
+    r"|(?:https?://)?(?:www\.)?github\.com/[\w.-]+/[\w.-]+/pull/\d+"
+    r"|#\d+")
+
 # ⚠️ Deliberately NOT covered: a bare `#N` with no `PR` word (`the verdict lands on #973`).
 # It is a PR reference in context, but `#` also introduces issue numbers and headings, and
 # the measured population spells its PR references with the word. Widening later is cheap;
@@ -483,6 +517,30 @@ def unqualified_pr(line):
             if not covered(match):
                 return match.group(0)
     return None
+
+
+def pr_without_number(line):
+    """The PR word in an `⏰ Ends:` slot that names a pull request but no number, or `None`.
+
+    A separate check from `unqualified_pr`, not a branch of it: that one refuses a *number*
+    the probe cannot resolve, this one refuses a slot that never gets as far as a number.
+    Neither subsumes the other — `PR #12` has a number and no repository, `PR for branch
+    fix/x` has a repository and no number.
+
+    ⚠️ A repo and a branch are not a PR reference. `` `bborbe/claude-supervisor` PR for
+    branch `fix/x` `` names both and still resolves to nothing, so this arm cannot be
+    satisfied by looking for an `owner/repo` span — the span is exactly what the recorded
+    shape carries.
+    """
+    body = ends_body(line)
+    if not body:
+        return None
+    word = PR_WORD.search(body)
+    if not word:
+        return None
+    if PR_OBSERVABLE.search(body):
+        return None
+    return word.group(0)
 
 
 def state_dir():
@@ -725,6 +783,19 @@ def evaluate(payload, environ=None, card_probe=None):
             code, _text, record = verdict(2, "unqualified-pr-reference", closer=line,
                                           phrase=bare)
             return code, _pr_message(bare), record
+    # ⚠️ A third, independent check: a slot that names a pull request in words but carries
+    # no number at all. `unqualified_pr` above cannot see it — there is no number to match —
+    # and `session_bound_class` cannot either, since a PR is an external probe and not a
+    # session-bound one. Fail-open: a matcher error skips this check, never blocks.
+    if ends:
+        try:
+            word = pr_without_number(ends)
+        except Exception:
+            word = None
+        if word:
+            code, _text, record = verdict(2, "pr-reference-without-number", closer=line,
+                                          phrase=word)
+            return code, _pr_word_message(word), record
     body = closer_body(line)
     # ⚠️ Before the card and gate checks: a pane-only ask is unanswerable whatever card it
     # carries, and `you run:` is not a verb the allow-list path ever reaches. Fail-open.
@@ -799,6 +870,17 @@ def _pr_message(phrase):
     )
 
 
+def _pr_word_message(phrase):
+    return (
+        f"closer-gate-lint: `⏰ Ends: …{phrase}…` names a pull request but carries no PR "
+        "number, so the round's re-probe resolves nothing and renders `unprobeable` — a "
+        "wait nobody can re-check. ⚠️ A repository or a branch name is not a PR reference: "
+        "the probe needs the number. Write it QUALIFIED, in the same `⏰ Ends:` slot: "
+        "`owner/repo#N` (e.g. `bborbe/nuke#698`) or a "
+        "`https://github.com/owner/repo/pull/N` URL.\n"
+    )
+
+
 def _paneless_message(phrase):
     return (
         f"closer-gate-lint: this session has no pane ({PANELESS_ENTRYPOINT_ENV}="
@@ -830,9 +912,13 @@ def _blocked_owner_message():
         "closer-gate-lint: this closer reports `🔴 BLOCKED` but names no owner. A block "
         "nobody owns is invisible: the fleet round can only route it to a manager or "
         "re-check an observable if the closer names one. CLAUDE.md § Async State Closer — "
-        "name the owner in the `👤 You:` line: the full 32-hex card id the operator must "
-        "answer, the manager or supervisor that owns it, or a re-checkable `⏰ Ends:` "
-        "observable. `waiting on someone` is not an owner.\n"
+        "name the owner in the `👤 You:` line. ⚠️ **All five arms `OWNER_RE` accepts**, "
+        "because this message steers what the next model writes and naming three of them "
+        "sent it to mint a card where a cheaper form already passes: the full 32-hex card "
+        "id or session-id prefix the operator must answer; the manager or supervisor that owns it; a re-checkable "
+        "`⏰ Ends:` observable; an operator verb (`pick` / `approve:` / `review:` / "
+        "`you run:`); or the `parked-wait` form `later (on <trigger>): …`. "
+        "`waiting on someone` is not an owner.\n"
     )
 
 

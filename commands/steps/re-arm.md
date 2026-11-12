@@ -34,26 +34,17 @@ When: every tick — arm `ScheduleWakeup` FIRST, before the read half
 
   ⚠️ **This file is the FLEET tier's copy. The goal and topic tiers emit the same two reaches from `commands/steps/round-liveness.md`, every round.** All three tiers open headless workers, so all three must refresh; a tier that emitted neither would have its headless spawns refused once stage 2 ships.
 
-  **Leg `mcp` is ONE tool call.** `answer_permission` with a sentinel `request_id` that no worker holds; the server finds no park, consults the wrapper, replies with the foreign-park message, and **that reply writes the reach**. If the call is refused before it reaches the server — a classifier denial, the outage case the Impact names — no record is written, which is the correct outcome.
+  **Leg `mcp` is ONE tool call.** `answer_permission` with a sentinel `request_id` and sentinel `agent_id`. The handler **records the reach on entry**, before it decodes arguments or looks either id up, so the call is what writes it — not the reply it comes back with. If the call is refused before it reaches the server — a classifier denial, the outage case the Impact names — no record is written, which is the correct outcome.
 
   ```
-  mcp__supervisor__answer_permission(request_id="answer-path-reach-sentinel", behavior="deny")
+  mcp__supervisor__answer_permission(agent_id="answer-path-reach-sentinel", request_id="answer-path-reach-sentinel", behavior="deny")
   ```
 
-  ⚠️ **A manager's ordinary `answer_permission` calls do NOT produce this leg** — they name a real park, which is in the server's `pending` map, so the settle path runs and the foreign-park arm never does. Measured 2026-11-10: **18 `wrapper` reaches and 0 `mcp` reaches**, because this step previously said the leg needed nothing.
+  ⚠️ **All three arguments are REQUIRED, `agent_id` included.** The tool's schema declares `{agent_id, request_id, behavior}` required, so a call naming only `request_id` is **rejected by the MCP layer before the handler runs** — no reach is written, and the manager sees `agent_id and request_id are required`. ⚠️ This step previously documented the two-argument form, which cannot work; measured 2026-11-12, a manager following it literally got the validation error and no leg. A sentinel `agent_id` is enough, and the reply it produces depends on which sentinel is fake: a fake **agent** gets `unknown session`, a fake **request id** against a real agent gets the foreign-park message. ⚠️ Either way the reach is already written, because the handler records it **on entry** — so the reply text is not the signal, and a manager must not retry on it.
 
-  **Leg `wrapper` is a Bash `curl`, in its own call, then the recorder in another.** Two calls, deliberately: folding the recorder onto the same line changes the command shape the permission classifier judges, and a green reach would then prove the wrong thing.
+  ⚠️ **On the current server this leg is written by ANY `answer_permission` call, real park or sentinel.** The Go handler (`claude-wrapper/pkg/roster_mcp.go` `answerPermission`) records the reach **on entry**, before it decodes its arguments or looks the request id up — so a manager that answered a real park this round already wrote the leg. ⚠️ **This paragraph previously claimed the opposite**, carrying over the JS server's settle-path reasoning ("a real park never reaches the foreign-park arm"); that was true of the retired `server/supervisor.mjs` and is **false of the server the fleet runs**. The sentinel is still required, because a manager that answers no parks would otherwise write nothing.
 
-  ```bash
-  curl -s -o /dev/null -w '%{http_code}' -X POST \
-    "${SUPERVISOR_WRAPPER_URL:-http://localhost:18090}/api/1.0/sessions/${CLAUDE_CODE_SESSION_ID}/answer" \
-    -H 'content-type: application/json' \
-    -d '{"request_id":"answer-path-reach-sentinel","behavior":"allow"}'
-  ```
-
-  ```bash
-  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/answer-reach.py" --status "<the status printed above>"
-  ```
+  **Leg `wrapper` is automatic — do nothing.** `manager-liveness.py --arm` emits it: the arm POSTs to the wrapper's answer route with a sentinel request id and records the reach only when the reply is `404` or `409`. ⚠️ **There is no separate curl or recorder call to run**, and adding one back is how this leg went unemitted for days (4 fresh `mcp` reaches against 1 fresh `wrapper` reach, measured 2026-11-13).
 
   ⚠️ **`SUPERVISOR_WRAPPER_URL` must be an ORIGIN, with no path.** `server/config.mjs` resolves it to `url.origin`, so a value carrying a path would have the server call `/api/1.0/...` while this curl posts to `<path>/api/1.0/...` — a route-level `404`, which the recorder accepts as a valid reach and which would therefore certify a route never reached.
 

@@ -168,20 +168,34 @@ session registry, the manager cap, the live-manager count, the attention store o
 goals/topics directory could not be read; it prints the reason to stderr and no `SUMMARY`. Open
 nothing, report the reason, and record this half `not-run` at key granularity.
 
-## 4. Record the count — in the digest, not only in chat
+## 4. Record the reading, PER KIND — in the digest, not only in chat
 
-`python3 "$P/fleet-legs.py" --digest "<this round's digest>" --leg operator-flagged --count <n> --invoked`,
-with `<n>` the flagged subjects this leg **declined to act on**: the tasks the batch refused,
-held or skipped, plus every goal or topic the selector reported `DEFERRED`, `WAITING`, `CARDED`
-or `UNKNOWN`. ⚠️ **`--invoked` is mandatory and is the truth about this leg, not a formality** —
+`python3 "$P/fleet-legs.py" --digest "<this round's digest>" --per-kind "tasks=<o>/<u>/<e> goals=<o>/<u>/<e> topics=<o>/<u>/<e>" --invoked`
+
+⚠️ **Three numbers per kind, and they must add up: `opened + declined == eligible`.** The script refuses a triple that does not, at the writer and at the reader — so a mis-derived number is a failed write, not a plausible line.
+
+| Kind | `<o>` opened | `<u>` declined | `<e>` eligible |
+|---|---|---|---|
+| **tasks** | the batch's own footer `Opened N` — never a hand-count | the hand-back's `operator-flagged` count: the tasks the batch refused, held or skipped | `<o> + <u>`, **by construction** |
+| **goals** | the `OPEN \| … \| goal \| …` lines you actually invoked `/supervisor:open --goal` for | the selector's **non-OPEN** goal lines — `DEFERRED`, `WAITING`, `CARDED`, `UNKNOWN`, `COVERED` — **counted from the output, never derived** | every goal line the selector printed a verdict for |
+| **topics** | the `OPEN \| … \| topic \| …` lines you actually invoked `/supervisor:open --topic` for | the selector's non-OPEN topic lines, same verdicts, **counted** | every topic line the selector printed a verdict for |
+
+⚠️ **Say which kind reconciles independently, because only one of them does.**
+
+- **Goals and topics reconcile.** `<o>` comes from the invocations you made; `<u>` and `<e>` are both **counted from the selector's own output**, not from each other. So `opened + declined == eligible` is a real cross-check across two producers: a leg that reports the selector's `OPEN` lines without invoking them yields `<o>=0`, the arithmetic still holds, and the line says truthfully that nothing was opened. Counting `<u>` as `<e> - <o>` would make the check vacuous — do not.
+- **Tasks do not.** The batch reports `Opened N` and the declined count and nothing else, so `<e>` there IS `<o> + <u>` and the guard is a consistency check, not a reconciliation. Its discriminator is the **source** of `<o>`: the batch's own footer, never a hand-count. Never describe the tasks triple as independently sourced — it is not, and the guard would be vacuous if it claimed to be.
+
+⚠️ **`--invoked` is mandatory and is the truth about this leg, not a formality** —
 it renders `(batch invoked)`, which is what separates "the batch ran and left N" from "the batch
 never ran and N are waiting". A leg that only counted the debt without invoking
 `/supervisor:open --flagged` writes `--not-invoked` and is the read-only failure `# 3` already
-tells you to refuse. ⚠️ **`MANAGED` and `COVERED` are excluded** — a live manager already owning the
-subject, and a goal whose topic opened this round, are both the leg working correctly, and
-counting them would render a healthy round as a regression in the `# Regression metric`. The
-line's format and its not-run form have their **single home in `commands/steps/output-shape.md`
-item 14** — read it there and never restate it here.
+tells you to refuse. ⚠️ **`MANAGED` is excluded from `<e>`** — a live manager already owning the
+subject is the leg working correctly, and counting it would render a healthy round as a
+regression in the `# Regression metric`. ⚠️ **`COVERED` is counted, as a DECLINE** — a goal whose
+topic opened in the same run was not skipped by accident, and the before-table check reads
+`<u>` for exactly that: a flagged row that appears in neither `<o>` nor `<u>` is the failure this
+leg exists to remove. The line's format and its not-run form have their **single home in
+`commands/steps/output-shape.md` item 14** — read it there and never restate it here.
 
 ⚠️ **Never render `unactioned: 0` for a leg that did not run** — a suppressed leg and a leg that
 opened nothing must never print the same, which is the whole reason the count is written to the
