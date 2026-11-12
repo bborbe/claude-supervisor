@@ -282,9 +282,11 @@ def standdown_marker(subject):
     if not subject:
         return None
     for branch in ml.BRANCHES:
-        marker = ml.stopped_marker(subject, branch)
-        if marker:
-            return os.path.basename(marker)
+        # `is_subject_stopped()` is the decision (the same predicate `open-queue.py` reads),
+        # and `stopped_marker()` is the same read returning the path it resolved. Two calls
+        # into ONE implementation, never a second derivation of the name.
+        if ml.is_subject_stopped(subject, branch):
+            return os.path.basename(ml.stopped_marker(subject, branch))
     return None
 
 
