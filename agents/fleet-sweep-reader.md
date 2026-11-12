@@ -48,6 +48,8 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 
 4. **Task file + stall signal (Step 2).** For every `busy`/`shell` **and `idle`** session, resolve its task file (the `claude_session_id:` stamp, else an **exact** `<name>.md` — across **every configured vault**, per the block below — may be a goal) and count its open boxes (`grep -cE '^[[:space:]]*-[[:space:]]*\[( |/)\]'`). ⚠️ `idle` is not optional: step 8's `parked` and `finished` rows both read an idle session's task file, so skipping it leaves every idle row unclassifiable. For `busy`/`shell` only, also `date -r "<task_file>" -u '+%Y-%m-%dT%H:%M:%SZ'`. Compare with the previous `task_mtime`. Never a message. ⚠️ **Not skippable for budget, and not partially skippable** — this pass and the step-1 roster join are what make every other section possible. A round that skips either has nothing for the drive leg and must not return a digest that reads as complete: print `UNKNOWN (pass not run)` in each section it starved.
 
+   **Transcript age — the digest's `<age>`, one call.** `python3 $P/who-needs-me.py --ages <ids…>` → `<sid8>\t<seconds>\t<human>\t<quiet|active|ambiguous>`. Pass every `busy`/`shell` row — its `quiet` is half the `stalled` test — **and** every other row step 8 will render, whose `<age>` is this same value. The task-file mtime is **never** rendered: it measures whether the *task page* was edited, which a long turn does not.
+
    ⚠️ **Resolve across every configured vault — the caller passes only one.** The caller supplies *the vault path and its tasks dir* (see `<inputs>`), so a session whose task lives in a sibling vault resolves to nothing under a single-vault lookup and is reported as unowned. A false *unowned* is the same class of defect as a false verdict: it reads as a finding.
 
    ```bash
@@ -110,7 +112,7 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
    | session's **transcript was written inside `LIVE_WINDOW`** (5 min) | progressing — in flight, never `stalled` |
    | session's newest `Stop` record carries a non-empty **`⏰ Ends:`** slot | **parked-on-watcher** — render `⌛ parked-on-watcher`; never `stalled`, never nudged |
    | transcript tail ends on an operator-facing `👤 You:` closer with no user/tool turn after it | parked — **whatever the status says, including `shell`** — ⚠️ **and this row MUST sit BELOW the `⏰ Ends:` row above**, because its canonical predicate `scripts/who-needs-my-help.py::parked()` returns True for a `👤 You: nothing` closer whose `⏰` line names a machine (`machine_wait()`): placed above, it claims exactly the session this change exists to stop nudging, the row renders `parked`, and `agents/fleet-drive.md` step 1 nudges a worker that is correctly waiting |
-   | `busy`/`shell` **and** task mtime unchanged for ≥2 consecutive sweeps (`stall_count >= 2` after this sweep's update) | **stalled** |
+   | `busy`/`shell` **and** task mtime unchanged for ≥2 consecutive sweeps (`stall_count >= 2` after this sweep's update) **and** `--ages` reads `quiet` — both clocks, never the task file alone | **stalled** |
    | `idle` **and** task file has open `[ ]`/`[/]` boxes | parked |
    | task `in_progress` + `claude_session_id` + not `parked` / `parked-on-watcher` / `waiting-on-human` + transcript `LAST-ACTIVE` ≥4h + absent from `ListAgents` + task mtime ≤7d | **orphan** candidate |
    | no prior snapshot, or no task file resolved | unclassified — insufficient data |
@@ -153,7 +155,7 @@ Return **≤ 48 lines for the fixed sections plus one `CLOSERS` row per live ses
 ```
 DIGEST <round timestamp> · <N> sessions · snapshot written: <swept_at from fleet-snapshot.py>
 CLASSIFICATION  <total> classified · <class>=<n> · <class>=<n> …    — or: UNKNOWN (pass not run)
-  <name> [<session id 8>] · <status> · <age> · <class> · <task file basename | —> · <open boxes | —> · <link | —>        ← only non-progressing rows
+  <name> [<session id 8>] · <status> · <age — transcript, from --ages> · <class> · <task file basename | —> · <open boxes | —> · <link | —>        ← only non-progressing rows
 BLOCKED (feed, raised — not verified open)
   <name> · pane <id> · <link> · <gate text, ≤80 chars>
 CLOSERS (last-turn closer and class)

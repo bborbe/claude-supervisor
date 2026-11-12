@@ -39,6 +39,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -2884,6 +2885,111 @@ class PaneReadFailureKind(unittest.TestCase):
         # 88.78 s is the worst read measured on 2026-11-08 — see the constants' comment.
         # A budget that does not clear it is a guess, and a guess is what produced this.
         self.assertGreater(wnm.PANE_LIST_TIMEOUT, 88.78)
+
+
+class AgesFlagTest(unittest.TestCase):
+    """`--ages` is the clock the fleet digest renders, and the quiet half of `stalled`.
+
+    Both failure directions are silent in production: a wrong age renders a working
+    session as 37-59 minutes inactive (measured 2026-10-23, five rows), and a wrong
+    `quiet` puts it in `stalled` where a manager is invited to nudge it. The fixture
+    transcripts are constructed; the live claims belong to the task page's `# Results`.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._old_projects = wnm.PROJECTS_DIR
+        wnm.PROJECTS_DIR = self.tmp
+        wnm._AGE_CACHE.clear()
+
+    def tearDown(self):
+        wnm.PROJECTS_DIR = self._old_projects
+        wnm._AGE_CACHE.clear()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def transcript(self, sid, age_seconds, project="proj"):
+        directory = os.path.join(self.tmp, project)
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, f"{sid}.jsonl")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("{}\n")
+        stamp = time.time() - age_seconds
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def ages(self, *ids):
+        env = dict(os.environ, PROJECTS_DIR=self.tmp)
+        result = subprocess.run([sys.executable, _SCRIPT, "--ages", *ids],
+                                capture_output=True, text=True, env=env)
+        self.assertEqual(0, result.returncode, result.stderr)
+        return [line.split("\t") for line in result.stdout.splitlines()]
+
+    def test_a_prefix_resolves_to_the_full_id(self):
+        sid = "0123456789abcdef0123456789abcdef"
+        self.transcript(sid, 10)
+        self.assertEqual((sid, False), wnm._resolve_session_id("01234567"))
+
+    def test_an_ambiguous_prefix_is_reported_never_quiet(self):
+        self.transcript("01234567-aaaa-4aaa-8aaa-aaaaaaaaaaaa", 10)
+        self.transcript("01234567-bbbb-4bbb-8bbb-bbbbbbbbbbbb", 10)
+        rows = self.ages("01234567")
+        self.assertEqual(["01234567", "?", "?", "ambiguous"], rows[0])
+
+    def test_a_session_writing_its_transcript_is_active_whatever_its_task_file_says(self):
+        sid = "01234567-cccc-4ccc-8ccc-cccccccccccc"
+        self.transcript(sid, 120)
+        row = self.ages("01234567")[0]
+        self.assertEqual("01234567", row[0])
+        self.assertEqual("active", row[3])
+        # The elapsed second is deliberately not pinned: the subprocess starts after
+        # `utime` stamped the fixture, so an exact `120` is a race the test loses on a
+        # loaded machine. The band still fails on a wrong clock (the task-file mtime
+        # this replaced reads hours) and on a wrong formatter (`120` vs `2m ago`).
+        self.assertGreaterEqual(int(row[1]), 120)
+        self.assertLess(int(row[1]), 180)
+        self.assertEqual("2m ago", row[2])
+
+    def test_a_failed_transcript_read_is_unknown_never_quiet(self):
+        # `inf` is reserved for "no transcript"; a read that raised did not happen, and
+        # reporting it as `quiet` is the failure this flag exists to prevent — a live
+        # session rendered as stalled and nudged.
+        sid = "01234567-1111-4111-8111-111111111111"
+        with mock.patch.object(wnm.glob, "glob", side_effect=OSError("boom")):
+            self.assertEqual(("01234567", "?", "?", "unknown"), wnm.ages_row(sid))
+
+    def test_a_transcript_past_the_bound_reads_quiet(self):
+        sid = "01234567-dddd-4ddd-8ddd-dddddddddddd"
+        self.transcript(sid, wnm.STALL_TRANSCRIPT_SECONDS + 60)
+        self.assertEqual("quiet", self.ages("01234567")[0][3])
+
+    def test_the_bound_itself_is_quiet_not_active(self):
+        # `>=`, not `>`: a session quiet for exactly the threshold is quiet. A `>` here
+        # would leave the boundary row reading active for one whole sweep.
+        sid = "01234567-eeee-4eee-8eee-eeeeeeeeeeee"
+        self.transcript(sid, wnm.STALL_TRANSCRIPT_SECONDS)
+        self.assertEqual("quiet", self.ages("01234567")[0][3])
+
+    def test_a_full_id_skips_the_prefix_glob(self):
+        sid = "01234567-ffff-4fff-8fff-ffffffffffff"
+        self.transcript(sid, 10)
+        self.assertEqual((sid, False), wnm._resolve_session_id(sid))
+
+    def test_an_id_that_is_not_an_id_fragment_is_never_globbed(self):
+        # `*` broadens the match and `/` escapes PROJECTS_DIR; both would answer with a
+        # stranger's age. Reported instead, and never as `quiet`.
+        self.assertEqual("ambiguous", self.ages("*")[0][3])
+        self.assertEqual("ambiguous", self.ages("../01234567")[0][3])
+
+    def test_a_long_argument_that_is_not_a_full_id_is_never_globbed(self):
+        # The full-id branch used to return any >=36-char argument unchanged, so a
+        # `/`-bearing or glob-bearing string reached the transcript glob and could
+        # widen past PROJECTS_DIR. Only an exact 36-char UUID skips the glob now.
+        self.assertEqual("ambiguous", self.ages("*" * 36)[0][3])
+        self.assertEqual("ambiguous", self.ages("../" + "a" * 34)[0][3])
+
+    def test_a_session_with_no_transcript_reads_quiet_not_active(self):
+        rows = self.ages("ffffffff")
+        self.assertEqual(["ffffffff", "inf", "no transcript", "quiet"], rows[0])
 
 
 if __name__ == "__main__":
