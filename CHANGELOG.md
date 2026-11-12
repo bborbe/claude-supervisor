@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.295.2
 
 - fix: **`stuck-idle.py` resolves a resumed session's transcript instead of giving up.** `resolve_transcript()` returned `None` whenever the glob matched more than one file, and a resumed session has one transcript per project dir it ran in — so every resumed headless worker read `unverifiable` for ever, the direction that never resumes anything. Found by exercising the deployed `v0.293.0` probe against a real session, where it rendered `transcript=none` on a session with two copies. Newest mtime is the only choice that answers the question the probe asks (*is this transcript moving*), and the same session then read `unchanged_rounds=2` with `in_flight=AskUserQuestion` → `not-stuck`, which is the probe correctly refusing to call a mid-call worker idle. Change set: `scripts/stuck-idle.py`, `scripts/tests/test_stuck_idle.py`, `CHANGELOG.md`.
 
