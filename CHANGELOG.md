@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.298.0
 
 - feat: **a manager round reports its own spend per change.** `manager-receipt.py` gains `--tokens` (parent transcript plus `<session-id>/subagents/*.jsonl`, windowed `round_started_at` → now, deduped by `message.id`) and `--snapshot` / `--count` (a moved-row count diffed against the sweep payload the leg snapshotted at its head, `n/a (baseline)` on the first tick). The round's tail prints `tokens spent ÷ cells moved` beside the census `tok 15m manager=` line, each with its own span. The numerator is a measured per-round token count, never an echo of the census; the denominator is a diff-derived moved-row count, so a round that spends 130K to report nothing is visible in its own output. Change set: `scripts/manager-receipt.py`, `scripts/tests/test_manager_receipt.py`, `commands/steps/topic-sweep.md`, `commands/steps/goal-sweep.md`, `commands/steps/round-tail.md`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
 
