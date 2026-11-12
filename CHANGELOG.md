@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.295.3
 
 - fix: **the keeper's `restart-worker` budget is raised from 120 s to 400 s, because role resolution alone costs 170.6 s.** `restart-worker.py` resolves the session's role through `fleet-board.vault_index()`, which walks every vault's topic/goal/task pages and reads each task's frontmatter — measured 2026-11-12 at 170.6 s, on its own, before the kill or the spawn. At the old 120 s budget every restart reported `outcome UNKNOWN` and recovered nothing, and because the hang sits BEFORE the kill it aborted harmlessly, so no failure was visible. The new `RESTART_WORKER_TIMEOUT` constant is shared by both call sites — the answer-gated fresh restart and the `--absent` resume — since both pay the same index cost and a literal left behind on either is a live defect. Operator ruling 2026-11-12: raise the budget above the index cost rather than optimise the index here. Tests: `test_the_restart_budget_exceeds_the_measured_index_cost`. Change set: `scripts/fleet-keeper.py`, `scripts/tests/test_fleet_keeper.py`, `CHANGELOG.md`.
 
