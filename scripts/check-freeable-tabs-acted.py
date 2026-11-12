@@ -19,7 +19,7 @@ queued, which makes this a routing failure rather than a careless one.
 caller sent the reap and stopped. Prose a caller can skip is the defect, so the pass is now
 a named step with its own required line and this check is its guard.
 
-    freeable-tabs: rows <N> · acted <M> · missing <N-M>
+    freeable-tabs: rows <N> · linkable <L> · acted <M> · missing <L-M>
 
 WHY IT IS A SCRIPT. The denominator is a parse over one payload block with a link test; the
 numerator is a read of the round's action record; the verdict is an exit code. A sentence
@@ -66,7 +66,7 @@ CHECK_NAME = "check-freeable-tabs-acted.py"
 #: The line the round step and the output shape must both carry. Anchored on all four counts
 #: together, because `freeable-tabs:` alone is satisfied by any sentence about freeable tabs.
 ROUND_LINE_MARKER = "freeable-tabs: rows <N> · closed <M> · refused <K> · skipped <J>"
-OUTPUT_SHAPE_MARKER = "freeable-tabs: rows <N> · acted <M> · missing <N-M>"
+OUTPUT_SHAPE_MARKER = "freeable-tabs: rows <N> · linkable <L> · acted <M> · missing <L-M>"
 
 #: Column-0 section heads. A head ends whatever block was open, so the parse cannot run past
 #: the block it is counting -- the payload carries `ESCALATION`, `CLOSERS` and `RETAINED`
@@ -118,13 +118,29 @@ def _norm_name(name):
     return re.sub(r"\s+", " ", text).strip().casefold()
 
 
+#: The row classes a `FREEABLE TABS` line can carry. Used to FIND the class field rather than
+#: assume its position: the payload renders an optional task column between the name and the
+#: class (`<name> · <task> · finished · <link>`), and reading `fields[1]` would return the task
+#: name on every such row — which silently disabled the `long-wait` exclusion it was meant to
+#: apply. Measured by review on 2026-11-12.
+ROW_CLASSES = ("finished", "deferred", "long-wait")
+
+
+def _row_class(fields):
+    """The class field from a row's `·`-separated fields, or "" when none is recognised."""
+    for field in fields[1:]:
+        if field.startswith(ROW_CLASSES):
+            return field
+    return ""
+
+
 def freeable_rows(text):
     """(name, row_class, has_resolved_link) per row under `FREEABLE TABS`, in payload order.
 
-    `row_class` is the row's second field (`finished`, `deferred <date>`, `long-wait <age>`).
-    It is carried because the close contract excludes `long-wait <age>` — those rows hold a
-    live wait and closing one destroys it — so a resolved link on a `long-wait` row is a
-    permanent, correct non-close and must never read as a deficit.
+    `row_class` is located by value, never by position — see `ROW_CLASSES`. It is carried
+    because the close contract excludes `long-wait <age>`: those rows hold a live wait and
+    closing one destroys it, so a resolved link on a `long-wait` row is a permanent, correct
+    non-close and must never read as a deficit.
     """
     rows = []
     block = None
@@ -150,8 +166,7 @@ def freeable_rows(text):
         if not name:
             continue
         fields = [field.strip() for field in stripped.split("·")]
-        row_class = fields[1] if len(fields) > 1 else ""
-        rows.append((name, row_class, RESOLVED_LINK in line))
+        rows.append((name, _row_class(fields), RESOLVED_LINK in line))
     return rows
 
 
@@ -193,18 +208,23 @@ def sent_path_for(drive_path):
 
 
 def static_failures():
+    """(failures, refused) for the static contract.
+
+    `refused` is True when a contract file exists but cannot be read: that says nothing about
+    whether the contract is intact, so it must never render as a deficit. A file that is
+    simply absent is a genuine failure — the contract has no body to check.
+    """
+    for path in (ROUND, OUTPUT_SHAPE):
+        if not path.exists():
+            return ["%s does not exist -- there is no body to check" % path], False
+
+    try:
+        round_step = ROUND.read_text(encoding="utf-8")
+        output_shape = OUTPUT_SHAPE.read_text(encoding="utf-8")
+    except OSError as exc:
+        return ["contract file unreadable: %s" % exc], True
+
     failures = []
-    if not ROUND.exists():
-        return ["%s does not exist -- the round step has no body to check" % ROUND]
-    if not OUTPUT_SHAPE.exists():
-        return [
-            "%s does not exist -- the never-omitted rule has no body to check"
-            % OUTPUT_SHAPE
-        ]
-
-    round_step = ROUND.read_text(encoding="utf-8")
-    output_shape = OUTPUT_SHAPE.read_text(encoding="utf-8")
-
     if ROUND_LINE_MARKER not in round_step:
         failures.append(
             "%s no longer requires `%s` -- the step would print nothing and a round that "
@@ -220,7 +240,7 @@ def static_failures():
             "%s no longer mandates `%s` -- the round may compute the counts and render "
             "silence" % (OUTPUT_SHAPE, OUTPUT_SHAPE_MARKER)
         )
-    return failures
+    return failures, False
 
 
 def artifact_failures(drive_path, sent_path):
@@ -251,8 +271,13 @@ def artifact_failures(drive_path, sent_path):
         if linked and not row_class.startswith(LONG_WAIT_CLASS)
     ]
     missing = [name for name in actionable if _norm_name(name) not in acted]
-    line = "freeable-tabs: rows %d · acted %d · missing %d" % (
+    # The arithmetic must hold as printed: `missing` is `linkable - acted`, so the line names
+    # the linkable population explicitly rather than implying `rows - acted`. `rows` counts the
+    # whole block (a quiet round still proves the block was read) and `linkable` is the subset
+    # the close contract can act on.
+    line = "freeable-tabs: rows %d · linkable %d · acted %d · missing %d" % (
         len(rows),
+        len(actionable),
         len(actionable) - len(missing),
         len(missing),
     )
@@ -307,9 +332,14 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     drive_path, sent_path, parse_error = _parse(argv)
 
-    failures = static_failures()
+    failures, static_refused = static_failures()
     if parse_error:
         print("check-freeable-tabs-acted: refused -- %s" % parse_error, file=sys.stderr)
+        return REFUSED
+    if static_refused:
+        print("check-freeable-tabs-acted: REFUSED", file=sys.stderr)
+        for failure in failures:
+            print("  - %s" % failure, file=sys.stderr)
         return REFUSED
     if sent_path and not drive_path:
         # `--sent` alone would fall through to the static-only run and exit 0 with the round

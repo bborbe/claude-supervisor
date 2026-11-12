@@ -80,7 +80,7 @@ class FreeableTabsArtifactTest(unittest.TestCase):
         drive = self._write("2026-11-12T10-08-16Z.drive", DEFECT_PAYLOAD)
         code, out, err = run(["--drive", drive])
         self.assertEqual(code, 1, out + err)
-        self.assertIn("freeable-tabs: rows 3 · acted 0 · missing 1", out)
+        self.assertIn("freeable-tabs: rows 3 · linkable 1 · acted 0 · missing 1", out)
         self.assertIn("Update All Service Repos Go Modules 2026-11", err)
 
     def test_the_same_payload_passes_once_the_record_carries_a_close(self):
@@ -93,14 +93,14 @@ class FreeableTabsArtifactTest(unittest.TestCase):
         )
         code, out, err = run(["--drive", drive])
         self.assertEqual(code, 0, out + err)
-        self.assertIn("freeable-tabs: rows 3 · acted 1 · missing 0", out)
+        self.assertIn("freeable-tabs: rows 3 · linkable 1 · acted 1 · missing 0", out)
 
     def test_a_quiet_round_is_clean(self):
         """No resolved link anywhere: `rows` still counts, `missing` is 0."""
         drive = self._write("2026-11-12T11-01-24Z.drive", QUIET_PAYLOAD)
         code, out, err = run(["--drive", drive])
         self.assertEqual(code, 0, out + err)
-        self.assertIn("freeable-tabs: rows 1 · acted 0 · missing 0", out)
+        self.assertIn("freeable-tabs: rows 1 · linkable 0 · acted 0 · missing 0", out)
 
     def test_a_long_wait_row_with_a_link_is_never_a_deficit(self):
         """`long-wait <age>` rows are excluded by contract: closing one destroys a live wait.
@@ -115,7 +115,33 @@ class FreeableTabsArtifactTest(unittest.TestCase):
         drive = self._write("lw.drive", payload)
         code, out, err = run(["--drive", drive])
         self.assertEqual(code, 0, out + err)
-        self.assertIn("freeable-tabs: rows 1 · acted 0 · missing 0", out)
+        self.assertIn("freeable-tabs: rows 1 · linkable 0 · acted 0 · missing 0", out)
+
+    def test_a_long_wait_row_with_a_task_column_is_still_excluded(self):
+        """The payload renders an optional task column between the name and the class.
+
+        Reading the class by position returns the TASK name on every such row, which silently
+        disabled the long-wait exclusion it was meant to apply. The class is located by value.
+        """
+        payload = QUIET_PAYLOAD.replace(
+            "  Every Session Records Its State and What It Waits On · deferred 2026-11-12T09:00 · no pane — digest carried —",
+            "  A Parked Worker · The Task It Holds · long-wait 14h · http://127.0.0.1:1337/jump?pane=12&t=q",
+        )
+        drive = self._write("lw4.drive", payload)
+        code, out, err = run(["--drive", drive])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("freeable-tabs: rows 1 · linkable 0 · acted 0 · missing 0", out)
+
+    def test_a_finished_row_with_a_task_column_is_still_actionable(self):
+        """The same 4-field shape, class `finished`: it must still be counted."""
+        payload = QUIET_PAYLOAD.replace(
+            "  Every Session Records Its State and What It Waits On · deferred 2026-11-12T09:00 · no pane — digest carried —",
+            "  A Worker · Its Task · finished · http://127.0.0.1:1337/jump?pane=12&t=q",
+        )
+        drive = self._write("fin4.drive", payload)
+        code, out, err = run(["--drive", drive])
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("freeable-tabs: rows 1 · linkable 1 · acted 0 · missing 1", out)
 
     def test_a_skipped_entry_counts_as_acted(self):
         """A refusal token is a legitimate outcome — the row is left for the next round."""
@@ -197,25 +223,25 @@ class FreeableTabsStaticTest(unittest.TestCase):
         path.write_text(text.replace(needle, ""), encoding="utf-8")
 
     def test_the_tree_passes_static(self):
-        self.assertEqual(check.static_failures(), [])
+        self.assertEqual(check.static_failures(), ([], False))
 
     def test_a_round_step_without_the_required_line_fails(self):
         round_copy = self._copies[check.ROUND.name]
         self._trip(round_copy, check.ROUND_LINE_MARKER)
         check.ROUND = round_copy
-        self.assertTrue(check.static_failures())
+        self.assertTrue(check.static_failures()[0])
 
     def test_a_round_step_that_stops_running_the_check_fails(self):
         round_copy = self._copies[check.ROUND.name]
         self._trip(round_copy, check.CHECK_NAME)
         check.ROUND = round_copy
-        self.assertTrue(check.static_failures())
+        self.assertTrue(check.static_failures()[0])
 
     def test_an_output_shape_without_the_line_fails(self):
         shape_copy = self._copies[check.OUTPUT_SHAPE.name]
         self._trip(shape_copy, check.OUTPUT_SHAPE_MARKER)
         check.OUTPUT_SHAPE = shape_copy
-        self.assertTrue(check.static_failures())
+        self.assertTrue(check.static_failures()[0])
 
 
 if __name__ == "__main__":
