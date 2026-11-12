@@ -22,6 +22,7 @@ observable so a branch keyed on the recorded string fails the suite.
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -101,6 +102,7 @@ class ExpiredDeclaration(unittest.TestCase):
     def _store(self, records):
         """A tmp attention store holding one session's `Stop` records."""
         d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         path = os.path.join(d, f"{_FULL_SID}.events.jsonl")
         with open(path, "w", encoding="utf-8") as f:
             for rec in records:
@@ -112,15 +114,14 @@ class ExpiredDeclaration(unittest.TestCase):
                 "detail": f"⏰ Ends: {ends}"}
 
     def test_the_recorded_expired_row_is_the_pair(self):
-        """SC2's before/after: ONE fixture, two verdicts.
+        """The before/after pair: ONE fixture, two verdicts.
 
         With the declaration resolved the row is actionable; the class alone — today's
         behaviour — is `unverifiable`. Both halves are asserted on the same fixture so
         neither can be satisfied by a mapping that simply revives every parked row.
         """
         d = self._store([self._stop(
-            "`make precommit` in `~/Documents/workspaces/claude-wrapper-flagged-tick` "
-            "exits 0", 7200)])
+            "`make precommit` in the feature worktree exits 0", 7200)])
         self.assertEqual("expired", cv.wait_verdict_for("64a0e8f1", state_dir=d))
         # after: the declaration widens the class
         self.assertEqual("revive", cv.verdict("parked-wait", "expired")[0])
@@ -134,13 +135,14 @@ class ExpiredDeclaration(unittest.TestCase):
         self.assertEqual("revive", cv.verdict("parked-wait", "expired")[0])
 
     def test_a_live_declaration_stays_unverifiable(self):
-        """SC3: the anti-regression half — a live wait must not start nudging."""
+        """The anti-regression half — a live wait must not start nudging."""
         d = self._store([self._stop("PR bborbe/nuke#698 merges", 60)])
         self.assertEqual("declared", cv.wait_verdict_for("64a0e8f1", state_dir=d))
         self.assertEqual("unverifiable", cv.verdict("parked-wait", "declared")[0])
 
     def test_a_row_with_no_declaration_stays_unverifiable(self):
         d = tempfile.mkdtemp()  # an empty store
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
         self.assertIsNone(cv.wait_verdict_for("64a0e8f1", state_dir=d))
         self.assertEqual("unverifiable", cv.verdict("parked-wait", None)[0])
 
