@@ -236,6 +236,103 @@ class Verdicts(Tmp):
         self.assertEqual(rr.feed_verdict(["x"], {"x"}, "read"), "gated")
 
 
+class TheParkLimb(Tmp):
+    """A `waiting` session is parked, not stuck — asserted on BOTH fields of one row.
+
+    Measured 2026-10-29: a headless worker suspended on a permission gate writes
+    nothing to its transcript, so transcript staleness reads identically to a finished
+    turn. `in_flight()` returned `quiet` for it and `stuck_verdict()` — which took no
+    `in_flight` argument at all — stamped the same row `frozen`, from the same read.
+    """
+
+    def registry(self, sid, status):
+        return {sid: {"status": status}}
+
+    def stale(self, sid):
+        """A transcript older than `LIVE_WINDOW`, i.e. the frozen shape."""
+        return 600.0
+
+    def test_a_waiting_session_reads_parked(self):
+        sid = "eeee5555"
+        verdict, limb = rr.in_flight([sid], self.registry(sid, "waiting"),
+                                     self.attention, time.time(), self.stale)
+        self.assertEqual(verdict, "parked")
+        self.assertIn("waiting", limb)
+
+    def test_a_parked_row_is_not_frozen(self):
+        sid = "ffff6666"
+        row = {"mtime": time.time() - 3600}
+        verdict, _ = rr.stuck_verdict(
+            row, [sid], "LIVE", "clear", 900, time.time(),
+            self.attention, self.projects, in_flight_verdict="parked")
+        self.assertEqual(
+            verdict, "none",
+            "a parked worker's tool call is suspended, so the transcript cannot tell "
+            "a park from a death — and this is the park")
+
+    def test_an_idle_session_with_a_static_transcript_is_still_frozen(self):
+        """The negative control: the park limb must not swallow the real case."""
+        sid = "9999aaaa"
+        row = {"mtime": time.time() - 3600}
+        fl, _ = rr.in_flight([sid], self.registry(sid, "idle"),
+                             self.attention, time.time(), self.stale)
+        self.assertEqual(fl, "quiet")
+        verdict, _ = rr.stuck_verdict(
+            row, [sid], "LIVE", "clear", 900, time.time(),
+            self.attention, self.projects, in_flight_verdict=fl)
+        self.assertEqual(verdict, "frozen")
+
+    def test_a_park_does_not_survive_the_gate_being_released(self):
+        """Once the registry leaves `waiting`, the same row is frozen again."""
+        sid = "8888bbbb"
+        row = {"mtime": time.time() - 3600}
+        fl, _ = rr.in_flight([sid], self.registry(sid, "busy"),
+                             self.attention, time.time(), self.stale)
+        self.assertNotEqual(fl, "parked")
+        verdict, _ = rr.stuck_verdict(
+            row, [sid], "LIVE", "clear", 900, time.time(),
+            self.attention, self.projects, in_flight_verdict=fl)
+        self.assertEqual(verdict, "frozen")
+
+
+    def test_compute_wires_the_park_verdict_through_to_stuck(self):
+        """`compute()` must pass its `in_flight` verdict into `stuck_verdict()`.
+
+        The unit cases above call `stuck_verdict()` directly, so they would all pass
+        on a build that computed `parked` and then dropped it at the call site — the
+        row would read `in_flight: parked` beside `stuck: frozen`, which is exactly
+        the contradiction this change exists to remove.
+        """
+        sid = "7777cccc"
+        sessions = os.path.join(self.dir, "sessions")
+        os.makedirs(sessions, exist_ok=True)
+        with open(os.path.join(sessions, "12345.json"), "w", encoding="utf-8") as fh:
+            json.dump({"sessionId": sid, "status": "waiting", "pid": 12345}, fh)
+
+        predispatch = rr._load("manager-predispatch")
+        orig_resolve = predispatch.resolve_tracked_by_member
+        orig_live = rr.liveness
+        try:
+            predispatch.resolve_tracked_by_member = lambda vault, members: (
+                [{"name": "A task", "mtime": 1_700_000_000 - 3600,
+                  "session": sid, "sessions": [sid]}], list(members))
+            rr.liveness = lambda ids, endpoint, registry_dir: "LIVE"
+            path = os.path.join(self.dir, "tracked.txt")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("A task\n")
+            doc = rr.compute("A subject", path, self.dir, 900, now=1_700_000_000,
+                             attention_dir=self.attention, sessions_dir=sessions,
+                             feed={"panes": set(), "owners": {}, "orphan_owners": [],
+                                   "state": "read", "error": None})
+        finally:
+            predispatch.resolve_tracked_by_member = orig_resolve
+            rr.liveness = orig_live
+
+        row = doc["rows"]["A task"]
+        self.assertEqual(row["in_flight"], "parked")
+        self.assertEqual(row["stuck"], "none")
+
+
 # The feed's pane column is right-aligned to four, so a real row reads `[ 417]`, and a
 # headless gate reads `[ hst]` with its store item id on the `answer:` continuation
 # line. The pre-fix pattern `^\s*\[(\d+)\]` matched 1 of these 3 rows (`[1234]`).
@@ -907,6 +1004,180 @@ class UnresolvedTrackedSet(Tmp):
         self.assertEqual(doc["resolution"]["state"], "empty")
         self.assertEqual(doc["rows"], {})
         self.assertEqual(doc["feed_counts"], {"gated": 0, "clear": 0, "unread": 0})
+
+
+class UnrecordedSessions(Tmp):
+    """A live session whose id is on NO page is still a row, and its park is its own.
+
+    Measured 2026-11-11: session `1c05c414` sat `waiting` on the fleet while the round
+    rendered `parked=0`, because no page carried it. `rows` is built from resolved task
+    files, so a session stamped on none of them entered no row's id set — and no `parked`
+    row could be emitted for it however parked it was. The failure direction is the
+    point: an unrecorded park dropped, or read as `quiet`, renders a clean fleet while a
+    worker waits on a gate.
+
+    The fixture drives the real registry reader — `{pid}.json` files carrying
+    `sessionId`, `status` and `cwd`, exactly the shape `~/.claude/sessions/` holds — so
+    the test fails if the reader or the join is ever replaced by a shortcut.
+    """
+
+    COVERED = "aaaaaaaa-0000-4000-8000-000000000001"
+    PARKED = "bbbbbbbb-0000-4000-8000-000000000002"
+    IDLE = "cccccccc-0000-4000-8000-000000000003"
+    MANAGER = "dddddddd-0000-4000-8000-000000000004"
+    OTHER_VAULT = "eeeeeeee-0000-4000-8000-000000000005"
+
+    def setUp(self):
+        super().setUp()
+        self.predispatch = rr._load("manager-predispatch")
+        self._resolve = self.predispatch.resolve_tracked_by_member
+        self._live = rr.liveness
+        rr.liveness = lambda ids, endpoint, registry_dir: "LIVE"
+        self.sessions = os.path.join(self.dir, "sessions")
+        os.makedirs(self.sessions, exist_ok=True)
+        self._pid = 9000
+
+    def tearDown(self):
+        self.predispatch.resolve_tracked_by_member = self._resolve
+        rr.liveness = self._live
+        super().tearDown()
+
+    def session(self, sid, status, cwd=None):
+        """Register one live session. A record's presence IS its liveness here.
+
+        ⚠️ The pid must be one the OS actually holds, or `session-identity` publishes
+        `alive: False` and the unrecorded join (correctly) skips the record — a fixture
+        with an invented pid would test the skip, not the join. This process's own pid is
+        occupied; with no `procStart` the identity pass answers "cannot tell", which the
+        join keeps.
+        """
+        self._pid += 1
+        rec = {"pid": os.getpid(), "sessionId": sid, "status": status,
+               "cwd": cwd if cwd is not None else self.dir}
+        path = os.path.join(self.sessions, "s%d.json" % self._pid)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+        return sid
+
+    def document(self, rows, members=None, sessions_dir=None):
+        def resolve(vault, names):
+            return ([{"name": n, "mtime": 0, "session": None, "sessions": rows[n]}
+                     for n in names if n in rows], list(names))
+
+        self.predispatch.resolve_tracked_by_member = resolve
+        path = os.path.join(self.dir, "tracked.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(members if members is not None else list(rows)) + "\n")
+        return rr.compute("A subject", path, self.dir, 900, now=1_700_000_000,
+                          attention_dir=self.attention,
+                          sessions_dir=sessions_dir if sessions_dir is not None else self.sessions,
+                          projects_dir=self.projects, feed=CLEAN_FEED)
+
+    def test_a_parked_session_on_no_page_surfaces_as_a_parked_row(self):
+        """SC1: the observed defect — `waiting` on the fleet, absent from the document."""
+        self.session(self.COVERED, "idle")
+        self.session(self.PARKED, "waiting")
+        doc = self.document({"Covered task": [self.COVERED]})
+
+        self.assertIn(self.PARKED, doc["resolution"]["unrecorded"])
+        key = "unrecorded:" + self.PARKED[:8]
+        self.assertIn(key, doc["rows"])
+        self.assertEqual(doc["rows"][key]["in_flight"], "parked")
+        self.assertTrue(doc["rows"][key]["unrecorded"])
+        self.assertFalse(doc["rows"][key]["resolved"])
+        # The row is a real observation, not the synthesised placeholder: it carries the
+        # session's own id and the registry limb that decided it.
+        self.assertEqual(doc["rows"][key]["ids"], [self.PARKED])
+        self.assertIn("registry: waiting", doc["rows"][key]["in_flight_limb"])
+        # And the park is not double-reported as stuck.
+        self.assertEqual(doc["rows"][key]["stuck"], "none")
+
+    def test_an_unrecorded_session_that_is_not_parked_fabricates_no_park(self):
+        """SC2: the negative control — the path discriminates, it is not a catch-all."""
+        self.session(self.COVERED, "idle")
+        self.session(self.IDLE, "idle")
+        doc = self.document({"Covered task": [self.COVERED]})
+
+        self.assertIn(self.IDLE, doc["resolution"]["unrecorded"])
+        key = "unrecorded:" + self.IDLE[:8]
+        self.assertIn(key, doc["rows"])
+        self.assertNotEqual(doc["rows"][key]["in_flight"], "parked")
+        # Nothing anywhere in the document reads `parked` for a fleet with no park.
+        self.assertEqual([n for n, r in doc["rows"].items() if r["in_flight"] == "parked"], [])
+
+    def test_a_busy_unrecorded_session_also_fabricates_no_park(self):
+        """SC2, the second half: `busy` is the other state the criterion names."""
+        self.session(self.COVERED, "idle")
+        self.session(self.IDLE, "busy")
+        doc = self.document({"Covered task": [self.COVERED]})
+        key = "unrecorded:" + self.IDLE[:8]
+        self.assertNotEqual(doc["rows"][key]["in_flight"], "parked")
+
+    def test_a_manager_id_in_metrics_sessions_stays_covered_and_is_not_re_owned(self):
+        """SC3: the guard — a manager id is evidence about the reader, not a new row.
+
+        `row["sessions"]` is `read_task`'s output from
+        `manager-predispatch.session_id_set` (the one home for "which fields are a
+        session id"). The unrecorded block only READS that set to learn which sessions a
+        page already accounts for, so a manager id arriving through `metrics_sessions`
+        neither widens into a second row nor gets dropped from the row it belongs to.
+        """
+        self.session(self.COVERED, "idle")
+        self.session(self.MANAGER, "waiting")
+        doc = self.document({"Owned task": [self.COVERED, self.MANAGER]})
+
+        # The manager id is on a page, so it is NOT unrecorded — and its `waiting`
+        # status therefore does not fabricate a park row beside the task that names it.
+        self.assertEqual(doc["resolution"]["unrecorded"], [])
+        self.assertEqual(list(doc["rows"]), ["Owned task"])
+        # The derivation is untouched: the row still carries the WHOLE set, unchanged.
+        self.assertEqual(doc["rows"]["Owned task"]["ids"], [self.COVERED, self.MANAGER])
+
+    def test_a_session_outside_this_vault_is_not_swept_in(self):
+        """A sibling vault's fleet is that vault's round to report, not this one's."""
+        sibling = os.path.join(self.dir, "..", "another-vault")
+        self.session(self.COVERED, "idle")
+        self.session(self.OTHER_VAULT, "waiting", cwd=sibling)
+        doc = self.document({"Covered task": [self.COVERED]})
+        self.assertEqual(doc["resolution"]["unrecorded"], [])
+        self.assertNotIn("unrecorded:" + self.OTHER_VAULT[:8], doc["rows"])
+
+    def test_the_row_count_invariant_includes_unrecorded(self):
+        """The reader's reconciliation, widened: every row is accounted for exactly once."""
+        self.session(self.COVERED, "idle")
+        self.session(self.PARKED, "waiting")
+        doc = self.document({"Covered task": [self.COVERED], "24 Goals/Gone.md": []},
+                            members=["Covered task", "24 Goals/Gone.md"])
+        res = doc["resolution"]
+        self.assertEqual(len(doc["rows"]),
+                         res["resolved_rows"] + len(res["unresolved"]) + len(res["unrecorded"]))
+        self.assertEqual(len(res["unrecorded"]), 1)
+
+    def test_an_absent_registry_adds_no_unrecorded_rows(self):
+        """No registry is "cannot tell", never "nothing is there" — and never a row."""
+        self.session(self.COVERED, "idle")
+        self.session(self.PARKED, "waiting")
+        # A registry dir that does not exist: `registry_records` answers None, and the
+        # unrecorded join must decline rather than invent a fleet.
+        doc = self.document({"Covered task": [self.COVERED]},
+                            sessions_dir=os.path.join(self.dir, "no-such-registry"))
+        self.assertEqual(doc["resolution"]["unrecorded"], [])
+        self.assertEqual(list(doc["rows"]), ["Covered task"])
+
+    def test_a_record_the_pid_check_disproved_is_not_a_park(self):
+        """A stale registry entry reads `alive: False` — a dead session, not a parked one.
+
+        Emitting a `parked` row for it would be the false positive this path exists to
+        avoid, so the join skips it. `alive: None` is "cannot tell" and stays.
+        """
+        self.session(self.COVERED, "idle")
+        dead = "ffffffff-0000-4000-8000-000000000006"
+        with open(os.path.join(self.sessions, "dead.json"), "w", encoding="utf-8") as fh:
+            json.dump({"pid": 999999, "sessionId": dead, "status": "waiting",
+                       "cwd": self.dir}, fh)
+        doc = self.document({"Covered task": [self.COVERED]})
+        self.assertEqual(doc["resolution"]["unrecorded"], [])
+        self.assertNotIn("unrecorded:" + dead[:8], doc["rows"])
 
 
 if __name__ == "__main__":

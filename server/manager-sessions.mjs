@@ -36,7 +36,7 @@ export const ROOT_NAME = 'Fleet Manager'
 // grows with the fleet: measured 2026-10-14 at 14–73 s under load (7.1 s on a quiet fleet), against
 // a 20 s bound inherited from the cluster reader. A count killed at 20 s is indistinguishable from
 // a fleet that cannot be counted, and the refusal that follows points the operator at the LIMIT —
-// the one thing that was not wrong. Observed: `spawn.maxManagers` raised to 10, refused as 5.
+// the one thing that was not wrong. Observed: `spawn.maxManagersSoft` raised to 10, refused as 5.
 //
 // ⚠️ A bound, not a fix. The board's own cost is tracked separately (its vault-wide walk: ~106 k
 // file opens and ~224 k `lstat`s per run); this exists so a slow board yields a COUNT rather than

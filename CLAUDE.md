@@ -167,7 +167,7 @@ commands/restart.md                              restart ONE named session, work
 commands/worker-restart.md                       DEPRECATED alias for commands/restart.md
 commands/close.md                                close ONE finished session — eight guards, never a resume
 scripts/restart-precheck.py                      its read-only pre-kill probe: worktree, transcript, cause of death
-scripts/restart-worker.py                        the kill+resume leg — seven refusals, never a broad `kill`
+scripts/restart-worker.py                        the kill+resume leg — eight refusals, never a broad `kill`
 scripts/resolve-launcher.py                      the resume's launcher + chip, resolved by code — a thin CLI over `restart-worker.py`'s `resolve_launcher`, called by `commands/open.md` § 3.1
 scripts/close-worker.py                          the close leg — reuses restart-worker/restart-precheck/jump, adds the task gate
 commands/open.md                                 resolve a name → jump / resume / spawn (manager-only)
@@ -198,6 +198,8 @@ scripts/{jump,who-needs-me}.py                   their helpers
 scripts/service-guard.py                         the fleet round's standing resource guard (fifth reading, router row 15) — `phys_footprint` + CPU per launchd service against `~/.claude/state/service-guard.json`; `--apply` reopens the owning row on a breach, never restarts
 scripts/keeper-census.py                         the sixth reading (router row 15) — every live session's keeper tier and every page's, against `docs/session-tiers.md` § Keep-alive; names each unkept / double-kept row and exits 1, posts one card per red episode, never acts
 scripts/declared-wait.py                         the shared `⏰ Ends:` reader — one home for the slot `fleet-board.py`, `manager-predispatch.py` and the fleet sweep all key on (the "fourth definition of idle" guard)
+scripts/observable-reprobe.py                    the `⏰ Ends:` observable probe — parses every PR a declaration names, asks `gh` whether each cleared, and prints `resumed` / `still-blocked` / `unprobeable`; clears only when EVERY named PR has, and never on an unreadable input
+scripts/wait-reprobe.py                          the round's join of declared waits to that probe — one row per declaring session, rendered as a `REPROBED` block; renders only, never resumes
 agents/goal-wrangler.md                routine approval loop over headless workers
 agents/topic-sweep-reader.md            the TOPIC sweep's read half — goal rows and their managers (called by topic-loop/topic-status)
 agents/topic-drive.md                   the TOPIC sweep's act leg — keep-alive and the ranked start hand-over

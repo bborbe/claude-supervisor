@@ -52,7 +52,7 @@ never starts a session (`docs/session-tiers.md` § The worker boundary).
    | `manager-cap` | 1 | a bound is reached; the **second line** names it: `goal-cap` (this topic runs N) or `manager-cap` (the fleet ceiling) | print the bound and the ranked `held` rows; start nothing this tick |
    | `workers are not this verb's to start` | 1 | a `--worker` argument reached the gate | report it; a task is a worker's anchor, and a worker is opened with `/supervisor:open --task`, not this verb |
 
-   ⚠️ **The fleet ceiling always wins over N.** N = 3 is a per-topic share; `spawn.maxManagers`
+   ⚠️ **The fleet ceiling always wins over N.** N = 3 is a per-topic share; `spawn.maxManagersSoft`
    is the outer bound. **Never raise the cap to make room** — rank and wait, or say which
    goal is starved and why.
 

@@ -1,6 +1,6 @@
 ---
 name: fleet-keepalive-actor
-description: Perform the fleet round's keep-alive leg — restart lapsed topic managers, resume due park watches, nudge watchers, resume dead workers; return the ≤ 1 KB hand-back. Router row 5b of /supervisor:fleet-drive. It acts; a read-only run is not a run of it.
+description: Perform the fleet round's keep-alive leg — restart lapsed topic managers, resume due park watches, nudge watchers, resume dead workers; return the ≤ 1 KB hand-back. Router row 5b of /supervisor:fleet-drive.
 model: sonnet
 tools: Read, Bash, Skill, SendMessage, mcp__supervisor__spawn_agent
 allowed-tools: Bash(python3:*), Bash(vault-cli:*), mcp__supervisor__spawn_agent
@@ -8,9 +8,8 @@ color: red
 ---
 
 <role>
-You perform the **keep-alive leg** of one fleet round: the five procedures that keep the fleet's
-own sessions alive — restart a lapsed topic manager, then a topic-less goal manager, resume a park watch whose re-check has
-passed, nudge a watcher past the park threshold, and resume a worker whose session died.
+You perform the **keep-alive leg** of one fleet round: seven procedures, listed in
+`commands/steps/keepalive.md` step 1.
 
 ⚠️ **This leg acts, and a read-only execution is not a run of it.** Every procedure restarts,
 resumes, records the resume and hands over the pane; a run that only prints `unactioned: <n>`
@@ -250,6 +249,10 @@ task's own `defer_date` resurfaces the row in every manager's open queue, but su
 resuming: no reader of that queue starts the parked session, so a round that misses this step
 **strands** the worker — the field is never a reason to skip it.
 
+## 2b. Resume a decision-parked worker
+
+Read `<plugin root>/commands/steps/keepalive-decision-parks.md` (absolute; never search) and run it.
+
 ## 3. Nudge a watcher past the park threshold
 
 The park rule is always loaded and was measured ignored. `agents/fleet-drive.md` excludes
@@ -403,8 +406,9 @@ and one that ran and found nothing must never print the same.
   other procedures normally. One absent instrument never stops the leg.
 - **`topic-keepalive.py` / `worker-keepalive.py` refuses or exits non-zero** → that is a
   verdict, not a crash to paper over: report the line verbatim and leave the row alone.
-- **`/supervisor:open` or `/supervisor:restart` is refused** → report the refusal and record no
-  resume. A refused act is not a resume that took, and the cap must not arm on it.
+- **`/supervisor:open` or `/supervisor:restart` is refused** → report the FULL session id, the
+  token and task name (never an 8-char prefix), and record no resume: a refused act is not a
+  resume that took, and the cap must not arm.
 - **A `SendMessage` fails, or the session has no roster name** → `undelivered: <id8>`, counted,
   never retried this tick (the ledger already counts it).
 - **Producing your mandated output seems to need a command outside your `Bash`** → that is a
@@ -421,6 +425,7 @@ through `fleet-legs.py` (steps 1, 1b, 4). The **hand-back** is the ≤ 1 KB summ
 ```text
 legs=written|UNKNOWN · legs-reason=<text>|— · lapsed-managers=<n>|not-run · topicless-goal-managers=<n>|not-run · dead-workers=<n>|not-run · dead-scan=complete|incomplete|—
 restarted=<n> · resumed=<n> · parked-due=<n> · nudged=<n> · undelivered=<n>
+decision-candidates=<n> · decision-resumed-a=<n> · decision-resumed-d=<n> · decision-unread=<n>
 crash-loop=<n> · cannot-tell=<n> · crash-loop-truncated=<n> · cannot-tell-truncated=<n> · payload=<path>|—
 crash-loop: <subject> · <MANAGER|WORKER>
 cannot-tell: <name> · <what could not be decided>
@@ -441,8 +446,7 @@ the caller prints them; their per-list counts are `crash-loop=` and `cannot-tell
 line. ⚠️ **One dropped count per list, never one shared `truncated=`** — `crash-loop-truncated=`
 and `cannot-tell-truncated=` each say how many rows of THAT list ride `payload=`, since a shared
 count cannot tell which list lost rows and the caller's arithmetic could not be satisfied.
-⚠️ **`park-nudge:` is a single summary line and never truncates** — no per-row list behind it, so
-it sits outside the size-cap exception. ⚠️ **`crash-loop:` and `cannot-tell:` are the only lines
+⚠️ **`crash-loop:` and `cannot-tell:` are the only lines
 that truncate — never a count.** Their full lists go to
 `~/.claude/state/fleet-handback/<round timestamp>.keepalive`, written through one `python3`
 call (`Path.mkdir(parents=True, exist_ok=True)`, write `<path>.tmp`, `os.replace`) — the same

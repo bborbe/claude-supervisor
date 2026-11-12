@@ -777,7 +777,13 @@ def main():
                         else task_verdict(task, defer_date.as_now())
                     )
     if bad is not None:
-        return refuse(*bad)
+        # ⚠️ Every refusal here names the session id, because the round joins a close line to
+        # the refusal that follows it on that value. `task-unresolved` already carries it
+        # ("no page carries <id>"); `task-not-terminal` and the page verdicts named only a
+        # path, which no close line can be joined to. Measured 2026-11-11 on 0.287.5: a
+        # refusal round produced four lines, two of them unjoinable.
+        detail = bad[1] if sid in bad[1] else f"session {sid} · {bad[1]}"
+        return refuse(bad[0], detail)
 
     # A headless worker has no pane to join, so the join is the one step this branch skips.
     # Every guard above has already run — the pane is where the close is *delivered*, never
@@ -799,7 +805,11 @@ def main():
     where = f"pane {pane}" if pane is not None else f"pid {pid} (entrypoint {entrypoint}, no pane)"
     # The success line names the pid separately, so its target must not repeat it.
     closed_target = f"pane {pane}" if pane is not None else f"headless session ({entrypoint})"
-    print(f"🧹 close-worker · session {sid[:8]} · pid {pid} · {rec.get('name')!r}")
+    # ⚠️ The FULL session id, not an 8-char prefix. The round prints this line as its close
+    # record, and the refusal that follows a close (`restart-worker.py`'s `task-terminal`) names
+    # the same full id — the two are joined on it, so a truncated one here cannot be joined and
+    # the refusal reads as an unrelated event. Measured 2026-11-11 on session 2e540d65.
+    print(f"🧹 close-worker · session {sid} · pid {pid} · {rec.get('name')!r}")
     if pages:
         for kind, page_path, fm, page_handed_off in pages:
             how = f"handed off to {fm.get('claude_session_id') or '(none)'}" if page_handed_off else "held"

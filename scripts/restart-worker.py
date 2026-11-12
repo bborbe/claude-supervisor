@@ -779,8 +779,22 @@ def parse_started(rec):
         return None
 
 
-def resume_command(sid, title, chip, cwd, launcher):
+def resume_command(sid, title, chip, cwd, launcher, fresh_prompt=None,
+                   wezterm="wezterm"):
     """The resume recipe, copied from `commands/open.md` Step 3.1.
+
+    ``fresh_prompt`` set → a NEW session is started through the same launcher, cwd and exit
+    trap, with that prompt as its first turn, instead of ``--resume <sid>``. Used by
+    `fleet-keeper.py`'s answer-gated `restart fresh` (operator ruling 2026-11-10): a lapsed
+    manager whose context is exhausted comes back exhausted on ``--resume``. The colour chip is
+    not applied on this path — the launcher takes one initial prompt, and it carries the loop.
+
+    ``wezterm`` must be the RESOLVED binary, never a bare name. Under launchd the keeper's
+    `PATH` is `/usr/bin:/bin:/usr/sbin:/sbin`, which does not contain wezterm, so a bare
+    `"wezterm"` raises FileNotFoundError there. Measured 2026-11-11: the keeper's
+    `restart fresh` killed the Fleet Manager and then could not spawn the replacement,
+    leaving the fleet dead for 14 minutes until the separate `--absent` resume path (which
+    already used `find_wezterm()`) recovered it.
 
     A markdown command is not executable, so this is a deliberate copy — see the module
     docstring. The `unset` list matters: a resumed session that inherits the parent's
@@ -835,12 +849,18 @@ def resume_command(sid, title, chip, cwd, launcher):
         "unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN "
         "CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; "
         + trap
-        + f'"{script}" --resume {sid} -n "{title}" "/color {chip}"'
+        + (f'"{script}" -n "{title}" "{fresh_prompt}"' if fresh_prompt
+           else f'"{script}" --resume {sid} -n "{title}" "/color {chip}"')
     )
-    argv = ["wezterm", "cli", "spawn"]
+    argv = [wezterm, "cli", "spawn"]
     if cwd:
         argv += ["--cwd", cwd]
     return argv + ["--", "env", f"SESSION_EXIT_RECORD={RECORD_SCRIPT}", "bash", "-lc", inner]
+
+
+#: The only prompts `--fresh-prompt` accepts. The value lands inside `bash -lc '…'`, so it is
+#: an allowlist, never free text.
+FRESH_PROMPTS = ("/supervisor:fleet-loop",)
 
 
 HOLDS_PATH = os.path.expanduser(
@@ -1171,6 +1191,45 @@ def read_registration(sid):
     return rec if isinstance(rec, dict) else None
 
 
+def task_terminal_refusal(sid, cwd):
+    """`(token, detail)` when this session's anchored task is already finished, else `None`.
+
+    Every resume leg starts from "the process is gone", never from "the work is done", so a
+    reaped worker whose task reads `completed` is handed a spawn slot again and the close is
+    undone — measured 2026-11-11: session 2e540d65 was closed at 07:18:34Z and its id was live
+    again at 07:33:55Z. The status is read from disk **here, at resume time**, not from a
+    census or digest taken earlier in the round: a task that flips between the candidate
+    enumeration and this call must be refused, and a snapshot read would start it.
+
+    The terminal set and the task lookup are `close-worker.py`'s, not a second copy — the
+    close side and the resume side have to agree on what "finished" means, or the two drift
+    and a task the close refuses to reap is a task the resume happily restarts.
+
+    `(None, None)` is returned in three cases, and only the middle one is an oversight risk:
+      * no task anchor — a manager, or a worker that never entered its task. Refusing here
+        would stop every manager resume.
+      * handed off — the session no longer owns the task; terminality is the successor's.
+      * `task-not-terminal` — the ordinary case, the resume may proceed.
+    """
+    cw = load_sibling("close-worker.py")
+    task = cw.find_task(sid, cwd)
+    if task is None:
+        return None, None
+    path, fm, handed_off = task
+    if handed_off:
+        return None, None
+    if cw.task_verdict(task, cw.defer_date.as_now()) is not None:
+        return None, None
+    status = (fm.get("status") or "").strip()
+    defer = fm.get("defer_date")
+    return (
+        "task-terminal",
+        f"session {sid} · {os.path.basename(path)} is status {status or '(none)'!r} with "
+        f"defer_date {defer or '(unset)'!r}; its work is finished, so resuming would "
+        "restart a session for a closed task and undo the close",
+    )
+
+
 def resume_absent(sid, sessions_dir, dry_run):
     """Resume a session whose process is GONE. Signals nothing; exits 0 only on a resume.
 
@@ -1225,6 +1284,14 @@ def resume_absent(sid, sessions_dir, dry_run):
               f"workspace-trust dialog")
         return 1
 
+    # A resume must not start a process for a task that is already finished. This is the only
+    # resume this script can perform for a headless worker, and the incident that motivated the
+    # guard was exactly that shape: a reaped headless worker whose task read `completed` came
+    # back as a live process fifteen minutes later.
+    token, detail = task_terminal_refusal(sid, cwd)
+    if token is not None:
+        return refuse(token, detail)
+
     fb = load_sibling("fleet-board.py")
     subject = str(reg.get("subject") or "").strip() or sid[:8]
     branch = str(reg.get("branch") or "").strip() or "fleet"
@@ -1246,7 +1313,7 @@ def resume_absent(sid, sessions_dir, dry_run):
         return 1
 
     chip = fb.MANAGER_COLOUR
-    header = (f"🔄 restart-worker --absent · session {sid[:8]} · {subject!r}"
+    header = (f"🔄 restart-worker --absent · session {sid} · {subject!r}"
               f"{' · dry-run' if dry_run else ''}")
     if dry_run:
         print(header)
@@ -1316,11 +1383,34 @@ def main():
                     help="resume a session whose process is GONE: refuses unless no registry "
                          "entry carries the id, signals nothing, and takes cwd and launcher from "
                          "the manager registration")
+    ap.add_argument("--fresh-prompt", choices=FRESH_PROMPTS, default=None,
+                    help="kill the session and start a NEW one (fresh context) through the same "
+                         "launcher and cwd, with this prompt as its first turn, instead of "
+                         "resuming the same id. Allowlisted: the value is typed into a shell")
+    ap.add_argument("--task-guard", action="store_true",
+                    help="read-only: run ONLY the terminal-task guard and exit. Exit 1 with the "
+                         "`task-terminal` token when the session's anchored task is finished, 0 "
+                         "when a resume may proceed. Signals nothing and spawns nothing, so a "
+                         "resume leg that does its own spawn (`commands/open.md` § 3) can route "
+                         "the check through this one implementation instead of copying it")
+    ap.add_argument("--cwd", help="with --task-guard: the directory the task lookup starts "
+                                  "from, normally the session's vault")
     args = ap.parse_args()
+    if args.fresh_prompt and args.absent:
+        ap.error("--fresh-prompt and --absent are exclusive")
 
     sid = args.session_id.strip()
     if not sid:
         ap.error("session id must not be empty")  # exits 2
+
+    if args.task_guard:
+        # The one implementation of the terminal-task guard, exposed so a resume leg that
+        # spawns on its own (`commands/open.md` § 3's wezterm `--resume`) can route the check
+        # here instead of copying it. Read-only: it signals nothing and spawns nothing.
+        token, detail = task_terminal_refusal(sid, args.cwd or os.getcwd())
+        if token is not None:
+            return refuse(token, detail)
+        return 0
 
     if args.absent:
         return resume_absent(sid, args.sessions_dir, args.dry_run)
@@ -1444,8 +1534,22 @@ def main():
                 "code and config",
             )
 
+    # The cwd the session must resume INTO. Read here, before the kill: a session
+    # resumed without its own cwd lands in wezterm's default working directory and
+    # stalls on Claude Code's workspace-trust dialog, registering no pid at all — so
+    # this is checked BEFORE signalling, never after. An unresumable session must not
+    # be killed, which is the whole reason the guard sits above `os.kill`.
+    cwd = (rec.get("cwd") or "").strip()
+
+    # The terminal-task guard runs before ANY output: every other refusal in this script
+    # prints its token as the first line a caller reads, and an unresumable session must not
+    # be signalled. It sits above the header for that reason, not by accident.
+    token, detail = task_terminal_refusal(sid, cwd)
+    if token is not None:
+        return refuse(token, detail)
+
     print(
-        f"🔄 restart-worker · session {sid[:8]} · pid {pid} · {name!r}"
+        f"🔄 restart-worker · session {sid} · pid {pid} · {name!r}"
         f"{' · dry-run' if args.dry_run else ''}"
     )
     print(
@@ -1455,13 +1559,6 @@ def main():
     print(f"   changed: {describe_changed(changed)}")
     for line, _ in describe_source(*mcp_source(argv)):
         print(line)
-
-    # The cwd the session must resume INTO. Read here, before the kill: a session
-    # resumed without its own cwd lands in wezterm's default working directory and
-    # stalls on Claude Code's workspace-trust dialog, registering no pid at all — so
-    # this is checked BEFORE signalling, never after. An unresumable session must not
-    # be killed, which is the whole reason the guard sits above `os.kill`.
-    cwd = (rec.get("cwd") or "").strip()
 
     # The launcher the session resumes THROUGH — resolved above, checked here, before the
     # kill: a session resumed through the wrong launcher comes back on a reduced MCP
@@ -1474,8 +1571,21 @@ def main():
         return 1
     print(f"   launcher: {launcher} ({launcher_source})")
 
+    # ⚠️ Resolved BEFORE the kill, for the same reason the launcher and cwd are: a spawn that
+    # cannot happen must not leave a killed pid behind it. The keeper runs under launchd, whose
+    # PATH holds no wezterm, so a bare `"wezterm"` fails there while the `--absent` path (which
+    # already calls `find_wezterm()`) succeeds — the asymmetry that produced the 2026-11-11
+    # destructive-without-restorative failure.
+    wezterm = find_wezterm()
+    if wezterm is None:
+        print("❌ error: no wezterm found on PATH or at a known install location "
+              f"({', '.join(WEZTERM_LOCATIONS)}) — refusing before the kill, nothing signalled")
+        return 1
+
     if args.dry_run:
-        print("   ✅ would kill the pid above and resume the same session id")
+        print("   ✅ would kill the pid above and "
+              + (f"start a fresh session with {args.fresh_prompt}" if args.fresh_prompt
+                 else "resume the same session id"))
         if cwd:
             print(f"   ↪ would resume into {cwd}")
         return 0
@@ -1519,7 +1629,7 @@ def main():
     # the caller branches on this exit code to decide whether the worker is back.
     try:
         spawned = subprocess.run(
-            resume_command(sid, title, chip, cwd, launcher),
+            resume_command(sid, title, chip, cwd, launcher, args.fresh_prompt, wezterm),
             capture_output=True, text=True, timeout=30,
         )
     except Exception as error:
@@ -1531,6 +1641,12 @@ def main():
         )
 
     pane = (spawned.stdout or "").strip().splitlines()
+    if args.fresh_prompt:
+        print(
+            f"   ✅ killed pid {pid}; started a FRESH session (not {sid}) in a new tab "
+            f"(pane {pane[-1] if pane else '?'}) with first turn {args.fresh_prompt}"
+        )
+        return 0
     print(
         f"   ✅ killed pid {pid}; resumed session {sid} in a new tab "
         f"(pane {pane[-1] if pane else '?'})"

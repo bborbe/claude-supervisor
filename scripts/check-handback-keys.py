@@ -73,10 +73,16 @@ LEGS = {
             # refusal — a document that observed nothing must not reach the caller as a
             # quiet fleet, and the caller cannot tell without these two keys.
             "resolution", "tracked", "unresolved",
+            # live sessions in this vault that NO page records. They carry rows of their
+            # own, so `rows=` already counts them — but a round that saw an unrecorded
+            # park must say so in the hand-back, and without this key the only place it
+            # could appear is the payload nobody forwards. Measured 2026-11-11: session
+            # `1c05c414` sat `waiting` while the round rendered `parked=0`.
+            "unrecorded",
             # liveness
             "live", "absent", "unknown",
-            # in-flight — all three values, the `unread` under its own key
-            "inflight", "quiet", "inflight-unread",
+            # in-flight — all four values, the `unread` under its own key
+            "inflight", "parked", "quiet", "inflight-unread",
             # attention feed
             "gated", "clear", "unread",
             # external wait — all three values, the `unread` under its own key
@@ -107,6 +113,11 @@ LEGS = {
             "legs", "legs-reason", "lapsed-managers", "topicless-goal-managers", "dead-workers",
             "dead-scan",
             "restarted", "resumed", "parked-due", "nudged", "undelivered",
+            # § 2b's two counts. `decision-candidates` exists so a round that saw rows and
+            # resumed none is distinguishable from one that saw none — the same reason
+            # `parked-due` is emitted beside `resumed`, applied to a population the clock
+            # leg cannot reach.
+            "decision-candidates", "decision-resumed-a", "decision-resumed-d", "decision-unread",
             # one count per truncatable row list: the caller's reconciliation is
             # `rows printed + that list's dropped count == this count`, so a list without
             # its count has no arithmetic to check and a row dropped in transit is invisible

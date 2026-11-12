@@ -38,7 +38,7 @@ path is read from `SUPERVISOR_LOAD_PATH`, else
 
 A refusal is a printed reason, never a traceback.
 
-## The seven refusals
+## The eight refusals
 
 Each exits `1` with its token as the first line of stdout. Every one fires **before**
 anything is signalled, so no code path reaches `os.kill` on a target it has not cleared.
@@ -52,6 +52,7 @@ anything is signalled, so no code path reaches `os.kill` on a target it has not 
 | `held-session` | The session carries an operator hold (`~/.claude/state/session-holds.json`, written by `/supervisor:hold`). | A hold says the session is not yours to touch at all, which outranks `busy-target`'s "the moment is wrong". Restarting is exactly the act the hold prevents, and only the operator releases it. |
 | `role-undetermined` | No role signal could be read. | Fail closed. An unreadable index proves nothing about a role; never assume worker. |
 | `stale-load-path` | None of the three inputs — newest load-path copy, the worker's MCP config file(s), the launcher script — is newer than the session's own start, or the session carries no parseable start time. | Nothing would load differently — the restart buys nothing. |
+| `task-terminal` | The session's anchored task reads `completed`, `aborted` or `hold`, or carries a `defer_date` in the future. The message names the session id, the task and its status. | The work is finished, so a resume restarts a session for a closed task and undoes the close. Measured 2026-11-11: session `2e540d65` was reaped at 07:18:34Z with a `completed` task and was live again at 07:33:55Z. The status is read from disk at resume time, never from a census taken earlier in the round — a task that flips between enumeration and the spawn must be refused. |
 
 ## Operational failures — not refusals
 
@@ -59,8 +60,8 @@ Exit `1` with an `❌ error:` prefix is an **operational failure**, not a refusa
 target. The one case today is `PermissionError` from `os.kill`: the pid resolved and the
 session id is known, but the caller may not signal it. It is deliberately *not* reported
 under a refusal token — reporting it as `unknown-session-id` would send the operator
-hunting for a typo in an id that was in fact found. The seven tokens above stay exactly
-seven; this is a different class of failure, and the prefix is what distinguishes them.
+hunting for a typo in an id that was in fact found. The eight tokens above stay exactly
+eight; this is a different class of failure, and the prefix is what distinguishes them.
 
 ## How "stale" is decided
 
@@ -181,7 +182,7 @@ jq -r '.permissions.allow[]' ~/.claude/settings.json | grep -E 'Bash\([^)]*p?kil
   reimplementing it, so exactly one kill+resume mechanism exists. Its read-only pre-kill
   probe is the sibling `scripts/restart-precheck.py`, which owns the worktree check and the
   cause-of-death classification; the two scripts share the registry read but not the
-  refusal vocabulary — the seven tokens above stay exactly seven.
+  refusal vocabulary — the eight tokens above stay exactly eight.
 
 ## `--absent`: resuming a session whose process is gone
 
@@ -209,13 +210,14 @@ it falls to the **worker** launcher rule — still the case on the normal path, 
 known gap.
 
 Its refusals — first-line token, exit 1, all before the spawn — are its own vocabulary and
-leave the seven above unchanged:
+leave the eight above unchanged:
 
 | Token | Fires when |
 |---|---|
 | `not-absent` | a registry entry carries the id, or the registry cannot be read — the process may be alive |
 | `held-session` | an operator hold, exactly as on the normal path |
 | `unknown-session-id` | no manager registration, so no vault to resume into |
+| `task-terminal` | the session's anchored task is already finished — the same guard and the same token as on the normal path, because this is the only resume this script performs for a headless worker and it is the path the 2026-11-11 incident took |
 
 An unresolvable vault or launcher is an `❌ error:` operational failure, never a refusal, and
 fires before anything is spawned.
@@ -238,7 +240,7 @@ to the session — matched on its whole id set, `claude_session_id` plus every
 is not a plain path, two task pages claiming the session, a `cwd` under no vault, or a
 launcher file that does not exist all leave it **unresolved** — and an unresolved launcher
 refuses **before the kill** with an `❌ error:` line, the same operational class as a missing
-`cwd`. It is not a target refusal, so the seven tokens stay seven. The output's `launcher:`
+`cwd`. It is not a target refusal, so the eight tokens stay eight. The output's `launcher:`
 line names the file and its source (`task` / `worker-default` / `vault`).
 
 ⚠️ **A goal's `launcher:` is not consulted**, on this path or the spawn path. It states how

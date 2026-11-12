@@ -2375,6 +2375,26 @@ class CauseClassification(unittest.TestCase):
         rec = self.rec(kind="idle", detail="nothing", role="agent")
         self.assertNotEqual(wnm.cause_class(rec), wnm.CAUSE_CAP)
 
+    def test_cap_refusal_is_matched_under_either_spelling(self):
+        """Both spellings of both pairs, because the pre-rename keys still parse.
+
+        The refusal text names the key that refused, and a config may carry either name —
+        so matching only the current names dropped a relayed worker-cap refusal to
+        `unknown`, which reads as "no cause found" rather than "capped".
+        """
+        for text in (
+            "refused: maxManagersHard reached",
+            "refused: maxManagersSoft reached",
+            "refused: maxWorkerHard reached",
+            "refused: maxWorkerSoft reached",
+            "refused: maxConcurrent reached",
+            "refused: maxConcurrentHard reached",
+        ):
+            with self.subTest(text=text):
+                wnm.last_assistant_text = lambda _r, t=text: t
+                rec = self.rec(kind="idle", detail="nothing", role="manager")
+                self.assertEqual(wnm.cause_class(rec), wnm.CAUSE_CAP)
+
     def test_unmatched_is_unknown(self):
         wnm.last_assistant_text = lambda _r: ""
         self.assertEqual(wnm.cause_class(self.rec(kind="idle", detail="nothing")),

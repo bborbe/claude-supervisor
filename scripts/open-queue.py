@@ -46,9 +46,15 @@ the round's act:
 
   * **`phase: todo`** — the operator's approval inbox. `commands/open.md` Gate 1
     refuses it, and this leg does not become an approval path by being automated.
+  * **`stopped: true`** — the operator ended the row deliberately
+    (`scripts/task-standdown.py`, written by `/supervisor:stop`). It outranks every
+    **derived** guard — a stopped-and-deferred row reports `stopped` — but not the two
+    above, which describe the row's own state rather than a derivation.
   * **a `blocked_by`** — the row names a dependency that is not met.
   * **a future `defer_date`** — defer-UNTIL, not a due date: the row is deliberately
     parked, and `next-focus.py` reads the same distinction.
+  * **a declared wait** — `prior_wait()` reads the session's own `Stop` records; see its
+    docstring for why only the unattended path must not spend a slot on a row that parks.
   * **an unreadable task file** — refused, because an absent guard read is not a clean
     one. Opening on an unknown guard state is the failure this branch exists to stop.
 
@@ -136,6 +142,15 @@ def _load(name, filename):
 #: `defer_date` is an instant, not a date — see `defer-date.py` for the accepted shapes.
 defer_date = _load("defer_date", "defer-date.py")
 
+#: The row's session-id set (`claude_session_id` + every `metrics_sessions` id) and the
+#: `⏰ Ends:` pattern both have one home each; reuse them rather than re-deriving.
+_predispatch = _load("manager_predispatch", "manager-predispatch.py")
+#: `⏰ Ends:` liveness (expiry, session-bound vs external) has one owner.
+_declared_wait = _load("declared_wait", "declared-wait.py")
+
+#: Where the Stop hook appends each session's `<sid>.events.jsonl`.
+ATTENTION_DIR = _declared_wait.STATE
+
 APPROVED = os.path.join(HERE, "approved-not-started.py")
 WORKER_SESSIONS = os.path.join(HERE, "worker-sessions.py")
 WORKER_TARGET = os.path.join(HERE, "worker-target.py")
@@ -145,6 +160,16 @@ FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
 # Sorts every row carrying no priority after every row that has one. A number, not a
 # sentinel string, so the key stays a tuple of comparables.
 NO_PRIORITY = 10**6
+
+#: The task tier's deliberate-stop marker — see `is_stopped()`. `scripts/task-standdown.py`
+#: is the only writer; this module and `scripts/worker-keepalive.py` are the readers.
+#: ⚠️ **The truthy set is declared in the two READERS rather than imported** — the repo's
+#: scripts are loaded by path, so a cross-module import would couple two files that are
+#: otherwise independent. `scripts/task-standdown.py` is the writer and holds no set: it
+#: writes the literal `"true"`. Keep the two readers' literals identical: a drift would
+#: make the open queue and the keepalive disagree about whether one row is stopped.
+STOPPED_KEY = "stopped"
+TRUTHY = {"true", "yes", "on"}
 
 
 def frontmatter(text):
@@ -193,7 +218,7 @@ def is_flagged(block):
     `not flagged`); the flag decides WHETHER a row opens, and `rank_key` decides only the
     order among the rows this admits.
     """
-    return (field(block, "flag") or "").strip().lower() in ("true", "yes", "on")
+    return (field(block, "flag") or "").strip().lower() in TRUTHY
 
 
 def priority_of(block):
@@ -241,7 +266,90 @@ def has_blocked_by(block):
     return False
 
 
-def guards(block, today):
+def is_stopped(block):
+    """`stopped: true` — the operator deliberately stood this row down.
+
+    The task tier's stand-down marker, written by `scripts/task-standdown.py` (through
+    `vault-cli task set`) when `/supervisor:stop` runs from a worker session. It is a
+    **page field**, not the manager tier's `<slug>.stopped` file, for the reason that
+    file cannot serve here: the state dir is per-user, so a slug would let two same-titled
+    tasks in different vaults share one marker.
+
+    Truthiness matches `is_flagged()`'s set, so the two boolean readers cannot disagree
+    about what `true` looks like.
+    """
+    return (field(block, STOPPED_KEY) or "").strip().lower() in TRUTHY
+
+
+def _newest_stop(session_id, attention_dir):
+    """(newest `Stop` record, set of closed item ids) for one session's event log.
+
+    ``(None, set())`` when the log is absent or carries no Stop — an absent log is a row
+    that never ran, and a never-run row is runnable.
+    """
+    path = os.path.join(attention_dir, "%s.events.jsonl" % session_id)
+    newest, closed = None, set()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                if rec.get("event") is None and rec.get("closed_by") is not None:
+                    closed.add(rec.get("item_id"))
+                    continue
+                if rec.get("event") != "Stop" or not isinstance(rec.get("ts"), (int, float)):
+                    continue
+                if newest is None or rec["ts"] > newest["ts"]:
+                    newest = rec
+    except OSError:
+        pass
+    return newest, closed
+
+
+def prior_wait(block, attention_dir, now_s=None):
+    """`waiting-external` | `waiting-operator` | None — did this row's last session end
+    on a wait a new session cannot clear?
+
+    Opening a row whose previous session parked on a machine or on an unanswered
+    operator question starts a worker that parks on its first turn, holding a slot and
+    no model call. Measured 2026-11-10: of 37 idle headless workers, 17 ended 🟡 WAITING
+    and 15 on an operator ask or block.
+
+    Read from the session with the NEWEST `Stop` across the row's whole session-id set,
+    so an old wait a later turn moved past does not hold the row forever.
+
+    * `waiting-external` — that session's `⏰ Ends:` is live per `declared-wait.py`
+      (verdict `declared`, not `expired`) AND `external`. A `session-bound` wake
+      (Monitor, ScheduleWakeup, a background shell …) died with the session — this leg
+      only sees rows with no live session — so nothing will fire it, and the row opens.
+    * `waiting-operator` — that Stop is a `question` card whose item was never closed.
+
+    ⚠️ **The `--flagged` batch (`flagged-rows.py`) does not apply this guard, on purpose.**
+    That batch is the operator opening named rows by hand; this leg is the fleet round
+    filling free slots unattended, and only the unattended path must not spend a slot on
+    a row that will park. `test_open_queue.py` names it as the fourth divergence.
+    """
+    newest_sid, newest, closed = None, None, set()
+    for sid in _predispatch.session_id_set(block):
+        rec, done = _newest_stop(sid, attention_dir)
+        closed |= done
+        if rec is not None and (newest is None or rec["ts"] > newest["ts"]):
+            newest_sid, newest = sid, rec
+    if newest is None:
+        return None
+    wait = _declared_wait.wait_record(newest_sid, state_dir=attention_dir, now=now_s)
+    if wait and wait["verdict"] == "declared" and wait["mechanism"] == "external":
+        return "waiting-external"
+    if newest.get("kind") == "question" and newest.get("item_id") not in closed:
+        return "waiting-operator"
+    return None
+
+
+def guards(block, today, attention_dir=None):
     """The reason this row may not open, or None when it may.
 
     The first failing guard is the reason reported, so the operator is told one thing
@@ -251,6 +359,16 @@ def guards(block, today):
         return "unreadable task file"
     if (field(block, "phase") or "").strip() == "todo":
         return "waiting approval"
+    # ⚠️ **Ahead of every DERIVED guard — `blocked_by` and `defer_date` — but after the two
+    # that describe the row's own state rather than a derivation.** A stop is the operator's
+    # own act and outranks a computed "not now": a row that is both stopped and deferred
+    # must report `stopped`, or the operator sees it silently reappear the day the defer
+    # expires with nothing recording that they had ended it. It deliberately does NOT
+    # outrank `unreadable task file` or `waiting approval`: an unreadable page is not
+    # evidence of a stop, and a `phase: todo` row is in the operator's approval inbox,
+    # which is the boundary `commands/open.md` Gate 1 owns.
+    if is_stopped(block):
+        return "stopped"
     if has_blocked_by(block):
         return "blocked"
     state, detail = defer_date.defer_state(field(block, "defer_date"), today)
@@ -260,7 +378,8 @@ def guards(block, today):
         print("open-queue: %s — treating as deferred" % detail, file=sys.stderr)
     if state in ("deferred", "invalid"):
         return "deferred"
-    return None
+    now_s = today.timestamp() if hasattr(today, "timestamp") else None
+    return prior_wait(block, attention_dir or ATTENTION_DIR, now_s)
 
 
 def rank_key(row):
@@ -311,7 +430,7 @@ def run_scalar(cmd):
     return proc.stdout.strip(), None
 
 
-def collect(tasks_dir, today, approved_json=None):
+def collect(tasks_dir, today, approved_json=None, attention_dir=None):
     """The ranked eligible rows (flagged and unflagged — `select()` applies the gate) plus
     the skipped ones with their reasons.
 
@@ -330,7 +449,7 @@ def collect(tasks_dir, today, approved_json=None):
     for entry in payload.get("rows", []):
         name = entry["name"]
         block = read_frontmatter(tasks_dir, name)
-        reason = guards(block, today)
+        reason = guards(block, today, attention_dir)
         if reason:
             skipped.append({"name": name, "reason": reason})
             continue

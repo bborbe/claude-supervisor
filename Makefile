@@ -42,6 +42,9 @@ changelog-archive:
 check-spawn-mode:
 	@python3 scripts/check-spawn-mode.py
 
+check-spawn-keys:
+	@python3 scripts/check-spawn-keys.py
+
 check-spawn-target:
 	@python3 scripts/check-spawn-target.py
 
@@ -117,6 +120,14 @@ check-drive-audit-budget:
 check-drive-unverifiable-paste:
 	@python3 scripts/check-drive-unverifiable-paste.py
 
+# A round drafts its nudges into the payload and sends them from its own session, and
+# nothing compared the two. Measured 2026-11-11 (`2026-11-11T08-51-29Z`): 5 drafted
+# recipients, 0 sent, and the round still read as complete -- `Sent: 0` renders exactly
+# like `Sent: 5`. The ledger stamps at draft time, so the miss suppresses the next round
+# and step 5b then closes the row.
+check-drive-nudges-sent:
+	@python3 scripts/check-drive-nudges-sent.py
+
 # A finished headless (`sdk-cli`) worker cannot self-close: vault-cli's session-self-exit.py
 # proves a tty and always answers `SELF-EXIT: stay` for one, so the round must close it
 # through close-worker.py. Measured 2026-11-10: a finished worker sat idle 45 minutes with
@@ -133,6 +144,9 @@ check-acting-legs:
 
 check-own-parks-routing:
 	@python3 scripts/check-own-parks-routing.py
+
+check-wrote-nothing:
+	@python3 scripts/check-wrote-nothing.py
 
 check: check-manager-allowlist check-open-manager-resolution
 	@for f in server/*.mjs scripts/*.mjs; do case "$$f" in *.test.mjs) continue ;; esac; node --check "$$f" || exit 1; done; echo "  server + scripts modules parse"
@@ -188,6 +202,6 @@ test: check check-server-deps
 # a reader following the wrong directory gets no feedback that they did. `server/package.json`'s
 # own `start` script is `bun install --no-summary && node supervisor.mjs`, so `bun install`
 # inside `server/` works too.
-precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-target check-open-manager-resolution check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-open-role-defaults check-open-resume-mode check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-ledger-writes check-drive-audit-budget check-drive-unverifiable-paste check-headless-reap-close check-acting-legs check-own-parks-routing test
+precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-keys check-spawn-target check-open-manager-resolution check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-open-role-defaults check-open-resume-mode check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-ledger-writes check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-headless-reap-close check-acting-legs check-own-parks-routing test check-wrote-nothing
 
-.PHONY: default hooks check-versions check-changelog check-changelog-size check-changelog-unreleased-fold changelog-archive check-spawn-mode check-spawn-target check-open-manager-resolution check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-open-role-defaults check-open-resume-mode check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-audit-budget check-drive-unverifiable-paste check-headless-reap-close check-acting-legs check-own-parks-routing check-manager-allowlist check check-server-deps test precommit
+.PHONY: default hooks check-versions check-changelog check-changelog-size check-changelog-unreleased-fold changelog-archive check-spawn-mode check-spawn-keys check-spawn-target check-open-manager-resolution check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-open-role-defaults check-open-resume-mode check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-headless-reap-close check-acting-legs check-own-parks-routing check-manager-allowlist check check-server-deps test precommit check-wrote-nothing

@@ -757,6 +757,101 @@ def resolve_tracked(vault: str, members: list[str]) -> list[dict]:
     return resolve_tracked_by_member(vault, members)[0]
 
 
+# --- the frozen-tree predicate ------------------------------------------------
+#
+# [[Manager Session]] § Cadence mechanics defines it verbatim: "no tracked file's
+# mtime has moved for >= 2 cadence intervals (30 min at the 15-min default), and the
+# tick's content has already left the machine."
+#
+# Both conjuncts are required and they are DIFFERENT claims. The first reads the
+# tracked set's mtimes. The second has no instrument in the runbook, so it is read
+# here: the round's own session ledger must carry no OPEN `asked-of-you`. An open one
+# is a question the operator has not answered — its content has NOT left the machine —
+# and gating over it would hide the one place they read it.
+#
+# ⚠️ This is NOT the digest `--check` computes. That one hashes content and liveness
+# and deliberately excludes raw mtime; `round-quiet.md` states the two are "a
+# different predicate, not a second spelling of this one", and neither may be read as
+# evidence for the other.
+# ⚠️ NOT under `STATE_DIR`. That is `~/.claude/state/manager-predispatch`, this script's
+# own store — deriving the ledger from it reads a directory that never exists, so
+# `open_asked_of_you()` returns `[]` on every call and the predicate silently collapses
+# to mtime-only. That is precisely the failure the gate exists to prevent, and it fails
+# silently: a missing ledger is a legitimate empty answer, so nothing distinguishes it.
+# The ledger's home is `open-items.py`'s: `~/.claude/state/open-items`.
+OPEN_ITEMS_DIR = os.path.expanduser(
+    os.environ.get("SUPERVISOR_OPEN_ITEMS_DIR", "~/.claude/state/open-items")
+)
+CADENCE_INTERVAL_SECONDS = 15 * 60
+FROZEN_INTERVALS = 2
+
+
+def open_asked_of_you(session_id: str = "") -> list[dict]:
+    """OPEN `asked-of-you` entries in one session's ledger; `[]` when unreadable.
+
+    Unreadable is `[]` on purpose: a session with no ledger asked the operator
+    nothing, and failing closed here would freeze the gate forever on every session
+    that never used the ledger.
+    """
+    sid = session_id or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if not sid:
+        return []
+    try:
+        with open(os.path.join(OPEN_ITEMS_DIR, f"{sid}.json"), encoding="utf-8") as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    items = d.get("items") if isinstance(d, dict) else None
+    return [
+        i for i in (items or [])
+        if isinstance(i, dict)
+        and i.get("kind") == "asked-of-you"
+        and i.get("state") == "open"
+    ]
+
+
+def frozen_tree(vault: str, subject: str, now: float | None = None,
+                interval_seconds: int = CADENCE_INTERVAL_SECONDS,
+                intervals: int = FROZEN_INTERVALS) -> dict:
+    """The frozen-tree predicate's verdict, both conjuncts evaluated."""
+    now = time.time() if now is None else now
+    _, members = resolve_subject(vault, subject)
+    tracked = resolve_tracked(vault, members)
+    mtimes = [t["mtime"] for t in tracked if t.get("mtime")]
+    newest = max(mtimes) if mtimes else None
+    window = intervals * interval_seconds
+    quiet = newest is None or (now - newest) >= window
+    asks = open_asked_of_you()
+    return {
+        "frozen": bool(quiet and not asks),
+        "tracked": len(tracked),
+        "newest_mtime": newest,
+        "quiet_seconds": None if newest is None else int(now - newest),
+        "window_seconds": window,
+        "open_asks": [i.get("text", "") for i in asks],
+    }
+
+
+def predicate(vault: str, subject: str) -> int:
+    """Print the verdict and its two reads; exit 0 only when frozen."""
+    v = frozen_tree(vault, subject)
+    if v["frozen"]:
+        print(
+            f"FROZEN — newest tracked mtime {v['quiet_seconds']}s ago "
+            f"(window {v['window_seconds']}s), 0 open asked-of-you, {v['tracked']} tracked"
+        )
+        return 0
+    why = []
+    if v["quiet_seconds"] is not None and v["quiet_seconds"] < v["window_seconds"]:
+        why.append(
+            f"a tracked file moved {v['quiet_seconds']}s ago (window {v['window_seconds']}s)"
+        )
+    if v["open_asks"]:
+        why.append(f"{len(v['open_asks'])} open asked-of-you")
+    print(f"NOT-FROZEN — {'; '.join(why) or 'no tracked files'}")
+    return 1
+
+
 def page_type_of(path: str) -> str:
     """The `page_type:` frontmatter value, scoped to the frontmatter block.
 
@@ -2699,6 +2794,16 @@ def main(argv: list[str]) -> int:
         ),
     )
     mode.add_argument(
+        "--predicate",
+        action="store_true",
+        help=(
+            "evaluate the frozen-tree predicate — BOTH conjuncts: no tracked file's "
+            "mtime moved for >= 2 cadence intervals, AND no open `asked-of-you` in this "
+            "session's ledger — printing FROZEN or NOT-FROZEN with its reads; exit 0 "
+            "only when frozen. This is not the digest `--check` computes"
+        ),
+    )
+    mode.add_argument(
         "--write-payload",
         action="store_true",
         help="write the rendered table (on stdin) to <slug>.table, for --save to read",
@@ -2739,6 +2844,9 @@ def main(argv: list[str]) -> int:
         # is told the argument was wrong instead of being handed a fail-open sweep.
         print(vault_error, file=sys.stderr)
         return EXIT_USAGE
+
+    if args.predicate:
+        return predicate(args.vault, args.subject)
 
     if args.content_keys:
         # The single home of the derivation clause (1) used to carry as prose. The leg is an

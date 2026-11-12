@@ -169,6 +169,13 @@ SITE_LIST = {
     # failed `get-text`: the guard maps it to `error:unreadable` and the wake skips the pane,
     # so a failed read can never read as an empty, wakeable composer.
     ("pane-wake-guard.py", "read_pane"), ("pane-wake.py", "read_pane"),
+    # added 2026-11-11 — `manager-wake.py`'s `wake`, the `wezterm cli send-text` the
+    # pane-wake half of "Wire the Sweep Gate Verdict Into the Manager Wake" types with.
+    # ⚠️ It is an ACTION, not a read: it reports its own failure and types nothing when
+    # the guard refuses, so it is enumerated for mechanism/list agreement and
+    # deliberately not driven into the three states. The pane JOIN it uses is `jump.py`'s
+    # `wezterm_panes` / `pane_sessions`, already enumerated and driven.
+    ("manager-wake.py", "wake"),
     # added 2026-10-22 — `manager-attention-watch.py`'s pane-title read, the join that
     # gives a re-registered park card its jump target. It returns `None` for a failed
     # query, never `""`: a `wezterm cli list` that never answered cannot prove a pane is
@@ -199,6 +206,13 @@ SITE_LIST = {
     # predicate. Same shape as `restart-worker.py`'s `worker_argv` above.
     ("fleet-reset.py", "own_pids"), ("fleet-reset.py", "pid_alive"),
     ("fleet-reset.py", "proc_comm"),
+    # added 2026-11-10 — `fleet-reset.py`'s `_pid_alive`, the strip guard's corroboration:
+    # it asks whether the identity registry's recorded pid is still running, and answers
+    # True when the read fails, so a task link is KEPT rather than stripped over a process
+    # that may still be alive. Same fail-closed predicate shape as the three above —
+    # enumerated for mechanism/list agreement, deliberately NOT driven into the three
+    # states, because its broken answer is a conservative refusal, not an empty read.
+    ("fleet-reset.py", "_pid_alive"),
 }
 
 
