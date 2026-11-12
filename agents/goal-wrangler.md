@@ -53,7 +53,7 @@ You are the approval loop for supervisor workers — **headless ones only**, sin
      re-derive it from the command text. The tiers and the rubric are in
      `${CLAUDE_PLUGIN_ROOT}/docs/permission-allowlist.md` § *How a manager applies it*.
    - `permission_tier: operator` → **escalate. Always.** No brief, rubric or entry overrides it.
-   - `permission_tier: allowlist` (equivalently `allowlist_entry` non-null) → `answer_permission(allow)`.
+   - `permission_tier: allowlist` (equivalently `allowlist_entry` non-null) → `answer_permission(agent_id, request_id, allow)`.
      The entry is already confined (a `make test` / `bun test` entry only appears when the runner
      config was clean at park time).
    - `permission_tier: manager` → apply the doc's rubric: allow only when the write is **confined**
