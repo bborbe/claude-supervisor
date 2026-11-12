@@ -80,7 +80,7 @@ class TestTick(unittest.TestCase):
         self._session("sid-a")
         rows, ok = self._run()
         self.assertTrue(ok)
-        self.assertEqual(rows, [("sid-a", "reap", "closed")])
+        self.assertEqual(rows, [("sid-a", "reap", "closed", tick_mod.TRIGGER_IDLE)])
         self.assertEqual(self._calls(), ["reap sid-a"])
 
     def test_task_terminal_routes_to_close_worker(self):
@@ -88,7 +88,7 @@ class TestTick(unittest.TestCase):
         self.reap_answers["sid-a"] = [1, "task-terminal"]
         rows, ok = self._run()
         self.assertTrue(ok)
-        self.assertEqual(rows, [("sid-a", "close-worker", "closed")])
+        self.assertEqual(rows, [("sid-a", "close-worker", "closed", tick_mod.TRIGGER_IDLE)])
         self.assertEqual(self._calls(), ["reap sid-a", "close sid-a"])
 
     def test_any_other_refusal_is_final(self):
@@ -96,7 +96,7 @@ class TestTick(unittest.TestCase):
         self.reap_answers["sid-a"] = [1, "wrapper-busy"]
         rows, ok = self._run()
         self.assertTrue(ok, "a refusal is the guards working, not a fault")
-        self.assertEqual(rows, [("sid-a", "reap", "wrapper-busy")])
+        self.assertEqual(rows, [("sid-a", "reap", "wrapper-busy", tick_mod.TRIGGER_IDLE)])
         self.assertEqual(self._calls(), ["reap sid-a"])
 
     def test_close_worker_refusal_is_reported(self):
@@ -105,7 +105,7 @@ class TestTick(unittest.TestCase):
         self.close_answers["sid-a"] = [1, "gate-held"]
         rows, ok = self._run()
         self.assertTrue(ok)
-        self.assertEqual(rows, [("sid-a", "close-worker", "gate-held")])
+        self.assertEqual(rows, [("sid-a", "close-worker", "gate-held", tick_mod.TRIGGER_IDLE)])
 
     def test_an_unexpected_exit_is_a_fault(self):
         self._session("sid-a")
@@ -122,7 +122,10 @@ class TestTick(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(
             sorted(rows),
-            [("sid-a", "reap", "would-close"), ("sid-b", "close-worker", "would-close")],
+            [
+                ("sid-a", "reap", "would-close", tick_mod.TRIGGER_IDLE),
+                ("sid-b", "close-worker", "would-close", tick_mod.TRIGGER_IDLE),
+            ],
         )
         self.assertIn("reap sid-a --dry-run", self._calls())
         self.assertIn("close sid-b --dry-run", self._calls())
@@ -158,7 +161,7 @@ class TestMain(unittest.TestCase):
         env["SUPERVISOR_VAULT_CONFIG"] = os.path.join(self.tmp, "vault-config.json")
         done = self._run(env)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
-        self.assertIn("candidates=0 closed 0 past the 15-min trigger · closed 0 with no wait", done.stdout)
+        self.assertIn("candidates=0 closed 0 past the 15-min trigger · closed 0 with no wait · refused 0", done.stdout)
 
     def test_the_summary_counts_reconcile_with_the_lines_written(self):
         """The accounting must equal the per-session lines, not a second tally that can drift.
@@ -167,15 +170,28 @@ class TestMain(unittest.TestCase):
         against a row set rather than re-deriving them.
         """
         rows = [
-            ("sid-a", "reap", "closed"),
-            ("sid-b", "close-worker", "closed"),
-            ("sid-c", "reap", "wrapper-busy"),
+            ("sid-a", "reap", "closed", tick_mod.TRIGGER_IDLE),
+            ("sid-b", "close-worker", "closed", tick_mod.TRIGGER_IDLE),
+            ("sid-c", "reap", "wrapper-busy", tick_mod.TRIGGER_IDLE),
         ]
         line = tick_mod.summary_line(rows)
-        self.assertEqual(line, "candidates=3 closed 2 past the 15-min trigger · closed 0 with no wait")
+        self.assertEqual(
+            line,
+            "candidates=3 closed 2 past the 15-min trigger · closed 0 with no wait · refused 1",
+        )
+
+    def test_a_no_wait_close_moves_the_second_count_not_the_first(self):
+        """The point of deriving it: a close that skips IDLE_FLOOR must land in the other count."""
+        rows = [
+            ("sid-a", "reap", "closed", tick_mod.TRIGGER_IDLE),
+            ("sid-b", "reap", "closed", "no-wait"),
+        ]
+        line = tick_mod.summary_line(rows)
+        self.assertIn("closed 1 past the 15-min trigger", line)
+        self.assertIn("closed 1 with no wait", line)
 
     def test_a_dry_run_summary_counts_would_close_as_a_close(self):
-        rows = [("sid-a", "reap", "would-close"), ("sid-b", "reap", "watcher-alive")]
+        rows = [("sid-a", "reap", "would-close", tick_mod.TRIGGER_IDLE), ("sid-b", "reap", "watcher-alive", tick_mod.TRIGGER_IDLE)]
         self.assertIn("candidates=2 closed 1 past the 15-min trigger", tick_mod.summary_line(rows))
 
     def test_a_missing_vault_cli_is_a_fault_not_a_quiet_tick(self):

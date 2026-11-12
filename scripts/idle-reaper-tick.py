@@ -40,6 +40,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REAPER = os.path.join(HERE, "reap-idle-headless.py")
 CLOSER = os.path.join(HERE, "close-worker.py")
 VERB_TIMEOUT = 300  # seconds; a single verb run reads the wrapper, the store and the vault
+#: Why this tick closed a row. Every close it can currently perform is the 15-minute idle
+#: close — a finished-task row still had to clear `IDLE_FLOOR` before it could reach
+#: `close-worker.py`. A future close path that skips that floor tags its rows differently,
+#: which is what makes `summary_line`'s two counts real rather than one count and a literal.
+TRIGGER_IDLE = "idle-15min"
 
 
 def load_reaper():
@@ -64,7 +69,7 @@ def run_verb(script, session_id, dry_run):
 
 
 def tick(sessions_dir=None, dry_run=False, reaper=None, reaper_path=REAPER, closer_path=CLOSER):
-    """Run one tick and return `(rows, ok)`; `rows` is `[(sid, verb, outcome)]`.
+    """Run one tick and return `(rows, ok)`; `rows` is `[(sid, verb, outcome, trigger)]`.
 
     The verb paths are parameters so a test can stand in scripts that record their calls —
     the real verbs signal whatever the registry names.
@@ -75,43 +80,47 @@ def tick(sessions_dir=None, dry_run=False, reaper=None, reaper_path=REAPER, clos
     for session_id in reaper.candidate_session_ids(sessions_dir):
         code, first, _ = run_verb(reaper_path, session_id, dry_run)
         if code == 0:
-            rows.append((session_id, "reap", "would-close" if dry_run else "closed"))
+            rows.append((session_id, "reap", "would-close" if dry_run else "closed", TRIGGER_IDLE))
             continue
         if code != 1:
             ok = False
-            rows.append((session_id, "reap", f"error:{first or code}"))
+            rows.append((session_id, "reap", f"error:{first or code}", TRIGGER_IDLE))
             continue
         if first != "task-terminal":
-            rows.append((session_id, "reap", first or "refused"))
+            rows.append((session_id, "reap", first or "refused", TRIGGER_IDLE))
             continue
         code, first, _ = run_verb(closer_path, session_id, dry_run)
         if code == 0:
-            rows.append((session_id, "close-worker", "would-close" if dry_run else "closed"))
+            rows.append((session_id, "close-worker", "would-close" if dry_run else "closed", TRIGGER_IDLE))
         elif code == 1:
-            rows.append((session_id, "close-worker", first or "refused"))
+            rows.append((session_id, "close-worker", first or "refused", TRIGGER_IDLE))
         else:
             ok = False
-            rows.append((session_id, "close-worker", f"error:{first or code}"))
+            rows.append((session_id, "close-worker", f"error:{first or code}", TRIGGER_IDLE))
     return rows, ok
 
 
 def summary_line(rows):
     """The tick's accounting, derived from the per-session lines it just wrote.
 
-    `rows` IS those lines, so each count is a filter over them rather than a second tally
-    that could drift from what was printed. Every close here is the 15-minute idle close —
-    a finished-task row still had to clear `IDLE_FLOOR` before it could reach
-    `close-worker.py`, so there is no no-wait close path in this tick and the second count
-    is 0 by construction. It is printed anyway: a future no-wait path then shows up as a
-    non-zero instead of silently redefining the first count.
+    `rows` IS those lines, so every count is a filter over them rather than a second tally
+    that could drift from what was printed. Both close counts are derived, never literals:
+    a close is *past the 15-min trigger* when its row carries `TRIGGER_IDLE`, and *with no
+    wait* when it does not. Today every close this tick can perform is the former, so the
+    second count is 0 — but it is computed, so a future close path that skips `IDLE_FLOOR`
+    moves it instead of silently redefining the first count.
 
     The `dry-run` marker is the caller's to prefix, not this function's: it describes the
     run, while every count here is the same whether or not anything was signalled.
     """
     closed = [row for row in rows if row[2] in ("closed", "would-close")]
+    past_trigger = [row for row in closed if row[3] == TRIGGER_IDLE]
+    no_wait = [row for row in closed if row[3] != TRIGGER_IDLE]
     return (
         f"candidates={len(rows)} "
-        f"closed {len(closed)} past the 15-min trigger · closed 0 with no wait"
+        f"closed {len(past_trigger)} past the 15-min trigger · "
+        f"closed {len(no_wait)} with no wait · "
+        f"refused {len(rows) - len(closed)}"
     )
 
 
@@ -139,8 +148,11 @@ def main(argv=None):
 
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     rows, ok = tick(args.sessions_dir, args.dry_run)
-    for session_id, verb, outcome in rows:
-        print(f"{stamp} idle-reaper-tick session={session_id} verb={verb} outcome={outcome}")
+    for session_id, verb, outcome, trigger in rows:
+        print(
+            f"{stamp} idle-reaper-tick session={session_id} verb={verb} "
+            f"outcome={outcome} trigger={trigger}"
+        )
     # Accounting, reconciled against the per-session lines this tick just wrote.
     mode = " dry-run" if args.dry_run else ""
     print(f"{stamp} idle-reaper-tick{mode} {summary_line(rows)}")
