@@ -168,7 +168,7 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
 `--check` reads files only: no model, no network. A host loop (launchd) runs it and
 turns exit 10 into a push.
 """
-import argparse, json, os, re, subprocess, sys, threading, time, urllib.error, urllib.request
+import argparse, json, os, re, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
 from datetime import datetime
 
 # This namespace is the liveness layer's OWN. `arm`, `stop` and `check` all resolve
@@ -938,6 +938,17 @@ def emit_wrapper_reach():
     2026-11-13. An instruction the fleet reliably does not follow is not a gate it can
     pass, so the arm emits it instead: one command, no extra step to skip.
 
+    ⚠️ **This certifies a WEAKER claim than the manual curl did, and that is a deliberate
+    choice.** `scripts/answer-reach.py`'s docstring says the wrapper leg exists to prove the
+    session's *answer* command reached the wrapper, and the permission classifier gates that
+    command. Folding the call in here makes the gated command `manager-liveness.py --arm` —
+    which must be allowed every round for the loop to run at all. So a reach now says "this
+    arm could POST to the answer route", not "this manager's own answer command is allowed".
+    It still separates a session whose wrapper is unreachable from one whose is not, and it
+    still writes nothing when the classifier denies the arm. Operators chose this over an
+    instruction the fleet reliably did not follow (4 fresh `mcp` reaches against 1 fresh
+    `wrapper` reach, 2026-11-13).
+
     ⚠️ **Best-effort, never fatal.** An arm is the liveness reading and must succeed
     even when the wrapper is down, so every failure here is reported and swallowed.
     A missing session id, an unreachable wrapper and a non-404/409 status all leave
@@ -947,20 +958,31 @@ def emit_wrapper_reach():
     session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     if not session_id:
         return
-    base = os.environ.get("SUPERVISOR_WRAPPER_URL", "http://localhost:18090").rstrip("/")
+    raw = os.environ.get("SUPERVISOR_WRAPPER_URL", "http://localhost:18090")
+    # ⚠️ An ORIGIN, with no path. `config.mjs` resolves the same variable to `url.origin`,
+    # so a value carrying a path would make this call hit `<path>/api/1.0/...` and get a
+    # route-level 404 — which `answer-reach.py` accepts as a valid reach, certifying a
+    # route never reached. `rstrip("/")` does not enforce that; `urlsplit` does.
+    parts = urllib.parse.urlsplit(raw)
+    base = f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else ""
+    if not base:
+        print(f"reach: SUPERVISOR_WRAPPER_URL {raw!r} is not an origin — no wrapper reach written", file=sys.stderr)
+        return
     body = b'{"request_id": "answer-path-reach-sentinel", "behavior": "allow"}'
-    request = urllib.request.Request(
-        f"{base}/api/1.0/sessions/{session_id}/answer",
-        data=body,
-        headers={"content-type": "application/json"},
-        method="POST",
-    )
     try:
+        # ⚠️ Built INSIDE the try: a malformed value raises ValueError here, and an
+        # uncaught traceback from a background thread is not "reported and swallowed".
+        request = urllib.request.Request(
+            f"{base}/api/1.0/sessions/{urllib.parse.quote(session_id, safe='')}/answer",
+            data=body,
+            headers={"content-type": "application/json"},
+            method="POST",
+        )
         with urllib.request.urlopen(request, timeout=10) as response:
             status = response.status
     except urllib.error.HTTPError as err:
         status = err.code
-    except (urllib.error.URLError, OSError) as err:
+    except (urllib.error.URLError, OSError, ValueError) as err:
         print(f"reach: wrapper call failed ({err}) — no wrapper reach written", file=sys.stderr)
         return
     recorder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "answer-reach.py")
@@ -994,7 +1016,7 @@ def arm(subject: str, branch: str, interval: int, resume: bool = False,
     # 2250s to 2251s and broke a test that asserts exact seconds. The reach is
     # best-effort and must never delay or fail the reading.
     global _REACH_THREAD
-    _REACH_THREAD = threading.Thread(target=emit_wrapper_reach, daemon=False)
+    _REACH_THREAD = threading.Thread(target=emit_wrapper_reach, daemon=True)
     _REACH_THREAD.start()
     # A re-arm after a stand-down starts a NEW cadence sample: the outage gap is not
     # cadence. That cannot be inferred from the marker any more — the arm preserves it —

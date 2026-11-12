@@ -47,18 +47,7 @@ When: every round, before the pre-dispatch gate
 
   ⚠️ **On the current server, any `answer_permission` call writes this leg — but a manager that answers no parks writes nothing, so the call is still required.** The Go handler records the reach **on entry**, before decoding arguments or looking the request id up (`claude-wrapper/pkg/roster_mcp.go` `answerPermission`). ⚠️ **An earlier version of this paragraph said the opposite** — that real parks settle on another arm and never write the leg. That was true of the retired JS `server/supervisor.mjs` and is false here; it was carried over by mistake.
 
-  **Leg `wrapper` is two calls, deliberately separate** so the curl keeps the exact command shape the permission classifier judges:
-
-  ```bash
-  curl -s -o /dev/null -w '%{http_code}' -X POST \
-    "${SUPERVISOR_WRAPPER_URL:-http://localhost:18090}/api/1.0/sessions/${CLAUDE_CODE_SESSION_ID}/answer" \
-    -H 'content-type: application/json' \
-    -d '{"request_id":"answer-path-reach-sentinel","behavior":"allow"}'
-  ```
-
-  ```bash
-  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/answer-reach.py" --status "<the status printed above>"
-  ```
+  **Leg `wrapper` is automatic — do nothing.** `manager-liveness.py --arm` emits it: the arm POSTs to the wrapper's answer route with a sentinel request id and records the reach only when the reply is `404` or `409`. ⚠️ **There is no separate curl or recorder call to run**, and adding one back is how this leg went unemitted for days (4 fresh `mcp` reaches against 1 fresh `wrapper` reach, measured 2026-11-13).
 
   ⚠️ **`SUPERVISOR_WRAPPER_URL` must be an ORIGIN, with no path.** `server/config.mjs` resolves it to `url.origin`, so a value carrying a path would have the server call `/api/1.0/...` while this curl posts to `<path>/api/1.0/...` — a route-level `404`, which the recorder accepts as a valid reach and which would therefore certify a route that was never reached.
 
