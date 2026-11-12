@@ -34,7 +34,7 @@ When: every tick — arm `ScheduleWakeup` FIRST, before the read half
 
   ⚠️ **This file is the FLEET tier's copy. The goal and topic tiers emit the same two reaches from `commands/steps/round-liveness.md`, every round.** All three tiers open headless workers, so all three must refresh; a tier that emitted neither would have its headless spawns refused once stage 2 ships.
 
-  **Leg `mcp` is ONE tool call.** `answer_permission` with a sentinel `request_id` that no worker holds; the server finds no park, consults the wrapper, replies with the foreign-park message, and **that reply writes the reach**. If the call is refused before it reaches the server — a classifier denial, the outage case the Impact names — no record is written, which is the correct outcome.
+  **Leg `mcp` is ONE tool call.** `answer_permission` with a sentinel `request_id` and sentinel `agent_id`. The handler **records the reach on entry**, before it decodes arguments or looks either id up, so the call is what writes it — not the reply it comes back with. If the call is refused before it reaches the server — a classifier denial, the outage case the Impact names — no record is written, which is the correct outcome.
 
   ```
   mcp__supervisor__answer_permission(agent_id="answer-path-reach-sentinel", request_id="answer-path-reach-sentinel", behavior="deny")
