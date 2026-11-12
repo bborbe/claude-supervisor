@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.302.3
 
 - fix: **park-nudge gates on the watching duration, not the bucket.** `scripts/park-nudge.py` selected candidates with `if row.get("bucket") != "watching": continue`, so a session parked on a clock/`defer_date` with no background shell read `idle` and was never nudged — however long its `🟡 WAITING` episode had run. Measured 2026-11-12: **9 of 9** sessions over the 15-minute bound sat in `idle` (`watching_min` 22–817 min) and the live reading emitted `0 nudged` while those same rows were over the threshold. An `idle` row is now admitted whenever its `watching_min` is measurable, and the duration check decides; `gated` (an operator wait), `working`, `light` and `unclassified` stay excluded. `stats["watching"]` still counts the watching bucket only, so the summary keeps reconciling with the reading's `counts.watching`. Re-run on the live reading: `7 nudged` (was 0), including the 841-minute row. Change set: `scripts/park-nudge.py`, `scripts/tests/test_park_nudge.py`, `CHANGELOG.md`.
 
