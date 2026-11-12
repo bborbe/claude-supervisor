@@ -138,18 +138,28 @@ def split_section(lines):
     return list(lines), None, []
 
 
+#: One `opened/declined/eligible` triple. The WRITER validates against this same regex the
+#: READER uses, never `int()`: `int()` also accepts `+1`, `01` and `1_0`, so a writer that
+#: trusted it would emit a line the reader's `\d+/\d+/\d+` rejects — a write that reports
+#: success and leaves a digest `--check` then refuses.
+TRIPLE_RE = re.compile(r"^\d+/\d+/\d+$")
+
+
 def per_kind_adds_up(triple):
-    """Is `<opened>/<declined>/<eligible>` arithmetically a reading?
+    """Is `<opened>/<declined>/<eligible>` a well-formed, arithmetically consistent reading?
 
     `opened + declined == eligible` is the whole point of carrying three numbers instead of
-    one: a count that does not add up is a count nobody can reconcile against the selector,
-    so it is refused at the writer AND at the reader rather than printed and trusted.
+    one, so it is refused at the writer AND at the reader rather than printed and trusted.
+    ⚠️ **This says the numbers agree, not that they are independently sourced** — for `tasks`
+    `<eligible>` IS `<opened> + <declined>` by construction, and the guard there is a
+    consistency check; the independent reconciliation is the goals/topics one, where all
+    three come from the selector's own verdict lines plus the invocations. See
+    `agents/fleet-flagged-open-actor.md` § 4 for which kind is which.
     """
-    try:
-        opened, declined, eligible = (int(p) for p in triple.split("/"))
-    except ValueError:
+    if not TRIPLE_RE.match(triple):
         return False
-    return min(opened, declined, eligible) >= 0 and opened + declined == eligible
+    opened, declined, eligible = (int(p) for p in triple.split("/"))
+    return opened + declined == eligible
 
 
 def parse_per_kind(spec):

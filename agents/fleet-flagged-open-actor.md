@@ -176,11 +176,14 @@ nothing, report the reason, and record this half `not-run` at key granularity.
 
 | Kind | `<o>` opened | `<u>` declined | `<e>` eligible |
 |---|---|---|---|
-| **tasks** | the batch's own footer `Opened N` — never a hand-count | `operator-flagged`: the tasks the batch refused, held or skipped | `<o> + <u>` |
-| **goals** | the `OPEN \| … \| goal \| …` lines you actually invoked `/supervisor:open --goal` for | `<e> - <o>`: the selector's `DEFERRED`, `WAITING`, `CARDED`, `UNKNOWN` and `COVERED` goal lines | every goal line the selector printed a verdict for |
-| **topics** | the `OPEN \| … \| topic \| …` lines you actually invoked `/supervisor:open --topic` for | `<e> - <o>`, same verdicts | every topic line the selector printed a verdict for |
+| **tasks** | the batch's own footer `Opened N` — never a hand-count | the hand-back's `operator-flagged` count: the tasks the batch refused, held or skipped | `<o> + <u>`, **by construction** |
+| **goals** | the `OPEN \| … \| goal \| …` lines you actually invoked `/supervisor:open --goal` for | the selector's **non-OPEN** goal lines — `DEFERRED`, `WAITING`, `CARDED`, `UNKNOWN`, `COVERED` — **counted from the output, never derived** | every goal line the selector printed a verdict for |
+| **topics** | the `OPEN \| … \| topic \| …` lines you actually invoked `/supervisor:open --topic` for | the selector's non-OPEN topic lines, same verdicts, **counted** | every topic line the selector printed a verdict for |
 
-⚠️ **`<e>` comes from the selector, `<o>` from the invocations — two independent sources.** That is what makes the line unfakeable: a leg that reports the selector's `OPEN` lines without invoking them yields `<o>=0`, and `o + u = e` still holds while the reading says, truthfully, that nothing was opened.
+⚠️ **Say which kind reconciles independently, because only one of them does.**
+
+- **Goals and topics reconcile.** `<o>` comes from the invocations you made; `<u>` and `<e>` are both **counted from the selector's own output**, not from each other. So `opened + declined == eligible` is a real cross-check across two producers: a leg that reports the selector's `OPEN` lines without invoking them yields `<o>=0`, the arithmetic still holds, and the line says truthfully that nothing was opened. Counting `<u>` as `<e> - <o>` would make the check vacuous — do not.
+- **Tasks do not.** The batch reports `Opened N` and the declined count and nothing else, so `<e>` there IS `<o> + <u>` and the guard is a consistency check, not a reconciliation. Its discriminator is the **source** of `<o>`: the batch's own footer, never a hand-count. Never describe the tasks triple as independently sourced — it is not, and the guard would be vacuous if it claimed to be.
 
 ⚠️ **`--invoked` is mandatory and is the truth about this leg, not a formality** —
 it renders `(batch invoked)`, which is what separates "the batch ran and left N" from "the batch

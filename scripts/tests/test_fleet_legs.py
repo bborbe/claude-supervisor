@@ -371,6 +371,30 @@ class TestPerKind(Base):
         self.write(digest_with_legs())
         self.refused("--per-kind", "tasks=1/2/3 goals=0/1/1", "--invoked")
 
+    def test_integer_forms_the_reader_rejects_are_refused_at_the_writer(self):
+        """`int()` accepts `+1`, `01` and `1_0`; the reader's `\\d+/\\d+/\\d+` does not.
+
+        A writer that trusted `int()` would emit a line it reports as written and `--check`
+        then refuses — a write that succeeds and a digest that stays broken.
+        """
+        for bad in ("tasks=+1/2/3", "tasks=1_0/2/3", "tasks= 1/2/3"):
+            with self.subTest(bad=bad):
+                self.write(digest_with_legs())
+                self.refused(
+                    "--per-kind", "%s goals=0/1/1 topics=0/0/0" % bad, "--invoked"
+                )
+                self.assertIn("no reading recorded this round", self.read())
+
+    def test_the_writer_and_the_reader_agree_on_what_a_triple_is(self):
+        """The one invariant behind the previous test, asserted directly."""
+        for triple in ("1/2/3", "0/0/0", "10/5/15", "01/2/3"):
+            self.assertTrue(legs.per_kind_adds_up(triple), triple)
+            self.assertTrue(legs.PER_KIND_RE.match(
+                "flagged-open: tasks=%s goals=0/0/0 topics=0/0/0 (batch invoked)" % triple
+            ), triple)
+        for triple in ("+1/2/3", "1_0/2/3", "1/2", "1/2/3/4", "-1/2/1"):
+            self.assertFalse(legs.per_kind_adds_up(triple), triple)
+
     def test_a_hand_written_per_kind_line_without_a_marker_fails_check(self):
         """The reader's own guard, reached only by a line the writer did not produce.
 
