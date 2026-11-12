@@ -2711,6 +2711,13 @@ class AgesFlagTest(unittest.TestCase):
         self.assertEqual("ambiguous", self.ages("*")[0][3])
         self.assertEqual("ambiguous", self.ages("../01234567")[0][3])
 
+    def test_a_long_argument_that_is_not_a_full_id_is_never_globbed(self):
+        # The full-id branch used to return any ≥36-char argument unchanged, so a
+        # `/`-bearing or glob-bearing string reached the transcript glob and could
+        # widen past PROJECTS_DIR. Only an exact 36-char UUID skips the glob now.
+        self.assertEqual("ambiguous", self.ages("*" * 36)[0][3])
+        self.assertEqual("ambiguous", self.ages("../" + "a" * 34)[0][3])
+
     def test_a_session_with_no_transcript_reads_quiet_not_active(self):
         rows = self.ages("ffffffff")
         self.assertEqual(["ffffffff", "inf", "no transcript", "quiet"], rows[0])

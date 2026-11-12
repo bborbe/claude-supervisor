@@ -667,6 +667,8 @@ def _resolve_session_id(sid):
     would silently widen past `PROJECTS_DIR`.
     """
     if len(sid) >= 36:
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", sid):
+            return sid, True
         return sid, False
     if not re.fullmatch(r"[0-9a-fA-F-]{1,35}", sid):
         return sid, True
@@ -2213,7 +2215,8 @@ def main():
         help="print '<sid8>\\t<seconds>\\t<human>\\t<quiet|active|ambiguous>' per id and "
         "exit — the transcript clock the fleet digest renders its age from, and the "
         "quiet test its `stalled` class needs. `inf` when the session has no "
-        "transcript; `ambiguous` when the id resolves to no single session.",
+        "transcript; `ambiguous` when a prefix matches more than one transcript, or the "
+        "argument is not an id fragment at all.",
     )
     ap.add_argument("--jump", metavar="PANE", help="activate this WezTerm pane and exit")
     ap.add_argument(
