@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: **`wait-reprobe.py` has a round caller, so a session parked on a merged PR is re-driven on that evidence.** The join shipped in v0.284.0 with no caller anywhere in `agents/`, `commands/` or `scripts/` — `CLAUDE.md:202` called it *"the round's join"* while nothing invoked it, so no round ever produced its `REPROBED` block. `drive-retained.py render` now prints the block after `RETAINED`/`PARKED`, from one probe pass, and a `declared · resumed` row carries a `→ re-drive` marker — `expired` rows do not, because `declared-wait.py` has already ruled them not a wait, and the live store is mostly expired. The marker is the code-side handle the drive leg's prose `NUDGES` step consumes; without it, "re-drive the resumed rows" is a rule an agent is asked to remember rather than a fact the script states. A refused join renders `(refused: …)` rather than dropping the section. Measured 2026-11-12: `21 declared: 1 resumed · 1 still blocked · 19 unprobeable`, the resumed row being `bborbe/sun#133`. Change set: `scripts/wait-reprobe.py`, `scripts/drive-retained.py`, `scripts/tests/test_wait_reprobe.py`, `scripts/tests/test_drive_retained.py`, `CHANGELOG.md`.
+
 ## v0.296.1
 
 - fix: **the answer-reach sentinel call now passes `agent_id`, so it stops being rejected before it can record anything.** Both step files documented `answer_permission(request_id, behavior)`; the tool's schema declares `agent_id`, `request_id` and `behavior` all required, so the MCP layer refused the call above the handler — no request reached the server and no `mcp` reach was written. Measured 2026-11-12: a manager following the step literally got `agent_id and request_id are required` and wrote no leg; retrying with a sentinel `agent_id` produced the foreign-park reply and the reach.
