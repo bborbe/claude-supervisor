@@ -1862,17 +1862,33 @@ class RearmShapeCountsHeadBeatsOnly(unittest.TestCase):
             fh.write(text)
         return p
 
-    def test_a_tail_marked_epoch_does_not_pay_the_step(self):
-        p = self.arms("1794141605 900 tail\n")
+    def tail(self, text):
+        p = os.path.join(self.live.name, "fleet--fleet-manager.tail")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return p
+
+    def test_a_stored_tail_epoch_does_not_pay_the_step(self):
+        # The production shape: a TWO-column ring with the marker in the sibling store.
+        # A reader that honours only the retired third column sees is_tail False here
+        # and counts the closing beat as a head — the no-op this test exists to catch.
+        p = self.arms("1794141605 900\n")
+        self.tail("1794141605\n")
         self.assertFalse(self.m.rearm_shape(p, 1794141600, 1794141700))
 
-    def test_the_same_epoch_unmarked_does_pay_the_step(self):
+    def test_the_same_epoch_with_no_store_does_pay_the_step(self):
         p = self.arms("1794141605 900\n")
         self.assertTrue(self.m.rearm_shape(p, 1794141600, 1794141700))
 
-    def test_a_head_beside_a_tail_still_pays(self):
-        p = self.arms("1794141605 900\n1794141650 900 tail\n")
+    def test_a_head_beside_a_stored_tail_still_pays(self):
+        p = self.arms("1794141605 900\n1794141650 900\n")
+        self.tail("1794141650\n")
         self.assertTrue(self.m.rearm_shape(p, 1794141600, 1794141700))
+
+    def test_a_legacy_third_column_tail_is_also_excluded(self):
+        # Rings written before the marker moved carry it as a third column.
+        p = self.arms("1794141605 900 tail\n")
+        self.assertFalse(self.m.rearm_shape(p, 1794141600, 1794141700))
 
 
 class GatedState(unittest.TestCase):

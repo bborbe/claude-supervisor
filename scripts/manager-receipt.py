@@ -947,6 +947,25 @@ def watcher_shape(artifact: str, started: float, now: float) -> bool:
     return newest is not None and started <= newest <= now
 
 
+def _tail_epochs_beside(artifact: str) -> set:
+    """The `<slug>.tail` store beside a `<slug>.arms` ring, as epoch keys.
+
+    `manager-liveness.py`'s `arm()` writes the ring as TWO columns and keeps the tail
+    marker in this sibling store — a session still running a pre-upgrade copy rebuilds
+    the ring from two-tuples and would erase a third-column marker on every arm it
+    takes. `parse_arm_lines` still recognises the retired column, so a reader that
+    honours only the column sees `is_tail` False on every ring this build writes and
+    silently counts tail beats as head beats.
+    """
+    if not artifact.endswith(".arms"):
+        return set()
+    try:
+        with open(artifact[: -len(".arms")] + ".tail", encoding="utf-8") as fh:
+            return {line.strip() for line in fh if line.strip()}
+    except OSError:
+        return set()
+
+
 def rearm_shape(artifact: str, started: float, now: float) -> bool:
     """An arm epoch INSIDE the round window — the step, not the file's existence.
 
@@ -973,10 +992,15 @@ def rearm_shape(artifact: str, started: float, now: float) -> bool:
     """
     try:
         with open(artifact, encoding="utf-8") as fh:
-            vals = [epoch for epoch, _, tail in liveness().parse_arm_lines(fh.read())
-                    if not tail]
+            pairs = liveness().parse_arm_lines(fh.read())
     except OSError:
         return False
+    # Both marker shapes have to be honoured. The store is the one this build writes;
+    # the third column survives only as read-only legacy on rings from before the move.
+    # Checking the column alone is a no-op against every current ring.
+    tail = _tail_epochs_beside(artifact)
+    vals = [epoch for epoch, _, column_tail in pairs
+            if not column_tail and f"{epoch:.0f}" not in tail]
     # The ring stores WHOLE seconds, so both bounds are floored to that resolution: an arm
     # stamped in the same wall-clock second as `round_started_at` can round *below* it, and
     # one stamped in the same second the check runs can read as *after* a fractional `now`.
