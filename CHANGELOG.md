@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.295.3
 
 - fix: **the answer-reach sentinel call now passes `agent_id`, so it stops being rejected before it can record anything.** Both step files documented `answer_permission(request_id, behavior)`; the tool's schema declares `agent_id`, `request_id` and `behavior` all required, so the MCP layer refused the call above the handler — no request reached the server and no `mcp` reach was written. Measured 2026-11-12: a manager following the step literally got `agent_id and request_id are required` and wrote no leg; retrying with a sentinel `agent_id` produced the foreign-park reply and the reach.
 - fix: **every documented `answer_permission` call now names `agent_id`.** The same unusable two-argument form was in `commands/steps/worker-channels.md`, `commands/goal-answer.md`, `commands/goal-loop.md`, `docs/fleet-surface.md` and `agents/goal-wrangler.md`; all now carry `agent_id`, so no page teaches a call the schema rejects.
