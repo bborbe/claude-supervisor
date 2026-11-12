@@ -62,6 +62,7 @@ is not a clean round, and must never render as one).
 """
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -117,6 +118,22 @@ SECTION_HEADS = (
 #: unverifiable block's lines with two leading spaces, and an agent pasting them strips them,
 #: so both shapes are live.
 TO_LINE = re.compile(r"^\s*TO:\s*(?P<recipient>.*?)\s*(?:\||$)")
+
+
+def _norm_recipient(name):
+    """Casefolded, decoration-stripped recipient label, for the drafted/recorded join.
+
+    A registry label carries the `⚙ ` marker a task title does not, and the round writes its
+    action record from that label while the payload's `TO:` line carries the bare name --
+    measured `2026-11-11T20-56-50Z`, where one correctly-sent nudge read as `missing 1` and
+    `unexpected sent 1` at once. Mirrors `fleet-board.py`'s `_norm_session_name` and
+    `manager-predispatch.py`'s helper of the same name and job, so this join agrees with the
+    round's own send order about what a recipient *is*. Copied rather than imported because
+    these scripts ship standalone.
+    """
+    text = unicodedata.normalize("NFKC", name or "").strip()
+    text = re.sub(r"^[^\w(]+", "", text)
+    return re.sub(r"\s+", " ", text).strip().casefold()
 
 
 def drafted_recipients(text):
@@ -265,13 +282,28 @@ def artifact_failures(drive_path, sent_path):
 
     # Only a drafted recipient can be actioned. A recorded name outside the drafted set is
     # an over-send -- reported, never counted, because it would mask a deficit.
-    sent = [name for name, action in actions.items() if action == "sent" and name in drafted]
-    actioned = [name for name in actions if name in drafted]
-    unexpected = [name for name in actions if name not in drafted]
+    #
+    # Both sides are joined on the NORMALISED name: the record is written from the roster's
+    # display label, so a correctly-sent nudge can arrive as `⚙ <name>` against a bare
+    # `TO: <name>` and would otherwise count as a lost send AND an over-send at once. The
+    # `drafted` list itself stays raw and first-seen-deduped -- collapsing names before the
+    # count would merge two genuinely distinct recipients into one denominator.
+    drafted_keys = {_norm_recipient(name) for name in drafted}
+    action_keys = {_norm_recipient(name) for name in actions}
+    # Distinct normalised recipients, not record lines: two differently-decorated entries
+    # for one recipient are one send, the same way two `TO:` lines for one recipient are
+    # one draft.
+    sent_keys = {
+        _norm_recipient(name)
+        for name, action in actions.items()
+        if action == "sent" and _norm_recipient(name) in drafted_keys
+    }
+    actioned = [name for name in drafted if _norm_recipient(name) in action_keys]
+    unexpected = [name for name in actions if _norm_recipient(name) not in drafted_keys]
     missing = len(drafted) - len(actioned)
     line = "nudges: drafted %d · sent %d · missing %d" % (
         len(drafted),
-        len(sent),
+        len(sent_keys),
         missing,
     )
     if unexpected:
