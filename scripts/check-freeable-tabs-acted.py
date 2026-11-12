@@ -42,7 +42,7 @@ Two halves, both required:
     (a) `commands/steps/drive.md` names this check and the line it must print.
     (b) `commands/steps/output-shape.md` mandates the line, so the round cannot omit it.
 
-  **Artifacts (`--drive`, optional `--sent`).** Given a round's payload, count the freeable
+  **Artifacts (`--drive`, optional `--record`).** Given a round's payload, count the freeable
   rows, read the action record, and report a deficit.
 
 Exit codes: 0 clean, 1 deficit, 2 refused (an unreadable payload or a malformed invocation
@@ -92,8 +92,13 @@ SECTION_HEADS = (
 #: first ` · `; the class and the third field are not needed to count, only the link is.
 FREEABLE_ROW = re.compile(r"^\s*(?P<name>[^·]+?)\s*·")
 
-#: A resolved pane link. The absence of this is what `no pane — <reason>` renders.
-RESOLVED_LINK = "http://"
+#: A resolved pane link, in either form the renderer emits. `scripts/jump-link.py` prints an
+#: `http://…/jump?pane=<N>&t=<token>` link when a jump token is configured and the literal
+#: `/supervisor:jump <N>` fallback when it is not (`jump-link.py:88`). Testing only for
+#: `http://` silently drops every fallback-form row from `linkable`, which reports a clean on
+#: exactly the unclosed row this guard exists to catch — a false negative, the one direction a
+#: guard must never fail in.
+RESOLVED_LINKS = ("http://", "/supervisor:jump ")
 
 #: The row class the close contract excludes. A `long-wait <age>` row is a parked worker
 #: holding a live wait, and `commands/steps/drive.md` forbids closing it — so a resolved link
@@ -102,7 +107,14 @@ LONG_WAIT_CLASS = "long-wait"
 
 #: The action-record entries that count as acting on a freeable row. A close and a reported
 #: refusal are both outcomes; only silence is a defect.
-ACTED_ACTIONS = ("closed", "skipped")
+#:
+#: These live in their OWN file (`<round>.freeable`), never the send record. Sharing
+#: `~/.claude/state/fleet-handback/<round>.sent` collides twice: the send step writes
+#: `skipped<TAB><recipient>` for a peer that moved to busy/shell — an unrelated meaning that
+#: would read as a refusal here — and `check-drive-nudges-sent.py` counts any recorded name
+#: outside its drafted set as `unexpected sent`, so every freeable close would pollute its
+#: line. One file per producer, one vocabulary per file.
+ACTED_ACTIONS = ("closed", "refused")
 
 
 def _norm_name(name):
@@ -123,13 +135,22 @@ def _norm_name(name):
 #: class (`<name> · <task> · finished · <link>`), and reading `fields[1]` would return the task
 #: name on every such row — which silently disabled the `long-wait` exclusion it was meant to
 #: apply. Measured by review on 2026-11-12.
-ROW_CLASSES = ("finished", "deferred", "long-wait")
+#: The class forms a row can carry: `finished` stands alone, the other two are prefix + value.
+ROW_CLASS_EXACT = ("finished",)
+ROW_CLASS_PREFIX = ("deferred ", "long-wait ")
 
 
 def _row_class(fields):
-    """The class field from a row's `·`-separated fields, or "" when none is recognised."""
+    """The class field from a row's `·`-separated fields, or "" when none is recognised.
+
+    The class is matched by its exact FORM — `finished` alone, or a `deferred <date>` /
+    `long-wait <age>` prefix — never by first word or `startswith` over the bare class word. A
+    task column can legitimately read "finished migration plan", and both looser matches read
+    that as the class, which silently disables the `long-wait` exclusion on the row that
+    carries it.
+    """
     for field in fields[1:]:
-        if field.startswith(ROW_CLASSES):
+        if field in ROW_CLASS_EXACT or field.startswith(ROW_CLASS_PREFIX):
             return field
     return ""
 
@@ -166,7 +187,7 @@ def freeable_rows(text):
         if not name:
             continue
         fields = [field.strip() for field in stripped.split("·")]
-        rows.append((name, _row_class(fields), RESOLVED_LINK in line))
+        rows.append((name, _row_class(fields), any(link in line for link in RESOLVED_LINKS)))
     return rows
 
 
@@ -199,12 +220,12 @@ def acted_names(path):
     return out
 
 
-def sent_path_for(drive_path):
-    """`<round>.sent` beside the payload: `.../2026-11-12T10-08-16Z.drive` -> `….sent`."""
+def record_path_for(drive_path):
+    """`<round>.freeable` beside the payload: `.../2026-11-12T10-08-16Z.drive` -> `….freeable`."""
     path = Path(drive_path)
     if path.suffix == ".drive":
-        return path.with_suffix(".sent")
-    return Path(str(path) + ".sent")
+        return path.with_suffix(".freeable")
+    return Path(str(path) + ".freeable")
 
 
 def static_failures():
@@ -284,7 +305,7 @@ def artifact_failures(drive_path, sent_path):
     if missing:
         return (
             [
-                "%d freeable row(s) carried a resolved link and no `closed` or `skipped` "
+                "%d freeable row(s) carried a resolved link and no `closed` or `refused` "
                 "entry: %s -- the round listed them and neither closed nor refused them, "
                 "which is the 2026-11-12 defect"
                 % (len(missing), "; ".join(missing[:3]))
@@ -302,7 +323,7 @@ def _parse(argv):
     silently would fall through to the static-only run and exit 0 over an unchecked round. No
     arguments at all is the Makefile/CI static run and is legal.
     """
-    values = {"--drive": None, "--sent": None}
+    values = {"--drive": None, "--record": None}
     i = 0
     while i < len(argv):
         token = argv[i]
@@ -311,7 +332,7 @@ def _parse(argv):
             if token.startswith("-"):
                 return None, None, "unknown flag %s" % name
             return None, None, (
-                "unexpected argument %r -- artifact paths must be given as --drive/--sent"
+                "unexpected argument %r -- artifact paths must be given as --drive/--record"
                 % token
             )
         if eq:
@@ -325,7 +346,7 @@ def _parse(argv):
         if not value:
             return None, None, "%s given with an empty value" % name
         values[name] = value
-    return values["--drive"], values["--sent"], None
+    return values["--drive"], values["--record"], None
 
 
 def main(argv=None):
@@ -342,10 +363,10 @@ def main(argv=None):
             print("  - %s" % failure, file=sys.stderr)
         return REFUSED
     if sent_path and not drive_path:
-        # `--sent` alone would fall through to the static-only run and exit 0 with the round
+        # `--record` alone would fall through to the static-only run and exit 0 with the round
         # unmeasured -- the same green-over-nothing the valueless-flag guard closes.
         print(
-            "check-freeable-tabs-acted: refused -- --sent requires --drive: an action record "
+            "check-freeable-tabs-acted: refused -- --record requires --drive: an action record "
             "cannot be measured against a payload it was not given",
             file=sys.stderr,
         )
@@ -355,7 +376,7 @@ def main(argv=None):
     refused = False
     if drive_path:
         artifact_failure, line, refused = artifact_failures(
-            drive_path, sent_path or sent_path_for(drive_path)
+            drive_path, sent_path or record_path_for(drive_path)
         )
         failures.extend(artifact_failure)
         if line:

@@ -87,7 +87,7 @@ class FreeableTabsArtifactTest(unittest.TestCase):
         """The same payload, one `closed` entry: the gate discriminates on the record."""
         drive = self._write("2026-11-12T10-08-16Z.drive", DEFECT_PAYLOAD)
         self._write(
-            "2026-11-12T10-08-16Z.sent",
+            "2026-11-12T10-08-16Z.freeable",
             "closed\tUpdate All Service Repos Go Modules 2026-11\n"
             "closed\tprivate-personal-c9\n",
         )
@@ -143,12 +143,55 @@ class FreeableTabsArtifactTest(unittest.TestCase):
         self.assertEqual(code, 1, out + err)
         self.assertIn("freeable-tabs: rows 1 · linkable 1 · acted 0 · missing 1", out)
 
-    def test_a_skipped_entry_counts_as_acted(self):
+    def test_the_jump_link_fallback_is_a_resolved_link(self):
+        """`jump-link.py:88` emits `/supervisor:jump <N>` when no jump token is configured.
+
+        Testing only for `http://` drops every fallback-form row from `linkable` and reports a
+        clean on exactly the unclosed row this guard exists to catch — a false negative, the
+        one direction a guard must never fail in.
+        """
+        payload = QUIET_PAYLOAD.replace(
+            "  Every Session Records Its State and What It Waits On · deferred 2026-11-12T09:00 · no pane — digest carried —",
+            "  A Worker · Its Task · finished · /supervisor:jump 42",
+        )
+        drive = self._write("fb.drive", payload)
+        code, out, err = run(["--drive", drive])
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("freeable-tabs: rows 1 · linkable 1 · acted 0 · missing 1", out)
+
+    def test_a_task_column_beginning_with_a_class_word_does_not_shadow_the_class(self):
+        """A task named "finished migration …" must not be read as the class field."""
+        payload = QUIET_PAYLOAD.replace(
+            "  Every Session Records Its State and What It Waits On · deferred 2026-11-12T09:00 · no pane — digest carried —",
+            "  A Worker · finished migration plan · long-wait 3h · http://127.0.0.1:1337/jump?pane=9&t=q",
+        )
+        drive = self._write("shadow.drive", payload)
+        code, out, err = run(["--drive", drive])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("linkable 0", out)
+
+    def test_the_production_invocation_form_is_measured(self):
+        """The exact `--drive <payload> --record <file>` pair the round step runs."""
+        drive = self._write("2026-11-12T10-08-16Z.drive", DEFECT_PAYLOAD)
+        record = self._write("2026-11-12T10-08-16Z.freeable", "")
+        code, out, err = run(["--drive", drive, "--record", record])
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("missing 1", out)
+
+    def test_an_unreadable_record_is_refused(self):
+        """An unreadable record says nothing about the rows, so it is never a deficit."""
+        drive = self._write("d.drive", DEFECT_PAYLOAD)
+        blocked = pathlib.Path(self.tmp) / "blocked.freeable"
+        blocked.mkdir()
+        code, out, err = run(["--drive", drive, "--record", str(blocked)])
+        self.assertEqual(code, 2, out + err)
+
+    def test_a_refused_entry_counts_as_acted(self):
         """A refusal token is a legitimate outcome — the row is left for the next round."""
         drive = self._write("2026-11-12T10-08-16Z.drive", DEFECT_PAYLOAD)
         self._write(
-            "2026-11-12T10-08-16Z.sent",
-            "skipped\tUpdate All Service Repos Go Modules 2026-11\n",
+            "2026-11-12T10-08-16Z.freeable",
+            "refused\tUpdate All Service Repos Go Modules 2026-11\n",
         )
         code, out, err = run(["--drive", drive])
         self.assertEqual(code, 0, out + err)
@@ -158,7 +201,7 @@ class FreeableTabsArtifactTest(unittest.TestCase):
         """A plain name is a `sent` entry — messaging a freeable row is the defect itself."""
         drive = self._write("2026-11-12T10-08-16Z.drive", DEFECT_PAYLOAD)
         self._write(
-            "2026-11-12T10-08-16Z.sent",
+            "2026-11-12T10-08-16Z.freeable",
             "Update All Service Repos Go Modules 2026-11\n",
         )
         code, out, err = run(["--drive", drive])
@@ -179,7 +222,7 @@ class FreeableTabsArtifactTest(unittest.TestCase):
             "⚙ Every Session Records Its State and What It Waits On",
         ).replace("no pane — digest carried —", "http://127.0.0.1:1337/jump?pane=5&t=q")
         drive = self._write("r.drive", payload)
-        self._write("r.sent", "closed\tEvery Session Records Its State and What It Waits On\n")
+        self._write("r.freeable", "closed\tEvery Session Records Its State and What It Waits On\n")
         code, out, err = run(["--drive", drive])
         self.assertEqual(code, 0, out + err)
         self.assertIn("missing 0", out)
@@ -191,7 +234,7 @@ class FreeableTabsArtifactTest(unittest.TestCase):
 
     def test_sent_without_drive_is_refused(self):
         """`--sent` alone would fall through to the static run and exit 0 unmeasured."""
-        code, _, err = run(["--sent", str(pathlib.Path(self.tmp) / "x.sent")])
+        code, _, err = run(["--record", str(pathlib.Path(self.tmp) / "x.freeable")])
         self.assertEqual(code, 2, err)
 
     def test_an_unknown_flag_is_refused(self):
