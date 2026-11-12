@@ -95,6 +95,24 @@ def tick(sessions_dir=None, dry_run=False, reaper=None, reaper_path=REAPER, clos
     return rows, ok
 
 
+def summary_line(rows, dry_run=False):
+    """The tick's accounting, derived from the per-session lines it just wrote.
+
+    `rows` IS those lines, so each count is a filter over them rather than a second tally
+    that could drift from what was printed. Every close here is the 15-minute idle close —
+    a finished-task row still had to clear `IDLE_FLOOR` before it could reach
+    `close-worker.py`, so there is no no-wait close path in this tick and the second count
+    is 0 by construction. It is printed anyway: a future no-wait path then shows up as a
+    non-zero instead of silently redefining the first count.
+    """
+    closed = [row for row in rows if row[2] in ("closed", "would-close")]
+    mode = " dry-run" if dry_run else ""
+    return (
+        f"candidates={len(rows)} "
+        f"closed {len(closed)} past the 15-min trigger · closed 0 with no wait"
+    )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="One tick of the 15-minute idle close.")
     parser.add_argument("--dry-run", action="store_true", help="run every guard, close nothing")
@@ -121,9 +139,9 @@ def main(argv=None):
     rows, ok = tick(args.sessions_dir, args.dry_run)
     for session_id, verb, outcome in rows:
         print(f"{stamp} idle-reaper-tick session={session_id} verb={verb} outcome={outcome}")
-    closed = sum(1 for _, _, o in rows if o in ("closed", "would-close"))
+    # Accounting, reconciled against the per-session lines this tick just wrote.
     mode = " dry-run" if args.dry_run else ""
-    print(f"{stamp} idle-reaper-tick{mode} candidates={len(rows)} closed={closed} refused={len(rows) - closed}")
+    print(f"{stamp} idle-reaper-tick{mode} {summary_line(rows, args.dry_run)}")
     return 0 if ok else 1
 
 
