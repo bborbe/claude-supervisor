@@ -11,12 +11,21 @@ Measured 2026-10-29 on round `2026-10-29T08-28-15Z`: of 7 parked rows only 4 car
 `CLOSERS` row, and the three uncaptured ones split into a routine turn end, a
 clock-bound `later (on …)`, and no closer at all — three different verdicts that a
 row-present / row-absent reading collapsed into one.
+
+The `ExpiredDeclaration` class below pins the SECOND input: a `parked-wait` row whose
+`⏰ Ends:` declaration has expired is re-driven (`revive`), while a live or absent one
+keeps `unverifiable`. The fixture is the recorded `64a0e8f1` shape — a `later (on …)`
+closer waiting on a `make precommit` probe — and a third fixture carries a DIFFERENT
+observable so a branch keyed on the recorded string fails the suite.
 """
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
+import tempfile
+import time
 import unittest
 
 _SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -24,6 +33,8 @@ _SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 _spec = importlib.util.spec_from_file_location("closer_verdict", _SCRIPT)
 cv = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cv)
+
+_FULL_SID = "64a0e8f1-eb96-45be-97fb-3359c65f4624"
 
 
 def load_capture():
@@ -64,7 +75,8 @@ class Verdicts(unittest.TestCase):
 
     def test_only_routine_revives(self):
         # The guard against a fix that suppresses or revives everything: exactly one
-        # class may reach `revive`, and it is the routine one.
+        # class may reach `revive` in the STATIC map, and it is the routine one. The
+        # expiry widening is dynamic and is pinned by `ExpiredDeclaration` below.
         reviving = [n for n in cv.VERDICTS if cv.VERDICTS[n][0] == "revive"]
         self.assertEqual(["routine"], reviving)
 
@@ -76,6 +88,86 @@ class Verdicts(unittest.TestCase):
         that exits 2, and nothing else in the suite would notice.
         """
         self.assertEqual(set(load_capture().CLOSER_CLASSES), set(cv.VERDICTS))
+
+
+class ExpiredDeclaration(unittest.TestCase):
+    """The join: an expired `⏰ Ends:` re-drives a `parked-wait` row.
+
+    The fixture is built from the recorded `64a0e8f1` shape (a `later (on …)` closer
+    waiting on a `make precommit` probe), so the case is the real one rather than a
+    shape invented to pass.
+    """
+
+    def _store(self, records):
+        """A tmp attention store holding one session's `Stop` records."""
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, f"{_FULL_SID}.events.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec) + "\n")
+        return d
+
+    def _stop(self, ends, age_s):
+        return {"event": "Stop", "ts": time.time() - age_s,
+                "detail": f"⏰ Ends: {ends}"}
+
+    def test_the_recorded_expired_row_is_the_pair(self):
+        """SC2's before/after: ONE fixture, two verdicts.
+
+        With the declaration resolved the row is actionable; the class alone — today's
+        behaviour — is `unverifiable`. Both halves are asserted on the same fixture so
+        neither can be satisfied by a mapping that simply revives every parked row.
+        """
+        d = self._store([self._stop(
+            "`make precommit` in `~/Documents/workspaces/claude-wrapper-flagged-tick` "
+            "exits 0", 7200)])
+        self.assertEqual("expired", cv.wait_verdict_for("64a0e8f1", state_dir=d))
+        # after: the declaration widens the class
+        self.assertEqual("revive", cv.verdict("parked-wait", "expired")[0])
+        # before: the class alone is still suppressed
+        self.assertEqual("unverifiable", cv.verdict("parked-wait")[0])
+
+    def test_a_second_expired_observable_also_revives(self):
+        """A DIFFERENT probe string — a special-case on `make precommit` fails here."""
+        d = self._store([self._stop("tag v9.9.9 exists on origin", 7200)])
+        self.assertEqual("expired", cv.wait_verdict_for("64a0e8f1", state_dir=d))
+        self.assertEqual("revive", cv.verdict("parked-wait", "expired")[0])
+
+    def test_a_live_declaration_stays_unverifiable(self):
+        """SC3: the anti-regression half — a live wait must not start nudging."""
+        d = self._store([self._stop("PR bborbe/nuke#698 merges", 60)])
+        self.assertEqual("declared", cv.wait_verdict_for("64a0e8f1", state_dir=d))
+        self.assertEqual("unverifiable", cv.verdict("parked-wait", "declared")[0])
+
+    def test_a_row_with_no_declaration_stays_unverifiable(self):
+        d = tempfile.mkdtemp()  # an empty store
+        self.assertIsNone(cv.wait_verdict_for("64a0e8f1", state_dir=d))
+        self.assertEqual("unverifiable", cv.verdict("parked-wait", None)[0])
+
+    def test_an_ambiguous_prefix_resolves_to_nothing(self):
+        # Two sessions sharing a prefix: a guess here would revive on another
+        # session's declaration, so it must keep today's verdict.
+        d = self._store([self._stop("`make precommit` exits 0", 7200)])
+        with open(os.path.join(d, "64a0e8f1-0000-0000-0000-000000000000.events.jsonl"),
+                  "w", encoding="utf-8") as f:
+            f.write(json.dumps(self._stop("another wait", 7200)) + "\n")
+        self.assertIsNone(cv.wait_verdict_for("64a0e8f1", state_dir=d))
+
+    def test_an_expired_declaration_does_not_widen_other_classes(self):
+        # The widening is confined to `parked-wait`: every other class keeps its
+        # static verdict even when the declaration is expired.
+        for cls, want in (("ask", "blocked"), ("none", "unverifiable"),
+                          ("routine", "revive")):
+            self.assertEqual(want, cv.verdict(cls, "expired")[0], cls)
+
+    def test_the_cli_applies_the_join(self):
+        d = self._store([self._stop("`make precommit` exits 0", 7200)])
+        out = subprocess.run(
+            [sys.executable, _SCRIPT, "--class", "parked-wait", "--session", "64a0e8f1"],
+            capture_output=True, text=True,
+            env={**os.environ, "ATTENTION_STATE_DIR": d})
+        self.assertEqual(0, out.returncode, out.stderr)
+        self.assertTrue(out.stdout.startswith("revive"), out.stdout)
 
 
 class Cli(unittest.TestCase):
