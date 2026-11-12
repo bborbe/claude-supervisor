@@ -28,6 +28,7 @@ nothing. Same rule as that script: one owner per file.
 Subcommands: reprobe | render
 """
 import argparse
+import importlib.util
 import json
 import os
 import subprocess
@@ -258,6 +259,34 @@ def render_parked(rows):
     return "\n".join(lines)
 
 
+def _load(filename, module_name):
+    """A sibling script, loaded by path — the repo's pattern for hyphenated names."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location(module_name, os.path.join(here, filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def render_reprobed(waits_fn=None, probe=None):
+    """The `REPROBED` block, from the join that owns it.
+
+    `wait-reprobe.py` owns the join and the block's shape, so this only calls it — the
+    same rule `agents/fleet-drive.md` step 0 states for the other render legs. A refused
+    join renders one `(refused: …)` line rather than nothing: a round that silently
+    dropped the section would be indistinguishable from a round that never rendered it,
+    which is the misreading `render_parked()`'s `(none)` exists to prevent.
+
+    `waits_fn` and `probe` are the test seams; production passes neither.
+    """
+    try:
+        wr = _load("wait-reprobe.py", "wait_reprobe")
+        records = (waits_fn or wr.read_waits)()
+        return wr.render_block(wr.reprobe(records, probe=probe))
+    except Exception as exc:
+        return "REPROBED — declared waits whose observable was probed\n  (refused: %s)" % exc
+
+
 def cmd_render(args):
     """Blocks on stdout, and optionally the merge payload -- from ONE probe pass.
 
@@ -283,6 +312,7 @@ def cmd_render(args):
             handle.write("\n")
     print(render_retained(rows, round_tag))
     print(render_parked(rows))
+    print(render_reprobed())
     return 0
 
 

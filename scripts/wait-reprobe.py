@@ -13,7 +13,11 @@ records: the sweep is handed a prompt, not a board, so prose naming a probe is a
 mechanism nobody can run.
 
 ⚠️ **It renders; it never resumes.** Resuming is the drive leg's decision, and this
-script does not own it.
+script does not own it. What it does own is saying *which* row that decision applies
+to: a `declared · resumed` row carries a `→ re-drive` marker, and nothing else does.
+The drive leg's `NUDGES` drafting is agent-authored prose, so the marker is the only
+handle a test can assert — without it, "re-drive the resumed rows" is a rule the agent
+is asked to remember rather than a fact the script states.
 
 ⚠️ **Only a declaration that NAMES ITS REPO is probed.** There is deliberately no
 resolver, and that is a measured decision rather than a gap:
@@ -59,6 +63,12 @@ REFUSED = 2
 _RESUMED = "resumed"
 _STILL = "still-blocked"
 _UNPROBEABLE = "unprobeable"
+
+#: Appended to the row the drive leg should act on. The drive's `NUDGES` drafting is
+#: agent-authored prose (`agents/fleet-drive.md`), so there is no code call site for a
+#: test to drive — the rendered marker is the only handle that makes "re-drive this
+#: one" a fact the script states rather than a rule the agent is asked to remember.
+_REDRIVE_MARKER = " → re-drive"
 
 
 def _load(filename, module_name):
@@ -116,6 +126,17 @@ def reprobe(records, probe=None):
     return rows
 
 
+def is_redrivable(row):
+    """Whether the drive leg should act on this row: a live declaration that has cleared.
+
+    `expired` is excluded deliberately. `declared-wait.py` has already ruled that
+    declaration is not a wait, so acting on it would re-drive a session that declares
+    nothing — and the live store is overwhelmingly `expired`, so the exclusion is what
+    keeps the marker meaningful rather than firing on every historical row.
+    """
+    return row.get("wait") == "declared" and row.get("verdict") == _RESUMED
+
+
 def render_block(rows):
     """The `REPROBED` block: one line per declaration, however long the list.
 
@@ -137,8 +158,15 @@ def render_block(rows):
         ends = (row.get("ends") or "").strip()
         suffix = f" — {ends[:70]}" if ends else ""
         lines.append(
-            "  [%s] %s · %s · %s%s"
-            % (row["session_id"][:12] or "?", row["wait"], row["verdict"], row["reason"], suffix)
+            "  [%s] %s · %s · %s%s%s"
+            % (
+                row["session_id"][:12] or "?",
+                row["wait"],
+                row["verdict"],
+                row["reason"],
+                _REDRIVE_MARKER if is_redrivable(row) else "",
+                suffix,
+            )
         )
     live = [r for r in rows if r["wait"] == "declared"]
     counts = {v: len([r for r in live if r["verdict"] == v]) for v in (_RESUMED, _STILL, _UNPROBEABLE)}
