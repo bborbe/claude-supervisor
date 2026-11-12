@@ -806,7 +806,7 @@ def _transcript_files(session: str) -> list:
     return out
 
 
-def spend_tokens(topic: str, branch: str = "", session: str = "", now: float = None) -> int:
+def spend_tokens(topic: str, branch: str = "", session: str = "") -> int:
     """Print the COMPLETED PREVIOUS round's output-token spend.
 
     Windowed `previous_round_started_at → round_started_at` and deduped by

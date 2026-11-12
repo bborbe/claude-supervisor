@@ -2132,6 +2132,22 @@ class SpendReadout(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(out.strip(), "n/a (baseline)")
 
+    def receipt(self):
+        with open(os.path.join(self.tmp.name, self.slug + ".json"), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_start_carries_the_previous_round_started_at(self):
+        # The core of the fix: `start()` reads the prior receipt and carries its
+        # `round_started_at` into `previous_round_started_at`. If that carry
+        # regressed, `--tokens` would silently print `n/a (baseline)` forever and no
+        # other test would fail — `open_round()` hand-writes the field.
+        self.cli("--start", "--topic", self.topic)
+        first = self.receipt()
+        self.assertNotIn("previous_round_started_at", first)
+        self.cli("--start", "--topic", self.topic)
+        second = self.receipt()
+        self.assertEqual(second["previous_round_started_at"], first["round_started_at"])
+
     def test_tokens_without_a_round_refuses(self):
         rc, out = self.cli("--tokens", "--topic", self.topic, "--session", self.session)
         self.assertEqual(rc, 2)
