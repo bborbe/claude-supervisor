@@ -274,6 +274,12 @@ def standdown_marker(subject):
     owns; a `task--<slug>.stopped` marker is honoured here all the same, because the
     marker's existence is the operator's act whatever tier wrote it.
 
+    ⚠️ **A same-named subject on ANOTHER tier therefore also skips this one, and that is
+    the deliberate direction.** The subject-resolution record carries its own `branch`, but
+    trusting it would mean a stale tier there misses the operator's real stop and reopens
+    the work — the failure this whole read exists to prevent. Over-skipping costs an
+    adoption, which the next round repeats; under-skipping costs the operator's decision.
+
     The returned name is the marker FILE as `manager-liveness.stopped_marker()` resolved
     it — never a re-composed `<branch>--<slug>`, which on the legacy path names a file that
     does not exist — so the report can say what evidence the skip rests on and which file
