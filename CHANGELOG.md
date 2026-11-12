@@ -7,7 +7,13 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
+## v0.290.0
 
+- feat: add a session-independent `UNCLAIMABLE` digest section to `fleet-sweep-reader`. A task whose `target_vault` is empty or absent is claimed by no controller — the non-owning one drops it as cross-vault traffic and the legacy-default one cannot recreate a file already at the title path — so no pod is scheduled and nothing reports it, which is why the row cannot hang off the session roster. `scripts/unclaimable-tasks.py` scans the agent runtime vaults and prints recent rows, a historical count and an undated bucket; since `agent-task-controller` v0.26.12 the create path refuses the empty field outright, so a **recent** hit means a producer still omits it and its PR is stalling silently. ⚠️ The window is `created_date` else `job_started_at`, never file mtime — measured 2026-11-11, an mtime window read 9,624 "recent" when the true number was 0, because mtime is the clone date on most of these files.
+
+## Unreleased
+
+- fix: **`next-focus-answer.py` unwraps `shlex.quote`'s apostrophe escape when the shell has already stripped the outer quoting.** Two payload shapes reach the store and they need different handling: the whole payload still quoted (one `shlex` token, so `shlex.split` returns it unquoted), and the outer quoting removed by the shell while the `'"'"'` escape survives **literally**. The second shape splits into many tokens, so the single-token branch never fired and the escape stayed in the row name — measured 2026-11-12 on store item `1127462d`, whose payload begins `A Worker'"'"'s Gate …` and splits into 14 tokens; the row was refused even though its page exists, so the operator's `add it to the plan` answer was dropped. `unquote_payload()` now falls back to unwrapping `'"'"'`, the only form `shlex.quote` emits, so the substitution is exact rather than a guess. The test builds the escape into both the name and the path, exactly as the live payload carries it. Change set: `scripts/next-focus-answer.py`, `scripts/tests/test_next_focus_answer.py`, `CHANGELOG.md`.
 
 ## Unreleased
 
