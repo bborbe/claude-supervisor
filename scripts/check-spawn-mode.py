@@ -14,6 +14,12 @@ Both are required, and neither is sufficient alone. (a) without (b) is a pointer
 follows; (b) without (a) is a second copy of the rule, which is the defect this whole
 change exists to remove. A bare comment naming the section satisfies neither.
 
+⚠️ **Since the 2026-11-12 operator ruling the mode itself comes from `role` alone** —
+`role: agent` → `headless`, `role: human` / `role: manager` → `interactive` — so (b)'s
+two directions are now the *storage* half rather than a classifier's output. The check
+still pins them: a site that passes only `false` leaves a human or manager row's stored
+`interactive` inert.
+
 **A call is a new-worker spawn iff it carries `prompt=` and NOT `resume=`.** The
 `resume=` half is load-bearing, not a nicety: `commands/fleet-loop.md` continues an
 exited headless worker with `spawn_agent(prompt="<the answer>", resume="<session-id>",
@@ -112,18 +118,28 @@ INTERACTIVE_FALSE = "interactive=false"
 INTERACTIVE_TRUE = "interactive=true"
 #: The home must actually define the rule, not merely name it.
 #:
-#: ⚠️ **These two phrases moved on 2026-10-22, with the rule they pin, and they pin its
-#: two halves rather than any one sentence of it.** The first names the *closed list* that
-#: keeps a `role: agent` row interactive — the classifier itself. The second pins its
-#: **exhaustiveness**, which is the half a reader is most likely to soften back into an
-#: open-ended "and similar cases": an exhaustive list with no closure sentence is a list
-#: that will grow a sixth signal the day someone finds an edge case.
+#: ⚠️ **These phrases moved on 2026-11-12, with the rule they pin.** Operator ruling: *"all
+#: agents should be headless … only interactive and manager should be tabs"*. The five
+#: watch-need signals are now **documentation only** — they no longer select `mode` for any
+#: row — so the old pair pinned the wrong half: it held a reader to a classifier the rule had
+#: already dropped.
 #:
-#: The superseded pair was ``("does finishing this task raise questions mid-flight",
-#: "floor, not a tie-break")`` — the old classifier question and the old floor. Both were
-#: deleted by the flip, and a check that kept pinning them would have failed on the correct
-#: tree while passing on the stale one, which is the one direction a guard must never fail.
-HOME_DEFINES = ("five watch-need signals", "no sixth, no `etc.`")
+#: Three pins, and each is load-bearing:
+#:   1. the rule itself — `role: agent` is `headless` always;
+#:   2. its negative half — the signals are *no longer a mode input*, which is the sentence a
+#:      reader is most likely to soften back into "keeps it interactive";
+#:   3. the list's exhaustiveness — an open-ended signal list grows a sixth entry the day
+#:      someone meets an edge case, even as documentation.
+#:
+#: The superseded pair was ``("five watch-need signals", "no sixth, no `etc.`")`` — it pinned
+#: the 2026-10-22 classifier, which the 2026-11-12 ruling removed. A check left pinning it
+#: would fail on the correct tree while passing on the stale one, the one direction a guard
+#: must never fail.
+HOME_DEFINES = (
+    "`role: agent` is `headless` always",
+    "no longer a mode input",
+    "no sixth, no `etc.`",
+)
 
 
 def call_spans(text):

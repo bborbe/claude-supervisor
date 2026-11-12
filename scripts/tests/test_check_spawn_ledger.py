@@ -63,8 +63,9 @@ def run(endpoint):
 
 class CheckSpawnLedgerTest(unittest.TestCase):
     def test_decided_new_worker_passes(self):
-        with FixtureEndpoint(ledger_rows=[row(SID, mode="interactive", mode_source="argument",
-                                              resumed_from=None, spawned_at=at(1))]) as fx:
+        with FixtureEndpoint(ledger_rows=[row(SID, role="human", mode="interactive",
+                                              mode_source="argument", resumed_from=None,
+                                              spawned_at=at(1))]) as fx:
             result = run(fx.url)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -88,7 +89,7 @@ class CheckSpawnLedgerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_missing_mode_source_is_not_an_offence(self):
-        with FixtureEndpoint(ledger_rows=[row(SID, mode="interactive",
+        with FixtureEndpoint(ledger_rows=[row(SID, role="human", mode="interactive",
                                               resumed_from=None, spawned_at=at(1))]) as fx:
             result = run(fx.url)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -102,7 +103,7 @@ class CheckSpawnLedgerTest(unittest.TestCase):
 
     def test_a_non_object_row_does_not_abort_the_check(self):
         """The store can serve a row that is not an object; it must be skipped, not raised on."""
-        with FixtureEndpoint(ledger_rows=[None, row(SID, mode="interactive",
+        with FixtureEndpoint(ledger_rows=[None, row(SID, role="human", mode="interactive",
                                                      mode_source="argument",
                                                      resumed_from=None, spawned_at=at(1))]) as fx:
             result = run(fx.url)
@@ -115,6 +116,89 @@ class CheckSpawnLedgerTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    # ── the second offence class: `role: agent` + `mode=interactive` (ruling 2026-11-12) ──
+    #
+    # ⚠️ `test_agent_row_opened_interactive_fails` is this class's KNOWN-POSITIVE CONTROL.
+    # A gate that has only ever printed OK is indistinguishable from one that cannot fire,
+    # and this one was added against a defect that the FIRST class cannot see at all: every
+    # offending row below records `mode_source=argument`, so `offenders()` passes them all.
+    # The paired `role: human` case is what shows the gate discriminates on role rather
+    # than rejecting every interactive row.
+
+    def test_agent_row_opened_interactive_fails(self):
+        """Known-positive control: an agent row that opened a tab must be rejected."""
+        with FixtureEndpoint(ledger_rows=[row(SID, role="agent", mode="interactive",
+                                              mode_source="argument", resumed_from=None,
+                                              spawned_at=at(1))]) as fx:
+            result = run(fx.url)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(SID, result.stdout)
+        self.assertIn("opened interactive", result.stdout)
+
+    def test_human_row_opened_interactive_passes(self):
+        """The paired control — same arguments, different role. Proves the gate is not
+        simply rejecting every interactive record."""
+        with FixtureEndpoint(ledger_rows=[row(SID, role="human", mode="interactive",
+                                              mode_source="argument", resumed_from=None,
+                                              spawned_at=at(1))]) as fx:
+            result = run(fx.url)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_agent_row_opened_headless_passes(self):
+        with FixtureEndpoint(ledger_rows=[row(SID, role="agent", mode="headless",
+                                              mode_source="argument", resumed_from=None,
+                                              spawned_at=at(1))]) as fx:
+            result = run(fx.url)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_role_absent_is_not_an_offence(self):
+        """The `role` field predates the ruling, but only a record written before the field
+        existed carries null — and failing those would make the gate unusable against any
+        older ledger, the same ground on which a missing `mode_source` is not an offence.
+
+        ⚠️ **The key is deleted, not set to `""`.** A present-but-blank `role` and an absent
+        one behave identically through `dict.get`, so a `role=""` fixture would pass whether
+        or not the reader distinguishes them — it would pin nothing. Deleting the key is the
+        shape the docstring claims to test.
+        """
+        absent = row(SID, mode="interactive", mode_source="argument", resumed_from=None,
+                     spawned_at=at(1))
+        del absent["role"]
+        with FixtureEndpoint(ledger_rows=[absent]) as fx:
+            result = run(fx.url)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_blank_role_is_not_an_offence(self):
+        """The companion case: `vault-cli task set "<task>" role ""` writes a present key
+        holding an empty value, and it is not an agent row either."""
+        with FixtureEndpoint(ledger_rows=[row(SID, role="", mode="interactive",
+                                              mode_source="argument", resumed_from=None,
+                                              spawned_at=at(1))]) as fx:
+            result = run(fx.url)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_resumed_agent_interactive_row_is_not_an_offence(self):
+        """Pins `role_mode_offenders`'s `resumed_from` guard. The existing resume case uses
+        `mode=headless`, so it would still pass if that guard were deleted — this is the
+        only case that exercises it on the role class."""
+        with FixtureEndpoint(ledger_rows=[row(SID, role="agent", mode="interactive",
+                                              mode_source="argument",
+                                              resumed_from="deadbeef", spawned_at=at(1))]) as fx:
+            result = run(fx.url)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_row_failing_both_classes_reports_both_sections(self):
+        """A row that is both `mode_source=config` and `role: agent` + `interactive` must
+        render both FAIL sections — the earlier coverage exercised this path only
+        incidentally and asserted one section."""
+        with FixtureEndpoint(ledger_rows=[row(SID, role="agent", mode="interactive",
+                                              mode_source="config", resumed_from=None,
+                                              spawned_at=at(1))]) as fx:
+            result = run(fx.url)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("with no mode decision", result.stdout)
+        self.assertIn("opened interactive", result.stdout)
 
 
 if __name__ == "__main__":

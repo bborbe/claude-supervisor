@@ -9,7 +9,11 @@ this, Step 0.6 printed `⛔ REFUSED — role: undecidable` for a body with no ro
 Static guard, six clauses:
 1. the refusal literal `role: undecidable` does not occur in `commands/open.md`;
 2. `commands/open.md` and `docs/fleet-surface.md` both cite the matrix by path;
-3. the matrix exists and states the `agent` / `headless` defaults;
+3. the matrix exists and states the `agent` role default and the `agent` → `headless`
+   mode mapping. ⚠️ **The mode needle reads `(forced)`, not `(default)`, since the
+   2026-11-12 operator ruling** — `role: agent` is `headless` always, so the matrix's
+   Rule 2 row is a forced mapping rather than a default. The clause is unchanged in
+   intent: the matrix must still pin `agent` → `headless` in words a reader cannot miss.
 4. `commands/open.md` tests `role:` by **value**, not key presence — a present-but-blank
    `role: ""` is re-classified, never used;
 5. `commands/open.md` treats a blank `mode:` as absent rather than as a declared mode;
@@ -54,7 +58,7 @@ def main() -> int:
     if "role-mode-matrix.md" not in surface_text:
         return fail("docs/fleet-surface.md does not cite role-mode-matrix.md")
     matrix = MATRIX.read_text(encoding="utf-8")
-    for needle in ("**`agent` (default)**", "**`headless` (default)**"):
+    for needle in ("**`agent` (default)**", "**`headless` (forced)**"):
         if needle not in matrix:
             return fail(f"docs/role-mode-matrix.md lost the default {needle}")
     # Clauses 4-6: a present-but-blank value is a default too (2026-11-12).

@@ -41,7 +41,7 @@ GOOD_SURFACE = (
 GOOD_MATRIX = (
     "# Role × mode decision matrix\n\n"
     "| no signal at all | **`agent` (default)** |\n"
-    "| agent, none of them | **`headless` (default)** |\n"
+    "| agent, none of them | **`headless` (forced)** |\n"
 )
 
 #: The wording that shipped before this change — the negative control for `role`.
