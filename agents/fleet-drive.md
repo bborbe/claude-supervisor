@@ -194,7 +194,7 @@ STALE WAITS — verbatim from drive-escalate.py (step 0c); a wait unchanged for 
 ESCALATION — grouped by cause
   <cause>
     <name> [<sid8>] · pane <id|—> · <link|no pane — <reason>> — <probe> → <result>   (mark unverified causes "unverified")
-      blocked rows only: append · manager <resolved|fleet>  before the em dash
+      blocked rows only: append · manager <name> when the digest's ROUTING block names this session
 UNCLAIMABLE — copied from the digest's UNCLAIMABLE section (step 6c); tasks no controller claims
   recent: <n> (since <date>) · historical: <n> · undated: <n>
   ⚠️ <n> recently minted — a producer is still emitting an empty target_vault   (only when recent > 0)
@@ -238,17 +238,17 @@ looking for a pane yourself**: no `wezterm cli list`, no title match, no fallbac
 never render a link, which needs `python3` this agent does not hold. The sweep resolves and renders;
 the caller prints what you hand it.
 
-**`manager` makes a blocked escalation reachable, and on a `blocked` row it always resolves.** It
-exists for the row whose closer named no owner. Resolve it with
-`python3 $P/escalation-manager.py "<task title>"` — that script is the one implementation of
-`docs/fleet-surface.md` § *Which manager owns a subject*, printing `fleet` for tier 4's fallback
-and exiting non-zero when the registry cannot be read. ⚠️ **A failed read is `UNKNOWN`, never
-`fleet`**: rendering `fleet` there claims the Fleet Manager owns a row it may not own, which is
-the defect this field closes. The chain ends at the Fleet Manager, so render `fleet` for that
-fallback and never `—` or `unresolved`. ⚠️ **Scope is `blocked` rows only:**
-`scripts/drive-unverifiable.py` is the OTHER producer of `ESCALATION` rows (step 6b) and does not
-emit this field — an `unverifiable` row is carded, not routed, so it carries no `manager` and is
-not a malformed handoff.
+**`manager` makes a blocked escalation reachable — the DIGEST produces it.** A `ROUTING` row
+carrying this session's `<sid8>` gives `· <manager> (<source>)`; append `· manager <manager>` to
+that `blocked` row. ⚠️ **A `blocked` row absent from `ROUTING` carries no `manager`** — its closer
+named an owner (card id, manager, `⏰ Ends:`) or was not a `🔴 BLOCKED` line — never `fleet`, `—`
+or `unresolved`.
+⚠️ **Never re-resolve here:**
+`scripts/round-detectors.py` builds the chain once per round (a real resolution measured 387 s); a
+second read is how two tiers end up owning one subject. A missing or `UNKNOWN` `DETECTORS` section
+is a malformed handoff — print the row without it and say so. ⚠️ **Scope is
+`blocked` rows only:** `scripts/drive-unverifiable.py` (step 6b) produces the other `ESCALATION`
+rows and emits no `manager` — an `unverifiable` row is carded, not routed.
 
 **`Waiting on your keystroke` — the operator's to-do list for this round.** Rendered immediately before the `LEDGER` line, never omitted. One row per pane whose verdict you assigned is **`blocked`** — that single source covers both routes in: a `CLOSERS` row that is a gate under step 4a, and a pane the digest lists under `BLOCKED`. A routine-continue `approve:` closer is **not** a gate (step 4a) and its verdict is `revive`, so it gets **no** row — never widen the routine-continue table by judgment here. A pane with two closer lines is **one** row carrying both actions. Order quick actions first: `approve` / `Shift+Tab` rows above `review` / `pick` rows; one carrying both takes the quicker and sorts with them. Each row is the bold action verb (with the rest of the action), then the task name, then the link **the digest carried** for that pane — you render none. With no rows the section prints `(nothing waiting on you)` verbatim. A session whose verdict is `unverifiable` is not actionable and does not belong in the list: it goes on the `unconfirmed:` line below, with its link (or the digest's `no pane — <reason>`) and why; it appears only when such verdicts exist. This list is the **operator's**; `ESCALATION` is the **manager's**, grouped by cause — a `blocked` pane appears in both, deliberately. ⚠️ **Drop a `BLOCKED` row only when the probe set in your prompt omits its pane.** See [`blocked-row-reread.md`](../docs/blocked-row-reread.md).
 **Hand-back** — obey `${CLAUDE_PLUGIN_ROOT}/docs/handback-contract.md` **for the form**: verdict lines and counts in `key=value` form, **≤ 1 KB**, non-empty, payload off the hand-back. ⚠️ **The contract's payload-path section does not cover this leg** — its table lists the manager store only and its keying rule is the subject slug, while the fleet loop keys on the round. The path rule that applies here is the one in this `<output_format>`. This leg's required set is the **drive verdicts — one line per candidate you decided, carrying the decision**:
