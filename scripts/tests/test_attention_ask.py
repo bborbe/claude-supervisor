@@ -771,13 +771,32 @@ def answered_lines(text):
     return [line for line in text.splitlines() if line.startswith("ANSWERED:")]
 
 
+def answered_at_lines(text):
+    """Only the `ANSWERED_AT:` lines — the flag's whole surface."""
+    return [line for line in text.splitlines() if line.startswith("ANSWERED_AT:")]
+
+
+# An answered item as the store returns it, carrying the timestamp the flag
+# renders. One fixture, reused by every `--answered-at` case, so a change to the
+# shape cannot make one test pass while another silently exercises a different
+# payload.
+ANSWERED_ITEM = {
+    "item_id": STORE_ITEM_ID,
+    "state": "answered",
+    "answer": {"kind": "option", "value": "the board"},
+    "answered_by": "attention-board",
+    "answered_client": OPERATOR_CLIENT,
+    "answered_at": "2026-11-11T21:52:03+01:00",
+}
+
+
 class PollTest(unittest.TestCase):
-    def poll(self, item):
+    def poll(self, item, answered_at=False):
         with mock.patch.object(
             ask.urllib.request, "urlopen", lambda req, timeout=None, **kwargs: FakeResponse(item)
         ):
             out = io.StringIO()
-            rc = ask.cmd_poll(STORE_ITEM_ID, out=out)
+            rc = ask.cmd_poll(STORE_ITEM_ID, out=out, answered_at=answered_at)
         return rc, out.getvalue()
 
     def test_open_item_reads_as_open(self):
@@ -1040,6 +1059,69 @@ class PollTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("NOT_OPERATOR_ANSWERED", text)
         self.assertNotIn("OPEN", text)
+
+    # --- `--answered-at` is opt-in and the default output is byte-identical ---
+    #
+    # The flag exists for `fleet-keeper.py`, which bounds how long an answered
+    # resume may wait from when the OPERATOR answered rather than from when the
+    # keeper first noticed. Every existing consumer (`pod-attention.py`,
+    # `answered-attribution.py`, the hooks) reads the default output, so the
+    # contract is that `ANSWERED_AT:` appears only when the flag is passed.
+    #
+    # ⚠️ **The gate is pinned at two layers, and neither layer alone is enough.**
+    # The function-level pair fails if the flag is ignored (zero lines where one
+    # is expected) and if it is made the default inside `cmd_poll` (a line where
+    # none is expected) — but it never touches argparse, so flipping the
+    # `--answered-at` default or breaking the `answered_at=args.answered_at`
+    # wiring would leave it green. `test_cli_wires_the_flag_through` closes that
+    # half.
+
+    def test_default_poll_prints_no_answered_at_line(self):
+        # The contract the opt-in gate exists to keep: an answered item polled
+        # without the flag renders exactly as it did before the flag existed.
+        rc, text = self.poll(ANSWERED_ITEM)
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED: option: the board", text)
+        self.assertEqual(answered_at_lines(text), [])
+
+    def test_answered_at_flag_prints_exactly_one_rfc3339_line(self):
+        # And with the flag, exactly one line -- not zero (flag ignored) and not
+        # two (a duplicated print).
+        rc, text = self.poll(ANSWERED_ITEM, answered_at=True)
+        self.assertEqual(rc, 0)
+        lines = answered_at_lines(text)
+        self.assertEqual(len(lines), 1, text)
+        self.assertEqual(lines[0], "ANSWERED_AT: 2026-11-11T21:52:03+01:00")
+
+    def test_answered_at_flag_prints_nothing_when_the_item_carries_no_timestamp(self):
+        # The flag gates a field, not the terminal: an answered item with no
+        # `answered_at` must not gain an empty `ANSWERED_AT:` line. The ATTRIBUTED
+        # terminal is asserted too, so a classification regression cannot make
+        # this pass by rendering some other terminal.
+        item = dict(ANSWERED_ITEM)
+        item.pop("answered_at")
+        rc, text = self.poll(item, answered_at=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED: option: the board", text)
+        self.assertEqual(answered_at_lines(text), [])
+
+    def test_cli_wires_the_flag_through(self):
+        # The half the function-level tests cannot see: argparse's default and
+        # the `answered_at=args.answered_at` call site. A flip of either leaves
+        # every test above green while every CLI caller gets the wrong output.
+        seen = []
+
+        def record(item_id, out=None, answered_at=False):
+            seen.append((item_id, answered_at))
+            return 0
+
+        with mock.patch.object(ask, "cmd_poll", record):
+            ask.main(["poll", STORE_ITEM_ID])
+            ask.main(["poll", STORE_ITEM_ID, "--answered-at"])
+        self.assertEqual(
+            seen,
+            [(STORE_ITEM_ID, False), (STORE_ITEM_ID, True)],
+        )
 
     def poll_error(self, code, body=b""):
         # fetch_item passes a Request to urlopen (it carries the auth header), so
