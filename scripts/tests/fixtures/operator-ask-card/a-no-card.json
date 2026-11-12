@@ -1,0 +1,3 @@
+[
+  {"item_id": "11111111111111111111111111111111", "state": "open", "producer_id": "bbbbbbbb-0000-0000-0000-0000000000ff", "kind": "question", "detail": "ANOTHER session's ask — this is the control that proves the join is by session, not by 'any open card'"}
+]
