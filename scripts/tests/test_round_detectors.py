@@ -199,6 +199,10 @@ class Detect(unittest.TestCase):
         }
         block, calls = self._run(texts, _items([]), managers={TASK: ("Topic Manager", "chain")})
         self.assertIn("routing=0", block)
+        # ⚠️ `unknown=0` is the assertion that catches the ordering bug: with the chain
+        # never built (`managers is None`), an owner check placed AFTER that branch reports
+        # these three owner-named rows as UNKNOWN. `routing=0` alone passes on that defect.
+        self.assertIn("unknown=0", block)
         self.assertEqual([], calls, "the chain must not be built when no row needs routing")
 
     def test_waiting_on_someone_routes(self):
@@ -222,6 +226,17 @@ class Detect(unittest.TestCase):
         self.assertIn("UNKNOWN (manager chain unreadable", block)
         self.assertNotIn("ROUTING (blocked closer naming no owner → the subject's manager)\n  (none)",
                          block)
+
+    def test_an_owner_named_row_beside_an_ownerless_one_is_not_unknown(self):
+        # The mixed population: one row needs the chain, one already names an owner. The
+        # owner-named row must not be swept into UNKNOWN by the chain's absence.
+        block, calls = self._run(
+            {SID_A: "🔴 BLOCKED · x\n👤 You: waiting on the build",
+             SID_B: "🔴 BLOCKED · y\n👤 You: waiting on " + "7e55adaf" * 4},
+            _items([]), managers={TASK: ("Topic Manager", "chain")})
+        self.assertIn("routing=1", block)
+        self.assertIn("unknown=0", block)
+        self.assertEqual([[TASK]], calls, "only the ownerless row's title is requested")
 
     def test_a_blank_manager_is_unknown_never_a_nameless_route(self):
         # The exact failure the detector exists to end, reached through its own path: a

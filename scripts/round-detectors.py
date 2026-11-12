@@ -184,6 +184,13 @@ def classify(rows, items, managers, chain_error=None):
         message = row["message"] or ""
         if not lint.BLOCKED_LINE_RE.search(message):
             continue
+        # ⚠️ The owner check comes BEFORE the `managers is None` branch, and that order is
+        # load-bearing. `routing_titles()` asks for a chain only for rows that need one, so
+        # when every blocked row already names an owner the chain is never built and
+        # `managers` is `None` — reading that as "unreadable" would accuse rows that need
+        # no routing at all. A row naming an owner is silently skipped: no record, no chain.
+        if lint.owner_named(row["body"], message):
+            continue
         if managers is None:
             unknown.append((row, f"manager chain unreadable ({chain_error})"))
             continue
