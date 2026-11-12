@@ -8,9 +8,12 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.300.1
+## Unreleased
 
 - feat: **`wait-reprobe.py` has a round caller, so a session parked on a merged PR is re-driven on that evidence.** The join shipped in v0.284.0 with no caller anywhere in `agents/`, `commands/` or `scripts/` — `CLAUDE.md:202` called it *"the round's join"* while nothing invoked it, so no round ever produced its `REPROBED` block. `drive-retained.py render` now prints the block after `RETAINED`/`PARKED`, from one probe pass, and a `declared · resumed` row carries a `→ re-drive` marker — `expired` rows do not, because `declared-wait.py` has already ruled them not a wait, and the live store is mostly expired. The marker is the code-side handle the drive leg's prose `NUDGES` step consumes; without it, "re-drive the resumed rows" is a rule an agent is asked to remember rather than a fact the script states. A refused join renders `(refused: …)` rather than dropping the section. Measured 2026-11-12: `21 declared: 1 resumed · 1 still blocked · 19 unprobeable`, the resumed row being `bborbe/sun#133`. `agents/fleet-drive.md` now pastes the third block, revives a `→ re-drive` row (the only route by which a `parked-on-watcher` row is ever nudged), and records it as a `revive` entry so the ledger suppresses a repeat. Change set: `scripts/wait-reprobe.py`, `scripts/drive-retained.py`, `scripts/tests/test_wait_reprobe.py`, `scripts/tests/test_drive_retained.py`, `agents/fleet-drive.md`, `CHANGELOG.md`.
+
+## v0.300.1
+
 
 - docs: **`fleet-surface.md` now states the decision-park resume rule.** The keep-alive leg's § 2b resumes a closed headless worker whose recorded wait has cleared, and the rule was written only in the step file and the agent body — `grep -c decision-park docs/fleet-surface.md` returned 0, so the doc a manager reads first did not mention the leg at all. The new section records the two wait kinds and their reads (approval later than the last transcript message; a non-empty `blocked_by` all `completed` with the latest `completed_date` later than that message), why ordering rather than presence is what makes the wait a consumable event (measured 2026-11-12: a row resumed at 23:39:17Z took a turn at 23:50:26Z and left the next round's candidates), that an empty `blocked_by` and a `hold` dependency are not cleared, that `unread` is a third answer, that the four decision counts live on the hand-back and in no payload file, and that the close belongs to `reap-idle-headless.py` on its own launchd tick rather than to this leg. Change set: `docs/fleet-surface.md`, `CHANGELOG.md`.
 
