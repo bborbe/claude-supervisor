@@ -621,14 +621,16 @@ it.
 
 **Where that directory comes from — and the orphan branch without which the rule can never
 fire for its own case.** ⚠️ **This is the rule's single home, and its citable name is "resume decisions item 3"** — the resume list below, never the readiness ladder above, whose own item 3 is an unrelated check. The path-B recipe above,
-`commands/open.md` § 3.1 and `agents/manager-drive.md` clause 3's `To resume` hand-over all
+`commands/open.md` § 3.1 and `agents/goal-drive.md` step 3's `To resume` hand-over all
 point here rather than naming a source of their own.
 
 Resolve the value **before** the spawn, from whichever of the two sources applies to the
 session. ⚠️ **They are a partition, not a search — never try source 2 because source 1 came back
-empty.** Which one applies is decided by whether the session still has a registry record, and
-that is settled before either is read; a record that exists without a `cwd` is a refusal (below),
-never a cue to fall through:
+empty.** Which one applies is decided by whether the session still has a registry record — the
+registry is pid-keyed while a resume knows only the session id, so the join is a scan of
+`~/.claude/sessions/*.json` for the record whose `sessionId` matches, which is the read
+`scripts/session-identity.py` provides — and that is settled before either is read; a record
+that exists without a `cwd` is a refusal (below), never a cue to fall through:
 
 1. **The session registry** — `~/.claude/sessions/<pid>.json`, its `cwd` field. The source for a
    session that still has a record.
@@ -637,11 +639,11 @@ never a cue to fall through:
    all**.
 
 ⚠️ **Source 2 is not a convenience — without it the rule can never be used for the case it
-exists for.** A registry entry is **deleted when its session exits** — `scripts/session-liveness.py`
-states the invariant in its own header, and this repo's `CLAUDE.md` registry table repeats it —
-so a **genuinely orphaned** session has no record *by construction*. The auto-resume gate's own
-clause reads *no registry entry on any id* as what makes a row an orphan at all
-(`agents/manager-drive.md`, clause 3). A rule naming only the registry therefore demands, from
+exists for.** A registry entry is **deleted when its session exits** — this repo's `CLAUDE.md`
+registry table states it for the `~/.claude/sessions/<pid>.json` row, and `scripts/who-needs-me.py`
+and `scripts/session-exit-record.py` restate it — so a **genuinely orphaned** session has no
+record *by construction*. The auto-resume gate's own liveness clause reads *no live id on any id*
+(`agents/goal-drive.md`, step 3). A rule naming only the registry therefore demands, from
 an orphan, the one field the orphan cannot have.
 
 ⚠️ **The transcript's first `cwd`, never its last, and never the project-directory name.**
