@@ -34,6 +34,14 @@ comes from `~/.claude/state/worker-manager/<sid>.json`, written by the recording
     none. Measured against the two managers in the incident above: `b34530bd` has a
     subject file (`BRO-21389 MDM via REST`), `f37d6f6a` has none. Both branches are real.
 
+⚠️ **A stood-down subject is skipped, and the skip is REPORTED.** `/supervisor:stop` writes
+`<branch>--<slug>.stopped` in the sweep-gate state dir and the operator's act says that
+subject's work is not to be picked up. Adoption would hand its stranded workers to a new
+owner and re-open exactly that work by another door, so the row is skipped before the claim
+is attempted and printed as `skipped: manager <sid8> — subject "<subject>" stood down
+(<marker>)`. The marker read is `manager-liveness.is_subject_stopped()` -- the one reader,
+shared with `open-queue.py`, never a second copy of the path.
+
 ⚠️ **Liveness is registry ∪ heartbeat, and the worker must be LIVE.** The registry is
 pid-keyed and cannot see a headless in-process worker; the heartbeat store covers exactly
 those. Reading either alone answers `0` or misses a population -- `worker-sessions.py`
@@ -90,6 +98,13 @@ def _load(module_name, filename):
 # reimplemented: two copies of "what is a manager" would drift, and the drift would be
 # silent -- this script would adopt on a predicate the router does not use.
 gf = _load("gate_owner_filter", "gate-owner-filter.py")
+
+# The ONE stand-down marker read (`<branch>--<slug>.stopped`), owned by the script that
+# writes it (`/supervisor:stop` -> `manager-liveness.py --stop`). Imported for the same
+# reason as `is_manager`: a copy would drift from the writer, and the drift would be
+# silent -- this script would hand a deliberately stood-down subject's workers to a new
+# owner, which is the defect it exists to avoid.
+ml = _load("manager_liveness", "manager-liveness.py")
 
 
 def normalise(text):
@@ -250,6 +265,27 @@ def already_owned(worker, claims, live):
     return bool(holder) and holder in live
 
 
+def standdown_marker(subject):
+    """The `<branch>--<slug>.stopped` marker standing this subject down, or None.
+
+    ⚠️ **Every tier is checked, because the exited session is a MANAGER and a manager can
+    have been stood down as a goal, a topic or a fleet subject.** The task tier's usual
+    stand-down is a page field (`stopped: true`) on the row itself, which `open-queue.py`
+    owns; a `task--<slug>.stopped` marker is honoured here all the same, because the
+    marker's existence is the operator's act whatever tier wrote it.
+
+    The returned name is the marker FILE, not the subject, so the report can say what
+    evidence the skip rests on -- the operator's `/supervisor:stop` is otherwise invisible
+    from the adoption output.
+    """
+    if not subject:
+        return None
+    for branch in ml.BRANCHES:
+        if ml.is_subject_stopped(subject, branch):
+            return "%s--%s.stopped" % (branch, ml.base_slug(subject))
+    return None
+
+
 def resolve_adopter(exited, live, self_id, subjects_dir=SUBJECTS):
     """(adopter sid, how) for one exited manager -- successor when unique, else fallback."""
     subject = subject_of(exited, subjects_dir)
@@ -373,6 +409,31 @@ def main(argv=None):
     for exited in sorted(stranded):
         workers = stranded[exited]
         adopter, how = resolve_adopter(exited, live, self_id, args.subjects_dir)
+        # ⚠️ **Before the claim, not after it.** `/supervisor:stop` says the subject's work
+        # is not to be picked up; adopting its stranded workers hands that work to a new
+        # owner and re-opens it by another door. The skip is REPORTED (`skipped` on the row
+        # and a `skipped:` line in text mode) rather than silent: an adoption leg that
+        # quietly drops a manager's workers is indistinguishable from one that found none.
+        subject = subject_of(exited, args.subjects_dir)
+        standdown = standdown_marker(subject)
+        if standdown:
+            rows.append(
+                {
+                    "exited": exited,
+                    "adopter": adopter,
+                    "how": how,
+                    "workers": workers,
+                    "adopted": [],
+                    "held": [],
+                    "parked": [],
+                    "skipped": {
+                        "subject": subject,
+                        "reason": "stood down",
+                        "marker": standdown,
+                    },
+                }
+            )
+            continue
         adopted, held = [], []
         for worker in workers:
             if args.dry_run:
@@ -410,6 +471,15 @@ def main(argv=None):
         return 0
 
     for row in rows:
+        if row.get("skipped"):
+            # ⚠️ The marker is named, not just the fact. "skipped" alone reads as a
+            # judgement; `(goal--<slug>.stopped)` says it is the operator's stand-down and
+            # which file to delete to undo it.
+            print(
+                'skipped: manager %s — subject "%s" stood down (%s)'
+                % (sid8(row["exited"]), row["skipped"]["subject"], row["skipped"]["marker"])
+            )
+            continue
         print("manager %s exited" % sid8(row["exited"]))
         print(
             "%d workers adopted from exited manager %s"
@@ -443,11 +513,13 @@ def main(argv=None):
     # script that never matched -- the same reason `gate-owner-filter.py` prints its
     # verdict census.
     sys.stderr.write(
-        "adopt-orphans: exited managers with live workers: %d  adopted: %d  held: %d\n"
+        "adopt-orphans: exited managers with live workers: %d  adopted: %d  held: %d  "
+        "skipped: %d\n"
         % (
             len(rows),
             sum(len(r["adopted"]) for r in rows),
             sum(len(r["held"]) for r in rows),
+            sum(1 for r in rows if r.get("skipped")),
         )
     )
     return 0
