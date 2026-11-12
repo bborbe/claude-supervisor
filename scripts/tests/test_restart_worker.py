@@ -220,12 +220,34 @@ class ResumeCommand(unittest.TestCase):
         self.assertIn("rc=$?", inner)
 
     def test_the_writer_path_rides_as_an_env_assignment(self):
-        """A spawned pane inherits wezterm's mux-server environment, not this process's."""
+        """The pane cannot resolve the plugin root for a script this file already locates."""
         argv = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")
         self.assertIn("--", argv)
         assignments = [a for a in argv if a.startswith("SESSION_EXIT_RECORD=")]
         self.assertEqual(len(assignments), 1)
         self.assertTrue(assignments[0].endswith("/scripts/session-exit-record.py"))
+
+    def test_the_spawn_pins_the_entrypoint_to_cli(self):
+        """`wezterm cli spawn` forwards the CALLER's environment, so a headless leg leaks.
+
+        Measured 2026-11-12: five live goal managers sat in real WezTerm panes running their
+        loops while their registry entrypoint read `sdk-cli`, because the leg that resumed
+        them was headless. The census flags a manager whose mode is headless as
+        `kind="invalid"` — a manager cannot be headless — so the chart's `invalid / headless`
+        series was this leak and nothing else. `closer-gate-lint.py` reads the same variable
+        as its paneless test, so those managers' `Shift+Tab` and `/reload-plugins` closers
+        were refused as unactionable asks.
+
+        The assignment must be POSITIVE, in the `env` prefix, not an addition to the `unset`
+        list: an absent value leaves Claude Code to derive the entrypoint itself, and this
+        pane is a tab by construction.
+        """
+        argv = rw.resume_command("sid", "title", "pink", "/d", "/l/cc")
+        self.assertIn("CLAUDE_CODE_ENTRYPOINT=cli", argv)
+        # It must ride as an env assignment before `bash`, never inside `bash -lc '…'`,
+        # where it would be a shell word rather than an exported variable.
+        self.assertLess(argv.index("CLAUDE_CODE_ENTRYPOINT=cli"), argv.index("bash"))
+        self.assertNotIn("CLAUDE_CODE_ENTRYPOINT", argv[-1])
 
     def test_a_spawn_marker_is_written_before_the_launcher_runs(self):
         """Without it an empty record cannot be told from an unwired writer."""

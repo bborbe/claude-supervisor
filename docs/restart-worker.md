@@ -267,8 +267,12 @@ rules.
 ## The one deliberate copy
 
 The resume recipe (`wezterm cli spawn … --resume <session-id>`, with the four
-`CLAUDE_CODE_*` variables unset) is copied from `commands/open.md` Step 3.1. A markdown
-command is not executable, so the two are kept in lockstep by hand.
+`CLAUDE_CODE_*` variables unset and `CLAUDE_CODE_ENTRYPOINT=cli` set in the `env` prefix) is
+copied from `commands/open.md` Step 3.1. A markdown command is not executable, so the two are
+kept in lockstep by hand. ⚠️ The positive assignment is not optional: `wezterm cli spawn`
+forwards the CALLER's environment, so a resume driven by a headless leg would register a real
+tab as `sdk-cli` and the census would chart it `invalid / headless` (measured 2026-11-12 on
+five live goal managers).
 
 ⚠️ **The LAUNCHER is no longer part of that copy, and must never become part of it again.**
 `commands/open.md` § 3.1 used to state the precedence in prose — *"apply the rule yourself"* —
