@@ -60,12 +60,18 @@ def _fleet_sessions():
     return module
 
 
-def resolve(task_title, board=None):
-    """`(manager_name, source)` for `task_title`.
+def resolve_many(task_titles, board=None):
+    """`{title: (manager_name, source)}` — the grouping built ONCE for every title.
+
+    ⚠️ **This exists because the grouping costs minutes, not milliseconds.** Measured
+    2026-11-12: one resolution took **387 s** (`vault_index` 64 s, `colour_census` 37 s,
+    `build_task_index` 87 s, under load). A caller resolving per row pays that per row,
+    which is the defect `round-detectors.py` batches away. One build, N lookups —
+    `manager_on_chain` itself measured 0.0 s.
 
     `source` is `chain` when a live manager resolved through the tiers, or `fleet` for
     tier 4's fallback. ⚠️ Raises rather than returning `fleet` when the inputs cannot be
-    read — see the module docstring.
+    read — see the module docstring. A repeated title is looked up once.
     """
     fb = board or _fleet_board()
     registry = fb.registry_records()
@@ -75,19 +81,30 @@ def resolve(task_title, board=None):
     # ⚠️ `build_grouping` wants `sid -> [task titles]`, built by `fleet-sessions.py` —
     # the same two calls `fleet-board.py`'s own `manager_sessions()` makes. A bare title
     # list raises inside the grouping, so this is the one construction, not a guess.
-    task_titles, _ = _fleet_sessions().build_task_index()
+    # ⚠️ The grouping wants the `sid -> [titles]` MAP; the loop below wants the caller's
+    # list. Two names, because iterating the map's keys silently resolves session ids.
+    stamps, _ = _fleet_sessions().build_task_index()
     grouping = fb.build_grouping(
-        registry, index, fb.colour_census(), fb.loop_slugs(), task_titles)
-    manager = fb.manager_on_chain(
-        index.goals_of(task_title), index, grouping.roles, grouping.subjects,
-        index.managed_by_of(task_title), task_title=task_title)
-    if not manager:
-        return FLEET_MANAGER, "fleet"
-    name = (registry.get(manager) or {}).get("name") or ""
-    name = name.strip()
-    if not name:
-        raise RuntimeError(f"manager session {manager} carries no registry name")
-    return name, "chain"
+        registry, index, fb.colour_census(), fb.loop_slugs(), stamps)
+    out = {}
+    for title in dict.fromkeys(task_titles):
+        manager = fb.manager_on_chain(
+            index.goals_of(title), index, grouping.roles, grouping.subjects,
+            index.managed_by_of(title), task_title=title)
+        if not manager:
+            out[title] = (FLEET_MANAGER, "fleet")
+            continue
+        name = (registry.get(manager) or {}).get("name") or ""
+        name = name.strip()
+        if not name:
+            raise RuntimeError(f"manager session {manager} carries no registry name")
+        out[title] = (name, "chain")
+    return out
+
+
+def resolve(task_title, board=None):
+    """`(manager_name, source)` for one title — the same resolution, one title."""
+    return resolve_many([task_title], board=board)[task_title]
 
 
 def main(argv=None):
