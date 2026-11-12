@@ -469,6 +469,106 @@ class Liveness(unittest.TestCase):
         self.plant_arms("Manager Layer", [2700, 1800, 900, 0])
         self.assertEqual(int(self.m.observed_period("goal--manager-layer")), 900)
 
+    def plant_tail_store(self, topic, epochs):
+        """Mark epochs as tail beats in `<slug>.tail`, leaving the ring untouched."""
+        s = self.m.slug(topic, "goal")
+        with open(self.m.path(s, "tail"), "w") as fh:
+            fh.write("".join(f"{e:.0f}\n" for e in epochs))
+
+    def two_tuple_rebuild(self, topic, interval):
+        """The pre-upgrade `arm()` rebuild, verbatim from 0.263.0:839-843.
+
+        A session still running that version appends `(time.time(), interval)` and
+        rewrites every line as `{epoch} {interval}` — no third column, and no
+        awareness that `<slug>.tail` exists.
+        """
+        s = self.m.slug(topic, "goal")
+        p, _ = self.m.resolve(s, "arms")
+        try:
+            with open(p) as fh:
+                prior = self.m.parse_arm_lines(fh.read())
+        except OSError:
+            prior = []
+        pairs = ([(e, iv) for e, iv, _ in prior]
+                 + [(time.time(), interval)])[-self.m.ARMS_KEEP:]
+        with open(p, "w") as fh:
+            fh.write("".join(f"{e:.0f} {iv}\n" for e, iv in pairs))
+
+    def test_the_tail_marker_survives_a_two_tuple_rebuild(self):
+        # SC1(a). The store is a file the pre-upgrade writer never opens, so its
+        # entries cannot be erased by a ring rebuild — which is the whole defect.
+        s = self.m.slug("Manager Layer", "goal")
+        now = time.time()
+        self.plant_arms("Manager Layer", [2700, 1800, 900, 0])
+        self.plant_tail_store("Manager Layer", [now - 1800, now - 900, now])
+        self.assertEqual(len(self.m.read_tail_epochs(s)), 3)
+        self.two_tuple_rebuild("Manager Layer", 900)
+        self.assertEqual(len(self.m.read_tail_epochs(s)), 3)
+
+    def test_a_tail_arm_marks_the_store_and_leaves_two_columns(self):
+        # SC1(b). Half (b) is what separates a real move from a decoy file: the newest
+        # ring line must carry exactly two fields, i.e. the column is really gone.
+        s = self.m.slug("Manager Layer", "goal")
+        self.plant_arms("Manager Layer", [2700, 1800, 900, 0])
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", "goal", 900, beat="tail")
+        self.assertEqual(len(self.m.read_tail_epochs(s)), 1)
+        p, _ = self.m.resolve(s, "arms")
+        with open(p) as fh:
+            newest = fh.read().splitlines()[-1]
+        self.assertEqual(len(newest.split()), 2)
+
+    def test_a_legacy_column_marker_migrates_into_the_store_on_the_next_arm(self):
+        # This writer drops the third column. A marker left only there must be carried
+        # into the store by the same arm that strips it, or the migration is itself the
+        # erasure — the defect this task closes, one surface in.
+        s = self.m.slug("Manager Layer", "goal")
+        now = time.time()
+        with open(self.m.path(s, "arms"), "w") as fh:
+            fh.write("".join([
+                f"{now - 1800:.0f} 900\n",
+                f"{now - 900:.0f} 900 tail\n",
+                f"{now:.0f} 900\n",
+            ]))
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", "goal", 900)
+        self.assertEqual(self.m.read_tail_epochs(s), {f"{now - 900:.0f}"})
+        p, _ = self.m.resolve(s, "arms")
+        with open(p) as fh:
+            lines = fh.read().splitlines()
+        self.assertTrue(all(len(line.split()) == 2 for line in lines))
+
+    def test_observed_period_reads_tail_beats_from_the_store(self):
+        # SC2. The fixture carries the marker ONLY in `<ring>.tail`; its `.arms` lines
+        # have no third column. The post-change reader must still measure the
+        # ROUND-to-round cadence, while a pre-upgrade reader — no tail concept at all —
+        # collapses to 300 on the same ring. Agreement would mean the marker is unread.
+        s = self.m.slug("Manager Layer", "goal")
+        now = time.time()
+        heads = [now - (5 - r) * 900 for r in range(6)]
+        tails = [h + 120 for h in heads]
+        with open(self.m.path(s, "arms"), "w") as fh:
+            fh.write("".join(f"{e:.0f} 900\n" for e in sorted(heads + tails)))
+        self.plant_tail_store("Manager Layer", tails)
+        self.assertEqual(int(self.m.observed_period("goal--manager-layer")), 900)
+        mixed = [(e, 900) for e in sorted(heads + tails)]
+        spans = [(b[0] - a[0], a[1]) for a, b in zip(mixed, mixed[1:])]
+        gaps = sorted(g for g, _ in spans)
+        pre = min(self.m.percentile(gaps, 0.90),
+                  self.m.PERIOD_CAP * self.m.median(gaps))
+        self.assertEqual(int(pre), 300)
+
+    def test_a_marker_free_ring_is_not_misread_as_all_tails(self):
+        # SC3(a). With no store, the reader must compute exactly what it did before:
+        # treating every arm as a head. A filter that flipped the default would turn
+        # this ring into "no heads" and fall back to the declared interval.
+        s = self.m.slug("Manager Layer", "goal")
+        now = time.time()
+        with open(self.m.path(s, "arms"), "w") as fh:
+            fh.write("".join(f"{now - 900 * (5 - i):.0f} 900\n" for i in range(6)))
+        self.assertEqual(int(self.m.observed_period("goal--manager-layer")), 900)
+        self.assertFalse(os.path.exists(self.m.path(s, "tail")))
+
     def test_a_legacy_two_column_line_reads_as_a_head_beat(self):
         # The original single-column format carries no marker at all. It must keep
         # counting as a head, or every pre-existing ring would contribute no gaps and
