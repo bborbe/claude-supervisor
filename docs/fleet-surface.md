@@ -768,8 +768,8 @@ separates continuing a worker from answering one:
 
 | The worker is… | Whose answer | Channel | Call |
 |---|---|---|---|
-| **still parked** on a question | the **operator's** | the permission channel | `answer_permission(deny, message="Operator answer, via supervisor: <option>")` |
-| **still parked** on a question | the **manager's own** | the permission channel | `answer_permission(deny, message="Manager answer, via supervisor: <option>")` |
+| **still parked** on a question | the **operator's** | the permission channel | `answer_permission(agent_id, request_id, deny, message="Operator answer, via supervisor: <option>")` |
+| **still parked** on a question | the **manager's own** | the permission channel | `answer_permission(agent_id, request_id, deny, message="Manager answer, via supervisor: <option>")` |
 | **already exited** (timeout, or turn end) | either | a fresh turn | `spawn_agent(resume=<id>, interactive=false, cwd=<explicit>)` |
 
 They do not substitute for one another: `answer_permission` cannot reach a process that has

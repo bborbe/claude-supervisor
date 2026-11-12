@@ -58,7 +58,16 @@ def resolve_transcript(session_id, projects_root=None):
     """
     root = projects_root or os.path.expanduser("~/.claude/projects")
     matches = glob.glob(os.path.join(root, "*", f"{session_id}.jsonl"))
-    return matches[0] if len(matches) == 1 else None
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    # ⚠️ **A RESUMED session has one transcript per project dir it ran in, and the live
+    # one is the newest.** Returning None on that tie — the shape this had until it was
+    # exercised against a real session — makes every resumed worker read `unverifiable`
+    # for ever, which is the direction that never resumes anything. Newest-mtime is the
+    # only choice that answers "is this transcript moving".
+    return max(matches, key=os.path.getmtime)
 
 
 def transcript_mtime(path):
