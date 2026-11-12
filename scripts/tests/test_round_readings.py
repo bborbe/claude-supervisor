@@ -1106,9 +1106,9 @@ class UnrecordedSessions(Tmp):
         limb = doc["rows"]["unrecorded:" + self.PARKED[:8]]["in_flight_limb"]
 
         self.assertIn("no tracked page records this session", limb)
-        # The bare overclaim must not survive anywhere in the limb — including as the
-        # substring the qualified form would otherwise contain.
-        self.assertNotIn("(no page records this session)", limb)
+        # The bare claim is NOT a substring of the qualified one ("tracked" sits between
+        # "no" and "page"), so this catches a limb that carries both forms.
+        self.assertNotIn("no page records this session", limb)
 
     def test_an_unrecorded_session_that_is_not_parked_fabricates_no_park(self):
         """SC2: the negative control — the path discriminates, it is not a catch-all."""
