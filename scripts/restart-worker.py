@@ -88,9 +88,8 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # The exit-record writer, which sits beside this script. Passed to the spawned pane as an
-# absolute path through `env`, because the pane inherits wezterm's mux-server environment
-# and cannot resolve `$CLAUDE_PLUGIN_ROOT` for a script this file already knows the
-# location of.
+# absolute path through `env`, because the pane cannot resolve `$CLAUDE_PLUGIN_ROOT` for a
+# script this file already knows the location of.
 RECORD_SCRIPT = os.path.join(HERE, "session-exit-record.py")
 
 # The registry. `SUPERVISOR_SESSIONS_DIR` first so a drill can point at a fixture tree;
@@ -799,7 +798,10 @@ def resume_command(sid, title, chip, cwd, launcher, fresh_prompt=None,
 
     A markdown command is not executable, so this is a deliberate copy — see the module
     docstring. The `unset` list matters: a resumed session that inherits the parent's
-    messaging socket believes it is the parent.
+    messaging socket believes it is the parent. ⚠️ The `env` prefix carries one positive
+    assignment beside the writer path — `CLAUDE_CODE_ENTRYPOINT=cli` — because the pane
+    inherits the SPAWNER's environment and a headless spawner would otherwise register a
+    real tab as `sdk-cli` (measured 2026-11-12; see the comment above `inner`).
 
     `--cwd` is in the recipe as of 2026-09-24 and must not be dropped from either copy.
     `wezterm cli spawn` otherwise inherits wezterm's own working directory — for a
@@ -828,8 +830,20 @@ def resume_command(sid, title, chip, cwd, launcher, fresh_prompt=None,
     # SIGKILLed worker then leaves no record anywhere, which is the whole gap
     # `session-exit-record.py` closes. Measured 2026-10-27 on this shape: as a child with
     # `trap _sx EXIT`, a `kill -9` records `rc=137`; behind `exec`, the trap cannot fire.
-    # The writer path travels as an `env` assignment because a spawned pane inherits
-    # wezterm's mux-server environment, not this process's.
+    # The writer path travels as an `env` assignment because the pane cannot resolve the
+    # plugin root for a script this file already knows the location of.
+    #
+    # ⚠️ `CLAUDE_CODE_ENTRYPOINT=cli` is not decoration. `wezterm cli spawn` forwards the
+    # CALLER's environment into the new pane (measured 2026-11-12: a spawn from a `cli`
+    # session reads `cli` back inside the pane, and the mux server carries no such
+    # variable), so a manager resumed by a headless leg comes up registered `sdk-cli`
+    # while it has a real pane. The census then charts it `invalid / headless` — a manager
+    # cannot be headless — and `closer-gate-lint.py` reads the same variable as its
+    # paneless test, so its `Shift+Tab` and `/reload-plugins` closers are refused as
+    # unactionable. Measured 2026-11-12 on five live goal managers at once.
+    #
+    # Set explicitly rather than added to the `unset` list: an absent value leaves Claude
+    # Code to derive the entrypoint itself, and this pane is a tab by construction.
     #
     # The observer is started BEFORE the trap and BEFORE the launcher, and it detaches into
     # its own session, so it outlives a kill of this whole process group. It watches `$$`
@@ -856,7 +870,8 @@ def resume_command(sid, title, chip, cwd, launcher, fresh_prompt=None,
     argv = [wezterm, "cli", "spawn"]
     if cwd:
         argv += ["--cwd", cwd]
-    return argv + ["--", "env", f"SESSION_EXIT_RECORD={RECORD_SCRIPT}", "bash", "-lc", inner]
+    return argv + ["--", "env", f"SESSION_EXIT_RECORD={RECORD_SCRIPT}",
+                   "CLAUDE_CODE_ENTRYPOINT=cli", "bash", "-lc", inner]
 
 
 #: The only prompts `--fresh-prompt` accepts. The value lands inside `bash -lc '…'`, so it is

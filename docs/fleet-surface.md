@@ -454,7 +454,7 @@ from every session. If `mcp__supervisor__*` is unavailable, use path B.
 **B — raw `wezterm cli spawn` (fallback, and the path for resuming a live session).**
 
 ```bash
-wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- env SESSION_EXIT_RECORD="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-exit-record.py" bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; _sx() { rc=$?; "$SESSION_EXIT_RECORD" append --session "<session_id>" --pid $$ --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn --session "<session_id>" --pid $$ || true; "$SESSION_EXIT_RECORD" observe --pid $$ --session "<session_id>" || true; trap _sx EXIT; "<claude_script>" --resume <session_id> -n "<title>" "/color '"$CHIP"'"'
+wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- env SESSION_EXIT_RECORD="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-exit-record.py" CLAUDE_CODE_ENTRYPOINT=cli bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; _sx() { rc=$?; "$SESSION_EXIT_RECORD" append --session "<session_id>" --pid $$ --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn --session "<session_id>" --pid $$ || true; "$SESSION_EXIT_RECORD" observe --pid $$ --session "<session_id>" || true; trap _sx EXIT; "<claude_script>" --resume <session_id> -n "<title>" "/color '"$CHIP"'"'
 ```
 
 ⚠️ **The launcher runs as a CHILD, never behind `exec`.** `exec` replaces the pane's shell, so
@@ -465,11 +465,19 @@ with the launcher as a child and `trap _sx EXIT` installed, `kill -9` of the chi
 that survives. **A call site that re-adds `exec` silently re-opens the gap this shape exists to
 close**, and nothing in the fleet would report it — the session simply leaves no record.
 
-⚠️ **`env` carries the writer path, and that is load-bearing.** A spawned pane inherits
-*wezterm's mux server* environment, not the calling shell's — the same fact that makes the
-`unset` prefix necessary. An exported variable therefore does not arrive, and inlining the path
-inside the single-quoted `bash -lc` string cannot expand at all. Pass it as an `env`
-assignment before `bash`.
+⚠️ **`env` carries the writer path, and that is load-bearing.** Inlining the path inside the
+single-quoted `bash -lc` string cannot expand at all; pass it as an `env` assignment before
+`bash`.
+
+⚠️ **A spawned pane inherits the CALLING session's environment — that is what the `unset`
+prefix is for, and it is also why `CLAUDE_CODE_ENTRYPOINT=cli` rides in the same `env` prefix.**
+`wezterm cli spawn` forwards the caller's environment (measured 2026-11-12: a spawn from a `cli`
+session reads `cli` back inside the pane, and the mux server carries no such variable). A
+manager opened or resumed by a headless leg therefore registers its tab as `sdk-cli`: the
+census charts it `invalid / headless`, since a manager cannot be headless, and
+`closer-gate-lint.py` treats it as paneless and refuses its `Shift+Tab` / `/reload-plugins`
+closers. Measured 2026-11-12 on five live goal managers. This paragraph previously stated the
+opposite mechanism — the mux server's environment — which is how the gap survived.
 
 ⚠️ **`--kind spawn` is a start marker, and an empty record is ambiguous without it.** The line
 is written before the launcher runs. A record holding `kind=spawn` and no end line is a session

@@ -7,9 +7,10 @@ fixtures pin *discrimination*, not parsing:
 
 - **The threshold discriminates.** Over 15 min emits, inside it does not. A run
   that emits for both, or for neither, fails.
-- **The bucket is the gate.** Every non-`watching` row in the bucket fixture
-  sits ABOVE the threshold, so an implementation that filters on the duration
-  alone emits for them and fails here.
+- **The duration is the gate, not the bucket.** A clock/defer park reads `idle`
+  (no background shell) while its `🟡 WAITING` episode is still open, so an
+  `idle` row over the threshold MUST emit. The bucket fixture pins both sides:
+  `watching` and `idle` emit; `gated` (an operator wait) and `working` do not.
 - **The duration is `watching_min`, not `quiet_min`.** A watcher re-arm writes to
   the transcript and resets the quiet clock, so a session parked 3 h 34 m read
   `quiet 12m` and was never nudged. The `divergent` fixture carries both fields
@@ -151,15 +152,22 @@ class ParkNudgeTest(unittest.TestCase):
         self.assertIn("vault-cli/vault-cli/0.10.0/scripts/session-self-exit.py", msg)
         self.assertNotIn(str(SCRIPT.parent / "session-self-exit.py"), msg)
 
-    # --- SC3: the bucket is the gate ----------------------------------------
+    # --- SC3: the duration is the gate, not the bucket ----------------------
 
-    def test_only_the_watching_row_emits_though_every_row_is_over_threshold(self):
+    def test_watching_and_idle_emit_but_gated_and_working_do_not(self):
+        """Every row here is over the threshold. `watching` and `idle` are the
+        union population; `gated` waits on the operator and `working` has no
+        open episode, so neither may emit."""
         watched = {r["bucket"]: r["watching_min"] for r in FIXTURE["buckets"]["sessions"]}
         self.assertEqual(watched, {"working": 40, "gated": 22, "idle": 60, "watching": 31})
         p = self.run_script(FIXTURE["buckets"])
         lines = self.nudges(p)
-        self.assertEqual(len(lines), 1, p.stdout)
-        self.assertIn(OVER, lines[0])
+        self.assertEqual(len(lines), 2, p.stdout)
+        self.assertIn(OVER, "".join(lines), "the watching row must emit")
+        self.assertIn("eeeeeeee-0000-4000-8000-000000000060", "".join(lines),
+                      "the idle (clock/defer) row must emit")
+        self.assertNotIn("cccccccc", p.stdout, "a working row has no open episode")
+        self.assertNotIn("dddddddd", p.stdout, "a gated row waits on the operator")
 
     # --- SC4: one nudge per watching episode --------------------------------
 
