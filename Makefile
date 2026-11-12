@@ -128,6 +128,15 @@ check-drive-unverifiable-paste:
 check-drive-nudges-sent:
 	@python3 scripts/check-drive-nudges-sent.py
 
+# A freeable tab row that is reaped is not thereby closed -- the reap is a message and the
+# close is the FREEABLE TABS step. The 2026-11-12 round queued a reap for a row the same
+# payload listed with a resolved pane link and never attempted the close; `pane 46` appears
+# zero times in that transcript, so no refusal token exists either. Static half only here
+# (the round supplies --drive at runtime); it fails when the step stops naming its line or
+# this check, or when output-shape stops mandating the line.
+check-freeable-tabs-acted:
+	@python3 scripts/check-freeable-tabs-acted.py
+
 # A finished headless (`sdk-cli`) worker cannot self-close: vault-cli's session-self-exit.py
 # proves a tty and always answers `SELF-EXIT: stay` for one, so the round must close it
 # through close-worker.py. Measured 2026-11-10: a finished worker sat idle 45 minutes with
@@ -202,6 +211,6 @@ test: check check-server-deps
 # a reader following the wrong directory gets no feedback that they did. `server/package.json`'s
 # own `start` script is `bun install --no-summary && node supervisor.mjs`, so `bun install`
 # inside `server/` works too.
-precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-keys check-spawn-target check-open-manager-resolution check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-open-role-defaults check-open-resume-mode check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-ledger-writes check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-headless-reap-close check-acting-legs check-own-parks-routing test check-wrote-nothing
+precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-keys check-spawn-target check-open-manager-resolution check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-open-role-defaults check-open-resume-mode check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-ledger-writes check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-own-parks-routing test check-wrote-nothing
 
-.PHONY: default hooks check-versions check-changelog check-changelog-size check-changelog-unreleased-fold changelog-archive check-spawn-mode check-spawn-keys check-spawn-target check-open-manager-resolution check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-open-role-defaults check-open-resume-mode check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-headless-reap-close check-acting-legs check-own-parks-routing check-manager-allowlist check check-server-deps test precommit check-wrote-nothing
+.PHONY: default hooks check-versions check-changelog check-changelog-size check-changelog-unreleased-fold changelog-archive check-spawn-mode check-spawn-keys check-spawn-target check-open-manager-resolution check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-open-role-defaults check-open-resume-mode check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-own-parks-routing check-manager-allowlist check check-server-deps test precommit check-wrote-nothing
