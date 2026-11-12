@@ -2823,6 +2823,16 @@ def main(argv: list[str]) -> int:
         ),
     )
     ap.add_argument(
+        "--heal",
+        action="store_true",
+        help=(
+            "with --compare-tracked: refresh the staged tracked set from the gate's "
+            "membership when the caller's set is a strict subset of it (the "
+            "`caller-scan-suspect` shape) and only then; every other shape is reported, "
+            "never written"
+        ),
+    )
+    ap.add_argument(
         "--buckets",
         default=None,
         help="with --save: path to the staged bucket JSON (see --write-buckets)",
@@ -2843,6 +2853,13 @@ def main(argv: list[str]) -> int:
         # already documents as "fix the call; do not read it as changed", so the caller
         # is told the argument was wrong instead of being handed a fail-open sweep.
         print(vault_error, file=sys.stderr)
+        return EXIT_USAGE
+
+    if args.heal and not args.compare_tracked:
+        # `--heal` is a modifier on the comparison, never a mode of its own: it can only
+        # act on a divergence, and there is no divergence without the comparison. Silently
+        # ignoring it would render a round that believes it refreshed a set it never read.
+        print("--heal requires --compare-tracked", file=sys.stderr)
         return EXIT_USAGE
 
     if args.predicate:
@@ -3084,11 +3101,13 @@ def main(argv: list[str]) -> int:
 
     if args.compare_tracked:
         # A dispatch whose tracked set disagrees with the gate's own membership is
-        # reported, not accepted. The two memberships are produced by different code from
-        # the same declarations, so each is self-consistent while they disagree — measured
-        # 2026-09-27: 154 declared against 153 in the snapshot, differing by one name whose
-        # only fault was a capital `The` against a case-sensitive membership compare.
-        # Nothing else could see it: APFS is case-insensitive, so `os.path.exists`,
+        # reported, not accepted — with one exception, `--heal`, which refreshes the
+        # caller's set on the single shape where it is provably a strict subset of the
+        # gate's (see the heal branch below). The two memberships are produced by different
+        # code from the same declarations, so each is self-consistent while they disagree
+        # — measured 2026-09-27: 154 declared against 153 in the snapshot, differing by one
+        # name whose only fault was a capital `The` against a case-sensitive membership
+        # compare. Nothing else could see it: APFS is case-insensitive, so `os.path.exists`,
         # `open()`, Obsidian's link resolver and `ls` all succeed on the capitalised path,
         # and no sweep notices because neither source is internally inconsistent.
         # ⚠️ What that framing got wrong is that the *caller's* half is not a derivation at
@@ -3126,6 +3145,8 @@ def main(argv: list[str]) -> int:
         print(f"COMPARE caller {len(mine)} names · gate {len(gate)} names")
         if not only_mine and not only_gate:
             print("  memberships identical")
+            if args.heal:
+                print(f"✅ TRACKED complete — {len(gate)} names, missing 0, extra 0")
             return EXIT_NOCHANGE
 
         # Which of the three causes this is. The declaration is read through the same
@@ -3162,8 +3183,63 @@ def main(argv: list[str]) -> int:
             f"caller scan written {scanned_at}"
         )
 
+        # The round's own receipt line, printed on every `--heal` run: `missing` is every
+        # name the gate holds and the caller lacks, `extra` every caller name the page
+        # never declared. Without it a healing round reports only that it healed and a
+        # round that healed nothing reports nothing — two states the receipt exists to
+        # keep apart. ⚠️ `extra` is measured against the *declaration*, never against the
+        # gate: a caller name inside the page's declared membership that the snapshot does
+        # not hold is the known healthy asymmetry, not an extra row.
+        if args.heal:
+            extra = (
+                len([n for n in only_mine if n not in set(members)])
+                if members is not None
+                else len(only_mine)
+            )
+            print(f"  TRACKED missing {len(only_gate)} · extra {extra}")
+
         if kind == DIVERGENCE_HEALTHY:
             print(f"✅ COMPARE healthy — {sentence}")
+            return EXIT_NOCHANGE
+        if kind == DIVERGENCE_CALLER_SCAN_SUSPECT and args.heal:
+            # Refresh-on-divergence, and only on this one shape. `caller-scan-suspect`
+            # means the caller's set is a strict subset of the gate's *and* carries
+            # nothing the page never declared, so the union is the gate's membership and
+            # no row is removed. Every other shape is left untouched: `caller-overshoot`
+            # and `both-sides-moved` can each mean the caller is right and the snapshot is
+            # a refresh behind, so writing there could delete a row that exists.
+            #
+            # ⚠️ Written only when the membership actually changes, never per firing.
+            # Measured 2026-11-12: a subject whose tracked file was last written at
+            # 14:09:48 and whose gate snapshot refreshed at 16:29:12 carried 130 names
+            # against 136 — six rows invisible to every sweep for three hours, because
+            # `goal-resolve.md` requires the declaration read to refresh on every firing
+            # and a prose step is not a producer. A refresh-on-divergence makes the write
+            # a code path that fires exactly when there is something to write.
+            #
+            # The label is printed before the write so the round's own output names the
+            # cause it acted on, not only the result: a healed tick and a tick that
+            # happened to find nothing to heal must not render the same first line.
+            print(f"⚠️ DIVERGENCE ({kind}): {sentence}")
+            healed = sorted(mine | gate)
+            path = tracked_path(args.subject)
+            tmp = path + ".tmp"
+            os.makedirs(STATE_DIR, exist_ok=True)
+            try:
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    fh.write("\n".join(healed) + "\n")
+                # Atomic for the reason `--write-tracked` gives: a reader sees either the
+                # old set or the new one, never a half-written file.
+                os.replace(tmp, path)
+            except BaseException:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+                raise
+            print(
+                f"REFRESHED tracked set {len(mine)} → {len(healed)} "
+                f"(+{len(only_gate)}): " + " · ".join(only_gate)
+            )
+            print(f"✅ TRACKED complete — {len(healed)} names, missing 0, extra 0")
             return EXIT_NOCHANGE
         if kind == DIVERGENCE_CALLER_FORMAT:
             # Refuse, do not report: nothing downstream can attribute a verdict to a row
