@@ -186,6 +186,69 @@ class Guard(unittest.TestCase):
         self._run_returning("")
         self.assertEqual("error:no-verdict", self.mod.guard(1))
 
+    def test_subject_state_is_passed_to_the_guard(self):
+        seen = {}
+
+        class R:
+            returncode = 0
+            stdout = "skip:sleeping\n"
+            stderr = ""
+
+        def run(argv, **kw):
+            seen["argv"] = argv
+            return R()
+
+        self.mod.subprocess.run = run
+        self.assertEqual("skip:sleeping", self.mod.guard(1, "SLEEPING"))
+        self.assertIn("--subject-state", seen["argv"])
+        self.assertEqual(seen["argv"][-1], "SLEEPING")
+
+    def test_no_state_omits_the_flag(self):
+        seen = {}
+
+        class R:
+            returncode = 0
+            stdout = "wake\n"
+            stderr = ""
+
+        def run(argv, **kw):
+            seen["argv"] = argv
+            return R()
+
+        self.mod.subprocess.run = run
+        self.assertEqual("wake", self.mod.guard(1, None))
+        self.assertNotIn("--subject-state", seen["argv"])
+
+
+class ReadState(unittest.TestCase):
+    def setUp(self):
+        self.mod = load()
+        self._real_run = self.mod.subprocess.run
+
+    def tearDown(self):
+        self.mod.subprocess.run = self._real_run
+
+    def _run_returning(self, stdout, returncode=0):
+        class R:
+            def __init__(self, out, rc):
+                self.stdout = out
+                self.returncode = rc
+                self.stderr = ""
+
+        self.mod.subprocess.run = lambda *a, **k: R(stdout, returncode)
+
+    def test_first_field_is_the_state(self):
+        self._run_returning("SLEEPING\tgoal--x\tuntil 2026-11-12T01:22:59+01:00\n")
+        self.assertEqual("SLEEPING", self.mod.read_state("X", "goal"))
+
+    def test_non_zero_exit_is_none_not_a_state(self):
+        self._run_returning("SLEEPING\tgoal--x\tdetail\n", returncode=3)
+        self.assertIsNone(self.mod.read_state("X", "goal"))
+
+    def test_empty_stdout_is_none(self):
+        self._run_returning("")
+        self.assertIsNone(self.mod.read_state("X", "goal"))
+
 
 class ResolvePane(unittest.TestCase):
     def setUp(self):
