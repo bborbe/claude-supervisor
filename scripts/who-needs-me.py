@@ -44,6 +44,12 @@ PROJECTS_DIR = os.environ.get("PROJECTS_DIR") or os.path.expanduser("~/.claude/p
 # Matched to vault-cli's per-session flock, per `session-liveness.md`. A transcript
 # written inside this window counts as fresh.
 LIVE_WINDOW = 5 * 60
+# The sweep's `stalled` class needs a transcript-quiet bound, not only a task-file one:
+# a session in a long turn writes its transcript continuously and edits its task file
+# never, so task mtime alone reads it as stalled. Two consecutive sweeps at the loop's
+# 15-min cadence. It shares its VALUE with `manager-predispatch.py`'s `STUCK_SECONDS`
+# and nothing else — that rule measures the task file's mtime, this one the transcript's.
+STALL_TRANSCRIPT_SECONDS = 30 * 60
 
 # How long a posted-closer record stays authoritative. The echo it suppresses
 # always lands at the END of the same turn as its post, so the window only has to
@@ -580,6 +586,25 @@ def _fleet_colours():
     return _FLEET_COLOURS
 
 
+_FLEET_SESSIONS = None
+
+
+def _fleet_sessions():
+    """Import fleet-sessions.py (hyphenated filename -> importlib) — the one age formatter.
+
+    `human_age()` there is what `fleet-board.py` renders its `Inactive` column with, so a
+    second formatter here would drift the digest's age from the board's.
+    """
+    global _FLEET_SESSIONS
+    if _FLEET_SESSIONS is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fleet-sessions.py")
+        spec = importlib.util.spec_from_file_location("fleet_sessions", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _FLEET_SESSIONS = mod
+    return _FLEET_SESSIONS
+
+
 def read_registry(sessions_dir=None):
     """The session registry as `session id -> the name it holds now`; `None` if unreadable.
 
@@ -672,6 +697,28 @@ def live_session_ids(sessions_dir=None):
     return None if registry is None else set(registry)
 
 
+def _transcript_age_read(sid):
+    """`(age, failed)` — `age` is `inf` when the transcript is absent, `None` on a failed read.
+
+    The two are different facts and only one of them is a reading. An absent transcript
+    means nothing has ever been written for this session, which is honestly stale; a
+    glob or stat that raised means the read did not happen, and reporting that as
+    `quiet` is the same defect this module refuses one level up — an unreadable source
+    rendered as a verdict. `session_transcript_age` keeps its `inf`-for-both contract
+    for every existing caller; `--ages` reads the flag and reports `unknown`.
+    """
+    try:
+        hits = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{sid}.jsonl"))
+    except Exception:
+        return None, True
+    if not hits:
+        return float("inf"), False
+    try:
+        return time.time() - max(os.path.getmtime(h) for h in hits), False
+    except Exception:
+        return None, True
+
+
 def session_transcript_age(sid):
     """Seconds since the session's transcript was last written; `inf` if absent.
 
@@ -688,18 +735,58 @@ def session_transcript_age(sid):
     """
     if sid in _AGE_CACHE:
         return _AGE_CACHE[sid]
-    age = float("inf")
-    try:
-        hits = glob.glob(os.path.join(PROJECTS_DIR, "*", f"{sid}.jsonl"))
-        if hits:
-            age = time.time() - max(os.path.getmtime(h) for h in hits)
-    except Exception:
+    age, failed = _transcript_age_read(sid)
+    if failed:
         age = float("inf")
     _AGE_CACHE[sid] = age
     return age
 
 
 _AGE_CACHE = {}
+
+
+def _resolve_session_id(sid):
+    """`(full id, ambiguous)` — the digest renders 8-char prefixes, transcripts need the id.
+
+    A prefix matching more than one transcript is reported rather than guessed: two
+    sessions sharing a prefix would otherwise lend one session's age to the other. An
+    argument that is not an id fragment at all is reported too — globbing it
+    would treat `*`, `?` and `[` as metacharacters and `/` as a path step, so the read
+    would silently widen past `PROJECTS_DIR`.
+    """
+    if len(sid) >= 36:
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", sid):
+            return sid, True
+        return sid, False
+    if not re.fullmatch(r"[0-9a-fA-F-]{1,35}", sid):
+        return sid, True
+    hits = {os.path.basename(p)[: -len(".jsonl")]
+            for p in glob.glob(os.path.join(PROJECTS_DIR, "*", f"{sid}*.jsonl"))}
+    if len(hits) == 1:
+        return hits.pop(), False
+    return sid, len(hits) > 1
+
+
+def ages_row(sid):
+    """One `--ages` row: `(sid8, seconds, human, quiet|active|ambiguous|unknown)`.
+
+    Split out of `main` so each verdict is reachable from a test. The two failure
+    shapes — an unresolvable id and a failed transcript read — must both be asserted
+    as *not* `quiet`, and a subprocess test cannot make a read fail.
+    """
+    full, ambiguous = _resolve_session_id(sid)
+    if ambiguous:
+        # Never `quiet`: an unresolvable id read as quiet would render a live
+        # session as stalled, the very defect this flag exists to remove.
+        return sid[:8], "?", "?", "ambiguous"
+    age, failed = _transcript_age_read(full)
+    if failed:
+        return sid[:8], "?", "?", "unknown"
+    if math.isfinite(age):
+        secs, human = str(int(age)), _fleet_sessions().human_age(age)
+    else:
+        secs, human = "inf", "no transcript"
+    return sid[:8], secs, human, "quiet" if age >= STALL_TRANSCRIPT_SECONDS else "active"
 
 
 def quiet_session_ids(records, live_ids):
@@ -2427,6 +2514,17 @@ def main():
         help="fill the `owners` map in causes.json via `vault-cli task search`. "
         "Slow — the search loads a model — and never on the default path.",
     )
+    ap.add_argument(
+        "--ages",
+        nargs="+",
+        metavar="SESSION_ID",
+        help="print '<sid8>\\t<seconds>\\t<human>\\t<quiet|active|ambiguous|unknown>' per id "
+        "and exit — the transcript clock the fleet digest renders its age from, and the "
+        "quiet test its `stalled` class needs. `inf` when the session has no "
+        "transcript; `unknown` when the transcript read itself failed; `ambiguous` when a "
+        "prefix matches more than one transcript, or the argument is not an id fragment "
+        "at all.",
+    )
     ap.add_argument("--jump", metavar="PANE", help="activate this WezTerm pane and exit")
     ap.add_argument(
         "--pane-for",
@@ -2435,6 +2533,10 @@ def main():
         "non-zero when no live session resolves",
     )
     a = ap.parse_args()
+    if a.ages:
+        for sid in a.ages:
+            print("\t".join(ages_row(sid)))
+        sys.exit(0)
     if a.jump:
         sys.exit(subprocess.call(["wezterm", "cli", "activate-pane", "--pane-id", a.jump]))
     if a.pane_for:
