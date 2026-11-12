@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.302.1
 
 - fix: **the answer-path probe now refuses a spawner whose wrapper answer route has not been shown to work, instead of trusting an armed loop.** Stage 1 recorded the reaches and reported them; this flips the verdict onto them. `reach_allowed_age` is `2 × period + 180`, with the period read from the `period=<N>s` field `manager-liveness.py --state` already prints — never re-derived from the cadence file, which would be a second implementation of a fact that script owns. `reach_verdict` refuses on an absent, unreadable, untimestamped or expired wrapper reach, each with a quotable reason.
   ⚠️ **The `mcp` leg is reported, never gated.** The origin case was measured on the wrapper route, and a manager that answers parks fine there is not the failure this refuses — gating on `mcp` would refuse it for a route it may never use, and at flip time would have refused every manager whose `mcp` reach had not yet arrived.
