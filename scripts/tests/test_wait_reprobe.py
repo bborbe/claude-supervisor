@@ -128,6 +128,27 @@ class Render(unittest.TestCase):
         rows = [{"session_id": "s", "ends": "PR #1187 merges", "verdict": "resumed", "reason": "r", "wait": "declared"}]
         self.assertIn("PR #1187 merges", wr.render_block(rows))
 
+    def test_a_declared_resumed_row_is_marked_re_drivable(self):
+        # The marker is the only code-side handle the drive leg's prose `NUDGES` step
+        # can consume, so a renderer that drops it leaves the join with no consumer.
+        rows = [{"session_id": "s", "ends": "", "verdict": "resumed", "reason": "r", "wait": "declared"}]
+        self.assertIn("→ re-drive", wr.render_block(rows))
+
+    def test_a_still_blocked_row_is_not_marked(self):
+        rows = [{"session_id": "s", "ends": "", "verdict": "still-blocked", "reason": "r", "wait": "declared"}]
+        self.assertNotIn("→ re-drive", wr.render_block(rows))
+
+    def test_an_expired_resumed_row_is_not_marked(self):
+        # `expired` means `declared-wait.py` already ruled it is not a wait. Marking it
+        # would re-drive a session that declares nothing, and the live store is mostly
+        # expired rows, so this exclusion is what keeps the marker from firing on all.
+        rows = [{"session_id": "s", "ends": "", "verdict": "resumed", "reason": "r", "wait": "expired"}]
+        self.assertNotIn("→ re-drive", wr.render_block(rows))
+
+    def test_an_unprobeable_declared_row_is_not_marked(self):
+        rows = [{"session_id": "s", "ends": "", "verdict": "unprobeable", "reason": "r", "wait": "declared"}]
+        self.assertNotIn("→ re-drive", wr.render_block(rows))
+
 
 class ReadWaits(unittest.TestCase):
     """The reader's refusals. Pass 1 shipped two byte-identical tests here, so neither
