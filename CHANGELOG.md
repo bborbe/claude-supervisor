@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- docs: **`fleet-surface.md` now states the decision-park resume rule.** The keep-alive leg's § 2b resumes a closed headless worker whose recorded wait has cleared, and the rule was written only in the step file and the agent body — `grep -c decision-park docs/fleet-surface.md` returned 0, so the doc a manager reads first did not mention the leg at all. The new section records the two wait kinds and their reads (approval later than the last transcript message; a non-empty `blocked_by` all `completed` with the latest `completed_date` later than that message), why ordering rather than presence is what makes the wait a consumable event (measured 2026-11-12: a row resumed at 23:39:17Z took a turn at 23:50:26Z and left the next round's candidates), that an empty `blocked_by` and a `hold` dependency are not cleared, that `unread` is a third answer, that the four decision counts live on the hand-back and in no payload file, and that the close belongs to `reap-idle-headless.py` on its own launchd tick rather than to this leg. Change set: `docs/fleet-surface.md`, `CHANGELOG.md`.
+
 ## v0.296.1
 
 - fix: **the answer-reach sentinel call now passes `agent_id`, so it stops being rejected before it can record anything.** Both step files documented `answer_permission(request_id, behavior)`; the tool's schema declares `agent_id`, `request_id` and `behavior` all required, so the MCP layer refused the call above the handler — no request reached the server and no `mcp` reach was written. Measured 2026-11-12: a manager following the step literally got `agent_id and request_id are required` and wrote no leg; retrying with a sentinel `agent_id` produced the foreign-park reply and the reach.
