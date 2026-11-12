@@ -675,6 +675,30 @@ class PerKindRefusal(unittest.TestCase):
         self.assertEqual(fr.refusals("goal", page("flag: 'true'")), [])
         self.assertEqual(fr.refusals("topic", page("flag: on")), [])
 
+    def test_an_agent_set_flag_reaches_the_consumer_as_a_refusal_not_a_skip(self):
+        """⚠️ The regression every other test in this class missed: they call
+        `refusals()` in isolation, so a gate that swallowed the case stayed green.
+
+        `row_for()` builds the row for a SET flag and lets `refusals()` label it. A gate
+        answering `not flagged` for an agent-set flag returned a skip reason instead, so
+        the `REFUSED | … | flag_set_by=<who>` line vanished and an agent-set flag read as
+        an unflagged row — the mislabel `flag_provenance.flag_refusal()` exists to stop,
+        and the token SC2's evidence is read from.
+        """
+        root = tempfile.mkdtemp()
+        tasks = os.path.join(root, "25 Tasks")
+        write(os.path.join(tasks, "A Task.md"),
+              page("page_type: task\nflag: true\nstatus: in_progress\nrole: agent",
+                   provenance="agent"))
+        cfg = {"tasks_dir": "25 Tasks", "path": root, "worker_launcher": "/opt/l/cc-v"}
+        ctx = {"today": "2026-11-12", "role_map": {}, "template_root": None,
+               "no_liveness": True, "managers": set(), "topic_map": {},
+               "mode_default": "interactive", "normalised": [],
+               "subjects": {}, "liveness_cache": {}}
+        row, reason = fr.row_for("v", cfg, "task", os.path.join(tasks, "A Task.md"), ctx)
+        self.assertIsNone(reason, "a SET flag must not be reported as a skip")
+        self.assertEqual(row["refused"], ["agent-set-flag"])
+
     def test_the_two_tokens_can_coexist_on_one_row(self):
         # Provenance and the manager-row rule are independent producers.
         ctx = {"topic_map": {}, "subjects": {}, "no_liveness": False,

@@ -144,10 +144,20 @@ flag_admits = flag_provenance.flag_admits
 
 
 def eligible(block, kind, today):
-    """The consumer's gate — a reason string when ineligible, None when eligible."""
+    """The consumer's gate — a reason string when ineligible, None when eligible.
+
+    ⚠️ **A SET flag is never "not flagged" here.** Whether a set flag ADMITS is
+    `refusals()`'s token to emit, not this gate's reason to swallow: asking
+    `flag_admits()` and returning "not flagged" relabelled an agent-set flag as an
+    unflagged row and made `refusals()`'s `agent-set-flag` branch unreachable — the
+    exact mislabel `flag_provenance.flag_refusal()` exists to prevent, and the token
+    the `REFUSED | … | flag_set_by=<who>` line and SC2's evidence are read from. So
+    this gate asks only whether the flag is SET; the consumer skips the row on the
+    token.
+    """
     if block is None:
         return "unreadable page"
-    if not flag_admits(block, kind):
+    if not flag_provenance.flag_set(block, kind):
         return "not flagged"
     status = (open_queue.field(block, "status") or "").strip()
     if status != "in_progress":

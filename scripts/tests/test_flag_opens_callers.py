@@ -143,6 +143,20 @@ class EveryPathReachesTheOnePredicate(unittest.TestCase):
             with self.subTest(kind=kind):
                 self.assertTrue(shared.flag_admits(body + "\nflag_set_by: legacy\n", kind))
 
+    def test_the_goal_and_topic_widening_to_one_is_pinned(self):
+        """⚠️ `FLAG_TRUTHY` admits `1`, which a YAML loader reads as an **int**, so a goal
+        or topic page saying `flag: 1` opens while a task page does not (`YAML_TRUE` has no
+        `1`, matching `commands/open.md` § Step 0.5's `t.get('flag') is True`).
+
+        Nothing else exercises this, so a later "tidy" of either tuple would silently widen
+        or narrow the three tiers without a red test.
+        """
+        shared = _load("flag_provenance", "flag_provenance.py")
+        page = "flag: 1\nflag_set_by: operator\n"
+        self.assertTrue(shared.flag_admits(page, "goal"))
+        self.assertTrue(shared.flag_admits(page, "topic"))
+        self.assertFalse(shared.flag_admits(page, "task"))
+
     def test_the_task_batch_selector_matches_the_shared_constant(self):
         """`commands/open.md` § Step 0.5 — the sixth path, an executable-prose selector.
 

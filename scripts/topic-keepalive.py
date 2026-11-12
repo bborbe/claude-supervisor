@@ -196,12 +196,19 @@ def flagged_path(vault: str, subject: str, branch: str = "goal") -> str:
 
 
 def _remember_flagged(marker: str) -> None:
+    """Record that this subject was flagged while running.
+
+    ⚠️ **A write fault warns and does not fail the probe** — the verdict is what the round
+    acts on, and a receipt-style fault must not cost it. But it must not be silent either:
+    without the marker the subject can never be stood down, so an unwritable state dir
+    would turn the whole retire path into a no-op that reports nothing at all.
+    """
     try:
         os.makedirs(os.path.dirname(marker), exist_ok=True)
         with open(marker, "w", encoding="utf-8") as fh:
             fh.write(time.strftime("%Y-%m-%dT%H:%M:%S%z") + "\n")
-    except OSError:
-        pass
+    except OSError as exc:
+        print(f"flagged marker not written ({marker}): {exc}", file=sys.stderr)
 
 
 _RECEIPT_MOD = None
@@ -398,6 +405,12 @@ def main(argv: list[str]) -> int:
         print(f'python3 scripts/manager-liveness.py --stop --subject "{a.subject}" '
               f'--branch {a.branch}  (the flag was cleared — the manager is retired and '
               f'never resumed; the page keeps its status)')
+        # ⚠️ Deliberately NOT recorded on `--receipt`. `manager-receipt.py`'s owed-verdict
+        # machinery exists for verdicts whose execution is otherwise unprovable, and it
+        # refuses a verdict outside `OWING_VERDICTS`; adding `stand-down` there would make
+        # every round owe an outcome it is not wired to pay, and an unpaid debt STOPS the
+        # round. A stand-down needs none: its execution is proved by the next tick reading
+        # the loop `STOPPED` and taking the `loop-stopped` arm.
         return 0
 
     if not sid:
