@@ -537,6 +537,87 @@ def read_abandoned(s: str) -> list:
         return []
 
 
+def gated_path(s: str) -> str:
+    return os.path.join(STATE_DIR, f"{s}.gated")
+
+
+def read_gated(s: str) -> list:
+    """`[(epoch, step), …]` — which steps the frozen-tree predicate suppressed, and when.
+
+    A **different claim** from `.abandoned`, and kept in its own file for that reason: an
+    abandonment is a recovery (a human or manager decided a leg was owed and waived), while
+    a gate is the predicate deciding the leg was never owed this tick. Collapsing the two
+    would make "the round skipped a leg by design" indistinguishable from "the round
+    skipped a leg it owed", which is exactly the distinction the criteria grade on.
+
+    Same tamper guards as `read_abandoned`: a non-finite epoch would excuse the step on
+    every later round, the permanent green the round-scoping exists to prevent.
+    """
+    try:
+        with open(gated_path(s), encoding="utf-8") as fh:
+            out = []
+            for line in fh:
+                parts = line.split()
+                if len(parts) != 2:
+                    continue
+                try:
+                    ts = float(parts[0])
+                except ValueError:
+                    continue
+                if not math.isfinite(ts):
+                    continue
+                out.append((ts, parts[1]))
+            return out
+    except OSError:
+        return []
+
+
+def render_cached(topic: str, branch: str = "", now: float = None) -> int:
+    """Print the cached sweep payload with a FRESH marker for this tick.
+
+    The operator's rulings require the table on every tick, including a gated one where
+    the reader never ran. The cached payload's own first line carries the tick that
+    produced it, so replaying it verbatim prints a header claiming a time this tick did
+    not run — and that makes a dead loop and a gated one look identical, which is the
+    ambiguity the marker exists to remove. The first line is therefore replaced, never
+    kept.
+    """
+    s = slug(topic, branch)
+    path = os.path.join(STATE_DIR, f"{s}.sweep")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        print(f"no cached sweep payload for {s} — nothing to render", file=sys.stderr)
+        return 1
+    if not lines:
+        print(f"cached sweep payload for {s} is empty", file=sys.stderr)
+        return 1
+    stamp = time.strftime("%H:%M", time.localtime(time.time() if now is None else now))
+    # The marker names the gate explicitly: a reader comparing ticks must be able to
+    # tell "the table is here because nothing changed" from "the table is here and the
+    # round ran". Never claim the goal/slot counts — this tick did not read them.
+    print(f"{stamp} ✓ {topic} — sweep gated this tick, table from cache")
+    for line in lines[1:]:
+        print(line)
+    return 0
+
+
+def gate(topic: str, branch: str, step: str) -> int:
+    """Record that the frozen-tree predicate suppressed `step` for this round.
+
+    ⚠️ **Only the predicate may call this.** A leg recorded here is excused from the
+    round's `--check` with no artifact, so writing it for a leg that was owed would let a
+    round report complete while skipping work — the failure the receipt exists to catch.
+    The caller states the predicate's verdict; this function does not re-derive it.
+    """
+    s = slug(topic, branch)
+    with open(gated_path(s), "a", encoding="utf-8") as fh:
+        fh.write(f"{time.time():.3f} {step}\n")
+    print(f"gated {s}: {step}")
+    return 0
+
+
 def start(topic: str, branch: str = "") -> int:
     s = slug(topic, branch)
     # Fields are CLEARED, not carried: a receipt that survived its own round would
@@ -945,10 +1026,14 @@ def _skips(s: str, branch: str, d: dict, started: float, limit: float, now: floa
     # fails whenever the operator is fast. A record dated a minute or a day ahead
     # still fails, which is what the guard is for.
     abandoned = {step for ts, step in read_abandoned(s) if int(started) <= ts <= now + 1}
+    # A gated step is excused on the same round-scoped window as a paid one: the gate
+    # applies to the round that took the verdict, never to a later round that must
+    # re-evaluate the predicate for itself.
+    gated = {step for ts, step in read_gated(s) if int(started) <= ts <= now + 1}
     fields = d.get("fields") or {}
     skipped = []
     for step in steps_for(branch, tier):
-        if step in abandoned:
+        if step in abandoned or step in gated:
             continue
         artifact = fields.get(step)
         if not artifact:
@@ -1156,6 +1241,18 @@ def main() -> int:
                       help="pay ONE skipped step (needs --step): removes it from the debt "
                            "and records it in <slug>.abandoned, which --check honours for "
                            "the round it was paid in and no later one")
+    mode.add_argument("--gate", action="store_true",
+                      help="record that the frozen-tree predicate suppressed ONE step "
+                           "(needs --step): writes <slug>.gated, which --check honours for "
+                           "THIS round only, so the round reports complete instead of "
+                           "carrying debt for a leg it never owed. A different claim from "
+                           "--abandon: that one pays an owed leg, this one records that the "
+                           "leg was not owed. Only the predicate may call it")
+    mode.add_argument("--render-cached", action="store_true",
+                      help="print the cached sweep payload with a FRESH timestamped marker "
+                           "for this tick — the gated tick's table, per the operator's "
+                           "2026-09-15 and 2026-09-20 rulings. The payload's own first line "
+                           "is stale and is replaced, never replayed")
     mode.add_argument("--record-verdict", action="store_true",
                       help="topic tier: a `resume`/`restart` keep-alive verdict the round now "
                            "owes an outcome for (needs --goal --vault --verdict --session); "
@@ -1221,6 +1318,16 @@ def main() -> int:
         if not a.step:
             ap.error("--abandon needs --step")
         return abandon(subject, a.branch, a.step)
+    if a.gate:
+        # Deliberately NOT fleet-scoped, unlike `--abandon`. The predicate applies to
+        # every tier, and the goal/topic tier is where it is most needed — `--abandon`
+        # refuses there because no debt file is written, but `--gate` writes a state
+        # `--check` honours directly, so it is that tier's only recovery path.
+        if not a.step:
+            ap.error("--gate needs --step")
+        return gate(subject, a.branch, a.step)
+    if a.render_cached:
+        return render_cached(subject, a.branch)
     if a.record_verdict or a.record_outcome:
         # Goal verdicts ride the goal/topic receipt only; the fleet tier owes none.
         if a.branch:
