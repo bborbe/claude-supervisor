@@ -357,7 +357,11 @@ class TestRender(unittest.TestCase):
         entries = [entry("aaaaaaaa", "blocked"), entry("bbbbbbbb", "unverifiable")]
         rows = [rendered("aaaaaaaa"), rendered("bbbbbbbb")]
         probed = []
-        saved = (drive_retained.read_ledger, drive_retained.disposition)
+        saved = (
+            drive_retained.read_ledger,
+            drive_retained.disposition,
+            drive_retained.render_reprobed,
+        )
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         out = os.path.join(tmp, "payload.json")
@@ -366,11 +370,18 @@ class TestRender(unittest.TestCase):
                 {"round": "R-1", "entries": entries}, None)
             drive_retained.disposition = lambda e: (
                 probed.append(e) or rows[len(probed) - 1])
+            # The join shells out to `declared-wait.py`; stub it so this test measures
+            # the probe-per-row count, not a live store read.
+            drive_retained.render_reprobed = lambda *a, **k: "REPROBED — stubbed"
             buf = io.StringIO()
             with redirect_stdout(buf):
                 rc = drive_retained.main(["render", "--json-out", out])
         finally:
-            drive_retained.read_ledger, drive_retained.disposition = saved
+            (
+                drive_retained.read_ledger,
+                drive_retained.disposition,
+                drive_retained.render_reprobed,
+            ) = saved
         self.assertEqual(rc, 0)
         self.assertEqual(len(probed), 2, "exactly one probe per retained row")
         with open(out, encoding="utf-8") as handle:
@@ -379,6 +390,47 @@ class TestRender(unittest.TestCase):
         self.assertEqual(len(payload["retained"]), 2)
         self.assertIn("aaaaaaaa", buf.getvalue())
         self.assertIn("bbbbbbbb", buf.getvalue())
+        self.assertIn("REPROBED", buf.getvalue(), "the render leg prints the join's block")
+
+
+class TestReprobed(unittest.TestCase):
+    """The round's `REPROBED` block, rendered by the join rather than re-implemented.
+
+    Before this leg existed, `wait-reprobe.py` had no caller anywhere in `agents/`,
+    `commands/` or `scripts/`, so no round ever produced its block. The tests here pin
+    that the render leg calls it, carries its marker, and refuses loudly instead of
+    dropping the section.
+    """
+
+    MERGED = {"state": "MERGED", "reviewDecision": "APPROVED", "mergeStateStatus": "UNKNOWN"}
+    OPEN = {"state": "OPEN", "reviewDecision": "REVIEW_REQUIRED", "mergeStateStatus": "BLOCKED"}
+
+    def rec(self, ends, wait="declared", sid="aaaa1111-0000-0000-0000-000000000001"):
+        return {"session_id": sid, "ends": ends, "verdict": wait, "mechanism": "external"}
+
+    def test_a_merged_declaration_renders_the_marker(self):
+        block = drive_retained.render_reprobed(
+            waits_fn=lambda: [self.rec("bborbe/nuke#698 MERGED")],
+            probe=lambda repo, number: self.MERGED,
+        )
+        self.assertIn("REPROBED", block)
+        self.assertIn("→ re-drive", block)
+
+    def test_an_open_declaration_renders_no_marker(self):
+        block = drive_retained.render_reprobed(
+            waits_fn=lambda: [self.rec("bborbe/nuke#698")],
+            probe=lambda repo, number: self.OPEN,
+        )
+        self.assertIn("still-blocked", block)
+        self.assertNotIn("→ re-drive", block)
+
+    def test_a_refused_join_renders_a_line_not_a_silent_gap(self):
+        def boom():
+            raise RuntimeError("store unreadable")
+        block = drive_retained.render_reprobed(waits_fn=boom)
+        self.assertIn("REPROBED", block)
+        self.assertIn("(refused:", block)
+        self.assertIn("store unreadable", block)
 
 
 if __name__ == "__main__":
