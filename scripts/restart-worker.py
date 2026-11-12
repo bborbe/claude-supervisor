@@ -22,7 +22,8 @@ Seven refusals, each exit 1 with a stable reason token as the first line of outp
                       carries no integer pid. The pid must be unique or nothing is
                       killed.
   busy-target         the target is mid-turn (`status` is not `idle`). A mid-turn kill
-                      loses the in-flight work.
+                      loses the in-flight work. `--allow-busy-lapse` lifts this ONE refusal
+                      and nothing else — see the flag's own note.
   headless-target     the target is not `interactive`. A headless worker has no reliable
                       resume guard, so its liveness stays undetermined.
   held-session        the operator holds this session (`/supervisor:hold`). Only they
@@ -1387,6 +1388,13 @@ def main():
                     help="kill the session and start a NEW one (fresh context) through the same "
                          "launcher and cwd, with this prompt as its first turn, instead of "
                          "resuming the same id. Allowlisted: the value is typed into a shell")
+    ap.add_argument("--allow-busy-lapse", action="store_true",
+                    help="lift ONLY the busy-target refusal, and only for the lapse "
+                         "fresh-restart path: requires --reason lapse AND --fresh-prompt, so "
+                         "it can never widen a code-staleness restart or a plain resume. "
+                         "Operator ruling 2026-11-12: on the lapse card the operator's answer "
+                         "IS the judgement that separates a lapse from a slow round, so a "
+                         "blanket refusal would override a decision the human has made")
     ap.add_argument("--task-guard", action="store_true",
                     help="read-only: run ONLY the terminal-task guard and exit. Exit 1 with the "
                          "`task-terminal` token when the session's anchored task is finished, 0 "
@@ -1398,6 +1406,11 @@ def main():
     args = ap.parse_args()
     if args.fresh_prompt and args.absent:
         ap.error("--fresh-prompt and --absent are exclusive")
+    if args.allow_busy_lapse and not (args.reason == "lapse" and args.fresh_prompt):
+        # The flag's whole safety is its narrowness: tied to the lapse fresh-restart path it
+        # can only lift a refusal the operator has already judged. Anywhere else it would let
+        # a mid-turn kill through on a machine token alone.
+        ap.error("--allow-busy-lapse requires --reason lapse AND --fresh-prompt")
 
     sid = args.session_id.strip()
     if not sid:
@@ -1451,12 +1464,18 @@ def main():
         return refuse("ambiguous-pid", f"registry entry {path} carries no integer pid")
 
     status = (rec.get("status") or "").strip().lower()
-    if status != "idle":
+    if status != "idle" and not args.allow_busy_lapse:
         return refuse(
             "busy-target",
             f"session {sid} is {status or 'in an unknown state'}, not idle; "
             "a mid-turn kill loses the in-flight work",
         )
+    if status != "idle":
+        # Reached only under --allow-busy-lapse, which the argument check above confines to
+        # `--reason lapse --fresh-prompt`. Printed so the kill is never silent about why it
+        # was permitted: a mid-turn manager is being stopped deliberately.
+        print(f"   ℹ️ busy-target lifted by --allow-busy-lapse (status {status!r}); the operator "
+              f"answered `restart fresh` on this lapse card")
 
     kind = (rec.get("kind") or "").strip().lower()
     if kind != "interactive":

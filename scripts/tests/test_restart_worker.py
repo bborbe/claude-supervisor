@@ -814,6 +814,42 @@ class Cli(unittest.TestCase):
         self.write(1, entry("busy", status="busy"))
         self.assert_refusal("busy", "busy-target")
 
+    def test_allow_busy_lapse_lifts_only_the_busy_refusal(self):
+        """Operator ruling 2026-11-12: a lapsed manager is usually still BUSY.
+
+        Measured 2026-11-12: 30 of 30 direct attempts refused `busy-target` because the
+        manager runs fleet rounds continuously. The flag must lift that one refusal and
+        let the restart reach its normal dry-run report.
+        """
+        self.write(1, entry("busylapse", name="Fleet Manager", status="busy"))
+        code, lines = self.run_cli("busylapse", "--reason", "lapse",
+                                   "--fresh-prompt", "/supervisor:fleet-loop",
+                                   "--allow-busy-lapse")
+        joined = "\n".join(lines)
+        self.assertEqual(code, 0, joined)
+        # The refusal token is never the FIRST line — the lift note mentions it by name, so a
+        # plain `assertNotIn` would fail on the very message that proves the lift happened.
+        self.assertNotEqual("busy-target", lines[0], joined)
+        self.assertIn("busy-target lifted by --allow-busy-lapse", joined)
+        self.assertIn("would kill the pid above and start a fresh session", joined)
+
+    def test_allow_busy_lapse_is_rejected_without_the_lapse_fresh_path(self):
+        """The flag's safety is its narrowness: anywhere else it would be a bare mid-turn kill."""
+        self.write(1, entry("busyx", name="Fleet Manager", status="busy"))
+        for extra in (["--allow-busy-lapse"],
+                      ["--reason", "code", "--fresh-prompt", "/supervisor:fleet-loop",
+                       "--allow-busy-lapse"],
+                      ["--reason", "lapse", "--allow-busy-lapse"]):
+            env = dict(os.environ)
+            env["SUPERVISOR_LOAD_PATH"] = self.load
+            env["SUPERVISOR_LAUNCHER"] = os.path.join(self.dir, "loadpath")
+            out = subprocess.run(
+                [sys.executable, SCRIPT, "busyx", "--sessions-dir", self.reg, "--dry-run", *extra],
+                capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(out.returncode, 2, f"{extra}: {out.stdout}{out.stderr}")
+            self.assertIn("--allow-busy-lapse requires", out.stderr + out.stdout, extra)
+
     def test_headless_target(self):
         self.write(1, entry("hl", kind="headless"))
         self.assert_refusal("hl", "headless-target")

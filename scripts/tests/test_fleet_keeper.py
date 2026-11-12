@@ -352,7 +352,7 @@ class FreshRestartPinTest(unittest.TestCase):
                 and ast.unparse(c.func) == "subprocess.run"]
         self.assertEqual(1, len(runs))
         self.assertEqual(["sys.executable", "script", "sid", "'--reason'", "'lapse'",
-                          "'--fresh-prompt'", "FRESH_PROMPT"],
+                          "'--fresh-prompt'", "FRESH_PROMPT", "'--allow-busy-lapse'"],
                          [ast.unparse(e) for e in runs[0].args[0].elts])
         assigns = [a for a in ast.walk(node) if isinstance(a, ast.Assign)
                    and any(isinstance(t, ast.Name) and t.id == "script" for t in a.targets)]
