@@ -8,7 +8,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { ANSWER_PATH_REMEDY, answerPathRefusal, runProbe } from './answer-path.mjs'
+import { ANSWER_PATH_REMEDY, ANSWER_PATH_REMEDY_AGENT, answerPathRefusal, runProbe } from './answer-path.mjs'
 
 const refused = (detail = 'no manager registration') => ({ ok: false, detail })
 const allowed = { ok: true, detail: "goal 'X' loop is OK" }
@@ -31,7 +31,7 @@ test('a headless spawn with a proven answer path proceeds', () => {
   assert.equal(answerPathRefusal({ opensInteractive: false, sessionId: 'sid', probe: () => allowed }), null)
 })
 
-test('a headless spawn without one is refused, naming the probe and the remedy', () => {
+test('a headless spawn without one is refused, naming the probe and the agent remedy', () => {
   const out = answerPathRefusal({
     opensInteractive: false,
     sessionId: 'sid',
@@ -41,7 +41,22 @@ test('a headless spawn without one is refused, naming the probe and the remedy',
   assert.match(out, /reads STALE, not OK/)
   assert.match(out, /scripts\/answer-path-check\.py/)
   assert.match(out, /15 minutes/)
-  assert.ok(out.includes(ANSWER_PATH_REMEDY))
+  assert.ok(out.includes(ANSWER_PATH_REMEDY_AGENT))
+  // The defect this change closes: an agent row must never be told to open a tab, because
+  // that is the cheaper remedy and the one a refused spawner actually takes.
+  assert.ok(!out.includes('Open the worker interactive'))
+})
+
+test('the two remedies are distinct, and only the human/manager one offers a tab', () => {
+  assert.notEqual(ANSWER_PATH_REMEDY, ANSWER_PATH_REMEDY_AGENT)
+  assert.match(ANSWER_PATH_REMEDY, /Open the worker interactive/)
+  assert.doesNotMatch(ANSWER_PATH_REMEDY_AGENT, /interactive/)
+  assert.match(ANSWER_PATH_REMEDY_AGENT, /manager loop/)
+})
+
+test('the cannot-name-the-session branch carries the agent remedy too', () => {
+  const out = answerPathRefusal({ opensInteractive: false, sessionId: '', probe: () => allowed })
+  assert.ok(out.includes(ANSWER_PATH_REMEDY_AGENT))
 })
 
 test('a session id the server cannot name refuses without consulting the probe', () => {
