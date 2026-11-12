@@ -3187,16 +3187,23 @@ def main(argv: list[str]) -> int:
         # name the gate holds and the caller lacks, `extra` every caller name the page
         # never declared. Without it a healing round reports only that it healed and a
         # round that healed nothing reports nothing — two states the receipt exists to
-        # keep apart. ⚠️ `extra` is measured against the *declaration*, never against the
-        # gate: a caller name inside the page's declared membership that the snapshot does
-        # not hold is the known healthy asymmetry, not an extra row.
+        # keep apart. ⚠️ `missing` is measured against the gate's snapshot, never against
+        # the live declaration, and the line says so: a page filed after the snapshot is
+        # missing from both sides and only the next gate tick carries it, so an unqualified
+        # `missing 0` would read as "nothing is missing anywhere". ⚠️ `extra` is measured
+        # against the page's declaration, never the gate: a caller name inside the declared
+        # membership that the snapshot does not hold is the known healthy asymmetry, not an
+        # extra row.
         if args.heal:
             extra = (
                 len([n for n in only_mine if n not in set(members)])
                 if members is not None
                 else len(only_mine)
             )
-            print(f"  TRACKED missing {len(only_gate)} · extra {extra}")
+            print(
+                f"  TRACKED missing {len(only_gate)} · extra {extra} "
+                f"— missing is against the gate's {len(gate)}-name membership"
+            )
 
         if kind == DIVERGENCE_HEALTHY:
             print(f"✅ COMPARE healthy — {sentence}")
