@@ -36,7 +36,7 @@ _spec.loader.exec_module(brr)
 TASK = "Some Blocked Subject"
 
 
-def _resolver(manager="Topic Manager", source="topic"):
+def _resolver(manager="Topic Manager", source="chain"):
     return lambda title: (manager, source)
 
 
@@ -47,7 +47,7 @@ class RoutesOnlyWhenOwnerless(unittest.TestCase):
         rec = brr.routing("waiting on the build", "", TASK, resolver=_resolver())
         self.assertIsNotNone(rec)
         self.assertEqual(rec["manager"], "Topic Manager")
-        self.assertEqual(rec["source"], "topic")
+        self.assertEqual(rec["source"], "chain")
 
     def test_a_closer_naming_a_card_id_is_not_routed(self):
         closer = "approve: reply `go` — card " + "7e55adaf" * 4
@@ -72,19 +72,48 @@ class RoutesOnlyWhenOwnerless(unittest.TestCase):
 
 
 class ComposesTheLint(unittest.TestCase):
-    def test_the_owner_decision_comes_from_the_lint(self):
-        # Same body, lint loaded by this module: the verdicts must agree, or the two have
-        # drifted and a row can be refused by one while routed by the other.
-        lint = brr._load("closer-gate-lint.py", "closer_gate_lint")
-        for closer in ("approve: card " + "7e55adaf" * 4,
-                       "escalate to the manager",
-                       "waiting on the build",
-                       "waiting on someone"):
+    """⚠️ Composition, not agreement. A byte-identical private copy of `OWNER_RE` would
+    agree with the lint on every fixture and still be the drift this forbids — so the test
+    stubs the loaded module and asserts `routing()` OBEYS it."""
+
+    def _with_fake_lint(self, verdict):
+        class FakeLint:
+            @staticmethod
+            def owner_named(body, text):
+                return verdict
+
+        original = brr._load
+        brr._load = lambda f, n: FakeLint if f == "closer-gate-lint.py" else original(f, n)
+        self.addCleanup(setattr, brr, "_load", original)
+
+    def test_a_lint_that_says_owner_named_produces_no_route(self):
+        self._with_fake_lint(True)
+        self.assertIsNone(brr.routing("waiting on the build", "", TASK, resolver=_resolver()))
+
+    def test_a_lint_that_says_no_owner_routes(self):
+        # The inverse: a private regex returning False everywhere would also pass the first
+        # test, so both directions are pinned.
+        self._with_fake_lint(False)
+        rec = brr.routing("waiting on the build", "", TASK, resolver=_resolver())
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec["manager"], "Topic Manager")
+
+
+class KnownFalseNegative(unittest.TestCase):
+    """DOCUMENTED-WRONG behaviour, pinned so a wiring must meet it rather than inherit it."""
+
+    def test_a_hex_wait_is_a_known_false_no_route(self):
+        # `OWNER_RE`'s first arm is `\b[0-9a-f]{8,32}\b`, so a commit SHA or an 8-digit date
+        # reads as an OWNER. A real "no recipient" row is therefore silently dropped — the
+        # failure this script exists to end. Not fixable here: the predicate belongs to
+        # `closer-gate-lint.py`, and a private copy is the drift this module forbids.
+        for closer in ("waiting on commit 64b708ab",
+                       "waiting on 20261112 nightly",
+                       "waiting on abc12345"):
             with self.subTest(closer=closer):
-                self.assertEqual(
-                    lint.owner_named(closer, closer),
-                    brr.routing(closer, closer, TASK, resolver=_resolver()) is None,
-                    closer)
+                self.assertIsNone(
+                    brr.routing(closer, closer, TASK, resolver=_resolver()),
+                    "if this now ROUTES, the hex arm was fixed — delete this test and say so")
 
 
 class UnresolvableIsNotSilence(unittest.TestCase):
@@ -97,8 +126,29 @@ class UnresolvableIsNotSilence(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             brr.routing("waiting on the build", "", TASK, resolver=boom)
 
+    def test_main_exits_2_when_the_manager_cannot_be_resolved(self):
+        # The CLI contract the class name promises, asserted through `main` — not only
+        # through `routing()`.
+        original = os.environ.get("SESSIONS_DIR")
+        os.environ["SESSIONS_DIR"] = "/tmp/does-not-exist-brr-test"
+        self.addCleanup(
+            lambda: os.environ.pop("SESSIONS_DIR", None) if original is None
+            else os.environ.__setitem__("SESSIONS_DIR", original))
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = brr.main(["--closer", "waiting on the build", "--task", "X"])
+        self.assertEqual(code, 2)
+
+    def test_the_ends_haystack_is_carried_by_row(self):
+        # `--row` is what makes a separate `⏰ Ends:` line visible; exercised through `main`.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            code = brr.main(["--closer", "blocked on the release",
+                             "--row", "blocked on the release\n⏰ Ends: v0.295.0 tagged",
+                             "--task", TASK])
+        self.assertEqual(code, 0, buf.getvalue())
+        self.assertIn("NO-ROUTE", buf.getvalue())
+
     def test_cli_prints_no_route_for_a_closer_that_names_an_owner(self):
-        # A card-id closer names an owner, so no board is consulted and no routing happens.
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
             code = brr.main(["--closer", "approve: card " + "7e55adaf" * 4, "--task", TASK])
