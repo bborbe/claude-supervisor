@@ -587,6 +587,91 @@ def read_gated(s: str) -> list:
         return []
 
 
+_BOX_TABLE = None
+
+
+def box_table():
+    """`box-table.py`, imported — the ONE renderer, for the fallback box.
+
+    `docs/sweep-output.md` § Rendering names this script as the only renderer
+    (*"Never hand-draw the box"*), and it is also that file's documented fallback for
+    a sweep that cannot classify. Imported rather than re-implemented for the reason
+    its own docstring gives: display width, VS16 and OSC 8 are handled there, and a
+    second implementation drifts on every one of them.
+    """
+    global _BOX_TABLE
+    if _BOX_TABLE is None:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "box-table.py")
+        spec = importlib.util.spec_from_file_location("box_table", p)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _BOX_TABLE = mod
+    return _BOX_TABLE
+
+
+#: The goal tier's frame — `Topic / Goal / Task | Session | Status | Phase | Met`
+#: (`docs/sweep-output.md` § The frame). ⚠️ **NOT the topic frame:** the topic tier
+#: renders `Goal | Status | Phase | Met | Manager`. Recognising only one of them is
+#: the defect the sibling task found in `_sweep_rows`, where a goal-tier `--count`
+#: read `0` on every tick.
+GOAL_FRAME_HEADER = ("Topic / Goal / Task", "Session", "Status", "Phase", "Met")
+GOAL_FRAME_WIDTHS = (42, 10, 34, 9, 17)
+#: The topic tier's frame, measured off the payload `manager-receipts/<slug>.sweep`
+#: itself (2026-11-12): content widths 42 · 20 · 10 · 9 · 16.
+TOPIC_FRAME_HEADER = ("Goal", "Status", "Phase", "Met", "Manager")
+TOPIC_FRAME_WIDTHS = (42, 20, 10, 9, 16)
+
+
+def tracked_names(subject: str) -> list[str]:
+    """The tracked set the round resolved, names only — `[]` when it never ran.
+
+    Read from `manager-predispatch.tracked_path()` (the caller's own input file), so
+    the fallback names the rows this round is actually watching rather than a set
+    re-derived here. Names only, by design: a gated tick read no statuses, and
+    inventing them would print a table claiming reads it never made.
+    """
+    try:
+        with open(predispatch().tracked_path(subject), encoding="utf-8") as fh:
+            return [ln.strip() for ln in fh if ln.strip()]
+    except OSError:
+        return []
+
+
+def _fallback_box(subject: str, tier: str, names: list[str]) -> str:
+    """The full frame built from the tracked set, for a tick with no payload to replay.
+
+    One row per tracked name with every other cell `—` (this frame's value for
+    *nothing recorded*), and on the goal tier the subject's own row first with its
+    rows indented beneath it — the shape a real goal payload renders.
+    """
+    if tier == "topic":
+        header, widths = TOPIC_FRAME_HEADER, TOPIC_FRAME_WIDTHS
+        rows = [[n, "—", "—", "—", "—"] for n in names]
+    else:
+        header, widths = GOAL_FRAME_HEADER, GOAL_FRAME_WIDTHS
+        rows = [[subject, "—", "—", "—", "—"]]
+        rows += [["   " + n, "—", "—", "—", "—"] for n in names]
+    return box_table().render(
+        {"header": list(header), "rows": rows, "widths": list(widths)}, link=False
+    )
+
+
+def _payload_body(lines: list[str]) -> list[str]:
+    """The payload's box, with the payload's OWN leading marker dropped.
+
+    ⚠️ **Never `lines[1:]`.** The two tiers' payloads differ: the topic payload opens
+    with a marker line (`16:41 ✓ … — 53 goals`), while the goal payload — written by
+    `--write-payload` — opens with the box's own TOP BORDER. Dropping the first line
+    unconditionally removed that border, so a gated goal tick printed a box with no
+    top edge: the frame the operator's rulings require, one cell short. The marker is
+    whatever precedes the first `┌`, so the split holds for both shapes.
+    """
+    i = 0
+    while i < len(lines) and not lines[i].lstrip().startswith("┌"):
+        i += 1
+    return lines[i:]
+
+
 def render_cached(topic: str, branch: str = "", now: float = None, tier: str = "goal") -> int:
     """Print the cached sweep payload with a FRESH marker for this tick.
 
@@ -596,24 +681,39 @@ def render_cached(topic: str, branch: str = "", now: float = None, tier: str = "
     not run — and that makes a dead loop and a gated one look identical, which is the
     ambiguity the marker exists to remove. The first line is therefore replaced, never
     kept.
+
+    ⚠️ **A tick with no payload to replay still prints a full box**, built from the
+    tracked set by `_fallback_box`, with the marker naming the absence. Before this,
+    the renderer exited 1 and printed nothing, so a subject that had never swept — or
+    whose payload path disagreed with its producer's — printed no table at all, which
+    is the failure `Manager Session` § Sweep output records from the first
+    implementation. An empty box would read as *the sweep ran and had no rows*; the
+    explicit `no cached table yet` is what keeps "no table yet" visible.
     """
     s = slug(topic, branch)
     path = payload_file(topic, tier)
+    stamp = time.strftime("%H:%M", time.localtime(time.time() if now is None else now))
     try:
         with open(path, encoding="utf-8") as fh:
-            lines = fh.read().splitlines()
+            body = _payload_body(fh.read().splitlines())
     except OSError:
-        print(f"no cached sweep payload for {s} — nothing to render", file=sys.stderr)
-        return 1
-    if not lines:
-        print(f"cached sweep payload for {s} is empty", file=sys.stderr)
-        return 1
-    stamp = time.strftime("%H:%M", time.localtime(time.time() if now is None else now))
+        body = []
+        why = f"no cached table yet at {path}"
+    else:
+        why = f"the cached payload for {s} carries no box"
+
+    if not body:
+        names = tracked_names(topic)
+        print(f"{stamp} ✓ {topic} — sweep gated this tick, {why} — "
+              f"{len(names)} row(s) from the tracked set, statuses not read")
+        print(_fallback_box(topic, tier, names))
+        return 0
+
     # The marker names the gate explicitly: a reader comparing ticks must be able to
     # tell "the table is here because nothing changed" from "the table is here and the
     # round ran". Never claim the goal/slot counts — this tick did not read them.
     print(f"{stamp} ✓ {topic} — sweep gated this tick, table from cache")
-    for line in lines[1:]:
+    for line in body:
         print(line)
     return 0
 
@@ -1549,7 +1649,9 @@ def main() -> int:
                       help="print the cached sweep payload with a FRESH timestamped marker "
                            "for this tick — the gated tick's table, per the operator's "
                            "2026-09-15 and 2026-09-20 rulings. The payload's own first line "
-                           "is stale and is replaced, never replayed")
+                           "is stale and is replaced, never replayed. With no payload to "
+                           "replay it still prints the marker plus a full box built from the "
+                           "tracked set, naming the absence — never a silent empty tick")
     mode.add_argument("--tokens", action="store_true",
                       help="print the round's output-token spend: parent transcript plus "
                            "subagents/*.jsonl, windowed round_started_at → now, deduped by "
