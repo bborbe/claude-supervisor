@@ -39,7 +39,7 @@ When: every round, before the pre-dispatch gate
 
   ⚠️ **This is the goal and topic tiers' half of a contract the fleet round writes in `commands/steps/re-arm.md`.** All three tiers can open headless workers and all three answer parks, so all three must refresh. The fleet round does it per tick in its own step; this one covers `commands/goal-drive.md` and `commands/topic-drive.md`, which run this step every round. A tier that emitted neither would have its headless spawns refused once the probe's verdict flips onto the reaches.
 
-  **Leg `mcp` is ONE tool call, and it must actually be made.** `answer_permission` with a sentinel `request_id` that no worker holds. The server finds no park, consults the wrapper (which returns "consulted, no answer" without issuing a POST for an id it does not hold), and replies with the foreign-park message — **that reply is the reach**, and it is the only place the `mcp` leg is written.
+  **Leg `mcp` is ONE tool call, and it must actually be made.** `answer_permission` with a sentinel `request_id` that no worker holds. The server finds no park, consults the wrapper (which returns "consulted, no answer" without issuing a POST for an id it does not hold), and replies with the foreign-park message. The handler records the reach **on entry**, so any `answer_permission` call writes this leg — but a manager that answers no parks writes nothing, which is why this call is still required.
 
   ```
   mcp__supervisor__answer_permission(agent_id="answer-path-reach-sentinel", request_id="answer-path-reach-sentinel", behavior="deny")

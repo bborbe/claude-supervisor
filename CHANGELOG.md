@@ -11,6 +11,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - fix: **the answer-reach sentinel call now passes `agent_id`, so it stops being rejected before it can record anything.** Both step files documented `answer_permission(request_id, behavior)`; the tool's schema declares `agent_id`, `request_id` and `behavior` all required, so the MCP layer refused the call above the handler — no request reached the server and no `mcp` reach was written. Measured 2026-11-12: a manager following the step literally got `agent_id and request_id are required` and wrote no leg; retrying with a sentinel `agent_id` produced the foreign-park reply and the reach.
+- fix: **every documented `answer_permission` call now names `agent_id`.** The same unusable two-argument form was in `commands/steps/worker-channels.md`, `commands/goal-answer.md`, `commands/goal-loop.md`, `docs/fleet-surface.md` and `agents/goal-wrangler.md`; all now carry `agent_id`, so no page teaches a call the schema rejects.
 - fix: **the steps no longer claim a real park cannot write the `mcp` reach.** That was true of the retired JS `server/supervisor.mjs` (real parks settle on another arm) and is false of the Go handler the fleet runs, which records the reach **on entry**, before it decodes arguments or looks the request id up. The sentinel is still required — a manager that answers no parks writes nothing — but the reason changed.
 
 
