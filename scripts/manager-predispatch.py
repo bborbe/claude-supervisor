@@ -208,6 +208,7 @@ import json
 import os
 import re
 import select
+import subprocess
 import sys
 import time
 import unicodedata
@@ -254,6 +255,15 @@ EXIT_WRITE_OK = 0
 # response is the same shape — stop and look rather than proceed — while staying a
 # separate name so a reader cannot mistake it for the digest verdict.
 EXIT_DIVERGENT = 10
+# The `caller-format` verdict is the one divergence that is a hard stop rather than a
+# report: the two memberships share NO name at all, so every downstream read would be
+# attributed to a row that does not exist and would render from empty lists. Measured
+# 2026-11-08 (Development Pipeline Throughput): a tracked set of 38 vault-relative page
+# paths against 543 real task rows classified `caller-format`, the round continued, and
+# the readings document rendered `clear=38 · none=38` for a fleet it never read. Distinct
+# from EXIT_DIVERGENT because the caller's response is different — refuse the round, not
+# "stop and look" — and distinct from EXIT_USAGE because the arguments were well formed.
+EXIT_CALLER_FORMAT = 11
 
 STUCK_SECONDS = 30 * 60
 
@@ -700,8 +710,18 @@ def declared_members(topic_path: str) -> list[str]:
     return members
 
 
-def resolve_tracked(vault: str, members: list[str]) -> list[dict]:
-    """A member may be a goal (admits tasks whose `goals:` name it) or a task.
+def resolve_tracked_by_member(vault: str, members: list[str]) -> tuple[list[dict], list[str]]:
+    """`(tracked tasks, the members that admitted at least one of them)`.
+
+    `resolve_tracked`'s flat list erases *which* member produced a task, and a caller that
+    renders one row per member cannot recover it: a member is a goal name or a task name,
+    and only a task name ever equals a row's `name`. Measured 2026-11-08: a caller deriving
+    its unresolved set from the row names alone would read a goal that admitted 30 tasks as
+    unresolved and carry a spurious `unread` row beside them — the same false negative the
+    member-level report exists to remove, one level down.
+
+    The admission rule lives here and only here; `resolve_tracked` is this function's first
+    half.
 
     Vault-only and pure: it never touches the registry, so a fixture can run it against a
     throwaway vault and get the same values the live run gets.
@@ -709,17 +729,127 @@ def resolve_tracked(vault: str, members: list[str]) -> list[dict]:
     tasks_dir = os.path.join(vault, TASKS_DIRNAME)
     member_set = set(members)
     tracked: list[dict] = []
+    matched: set[str] = set()
     for entry in sorted(os.listdir(tasks_dir)):
         if not entry.endswith(".md"):
             continue
         task = read_task(os.path.join(tasks_dir, entry))
         if task is None:
             continue
+        # Every member that admitted this task, not just the first: one task may name two
+        # tracked goals, and both are resolved.
+        admitted = member_set.intersection(task["goals"])
         if task["name"] in member_set:  # declared directly as a task entry
-            tracked.append(task)
-        elif member_set.intersection(task["goals"]):
-            tracked.append(task)
-    return sorted(tracked, key=lambda t: t["name"])
+            admitted.add(task["name"])
+        if not admitted:
+            continue
+        tracked.append(task)
+        matched |= admitted
+    return sorted(tracked, key=lambda t: t["name"]), sorted(matched)
+
+
+def resolve_tracked(vault: str, members: list[str]) -> list[dict]:
+    """A member may be a goal (admits tasks whose `goals:` name it) or a task.
+
+    Vault-only and pure: it never touches the registry, so a fixture can run it against a
+    throwaway vault and get the same values the live run gets.
+    """
+    return resolve_tracked_by_member(vault, members)[0]
+
+
+# --- the frozen-tree predicate ------------------------------------------------
+#
+# [[Manager Session]] § Cadence mechanics defines it verbatim: "no tracked file's
+# mtime has moved for >= 2 cadence intervals (30 min at the 15-min default), and the
+# tick's content has already left the machine."
+#
+# Both conjuncts are required and they are DIFFERENT claims. The first reads the
+# tracked set's mtimes. The second has no instrument in the runbook, so it is read
+# here: the round's own session ledger must carry no OPEN `asked-of-you`. An open one
+# is a question the operator has not answered — its content has NOT left the machine —
+# and gating over it would hide the one place they read it.
+#
+# ⚠️ This is NOT the digest `--check` computes. That one hashes content and liveness
+# and deliberately excludes raw mtime; `round-quiet.md` states the two are "a
+# different predicate, not a second spelling of this one", and neither may be read as
+# evidence for the other.
+# ⚠️ NOT under `STATE_DIR`. That is `~/.claude/state/manager-predispatch`, this script's
+# own store — deriving the ledger from it reads a directory that never exists, so
+# `open_asked_of_you()` returns `[]` on every call and the predicate silently collapses
+# to mtime-only. That is precisely the failure the gate exists to prevent, and it fails
+# silently: a missing ledger is a legitimate empty answer, so nothing distinguishes it.
+# The ledger's home is `open-items.py`'s: `~/.claude/state/open-items`.
+OPEN_ITEMS_DIR = os.path.expanduser(
+    os.environ.get("SUPERVISOR_OPEN_ITEMS_DIR", "~/.claude/state/open-items")
+)
+CADENCE_INTERVAL_SECONDS = 15 * 60
+FROZEN_INTERVALS = 2
+
+
+def open_asked_of_you(session_id: str = "") -> list[dict]:
+    """OPEN `asked-of-you` entries in one session's ledger; `[]` when unreadable.
+
+    Unreadable is `[]` on purpose: a session with no ledger asked the operator
+    nothing, and failing closed here would freeze the gate forever on every session
+    that never used the ledger.
+    """
+    sid = session_id or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if not sid:
+        return []
+    try:
+        with open(os.path.join(OPEN_ITEMS_DIR, f"{sid}.json"), encoding="utf-8") as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    items = d.get("items") if isinstance(d, dict) else None
+    return [
+        i for i in (items or [])
+        if isinstance(i, dict)
+        and i.get("kind") == "asked-of-you"
+        and i.get("state") == "open"
+    ]
+
+
+def frozen_tree(vault: str, subject: str, now: float | None = None,
+                interval_seconds: int = CADENCE_INTERVAL_SECONDS,
+                intervals: int = FROZEN_INTERVALS) -> dict:
+    """The frozen-tree predicate's verdict, both conjuncts evaluated."""
+    now = time.time() if now is None else now
+    _, members = resolve_subject(vault, subject)
+    tracked = resolve_tracked(vault, members)
+    mtimes = [t["mtime"] for t in tracked if t.get("mtime")]
+    newest = max(mtimes) if mtimes else None
+    window = intervals * interval_seconds
+    quiet = newest is None or (now - newest) >= window
+    asks = open_asked_of_you()
+    return {
+        "frozen": bool(quiet and not asks),
+        "tracked": len(tracked),
+        "newest_mtime": newest,
+        "quiet_seconds": None if newest is None else int(now - newest),
+        "window_seconds": window,
+        "open_asks": [i.get("text", "") for i in asks],
+    }
+
+
+def predicate(vault: str, subject: str) -> int:
+    """Print the verdict and its two reads; exit 0 only when frozen."""
+    v = frozen_tree(vault, subject)
+    if v["frozen"]:
+        print(
+            f"FROZEN — newest tracked mtime {v['quiet_seconds']}s ago "
+            f"(window {v['window_seconds']}s), 0 open asked-of-you, {v['tracked']} tracked"
+        )
+        return 0
+    why = []
+    if v["quiet_seconds"] is not None and v["quiet_seconds"] < v["window_seconds"]:
+        why.append(
+            f"a tracked file moved {v['quiet_seconds']}s ago (window {v['window_seconds']}s)"
+        )
+    if v["open_asks"]:
+        why.append(f"{len(v['open_asks'])} open asked-of-you")
+    print(f"NOT-FROZEN — {'; '.join(why) or 'no tracked files'}")
+    return 1
 
 
 def page_type_of(path: str) -> str:
@@ -1262,11 +1392,170 @@ def read_holds() -> dict:
     return holds if isinstance(holds, dict) else {}
 
 
+# --------------------------------------------------------------------------- #
+# the Hold window -- the second source of heldness
+# --------------------------------------------------------------------------- #
+#
+# A pane parked in the WezTerm role map's Hold window is held with no store entry
+# at all: the operator's statement is the pane's POSITION, not a `hold` call. It is
+# resolved at read time from the map's `Hold.window_id` plus `wezterm cli list`, and
+# never persisted -- a stored entry would outlive the pane leaving the window, so
+# the hold would then be unreleasable by the gesture that set it. Inlined, like
+# `read_holds` above: the plugin's scripts do not import each other.
+
+# The WezTerm role map. Same variable the server reads (`server/config.mjs`) and
+# `session-holds.py` reads, so a test can point at a tmp map exactly as it already
+# points `SUPERVISOR_SESSION_HOLDS` at a tmp store.
+ROLE_MAP = os.environ.get("SUPERVISOR_ROLE_MAP") or os.path.expanduser(
+    "~/.cache/wezterm-role-map.json"
+)
+
+
+def panes():
+    """Every WezTerm pane, or `None` when the query FAILED.
+
+    ⚠️ `None`, never `[]`: a failed `wezterm cli list` cannot prove a pane is gone
+    any more than it can prove one is live, so no caller may read it as "no panes
+    exist". `[]` is reserved for a transport that answered with zero panes.
+
+    ⚠️ A machine with no `wezterm` BINARY is a fourth state and answers `[]`: an
+    absent transport has no panes, and the Hold window is a WezTerm concept, so
+    where WezTerm is not installed there is nothing for it to apply to. Only
+    `FileNotFoundError` reads that way; any other `OSError` (a mux socket that is
+    gone) is a genuine failure and stays `None`. See `docs/pane-reads.md`.
+    """
+    try:
+        result = subprocess.run(
+            ["wezterm", "cli", "list", "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return []
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        listing = json.loads(result.stdout)
+    except ValueError:
+        return None
+    return listing if isinstance(listing, list) else None
+
+
+# The activity glyph WezTerm puts in front of a pane title (`✳` active, `◑`/`◐`
+# otherwise). Decoration on the title, never part of the name.
+_GLYPH = re.compile(r"^[^\w\s]{1,2}\s+")
+
+
+def registry_names():
+    """name -> session id, for the pane join. Later entries win on a clash."""
+    names = {}
+    for path in glob.glob(os.path.join(REGISTRY_DIR, "*.json")):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        sid = data.get("sessionId") or data.get("session_id")
+        name = data.get("name")
+        if sid and name:
+            names[name] = sid
+    return names
+
+
+def session_pane(session_id, listing):
+    """The pane currently showing this session, or None when the listing has none.
+
+    The registry carries no pane id, so a session id joins to its pane through the
+    registry `name`, which is what the tab TITLE carries -- the same join the
+    server's `findRegisteredByName` uses.
+    """
+    names = registry_names()
+    for pane in listing:
+        title = pane.get("title") or ""
+        name = title if title in names else _GLYPH.sub("", title)
+        if names.get(name) == session_id:
+            return pane.get("pane_id")
+    return None
+
+
+def pane_window(pane_id, listing):
+    """The WezTerm window id owning this pane, or None when the listing has none.
+
+    Read straight off the pane record, with no name join, so it answers for a
+    Hold-window pane whose title the registry does not know.
+    """
+    for pane in listing:
+        if str(pane.get("pane_id")) == str(pane_id):
+            window = pane.get("window_id")
+            if isinstance(window, bool) or not isinstance(window, int):
+                return None
+            return window
+    return None
+
+
+def hold_window_id():
+    """The role map's Hold window id, or None when it cannot be read.
+
+    Read directly from the map's `Hold.window_id`, never through the server's role
+    map: its `ROLES` deliberately excludes Hold, because the Hold window is a
+    parking lot rather than a role and is never spawned into.
+    """
+    try:
+        with open(ROLE_MAP, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    entry = data.get("Hold") if isinstance(data, dict) else None
+    window = entry.get("window_id") if isinstance(entry, dict) else None
+    if isinstance(window, bool) or not isinstance(window, int):
+        return None
+    return window
+
+
+def in_hold_window(target):
+    """Whether session `target` sits in the role map's Hold window.
+
+    Three states, per `docs/pane-reads.md`: `True` in the window, `False` not in
+    it, `None` when the pane listing could NOT be read, so the question is
+    unanswered. A missing role map, an unreadable one, or one carrying no `Hold`
+    key is NOT that third state -- it is the documented fallback to explicit holds
+    only, and it answers `False`.
+    """
+    window = hold_window_id()
+    if window is None:
+        return False
+    listing = panes()
+    if listing is None:
+        return None
+    pane = target if str(target).isdigit() else session_pane(target, listing)
+    if pane is None:
+        return False
+    return pane_window(pane, listing) == window
+
+
 def is_held(session_id: str) -> bool:
-    """True when this session carries a hold. Never raises."""
+    """True when this session carries a hold -- store or Hold window. Never raises.
+
+    The second source is the WezTerm Hold window: a pane parked there is held with
+    no store entry, resolved at read time.
+
+    ⚠️ A failed pane read answers *not held* here, and that is the safe direction
+    for THIS caller rather than a collapse. The value is only ever a DIGEST INPUT
+    (`digest_of`), and this gate is fail-open -- CHANGE authorises a sweep, it never
+    suppresses one. So a missed Hold-window hold costs one un-moved digest while the
+    held row still renders on the next tick, whereas inventing a hold would make the
+    gate answer CHANGE on every tick for as long as the transport stayed down,
+    defeating the saving the gate exists for. That is the same direction the store
+    read above documents, and the two must agree.
+    """
     if not session_id:
         return False
-    return isinstance(read_holds().get(session_id), dict)
+    if isinstance(read_holds().get(session_id), dict):
+        return True
+    return in_hold_window(session_id) is True
 
 
 def liveness_change_term(t: dict) -> int:
@@ -2505,6 +2794,16 @@ def main(argv: list[str]) -> int:
         ),
     )
     mode.add_argument(
+        "--predicate",
+        action="store_true",
+        help=(
+            "evaluate the frozen-tree predicate — BOTH conjuncts: no tracked file's "
+            "mtime moved for >= 2 cadence intervals, AND no open `asked-of-you` in this "
+            "session's ledger — printing FROZEN or NOT-FROZEN with its reads; exit 0 "
+            "only when frozen. This is not the digest `--check` computes"
+        ),
+    )
+    mode.add_argument(
         "--write-payload",
         action="store_true",
         help="write the rendered table (on stdin) to <slug>.table, for --save to read",
@@ -2545,6 +2844,9 @@ def main(argv: list[str]) -> int:
         # is told the argument was wrong instead of being handed a fail-open sweep.
         print(vault_error, file=sys.stderr)
         return EXIT_USAGE
+
+    if args.predicate:
+        return predicate(args.vault, args.subject)
 
     if args.content_keys:
         # The single home of the derivation clause (1) used to carry as prose. The leg is an
@@ -2863,6 +3165,18 @@ def main(argv: list[str]) -> int:
         if kind == DIVERGENCE_HEALTHY:
             print(f"✅ COMPARE healthy — {sentence}")
             return EXIT_NOCHANGE
+        if kind == DIVERGENCE_CALLER_FORMAT:
+            # Refuse, do not report: nothing downstream can attribute a verdict to a row
+            # when the two sets share no name, so continuing writes a document that reads
+            # as a quiet fleet while it is really a wrong-form scan. Printed BEFORE the
+            # names so the caller's first line is the verdict, not a list to interpret.
+            print(f"⛔ COMPARE caller-format — {sentence}")
+            for label, names in (("caller-only", only_mine), ("gate-only", only_gate)):
+                for n in names[:10]:
+                    print(f"  {label}: {n}")
+                if len(names) > 10:
+                    print(f"  … and {len(names) - 10} more {label}")
+            return EXIT_CALLER_FORMAT
         print(f"⚠️ DIVERGENCE ({kind}): {sentence}")
         for label, names in (("caller-only", only_mine), ("gate-only", only_gate)):
             for n in names[:10]:

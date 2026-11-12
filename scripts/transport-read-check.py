@@ -44,7 +44,24 @@ SITE_LIST = {
     ("jump.py", "activate_pane_by_id"), ("jump.py", "activate_tab"),
     ("jump.py", "current_window"), ("jump.py", "main"),
     ("jump.py", "pane_sessions"), ("jump.py", "wezterm_panes"),
-    ("session-holds.py", "pane_title"),
+    # ⚠️ As of 2026-10-12 `pane_title` is a CALLER here, not the transport call: the
+    # `wezterm cli list` read moved into `panes()`, which the walk derives as the seed.
+    # It keeps the three-state contract — `None` on a failed query, `[]` only for a
+    # reachable WezTerm holding nothing — because the Hold-window predicate joins
+    # through it, and a failed read collapsed into "no panes" would silently un-hold
+    # every pane in the Hold window. `pane_title` stays listed for the closure, the
+    # same way every other caller is.
+    ("session-holds.py", "panes"), ("session-holds.py", "pane_title"),
+    # added 2026-10-12 — the SAME Hold-window predicate inlined into the four
+    # consumers that decide whether a session is held: `manager-predispatch.py`
+    # (digest input), `notify-gate.py` (escalation suppression), `restart-worker.py`
+    # (restart refusal) and `orphan-candidates.py` (candidate drop). Each carries its
+    # own `panes()` with the identical three-state contract — `None` on a failed
+    # `wezterm cli list`, `[]` only for a reachable WezTerm holding nothing (or an
+    # absent `wezterm` binary). A failed read collapsed into "no panes" would silently
+    # un-hold every pane in the Hold window at that consumer.
+    ("manager-predispatch.py", "panes"), ("notify-gate.py", "panes"),
+    ("restart-worker.py", "panes"), ("orphan-candidates.py", "panes"),
     # added 2026-10-05 — `open-items.py`'s pane-existence probe, the read half of the new
     # origin record. `classify` asks whether an entry's recorded raising pane still exists;
     # `live_panes` is that query, and it must keep the same three-state contract as every
@@ -59,6 +76,19 @@ SITE_LIST = {
     # `session-liveness.py` holds no `subprocess` call at all.
     ("session-identity.py", "_ps_starts"),
     ("stop-probe.py", "gate_processes"),
+    # added 2026-11-08 — `reap-idle-headless.py`'s watcher probe: `pgrep -P` plus a
+    # `ps -o args=` per child, asking whether a backgrounded command is still running.
+    # It carries the three-state contract for a sharper reason than most: `None` means
+    # the tree could not be read and the verb REFUSES, `[]` means read-and-empty and the
+    # close may proceed, and a list means a watcher would die with the process. Collapsing
+    # `None` into `[]` would reap a worker whose watcher was merely unobservable.
+    ("reap-idle-headless.py", "watchers"),
+    # the same file's pid-identity read: `ps -o lstart=` taken before and after the guards.
+    # `None` means the start time could not be read and the caller REFUSES — an identity
+    # that was never established is never signalled, so there is no fallback path; a string
+    # means it was read. Never collapsed into "no process", which would make a recycled pid
+    # indistinguishable from a live one.
+    ("reap-idle-headless.py", "process_start"),
     # added 2026-10-07 — `plugin-version-census.py`, the fleet reading of which plugin
     # version each live session serves. Its two READS keep the three-state contract and are
     # driven below: `wezterm_panes` (the pane map the jump target is joined through) and
@@ -135,6 +165,17 @@ SITE_LIST = {
     # collapsing one into an empty result — so it is enumerated for the mechanism/list
     # agreement and, like `close-worker.py`'s `main`, deliberately not driven.
     ("spawn-goal.py", "pane_text"), ("spawn-goal.py", "send"),
+    # added 2026-11-08 — the fleet-triage pane wake's two viewport reads (#692). `None` on a
+    # failed `get-text`: the guard maps it to `error:unreadable` and the wake skips the pane,
+    # so a failed read can never read as an empty, wakeable composer.
+    ("pane-wake-guard.py", "read_pane"), ("pane-wake.py", "read_pane"),
+    # added 2026-11-11 — `manager-wake.py`'s `wake`, the `wezterm cli send-text` the
+    # pane-wake half of "Wire the Sweep Gate Verdict Into the Manager Wake" types with.
+    # ⚠️ It is an ACTION, not a read: it reports its own failure and types nothing when
+    # the guard refuses, so it is enumerated for mechanism/list agreement and
+    # deliberately not driven into the three states. The pane JOIN it uses is `jump.py`'s
+    # `wezterm_panes` / `pane_sessions`, already enumerated and driven.
+    ("manager-wake.py", "wake"),
     # added 2026-10-22 — `manager-attention-watch.py`'s pane-title read, the join that
     # gives a re-registered park card its jump target. It returns `None` for a failed
     # query, never `""`: a `wezterm cli list` that never answered cannot prove a pane is
@@ -153,6 +194,25 @@ SITE_LIST = {
     # so the mechanism and this list agree; like `spawn-goal.py`'s `send` it is also an
     # ACTION, so it is deliberately not driven into the three states below.
     ("fleet-keeper.py", "wezterm"),
+    # added 2026-11-10 — `fleet-reset.py`'s three `ps` reads behind the stop leg. They are
+    # PREDICATES, not read-and-render sites, and each fails CLOSED rather than empty:
+    # `own_pids` protects this process and its parent even when the walk fails (so a broken
+    # read can never shrink the protected set to nothing), `pid_alive` answers True when the
+    # state cannot be read (so an entry is kept, never cleared over a process that may be
+    # alive), and `proc_comm` answers '' (so the process-shape guard refuses to signal).
+    # Enumerated for mechanism/list agreement; deliberately NOT driven into the three states,
+    # because their broken answer is a conservative refusal and not an empty read — driving
+    # them would assert `broken -> None`, which is the wrong contract for a fail-closed
+    # predicate. Same shape as `restart-worker.py`'s `worker_argv` above.
+    ("fleet-reset.py", "own_pids"), ("fleet-reset.py", "pid_alive"),
+    ("fleet-reset.py", "proc_comm"),
+    # added 2026-11-10 — `fleet-reset.py`'s `_pid_alive`, the strip guard's corroboration:
+    # it asks whether the identity registry's recorded pid is still running, and answers
+    # True when the read fails, so a task link is KEPT rather than stripped over a process
+    # that may still be alive. Same fail-closed predicate shape as the three above —
+    # enumerated for mechanism/list agreement, deliberately NOT driven into the three
+    # states, because its broken answer is a conservative refusal, not an empty read.
+    ("fleet-reset.py", "_pid_alive"),
 }
 
 
@@ -211,10 +271,17 @@ POPULATED = {
     ("oi", "live_panes"): '[{"pane_id": "204", "title": "t"}]',
     ("pvc", "wezterm_panes"): '[{"pane_id": "204", "tty_name": "/dev/ttys001"}]',
     ("pvc", "_pid_ttys"): "101 ttys001",
+    ("sh", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
+    ("mp", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
+    ("ng", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
+    ("rw", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
+    ("oc", "panes"): '[{"pane_id": 874, "window_id": 11, "title": "✳ t"}]',
     ("mmf", "wezterm_panes"): '[{"pane_id": "204", "title": "t"}]',
     ("mmf", "pane_lines"): "context\nEnter to select",
     ("sg", "pane_text"): "  ⎿  Goal set: Task \"t\" is finished.",
     ("ser", "_process_table"): "101 1 claude",
+    ("pwg", "read_pane"): "\u276f\u00a0",
+    ("pw", "read_pane"): "\u276f\u00a0",
 }
 
 
@@ -286,10 +353,18 @@ def main():
             ("sp", "stop-probe.py"),
             ("oi", "open-items.py"),
             ("pvc", "plugin-version-census.py"),
+            ("sh", "session-holds.py"),
+            ("mp", "manager-predispatch.py"),
+            ("ng", "notify-gate.py"),
+            ("rw", "restart-worker.py"),
+            ("oc", "orphan-candidates.py"),
             ("wnmh", "who-needs-my-help.py"),
             ("mmf", "manager-menu-footer.py"),
             ("sg", "spawn-goal.py"),
             ("ser", "session-exit-record.py"),
+            ("rih", "reap-idle-headless.py"),
+            ("pwg", "pane-wake-guard.py"),
+            ("pw", "pane-wake.py"),
         )
     }
 
@@ -315,6 +390,9 @@ def main():
         ("fs", "live_processes", ()), ("sp", "gate_processes", ()),
         ("oi", "live_panes", ()),
         ("pvc", "wezterm_panes", ()), ("pvc", "_pid_ttys", ([1],)),
+        ("sh", "panes", ()),
+        ("mp", "panes", ()), ("ng", "panes", ()),
+        ("rw", "panes", ()), ("oc", "panes", ()),
         # The viewport read takes a pane id; any id reaches the subprocess, and the
         # three states are what matter — broken must be `None`, and a reachable
         # transport answering with nothing must not become a failure.
@@ -330,6 +408,14 @@ def main():
         ("sg", "pane_text", (1,)),
         # added 2026-11-06 — the observer's process-tree read, driven like `pvc._pid_ttys`.
         ("ser", "_process_table", ()),
+        # added 2026-11-08 — the reap verb's two transport reads, DRIVEN and not merely
+        # listed. An enumeration entry nothing reaches is a false green for exactly the
+        # read it claims to protect (the `mmf` pair above was found that way), and here
+        # the property is load-bearing: `watchers` returning `[]` for an unreadable tree
+        # would reap a worker whose background watcher was merely unobservable.
+        ("rih", "watchers", (1,)), ("rih", "process_start", (1,)),
+        # added 2026-11-08 — the pane wake's viewport reads, driven like `sg.pane_text`.
+        ("pwg", "read_pane", (1,)), ("pw", "read_pane", (1,)),
     ]
     if args.capture:
         print(f"== three-state captures — {os.path.abspath(args.tree)}")

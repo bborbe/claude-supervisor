@@ -342,17 +342,20 @@ def _registration(session_id):
 
 
 def _liveness_ok(subject, branch, module=None):
-    """Whether `subject`'s manager loop on `branch` is armed and fresh — state `OK`.
+    """Whether `subject`'s manager loop on `branch` is armed and fresh — `OK` or `SLEEPING`.
 
-    ⚠️ **Only `OK` suppresses.** `STALE`, `STOPPED`, `UNARMED`, `INVALID` and every refusal
-    (an unknown branch raises inside `slug`) leave the goal qualifying. The registration
-    directory is documented as never cleaned, so a registration outlives its session; a
-    stale one that suppressed would hide a genuinely manager-less goal, and hiding work is
-    the silent direction. Failing to suppress posts a card the operator can decline.
+    ⚠️ **`OK` and `SLEEPING` suppress; nothing else does.** A sleeping manager is a LIVE
+    owner waiting on its own `defer_date` — proposing a second one would be the
+    double-writer failure, and accepting the card would put two managers on one subject.
+    `STALE`, `STOPPED`, `UNARMED`, `INVALID` and every refusal (an unknown branch raises
+    inside `slug`) leave the goal qualifying. The registration directory is documented as
+    never cleaned, so a registration outlives its session; a stale one that suppressed
+    would hide a genuinely manager-less goal, and hiding work is the silent direction.
+    Failing to suppress posts a card the operator can decline.
     """
     try:
         module = module or _liveness()
-        return module.classify(module.slug(subject, branch), time.time())[0] == "OK"
+        return module.classify(module.slug(subject, branch), time.time())[0] in ("OK", "SLEEPING")
     except (AttributeError, OSError, ValueError):
         return False
 

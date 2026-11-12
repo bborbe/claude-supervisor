@@ -34,6 +34,7 @@ allowed-tools:
   - mcp__tts__say
   - mcp__supervisor__list_agents
   - mcp__supervisor__agent_status
+  - mcp__supervisor__answer_permission
 argument-hint: "[topic] [--interval <N>m] (topic detected when omitted)"
 ---
 ⚠️ **A voiced question is also a board card** — any `mcp__tts__say` containing `?` is paired with an `attention-ask.py post` within 60 s. Rule and detector: [`docs/voice-asks.md`](../docs/voice-asks.md).
@@ -144,12 +145,18 @@ detection resolve **once** at manager start, never per wakeup.
 
    ```bash
    python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/manager-liveness.py \
-     --arm --subject "<topic>" --branch topic --interval <the clamped seconds just armed>
+     --arm --resume --subject "<topic>" --branch topic --interval <the clamped seconds just armed>
    ```
 
    ⚠️ **`--branch topic` is not optional** — the state slug carries the tier
    (`topic--<base>`), so a topic and a goal that share a name never overwrite each other's
    cadence record.
+
+   ⚠️ **`--resume` is what keeps the documented `Restart: /supervisor:topic-loop "<subject>"`
+   working.** A plain `--arm` never clears `<slug>.stopped`: an arm is the round's
+   *reading*, and a reading that cleared the marker is how a deliberate stand-down got
+   erased (measured 2026-11-07 — stood down 12:13, read 12:51, restarted at 13:14). This
+   loop-start arm is the one place that passes it; a round's liveness step must never.
 
    ⚠️ **The wakeup target carries a hard ceiling — ≤10 KB — and `scripts/check-budget.py`
    enforces it.** `commands/topic-drive.md` is in that checker's explicit `WAKEUP_TARGETS`

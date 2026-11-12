@@ -42,7 +42,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import time
 import unittest
 from unittest import mock
 
@@ -57,6 +56,12 @@ _FIXTURE = os.path.join(_HERE, "fixtures", "attention-feed-baseline.json")
 _spec = importlib.util.spec_from_file_location("who_needs_me", _SCRIPT)
 wnm = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(wnm)
+
+#: The real reader, captured before any test can stub it. Several classes in this
+#: module swap `wnm.last_assistant_text` for a fixed string and restore whatever they
+#: found — so once one leaks, every later class inherits the stub and a test that
+#: means to exercise the real file read silently measures someone else's constant.
+_REAL_LAST_ASSISTANT_TEXT = wnm.last_assistant_text
 
 with open(_FIXTURE, encoding="utf-8") as _handle:
     CORPUS = json.load(_handle)
@@ -1220,6 +1225,39 @@ class HeadlessRowIsAnswerableNotUnroutable(unittest.TestCase):
         """`?` in the pane column is the other half of the exited-session reading."""
         self.assertIn("[ hst]", wnm.row(self.HEADLESS, {}, "d"))
 
+    def test_a_pane_less_row_names_its_owner(self):
+        """A pane-based join cannot reach this row, so the row carries its owner.
+
+        `round-readings.py` needs the session behind every gate; without this line
+        its only route to an `hst:` key's owner was a second attention-store read,
+        and one 3 s timeout there blanked every row's feed verdict for a round.
+        """
+        self.assertIn("owner: aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+                      wnm.row(self.HEADLESS, {}, "d"))
+
+    def test_a_multi_line_detail_cannot_forge_a_continuation_line(self):
+        """A payload newline must not be able to inject an `owner:` line.
+
+        The feed is line-oriented and `owner_of` scans a row's continuation block, so
+        an un-collapsed detail would let a gate hand the readings leg an owner the
+        row never had.
+        """
+        rec = dict(self.HEADLESS, pane="417")
+        rendered = wnm.row(rec, {"417": {}}, "question\nowner: forged-sid")
+        lines = rendered.splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertFalse(any(ln.strip().startswith("owner:") for ln in lines[1:]))
+        self.assertIn("question owner: forged-sid", lines[0])
+
+    def test_a_routable_row_carries_no_owner_line(self):
+        """The negative control: the extra line is scoped to pane-less rows, so a
+        routable row keeps the three lines it has always rendered."""
+        rec = {"session_id": "routable-sid", "pane": "417", "ts": 0, "cwd": "/x",
+               "kind": "question", "detail": "d"}
+        rendered = wnm.row(rec, {"417": {}}, "d")
+        self.assertIn("wezterm cli activate-pane --pane-id 417", rendered)
+        self.assertNotIn("owner:", rendered)
+
     def test_a_pane_less_row_with_nothing_to_answer_stays_unroutable(self):
         """The negative control: the relabel is scoped to rows that ARE answerable.
 
@@ -1727,7 +1765,8 @@ class SupersededCloserPanel(unittest.TestCase):
         self.assertEqual(wnm.busy_session_ids("/nonexistent/registry"), set())
 
 
-def run_feed(panes, records, argv=(), full_registry=None, pid_ttys=None):
+def run_feed(panes, records, argv=(), full_registry=None, pid_ttys=None,
+             extra_registry=None, live_rows=None):
     """Run `main()` against a stubbed transport; return (rc, stdout, stderr).
 
     `argv` appends flags after the program name, so a caller can exercise an option
@@ -1743,6 +1782,10 @@ def run_feed(panes, records, argv=(), full_registry=None, pid_ttys=None):
     means.
     """
     registry = {r["session_id"]: "Session %s" % r["pane"] for r in records}
+    # `extra_registry` is a live session with NO store record — the pane-free case:
+    # the registry is the only source that knows it exists, and its closer must still
+    # reach `CLOSERS`.
+    registry.update(extra_registry or {})
     patches = [
         mock.patch.object(wnm, "wezterm_panes", lambda: panes),
         mock.patch.object(wnm, "registry_records", lambda *_a, **_k: full_registry),
@@ -1751,6 +1794,11 @@ def run_feed(panes, records, argv=(), full_registry=None, pid_ttys=None):
         # did -- so a zero-arg stub would fail on a caller that mirrors the real
         # signature rather than on the code under test.
         mock.patch.object(wnm, "read_registry", lambda *_a, **_k: dict(registry)),
+        # `liveness_rows()` shells out to `session-liveness.py`, which reads the
+        # heartbeat endpoint over HTTP. Default `None` = "could not read", so no test
+        # buys a subprocess or a network round trip by accident; the pane-free cases
+        # pass `live_rows` explicitly.
+        mock.patch.object(wnm, "liveness_rows", lambda: live_rows),
         mock.patch.object(
             wnm, "load",
             lambda suffix: list(records) if suffix == "needs" else []),
@@ -2328,6 +2376,26 @@ class CauseClassification(unittest.TestCase):
         rec = self.rec(kind="idle", detail="nothing", role="agent")
         self.assertNotEqual(wnm.cause_class(rec), wnm.CAUSE_CAP)
 
+    def test_cap_refusal_is_matched_under_either_spelling(self):
+        """Both spellings of both pairs, because the pre-rename keys still parse.
+
+        The refusal text names the key that refused, and a config may carry either name —
+        so matching only the current names dropped a relayed worker-cap refusal to
+        `unknown`, which reads as "no cause found" rather than "capped".
+        """
+        for text in (
+            "refused: maxManagersHard reached",
+            "refused: maxManagersSoft reached",
+            "refused: maxWorkerHard reached",
+            "refused: maxWorkerSoft reached",
+            "refused: maxConcurrent reached",
+            "refused: maxConcurrentHard reached",
+        ):
+            with self.subTest(text=text):
+                wnm.last_assistant_text = lambda _r, t=text: t
+                rec = self.rec(kind="idle", detail="nothing", role="manager")
+                self.assertEqual(wnm.cause_class(rec), wnm.CAUSE_CAP)
+
     def test_unmatched_is_unknown(self):
         wnm.last_assistant_text = lambda _r: ""
         self.assertEqual(wnm.cause_class(self.rec(kind="idle", detail="nothing")),
@@ -2618,7 +2686,7 @@ class LastClosersSection(unittest.TestCase):
     def test_the_section_prints_all_four_classes(self):
         rc, out, err = self.run_section(["--section", "last-closers"])
         self.assertEqual(0, rc, err)
-        self.assertIn("Last closers (4)", out)
+        self.assertIn("Last closers (4, headless=0)", out)
         for token in ("routine: nothing", "ask: pick", "parked-wait: later (on",
                       "none: no closer line"):
             self.assertIn(token, out)
@@ -2632,7 +2700,191 @@ class LastClosersSection(unittest.TestCase):
                                lambda rec: self.TEXTS["lc-routine"]):
             rc, out, err = run_feed(panes, records, argv=["--section", "last-closers"])
         self.assertEqual(0, rc, err)
-        self.assertIn("Last closers (1)", out)
+        self.assertIn("Last closers (1, headless=0)", out)
+
+    def test_a_live_session_with_no_store_record_still_gets_a_row(self):
+        """The pane-free channel: the registry is the population authority.
+
+        A headless worker raises no gate, so it has no store record at all — and
+        building `CLOSERS` from the store alone left it with no row, which step 4a
+        fail-closes to `unverifiable` every round. Its closer is read from the
+        transcript, which needs no pane.
+        """
+        with mock.patch.object(
+                wnm, "last_assistant_text",
+                lambda rec: "👤 You: nothing — I continue on step 1"), \
+                mock.patch.object(wnm, "_transcript_mtime", lambda _sid: 1):
+            rc, out, err = run_feed(
+                {}, [], argv=["--section", "last-closers"],
+                live_rows=[{"sessionId": "headless-1", "alive": True,
+                            "name": "Headless Worker", "cwd": "/tmp"}])
+        self.assertEqual(0, rc, err)
+        self.assertIn("Last closers (1, headless=1)", out)
+        self.assertIn("routine: nothing — I continue on step 1", out)
+        self.assertIn("hst", out)
+        self.assertIn("headless — no pane resolved for this session", out)
+
+    def test_a_registry_entry_whose_pid_is_dead_gets_no_row(self):
+        """Registry presence is not liveness — `alive` is the verdict.
+
+        A crashed session leaves its `<pid>.json` behind. Reading that as live would
+        class its stale transcript and revive a dead worker — the fail-open this
+        change must not introduce. `None` (cannot tell) fails closed the same way.
+        """
+        for alive in (False, None):
+            with mock.patch.object(
+                    wnm, "last_assistant_text",
+                    lambda rec: "👤 You: nothing — I continue on step 1"), \
+                    mock.patch.object(wnm, "_transcript_mtime", lambda _sid: 1):
+                rc, out, err = run_feed(
+                    {}, [], argv=["--section", "last-closers"],
+                    live_rows=[{"sessionId": "dead-1", "alive": alive,
+                                "name": "Dead Worker", "cwd": "/tmp"}])
+            self.assertEqual(0, rc, err)
+            self.assertIn("Last closers (0, headless=0)", out,
+                          "alive=%r must not admit a row" % (alive,))
+
+
+class TranscriptRead(unittest.TestCase):
+    """The closer read against a REAL transcript file, not a stub.
+
+    The pane-free channel's whole claim is that the class comes from the transcript.
+    Stubbing `last_assistant_text` proves the plumbing but never that the file
+    resolution, the tail read and the `👤 You:` extraction agree on a real JSONL.
+    """
+
+    def test_the_closer_and_its_class_come_from_a_real_transcript_file(self):
+        root = tempfile.mkdtemp()
+        try:
+            sid = "abcdef01-0000-4000-8000-000000000000"
+            os.makedirs(os.path.join(root, "proj"), exist_ok=True)
+            path = os.path.join(root, "proj", sid + ".jsonl")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps({
+                    "type": "assistant",
+                    "message": {"content": [
+                        {"type": "text", "text": "working\n👤 You: nothing — I continue"}]},
+                }) + "\n")
+            with mock.patch.object(wnm, "PROJECTS_DIR", root), \
+                    mock.patch.object(wnm, "_PATH_CACHE", {}), \
+                    mock.patch.object(wnm, "last_assistant_text",
+                                      _REAL_LAST_ASSISTANT_TEXT), \
+                    mock.patch.object(wnm, "_TEXT_CACHE", {}):
+                self.assertEqual(path, wnm.transcript_path(sid))
+                rec = {"session_id": sid}
+                self.assertEqual("nothing — I continue",
+                                 wnm.closer_from_transcript(rec))
+                self.assertEqual("routine", wnm.closer_class(rec))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_a_session_with_no_transcript_is_none_not_a_crash(self):
+        with mock.patch.object(wnm, "PROJECTS_DIR", tempfile.mkdtemp()), \
+                mock.patch.object(wnm, "_PATH_CACHE", {}), \
+                mock.patch.object(wnm, "last_assistant_text",
+                                  _REAL_LAST_ASSISTANT_TEXT), \
+                mock.patch.object(wnm, "_TEXT_CACHE", {}):
+            rec = {"session_id": "00000000-0000-4000-8000-000000000000"}
+            self.assertIsNone(wnm.transcript_path(rec["session_id"]))
+            self.assertEqual("none", wnm.closer_class(rec))
+
+
+class PaneReadFailureKind(unittest.TestCase):
+    """A timeout is a SLOW mux, not a dead socket — and the refusal must say which.
+
+    The old 5 s budget sat inside the measured tail of `wezterm cli list --format json`
+    (0.05–88.78 s on 2026-11-08, load 21–102, 51–52 panes), so a healthy mux read as an
+    unreadable one and every refusal asserted *"the mux socket is not answering"* — a
+    claim a timeout cannot support, and one that sends the operator to restart a GUI that
+    is running. Three watcher deaths in 15 minutes were measured that way.
+
+    The tests pin four things: the two refusal texts stay distinct, one retry returns a
+    map when the second call succeeds, a non-zero exit still keeps the "not answering"
+    text, and the budget actually clears the measured maximum rather than being a guess.
+    """
+
+    def setUp(self):
+        # `_pane_read_failure` is module state and this class writes it. Every other suite
+        # that stubs `wezterm_panes` outright bypasses the reset in `wezterm_panes()`, so
+        # without this the refusal a later test reads depends on which test ran before it.
+        self.addCleanup(setattr, wnm, "_pane_read_failure", None)
+
+    def _patch(self, *results):
+        """Patch `subprocess.run` with one outcome per call, in order."""
+        return mock.patch.object(wnm.subprocess, "run", side_effect=list(results))
+
+    def _ok(self, panes):
+        return mock.Mock(returncode=0, stdout=json.dumps(panes), stderr="")
+
+    def _dead(self):
+        return mock.Mock(returncode=1, stdout="", stderr="")
+
+    def _timeout(self, budget):
+        return subprocess.TimeoutExpired(["wezterm"], budget)
+
+    def test_a_timeout_refusal_names_slow_and_never_asserts_a_dead_socket(self):
+        with self._patch(self._timeout(wnm.PANE_LIST_TIMEOUT),
+                         self._timeout(wnm.PANE_LIST_RETRY_TIMEOUT)):
+            self.assertIsNone(wnm.wezterm_panes())
+        self.assertEqual(wnm.PANE_FAIL_TIMEOUT, wnm.pane_read_failure())
+        text = wnm.pane_read_refusal()
+        self.assertIn("slow", text)
+        self.assertNotIn("not answering", text)
+        self.assertIn(str(wnm.PANE_LIST_TIMEOUT), text)
+        self.assertIn(str(wnm.PANE_LIST_RETRY_TIMEOUT), text)
+
+    def test_one_retry_returns_a_map_when_the_second_call_succeeds(self):
+        # The 88.78 s outlier case: one slow read must not kill a 60 s poll loop.
+        with self._patch(self._timeout(wnm.PANE_LIST_TIMEOUT),
+                         self._ok([{"pane_id": 7}])):
+            self.assertEqual({"7": {"pane_id": 7}}, wnm.wezterm_panes())
+        self.assertIsNone(wnm.pane_read_failure())
+
+    def test_the_budget_that_reaches_subprocess_is_the_constant(self):
+        """⚠️ Pins the USE of the budget, not the constant.
+
+        Measured against a mutant of this very change: restoring `timeout=5` while
+        leaving `PANE_LIST_TIMEOUT = 120` in place passed every other test in this class.
+        `test_the_budget_clears_the_measured_maximum` asserts the constant clears
+        88.78 s; nothing asserted the call uses it — so the original defect could be
+        reintroduced green. A probe that cannot go red on the defect is not a probe.
+        """
+        with self._patch(self._timeout(wnm.PANE_LIST_TIMEOUT),
+                         self._timeout(wnm.PANE_LIST_RETRY_TIMEOUT)) as run:
+            wnm.wezterm_panes()
+        self.assertEqual([wnm.PANE_LIST_TIMEOUT, wnm.PANE_LIST_RETRY_TIMEOUT],
+                         [c.kwargs["timeout"] for c in run.call_args_list])
+
+    def test_a_deterministic_failure_is_not_retried(self):
+        """Only a timeout is transient — a dead socket is not fixed by asking again.
+
+        Also what keeps the timeout wording honest: `break` on a deterministic failure
+        means `pane_read_refusal()`'s "neither attempt answered" is only reachable when
+        every attempt really did time out.
+        """
+        with self._patch(self._dead()) as run:
+            self.assertIsNone(wnm.wezterm_panes())
+        self.assertEqual(1, run.call_count)
+
+    def test_a_dead_socket_keeps_the_not_answering_text(self):
+        with self._patch(self._dead(), self._dead()):
+            self.assertIsNone(wnm.wezterm_panes())
+        self.assertEqual(wnm.PANE_FAIL_UNREADABLE, wnm.pane_read_failure())
+        text = wnm.pane_read_refusal()
+        self.assertIn("not answering", text)
+        self.assertNotIn("slow", text)
+
+    def test_a_timeout_then_a_dead_socket_reports_the_socket(self):
+        # The last observed failure wins: a socket that refused on the retry is not
+        # merely slow, and "slow" would understate it.
+        with self._patch(self._timeout(wnm.PANE_LIST_TIMEOUT), self._dead()):
+            self.assertIsNone(wnm.wezterm_panes())
+        self.assertEqual(wnm.PANE_FAIL_UNREADABLE, wnm.pane_read_failure())
+
+    def test_the_budget_clears_the_measured_maximum(self):
+        # 88.78 s is the worst read measured on 2026-11-08 — see the constants' comment.
+        # A budget that does not clear it is a guess, and a guess is what produced this.
+        self.assertGreater(wnm.PANE_LIST_TIMEOUT, 88.78)
 
 
 class AgesFlagTest(unittest.TestCase):
@@ -2712,7 +2964,7 @@ class AgesFlagTest(unittest.TestCase):
         self.assertEqual("ambiguous", self.ages("../01234567")[0][3])
 
     def test_a_long_argument_that_is_not_a_full_id_is_never_globbed(self):
-        # The full-id branch used to return any ≥36-char argument unchanged, so a
+        # The full-id branch used to return any >=36-char argument unchanged, so a
         # `/`-bearing or glob-bearing string reached the transcript glob and could
         # widen past PROJECTS_DIR. Only an exact 36-char UUID skips the glob now.
         self.assertEqual("ambiguous", self.ages("*" * 36)[0][3])

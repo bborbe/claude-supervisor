@@ -40,7 +40,7 @@ Exit 0 = allowed (prints `spawn-ok: <goal>` and, with `--print`, the `/superviso
 line to run). Exit 2 = usage error, which is never a verdict.
 
 ⚠️ **The fleet ceiling always wins over N.** N = 3 is a per-topic share; the fleet-wide
-`spawn.maxManagers` is the outer bound, and six topics at N = 3 would want eighteen
+`spawn.maxManagersSoft` is the outer bound, and six topics at N = 3 would want eighteen
 managers against a ceiling of ten. The cap is never raised to make room.
 
 ⚠️ **Startability is the operator's approval, read from disk, never inferred.** A goal at
@@ -129,6 +129,27 @@ def scalar(fm: str, key: str) -> str:
     # unflagged page whose `flag:` is blank would then read as `flag: <the next key>`.
     m = re.search(rf"^{re.escape(key)}:[ \t]*(.*)$", fm, re.MULTILINE)
     return (m.group(1).strip().strip("\"'") if m else "")
+
+
+#: Every spelling of "no id recorded", compared case-insensitively — the same set
+#: `scripts/goals-declaration.py` uses for "declares nothing", and the same fold
+#: `scripts/owner.py`'s `page_session_id` owns. Duplicated deliberately: this script loads
+#: no `owner.py`, and both run standalone out of the plugin cache, so there is no shared
+#: module to import — `test_topic_keepalive.py` asserts the two agree.
+_EMPTY_IDS = frozenset({"", "[]", "null", "~"})
+
+
+def session_id(fm: str) -> str:
+    """The page's recorded session id, or "" for every spelling of "none recorded".
+
+    ⚠️ **`scalar()` alone returns the literal text after the colon**, so
+    `claude_session_id: null` arrives as the four characters `null` — non-empty, and a legal
+    `session-liveness.py` argument, so it probes as a session that was never named. This
+    script only counts a LIVE probe (`probe.returncode == 0`), so a `null` id never inflated
+    the manager count; the fold is here to keep the two copies in step.
+    """
+    value = scalar(fm, "claude_session_id").strip()
+    return "" if value.lower() in _EMPTY_IDS else value
 
 
 def section(text: str, heading: str) -> str:
@@ -245,7 +266,7 @@ def live_goal_managers(vault: str, topics_dir: str, goals: list[str]) -> int:
             with open(page, encoding="utf-8") as fh:
                 # `claude_session_id` is the only field a goal page records its manager in.
                 _fm = frontmatter(fh.read())
-                sid = scalar(_fm, "claude_session_id")
+                sid = session_id(_fm)
         except OSError:
             continue
         if not sid:
@@ -261,14 +282,21 @@ def live_goal_managers(vault: str, topics_dir: str, goals: list[str]) -> int:
 
 
 def fleet_manager_ceiling() -> int | None:
-    """`spawn.maxManagers` as the server resolves it, or None when it cannot be read."""
+    """`spawn.maxManagersSoft` as the server resolves it, or None when it cannot be read.
+
+    Both spellings, current first — the same fold `resolveMaxManagers` applies. Reading only
+    the current name would return None for an operator's existing config, both `ceiling is
+    not None` guards would be skipped, and the fleet ceiling would silently stop binding.
+    """
     cfg = os.path.expanduser("~/.config/claude-supervisor/config.json")
     try:
         with open(cfg, encoding="utf-8") as fh:
             spawn = (json.load(fh) or {}).get("spawn") or {}
     except (OSError, ValueError):
         return None
-    value = spawn.get("maxManagers")
+    value = spawn.get("maxManagersSoft")
+    if value is None:
+        value = spawn.get("maxManagers")
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
     return value
@@ -580,7 +608,7 @@ def main(argv: list[str]) -> int:
     if ceiling is not None and live is not None and live >= ceiling:
         return refuse(
             REFUSE_CAP,
-            f"{live} managers live fleet-wide, ceiling spawn.maxManagers = {ceiling}. "
+            f"{live} managers live fleet-wide, ceiling spawn.maxManagersSoft = {ceiling}. "
             f"N is a per-topic share; the ceiling is the outer bound and is never raised "
             f"to make room.",
             bound="manager-cap",

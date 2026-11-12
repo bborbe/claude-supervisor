@@ -9,7 +9,18 @@
 //   (a) present in the **spawn ledger**, which the **session-ledger endpoint** answers — what makes it a
 //       session this supervisor opened, rather than a manager or one of the operator's own;
 //       and
-//   (b) **live**, which the **session-heartbeat endpoint** answers.
+//   (b) **live**, which is answered by **two channels, unioned**: the **session-heartbeat
+//       endpoint** (a row with `live: true` **and** a non-empty `state`), or the **identity
+//       registry**'s pid check for a local session that holds no heartbeat.
+//
+// ⚠️ **Both halves of (b) are load-bearing, and each fixes a different error direction.**
+// Without the registry, a headless local worker (`claude --print --input-format stream-json …`)
+// is invisible: it writes a ledger record and holds a live pid but never stamps a heartbeat, so
+// its row reads `live: false` — measured 2026-11-07, 44 live sessions counted as 10, all 22 of
+// the difference this shape. Without the `state` requirement, the store's **ghost** rows are
+// counted: a placeholder the store keeps stamping after its session exited (`b3d743ea`,
+// `source: a2a`, `state: ""`), which made the cap read 51 against 49 real processes. A counter
+// that fixes one direction only trades an under-count for an over-count.
 //
 // ⚠️ **The liveness source is the endpoint, and the join survived the move.** Until 2026-10-09
 // this read two channels — the registry (`~/.claude/sessions/<pid>.json`, pid-keyed and
@@ -26,7 +37,7 @@
 // blind to headless workers, so a fleet that was silently under-counting now counts what it was
 // rendering dead. Measured 2026-10-09 on this host: **11** under the registry join, **22** under
 // the endpoint. `docs/fleet-surface.md` § Spawn a worker item 5 already carries the warning —
-// re-read `spawn.maxConcurrent` before the first sweep after upgrading, because the first tick
+// re-read `spawn.maxWorkerSoft` before the first sweep after upgrading, because the first tick
 // can read **at or over** the target with no error on either side.
 //
 //   * The ledger's own `status` is **not** a liveness source — measured 2026-10-01, 824 of
@@ -42,10 +53,11 @@
 // cap exists to bound. Managers started by hand — `/supervisor:open` in a plain wezterm tab —
 // write no record at all. `scripts/worker-sessions.py` carries the same definition for shell
 // callers.
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { config } from './config.mjs'
+import { pidIsAlive, readRegistry } from './liveness.mjs'
 import { liveFromHeartbeat, readHeartbeat } from './session-heartbeat.mjs'
 import { ledgerBySessionId, readSessionLedger } from './session-ledger.mjs'
 
@@ -60,6 +72,16 @@ import { ledgerBySessionId, readSessionLedger } from './session-ledger.mjs'
 // ⚠️ **The window is 60 s and the fallback is labelled.** A count from minutes ago is not evidence
 // about the fleet now; past the window the refusal stands. And it is never `0`: the cache holds a
 // real earlier count, and an absent cache is a refusal.
+//
+// ⚠️ **A SPAWN INVALIDATES IT, and that is what keeps the fallback from releasing a burst.** The
+// cache is written only by a successful live count, so without invalidation a spawn that lands
+// after the last count leaves a cached number that predates it — and the very next spawn, if its
+// live read fails, decides on that pre-spawn number. Every spawn in a burst during an outage would
+// then be allowed on the same stale value, which is a rate guard that cannot see the rate. So the
+// spawn path deletes the cache: a failed read after a spawn has NO fallback and refuses, until a
+// successful count re-establishes one that already includes the spawn. The refusal is the safe
+// direction — a limit that cannot count must not open — and it costs the fallback nothing in the
+// case it was added for (a transient store failure with no spawn immediately before it).
 export const COUNT_CACHE_TTL_MS = 60_000
 export const COUNT_CACHE_FILE = 'last-worker-count.json'
 
@@ -84,6 +106,17 @@ export async function readCountCache({ stateDir = config.stateDir, now = Date.no
     return { count: parsed.count, ageMs }
   } catch {
     return null
+  }
+}
+
+// Delete the cache, so a failed read after a spawn refuses instead of deciding on a pre-spawn
+// number. Best-effort in the same sense as the write: a cache that cannot be removed must never
+// fail the spawn it was invalidated for. `ENOENT` is the normal case — there was nothing to drop.
+export async function invalidateCountCache({ stateDir = config.stateDir } = {}) {
+  try {
+    await unlink(countCachePath(stateDir))
+  } catch {
+    // Swallowed on purpose — see above.
   }
 }
 
@@ -143,12 +176,33 @@ export async function readLedger({ endpoint, fetchImpl, onFailure } = {}) {
 // heartbeat, `cluster` for a mirrored cluster session. It is no longer the registry's own
 // `status`, because the registry is no longer on this path. Descriptive only — nothing decides
 // on it.
+// ⚠️ **The half the endpoint cannot answer.** A headless local worker
+// (`claude --print --input-format stream-json …`) writes a ledger record and holds a live pid,
+// but it never stamps a heartbeat — so its row reads `live: false` and the endpoint's live set
+// excludes it. Measured 2026-11-07 on the shell twin: 44 live sessions, 10 counted, and all 22
+// of the difference resolved in the ledger with `role: agent`, `mode: headless` and an alive
+// pid. The registry is the only channel that answers for them, so it is unioned into the live
+// map here — one home, so the count and the population split cannot drift.
+//
+// An unreadable registry adds nothing rather than failing the count: the endpoint already
+// answered, and a missing second channel is not an unknown first one.
+function unionRegistry(live, registry) {
+  for (const entry of (registry ?? readRegistry()) ?? []) {
+    if (!entry || typeof entry.sessionId !== 'string' || !entry.sessionId) continue
+    if (live.has(entry.sessionId)) continue
+    if (!pidIsAlive(entry.pid)) continue
+    live.set(entry.sessionId, 'registry')
+  }
+  return live
+}
+
 export async function workerSessions({
   endpoint,
   fetchImpl,
   now = Date.now,
   onFailure,
   stateDir,
+  registry,
 } = {}) {
   // ⚠️ `ledgerDir` left the signature with the file read, and a caller still passing it is
   // harmless rather than broken — an extra key on a destructured parameter is ignored. It is
@@ -182,22 +236,28 @@ export async function workerSessions({
   }
   const live = liveFromHeartbeat(rows)
 
+  unionRegistry(live, registry)
+
   const workers = []
+  let managers = 0
+  // ⚠️ **Four worker modes, not two.** The ledger carries `interactive`, `headless`, `cluster`
+  // and `a2a`; a binary headless-vs-else classifier reported live cluster and a2a workers as
+  // "interactive" — exactly the conflation this split exists to prevent. Measured 2026-11-08 on
+  // this host's ledger: 3203 interactive, 1113 headless, 46 cluster, 133 a2a.
+  const modes = { interactive: 0, headless: 0, cluster: 0, a2a: 0 }
   for (const [sessionId, record] of Object.entries(ledger)) {
     if (!live.has(sessionId)) continue
-    // Auto-resumes are excluded — they answer to the auto-resume gate's own 30-min crash-loop
-    // cap, and counting them here would leave a sweep that revived two dead workers unable to
-    // start any new one (docs/fleet-surface.md § Spawn a worker item 5). The marker is the
-    // ledger's `resumed_from`, the same field `scripts/check-spawn-ledger.py` reads.
-    //
-    // ⚠️ **This filter is not new behaviour being invented; it is a contract that used to hold
-    // by accident.** The exclusion was never implemented in code, and every auto-resume is
-    // HEADLESS — the gate hands over path A, which `resumeSupportError` refuses alongside an
-    // interactive resolution — so under the old registry-only count a resumed worker held a
-    // ledger record and no registry entry and was excluded *by construction*. Reading a channel
-    // that can see headless workers is exactly what removes that accident, so the rule has to be
-    // written down or the move silently un-excludes the population item 5 names.
-    if (record.resumed_from) continue
+    // ⚠️ **A RESUMED WORKER IS COUNTED, and the exclusion that used to sit here was the defect.**
+    // Until 2026-11-10 this loop skipped every record carrying `resumed_from`, on the reasoning
+    // that auto-resumes answer to the auto-resume gate's own 30-min crash-loop cap and that
+    // counting them "would leave a sweep that revived two dead workers unable to start any new
+    // one". That reasoning inverts the cap: a resumed worker is a live process consuming exactly
+    // the load the cap exists to bound, so a sweep that revives two dead workers has added two to
+    // the fleet and must be refused at the ceiling like any other addition. Measured 2026-11-10:
+    // the keep-alive leg resumed 34 dead workers in one round, none of them counted, and the
+    // counter read 22 against 78 live worker sessions — every session it missed was a resume.
+    // The crash-loop cap on the resume path is a separate control on how many resumes a round may
+    // perform, and it is unchanged by this.
     // A manager is not a worker. `spawn_agent(role="manager")` writes a ledger record exactly
     // like a worker's, so presence in the ledger alone would count a manager against the cap
     // and push the fleet toward refusing ordinary spawns. ⚠️ **ONLY an explicit `manager`
@@ -205,11 +265,50 @@ export async function workerSessions({
     // field existed, and those are workers and managers alike, so treating absence as "manager"
     // would drop every pre-field worker out of the count this cap exists to enforce. The same
     // rule, and the same reason, is in `scripts/gate-owner-filter.py`'s `is_manager`.
-    if (record.role === 'manager') continue
+    if (record.role === 'manager') {
+      managers += 1
+      continue
+    }
+    const mode = record.mode || 'interactive'
+    if (Object.prototype.hasOwnProperty.call(modes, mode)) modes[mode] += 1
+    else modes.interactive += 1
     workers.push({ sessionId, status: live.get(sessionId), label: record.label })
   }
   // Record the count for the next failed read. Best-effort: a cache that cannot be written must
   // not fail a count that succeeded.
   await writeCountCache(workers.length, { stateDir, now })
-  return { workers, error: null, stale: null }
+  // The split rides along on the same pass: the cap gate's refusal prints what the number is
+  // made of, and reading the stores a second time to answer that would be a second measurement
+  // of a fleet that has already moved.
+  // ⚠️ **`total` is the cap's unit, so managers are NOT in it.** The refusal prints this split
+  // beside `liveCount`, which excludes managers; a total that included them would put two
+  // irreconcilable numbers in one sentence. Managers are reported as context.
+  const workersByMode = modes.interactive + modes.headless + modes.cluster + modes.a2a
+  const populations = {
+    managers,
+    interactive: modes.interactive,
+    headless: modes.headless,
+    cluster: modes.cluster,
+    a2a: modes.a2a,
+    total: workersByMode,
+  }
+  return { workers, populations, error: null, stale: null }
+}
+
+// The three populations the caps act on — managers, interactive workers, headless workers —
+// and their total. **A thin wrapper over `workerSessions`, not a second classifier.** Measured
+// 2026-11-08, the review found three copies of these rules and two of them already disagreed on
+// manager+auto-resume records; delegating is what keeps one home.
+//
+// ⚠️ **The manager population comes from the LEDGER, not from `fleet-board.py`.** The board is
+// the doc's named manager source, but measured 2026-11-08 it emitted `{header, rows}` of
+// display strings — no per-session `role` — and did not complete inside 90 s twice on this
+// host. The ledger carries `role` and is already read here. A manager started by hand writes
+// no record at all, so it is absent from this count: a stated gap, not a silent one.
+//
+// ⚠️ **`total` is interactive + headless, NOT including managers** — the cap's unit, so the
+// refusal's split reconciles with the count printed beside it.
+export async function workerPopulations(opts = {}) {
+  const { populations, error } = await workerSessions(opts)
+  return { populations, error }
 }

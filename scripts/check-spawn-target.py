@@ -64,6 +64,12 @@ CITING_SITES = (
     "commands/steps/goal-spawn.md",
     "commands/open.md",
     "commands/open-a2a.md",
+    # ⚠️ `agents/goal-spawn-reader.md` joined on 2026-11-06 with the spawn leg's
+    # delegation: the per-row target decision moved out of `commands/steps/goal-spawn.md`
+    # and into that agent, so the agent is now the site that reads the field and carries
+    # the binding. It cites item 7 for the disqualifier list, warns in the marker's own
+    # shape and keeps the advisory clause — the caller only prints what it returns.
+    "agents/goal-spawn-reader.md",
 )
 
 

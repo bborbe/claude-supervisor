@@ -1,10 +1,10 @@
 """check-acting-legs.py: the delegate rule's carve-out, and each acting leg's own statement.
 
 The round's delegate rule sends everything that is not the sweep to a sub-agent, and rows 5b
-(keep alive) and 5c (flagged open) are exactly that — while being the only two rows whose
-purpose is to act. With no carve-out a round delegates them read-only and prints a count it was
-told to print: measured 2026-11-01 13:27 CET, a round instructed its sub-agent to print
-`opened=0` and resumed none of the 8 `resume` rows it read.
+(keep alive), 5c (flagged open), 5d (own parks), 16 (open leg) and 16b (manager-subject reap)
+are exactly that — while being the only rows whose purpose is to act. With no carve-out a round delegates them read-only and
+prints a count it was told to print: measured 2026-11-01 13:27 CET, a round instructed its
+sub-agent to print `opened=0` and resumed none of the 8 `resume` rows it read.
 
 `test_flagged_leg_without_its_statement_fails` is the case this file exists for: a tree whose
 router carries the carve-out and whose 5c file never says the leg acts is exactly the tree that
@@ -24,13 +24,16 @@ SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "check-acting-legs.py"
 ROUTER = "commands/fleet-drive.md"
 KEEPALIVE = "commands/steps/keepalive.md"
 FLAGGED = "commands/steps/flagged-open.md"
+OWN_PARKS = "commands/steps/own-parks.md"
+OPEN = "commands/steps/open.md"
+MANAGER_REAP = "commands/steps/manager-reap.md"
 
-CARVEOUT = "5b and 5c are acting legs"
+CARVEOUT = "5b, 5c, 5d, 16 and 16b are acting legs"
 MARKER = "a read-only execution is not a run of it"
 WHEN = "every tick"
 
 
-def router(with_carveout: bool = True, rows: tuple[tuple[str, str], ...] = (("5b", KEEPALIVE), ("5c", FLAGGED))) -> str:
+def router(with_carveout: bool = True, rows: tuple[tuple[str, str], ...] = (("5b", KEEPALIVE), ("5c", FLAGGED), ("5d", OWN_PARKS), ("16", OPEN), ("16b", MANAGER_REAP))) -> str:
     lines = [
         "# Fleet drive",
         "",
@@ -79,6 +82,9 @@ class Base(unittest.TestCase):
         self.write(ROUTER, router())
         self.write(KEEPALIVE, step("Keep alive"))
         self.write(FLAGGED, step("Flagged open"))
+        self.write(OWN_PARKS, step("Own parks"))
+        self.write(OPEN, step("Open leg"))
+        self.write(MANAGER_REAP, step("Manager-subject reap"))
 
     def write(self, rel: str, text: str) -> None:
         (pathlib.Path(self.dir) / rel).write_text(text, encoding="utf-8")
@@ -117,6 +123,36 @@ class TestGuard(Base):
         r = self.guard()
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("commands/steps/keepalive.md", r.stderr)
+
+    def test_own_parks_without_its_statement_fails(self) -> None:
+        # 5d shipped after the carve-out was written, so the row was never added to the list of
+        # exceptions: the round delegated it read-only, the sub-agent held no answer_permission,
+        # and the step skipped into a transcript nobody reads. Measured 2026-11-07.
+        self.write(OWN_PARKS, step("Own parks", with_marker=False))
+        r = self.guard()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("commands/steps/own-parks.md", r.stderr)
+        self.assertIn("carries no acting statement", r.stderr)
+
+    def test_open_leg_without_its_statement_fails(self) -> None:
+        # 16 is the round's heaviest leg and the last to be split into an agent. Delegated
+        # without its own acting statement, the agent writes the block and opens nothing —
+        # `opened=0` for a round that was told to print it.
+        self.write(OPEN, step("Open leg", with_marker=False))
+        r = self.guard()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("commands/steps/open.md", r.stderr)
+        self.assertIn("carries no acting statement", r.stderr)
+
+    def test_manager_reap_without_its_statement_fails(self) -> None:
+        # 16b posts the reap card and hands every reap line over for sending. Delegated
+        # read-only it prints `reap=0` while stale managers keep running — a count it was
+        # told to print, not one it measured.
+        self.write(MANAGER_REAP, step("Manager-subject reap", with_marker=False))
+        r = self.guard()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("commands/steps/manager-reap.md", r.stderr)
+        self.assertIn("carries no acting statement", r.stderr)
 
     def test_carveout_moved_off_the_router_fails(self) -> None:
         # One home, and that home is beside the rule it excepts.

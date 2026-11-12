@@ -1618,13 +1618,25 @@ class TestTrackedArtifacts(Base):
         """Work Approval tick #90: 11 names a side, sharing none. Two independently-derived
         memberships cannot each hold every name the other lacks, so the shape is itself the
         tell — a caller-side format error (here a `sed` that never fired and kept each
-        bullet's `— description` tail), not a disagreement of any size."""
+        bullet's `— description` tail), not a disagreement of any size.
+
+        ⚠️ This is the ONE divergence that blocks rather than reports, so it carries its
+        own exit code. Measured 2026-11-08 (Development Pipeline Throughput): 38
+        vault-relative page paths against 543 real task rows classified `caller-format`,
+        the round continued on the shared exit 10, and the readings document rendered
+        `clear=38 · none=38` for a fleet it never read. A caller branching on 10 for
+        "stop and look" cannot also treat it as "refuse the round", so the two verdicts
+        are two codes.
+        """
         self.tracked("ATopic", ["ATask", "AGoal"])
         self.snapshot("ATopic", ["Other1", "Other2"])
         rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
-        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertEqual(rc, self.m.EXIT_CALLER_FORMAT, out)
+        self.assertNotEqual(self.m.EXIT_CALLER_FORMAT, self.m.EXIT_DIVERGENT,
+                            "a blocking verdict must not share the report-only code")
         self.assertIn("caller-format", out)
         self.assertIn("format error", out)
+        self.assertIn("⛔", out, "the refusal must be legible on the first line")
 
     def test_compare_names_the_caller_side_when_the_scan_overshot(self):
         """The other direction of the same cause: gate-only is empty and the caller carries
@@ -1706,6 +1718,10 @@ class HoldDigest(Base):
         super().setUp()
         self.holds = os.path.join(self.tmp, "holds.json")
         self.m.HOLDS_PATH = self.holds
+        # No role map: the Hold-window source is off for these store tests, so they
+        # never shell out to a real WezTerm and stay host-independent. The window is
+        # exercised on its own in HoldWindowDigest below.
+        self.m.ROLE_MAP = os.path.join(self.tmp, "no-role-map.json")
         self.write_holds()
 
     def write_holds(self, *session_ids):
@@ -1752,6 +1768,77 @@ class HoldDigest(Base):
         with open(self.holds, "w", encoding="utf-8") as handle:
             handle.write("{not json")
         self.assertEqual(before, self.m.digest_of(tracked))
+
+
+class HoldWindowDigest(Base):
+    """The Hold WINDOW as a digest input -- the second source of heldness.
+
+    A pane parked in the role map's Hold window is held with no store entry at all.
+    Like the store hold, that is a DIGEST INPUT here, never a suppression: this gate
+    only decides whether the sweep runs, so adding or releasing a Hold-window hold
+    must move the digest and wake the loop to re-render the row.
+
+    A failed pane read answers *not held*, and that is the chosen direction for THIS
+    caller rather than a collapse: the gate is fail-open (CHANGE authorises a sweep,
+    it never suppresses one), so a missed Hold-window hold costs one un-moved digest
+    while the held row still renders on the next tick -- whereas inventing a hold
+    would answer CHANGE on every tick for as long as the transport stayed down,
+    defeating the saving the gate exists for. Same direction the store read
+    documents, and the two must agree.
+
+    Both directions are asserted by name, and the pane read is stubbed so the suite
+    never depends on the host having WezTerm.
+    """
+
+    NAME = "⚙ held"
+    PANE = 874
+    HOLD_WINDOW = 11
+    AGENT_WINDOW = 9
+
+    def setUp(self):
+        super().setUp()
+        # An absent store: the window must hold on its own, with no entry.
+        self.m.HOLDS_PATH = os.path.join(self.tmp, "holds.json")
+        self.m.ROLE_MAP = os.path.join(self.tmp, "role-map.json")
+        with open(self.m.ROLE_MAP, "w", encoding="utf-8") as handle:
+            json.dump({"Hold": {"window_id": self.HOLD_WINDOW}}, handle)
+        self.m.registry_names = lambda: {self.NAME: HELD}
+
+    def pane_in(self, window):
+        self.m.panes = lambda: [
+            {"pane_id": self.PANE, "window_id": window, "title": "✳ " + self.NAME}
+        ]
+
+    def row(self, name, session):
+        return {
+            "name": name,
+            "status": "in_progress",
+            "phase": "execution",
+            "session": session,
+        }
+
+    def test_a_pane_in_the_hold_window_is_held(self):
+        """Too-tight: position alone is a hold, with no store entry."""
+        self.pane_in(self.HOLD_WINDOW)
+        self.assertTrue(self.m.is_held(HELD))
+
+    def test_a_pane_outside_the_hold_window_is_not_held(self):
+        """Too-loose: a pane in another window is an ordinary session."""
+        self.pane_in(self.AGENT_WINDOW)
+        self.assertFalse(self.m.is_held(HELD))
+
+    def test_the_hold_window_moves_the_digest(self):
+        """The digest input the gate is graded on: moving the pane moves it."""
+        tracked = [self.row("a", HELD)]
+        self.pane_in(self.HOLD_WINDOW)
+        held = self.m.digest_of(tracked)
+        self.pane_in(self.AGENT_WINDOW)
+        self.assertNotEqual(held, self.m.digest_of(tracked))
+
+    def test_a_failed_pane_read_reads_not_held(self):
+        """The chosen response: no spurious CHANGE while the transport is down."""
+        self.m.panes = lambda: None
+        self.assertFalse(self.m.is_held(HELD))
 
 
 class TestStuck(Base):
@@ -3386,6 +3473,110 @@ class TestCheckboxCountStruckRows(unittest.TestCase):
         # the choice cannot drift silently.
         text = "# Tasks\n\n- [x] kept\n- [/] ~~[[InFlight]]~~ — being reworked\n"
         self.assertEqual(self.m.checkbox_count(text), "1/2")
+
+
+class LedgerPathDefault(unittest.TestCase):
+    """The ledger path is NOT derived from this script's own state dir.
+
+    The defect this pins: `os.path.join(STATE_DIR, "open-items")` resolves under
+    `~/.claude/state/manager-predispatch`, a directory that never exists — so
+    `open_asked_of_you()` returned `[]` on every call and the frozen-tree predicate
+    silently collapsed to mtime-only, the exact failure the gate exists to prevent.
+
+    It reads the DEFAULT, in its own class, because `TestFrozenTree.setUp` overrides
+    `OPEN_ITEMS_DIR` with a tempdir — which is why every other test passed while the
+    production path was wrong.
+    """
+
+    def test_the_default_ledger_path_is_the_real_ledger(self):
+        m = load(tempfile.mkdtemp())
+        self.assertNotIn(
+            os.path.realpath(m.STATE_DIR), os.path.realpath(m.OPEN_ITEMS_DIR)
+        )
+        self.assertTrue(
+            m.OPEN_ITEMS_DIR.endswith(os.path.join("state", "open-items")),
+            m.OPEN_ITEMS_DIR,
+        )
+
+
+class TestFrozenTree(Base):
+    """The frozen-tree predicate — both conjuncts, and neither may stand in for the other.
+
+    `Manager Session.md:488` defines it as *"no tracked file's mtime has moved for >= 2
+    cadence intervals (30 min at the 15-min default), AND the tick's content has already
+    left the machine."* The second conjunct has no instrument in the runbook, so it is
+    read here as: this session's ledger carries no OPEN `asked-of-you`. Each test pins one
+    conjunct in isolation — a predicate that answers on mtime alone passes the quiet-tree
+    case and hides an unpublished operator question, which is the failure the runbook
+    names in as many words.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        os.makedirs(self.m.OPEN_ITEMS_DIR)
+        self.sid = "sid-under-test"
+        self._saved = os.environ.get("CLAUDE_CODE_SESSION_ID")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = self.sid
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        else:
+            os.environ["CLAUDE_CODE_SESSION_ID"] = self._saved
+
+    def age(self, seconds):
+        """Push every tracked task's mtime `seconds` into the past."""
+        tasks = os.path.join(self.vault, "25 Tasks")
+        for name in os.listdir(tasks):
+            os.utime(os.path.join(tasks, name), (time.time() - seconds,) * 2)
+
+    def ledger(self, items):
+        path = os.path.join(self.m.OPEN_ITEMS_DIR, self.sid + ".json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"session_id": self.sid, "items": items}, fh)
+
+    def test_quiet_tree_with_no_open_asks_is_frozen(self):
+        self.age(4 * 3600)
+        v = self.m.frozen_tree(self.vault, "ATopic")
+        self.assertTrue(v["frozen"], v)
+
+    def test_a_recently_moved_tracked_file_is_not_frozen(self):
+        self.age(4 * 3600)
+        self.write("25 Tasks/ATask.md", TASK.format(sid="", progress=""))
+        v = self.m.frozen_tree(self.vault, "ATopic")
+        self.assertFalse(v["frozen"], v)
+        self.assertLess(v["quiet_seconds"], v["window_seconds"])
+
+    def test_an_open_asked_of_you_blocks_the_gate_even_on_a_quiet_tree(self):
+        # The conjunct that mtime alone cannot see: the tree is frozen, but a question
+        # the operator has not answered is still the manager's live context.
+        self.age(4 * 3600)
+        self.ledger([{"kind": "asked-of-you", "state": "open", "text": "ship it?"}])
+        v = self.m.frozen_tree(self.vault, "ATopic")
+        self.assertFalse(v["frozen"], v)
+        self.assertEqual(v["open_asks"], ["ship it?"])
+
+    def test_a_closed_asked_of_you_does_not_block(self):
+        self.age(4 * 3600)
+        self.ledger([{"kind": "asked-of-you", "state": "closed", "text": "answered"}])
+        self.assertTrue(self.m.frozen_tree(self.vault, "ATopic")["frozen"])
+
+    def test_other_ledger_kinds_do_not_block(self):
+        # Only `asked-of-you` is a question awaiting an answer; `pushed` and `asked-of-me`
+        # close on their task file and carry nothing the operator still owes.
+        self.age(4 * 3600)
+        self.ledger([
+            {"kind": "pushed", "state": "open", "text": "filed a task"},
+            {"kind": "asked-of-me", "state": "open", "text": "do the thing"},
+        ])
+        self.assertTrue(self.m.frozen_tree(self.vault, "ATopic")["frozen"])
+
+    def test_a_missing_ledger_does_not_block(self):
+        # Unreadable is `[]`, never fail-closed: a session that never used the ledger
+        # asked the operator nothing, and blocking there would freeze the gate forever.
+        self.age(4 * 3600)
+        self.assertTrue(self.m.frozen_tree(self.vault, "ATopic")["frozen"])
 
 
 if __name__ == "__main__":

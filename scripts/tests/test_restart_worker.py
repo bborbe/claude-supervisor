@@ -185,6 +185,25 @@ class ResumeCommand(unittest.TestCase):
         inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc-private-claude")[-1]
         self.assertIn('"/l/cc-private-claude" --resume sid', inner)
 
+    def test_fresh_prompt_starts_a_new_session_not_a_resume(self):
+        """`--fresh-prompt` (keeper `restart fresh`, 2026-11-10) must never carry `--resume`:
+        a resumed session brings its exhausted context back, which is the whole failure."""
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc",
+                                  "/supervisor:fleet-loop")[-1]
+        self.assertNotIn("--resume", inner)
+        self.assertIn('"/l/cc" -n "title" "/supervisor:fleet-loop"', inner)
+        self.assertIn("trap _sx EXIT", inner)
+
+    def test_fresh_prompt_is_allowlisted(self):
+        self.assertEqual(("/supervisor:fleet-loop",), rw.FRESH_PROMPTS)
+
+    def test_resume_command_uses_the_resolved_wezterm_not_a_bare_name(self):
+        """Regression 2026-11-11: a bare `"wezterm"` is not on launchd's PATH, so the keeper's
+        `restart fresh` killed the Fleet Manager and could not spawn the replacement."""
+        argv = rw.resume_command("sid", "title", "pink", "/d", "/l/cc",
+                                 wezterm="/Applications/WezTerm.app/Contents/MacOS/wezterm")
+        self.assertEqual("/Applications/WezTerm.app/Contents/MacOS/wezterm", argv[0])
+
     def test_no_exec_so_the_exit_status_survives(self):
         """`exec` makes a SIGKILLed worker leave no record anywhere — the whole point.
 
@@ -329,6 +348,85 @@ class ResolveLauncher(unittest.TestCase):
         self.page("25 Tasks", "T", "claude_session_id: s1\nlauncher: cc-private-claude")
         path, source = rw.resolve_launcher("s1", self.vault, self.fb)
         self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "task"))
+
+    def test_a_human_row_takes_the_claude_sibling_over_the_worker_default(self):
+        """Operator ruling 2026-11-06 / matrix Rule 4: a human row is not a delegate."""
+        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"))
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "claude-sibling"))
+
+    def test_the_human_sibling_sits_ahead_of_a_configured_manager_launcher(self):
+        """Both private-personal and seibert-brogrammers point `manager_launcher` at `-deepseek`;
+        taking it first would leave the human row on the worker model while reporting success."""
+        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"),
+                       manager_launcher=os.path.join(self.scripts, "cc-private-glm"))
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-claude"), "claude-sibling"))
+
+    def test_the_human_rule_falls_through_to_the_manager_default_without_a_sibling(self):
+        os.remove(os.path.join(self.scripts, "cc-private-claude"))
+        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"),
+                       manager_launcher="cc-private-glm")
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-glm"), "manager-default"))
+
+    def test_the_human_rule_ends_on_the_vault_claude_script_never_the_worker_default(self):
+        """Matrix Rule 4's last rung. A vault with a `worker_launcher` but no `-claude`
+        sibling and no `manager_launcher` must still open the row on `claude_script` —
+        returning the worker default here puts a human row on `-deepseek`."""
+        os.remove(os.path.join(self.scripts, "cc-private-claude"))
+        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"))
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private"), "vault"))
+
+    def test_two_pages_claiming_one_session_are_refused(self):
+        """First-match would resume under a subject chosen by page ordering."""
+        os.makedirs(os.path.join(self.vault, "23 Topics"))
+        self.page("24 Goals", "G", "claude_session_id: m1")
+        self.page("23 Topics", "Fleet", "claude_session_id: m1")
+        role, subject, error = rw.resume_role("m1", self.vault, self.fb)
+        self.assertIsNone(subject)
+        self.assertIn("2 pages claim session m1", error)
+
+    def test_a_human_rows_own_launcher_still_wins(self):
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human\nlauncher: cc-private-glm")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-glm"), "task"))
+
+    def test_an_agent_row_is_unaffected_by_the_human_rule(self):
+        self.configure(worker_launcher=os.path.join(self.scripts, "cc-private-deepseek"))
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: agent")
+        path, source = rw.resolve_launcher("s1", self.vault, self.fb)
+        self.assertEqual((path, source), (os.path.join(self.scripts, "cc-private-deepseek"), "worker-default"))
+
+    def test_claimant_role_reports_the_bound_task_and_nothing_else(self):
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
+        self.assertEqual(rw._role_field(os.path.join(self.vault, "25 Tasks", "T.md")), "human")
+        self.assertEqual(rw._role_field(os.path.join(self.vault, "25 Tasks", "absent.md")), "")
+
+    def test_resume_role_reads_a_manager_from_its_goal_page(self):
+        """The registry is deleted when a session exits, and a manager only reaches the
+        resume path once it has exited — so the page field, not the registry, is the source."""
+        self.page("24 Goals", "G", "claude_session_id: m1")
+        self.assertEqual(rw.resume_role("m1", self.vault, self.fb), ("manager", ("goal", "G"), None))
+
+    def test_resume_role_reads_a_manager_from_its_topic_page(self):
+        os.makedirs(os.path.join(self.vault, "23 Topics"))
+        self.page("23 Topics", "Fleet", "claude_session_id: m1")
+        self.assertEqual(rw.resume_role("m1", self.vault, self.fb), ("manager", ("topic", "Fleet"), None))
+
+    def test_resume_role_reads_a_human_from_the_claimant_task(self):
+        self.page("25 Tasks", "T", "claude_session_id: s1\nrole: human")
+        self.assertEqual(rw.resume_role("s1", self.vault, self.fb), ("human", None, None))
+
+    def test_resume_role_defaults_to_agent(self):
+        self.page("25 Tasks", "T", "claude_session_id: s1")
+        self.assertEqual(rw.resume_role("s1", self.vault, self.fb), ("agent", None, None))
+        self.assertEqual(rw.resume_role("nobody", self.vault, self.fb), ("agent", None, None))
 
     def test_unsafe_configured_worker_launcher_is_none(self):
         self.configure(worker_launcher="cc;rm -rf")
@@ -665,8 +763,13 @@ class Cli(unittest.TestCase):
         os.makedirs(self.reg)
         self.load = os.path.join(self.dir, "loadpath")
         os.makedirs(os.path.join(self.load, "9.9.9"))
+        # No role map: the Hold-window source is off for the store/CLI tests, so they
+        # never shell out to a real WezTerm and stay host-independent. The window is
+        # exercised on its own in HoldWindow below.
+        os.environ["SUPERVISOR_ROLE_MAP"] = os.path.join(self.dir, "no-role-map.json")
 
     def tearDown(self):
+        os.environ.pop("SUPERVISOR_ROLE_MAP", None)
         self.tmp.cleanup()
 
     def write(self, pid, rec):
@@ -677,6 +780,13 @@ class Cli(unittest.TestCase):
         env = dict(os.environ)
         env["SUPERVISOR_LOAD_PATH"] = self.load
         env["SUPERVISOR_LAUNCHER"] = os.path.join(self.dir, "loadpath")
+        # `main()` resolves the wezterm binary BEFORE the kill, and refuses with exit 1 when
+        # it cannot — deliberately, so a spawn that cannot happen never leaves a killed pid
+        # behind it. A CI runner has no wezterm, so without this every success-path test
+        # would take that refusal. `setdefault`, never an assignment: the tests that PROVE
+        # the refusal (and the ones that point the override at a missing path) set it
+        # themselves and must keep what they set.
+        env.setdefault("SUPERVISOR_WEZTERM", sys.executable)
         out = subprocess.run(
             [sys.executable, SCRIPT, sid, "--sessions-dir", self.reg, "--dry-run", *extra],
             capture_output=True, text=True, env=env,
@@ -735,6 +845,10 @@ class Cli(unittest.TestCase):
         # A stale launcher by default, so the fixture — never the real vault config or
         # a real launcher's mtime — decides the case.
         env["SUPERVISOR_LAUNCHER"] = launcher or self.stale(self.touch("cc-default"))
+        # Same seam as `run_cli`, and for the same reason: `main()` resolves wezterm before
+        # the kill and refuses when it cannot, and a CI runner has none. `setdefault` so a
+        # test that deliberately points the override at a missing path keeps its value.
+        env.setdefault("SUPERVISOR_WEZTERM", sys.executable)
         out = subprocess.run(
             [sys.executable, SCRIPT, sid, "--sessions-dir", self.reg, "--dry-run"],
             capture_output=True, text=True, env=env,
@@ -811,6 +925,27 @@ class Cli(unittest.TestCase):
         self.assertIn("no launcher could be resolved", out.stdout)
         self.assertNotIn("killed pid", out.stdout)
 
+    def test_missing_wezterm_refuses_before_the_kill(self):
+        """Regression 2026-11-11: the fresh restart killed the manager, then could not spawn.
+
+        `find_wezterm()` honours SUPERVISOR_WEZTERM, so pointing it at a missing path proves
+        the refusal fires on the same code path the keeper takes — and that it fires BEFORE
+        anything is signalled, which is what makes the failure non-destructive.
+        """
+        self.write(1, entry("nowez", name="Fleet Manager"))
+        env = dict(os.environ)
+        env["SUPERVISOR_LOAD_PATH"] = self.load
+        env["SUPERVISOR_LAUNCHER"] = os.path.join(self.dir, "loadpath")
+        env["SUPERVISOR_WEZTERM"] = os.path.join(self.dir, "no-such-wezterm")
+        out = subprocess.run(
+            [sys.executable, SCRIPT, "nowez", "--sessions-dir", self.reg,
+             "--reason", "lapse", "--fresh-prompt", "/supervisor:fleet-loop"],
+            capture_output=True, text=True, env=env,
+        )
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("no wezterm found", out.stdout)
+        self.assertNotIn("killing-pid", out.stdout)
+
     def _run_with_vault_cli(self, sid, vault_cli):
         """Run the CLI with NO config override, so `vault-cli` itself must be resolved."""
         env = dict(os.environ)
@@ -884,6 +1019,41 @@ class Cli(unittest.TestCase):
         self.assertEqual(code, 0, lines)
         self.assertIn("would kill", "\n".join(lines))
 
+    def test_the_restart_header_names_the_full_session_id(self):
+        """The round joins a close line and a refusal line on the full id, so the resume
+        header must carry it too — a truncated one leaves both unjoinable."""
+        sid = "aaaa1111-2222-4333-8444-555566667777"
+        self.write(1, entry(sid, name="Some Worker"))
+        code, lines = self.run_cli(sid)
+        self.assertEqual(code, 0, lines)
+        self.assertIn(f"session {sid}", "\n".join(lines))
+
+    def test_a_terminal_task_is_refused_on_the_normal_path(self):
+        """Entry point A: the normal restart refuses before the kill when the anchored task
+        is finished. The probe is the CLI, so it asserts the token a caller branches on."""
+        sid = "bbbb2222-3333-4444-8555-666677778888"
+        self.write(1, entry(sid, name="Some Worker", cwd=self.dir))
+        tasks = os.path.join(self.dir, "25 Tasks")
+        os.makedirs(tasks, exist_ok=True)
+        with open(os.path.join(tasks, "A Task.md"), "w") as fh:
+            fh.write("---\nstatus: completed\nclaude_session_id: " + sid + "\n---\n\n# Summary\n")
+        cfg = os.path.join(self.dir, "vaults.json")
+        with open(cfg, "w") as fh:
+            json.dump([{"name": "v", "path": self.dir, "tasks_dir": "25 Tasks"}], fh)
+        prev = os.environ.get("SUPERVISOR_VAULT_CONFIG")
+        os.environ["SUPERVISOR_VAULT_CONFIG"] = cfg
+
+        def restore():
+            if prev is None:
+                os.environ.pop("SUPERVISOR_VAULT_CONFIG", None)
+            else:
+                os.environ["SUPERVISOR_VAULT_CONFIG"] = prev
+
+        self.addCleanup(restore)
+        code, lines = self.run_cli(sid)
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "task-terminal", lines)
+
     def test_help_exits_zero(self):
         out = subprocess.run(
             [sys.executable, SCRIPT, "--help"], capture_output=True, text=True
@@ -933,7 +1103,8 @@ class AbsentMode(unittest.TestCase):
         self.cfg = os.path.join(self.dir, "vaults.json")
         with open(self.cfg, "w") as fh:
             json.dump([{"name": "v1", "path": self.vault, "claude_script": self.vault_script,
-                        "manager_launcher": self.launcher, "worker_launcher": "/no/worker"}], fh)
+                        "manager_launcher": self.launcher, "worker_launcher": "/no/worker",
+                        "tasks_dir": "25 Tasks"}], fh)
         self.exits = os.path.join(self.dir, "session-exit")
         os.makedirs(self.exits)
         self.holds = os.path.join(self.dir, "holds.json")
@@ -974,6 +1145,42 @@ class AbsentMode(unittest.TestCase):
             argv.append("--dry-run")
         out = subprocess.run(argv + list(extra), capture_output=True, text=True, env=env)
         return out.returncode, out.stdout.strip().splitlines()
+
+    def write_task(self, status, defer=None, sid=None):
+        tasks = os.path.join(self.vault, "25 Tasks")
+        os.makedirs(tasks, exist_ok=True)
+        lines = [f"status: {status}", f"claude_session_id: {sid or self.SID}"]
+        if defer:
+            lines.append(f'defer_date: "{defer}"')
+        with open(os.path.join(tasks, "A Task.md"), "w") as fh:
+            fh.write("---\n" + "\n".join(lines) + "\n---\n\n# Summary\n")
+
+    def test_a_finished_task_is_refused_before_the_spawn(self):
+        """The `--absent` resume is the only resume this script performs for a headless
+        worker, and the incident that motivated the guard was exactly this shape: a reaped
+        worker whose task read `completed` came back as a live process. Nothing may be
+        spawned, and the token must be the first line a caller reads."""
+        self.register()
+        self.write_task("completed")
+        code, lines = self.run_absent(dry=False)
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "task-terminal", lines)
+        self.assertFalse(os.path.exists(self.spawned), "a refused resume must not spawn")
+
+    def test_an_in_progress_task_still_resumes(self):
+        """The negative control: a live task must not be caught by the guard."""
+        self.register()
+        self.write_task("in_progress")
+        code, lines = self.run_absent(dry=False)
+        self.assertEqual(code, 0, lines)
+        self.assertTrue(os.path.exists(self.spawned), "a permitted resume must spawn")
+
+    def test_the_absent_header_names_the_full_session_id(self):
+        self.register()
+        self.write_task("in_progress")
+        code, lines = self.run_absent(dry=True)
+        self.assertEqual(code, 0, lines)
+        self.assertIn(f"session {self.SID}", "\n".join(lines))
 
     def test_a_dead_registered_manager_resumes_into_its_vault_on_its_manager_launcher(self):
         self.register()
@@ -1174,6 +1381,202 @@ class HeldSession(Cli):
             handle.write("{not json")
         _code, lines = self.run_cli(SID_HELD)
         self.assertNotEqual(lines[0] if lines else "", "held-session", lines)
+
+
+SID_WINDOW = "cccccccc-1111-2222-3333-444444444444"
+
+
+class HoldWindow(Cli):
+    """The Hold WINDOW -- a pane parked in the role map's Hold window is refused.
+
+    The second source of heldness, and the one where a failed read must REFUSE: a
+    restart KILLS a process, so a broken transport read as "not held" is the
+    direction that restarts a session the operator parked. `docs/pane-reads.md`
+    prescribes *refuse non-zero, naming the transport* for a caller that already
+    exits non-zero -- which this one does on every refusal.
+
+    Both directions are asserted by name. The whole path is real -- a fixture role
+    map, a fixture registry and a fake `wezterm` on PATH -- so the test never
+    depends on the host having WezTerm.
+    """
+
+    NAME = "⚙ held worker"
+    PANE = 874
+    HOLD_WINDOW = 11
+    AGENT_WINDOW = 9
+
+    def setUp(self):
+        super().setUp()
+        self.role_map = os.path.join(self.dir, "role-map.json")
+        with open(self.role_map, "w", encoding="utf-8") as handle:
+            json.dump({"Hold": {"window_id": self.HOLD_WINDOW}}, handle)
+        os.environ["SUPERVISOR_ROLE_MAP"] = self.role_map
+        # registry_names() reads SESSIONS_DIR, so point it at the fixture registry and
+        # seed the session's name -- the join the pane title carries.
+        os.environ["SUPERVISOR_SESSIONS_DIR"] = self.reg
+        self.bin = os.path.join(self.dir, "bin")
+        os.makedirs(self.bin)
+        self.write_wezterm(self.HOLD_WINDOW)
+        self.write(4242, entry(SID_WINDOW, name=self.NAME))
+
+    def tearDown(self):
+        os.environ.pop("SUPERVISOR_SESSIONS_DIR", None)
+        super().tearDown()
+
+    def write_wezterm(self, window, fail=False):
+        path = os.path.join(self.bin, "wezterm")
+        with open(path, "w", encoding="utf-8") as handle:
+            if fail:
+                handle.write("#!/bin/sh\nexit 1\n")
+            else:
+                listing = json.dumps(
+                    [{"pane_id": self.PANE, "window_id": window,
+                      "title": "✳ " + self.NAME}]
+                )
+                handle.write("#!/bin/sh\ncat <<'JSON'\n" + listing + "\nJSON\n")
+        os.chmod(path, 0o755)
+
+    def run_hold(self):
+        env = dict(os.environ)
+        env["PATH"] = self.bin + os.pathsep + env.get("PATH", "")
+        env["SUPERVISOR_LOAD_PATH"] = self.load
+        env["SUPERVISOR_LAUNCHER"] = os.path.join(self.dir, "loadpath")
+        out = subprocess.run(
+            [sys.executable, SCRIPT, SID_WINDOW, "--sessions-dir", self.reg, "--dry-run"],
+            capture_output=True, text=True, env=env,
+        )
+        return out.returncode, out.stdout.strip().splitlines()
+
+    def test_a_session_in_the_hold_window_is_refused(self):
+        """Too-tight: a Hold-window pane refuses the restart with no store entry."""
+        code, lines = self.run_hold()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "held-session", lines)
+
+    def test_a_session_outside_the_hold_window_is_not_refused_for_a_hold(self):
+        """Too-loose: the SAME session, pane in another window, is not held."""
+        self.write_wezterm(self.AGENT_WINDOW)
+        code, lines = self.run_hold()
+        self.assertNotEqual(lines[0] if lines else "", "held-session", lines)
+
+    def test_an_unreadable_pane_list_refuses_naming_the_transport(self):
+        """The chosen response for THIS caller: refuse, never read as not held."""
+        self.write_wezterm(self.HOLD_WINDOW, fail=True)
+        code, lines = self.run_hold()
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "hold-unreadable", lines)
+
+
+class TaskTerminalRefusal(unittest.TestCase):
+    """A resume must not start a process for a task that is already finished.
+
+    Measured 2026-11-11: session 2e540d65 was reaped at 07:18:34Z while its task read
+    `completed`, and the same id was live again at 07:33:55Z — a finished worker was handed
+    a spawn slot and the close was undone. Every case below is a fixture task in one of the
+    states the guard must tell apart, and the negative control (`in_progress`) is what keeps
+    the guard from being a blanket refusal that would stop every resume.
+    """
+
+    SID = "2e540d65-7916-4609-98aa-3fd8f1923211"
+
+    def _vault(self, frontmatter_lines):
+        """A one-task vault plus the config override that points the lookup at it."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        tasks = os.path.join(tmp.name, "25 Tasks")
+        os.makedirs(tasks)
+        task_path = os.path.join(tasks, "A Task.md")
+        self._write_task(task_path, frontmatter_lines)
+        config = os.path.join(tmp.name, "vaults.json")
+        with open(config, "w", encoding="utf-8") as fh:
+            json.dump([{"name": "v", "path": tmp.name, "tasks_dir": "25 Tasks"}], fh)
+        previous = os.environ.get("SUPERVISOR_VAULT_CONFIG")
+        os.environ["SUPERVISOR_VAULT_CONFIG"] = config
+
+        def restore():
+            if previous is None:
+                os.environ.pop("SUPERVISOR_VAULT_CONFIG", None)
+            else:
+                os.environ["SUPERVISOR_VAULT_CONFIG"] = previous
+
+        self.addCleanup(restore)
+        return tmp.name, task_path
+
+    @staticmethod
+    def _write_task(path, frontmatter_lines):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("---\n" + "\n".join(frontmatter_lines) + "\n---\n\n# Summary\n")
+
+    def _refusal(self, status, defer=None, sid=None):
+        lines = [f"status: {status}", f"claude_session_id: {sid or self.SID}"]
+        if defer:
+            lines.append(f'defer_date: "{defer}"')
+        cwd, _ = self._vault(lines)
+        return rw.task_terminal_refusal(self.SID, cwd)
+
+    def test_completed_is_refused(self):
+        token, detail = self._refusal("completed")
+        self.assertEqual(token, "task-terminal")
+        self.assertIn("completed", detail)
+        # The close record names the full id, so the refusal must too — the round joins the
+        # two lines on it. A refusal naming only the task basename cannot be joined.
+        self.assertIn(self.SID, detail)
+
+    def test_aborted_is_refused(self):
+        self.assertEqual(self._refusal("aborted")[0], "task-terminal")
+
+    def test_hold_is_refused(self):
+        self.assertEqual(self._refusal("hold")[0], "task-terminal")
+
+    def test_a_future_defer_is_refused(self):
+        token, detail = self._refusal("in_progress", defer="2099-01-01")
+        self.assertEqual(token, "task-terminal")
+        self.assertIn("2099-01-01", detail)
+
+    def test_in_progress_still_resumes(self):
+        """The negative control: the guard must not refuse every resume."""
+        self.assertIsNone(self._refusal("in_progress")[0])
+
+    def test_a_past_defer_still_resumes(self):
+        self.assertIsNone(self._refusal("in_progress", defer="2020-01-01")[0])
+
+    def test_no_anchor_is_not_a_refusal(self):
+        """A session whose task belongs to someone else is not this guard's business."""
+        cwd, _ = self._vault(["status: completed", "claude_session_id: some-other-session"])
+        self.assertIsNone(rw.task_terminal_refusal(self.SID, cwd)[0])
+
+    def test_the_status_is_read_at_call_time_not_cached(self):
+        """The flip between enumeration and spawn must be seen.
+
+        A census or digest read taken earlier in the round would return `None` here and
+        start the process — which is the defect the guard exists to close.
+        """
+        cwd, task_path = self._vault(
+            ["status: in_progress", f"claude_session_id: {self.SID}"]
+        )
+        self.assertIsNone(rw.task_terminal_refusal(self.SID, cwd)[0])
+        self._write_task(task_path, ["status: completed", f"claude_session_id: {self.SID}"])
+        self.assertEqual(rw.task_terminal_refusal(self.SID, cwd)[0], "task-terminal")
+
+
+    def test_the_cli_task_guard_exits_one_on_a_finished_task(self):
+        """`--task-guard` is the route a leg that spawns on its own uses, so the CLI's own
+        exit code and first line are the contract — not the helper's return value."""
+        cwd, _ = self._vault(["status: completed", f"claude_session_id: {self.SID}"])
+        out = subprocess.run(
+            [sys.executable, SCRIPT, self.SID, "--task-guard", "--cwd", cwd],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertEqual(out.stdout.strip().splitlines()[0], "task-terminal")
+
+    def test_the_cli_task_guard_exits_zero_on_a_live_task(self):
+        cwd, _ = self._vault(["status: in_progress", f"claude_session_id: {self.SID}"])
+        out = subprocess.run(
+            [sys.executable, SCRIPT, self.SID, "--task-guard", "--cwd", cwd],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
 
 if __name__ == "__main__":

@@ -40,23 +40,23 @@ CODE = (
 )
 #: A referencing site: names the constant and points at the home rather than restating it.
 SITE = (
-    "Respect `spawn.maxConcurrent`; see `docs/fleet-surface.md` § Spawn a worker item 5.\n"
+    "Respect `spawn.maxWorkerSoft`; see `docs/fleet-surface.md` § Spawn a worker item 5.\n"
 )
 #: The shape the check exists to reject: the number is copied into a command file, so the
 #: home and this copy can drift with nothing to catch it.
 SITE_RESTATES = (
-    "Respect `spawn.maxConcurrent`, which defaults to 20.\n"
+    "Respect `spawn.maxWorkerSoft`, which defaults to 20.\n"
 )
 #: A site that reads ONE side of the comparison and remembers the other. It names the
 #: constant and points at its home, so (b) is satisfied and the file looks complete — but
 #: only the count is an instrument, which is the shape measured on 2026-10-02.
 SITE_READS_COUNT_ONLY = (
-    "Respect `spawn.maxConcurrent`; see `docs/fleet-surface.md` § Spawn a worker item 5.\n"
+    "Respect `spawn.maxWorkerSoft`; see `docs/fleet-surface.md` § Spawn a worker item 5.\n"
     "Count with `python3 scripts/worker-sessions.py --count`.\n"
 )
 #: The pair. Reading both sides is what makes a tick a comparison rather than a memory.
 SITE_READS_BOTH = (
-    "Respect `spawn.maxConcurrent`; see `docs/fleet-surface.md` § Spawn a worker item 5.\n"
+    "Respect `spawn.maxWorkerSoft`; see `docs/fleet-surface.md` § Spawn a worker item 5.\n"
     "Count with `python3 scripts/worker-sessions.py --count` and read the target with\n"
     "`python3 scripts/worker-target.py`.\n"
 )

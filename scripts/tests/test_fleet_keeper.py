@@ -277,8 +277,14 @@ class NoKillPathTest(unittest.TestCase):
         keeper killed a healthy manager. The operator's 2026-11-06 answer admits exactly one
         resume, gated on their answer, so the pin now holds everywhere but that function.
         """
-        src, _tree, node = self.parsed()
+        src, tree, node = self.parsed()
         rest = src.replace(ast.get_source_segment(src, node), "")
+        # Narrowed again 2026-11-10: the answer-gated `restart fresh` executor is the second
+        # and last function allowed to hold a restart-worker call.
+        fresh = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+                 and n.name == FreshRestartPinTest.EXECUTOR]
+        self.assertEqual(1, len(fresh))
+        rest = rest.replace(ast.get_source_segment(src, fresh[0]), "")
         self.assertEqual([], self.KILL_SHAPES.findall(self.strip(rest)))
 
     def test_the_executor_can_only_resume_an_absent_session_never_kill(self):
@@ -325,6 +331,129 @@ class NoKillPathTest(unittest.TestCase):
         """Runs through the SAME stripping as the check above, so a stripper that deleted code
         would make this fail rather than let the real check pass blind."""
         self.assertTrue(self.KILL_SHAPES.search(self.code_only("restart-worker.py")))
+
+
+class FreshRestartPinTest(unittest.TestCase):
+    """The `restart fresh` executor (operator ruling 2026-11-10) is answer-gated and exact."""
+
+    EXECUTOR = "restart_fresh_session"
+    CALLER = "act_on_fresh_answer"
+
+    def parsed(self):
+        src = (_SCRIPTS / "fleet-keeper.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == self.EXECUTOR]
+        self.assertEqual(1, len(nodes))
+        return src, tree, nodes[0]
+
+    def test_the_executor_runs_exactly_the_fresh_argv(self):
+        _src, _tree, node = self.parsed()
+        runs = [c for c in ast.walk(node) if isinstance(c, ast.Call)
+                and ast.unparse(c.func) == "subprocess.run"]
+        self.assertEqual(1, len(runs))
+        self.assertEqual(["sys.executable", "script", "sid", "'--reason'", "'lapse'",
+                          "'--fresh-prompt'", "FRESH_PROMPT"],
+                         [ast.unparse(e) for e in runs[0].args[0].elts])
+        assigns = [a for a in ast.walk(node) if isinstance(a, ast.Assign)
+                   and any(isinstance(t, ast.Name) and t.id == "script" for t in a.targets)]
+        self.assertEqual("os.path.join(HERE, 'restart-worker.py')", ast.unparse(assigns[0].value))
+        self.assertEqual("/supervisor:fleet-loop", fk.FRESH_PROMPT)
+
+    def test_the_executor_is_reachable_only_from_the_answer_gate(self):
+        _src, tree, _node = self.parsed()
+        holders = []
+        for top in tree.body:
+            if isinstance(top, ast.FunctionDef) and top.name == self.EXECUTOR:
+                continue
+            for n in ast.walk(top):
+                if (isinstance(n, ast.Name) and n.id == self.EXECUTOR) or \
+                   (isinstance(n, ast.Constant) and n.value == self.EXECUTOR) or \
+                   (isinstance(n, ast.Attribute) and n.attr == self.EXECUTOR):
+                    holders.append(getattr(top, "name", type(top).__name__))
+        self.assertEqual([self.CALLER], holders)
+
+    def test_the_failure_detail_is_the_error_line_not_the_header(self):
+        """Regression 2026-11-11: the keeper reported `lines[0]` — restart-worker's header —
+        as the cause, so the real `❌ error:` line one line lower was never surfaced."""
+        import types
+        saved = fk.subprocess.run
+        self.addCleanup(lambda: setattr(fk.subprocess, "run", saved))
+        fk.subprocess.run = lambda *a, **k: types.SimpleNamespace(
+            returncode=1,
+            stdout=("🔄 restart-worker · session ab12 · pid 1 · 'Fleet Manager'\n"
+                    "   role: manager · status: idle\n"
+                    "❌ error: no wezterm found on PATH — refusing before the kill\n"),
+            stderr="")
+        ok, detail = fk.restart_fresh_session("ab12")
+        self.assertFalse(ok)
+        self.assertIn("no wezterm found", detail)
+        self.assertNotIn("restart-worker · session", detail)
+
+    def test_the_gate_requires_the_fresh_answer(self):
+        _src, tree, _node = self.parsed()
+        gate = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == self.CALLER][0]
+        self.assertIn("option != FRESH_OPTION", ast.unparse(gate))
+
+
+class AnsweredFreshRestartTest(KeeperBase):
+    """`restart fresh` runs ONLY on that answer to a LIVE manager's lapse card, once."""
+
+    def setUp(self):
+        super().setUp()
+        saved = {k: getattr(fk, k) for k in ("answer_of", "restart_fresh_session")}
+        self.addCleanup(lambda: [setattr(fk, k, v) for k, v in saved.items()])
+        self.answer = None
+        self.restarts = []
+        self.options = {}
+        fk.answer_of = lambda item: (self.answer, None)
+        fk.restart_fresh_session = lambda sid: (self.restarts.append(sid) or (True, "pane 9"))
+
+        def notify(key, payload, options, context=""):
+            self.cards.append(key)
+            self.options[key] = list(options)
+            return f"item-{len(self.cards)}"
+        fk.notify = notify
+        self.live = "LIVE"
+
+    def lapse_cards(self):
+        return [k for k in self.cards if k.startswith("fleet-keeper-lapse-")]
+
+    def test_the_lapse_card_of_a_live_manager_offers_restart_fresh(self):
+        self.stale_run(T0, 45)
+        self.assertIn(fk.FRESH_OPTION, self.options[self.lapse_cards()[0]])
+        self.assertIn("acknowledge", self.options[self.lapse_cards()[0]])
+
+    def test_no_answer_restarts_nothing(self):
+        self.stale_run(T0, 90)
+        self.assertEqual([], self.restarts)
+
+    def test_acknowledge_restarts_nothing(self):
+        self.answer = "acknowledge"
+        self.stale_run(T0, 90)
+        self.assertEqual([], self.restarts)
+
+    def test_the_answer_restarts_exactly_once(self):
+        self.answer = fk.FRESH_OPTION
+        self.stale_run(T0, 90)
+        self.assertEqual([SID], self.restarts, "an answer must never become a loop")
+        self.assertTrue(any(k.startswith("fleet-keeper-fresh-") for k in self.cards))
+
+    def test_a_busy_refusal_retries_within_the_bound_then_stops(self):
+        self.answer = fk.FRESH_OPTION
+        fk.restart_fresh_session = lambda sid: (self.restarts.append(sid)
+                                                or (False, "exit 1: busy-target"))
+        self.stale_run(T0, 41 + 40)
+        tries_in_bound = len(self.restarts)
+        self.assertGreater(tries_in_bound, 1, "a busy refusal must not spend the answer")
+        self.assertLessEqual(tries_in_bound, fk.RESUME_DEFER_MAX // 60 + 1)
+        self.stale_run(T0 + 81 * MIN, 30)
+        self.assertEqual(tries_in_bound, len(self.restarts), "retries must stop after the bound")
+
+    def test_a_non_live_manager_is_never_restarted_fresh(self):
+        self.live = "UNKNOWN"
+        self.answer = fk.FRESH_OPTION
+        self.stale_run(T0, 90)
+        self.assertEqual([], self.restarts)
 
 
 class AnsweredResumeTest(KeeperBase):

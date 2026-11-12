@@ -183,17 +183,29 @@ def build_task_index() -> tuple[dict[str, list[str]], dict[str, dict]]:
         titles.setdefault(sid, []).append(f.stem)
         status = _TASK_STATUS.search(text)
         phase = _TASK_PHASE.search(text)
+        defer = _TASK_DEFER.search(text)
         meta.setdefault(sid, {
             "title": f.stem,
             "path": str(f),
             "status": status.group(1) if status else "",
             "phase": phase.group(1) if phase else "",
             "open_boxes": len(_OPEN_BOX.findall(text)),
+            # The raw scalar, unparsed: the caller decides what "due" means.
+            # Parsing here would put a second `defer_date` reader in the tree,
+            # which is the defect `defer-date.py` exists to prevent.
+            "defer_date": _unquote(defer.group(1)) if defer else "",
         })
     return titles, meta
 
+
+def _unquote(value: str) -> str:
+    """A frontmatter scalar without its surrounding quotes, trimmed."""
+    return value.strip().strip("\"'").strip()
+
+
 _TASK_STATUS = re.compile(r"^status:\s*[\"']?([A-Za-z_]+)", re.M)
 _TASK_PHASE = re.compile(r"^phase:\s*[\"']?([A-Za-z_]+)", re.M)
+_TASK_DEFER = re.compile(r"^defer_date:\s*(.+)$", re.M)
 # The vault's own open-box convention: `- [ ]` unchecked, `- [/]` in progress.
 _OPEN_BOX = re.compile(r"^\s*-\s*\[[ /]\]", re.M)
 

@@ -111,9 +111,15 @@ class AnswerGateTest(unittest.TestCase):
         if delivery is None:
             delivery = {"item_id": "i1", "status": "delivered", "carrier": "supervisor:attention-poll"}
         out = io.StringIO()
+        # ⚠️ `ATTENTION_STATE_DIR` is redirected into a throwaway dir. `cmd_answer` writes an
+        # answer marker beside the worker's event log, so without this every message-class
+        # test would write into the real `~/.claude/state/attention` — polluting the operator's
+        # live state from the test suite, and making the assertions depend on a file that
+        # outlives the run.
         with mock.patch.object(aa, "fetch_item", return_value=item), \
              mock.patch.object(aa, "post_answer", side_effect=post) as posted, \
              mock.patch.object(aa, "fetch_delivery", return_value=delivery), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", tempfile.mkdtemp()), \
              mock.patch.object(aa, "_sleep", lambda _s: None):
             rc = aa.cmd_answer("i1", "arm", self.REG, out=out, decision=decision)
         return rc, out.getvalue(), posted
@@ -640,6 +646,167 @@ class FetchDeliveryTest(unittest.TestCase):
             report = aa.fetch_delivery("i1")
         self.assertTrue(captured["url"].endswith("/api/1.0/attention/i1/attempt"))
         self.assertEqual(report["status"], "delivered")
+
+
+class MirrorCardLookup(unittest.TestCase):
+    """An answer given on a Stop-hook MIRROR card must reach the waiting session.
+
+    A mirror is a gate the EVENT LOG holds and the STORE never carried — the class
+    `who-needs-me.py`'s `board_missing_gates()` returns. So `fetch_item()` 404s on the
+    mirror's id, and on unfixed code that exception escapes `cmd_answer` before any
+    TARGET is printed: the operator's approve lands nowhere and the session keeps
+    waiting.
+
+    ⚠️ The fixtures use the shapes the hook ACTUALLY writes — an open line carrying
+    `type: "open"` + `kind`, and a close line carrying `closed_by` and no `type`
+    (`~/.claude/hooks/attention-log.py`). A one-line `{item_id, session_id, kind}` record
+    is a shape production never emits, so it cannot express a closed card and would pin
+    the bug rather than catch it.
+    """
+
+    SID = "3f9c1a2b-4d5e-4f60-8a7b-1c2d3e4f5a6b"
+
+    def setUp(self):
+        self.state = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.state, True)
+        self.registry = [{"sessionId": self.SID, "name": "claude-1f"}]
+
+    def _write(self, *records):
+        # Filename matches the record's session_id, as every real log does.
+        path = os.path.join(self.state, f"{self.SID}.events.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec) + "\n")
+
+    def _open(self, item_id="mirror-1", kind="question"):
+        return {"type": "open", "item_id": item_id, "session_id": self.SID,
+                "kind": kind, "event": "Stop", "ts": 1}
+
+    def _close(self, item_id="mirror-1"):
+        return {"item_id": item_id, "session_id": self.SID,
+                "closed_by": "UserPromptSubmit", "ts": 2}
+
+    def _answer(self, item_id, err=None):
+        out = io.StringIO()
+        err = err or urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        with mock.patch.object(aa, "fetch_item", side_effect=err), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", self.state), \
+             mock.patch.object(aa, "write_answer_marker") as marked:
+            rc = aa.cmd_answer(item_id, "operator", self.registry, out)
+        return rc, out.getvalue(), marked
+
+    def test_answering_a_mirror_id_routes_to_the_producing_session(self):
+        self._write(self._open())
+        rc, text, marked = self._answer("mirror-1")
+        self.assertEqual(rc, 0, text)
+        self.assertIn("TARGET: claude-1f", text)
+        # The marker the store path writes, so the close line carries who answered.
+        self.assertEqual(marked.call_args[0][0], self.SID)
+
+    def test_a_closed_mirror_is_refused_not_routed(self):
+        # The store path has a compare-and-set for this; the mirror path has none, so
+        # the fold is the only guard.
+        self._write(self._open(), self._close())
+        rc, text, _ = self._answer("mirror-1")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("FAILED:", text)
+        self.assertNotIn("TARGET:", text)
+
+    def test_a_permission_mirror_is_refused(self):
+        # A relay cannot release another session's parked gate — that is permission
+        # laundering, and this arm cannot record a verdict anywhere.
+        self._write(self._open(kind="permission"))
+        rc, text, _ = self._answer("mirror-1")
+        self.assertEqual(rc, 2, text)
+        self.assertIn("REFUSED:", text)
+        self.assertNotIn("TARGET:", text)
+
+    def test_an_idle_record_is_not_a_gate(self):
+        self._write(self._open(kind="idle"))
+        rc, text, _ = self._answer("mirror-1")
+        self.assertEqual(rc, 1, text)
+        self.assertNotIn("TARGET:", text)
+
+    def test_a_close_in_another_log_file_still_closes_the_card(self):
+        # The fold is global, not per-file — `who-needs-me.load_events()` folds per file,
+        # so a "harmonize with load_events" refactor would restore the routed-closed-card
+        # bug with every other test still green. This pins the cross-file case.
+        other = "8d2e4c3a-5f61-4a72-9b83-2d3e4f5a6b7c"
+        self._write(self._open())
+        with open(os.path.join(self.state, f"{other}.events.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"item_id": "mirror-1", "session_id": other,
+                                "closed_by": "UserPromptSubmit", "ts": 3}) + "\n")
+        rc, text, _ = self._answer("mirror-1")
+        self.assertEqual(rc, 1, text)
+        self.assertNotIn("TARGET:", text)
+
+    def test_an_undeliverable_producer_writes_no_marker(self):
+        # The marker asserts an answer landed. A session that has exited cannot receive
+        # one, so writing it would attribute a question nobody answered.
+        self._write(self._open())
+        out = io.StringIO()
+        not_found = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        with mock.patch.object(aa, "fetch_item", side_effect=not_found), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", self.state), \
+             mock.patch.object(aa, "write_answer_marker") as marked:
+            rc = aa.cmd_answer("mirror-1", "operator", [], out)
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertIn("UNDELIVERABLE:", out.getvalue())
+        # Nothing was recorded and nothing will be delivered, so the branch must not
+        # claim the card was answered.
+        self.assertNotIn("ANSWERED:", out.getvalue())
+        marked.assert_not_called()
+
+    def test_a_mirror_attempt_404_reports_the_delivery_not_a_failure(self):
+        # The command runs this step unconditionally after a delivery, so a 404 here
+        # would report a delivery that happened as a failed attempt.
+        #
+        # ⚠️ The record is CLOSED, which is the normal case: the session's next turn
+        # clears the card before this leg runs. A gate-only check would re-raise FAILED
+        # for a delivery that succeeded.
+        self._write(self._open(), self._close())
+        out = io.StringIO()
+        not_found = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        with mock.patch.object(aa, "post_attempt", side_effect=not_found), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", self.state):
+            rc = aa.cmd_attempt("mirror-1", "operator", "delivered", out)
+        self.assertEqual(rc, 0, out.getvalue())
+        # The suffix, not the prefix: "ATTEMPT: mirror-1 delivered" is a prefix of BOTH
+        # messages, so it would pass on a handler that swallowed the 404 and fell through.
+        self.assertIn("mirror card — no store record", out.getvalue())
+
+    def test_a_404_for_an_id_that_is_not_a_mirror_still_raises(self):
+        # An older store has no /attempt endpoint; `commands/attention-next.md` documents
+        # that as "a missing endpoint, not a failed delivery" and expects FAILED. Only a
+        # real mirror card may be swallowed.
+        out = io.StringIO()
+        not_found = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        with mock.patch.object(aa, "post_attempt", side_effect=not_found), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", self.state):
+            with self.assertRaises(urllib.error.HTTPError):
+                aa.cmd_attempt("not-a-mirror", "operator", "delivered", out)
+
+    def test_a_non_404_attempt_error_still_raises(self):
+        out = io.StringIO()
+        boom = urllib.error.HTTPError("u", 500, "Server Error", {}, None)
+        with mock.patch.object(aa, "post_attempt", side_effect=boom):
+            with self.assertRaises(urllib.error.HTTPError):
+                aa.cmd_attempt("x", "operator", "delivered", out)
+
+    def test_an_id_in_neither_store_nor_log_fails_loudly(self):
+        self._write(self._open(item_id="other"))
+        rc, text, _ = self._answer("nowhere")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("FAILED:", text)
+
+    def test_a_non_404_store_error_does_not_fall_back_to_the_log(self):
+        self._write(self._open())
+        rc, text, _ = self._answer(
+            "mirror-1", err=urllib.error.HTTPError("u", 500, "Server Error", {}, None)
+        )
+        self.assertEqual(rc, 1, text)
+        self.assertIn("FAILED: store returned 500", text)
+        self.assertNotIn("TARGET:", text)
 
 
 if __name__ == "__main__":

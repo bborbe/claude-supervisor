@@ -2,14 +2,15 @@
   "_note": "Bodies over the 30 KB budget, held at the size they carry in the tree this PR leaves. Seeded from that tree, not from the pre-PR tree: the three files this PR edits are recorded post-change, so no entry is compared against a size the change removed. scripts/check-budget.py fails BOTH ways \u2014 above an entry (a regression) and below it (a stale baseline) \u2014 so run --tighten after any shrink and commit the result.",
   "_budget_bytes": 30720,
   "files": {
-    "agents/fleet-drive.md": 30158,
-    "agents/fleet-sweep-reader.md": 41353,
-    "agents/goal-drive.md": 140817,
-    "agents/goal-sweep-reader.md": 167634,
-    "commands/fleet-loop.md": 4402,
-    "commands/goal-drive.md": 10105,
-    "commands/goal-status.md": 46913,
-    "commands/open.md": 78389,
+    "agents/fleet-drive.md": 44944,
+    "agents/fleet-sweep-reader.md": 43658,
+    "agents/goal-drive.md": 143291,
+    "agents/goal-sweep-reader.md": 167629,
+    "commands/fleet-loop.md": 4903,
+    "commands/goal-drive.md": 10076,
+    "commands/goal-status.md": 47046,
+    "commands/open.md": 83781,
+    "commands/steps/round-tail.md": 31490,
     "commands/worker-drive.md": 49817
   }
 }

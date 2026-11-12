@@ -8,47 +8,125 @@ user-invocable: false
 
 When: every tick — after Readings
 
-## The leg
+⚠️ **Row 16b runs immediately after this one** — `commands/steps/manager-reap.md` reaps a
+manager whose goal or topic subject is terminal. It is a sibling row rather than a section
+here because it acts on a different population (manager sessions, not worker rows) and owns
+its own script; the pairing is the round's, not this step's.
 
-    python3 $P/open-queue.py --tasks-dir "<vault>/<tasks-dir>" --vault "<vault>" --json
+⚠️ **This leg acts, and a read-only execution is not a run of it.** It opens each selected row; a
+run that only prints the block has measured nothing — `opened=0` because the leg was told to print
+it is a failure, not a quiet round. It is one of the round's acting legs, so the round's delegate
+rule carves it out — a sub-agent may run it only with write tools (`commands/fleet-drive.md`, the
+delegate rule's carve-out).
 
-The script owns the population, the guards, the rank and the cap; **this step owns only the opening**. ⚠️ **ONE invocation, two fields** — `--json` carries both `render` (the block, to print verbatim) and `selected[].action` (each row's ready-to-run command). Never run the leg twice: a second read is a different tick's queue, so the block and the actions could name different rows.
+1. **Dispatch the leg — this step no longer carries its procedure.** Dispatch:
 
-**Print `.render` verbatim**, then **run each `.selected[].action` verbatim**, in the order given. ⚠️ **`--vault` is load-bearing.** Task titles are not namespaced across vaults (`commands/open.md:321`), and without it `/supervisor:open` resolves the vault from the session cwd — so a row read from `<vault>` can open a same-named task in a different vault, or be refused as not-found. The population and the action must name one vault. ⚠️ **Never compose the command from the printed name — take the `action` string from `--json`.** A row name is a task-file stem and the vault is worker-writable, so a `"` in it breaks naive quoting and a `$(…)` or backtick executes in this session's shell; the script emits each selected row's action already `shlex.quote`d (`selected[].action`), the same shape `next-focus.py` uses for its `action` field. Paste it verbatim. Nothing else: no batch helper, no in-line `spawn_agent` (`docs/fleet-surface.md` § Spawn a worker item 6 holds `spawn_agent` for `resume=` alone), no reordering.
+   `Task(subagent_type: "supervisor:fleet-open-actor", prompt: <the vault + the absolute tasks dir + this round's digest path + round timestamp>)`
 
-## The block
+   The plugin prefix is required — a bare `fleet-open-actor` resolves to a personal
+   `~/.claude/agents/` copy. The agent (Sonnet) runs `open-queue.py --json` once, writes the
+   rendered block to this round's payload, runs every `selected[].action` verbatim through
+   `/supervisor:open`, and hands back the verdicts. It owns the one-invocation rule, the `--vault`
+   rule, the never-compose rule, the block's three shapes and the "workers only, never a manager"
+   boundary — read them in `agents/fleet-open-actor.md`; this step does not restate them.
 
-    open leg: selected 3 (workers 27/30)
-      1. Fix the Fleet View — flagged
-      2. Reap a Manager Whose Subject Is Terminal — priority 1
-      3. Tighten the Reflect Scan — priority 2
-      skipped: 130 — 3 blocked · 116 capacity · 10 deferred · 1 waiting approval
+2. **What this step does with the hand-back.**
 
-The skipped reasons are **counted, not named**, and print in alphabetical order — that is what the script emits, so print it as it comes.
+   - **`status=ok`** → **print the block at `render=` verbatim.** That file's contents are the
+     `open leg:` block `commands/steps/output-shape.md` item 3 renders — the head with its
+     `workers` reading, the selected rows in rank order, and the `skipped:` tally by reason. Then
+     print the tally `opened: <n> of <m> · resumed=<n> · jumped=<n>` and every `refused:` line
+     **verbatim**. ⚠️ **All four counts print, every round** — a round that resumed two rows and
+     one that lost two must not render the same, and `opened` alone cannot tell them apart.
+     ⚠️ **Open nothing a refusal names**, and never reorder or retry a row. ⚠️ **The gap between
+     `opened` and `selected` is the refusals plus the `resumed=` and `jumped=` rows** — `opened`
+     counts only the rows that produced a **new worker**; a resumed row re-enters an existing
+     conversation and a jumped row only activated a live session
+     (`agents/fleet-open-actor.md` § 3 owns the mapping).
+   - **`status=unknown`** → print `open leg: unknown` and **open nothing this tick.** The agent has
+     already opened nothing; do not retry the leg. ⚠️ **`unknown` is a third answer, never `0`** —
+     *"no free slots"* and *"I could not count"* must not render the same, and a leg that opened
+     nothing because it could not read is not a leg that found nothing.
+   - **`status=not-run`** → print `open leg: not run — <reason>` with `<reason>` taken from the
+     hand-back's `reason=`, and open nothing. ⚠️ **The reason comes from `reason=`, never from the
+     agent's prose** — the hand-back is the only channel that crosses the delegation boundary, and a
+     `not-run` with no `reason=` leaves the dash empty. A leg whose payload write failed is not a
+     round that found nothing to open.
+   - **`truncated=` greater than zero** → `n` refusals ride `payload=` only; read that file, print
+     the remainder verbatim, and reconcile it against `refused=` as
+     `docs/handback-contract.md` § The shape — the truncation exception — states.
+   - ⚠️ **This leg carries no `LEGS` digest key** — `fleet-legs.py`'s three keys are the keep-alive's
+     two and the flagged-open's one, and item 3 renders this leg's block from the payload. Never
+     write a `fleet-legs.py` line for it, and never invent a `--not-run` record for a key that does
+     not exist.
 
-Two rounds print a different line and nothing else:
+   ⚠️ **When the delegation returns no usable hand-back** — it errored, came back empty, or
+   resolved to something that returned no hand-back — run the leg by hand from
+   `agents/fleet-open-actor.md` (this step no longer carries its procedure) and carry on. Trigger on
+   the missing hand-back, never on a matched error string. ⚠️ **A hand-back carrying a block but no
+   `opened` count is the read-only failure this leg exists to remove** — treat it as no usable
+   hand-back and run the leg. ⚠️ **Re-invoke only when nothing was opened** — the leg is not
+   idempotent across a lost hand-back: the first invocation may have spawned rows before the
+   hand-back was lost, and a second run would spawn a second worker onto those tasks. One read
+   decides it, and that read is the **spawn ledger**, never the roster: import
+   `scripts/spawn-ledger.py` and call its `read_ledger()` (session-id → wire row), then look for a
+   row whose `label` is one of the block's selected task names. `label` **is** the task name —
+   `/supervisor:open` § 3 passes `label <task>` — and a row with `resumed_from` set is a resume, not
+   a create.
+   ⚠️ **Why this instrument and not `fleet-sessions.py`:** that roster's rows are built from session
+   **transcripts** with the ledger joined on, so a worker spawned seconds ago has no row yet — which
+   is exactly the window this guard exists to cover (`fleet-sessions.py` says so itself: an absent
+   ledger record is a *different* claim from "not spawned"). `spawn_agent` writes the ledger row at
+   the spawn edge — the write is issued before the spawn call returns, not when the worker first
+   speaks — so by the time the caller re-reads, a spawn seconds old has a row while a
+   transcript-derived roster row does not.
+   ⚠️ **The selected names come from the payload**, `<digest minus .digest>.open` — written by
+   `agents/fleet-open-actor.md` § 2 *before* § 3 acts. Its numbered rows read `  <n>. <name> — <why>`,
+   where `<why>` is the row's RANK — `flagged · priority <n>` or `flagged · no priority`, since the
+   flag is the admission gate and every selected row carries it. Take the name as the field between
+   the `<n>. ` prefix and the LAST ` — ` separator; never strip a fixed suffix, because a suffix
+   that names the rank goes stale the moment the rank vocabulary changes and leaves a fragment on
+   the name.
+   ⚠️ **`read_ledger()` answers three ways, and this guard must branch on all three.** Its own
+   docstring is explicit: `{}` is *read it, nobody is recorded* while `None` is *could not read it*,
+   and collapsing them "turns a failure into a confident empty fleet". A guard that tests only
+   "row found / no row" reads an unreadable ledger as the empty fleet and authorises exactly the
+   re-run this paragraph exists to forbid. So:
 
-    open leg: no free slots — selected 0 (workers 30/30)
-    open leg: target unlimited — selected 0 (workers unlimited)
-
-⚠️ **`target unlimited` is the `spawn.maxConcurrent: 0` config, and the leg opens nothing there on purpose.** `0` removes the server's cap, and the cap is the only bound this leg has to rank against — admitting every eligible row because the bound was removed would be the bulk opening the 2026-10-01 ruling forbids. The line names a config state, not a quiet round: a fleet with no target set is the operator's to fix, and it is the round's to report.
+   - **No payload ⇒ the leg never reached its act step ⇒ nothing was opened ⇒ a re-run is safe.**
+   - **`None` ⇒ unreadable ⇒ cannot tell ⇒ open nothing and never re-run.** Print
+     `open leg: unknown — opened=unknown (spawn ledger unreadable)`; `commands/steps/output-shape.md`
+     item 3 owns that form. The first invocation may have spawned rows seconds before the hand-back
+     was lost, and a second run would spawn a second worker onto those tasks.
+   - **A row naming a selected task** — a row with `resumed_from` set is a resume, not a create —
+     ⇒ that task was opened ⇒ open nothing more, never re-run, and print
+     `open leg: unknown — opened=unknown (spawn ledger names <name>)`.
+   - **A readable ledger with no such row ⇒ nothing was opened ⇒ the leg may run again.**
 
 ## What the leg does not decide
 
-⚠️ **The leg ranks; `/supervisor:open` decides admissibility.** Every gate that command owns — Gate 1 (approval), Gate 2 (the readiness ladder, `docs/fleet-surface.md` § Spawn a worker item 2), Gate 3 (the cap and the operator-named marker) — runs unchanged for every row this leg hands it. The leg never pre-clears one, and a row that clears the leg can still be refused at the spawn. Report that refusal and **continue to the next row**; a refusal is not a reason to reorder the list or to retry the same row.
+⚠️ **The leg gates and ranks; `/supervisor:open` decides admissibility.** Every gate that command owns —
+Gate 1 (approval), Gate 2 (the readiness ladder, `docs/fleet-surface.md` § Spawn a worker item 2),
+Gate 3 (the cap and the operator-named marker) — runs unchanged for every row this leg hands it.
+The leg never pre-clears one, and a row that clears the leg can still be refused at the spawn.
 
-⚠️ **Never open a row the leg skipped.** The skipped list carries a reason per row and those reasons are the whole point of printing it: `waiting approval` is the operator's inbox (`commands/open.md` § Step 1.5 Gate 1), `blocked` and `deferred` are the row's own conditions, and `capacity` means the rank admitted more than the fleet has room for. A round that opens past the printed count has replaced the rank with its own judgement.
+⚠️ **Never open a row the leg skipped.** The skipped list carries a reason per row and those
+reasons are the whole point of printing it: `not flagged` is a row the operator did not mark for
+auto-open, `waiting approval` is the operator's inbox (`commands/open.md` § Step 1.5 Gate 1),
+`blocked` and `deferred` are the row's own conditions, and `capacity` means the admitted rows exceed
+the room the fleet has. A round that opens past the
+printed count has replaced the rank with its own judgement.
 
-⚠️ **`unknown` is a third answer, never `0`.** An unreadable queue or capacity store prints `open leg: unknown` and exits non-zero. Print it as it comes back and **open nothing this tick** — *"no free slots"* and *"I could not count"* must not render the same, and a leg that opens nothing because it could not read is not a leg that found nothing to open.
-
-## The boundary — no manager, ever
-
-⚠️ **This leg opens workers only. It never spawns, arms or resumes a topic manager or a goal manager.** Operator ruling 2026-10-30, verbatim: *"we dont want to auto open topic-manager, goal-manager ... but flag are fine"*. A goal with ready rows and no live manager gets its **workers** opened; the goal's manager state is unchanged by this leg and is the negative control the round reports (`manager-liveness.py --state --subject "<goal>"`, before and after).
-
-⚠️ **The flag is a mark, not an approval, and whoever set it counts.** `flag: true` (`true`/`yes`/`on`) ranks a row first; `flag_set_by` is a note, not a gate (operator ruling 2026-10-30: *"it should not matter how set the flag"*). The approval is still `approved_at`, which every row this leg ranks already carries.
-
-⚠️ **This predicate is deliberately wider than `commands/open.md` § Step 0.5's.** That selector keeps `OPENING_ACTORS = ('operator', 'legacy')` because it writes `approved_by: operator`; this leg only orders already-approved rows, so it reads the flag alone. `docs/session-tiers.md` § rule 2 owns the split.
+⚠️ **This leg opens workers only. It never spawns, arms or resumes a topic manager or a goal
+manager.** Operator ruling 2026-10-30, verbatim: *"we dont want to auto open topic-manager,
+goal-manager ... but flag are fine"*. A goal with ready rows and no live manager gets its
+**workers** opened; the goal's manager state is unchanged by this leg and is the negative control
+the round reports (`manager-liveness.py --state --subject "<goal>"`, before and after).
 
 ## Where the rules live
 
-This step restates none of them. The rank, the guards and the capacity instruments are `scripts/open-queue.py`'s header; the spawn gates are `commands/open.md`; the tier boundary is `docs/session-tiers.md`; the cap is `docs/fleet-surface.md` § Spawn a worker item 5. A change to any of them belongs in that file, not here.
+This step restates none of them. The rank, the guards and the capacity instruments are
+`scripts/open-queue.py`'s header; the spawn gates are `commands/open.md`; the tier boundary is
+`docs/session-tiers.md`; the cap is `docs/fleet-surface.md` § Spawn a worker item 5; the block's
+three shapes and every act count are `agents/fleet-open-actor.md`. A change to any of them belongs
+in that file, not here.

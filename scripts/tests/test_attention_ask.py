@@ -174,7 +174,11 @@ class PostBatchTest(unittest.TestCase):
             rc = ask.cmd_post_batch(batch_args(task=["Alpha", "Beta", "Gamma"]), out=out)
 
         self.assertEqual(rc, 0)
-        self.assertEqual(len(calls), 1)
+        # Count POSTS, not every request: the producer-kind resolver reads the
+        # session ledger first, and that read is not a card. The contract under
+        # test is "N rows, ONE card", so a GET must not be counted as one.
+        posts = [url for url in calls if url.rstrip("/").endswith("/api/1.0/attention")]
+        self.assertEqual(len(posts), 1, calls)
         body = captured["body"]
         self.assertEqual(body["answer_mechanism"], "message")
         # ⚠️ Both new defaults are pinned HERE as well as on `post`, and the
@@ -802,6 +806,64 @@ class PollTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("ANSWERED: option: the board", text)
         self.assertIn("ANSWERED_BY: attention-board", text)
+        # The client evidence is what separates a board click from a script, so
+        # it must be readable from `poll` without grepping the controller's log.
+        self.assertIn(
+            "ANSWERED_CLIENT: Mozilla/5.0 (Macintosh) Chrome/153.0.0.0 @ 127.0.0.1:63415",
+            text,
+        )
+
+    def test_script_answer_renders_a_distinct_client(self):
+        rc, text = self.poll(
+            {
+                "item_id": STORE_ITEM_ID,
+                "state": "answered",
+                "answer": {"kind": "option", "value": "the board"},
+                "answered_by": "attention-board",
+                "answered_client": {
+                    "user_agent": "curl/8.7.1",
+                    "remote_addr": "127.0.0.1:63416",
+                    "automation": False,
+                },
+            }
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED_CLIENT: curl/8.7.1 @ 127.0.0.1:63416", text)
+        self.assertNotIn("Chrome", text)
+
+    def test_forwarded_for_renders_beside_the_peer_address(self):
+        _, text = self.poll(
+            {
+                "item_id": STORE_ITEM_ID,
+                "state": "answered",
+                "answer": {"kind": "option", "value": "the board"},
+                "answered_by": "attention-board",
+                "answered_client": {
+                    "user_agent": "curl/8.7.1",
+                    "remote_addr": "127.0.0.1:63417",
+                    "forwarded_for": "203.0.113.7",
+                },
+            }
+        )
+        # Beside, never instead of: the header is caller-set, so the peer
+        # address stays the unspoofable half of the line.
+        self.assertIn(
+            "ANSWERED_CLIENT: curl/8.7.1 @ 127.0.0.1:63417 (forwarded_for: 203.0.113.7)",
+            text,
+        )
+
+    def test_item_without_a_recorded_client_prints_no_client_line(self):
+        _, text = self.poll(
+            {
+                "item_id": STORE_ITEM_ID,
+                "state": "closed",
+                "answered_by": "attention-board",
+            }
+        )
+        # The actor line proves the terminal ran and would have carried a client
+        # had the store recorded one — so the absence below is a real absence.
+        self.assertIn("ANSWERED_BY: attention-board", text)
+        self.assertNotIn("ANSWERED_CLIENT:", text)
 
     def test_skip_is_rendered_without_a_trailing_value(self):
         _, text = self.poll(

@@ -22,8 +22,8 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { runAgentLoop } from './agent-loop.mjs'
-import { StreamLaggedError } from './wrapper-stream.mjs'
+import { runAgentLoop, ZERO_TURN_ERROR } from './agent-loop.mjs'
+import { StreamExhaustedError, StreamGapError, StreamLaggedError } from './wrapper-stream.mjs'
 
 // Builds a synthetic message stream and a driver that records the agent's `status`
 // after each message has been consumed by the loop — which is the only place the
@@ -231,6 +231,62 @@ test('a StreamLaggedError is never settled done, even after a captured success r
   assert.equal(terminal[0][1].status, 'error')
 })
 
+// ⚠️ The same contract as the StreamLaggedError case above, for the 409 gap. A `result` can
+// arrive mid-turn, so its presence does not prove the turn closed — and a StreamGapError means
+// the events between the resume point and the successor's first frame are missing outright.
+// Settling it `done` reports a completed turn whose transcript has an invisible hole.
+test('a StreamGapError is never settled done, even after a captured success result', async () => {
+  const agent = makeAgent()
+  const ledgerCalls = []
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-1' }
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'mid-turn', num_turns: 1, permission_denials: [] }
+    throw new StreamGapError('sess-1', 42)
+  }
+
+  await runAgentLoop({
+    q: stream(),
+    agent,
+    writeLedger: (...args) => {
+      ledgerCalls.push(args)
+      return {}
+    },
+    log: () => {},
+  })
+
+  assert.equal(agent.status, 'error', 'a transcript gap is not a finished turn')
+  const terminal = ledgerCalls.filter(([, patch]) => patch !== undefined)
+  assert.equal(terminal.length, 1)
+  assert.equal(terminal[0][1].status, 'error')
+})
+
+// The third gap class, and the one a name-based exclusion missed: budget exhaustion throws
+// StreamExhaustedError, which must settle `error` on a captured result just like the other two.
+test('a StreamExhaustedError is never settled done, even after a captured success result', async () => {
+  const agent = makeAgent()
+  const ledgerCalls = []
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-1' }
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'mid-turn', num_turns: 1, permission_denials: [] }
+    throw new StreamExhaustedError('sess-1', 'HTTP 503')
+  }
+
+  await runAgentLoop({
+    q: stream(),
+    agent,
+    writeLedger: (...args) => {
+      ledgerCalls.push(args)
+      return {}
+    },
+    log: () => {},
+  })
+
+  assert.equal(agent.status, 'error', 'budget exhaustion is not a finished turn')
+  const terminal = ledgerCalls.filter(([, patch]) => patch !== undefined)
+  assert.equal(terminal.length, 1)
+  assert.equal(terminal[0][1].status, 'error')
+})
+
 test('a throwing turn-complete hook does not settle the worker as error', async () => {
   const agent = makeAgent()
   async function* stream() {
@@ -249,4 +305,104 @@ test('a throwing turn-complete hook does not settle the worker as error', async 
   })
 
   assert.equal(agent.status, 'done', 'a hook bug must not be recorded as a worker error — the turn completed')
+})
+
+// Zero-turn resume (measured 2026-11-05, agent_12 / agent_13): the CLI's own
+// `<task-notification>` for orphaned background agents settled with a `result` carrying
+// `num_turns: 0` and an empty result, and the worker read `done` though no turn ran.
+test('a stream whose last result has num_turns 0 settles error, never done', async () => {
+  const agent = makeAgent()
+  const ledgerCalls = []
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-z' }
+    yield { type: 'user', message: { content: '<task-notification>…</task-notification>' } }
+    yield { type: 'result', subtype: 'success', is_error: false, result: '', num_turns: 0, permission_denials: [] }
+  }
+  await runAgentLoop({ q: stream(), agent, writeLedger: (...a) => { ledgerCalls.push(a); return {} }, log: () => {} })
+  assert.equal(agent.status, 'error')
+  assert.equal(agent.error, ZERO_TURN_ERROR)
+  assert.equal(agent.result.zero_turn, true)
+  const terminal = ledgerCalls.at(-1)[1]
+  assert.equal(terminal.status, 'error')
+  assert.equal(terminal.error, ZERO_TURN_ERROR)
+})
+
+test('positive control: a resume whose last result ran turns still settles done', async () => {
+  const agent = makeAgent()
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-p' }
+    yield { type: 'result', subtype: 'success', is_error: false, result: '', num_turns: 0, permission_denials: [] }
+    yield { type: 'assistant', message: { content: 'working' } }
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'did it', num_turns: 4, permission_denials: [] }
+  }
+  await runAgentLoop({ q: stream(), agent, writeLedger: () => ({}), log: () => {} })
+  assert.equal(agent.status, 'done')
+  assert.equal(agent.error, undefined)
+  assert.equal(agent.result.zero_turn, undefined)
+})
+
+test('a zero-turn result followed by a stream throw is not read as a completed turn', async () => {
+  const agent = makeAgent()
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-t' }
+    yield { type: 'result', subtype: 'success', is_error: false, result: '', num_turns: 0, permission_denials: [] }
+    throw new Error('socket closed')
+  }
+  const ledgerCalls = []
+  await runAgentLoop({ q: stream(), agent, writeLedger: (...a) => { ledgerCalls.push(a); return {} }, log: () => {} })
+  assert.equal(agent.status, 'error')
+  assert.equal(agent.error, ZERO_TURN_ERROR)
+  assert.equal(agent.result.zero_turn, true)
+  assert.equal(ledgerCalls.at(-1)[1].status, 'error')
+  assert.equal(ledgerCalls.at(-1)[1].error, ZERO_TURN_ERROR)
+})
+
+// The latch: a real turn followed by a late synthetic zero-turn result is NOT a zero-turn run.
+test('a zero-turn result arriving after a real turn does not report the prompt as unexecuted', async () => {
+  const agent = makeAgent()
+  const ledgerCalls = []
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-l' }
+    yield { type: 'assistant', message: { content: 'working' } }
+    yield { type: 'result', subtype: 'success', is_error: false, result: 'did it', num_turns: 4, permission_denials: [] }
+    yield { type: 'user', message: { content: '<task-notification>late</task-notification>' } }
+    yield { type: 'result', subtype: 'success', is_error: false, result: '', num_turns: 0, permission_denials: [] }
+  }
+  await runAgentLoop({ q: stream(), agent, writeLedger: (...a) => { ledgerCalls.push(a); return {} }, log: () => {} })
+  assert.equal(agent.status, 'done')
+  assert.equal(agent.error, undefined)
+  assert.equal(agent.result.zero_turn, undefined)
+  assert.equal(ledgerCalls.at(-1)[1].status, 'done')
+})
+
+test('a gap error after a zero-turn result keeps the gap reason, never the zero-turn marker', async () => {
+  const agent = makeAgent()
+  const gap = new Error('stream lagged')
+  gap.gap = true
+  gap.name = 'StreamGapError'
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-g' }
+    yield { type: 'result', subtype: 'success', is_error: false, result: '', num_turns: 0, permission_denials: [] }
+    throw gap
+  }
+  const ledgerCalls = []
+  await runAgentLoop({ q: stream(), agent, writeLedger: (...a) => { ledgerCalls.push(a); return {} }, log: () => {} })
+  assert.equal(agent.status, 'error')
+  assert.equal(agent.error, String(gap))
+  assert.equal(agent.result.zero_turn, undefined)
+  assert.equal(ledgerCalls.at(-1)[1].error, String(gap))
+})
+
+test("the zero-turn settle mutates result in place, so the supervisor's keep timer still holds it", async () => {
+  const agent = makeAgent()
+  let captured = null
+  async function* stream() {
+    yield { type: 'system', subtype: 'init', session_id: 'sess-i' }
+    yield { type: 'result', subtype: 'success', is_error: false, result: '', num_turns: 0, permission_denials: [] }
+  }
+  // The hook fires after `agent.result` is assigned — the same object the supervisor's timer holds.
+  await runAgentLoop({ q: stream(), agent, writeLedger: () => ({}), log: () => {}, onTurnComplete: (a) => { captured = a.result } })
+  assert.ok(captured, 'the result object existed before the settle')
+  assert.equal(agent.result, captured)
+  assert.equal(captured.zero_turn, true)
 })

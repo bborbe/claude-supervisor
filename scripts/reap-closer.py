@@ -200,11 +200,51 @@ def _partial_closer(text):
     return None
 
 
+ENDS_MARKER = "⏰ Ends:"
+
+
 def last_closer(path, max_bytes=MAX_SCAN):
     """`(timestamp, line)` for the transcript's last `👤 You:` line, or `None`.
 
     Scans backwards from EOF and returns at the first assistant message carrying a
     closer, so the common case (closer at the end) costs one `WINDOW` read.
+    """
+    found = _closer_message(path, max_bytes)
+    return None if found is None else (found[0], found[1])
+
+
+def last_closer_and_ends(path, max_bytes=MAX_SCAN):
+    """`(timestamp, you_line, ends_line_or_None)` from ONE scan, or `None` with no closer.
+
+    The Stop-time lint reads both lines and must read them from the same message; two
+    calls could straddle a write that lands between them.
+    """
+    scan = last_closer_scan(path, max_bytes)
+    return None if scan is None else (scan[0], scan[1], scan[2])
+
+
+def last_closer_scan(path, max_bytes=MAX_SCAN):
+    """`(timestamp, you_line, ends_line_or_None, message_text_or_None)` from ONE scan.
+
+    ⚠️ The message text is returned for the checks that read the whole closer block
+    rather than one line — the `🔴 BLOCKED` state line, which the owner test needs.
+    It is `None` when the closer was salvaged from a partially-written line, exactly
+    as `_closer_message` reports it, and a caller must read that as "cannot tell",
+    never as "the block is absent".
+    """
+    found = _closer_message(path, max_bytes)
+    if found is None:
+        return None
+    ts, you, text = found
+    ends = [ln.strip() for ln in (text or "").splitlines() if ENDS_MARKER in ln]
+    return ts, you, (ends[-1] if ends else None), text
+
+
+def _closer_message(path, max_bytes=MAX_SCAN):
+    """`(timestamp, you_line, text)` for the last assistant message carrying a closer.
+
+    `text` is the message's joined text blocks, or `None` when the closer was salvaged
+    from a partially-written line (only the `👤 You:` line is recoverable there).
     """
     for raw in tail_lines(path, max_bytes):
         try:
@@ -216,7 +256,7 @@ def last_closer(path, max_bytes=MAX_SCAN):
             text = raw.decode("utf-8", "replace")
             salvaged = _partial_closer(text)
             if salvaged is not None:
-                return salvaged
+                return salvaged[0], salvaged[1], None
             if _ASSISTANT.search(text):
                 # An assistant message we cannot read is not a licence to use an older one.
                 return None
@@ -232,7 +272,7 @@ def last_closer(path, max_bytes=MAX_SCAN):
             )
         you = [ln.strip() for ln in text.splitlines() if "👤 You:" in ln]
         if you:
-            return d.get("timestamp") or "?", you[-1]
+            return d.get("timestamp") or "?", you[-1], text
     return None
 
 

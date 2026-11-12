@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
-"""The round's delegate rule carves out its two acting legs, and each leg says so at its own home.
+"""The round's delegate rule carves out its acting legs, and each leg says so at its own home.
 
 `commands/fleet-drive.md`'s delegate rule tells every round to hand anything that is not the
-sweep to a sub-agent. Rows 5b (keep alive) and 5c (flagged open) *are* "anything not the
-sweep", and they are also the only two rows whose purpose is to **act** — restart or resume a
-session, open a page the operator flagged. With no carve-out the natural reading of the rule
-swallows exactly those two legs, and a delegated sub-agent runs read-only, so the round prints
-a count it was told to print instead of doing the thing the row exists for.
+sweep to a sub-agent. Rows 5b (keep alive), 5c (flagged open), 5d (own parks), 16 (open leg)
+and 16b (manager-subject reap) *are* "anything not the sweep", and they are also the only rows
+whose purpose is to **act** — restart or resume a session, open a page the operator flagged,
+answer a parked permission prompt, open the rows the rank selected, post the reap card and
+hand over the reap lines. With no carve-out the natural reading of the rule swallows
+exactly those legs, and a delegated sub-agent runs read-only, so the round prints a count it was
+told to print instead of doing the thing the row exists for.
+
+⚠️ **5d was missed by ordering, and the miss was silent.** It shipped in `v0.244.0`; the carve-out
+that names the acting rows shipped in `v0.244.1`, so the row was added to the router after the
+list of exceptions had already been written. Measured 2026-11-07: the Fleet Manager's transcript
+holds nine `own-parks:` lines, all `nothing parked`, all between `18:54:17Z` and `18:58:37Z` on
+2026-11-06 — and none in the ~16 hours after, while its loop armed every 15 minutes and it
+spawned ten workers that morning. A row that is delegated read-only prints its skip into a
+sub-agent's transcript, which is not the round's, so the round's own output never showed the
+omission.
 
 Measured 2026-11-01 13:27 CET, session `ac24db61`: the round delegated 5c with the instruction
 *"the literal line `unactioned: <found − opened> operator-flagged` **with opened=0**"*, never
@@ -21,8 +32,8 @@ Three properties, each of which fails silently on its own:
    copies is still "exactly one home" — so it must be *found*; and a second copy is the counter
    a grep cannot tell from the real one.
 2. **It lives in the router file**, not in a step file. The rule it excepts is there, and a
-   carve-out filed away from its rule is read by nobody. It must name both rows, the write tools
-   a delegated run needs, and the read-only case that is not a run. ⚠️ **The granularity is the
+   carve-out filed away from its rule is read by nobody. It must name every acting row, the write
+   tools a delegated run needs, and the read-only case that is not a run. ⚠️ **The granularity is the
    FILE, not the paragraph** — this check asserts the carve-out sits in `commands/fleet-drive.md`,
    and cannot tell whether it sits beside the delegate rule or a hundred lines from it. Placement
    within the file is a review question; only the file is mechanical.
@@ -31,8 +42,8 @@ Three properties, each of which fails silently on its own:
    whose own file never says it acts can be run read-only by a sub-agent that did exactly what
    the file said, and nothing in the tree notices.
 
-**What this proves, and what it does not.** It proves the three texts are present, single-copy,
-mutually pointed, and that the router still dispatches both legs. It does **not** prove a round
+**What this proves, and what it does not.** It proves every acting leg's text is present, single-copy,
+mutually pointed, and that the router still dispatches every acting leg. It does **not** prove a round
 acted: a tree whose prose is right and whose round is still read-only passes here. The live
 evidence is the round's own output; this guard only stops the rule being deleted or softened
 without a test noticing.
@@ -48,7 +59,7 @@ STEPS = COMMANDS / "steps"
 #: Phrase from the carve-out's own first sentence. A plain substring, so a reflow of the
 #: surrounding prose leaves it intact; rewording that sentence is a deliberate act, and the
 #: failure is the reminder that this home assertion moves with it.
-CARVEOUT = "5b and 5c are acting legs"
+CARVEOUT = "5b, 5c, 5d, 16 and 16b are acting legs"
 CARVEOUT_HOME = COMMANDS / "fleet-drive.md"
 CARVEOUT_NEEDS = ("write tools", "read-only")
 
@@ -59,6 +70,16 @@ POINTER = "commands/fleet-drive.md"
 LEGS = {
     "5b": STEPS / "keepalive.md",
     "5c": STEPS / "flagged-open.md",
+    "5d": STEPS / "own-parks.md",
+    # 16 joined on 2026-11-08 with the open leg's split into `agents/fleet-open-actor.md`. It
+    # acts the same way — it opens every row the rank selected, through `/supervisor:open` —
+    # and it was delegated by the same rule, so it needs the same two guarantees: a write
+    # grant when it is delegated, and its own file saying so.
+    "16": STEPS / "open.md",
+    # 16b joined on 2026-11-09 with the manager-subject reap: it posts the reap card and
+    # hands every reap line to the caller to send, so it is delegated by the same rule and
+    # needs the same two guarantees.
+    "16b": STEPS / "manager-reap.md",
 }
 HEADER = ("#", "Step", "When", "File")
 
@@ -127,13 +148,13 @@ def main() -> int:
         failures.append(
             f"no file under {COMMANDS.relative_to(REPO)}/ carries the carve-out {CARVEOUT!r}.\n"
             f"      Without it the delegate rule reads as 'anything not the sweep', which\n"
-            f"      swallows rows 5b and 5c — the two legs whose whole purpose is to act."
+            f"      swallows rows 5b, 5c, 5d, 16 and 16b — the legs whose whole purpose is to act."
         )
     elif total > 1:
         where = ", ".join(f"{p.relative_to(REPO)} ×{n}" for p, n in found)
         failures.append(
             f"the carve-out {CARVEOUT!r} appears {total} times: {where}.\n"
-            f"      One copy only — the two step files point at it rather than restating it."
+            f"      One copy only — the step files point at it rather than restating it."
         )
     else:
         home, _ = found[0]
@@ -175,7 +196,7 @@ def main() -> int:
                 f"      The exception has one home; the leg names it rather than restating it."
             )
 
-    # 4 — the router still dispatches both legs, so the carve-out governs something.
+    # 4 — the router still dispatches every acting leg, so the carve-out governs something.
     rows = router_rows(CARVEOUT_HOME)
     for row, leg in LEGS.items():
         if leg.name not in rows.get(row, []):
@@ -192,7 +213,7 @@ def main() -> int:
 
     print(
         f"acting-legs ok: {CARVEOUT!r} appears once, in "
-        f"{CARVEOUT_HOME.relative_to(REPO)}, and both acting legs state it at their own home"
+        f"{CARVEOUT_HOME.relative_to(REPO)}, and every acting leg states it at its own home"
     )
     return 0
 

@@ -37,6 +37,16 @@ each resolve to the third value — never to `clear`, `none` or `quiet`. Folding
 read into a negative is the silent direction that makes a blocked worker read as a
 working one, which is the defect this file exists to remove.
 
+**A failure degrades per row, never to a whole-family blank.** The feed family is
+`read` / `partial` / `unread`: `partial` keeps every positively-gated row `gated` and
+marks only the rows that could own an unattributed gate `unread`. The document carries
+`feed_counts`, counted from the rows themselves, so `gated + clear + unread` equals the
+row count by construction, and a `probes` list naming every failed probe with its error
+— a transient store fault and a genuinely gate-free fleet must be distinguishable
+without re-running anything. Measured 2026-11-08 05:06:29Z: a single failed store read
+rendered `gated=0 · clear=0 · unread=11` for 11 rows while the feed itself was
+answering; a re-run 39 s later read `gated=1 · clear=10 · unread=0`.
+
 **Reuse, never re-derive.** Id sets come from `session-ids.py`, liveness from
 `session-liveness.py`, the registry and transcript age from `who-needs-me.py`, the
 pane→session join from `gate-owner-filter.py`, and the tracked model from
@@ -187,7 +197,7 @@ def in_flight(session_ids, registry, attention_dir, now, transcript_age):
                 break  # the carve-out: fall through to limb 2
             return "in-flight", "limb 1 (registry: shell)"
         if status == "waiting":
-            return "quiet", "limb 1 (registry: waiting)"
+            return "parked", "limb 1 (registry: waiting)"
         if status is None:
             unreadable += 1
 
@@ -252,96 +262,203 @@ def liveness(session_ids, endpoint, registry_dir):
     return "UNKNOWN"
 
 
-def feed_panes(endpoint):
-    """`(set_of_panes, state)` from the feed's `Needs you` section.
+def feed_panes(endpoint=None):
+    """The feed read as one dict: `panes`, `owners`, `orphan_owners`, `state`, `error`.
 
     `--all` is part of the call, not a preference: the section caps at 20 rows and
     withholds the rest, so a capped read turns a gated row past the cap into a false
     `clear` — the defect this verdict exists to remove.
+
+    ⚠️ **One retry, then the failure is NAMED — never rendered as a verdict about
+    the rows.** `who-needs-me.py` globs every session's event log and reads the
+    store and transcripts; under load it can exceed the 60 s bound and exit
+    non-zero, and one such miss blanked the whole feed family for a round
+    (measured 2026-11-08 05:06:29Z: `gated=0 · clear=0 · unread=11` for 11 rows,
+    while a direct `who-needs-me.py --section needs-you` in the same minute
+    returned `Needs you (25)`, exit 0; a re-run 39 s later read
+    `gated=1 · clear=10 · unread=0`). A transient that clears in under a minute is
+    exactly what a single retry absorbs; after it, the failure is reported as
+    `error` and every row is honestly `unread` because no feed read succeeded.
+
+    ⚠️ **A fallback render is retried too.** When `who-needs-me.py` answers exit 0
+    from the event log (`STORE_FALLBACK_NOTE`), that read cannot certify a row
+    clear — so one retry is worth its cost, and a store that recovered within the
+    round then produces a complete read instead of a `partial` one. A second
+    fallback is returned as `partial`, named.
     """
     cmd = [sys.executable, os.path.join(HERE, "who-needs-me.py"),
            "--section", "needs-you", "--all"]
-    try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        return set(), "unread"
-    if out.returncode != 0:
-        return set(), "unread"
-    return parse_feed(out.stdout)
+    env = None
+    if endpoint:
+        # `--endpoint` is documented as the store URL the caller injects; the
+        # subprocess reads it from the environment, so pass it through here rather
+        # than leaving the flag a no-op.
+        env = dict(os.environ, ATTENTION_STORE_URL=endpoint)
+    fallback_note = _load("who-needs-me").STORE_FALLBACK_NOTE
+    last = "no attempt ran"
+    fallback = None
+    for attempt in range(2):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
+                                 env=env)
+        except (OSError, subprocess.SubprocessError) as exc:
+            last = f"{type(exc).__name__}: {exc}"
+            continue
+        if out.returncode != 0:
+            tail = (out.stderr or out.stdout or "").strip().splitlines()
+            last = f"exit {out.returncode}: {tail[-1] if tail else 'no output'}"
+            continue
+        if attempt == 0 and fallback_note in out.stdout:
+            fallback = parse_feed(out.stdout)
+            continue
+        return parse_feed(out.stdout)
+    if fallback is not None:
+        return fallback
+    return {
+        "panes": set(),
+        "owners": {},
+        "orphan_owners": [],
+        "state": "unread",
+        "error": f"who-needs-me.py --section needs-you --all failed twice: {last}",
+    }
 
 
 def parse_feed(text):
-    """`(set_of_keys, state)` from the feed's rendered rows.
+    """The feed's rendered rows as `panes`, `owners`, `orphan_owners`, `state`, `error`.
 
     Keys are digit panes and `hst:<store item id>` keys, exactly as
-    `gate-owner-filter.feed_rows` reads them. A row marker that yields no key — a
-    `[   ?]` row, or a `[ hst]` row with no `answer:` line — is a gate whose owner
-    cannot be named, so the read is `unread`: dropping it would let its worker read
-    `clear`, which is the defect this verdict exists to remove.
+    `gate-owner-filter.feed_rows` reads them. A pane-less row also carries the
+    session that owns it (`owner_of`), so a gate is attributable without a second
+    store read.
+
+    A row marker that yields NEITHER a key nor an owner is a gate nobody can
+    attribute. That sets `state: partial` — never `read`, because a `clear` from a
+    read that saw an unattributable gate would let that gate's worker read clear.
+    `partial` is still not a whole-family blank: the rows that ARE gated keep their
+    verdict, and only the rows that could own the unattributed gate read `unread`.
     """
     lines = text.splitlines()
     filt = _load("gate-owner-filter")
-    keys = {pane for pane, _ in filt.feed_rows(lines)}
-    state = "read"
+    panes = {pane for pane, _ in filt.feed_rows(lines)}
+    owners, orphan_owners = {}, []
+    unkeyed = 0
     for index, line in enumerate(lines):
         m = ROW_RE.match(line)
         if not m:
             continue
         token = m.group(1)
-        if token == "?" or (token == "hst" and filt.headless_key(lines, index) is None):
-            state = "unread"
-    return keys, state
+        owner = filt.owner_of(lines, index)
+        if token == "?":
+            # A pane-less row with nothing to answer is still a gate; it just has
+            # no key. Its owner line makes it attributable all the same.
+            if owner:
+                orphan_owners.append(owner)
+            else:
+                unkeyed += 1
+            continue
+        if token == "hst":
+            key = filt.headless_key(lines, index)
+            if key is None:
+                if owner:
+                    orphan_owners.append(owner)
+                else:
+                    unkeyed += 1
+                continue
+            if owner:
+                owners[key] = owner
+    state = "read" if unkeyed == 0 else "partial"
+    error = None
+    if unkeyed:
+        error = (f"{unkeyed} feed row(s) name neither a key nor an owner — their "
+                 "gates cannot be attributed to a tracked row")
+    # `who-needs-me.py` falls back to the event log when the store does not answer,
+    # and on that branch it renders `Needs you (0)` for a fleet that may hold open
+    # store-only items. Reading that as a complete, gate-free feed is the fail-open
+    # direction — the mirror of the fail-closed defect above: a fallback read cannot
+    # certify any row `clear`, so the family is `partial` and the probe is named.
+    if _load("who-needs-me").STORE_FALLBACK_NOTE in text:
+        state = "partial"
+        error = error or (
+            "who-needs-me.py read the event log because the attention store was "
+            "unreachable — a fallback read cannot certify a row clear")
+    return {"panes": panes, "owners": owners, "orphan_owners": orphan_owners,
+            "state": state, "error": error}
 
 
 def feed_verdict(session_ids, gated_sessions, state):
-    """`gated` | `clear` | `unread` — `clear` only from a read that actually ran."""
-    if state != "read":
-        return "unread"
-    if not session_ids:
-        return "clear"
-    return "gated" if any(s in gated_sessions for s in session_ids) else "clear"
+    """`gated` | `clear` | `unread` — `clear` only from a read that actually ran.
 
-
-def gated_sessions_from_panes(panes, attention_dir, store_endpoint=None):
-    """`(set_of_session_ids, state)` for the feed's keys.
-
-    Digit panes join through the events log, `hst:<id>` keys through the attention
-    store — the hops `gate-owner-filter.py`'s `session_for_pane` / `headless_items`
-    already perform, reused here rather than re-derived.
-
-    A failed log read, or an `hst:` key the store does not resolve to a session, is
-    `unread`, never an empty set: `headless_items` returns `[]` both for an
-    unreachable store and for no match, so an unresolved key is the only signal a
-    store read failed, and it must not read as `clear`.
+    `gated` wins over every state: a row positively identified in the feed is
+    gated whatever happened to the rest of the read. `partial` is a read that ran
+    but could not attribute every gate it saw, so a row that is not positively
+    gated cannot be certified clear — it may own the unattributed gate. That is
+    what makes the failure per-row: the gated rows keep their verdict and only
+    the rest fall to `unread`.
     """
+    if any(s in gated_sessions for s in session_ids):
+        return "gated"
+    if state == "read":
+        return "clear"
+    return "unread"
+
+
+def gated_sessions_from_panes(feed, attention_dir, store_endpoint=None):
+    """`(gated_session_ids, state, error)` for the feed's rows.
+
+    Digit panes join through the events log. `hst:<id>` keys join through the
+    owner the row itself declares (`owner_of`); only a feed that carries no owner
+    line (an older build) falls back to the attention store, and that fallback is
+    the checked read, so a store failure is NAMED rather than rendered as a
+    per-row verdict.
+
+    A failed log read is `unread` for the whole family — no digit pane can be
+    resolved — and it is named. An `hst:` key that resolves to no session leaves
+    the read `partial`: the keys that did resolve keep their rows gated.
+    """
+    panes = set(feed.get("panes") or ())
+    owners = dict(feed.get("owners") or {})
+    out = set(feed.get("orphan_owners") or ())
+    state = feed.get("state") or "read"
+    # `error` here names only a failure THIS join hit. The feed read's own error
+    # rides on `feed["error"]` and is reported by the caller, so echoing it here
+    # would name the same failing probe twice.
+    error = None
     if not panes:
-        return set(), "read"
+        return out, state, error
     filt = _load("gate-owner-filter")
-    hst = [p for p in panes if filt.is_headless_key(p)]
     digit = [p for p in panes if not filt.is_headless_key(p)]
-    out, state = set(), "read"
+    hst = [p for p in panes if filt.is_headless_key(p)]
     if digit:
         try:
             items = filt.log_items(attention_dir)
-        except Exception:
-            return set(), "unread"
+        except Exception as exc:
+            return out, "unread", f"event-log read failed: {type(exc).__name__}: {exc}"
         for pane in digit:
             sid = filt.session_for_pane(pane, items)
             if sid:
                 out.add(sid)
-    if hst:
+    unresolved = [key for key in hst if not owners.get(key)]
+    for key in hst:
+        sid = owners.get(key)
+        if sid:
+            out.add(sid)
+    if unresolved:
         try:
-            records = filt.headless_items(hst, store_endpoint)
-        except Exception:
-            records = []
-        owners = {r["pane"]: r.get("session_id") for r in records}
-        for key in hst:
-            sid = owners.get(key)
+            records, store_error = filt.headless_items_checked(unresolved, store_endpoint)
+        except Exception as exc:
+            records, store_error = [], f"attention store read failed: {type(exc).__name__}: {exc}"
+        if store_error:
+            return out, "partial", store_error
+        found = {r["pane"]: r.get("session_id") for r in records}
+        for key in unresolved:
+            sid = found.get(key)
             if sid:
                 out.add(sid)
             else:
-                state = "unread"
-    return out, state
+                state = "partial"
+                error = error or (f"{key} resolves to no session in the attention "
+                                  "store")
+    return out, state, error
 
 
 # --------------------------------------------------------------------------- #
@@ -495,21 +612,83 @@ def denial_still_blocks(sid, rec, attention_dir, now, projects_dir=None):
     return later_success(sid, tool, ts, projects_dir or PROJECTS_DIR) is not True
 
 
-def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=None,
-                  projects_dir=None):
-    """`(verdict, reason)` — denied | frozen | none | unread.
+def permission_channel_sid(session_ids, projects_dir, now=None):
+    """The first session id whose permission channel is dead, or None.
 
-    Two carriers, both of which today render `progressing`:
+    A row carries every id it ever ran under, so all of them are read — but only
+    those whose transcript is still FRESH (`PERM_CHANNEL_STALE_S`). ⚠️ **Without that
+    bound the carrier is a permanent false positive:** the channel window is anchored
+    on the transcript's own last stamp, so an id from a session that died with its
+    last 15 minutes full of aborts keeps matching forever, and pins a healthy live row
+    to `permission-channel`. Measured on this change's first review, 2026-11-09.
+
+    ⚠️ **The RULE is not restated here.** `manager-attention-watch.py` owns the
+    window, the threshold, the staleness bound and the reason string; this function
+    only supplies the wider read that rule needs and reports the id. A second copy
+    would be a second place for the window to drift — and the drift would be silent,
+    because too short a window reads as "no aborts" rather than as an error.
+    """
+    watch = _load("manager-attention-watch")
+    now = time.time() if now is None else now
+    for sid in session_ids or []:
+        if not sid or os.path.basename(sid) != sid:
+            continue
+        try:
+            hits = glob.glob(os.path.join(projects_dir, "*",
+                                          glob.escape(sid) + "*.jsonl"))
+        except OSError:
+            continue
+        if not hits:
+            continue
+        try:
+            path = max(hits, key=os.path.getmtime)
+            if now - os.path.getmtime(path) > watch.PERM_CHANNEL_STALE_S:
+                continue
+        except OSError:
+            continue
+        wide = watch.read_recent_tail(path, watch.PERM_CHANNEL_WINDOW_S)
+        if wide is None:
+            continue
+        if watch.channel_aborts(wide) >= watch.PERM_CHANNEL_MIN:
+            return sid
+    return None
+
+
+def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=None,
+                  projects_dir=None, in_flight_verdict=None):
+    """`(verdict, reason)` — denied | permission-channel | frozen | none | unread.
+
+    Three carriers, all of which would otherwise render `progressing`:
 
     * **denied** — the worker declared a denial it could not get past (its
       `<sid>.denial.json` marker, written before it messages its manager). The feed
       cannot carry this class at all, so without this carrier a denied worker is
       invisible for as long as it keeps retrying.
+    * **permission-channel** — the session's permission channel is aborting, read
+      from its transcript by `manager-attention-watch.channel_aborts`. The registry
+      reads such a worker `busy` or `waiting` and the feed calls it progressing,
+      while every write it exists to make fails; measured 2026-10-28 on three
+      sessions, one of them holding a live dev repair it could not run.
     * **frozen** — the task file has not moved for a whole interval while its owner
       is LIVE. That is shorter than the park cell's 2x threshold, and unlike it this
       is a stuck claim rather than a check-in.
 
-    `none` is only returned when both carriers were actually examined.
+    ⚠️ **One veto, not a fourth carrier: `parked`.** The caller's `in_flight` verdict
+    reads `parked` when the session registry says the worker is blocked on input, and
+    transcript staleness is exactly what a suspended tool call produces — so a row the
+    ladder just called `parked` must not also be stamped `frozen`. Without this the row
+    emits `in_flight: parked` beside `stuck: frozen`, which is the contradiction this
+    argument exists to remove. It is read after the `gated` short-circuit (a genuinely
+    gated row is already `none`) and before the mtime check.
+
+    `none` is only returned when every carrier was actually examined.
+
+    ⚠️ **`permission-channel` is read BEFORE the `feed == "gated"` short-circuit, and
+    that ordering is the point.** A gated row is reported by the park cell — but a
+    park on a session whose channel is dead is a park no answer can reach: the
+    operator answers, the delivery aborts, and the row goes back to looking parked.
+    The channel death is the more specific fact, exactly as `is_gated` in the watcher
+    puts its `stuck` limb ahead of the registry half for the same reason.
 
     The `denied` carrier is a *live* claim, so it is read through
     `denial_still_blocks` rather than taken at face value — a marker whose tool has
@@ -524,8 +703,16 @@ def stuck_verdict(row, session_ids, live, feed, interval, now, attention_dir=Non
         if denial_still_blocks(sid, rec, attention_dir, now, projects_dir):
             tool = rec.get("tool") or "a tool"
             return "denied", f"{tool} denied — {rec.get('reason') or 'no reason recorded'}"
+    dead = permission_channel_sid(session_ids, projects_dir or PROJECTS_DIR, now)
+    if dead:
+        return "permission-channel", f"{dead[:8]} — permission channel aborting (Stream closed)"
     if feed == "gated":
         # A genuinely gated worker is reported by the park cell, never double-reported.
+        return "none", ""
+    if in_flight_verdict == "parked":
+        # The registry says this worker is blocked on input. A parked worker's tool
+        # call is suspended and writes nothing to the transcript, so the frozen check
+        # below cannot tell a park from a death — and it is the park.
         return "none", ""
     mtime = row.get("mtime")
     if mtime is None:
@@ -558,10 +745,33 @@ def read_tracked(path):
         return []
 
 
+# `read` < `partial` < `unread`: the worse of two probe states wins, so one failed
+# probe is never washed out by a sibling that succeeded.
+_STATE_RANK = {"read": 0, "partial": 1, "unread": 2}
+
+
+def worst_state(*states):
+    return max(states, key=lambda s: _STATE_RANK.get(s, 2))
+
+
+def _under(path, root):
+    """Is `path` at or below `root`?
+
+    The separator on the prefix is load-bearing: without it `/a/bc` reads as "under"
+    `/a/b`, and a session in a sibling vault would be swept into the wrong round.
+    """
+    root = root.rstrip(os.sep)
+    return path == root or path.startswith(root + os.sep)
+
+
 def compute(subject, tracked_path, vault, interval, now=None,
             endpoint=None, registry_dir=None, attention_dir=None,
-            sessions_dir=None, projects_dir=None):
-    """Build the readings document. Pure over its injected paths."""
+            sessions_dir=None, projects_dir=None, feed=None):
+    """Build the readings document. Pure over its injected paths.
+
+    `feed` injects the feed read (tests do); when None it is taken from
+    `feed_panes`, which runs `who-needs-me.py`.
+    """
     now = time.time() if now is None else now
     attention_dir = attention_dir or ATTENTION_DIR
     wnm = _load("who-needs-me")
@@ -570,15 +780,35 @@ def compute(subject, tracked_path, vault, interval, now=None,
     predispatch = _load("manager-predispatch")
 
     members = read_tracked(tracked_path)
-    rows = predispatch.resolve_tracked(vault, members) if vault else []
-    if not rows:
-        rows = [{"name": n, "mtime": None, "session": None, "sessions": []} for n in members]
+    rows, matched_members = (
+        predispatch.resolve_tracked_by_member(vault, members) if vault else ([], []))
+    # ⚠️ NO synthesised rows. A placeholder carrying `sessions: []` is not an observation:
+    # `feed_verdict([], gated, "read")` answers `clear` and `external_wait([])` answers
+    # `none`, so N placeholders render `clear=N · none=N` for a fleet that was never read.
+    # Measured 2026-11-08 (Development Pipeline Throughput): the tracked set was 38
+    # vault-relative page paths, which `resolve_tracked` matches against neither a task's
+    # name nor its `goals:`, so every one of the 38 synthesised rows read `clear` while 543
+    # real task rows — 387 of them carrying a session id — went unseen. An unresolved
+    # member is routed to the unread vocabulary below instead, which is the answer the
+    # document already had and could never reach.
+    matched = set(matched_members)
+    unresolved = [n for n in dict.fromkeys(members) if n not in matched]
 
     registry = wnm.registry_records(sessions_dir)
-    panes, feed_state = feed_panes(endpoint)
-    gated, join_state = gated_sessions_from_panes(panes, attention_dir)
-    if join_state != "read":
-        feed_state = "unread"
+    feed = feed_panes(endpoint) if feed is None else feed
+    gated, join_state, join_error = gated_sessions_from_panes(
+        feed, attention_dir, endpoint)
+    feed_state = worst_state(feed.get("state") or "unread", join_state)
+    # The failing probes, named. A `clear` that came from a read nobody can point
+    # at is indistinguishable from a genuinely gate-free fleet, and that is the
+    # distinction the document must carry.
+    probes = []
+    if feed.get("error"):
+        probes.append({"probe": "who-needs-me.py --section needs-you --all",
+                       "error": feed["error"]})
+    if join_error:
+        probes.append({"probe": "gate-owner-filter.py feed join",
+                       "error": join_error})
 
     out_rows = {}
     for row in rows:
@@ -593,7 +823,7 @@ def compute(subject, tracked_path, vault, interval, now=None,
         fv = feed_verdict(ids, gated, feed_state)
         ew = external_wait(ids, attention_dir)
         sv, sreason = stuck_verdict(row, ids, live, fv, interval, now, attention_dir,
-                                    projects_dir or PROJECTS_DIR)
+                                    projects_dir or PROJECTS_DIR, in_flight_verdict=fl)
         out_rows[name] = {
             "ids": ids,
             "liveness": live,
@@ -604,20 +834,111 @@ def compute(subject, tracked_path, vault, interval, now=None,
             "task_mtime": row.get("mtime"),
             "stuck": sv,
             "stuck_reason": sreason,
+            # The marker the families are read through: a resolved row's empty id set is a
+            # real answer (no owner), an unresolved row's is not an observation at all.
+            "resolved": True,
         }
 
     # A tracked name that resolved to no task file is NOT silently dropped: an absent
     # row reads exactly like a row that was never declared, and the reader's table
     # would then quietly shrink. It carries the unread vocabulary instead.
-    for name in members:
-        if name in out_rows:
+    for name in unresolved:
+        if name in out_rows:  # a name that is both a task and a member keeps its row
             continue
         out_rows[name] = {
             "ids": [], "liveness": "UNKNOWN", "in_flight": "unread",
             "in_flight_limb": "no task file resolved", "feed": "unread",
             "external_wait": "unread", "task_mtime": None,
             "stuck": "unread", "stuck_reason": "no task file resolved for this name",
+            "resolved": False,
         }
+
+    # A live session whose id appears on NO page is outside the derivation above: `rows`
+    # is built from resolved task files, and a session stamped on none of them enters no
+    # row's id set — so no `parked` row can be emitted for it however parked it is.
+    # Measured 2026-11-11: session `1c05c414` sat `waiting` on the fleet while the round
+    # rendered `parked=0`, because no page carried it. The failure direction is what makes
+    # this load-bearing: an unrecorded park silently dropped, or read as `quiet`, renders a
+    # clean fleet while a worker waits on a gate.
+    #
+    # ⚠️ These rows are NOT the synthesised placeholders refused above — each carries a
+    # real registry id, so every family on it is an observation rather than a default.
+    # ⚠️ The id set is NOT re-derived here. `row["sessions"]` is `read_task`'s output from
+    # `manager-predispatch.session_id_set` — the one home for "which fields are a session
+    # id" — and this block only READS that set to learn which sessions a page already
+    # accounts for. Nothing is added to any row, so a manager id arriving through
+    # `metrics_sessions` stays exactly where it was: this does not widen that
+    # contamination, it reuses the same set so a covered session is never double-reported.
+    covered = set()
+    for rec in out_rows.values():
+        covered.update(rec.get("ids") or [])
+    unrecorded = []
+    vault_root = os.path.realpath(vault) if vault else None
+    if vault_root and registry:
+        for sid, rec in sorted(registry.items()):
+            if sid in covered:
+                continue
+            cwd = rec.get("cwd")
+            # Scope: this round reads THIS vault. A session parked in another vault is
+            # that vault's round to report; sweeping every cwd in would make each round
+            # carry every other vault's fleet and drown the one park it exists to show.
+            if not cwd or not _under(os.path.realpath(cwd), vault_root):
+                continue
+            # `alive` is three-state, and only an explicit `False` is a dead session: the
+            # pid is gone or is held by a process that is not this record's. Emitting a
+            # `parked` row for one would be the false positive this whole path exists to
+            # avoid, so it is skipped. `None` is "cannot tell" and is kept — reading it as
+            # death is the silent direction.
+            if rec.get("alive") is False:
+                continue
+            unrecorded.append(sid)
+
+    for sid in unrecorded:
+        ids = [sid]
+        live = liveness(ids, endpoint, registry_dir)
+        fl, limb = in_flight(ids, registry, attention_dir, now, wnm.session_transcript_age)
+        fv = feed_verdict(ids, gated, feed_state)
+        ew = external_wait(ids, attention_dir)
+        sv, sreason = stuck_verdict({"mtime": None}, ids, live, fv, interval, now,
+                                    attention_dir, projects_dir or PROJECTS_DIR,
+                                    in_flight_verdict=fl)
+        out_rows[f"unrecorded:{sid[:8]}"] = {
+            "ids": ids,
+            "liveness": live,
+            "in_flight": fl,
+            "in_flight_limb": f"{limb} (no page records this session)",
+            "feed": fv,
+            "external_wait": ew,
+            "task_mtime": None,
+            "stuck": sv,
+            "stuck_reason": sreason,
+            # No page carries this session — the same marker an unresolved member row
+            # carries, and here it names WHY rather than reading as a lost task.
+            "resolved": False,
+            "unrecorded": True,
+        }
+
+    # Counted from the rows themselves, not accumulated beside them, so the
+    # document cannot carry a total that disagrees with its own table:
+    # `gated + clear + unread == len(rows)` is structural, not asserted.
+    feed_counts = {"gated": 0, "clear": 0, "unread": 0}
+    for rec in out_rows.values():
+        feed_counts[rec["feed"]] += 1
+
+    # What the tracked set actually resolved to, as counts rather than an adjective.
+    # `state` is the one word a caller may branch on, and two of its four values mean
+    # NO family value in this document came from an observation: `unresolved` (members
+    # were declared, none admitted a task) and `empty` (no members at all). A reader
+    # that renders a table from either renders a quiet fleet out of nothing — the
+    # 2026-11-08 defect. `partial` names, by name, the members that admitted nothing.
+    if not members:
+        resolution_state = "empty"
+    elif not rows:
+        resolution_state = "unresolved"
+    elif unresolved:
+        resolution_state = "partial"
+    else:
+        resolution_state = "resolved"
 
     return {
         "subject": subject,
@@ -633,6 +954,28 @@ def compute(subject, tracked_path, vault, interval, now=None,
         # up reconciling two sources on every round.
         "park_threshold_seconds": 2 * interval,
         "feed_state": feed_state,
+        # The feed family's own tally, taken from the rows above: it sums to the
+        # row count by construction, so a reader can check the invariant without
+        # re-counting.
+        "feed_counts": feed_counts,
+        # Did the tracked set resolve to anything? `resolved_rows` is the count of
+        # TASK rows, never the member count — a goal member admits many rows.
+        "resolution": {
+            "state": resolution_state,
+            "tracked": len(members),
+            "matched_members": len(matched),
+            "resolved_rows": len(rows),
+            "unresolved": unresolved,
+            # Live sessions in this vault that no page records. They carry rows of their
+            # own above, so the document's row count is `resolved_rows` plus
+            # `len(unresolved)` plus `len(unrecorded)` — the reader's invariant, widened
+            # here so an unrecorded park cannot be reconciled away as a caller bug.
+            "unrecorded": unrecorded,
+        },
+        # Every probe that failed this round, with its own error. Empty on a clean
+        # read; a transient store fault and a genuinely gate-free fleet are then
+        # distinguishable without re-running anything.
+        "probes": probes,
         "rows": out_rows,
     }
 

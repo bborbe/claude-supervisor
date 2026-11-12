@@ -43,7 +43,7 @@ The fleet manager never performs the *work*: no code edits, no repo/PR/k8s verif
 **What stays here:** every liveness verdict, every confirmation of a candidate, and every action.
 ⚠️ **The `resume=` row is the only reason this file holds `mcp__supervisor__spawn_agent` — and the grant also permits an *open*.** Never use it to open a worker: route opens through `/supervisor:open`, whose § Step 0.6 decides `mode` and Step 3 consumes it. If a case cannot route there, classify and pass the argument explicitly — `interactive=false` for `mode: headless`, `interactive=true` otherwise. A worker opened with the argument omitted reports `mode_source=config`. Rule: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6.
 - **Pick the prefix that matches who answered.** `Operator answer, via supervisor:` only when the operator answered in this session; `Manager answer, via supervisor:` for your own decision. **Neither releases an irreversible or production-touching action.** Spec: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § The two prefixes are not interchangeable.
-- **A manager closes a finished worker's session only through `/supervisor:close`** — the verb refuses `busy-target`, `gate-held`, `dirty-worktree`, `held-session`, `task-not-terminal` and `task-unresolved`, and reuses the restart scripts' guards rather than adding a second kill mechanism. It closes a pane-less session (`entrypoint: sdk-cli`) by SIGTERM on its registry pid, under those same guards — never by a hand-rolled `kill`. `/vault-cli:sync-progress` and `/vault-cli:session-close` still read the worker's own conversation and remain the worker's act; do not design a reaping rule that depends on typing into a worker.
+- **A manager closes a finished worker's session through `close-worker.py` only** — directly (the fleet round's drive step closes a finished headless row itself) or via `/supervisor:close`, which runs the same script. It refuses `busy-target`, `gate-held`, `dirty-worktree`, `held-session`, `task-not-terminal` and `task-unresolved`, and reuses the restart scripts' guards rather than adding a second kill mechanism. It closes a pane-less session (`entrypoint: sdk-cli`) by SIGTERM on its registry pid, under those same guards — never by a hand-rolled `kill`. `/vault-cli:sync-progress` and `/vault-cli:session-close` still read the worker's own conversation and remain the worker's act; do not design a reaping rule that depends on typing into a worker.
 ## Step 4 — Act, within the autonomy boundary
 
 Two message classes. **Never send anything on this fleet without applying this split.**
@@ -76,8 +76,38 @@ Before naming a cause in Step 5, confirm it against the system it is about — `
 
 Measured 2026-10-12 on a cold `v0.130.0` round: rows 3 (`orphan=46`, `collision=1`), 8 (`ledger=16`) and 11 (`blocked=3`) each held, none was read, and the mandatory `📋 Open with the operator` render was omitted.
 
+⚠️ **"Not in context" is not the only stale case — a body you still hold can be out of date.** After `/reload-plugins` the session keeps the body it read at session start: the paths were pinned to the version directory current then, the disk has moved since, and the rule above sees a body that *is* in context and re-reads nothing. So before executing a step you already hold, compare the file's current `shasum -a 256` against the hash recorded for it, and re-read when they differ.
+
+⚠️ **Key the record on the step's path *inside the plugin*, never its absolute path.** `${CLAUDE_PLUGIN_ROOT}` resolves under `~/.claude/plugins/cache/…/<version>/` (`docs/fleet-surface.md` § the probe and the lever), so an absolute path changes at every release — keying on it forces a blanket re-read at each bump, which is the version trigger this section rejects. The key is `<rel>`: the step file's path relative to the plugin root, e.g. `commands/steps/keepalive.md`.
+
+⚠️ **The session id is `$CLAUDE_CODE_SESSION_ID`, and the ledger holds ONE line per step.** An append-only file grows without bound and leaves several hashes per step with no stated winner; rewrite the entry instead:
+
+```bash
+L=~/.claude/state/step-body-hashes/$CLAUDE_CODE_SESSION_ID.txt
+mkdir -p "$(dirname "$L")"
+grep -v "  <rel>$" "$L" 2>/dev/null > "$L.new"
+shasum -a 256 "<file>" | awk -v k="<rel>" '{print $1 "  " k}' >> "$L.new"
+mv "$L.new" "$L"
+```
+
+Compare with `grep "  <rel>$" "$L" | awk '{print $1}'`. One target, the same in every router.
+
+⚠️ **A missing record is a stale verdict, not a skip.** The case this rule exists for is a body read before it did, so there is nothing to compare against — re-read the file and record it, once. Reading "no record" as "unchanged" reproduces the defect exactly, in the one round that matters most. **When the compare fires, print one line naming the step, `read under <hash>` and `now <hash>`, then re-read** — a refresh nobody can see in the round's own output is indistinguishable from no refresh at all.
+
+⚠️ **The measure is the file's content, never the plugin version.** Measured 2026-11-08 20:48: four rounds ran against `0.251.3` step files while five releases shipped, and all four step files the round reads were byte-identical — what moved was the version segment in every path. A version trigger fires on every release (a blanket re-read by another name) while still missing a step file edited in place. Measured 2026-11-05: six rounds on `0.240.0` skipped the keepalive leg for 80 minutes, because the Fleet Manager still held the `0.238.5` body, which carries no park-nudge procedure.
+
 ## No manager-proposal row
 
 ⚠️ **The round does not propose managers for unmanaged goals.** The row was removed 2026-10-29 by operator ruling, so a round that reports an unmanaged topic reports it and stops. This lives here rather than in `commands/fleet-drive.md` because the router table carries rows that run, and an absence is not a row — but it is stated, so a future reader does not read the gap as an omission and add it back.
 
 **The opening condition, stated because the prohibition above is otherwise only half a rule: the only subject this fleet opens is one carrying `flag: true` with no loop armed.** The flag is the operator's alone to set — an agent setting it, or reading an importance judgement as a substitute for it, is the removed row coming back by hand. A subject that is non-terminal, has live workers, or looks important is **not** a reason to propose a manager: none of those three is the flag, and all three are the reasoning the removed row used.
+
+⚠️ **Proposing is not opening, and the fleet tier does the second.** A flagged **goal** or
+**topic** with no live manager is opened by the flagged-open leg
+(`commands/steps/flagged-open.md` § Step 5c.1), through `scripts/flagged-subjects.py` and
+`/supervisor:open --goal` / `--topic`. That is rule 2 executing the operator's own mark, not
+the removed row returning: the removed row asked the operator to decide *which* unmanaged
+goal deserved a manager, while this leg decides nothing — it opens what the operator already
+flagged and stops at the cap. **Never restore the ask**: a round that finds an unmanaged,
+unflagged goal reports it and stops.
+

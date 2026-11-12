@@ -174,10 +174,43 @@ export function findRegisteredByName(name, { dir = SESSIONS_DIR, registry = read
 //
 // null is "no information" (unreadable directory) and must stay distinct from `[]`,
 // "read, and nothing holds this name" — a caller renames on `[]` and must not on null.
-export function sessionIdsNamed(name, { dir = SESSIONS_DIR, registry = readRegistry } = {}) {
+// `isAlive` defaults to null — NO filter — because the name-claiming caller (`uniqueTabName`)
+// wants presence: a stale entry only costs a suffix. A caller asking "would this name reach
+// someone else?" wants pid-checked liveness instead, and passes `pidIsAlive` explicitly.
+export function sessionIdsNamed(name, { dir = SESSIONS_DIR, registry = readRegistry, isAlive = null } = {}) {
   const entries = registry(dir)
   if (!entries) return null
-  return entries.filter((entry) => entry.name === name).map((entry) => entry.sessionId)
+  return entries
+    .filter((entry) => entry.name === name && (!isAlive || isAlive(entry.pid)))
+    .map((entry) => entry.sessionId)
+}
+
+// The names a session id is registered under — the INVERSE of `sessionIdsNamed`, and the
+// join a caller needs when it holds an id while the transport it wants takes a name.
+//
+// That is the headless case in `send_agent_message`: the server holds the worker's session
+// id, `SendMessage` takes a registry name, and the worker's claude child registered one when
+// it started. Without this join the refusal named a channel the caller could not address —
+// measured 2026-11-08: session 6d16758d was live and registered as `claude-1f`, while
+// `SendMessage` by id answered "No agent named '6d16758d…' is reachable".
+//
+// A LIST rather than one name, because the ambiguity has to stay visible: two entries can
+// carry the same name, and a caller that picked either would deliver to the wrong
+// conversation. null is again "no information" (unreadable directory), distinct from `[]`,
+// "read, and this id is registered under nothing" — the first is retryable, the second is a
+// worker that cannot be addressed at all.
+// ⚠️ PID-CHECKED, unlike `sessionIdsNamed` beside it, and the direction is what decides that.
+// A name is handed to `SendMessage`, so a stale entry left by a crashed session yields an
+// address that answers `No agent named … is reachable` — the unperformable remedy this join
+// exists to remove. `uniqueTabName` reads the other way round: there PRESENCE is the safe
+// answer, because over-counting a name only appends a suffix, so its read stays unfiltered.
+export function namesForSessionId(sessionId, { dir = SESSIONS_DIR, registry = readRegistry, isAlive = pidIsAlive } = {}) {
+  if (typeof sessionId !== 'string' || !sessionId) return []
+  const entries = registry(dir)
+  if (!entries) return null
+  return entries
+    .filter((entry) => entry.sessionId === sessionId && typeof entry.name === 'string' && entry.name && isAlive(entry.pid))
+    .map((entry) => entry.name)
 }
 
 // A tab name that nothing currently holds, derived BEFORE the process starts.
