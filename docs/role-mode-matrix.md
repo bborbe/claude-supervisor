@@ -40,7 +40,7 @@ Ask of the task **body** (never the title or frontmatter): *does finishing this 
 
 | `role` | Remedy |
 |---|---|
-| `agent` | *Arm this session's manager loop and re-run the spawn*; where no loop can be armed (no `worker-manager` registration), the row stays **refused** for the tick. **Never** *open interactive* — that is the tab Rule 2 forbids, and it is the cheaper remedy, so a refused spawner takes it (measured 2026-11-12: 21 `agent` new-worker spawns opened as tabs in 24 h, every one `mode_source=argument`). |
+| `agent` | *Arm this session's manager loop and re-run the spawn*; where no loop can be armed (no `worker-manager` registration), the row stays **refused** for the tick. **Never** *open interactive* — that is the tab Rule 2 forbids, and it is the cheaper remedy, so a refused spawner takes it (measured 2026-11-12, the same count Rule 2 records: **24 of the 90** `agent` new-worker spawns opened as tabs in 24 h, every one `mode_source=argument`). |
 | `human` / `manager` | Open the row `interactive`, or arm this session's manager loop and re-run — a tab is what the role is for. |
 
 ⚠️ **The bound supervisor does not enforce this probe.** The live daemon is the Go `claude-wrapper` at `127.0.0.1:18090/supervisor/mcp`, and its spawn path carries no answer-path guard; the refusal belongs to the command, so a session that skips the step is not caught downstream.

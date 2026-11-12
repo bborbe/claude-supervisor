@@ -35,7 +35,6 @@ test('a headless spawn without one is refused, naming the probe and the agent re
   const out = answerPathRefusal({
     opensInteractive: false,
     sessionId: 'sid',
-    role: 'agent',
     probe: () => refused("this session's manager loop on goal 'X' reads STALE, not OK"),
   })
   assert.match(out, /^refusing a headless spawn:/)
@@ -48,36 +47,16 @@ test('a headless spawn without one is refused, naming the probe and the agent re
   assert.ok(!out.includes('Open the worker interactive'))
 })
 
-test('a human or manager row gets the interactive remedy — a tab is what it is for', () => {
-  for (const role of ['human', 'manager']) {
-    const out = answerPathRefusal({
-      opensInteractive: false,
-      sessionId: 'sid',
-      role,
-      probe: () => refused(),
-    })
-    assert.ok(out.includes(ANSWER_PATH_REMEDY), role)
-    assert.ok(!out.includes(ANSWER_PATH_REMEDY_AGENT), role)
-  }
+test('the two remedies are distinct, and only the human/manager one offers a tab', () => {
+  assert.notEqual(ANSWER_PATH_REMEDY, ANSWER_PATH_REMEDY_AGENT)
+  assert.match(ANSWER_PATH_REMEDY, /Open the worker interactive/)
+  assert.doesNotMatch(ANSWER_PATH_REMEDY_AGENT, /interactive/)
+  assert.match(ANSWER_PATH_REMEDY_AGENT, /manager loop/)
 })
 
-test('an absent or unknown role defaults to the agent shape — never the tab', () => {
-  for (const role of [undefined, '', 'worker']) {
-    const out = answerPathRefusal({
-      opensInteractive: false,
-      sessionId: 'sid',
-      role,
-      probe: () => refused(),
-    })
-    assert.ok(out.includes(ANSWER_PATH_REMEDY_AGENT), String(role))
-  }
-})
-
-test('the cannot-name-the-session branch carries the role-aware remedy too', () => {
-  const agent = answerPathRefusal({ opensInteractive: false, sessionId: '', role: 'agent', probe: () => allowed })
-  assert.ok(agent.includes(ANSWER_PATH_REMEDY_AGENT))
-  const human = answerPathRefusal({ opensInteractive: false, sessionId: '', role: 'human', probe: () => allowed })
-  assert.ok(human.includes(ANSWER_PATH_REMEDY))
+test('the cannot-name-the-session branch carries the agent remedy too', () => {
+  const out = answerPathRefusal({ opensInteractive: false, sessionId: '', probe: () => allowed })
+  assert.ok(out.includes(ANSWER_PATH_REMEDY_AGENT))
 })
 
 test('a session id the server cannot name refuses without consulting the probe', () => {
