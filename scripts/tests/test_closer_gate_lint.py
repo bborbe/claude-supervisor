@@ -297,9 +297,10 @@ class CloserGateLintTest(unittest.TestCase):
                 self.assertEqual(0, code)
 
     def test_a_blocked_closer_over_a_parked_later_on_closer_passes(self):
-        # `later (on <trigger>):` is the PARKED form, which the Async State Closer treats as
-        # a legal closer — the operator has deferred to a named trigger, so it names an owner
-        # exactly as `pick` does. These are RECORDED shapes from
+        # `later (on <trigger>):` is the `parked-wait` form (`docs/closer-classes.md`), which
+        # the Async State Closer treats as a legal closer — the operator has deferred to a
+        # named trigger, so it names an owner exactly as `pick` does. These are RECORDED
+        # shapes from
         # `~/.claude/state/closer-gate-lint/`: every one carries a PROSE trigger, so none is a
         # 32-hex card id, a role, or an `⏰ Ends:` — and before this arm the lint refused a
         # `🔴 BLOCKED` line over one, which is a false positive on a legal closer.

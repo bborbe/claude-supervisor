@@ -848,7 +848,7 @@ def _blocked_owner_message():
         "name the owner in the `👤 You:` line. ⚠️ **All five arms `OWNER_RE` accepts**, "
         "because this message steers what the next model writes and naming three of them "
         "sent it to mint a card where a cheaper form already passes: the full 32-hex card "
-        "id the operator must answer; the manager or supervisor that owns it; a re-checkable "
+        "id or session-id prefix the operator must answer; the manager or supervisor that owns it; a re-checkable "
         "`⏰ Ends:` observable; an operator verb (`pick` / `approve:` / `review:` / "
         "`you run:`); or the `parked-wait` form `later (on <trigger>): …`. "
         "`waiting on someone` is not an owner.\n"
