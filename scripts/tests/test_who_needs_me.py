@@ -1261,10 +1261,12 @@ class HeadlessRowIsAnswerableNotUnroutable(unittest.TestCase):
     def test_a_pane_less_row_with_nothing_to_answer_stays_unroutable(self):
         """The negative control: the relabel is scoped to rows that ARE answerable.
 
-        Without a store id there is no handover and no route, so the row is
-        genuinely unroutable and must keep saying so — otherwise this change would
-        dress up a dead end as actionable, which is the failure the original
-        `unroutable` wording existed to prevent.
+        Without an id there is no handover and no route, so the row is genuinely
+        unroutable and must keep saying so — otherwise this change would dress up a
+        dead end as actionable, which is the failure the original `unroutable` wording
+        existed to prevent. ⚠️ The fixture must carry **neither** id: a log-only row is
+        now answerable (see `MirrorRowHandsOverItsLogId`), so leaving an `item_id` here
+        would assert the opposite of the shipped behaviour.
         """
         rec = dict(self.HEADLESS)
         del rec["store_item_id"]
@@ -1283,6 +1285,80 @@ class HeadlessRowIsAnswerableNotUnroutable(unittest.TestCase):
         rendered = wnm.row(rec, {"1": {}}, "d")
         self.assertIn("unroutable — pane 999 does not resolve to this session", rendered)
         self.assertNotIn("headless", rendered)
+
+
+class MirrorRowHandsOverItsLogId(unittest.TestCase):
+    """A `board_missing` row carries a card no store ever held, and it is still answerable.
+
+    `board_missing_gates()` returns event-log records, and `normalize_store_item()` is the
+    only writer of `store_item_id` — so EVERY `board_missing` row has none, and the old
+    `answer_handover()` returned "" for all of them. That made the mirror routing shipped
+    in `attention-answer.py`'s 404 arm unreachable end to end: no operator-facing surface
+    ever printed a mirror card's id. Measured 2026-11-11, and the bot review of the
+    routing PR (`bborbe/claude-supervisor#810`) called the path unreachable independently.
+
+    ⚠️ The marker is `relay-only`, and it is not decoration. A mirror answer is RELAYED to
+    the producing session and never recorded — `attention-answer.py:539-540` prints
+    `ANSWERED: <id> (no store record)` and `TARGET: <name>` and writes no answer text — so
+    a row that looked like a store row's handover would promise a record it cannot make.
+    """
+
+    MIRROR_QUESTION = {"session_id": "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb", "pane": "",
+                       "ts": 0, "cwd": "/tmp/x", "kind": "question", "detail": "q",
+                       "item_id": "9c1f2e3d4a5b6c7d8e9f0a1b2c3d4e5f"}
+    MIRROR_PERMISSION = dict(MIRROR_QUESTION, kind="permission")
+    STORE_ROW = {"session_id": "cccccccc-3333-4333-8333-cccccccccccc", "pane": "",
+                 "ts": 0, "cwd": "/tmp/x", "kind": "question", "detail": "q",
+                 "item_id": "LOGID", "store_item_id": "STOREID"}
+
+    def test_a_question_mirror_hands_over_the_log_id(self):
+        """The log id IS what `cmd_answer`'s 404 arm resolves (`mirror_gate`)."""
+        rendered = wnm.row(self.MIRROR_QUESTION, {}, "d")
+        self.assertIn("attention-answer.py answer 9c1f2e3d4a5b6c7d8e9f0a1b2c3d4e5f", rendered)
+
+    def test_a_question_mirror_says_its_answer_is_relayed_not_recorded(self):
+        """SC3: the literal marker a store row lacks."""
+        self.assertIn("relay-only", wnm.row(self.MIRROR_QUESTION, {}, "d"))
+
+    def test_a_store_row_carries_no_relay_marker(self):
+        """The other half of SC3 — absence on the store row, in the same render shape."""
+        rendered = wnm.row(self.STORE_ROW, {}, "d")
+        self.assertIn("attention-answer.py answer STOREID", rendered)
+        self.assertNotIn("relay-only", rendered)
+
+    def test_a_permission_mirror_offers_no_answer_command(self):
+        """SC2: `attention-answer.py:517` refuses it as laundering, so a handover here
+        would be an action handed to the operator and then refused."""
+        rendered = wnm.row(self.MIRROR_PERMISSION, {}, "d")
+        self.assertNotIn("attention-answer.py", rendered)
+
+    def test_a_permission_mirror_names_the_channel_and_its_id_source(self):
+        """SC2: `answer_permission`, plus WHERE its id comes from — never the feed."""
+        rendered = wnm.row(self.MIRROR_PERMISSION, {}, "d")
+        self.assertIn("answer_permission", rendered)
+        self.assertIn("pending_permissions", rendered)
+        self.assertIn("question.request_id", rendered)
+
+    def test_a_permission_mirror_prints_no_id_of_its_own(self):
+        """The id must NOT be the log id: `/answer` rejects it with `409 no pending
+        request`, which reads exactly like "already answered"
+        (`docs/permission-allowlist.md:242-243`)."""
+        rendered = wnm.row(self.MIRROR_PERMISSION, {}, "d")
+        self.assertNotIn("9c1f2e3d4a5b6c7d8e9f0a1b2c3d4e5f", rendered)
+
+    def test_a_row_with_neither_id_gets_no_handover(self):
+        """The guard: an id is required, and absent stays absent."""
+        rec = dict(self.MIRROR_QUESTION)
+        del rec["item_id"]
+        self.assertEqual("", wnm.answer_handover(rec))
+
+    def test_a_turn_record_gets_no_handover(self):
+        """Only `permission` and `question` are cards; an `idle` line names no ask."""
+        self.assertEqual("", wnm.answer_handover(dict(self.MIRROR_QUESTION, kind="idle")))
+
+    def test_a_mirror_row_renders_as_a_headless_gate(self):
+        """It is answerable, so it must not read as an exited session."""
+        self.assertIn("[ hst]", wnm.row(self.MIRROR_QUESTION, {}, "d"))
 
 
 class ProvenanceRendering(unittest.TestCase):

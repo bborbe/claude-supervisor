@@ -2038,16 +2038,46 @@ def answer_handover(rec):
     reached without ever saying how to clear it — the gate is real, open, and
     answerable, so the row must name the way (measured 2026-09-25, session `50193c14`).
 
-    The id is the STORE's, never the row's `item_id` — see `normalize_store_item`; the
-    row's value is the log's join key and does not resolve against the answer endpoint.
-    A `permission` item needs an explicit verdict and neither default is safe, so both
-    are named and neither is chosen, matching the refusal `attention-answer.py` enforces.
+    A STORE row's id is the store's, never the row's `item_id` — see
+    `normalize_store_item`; there the row's value is the log's join key and does not
+    resolve against the answer endpoint. A `permission` item needs an explicit verdict
+    and neither default is safe, so both are named and neither is chosen, matching the
+    refusal `attention-answer.py` enforces.
+
+    ⚠️ **A row with no `store_item_id` is a MIRROR, not an unanswerable row.** Every
+    `board_missing` row comes from `load_events()` and carries none, so returning ""
+    here made the routing shipped in `attention-answer.py`'s 404 arm unreachable: no
+    operator-facing surface ever printed a mirror card's id, and a card with no way to
+    answer it is the same dead end one layer down. For a `question` mirror the LOG id
+    is exactly what that arm resolves (`mirror_gate`), so the handover carries it and
+    says `relay-only` — the answer is relayed to the producing session, never recorded,
+    which is why `attention-answer.py` prints `(no store record)` to match.
+
+    ⚠️ **A `permission` mirror gets no command at all.** `attention-answer.py` refuses
+    one as permission laundering (`:517`), so a handover here would be an action handed
+    to the operator and then refused. The channel that CAN release a parked permission
+    gate is `answer_permission`, and its id is deliberately NOT this record's:
+    `docs/permission-allowlist.md:242-243` says take the request id from
+    `GET /api/1.0/sessions` (`question.request_id`), never from the feed, whose ids are
+    store/log ids and answer `409 no pending request` — which reads exactly like
+    "already answered". So the line names the channel and where its id comes from, and
+    prints no id of its own.
     """
-    item = rec.get("store_item_id")
-    if not item or rec.get("kind") not in ("permission", "question"):
+    kind = rec.get("kind")
+    if kind not in ("permission", "question"):
         return ""
-    cmd = f"answer: python3 {ANSWER_SCRIPT} answer {item}"
-    return cmd + " --decision allow|deny" if rec.get("kind") == "permission" else cmd
+    item = rec.get("store_item_id")
+    if item:
+        cmd = f"answer: python3 {ANSWER_SCRIPT} answer {item}"
+        return cmd + " --decision allow|deny" if kind == "permission" else cmd
+    log_id = rec.get("item_id")
+    if not log_id:
+        return ""
+    if kind == "permission":
+        return ("answer_permission: no store record for this card — take the request id "
+                "from pending_permissions / GET /api/1.0/sessions (question.request_id), "
+                "never from this feed")
+    return f"answer (relay-only): python3 {ANSWER_SCRIPT} answer {log_id}"
 
 
 def one_line(text, limit):
