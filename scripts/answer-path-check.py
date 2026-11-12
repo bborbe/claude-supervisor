@@ -42,6 +42,7 @@ baseline instead of raising it. The refusal and the arming have to land together
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -134,18 +135,22 @@ def liveness_state(subject, branch):
             timeout=20,
         )
     except (OSError, subprocess.SubprocessError) as err:
-        return None, f"manager-liveness.py could not run ({err})"
+        return None, f"manager-liveness.py could not run ({err})", None
     # `--state` exits 0 whatever the state: the state IS the answer.
     if done.returncode != 0:
         return None, (
             f"manager-liveness.py --state exited {done.returncode}: "
             f"{(done.stderr or done.stdout).strip()[:200]}"
-        )
+        ), None
     first = (done.stdout or "").strip().split("\n")[0]
     if not first:
-        return None, "manager-liveness.py --state printed nothing"
+        return None, "manager-liveness.py --state printed nothing", None
     state = first.split("\t")[0].strip()
-    return state, None
+    # ⚠️ The period comes from the SAME line, never from a second read of the cadence file.
+    # Re-deriving the slug and path here would be a second implementation of a fact
+    # `manager-liveness.py` already owns, and the two would drift — the two-counters defect
+    # this repo refuses everywhere else.
+    return state, None, liveness_period(first)
 
 
 def reach_report(session_id):
@@ -200,13 +205,75 @@ def reach_age_seconds(ts):
         return None
 
 
+# The reach window, in the one place it is defined.
+#
+# ⚠️ **Twice the loop's own staleness limit, plus the same SLACK.** A reach must outlive a
+# STALE loop, or the "a stopped loop is still refused" control has no window in which it can
+# exist: `--state` calls a loop STALE at `period + SLACK`, so a reach valid for
+# `2*period + SLACK` is still fresh for one full period after the loop has gone stale.
+#
+# ⚠️ The period is the manager's OWN observed cadence, never a constant. Intervals range from
+# the goal loop's 300 s floor to a fleet tick of 900 s or more, and a single number would
+# either refuse a slow manager's perfectly good reach or accept a fast manager's stale one.
+REACH_SLACK = 180
+# What a subject with no cadence history is assumed to tick at, so the window is still bounded
+# rather than infinite. Matches the goal-loop default.
+REACH_DEFAULT_PERIOD = 900
+
+
+def reach_allowed_age(period):
+    """The reach window in seconds for a subject whose loop ticks at `period`."""
+    return 2 * (period if isinstance(period, int) and period > 0 else REACH_DEFAULT_PERIOD) + REACH_SLACK
+
+
+def reach_verdict(session_id, allowed):
+    """(ok, reason) for the WRAPPER leg only.
+
+    ⚠️ **The `mcp` leg is reported, never gated.** The origin case this check exists for was
+    measured on the wrapper route — a manager whose Bash `curl` to
+    `/api/1.0/sessions/<sid>/answer` was classifier-denied. A manager that answers parks fine
+    on the wrapper route is not the failure this refuses, and gating on `mcp` as well would
+    refuse it for a route it may never use. The `mcp` leg is still written and still reported,
+    so a reader can see it; it just does not decide.
+    """
+    path = os.path.join(REACH_DIR, f"{session_id}.wrapper.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            record = json.load(handle)
+    except FileNotFoundError:
+        return False, "it carries no wrapper reach record"
+    except (OSError, ValueError) as err:
+        # ⚠️ Unreadable is a refusal, not an absence: "no record" and "a record I could not
+        # parse" are different facts, and only one of them might be a fresh reach.
+        return False, f"its wrapper reach record is unreadable ({err})"
+    if not isinstance(record, dict) or not isinstance(record.get("ts"), str):
+        return False, "its wrapper reach record has no string ts"
+    age = reach_age_seconds(record["ts"])
+    if age is None:
+        return False, "its wrapper reach record's timestamp does not parse"
+    if age > allowed:
+        return False, f"its wrapper reach is {int(age)}s old, past the {allowed}s window"
+    return True, ""
+
+
+def liveness_period(line):
+    """The observed period in seconds from a `--state` line, or None when it does not say.
+
+    The line reads `OK\tfleet--fleet-manager\tage=11s limit=1156s period=976s(observed)`.
+    A subject with no cadence history reports its declared interval instead, and the word in
+    the parentheses says which — both are usable, and the caller does not care which it got.
+    """
+    match = re.search(r"period=(\d+)s", line or "")
+    return int(match.group(1)) if match else None
+
+
 def check(session_id):
     """(ok, subject, branch, detail) — never raises."""
     found, reason = registration(session_id)
     if found is None:
         return False, None, None, reason
     subject, branch = found
-    state, reason = liveness_state(subject, branch)
+    state, reason, period = liveness_state(subject, branch)
     if state is None:
         return False, subject, branch, reason
     if state != "OK":
@@ -215,7 +282,17 @@ def check(session_id):
             f"nothing is armed to answer a headless worker's parked prompt"
         )
     reach = reach_report(session_id)
-    return True, subject, branch, f"{branch} '{subject}' loop is OK; reach: {reach}"
+    allowed = reach_allowed_age(period)
+    verdict, reason = reach_verdict(session_id, allowed)
+    if not verdict:
+        return False, subject, branch, (
+            f"this session's manager loop on {branch} '{subject}' reads OK, but {reason} — "
+            f"the loop is armed and the answer command has not been shown to reach its route "
+            f"within {allowed}s. reach: {reach}"
+        )
+    return True, subject, branch, (
+        f"{branch} '{subject}' loop is OK; reach: {reach} (wrapper required, mcp reported only)"
+    )
 
 
 def main():
