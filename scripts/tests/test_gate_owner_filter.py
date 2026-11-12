@@ -345,6 +345,40 @@ class UnownedIsRoutedToTheFleetManager(unittest.TestCase):
             (gf.EMIT, "dead-manager"),
         )
 
+    def test_a_dead_claimants_pane_is_routed_too(self):
+        """The THIRD sibling: the manager that CLAIMED this pane is gone.
+
+        `claim-dead` fires when a live manager recorded a claim and then died, so nobody can
+        act on the pane — the same defect as `unowned` and `dead-manager`, reached through
+        the claim block. It did NOT appear in either SC1 window measured on 2026-11-11, and
+        that is the argument for routing it now rather than after it fires on some later
+        hour and fails the same criterion the other two already failed.
+        """
+        self.assertEqual(
+            self.call("worker-1", None, claims={"worker-1": "mgr-gone"}),
+            (gf.DROP, "claim-dead-fleet"),
+        )
+        self.assertEqual(
+            self.call("worker-1", None, claims={"worker-1": "mgr-gone"}, me=self.FLEET),
+            (gf.EMIT, "claim-dead-fleet"),
+        )
+        self.assertEqual(
+            self.call("worker-1", None, claims={"worker-1": "mgr-gone"}, fleet=None),
+            (gf.EMIT, "claim-dead"),
+        )
+
+    def test_a_live_claimant_still_owns_the_pane(self):
+        """A live peer's claim is a RESOLVED owner and must not be routed away.
+
+        The routed limb is reached only after this branch, so a live claimant keeps
+        `claimed` and a claim by this watcher keeps `own-claim` — the ordering the previous
+        review found broken.
+        """
+        self.assertEqual(
+            self.call("worker-1", None, claims={"worker-1": "manager-y"}),
+            (gf.DROP, "claimed"),
+        )
+
     def test_a_goal_manager_drops_an_unowned_gate(self):
         """The fix: the class leaves every goal manager's feed."""
         self.assertEqual(self.call("worker-1", None), (gf.DROP, gf.UNOWNED_FLEET))
@@ -1191,6 +1225,28 @@ class SummaryLine(unittest.TestCase):
         with open(os.path.join(self.registry, "p.json"), "w", encoding="utf-8") as handle:
             json.dump({"sessionId": "own-mgr"}, handle)
         self.endpoint.add_ledger_row(ledger_row("w1", spawner_session_id="own-mgr"))
+
+    def test_the_fleet_routed_bucket_covers_every_routed_class(self):
+        """ONE bucket for all three routed classes, and an EMIT is not a drop.
+
+        The bucket answers "how much left this feed for the Fleet Manager", not "which hop
+        found it" — the specific reason stays on the row for `--explain` and the ledger.
+        Pinning all three classes in one run is what stops a class added later from landing
+        in no bucket at all, which would read as a clean filter.
+        """
+        rows = [
+            {"verdict": gf.DROP, "reason": "unowned-fleet"},
+            {"verdict": gf.DROP, "reason": "dead-manager-fleet"},
+            {"verdict": gf.DROP, "reason": "claim-dead-fleet"},
+            {"verdict": gf.DROP, "reason": "peer-manager"},
+            # The Fleet Manager RECEIVING a routed gate is an emit, not a drop — counting it
+            # as routed would report the gate as leaving the feed it just arrived in.
+            {"verdict": gf.EMIT, "reason": "unowned-fleet"},
+        ]
+        line = gf.counts_line(rows)
+        self.assertIn("dropped(fleet-routed): 3", line, line)
+        self.assertIn("dropped(peer-manager): 1", line, line)
+        self.assertIn("emit: 1", line, line)
 
     def test_each_drop_bucket_is_counted_under_its_own_reason(self):
         result = subprocess.run(

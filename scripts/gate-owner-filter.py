@@ -386,6 +386,11 @@ UNOWNED = "unowned"
 #: after-window: one orphaned worker pane (`088ab282`, spawned 2026-11-07, ledger still
 #: `running`) was the only foreign wake left, and it arrived through this branch.
 DEAD_MANAGER = "dead-manager"
+#: A claim recorded by a manager that is no longer live. The third sibling of `unowned` and
+#: `dead-manager`: the claimant is gone, so nobody can act on the pane. Not observed in the
+#: SC1 windows measured on 2026-11-11, which is exactly why it is routed here rather than
+#: left to fire on some later hour and fail the same criterion the other two failed.
+CLAIM_DEAD = "claim-dead"
 #: Appended to a routed reason, so `--explain` and the ledger keep WHICH class was routed
 #: while the counts line can bucket them together. `unowned` -> `unowned-fleet`.
 FLEET_SUFFIX = "-fleet"
@@ -1041,7 +1046,10 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None, scope=None,
             if live is None:
                 return EMIT, "liveness-unknown"
             if holder not in live:
-                return EMIT, "claim-dead"
+                # THE THIRD SIBLING of `unowned` and `dead-manager`, and the same defect:
+                # the manager that CLAIMED this pane is gone, so nobody can act on it and
+                # the old rule handed it to every manager. Routed like its siblings.
+                return route_to_fleet(self_id, fleet, CLAIM_DEAD)
             return DROP, "claimed"
     # Nothing above resolved this pane, so the routed limb decides — LAST, for the reason
     # in the comment above hop 3b.
