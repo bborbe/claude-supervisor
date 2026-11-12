@@ -1695,6 +1695,96 @@ class TestTrackedArtifacts(Base):
         self.assertIn("unclassified", out)
         self.assertIn("could not be read", out)
 
+    # -- `--heal` ------------------------------------------------------------------
+    #
+    # The refresh-on-divergence. Measured 2026-11-12: a goal manager's tracked file was
+    # last written at 14:09:48 while its gate snapshot refreshed at 16:29:12, so 130 names
+    # stood against 136 and six declaring rows were invisible to every sweep for three
+    # hours. The comparison caught it on every firing and reported it; nothing wrote.
+
+    def read_tracked(self, subject):
+        with open(self.m.tracked_path(subject), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_heal_refreshes_a_strict_subset_and_names_the_added_rows(self):
+        """The defect's own shape: the caller's set is a strict subset of the gate's and
+        carries nothing the page never declared. The refresh writes the union — no row is
+        removed — and the round's own output names each row it added."""
+        self.tracked("ATopic", ["ATask", "AGoal"])
+        self.snapshot("ATopic", ["ATask", "AGoal", "Dropped"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked", "--heal")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+        self.assertIn("caller-scan-suspect", out)
+        self.assertIn("TRACKED missing 1 · extra 0", out)
+        self.assertIn("REFRESHED tracked set 2 → 3 (+1): Dropped", out)
+        self.assertIn("✅ TRACKED complete — 3 names, missing 0, extra 0", out)
+        self.assertEqual(self.read_tracked("ATopic"), "AGoal\nATask\nDropped\n")
+
+    def test_the_healed_set_compares_identical_on_the_next_firing(self):
+        """The probe SC3/SC4 grade: after the refresh, the very next round reports
+        `missing 0 · extra 0` and writes nothing — so the receipt can never carry a stale
+        "healed" claim into a second round."""
+        self.tracked("ATopic", ["ATask", "AGoal"])
+        self.snapshot("ATopic", ["ATask", "AGoal", "Dropped"])
+        self.run_gate("--subject", "ATopic", "--compare-tracked", "--heal")
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked", "--heal")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+        self.assertIn("memberships identical", out)
+        self.assertIn("✅ TRACKED complete — 3 names, missing 0, extra 0", out)
+        self.assertNotIn("REFRESHED", out)
+
+    def test_heal_never_writes_on_caller_overshoot(self):
+        """The other direction, and the reason the write is gated on one label: here the
+        caller carries a name the page never declared while gate-only is empty, so the
+        caller may be right and the snapshot a refresh behind. Overwriting would delete a
+        row that exists."""
+        self.tracked("ATopic", ["ATask", "Stray"])
+        self.snapshot("ATopic", ["ATask"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked", "--heal")
+        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertIn("caller-overshoot", out)
+        self.assertNotIn("REFRESHED", out)
+        self.assertEqual(self.read_tracked("ATopic"), "ATask\nStray\n")
+
+    def test_heal_never_writes_when_neither_side_is_exonerated(self):
+        self.tracked("ATopic", ["ATask", "Stray"])
+        self.snapshot("ATopic", ["ATask", "Extra"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked", "--heal")
+        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertIn("both-sides-moved", out)
+        self.assertIn("TRACKED missing 1 · extra 1", out)
+        self.assertNotIn("REFRESHED", out)
+        self.assertEqual(self.read_tracked("ATopic"), "ATask\nStray\n")
+
+    def test_heal_refuses_a_caller_format_pair_and_writes_nothing(self):
+        """`caller-format` is the one divergence that refuses the round. Healing it would
+        write a set built from a wrong-form scan, so it stays a refusal under `--heal`
+        too."""
+        self.tracked("ATopic", ["ATask", "AGoal"])
+        self.snapshot("ATopic", ["Other1", "Other2"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked", "--heal")
+        self.assertEqual(rc, self.m.EXIT_CALLER_FORMAT, out)
+        self.assertIn("caller-format", out)
+        self.assertNotIn("REFRESHED", out)
+        self.assertEqual(self.read_tracked("ATopic"), "ATask\nAGoal\n")
+
+    def test_heal_never_writes_when_the_snapshot_is_unreadable(self):
+        """"I could not check" is not "there is nothing to add": an unreadable snapshot
+        leaves the previous set untouched and reports, exactly as the comparison does."""
+        self.tracked("ATopic", ["ATask"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked", "--heal")
+        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertIn("unavailable", out)
+        self.assertNotIn("REFRESHED", out)
+        self.assertEqual(self.read_tracked("ATopic"), "ATask\n")
+
+    def test_heal_without_the_comparison_is_a_usage_error(self):
+        """A modifier that silently did nothing would let a round believe it refreshed a
+        set it never read. `--print` supplies the required mode so this reaches the
+        explicit check rather than argparse's "one of the arguments is required" exit."""
+        rc, out = self.run_gate("--subject", "ATopic", "--print", "--heal")
+        self.assertEqual(rc, self.m.EXIT_USAGE, out)
+
 
 HELD = "aaaaaaaa-1111-2222-3333-444444444444"
 OTHER = "bbbbbbbb-1111-2222-3333-444444444444"

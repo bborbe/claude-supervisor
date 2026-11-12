@@ -2068,7 +2068,11 @@ class SpendReadout(unittest.TestCase):
         self.topic = "Recurring Operator Gates"
         self.slug = "recurring-operator-gates"
         self.session = "11111111-2222-3333-4444-555555555555"
+        # The lag window's two ends: the previous round started 600 s ago and the
+        # current round started 300 s ago, so records in [started, ended) belong to
+        # the previous round.
         self.started = time.time() - 600
+        self.ended = time.time() - 300
 
     def tearDown(self):
         for t in (self.tmp, self.live, self.projects):
@@ -2090,12 +2094,20 @@ class SpendReadout(unittest.TestCase):
             sys.argv = old
         return rc, out.getvalue()
 
-    def open_round(self, started=None):
-        """Write the receipt directly, with a window far enough back to hold fixtures."""
-        started = self.started if started is None else started
+    def open_round(self):
+        """The receipt for a round whose PREVIOUS round is the measured window."""
         p = os.path.join(self.tmp.name, self.slug + ".json")
         with open(p, "w", encoding="utf-8") as fh:
-            json.dump({"topic": self.topic, "round_started_at": started, "fields": {}}, fh)
+            json.dump({"topic": self.topic, "round_started_at": self.ended,
+                       "previous_round_started_at": self.started, "fields": {}}, fh)
+        return p
+
+    def first_tick(self):
+        """A receipt with no previous round — the first tick."""
+        p = os.path.join(self.tmp.name, self.slug + ".json")
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({"topic": self.topic, "round_started_at": self.ended,
+                       "fields": {}}, fh)
         return p
 
     def transcript(self, relpath, records):
@@ -2150,10 +2162,10 @@ class SpendReadout(unittest.TestCase):
 
     def test_tokens_sums_parent_and_subagent_files(self):
         self.open_round()
-        now = time.time()
-        self.transcript(self.session + ".jsonl", [self.rec("msg_p", 100, now - 100)])
+        self.transcript(self.session + ".jsonl",
+                        [self.rec("msg_p", 100, self.started + 100)])
         self.transcript(os.path.join(self.session, "subagents", "a.jsonl"),
-                        [self.rec("msg_a", 200, now - 90)])
+                        [self.rec("msg_a", 200, self.started + 90)])
         rc, out = self.cli("--tokens", "--topic", self.topic, "--session", self.session)
         self.assertEqual(rc, 0)
         # 300, not 100: the parent alone omits the subagent leg.
@@ -2161,24 +2173,47 @@ class SpendReadout(unittest.TestCase):
 
     def test_tokens_dedups_by_message_id(self):
         self.open_round()
-        now = time.time()
         # One assistant message spans several records that repeat `usage` verbatim.
         self.transcript(self.session + ".jsonl",
-                        [self.rec("msg_same", 100, now - 100),
-                         self.rec("msg_same", 100, now - 99),
-                         self.rec("msg_other", 50, now - 98)])
+                        [self.rec("msg_same", 100, self.started + 100),
+                         self.rec("msg_same", 100, self.started + 99),
+                         self.rec("msg_other", 50, self.started + 98)])
         rc, out = self.cli("--tokens", "--topic", self.topic, "--session", self.session)
         self.assertEqual(rc, 0)
         self.assertEqual(out.strip(), "150")
 
-    def test_tokens_windows_from_round_started_at(self):
+    def test_tokens_windows_the_previous_round(self):
         self.open_round()
         self.transcript(self.session + ".jsonl",
                         [self.rec("msg_before", 999, self.started - 60),
-                         self.rec("msg_inside", 42, self.started + 60)])
+                         self.rec("msg_inside", 42, self.started + 60),
+                         self.rec("msg_after", 777, self.ended + 10)])
         rc, out = self.cli("--tokens", "--topic", self.topic, "--session", self.session)
         self.assertEqual(rc, 0)
         self.assertEqual(out.strip(), "42")
+
+    def test_tokens_first_tick_is_baseline(self):
+        # No previous round: `n/a (baseline)`, never `0`.
+        self.first_tick()
+        rc, out = self.cli("--tokens", "--topic", self.topic, "--session", self.session)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "n/a (baseline)")
+
+    def receipt(self):
+        with open(os.path.join(self.tmp.name, self.slug + ".json"), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_start_carries_the_previous_round_started_at(self):
+        # The core of the fix: `start()` reads the prior receipt and carries its
+        # `round_started_at` into `previous_round_started_at`. If that carry
+        # regressed, `--tokens` would silently print `n/a (baseline)` forever and no
+        # other test would fail — `open_round()` hand-writes the field.
+        self.cli("--start", "--topic", self.topic)
+        first = self.receipt()
+        self.assertNotIn("previous_round_started_at", first)
+        self.cli("--start", "--topic", self.topic)
+        second = self.receipt()
+        self.assertEqual(second["previous_round_started_at"], first["round_started_at"])
 
     def test_tokens_without_a_round_refuses(self):
         rc, out = self.cli("--tokens", "--topic", self.topic, "--session", self.session)

@@ -50,7 +50,7 @@ Rationale and incident history: the Manager Session runbook § Command rationale
 | # | Step | When | File |
 |---|---|---|---|
 | 0a | Write the liveness record | every round, before the pre-dispatch gate | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-liveness.md` |
-| 1 | Resolve the subject and the tracked set | manager start; the declaration read re-runs every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-resolve.md` |
+| 1 | Resolve the subject and the tracked set | every tick (declaration read refreshes per firing) | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-resolve.md` |
 | 2 | Take the round's readings | every tick, **before** the sweep dispatch | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-readings.md` |
 | 2b | Quiet check | every tick, after the readings | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-quiet.md` |
 | 3 | Sweep | every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-sweep.md` |
