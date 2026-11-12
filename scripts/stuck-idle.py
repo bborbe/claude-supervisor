@@ -105,7 +105,7 @@ def in_flight_tool(path):
     a scan that reports any of them names a call the worker abandoned — the same
     rule `CLAUDE.md` § Reading a worker states for `agent_status`.
     """
-    pending = None  # (id, name) of the last unmatched call
+    pending = []  # [(id, name)] still running, in call order
     for rec in _records(path):
         content = rec.get("message", {}).get("content") if isinstance(rec.get("message"), dict) else None
         if not isinstance(content, list):
@@ -114,16 +114,24 @@ def in_flight_tool(path):
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "tool_use":
-                pending = (block.get("id"), block.get("name") or "tool")
-            elif block.get("type") == "tool_result" and pending is not None:
-                # ⚠️ **Match the id, never "the next result clears it".** Two calls in
-                # flight answer out of order, so an id-blind clear reports the second call
-                # finished while it is still running — and an idle verdict on a working
-                # worker is the one this probe must never produce. A record with no
-                # `tool_use_id` predates the field, so it still clears.
-                if block.get("tool_use_id") in (None, pending[0]):
-                    pending = None
-    return pending[1] if pending else None
+                pending.append((block.get("id"), block.get("name") or "tool"))
+            elif block.get("type") == "tool_result":
+                # ⚠️ **A SET keyed by id, never "the next result clears the last call".**
+                # Two calls in flight answer out of order, so clearing on arrival reports
+                # the survivor finished while it is still running — and an idle verdict on
+                # a working worker is the one this probe must never produce. A record with
+                # no `tool_use_id` predates the field, so it clears the newest call.
+                result_id = block.get("tool_use_id")
+                if result_id is None:
+                    # ⚠️ **A legacy record carries no id, and there the repo's own rule
+                    # applies: the conversation moved past every earlier call, so an
+                    # unmatched one before this result is ABANDONED, not running.**
+                    # Clearing only the newest would keep an interrupted call alive
+                    # forever and report a finished worker as busy.
+                    pending = []
+                else:
+                    pending = [call for call in pending if call[0] != result_id]
+    return pending[-1][1] if pending else None
 
 
 def declared_wait(task_file, window=40):
@@ -146,6 +154,17 @@ def declared_wait(task_file, window=40):
     return any(marker in tail for marker in WAIT_MARKERS)
 
 
+def unchanged_rounds(mtime, previous_mtime):
+    """How many rounds the transcript has read the same — 2 when it matches, else 1.
+
+    One definition, called by `decide()` and by `main()`'s render: the rule that decides
+    the verdict and the number printed beside it must not be computed twice.
+    """
+    if mtime is not None and previous_mtime is not None and int(previous_mtime) == int(mtime):
+        return 2
+    return 1
+
+
 def decide(mtime, previous_mtime, in_flight, wait):
     """The verdict, as a table — every conjunct required.
 
@@ -154,9 +173,7 @@ def decide(mtime, previous_mtime, in_flight, wait):
     """
     if mtime is None or wait is None:
         return VERDICT_UNVERIFIABLE
-    unchanged = 1
-    if previous_mtime is not None and int(previous_mtime) == int(mtime):
-        unchanged = 2
+    unchanged = unchanged_rounds(mtime, previous_mtime)
     if unchanged < UNCHANGED_ROUNDS_REQUIRED:
         return VERDICT_NOT_STUCK
     if in_flight:
@@ -194,7 +211,7 @@ def main(argv=None):
             ap.error("--previous-mtime must be an integer epoch or 'none'")
 
     verdict = decide(mtime, previous, tool, wait)
-    unchanged = 2 if (mtime is not None and previous == mtime) else 1
+    unchanged = unchanged_rounds(mtime, previous)
     print(
         f"STUCK {sid} task={os.path.basename(args.task)!r} "
         f"transcript={path or 'none'} mtime={mtime if mtime is not None else 'none'} "
