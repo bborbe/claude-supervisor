@@ -40,7 +40,7 @@ Not `/supervisor:worker-drive` (session-scoped) and not `/fleet-status` (statele
 
 The hard invariants and gates live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/rules.md` — their single normative home. This file and the round do not restate them.
 
-⚠️ This file's frontmatter grants `mcp__supervisor__spawn_agent`; the mode rule that governs every spawn — the classifier, the `mode:` field and both headless constraints — has its single home in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6. Read it there; never restate it here.
+⚠️ This file's frontmatter grants `mcp__supervisor__spawn_agent`; the mode rule that governs every spawn — the `role`-forced mapping, the `mode:` field and both headless constraints — has its single home in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6. Read it there; never restate it here.
 
 ## Interval
 
