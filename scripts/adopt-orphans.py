@@ -148,6 +148,14 @@ def live_session_ids(registry_dir=None, heartbeat_dir=None, registry_out=None):
         # while looking correct. `read_registry_entries` is the same file read as the list
         # shape, and it keeps the field.
         entries = identity.read_registry_entries(registry_dir) if registry_dir else identity.read_registry_entries()
+        if entries is None:
+            # ⚠️ **Not silent.** An unreadable registry here means the parked population
+            # was never read, so the `parked:` line reports nothing for a reason — and an
+            # empty line and a clean fleet must not render the same.
+            sys.stderr.write(
+                "adopt-orphans: registry re-read failed -- the parked population was not "
+                "measured this round\n"
+            )
         for _path, rec in entries or []:
             session_id = rec.get("sessionId") or rec.get("session_id")
             if session_id:
