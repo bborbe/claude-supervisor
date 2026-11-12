@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.298.1
 
 - fix: **`stuck-heal.py` refuses to restart a session that carries an open operator card.** The ladder's rungs are all actions, and a session with a live card is waiting on a person — restarting it discards the question they were about to answer, the same reason `close-worker.py` carries `gate-held` and `restart-worker.py` carries `held-session`. The check runs BEFORE `decide()`, reads the store's open items through `who-needs-me.py`'s `store_items()`, and prints two lines: `open-card` then the session id and the card id. ⚠️ **An unreadable store refuses too, as `store-unreachable`** — a gate that cannot be read is not a gate that is absent, and the fail-open direction restarts a worker whose operator is mid-answer. `commands/steps/round-tail.md` now says a refusal prints no `HEAL` line at all and names both tokens. Change set: `scripts/stuck-heal.py`, `scripts/tests/test_stuck_heal.py`, `commands/steps/round-tail.md`, `CHANGELOG.md`.
 
