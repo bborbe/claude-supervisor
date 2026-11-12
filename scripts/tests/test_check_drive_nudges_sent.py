@@ -216,6 +216,105 @@ class Artifacts(unittest.TestCase):
         self.assertIn("--sent requires --drive", err)
 
 
+class DecoratedRecipients(unittest.TestCase):
+    """A record written from the roster's display label must still count as a send.
+
+    Measured `2026-11-11T20-56-50Z`: the round's `.sent` carried `⚙ Serve the git-rest
+    Protocols vault-api Clients Still Need` against a payload whose `TO:` line was the same
+    name **undecorated**, and the gate read `missing 1 · unexpected sent 1` -- a lost send
+    and an over-send manufactured out of one correctly-sent nudge.
+    """
+
+    NAME = "Serve the git-rest Protocols vault-api Clients Still Need"
+    PAYLOAD = "fleet-drive — 1 candidates\nNUDGES\n  TO: %s | context\n" % NAME
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.drive = self.tmp / "round.drive"
+        self.drive.write_text(self.PAYLOAD, encoding="utf-8")
+
+    def write_sent(self, names):
+        (self.tmp / "round.sent").write_text(
+            "\n".join(names) + "\n", encoding="utf-8"
+        )
+
+    def test_a_decorated_record_entry_reads_as_a_send(self):
+        self.write_sent(["⚙ " + self.NAME])
+        rc, out, err = run_main(["--drive", str(self.drive)])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("nudges: drafted 1 · sent 1 · missing 0", out)
+        self.assertNotIn("unexpected", out)
+
+    def test_a_second_decoration_glyph_is_stripped_too(self):
+        """A literal `⚙ ` strip passes the case above and fails here."""
+        self.write_sent(["◈ " + self.NAME])
+        rc, out, err = run_main(["--drive", str(self.drive)])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("nudges: drafted 1 · sent 1 · missing 0", out)
+
+    def test_an_undecorated_record_entry_matches_a_decorated_to_line(self):
+        """The join is normalised on BOTH sides, not only on the record."""
+        self.drive.write_text(
+            "fleet-drive — 1 candidates\nNUDGES\n  TO: ⚙ %s | context\n" % self.NAME,
+            encoding="utf-8",
+        )
+        self.write_sent([self.NAME])
+        rc, out, err = run_main(["--drive", str(self.drive)])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("nudges: drafted 1 · sent 1 · missing 0", out)
+
+    def test_a_genuinely_missing_recipient_still_fails(self):
+        """The fix must not blind the deficit half: decoration is not a wildcard."""
+        self.write_sent(["⚙ Somebody Else Entirely"])
+        rc, out, _ = run_main(["--drive", str(self.drive)])
+        self.assertEqual(rc, 1)
+        self.assertIn("nudges: drafted 1 · sent 0 · missing 1", out)
+
+    def test_a_recorded_name_outside_the_drafted_set_is_still_unexpected(self):
+        """The over-send half survives: an unmatched record is reported, never counted."""
+        self.write_sent([self.NAME, "somebody-else"])
+        rc, out, _ = run_main(["--drive", str(self.drive)])
+        self.assertEqual(rc, 0)
+        self.assertIn(
+            "nudges: drafted 1 · sent 1 · missing 0 · unexpected sent 1", out
+        )
+
+
+class NormalizerMirror(unittest.TestCase):
+    """`_norm_recipient` is a MIRROR of `fleet-board.py`'s `_norm_session_name`.
+
+    ⚠️ Two copies, one rule. The gate cannot import the canonical one -- these scripts ship
+    standalone -- so the two are pinned together here, the way
+    `test_manager_menu_guard.py` pins its own copy.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location(
+            "fleet_board", str(SCRIPTS / "fleet-board.py")
+        )
+        cls.board = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.board)
+
+    def test_the_mirror_agrees_with_the_canonical_copy(self):
+        for name in (
+            "⚙ Sentry Agent Manager",
+            "Sentry Agent Manager",
+            "Fleet Manager",
+            "  ⚙  Double  Spaced  ",
+            "",
+            None,
+            "✳ starred",
+            "◈ glyph",
+            "Already Geared ⚙",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    check._norm_recipient(name), self.board._norm_session_name(name)
+                )
+
+
 class StaticOnTheTree(unittest.TestCase):
     def test_passes_on_the_real_tree(self):
         self.assertEqual(check.static_failures(), [])
