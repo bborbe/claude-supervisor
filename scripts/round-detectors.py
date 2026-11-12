@@ -194,7 +194,14 @@ def classify(rows, items, managers, chain_error=None):
             unknown.append((row, f"routing failed ({exc})"))
             continue
         if record:
-            routing.append((row, record))
+            # ⚠️ A ROUTING row that names nobody is the failure this whole detector exists
+            # to end, reached through its own path. `resolve_many()` already raises on a
+            # blank registry name, so this is the second door: an injected or future
+            # resolver that yields `""` must render UNKNOWN, never a nameless record.
+            if not str(record.get("manager") or "").strip():
+                unknown.append((row, "routing record names no manager"))
+            else:
+                routing.append((row, record))
     return no_card, routing, unknown, carded
 
 

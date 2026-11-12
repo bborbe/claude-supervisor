@@ -223,6 +223,16 @@ class Detect(unittest.TestCase):
         self.assertNotIn("ROUTING (blocked closer naming no owner → the subject's manager)\n  (none)",
                          block)
 
+    def test_a_blank_manager_is_unknown_never_a_nameless_route(self):
+        # The exact failure the detector exists to end, reached through its own path: a
+        # resolver that yields "" must not print `ROUTE` with no recipient.
+        block, _ = self._run({SID_A: "🔴 BLOCKED · x\n👤 You: waiting on the build"},
+                             _items([]), managers={TASK: ("", "chain")})
+        self.assertIn("routing=0", block)
+        self.assertIn("unknown=1", block)
+        self.assertIn("routing record names no manager", block)
+        self.assertNotIn(" ·  (chain)", block)
+
     def test_tier_four_renders_fleet(self):
         block, _ = self._run({SID_A: "🔴 BLOCKED · x\n👤 You: waiting on the build"},
                              _items([]), managers={TASK: ("fleet", "fleet")})
