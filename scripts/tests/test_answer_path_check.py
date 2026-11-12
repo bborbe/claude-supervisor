@@ -159,6 +159,8 @@ class AnswerPathCheckTest(unittest.TestCase):
         os.environ["MANAGER_LIVENESS_STATE_DIR"] = state
         try:
             self.write_registration("fleet-session", {"subject": "Fleet Manager", "branch": "fleet"})
+            # The second fact, since stage 2: an armed loop plus a fresh wrapper reach.
+            self.write_fresh_wrapper_reach("fleet-session")
             subprocess.run(
                 [sys.executable, self.mod.LIVENESS, "--arm", "--subject", "Fleet Manager",
                  "--branch", "fleet", "--interval", "900"],
@@ -186,8 +188,11 @@ class AnswerPathCheckTest(unittest.TestCase):
     # --- the liveness half -----------------------------------------------------
 
     def test_ok_state_is_the_only_pass(self):
+        # ⚠️ Since stage 2, loop state alone is not enough: the wrapper reach is the second
+        # fact, and this test now asserts the pair rather than the state by itself.
         self.write_registration("good", {"subject": "A Goal", "branch": "goal"})
-        self.mod.LIVENESS = fake_liveness(self.tmp, "OK\tgoal--a-goal\tfresh\n")
+        self.write_fresh_wrapper_reach("good")
+        self.mod.LIVENESS = fake_liveness(self.tmp, "OK\tgoal--a-goal\tage=11s period=976s(observed)\n")
         ok, subject, branch, detail = self.mod.check("good")
         self.assertTrue(ok)
         self.assertEqual((subject, branch), ("A Goal", "goal"))
@@ -258,7 +263,8 @@ class AnswerPathCheckTest(unittest.TestCase):
 
     def test_ok_branch_exits_zero_with_json(self):
         self.write_registration("good", {"subject": "A Goal", "branch": "goal"})
-        self.mod.LIVENESS = fake_liveness(self.tmp, "OK\tgoal--a-goal\tfresh\n")
+        self.write_fresh_wrapper_reach("good")
+        self.mod.LIVENESS = fake_liveness(self.tmp, "OK\tgoal--a-goal\tage=11s period=976s(observed)\n")
         code, out = self.run_main(["--session-id", "good", "--json"])
         self.assertEqual(code, 0)
         payload = json.loads(out)
@@ -271,6 +277,15 @@ class AnswerPathCheckTest(unittest.TestCase):
     # Stage 1 only REPORTS reaches; the verdict is still the loop state. These pin the report,
     # because stage 2 flips the verdict onto exactly this string and a report that silently
     # read a broken record as absent would then certify on nothing.
+
+    def write_fresh_wrapper_reach(self, session_id="good"):
+        """A wrapper reach inside the window — what the OK branch now needs to pass."""
+        self.write_reach(session_id, "wrapper", {
+            "session_id": session_id,
+            "leg": "wrapper",
+            "ts": self.mod_now(),
+            "outcome": "http-409",
+        })
 
     def write_reach(self, session_id, leg, payload):
         directory = os.path.join(self.tmp, "reach")
@@ -303,9 +318,44 @@ class AnswerPathCheckTest(unittest.TestCase):
         # A writer whose clock is ahead must not print a negative age, which reads as a probe bug.
         self.assertGreaterEqual(self.mod.reach_age_seconds("2999-01-01T00:00:00Z"), 0.0)
 
+    # --- stage 2: the wrapper leg gates, the mcp leg only reports -----------------
+
+    def test_ok_without_a_wrapper_reach_refuses(self):
+        self.write_registration("good", {"subject": "A Goal", "branch": "goal"})
+        self.mod.LIVENESS = fake_liveness(self.tmp, "OK\tgoal--a-goal\tage=11s period=976s(observed)\n")
+        ok, _, _, detail = self.mod.check("good")
+        self.assertFalse(ok)
+        self.assertIn("no wrapper reach record", detail)
+        # The window it was measured against is named, so the refusal is quotable.
+        self.assertIn("within 2132s", detail)
+
+    def test_an_expired_wrapper_reach_refuses_and_names_its_age(self):
+        self.write_registration("good", {"subject": "A Goal", "branch": "goal"})
+        self.mod.LIVENESS = fake_liveness(self.tmp, "OK\tgoal--a-goal\tage=11s period=976s(observed)\n")
+        # One minute past the window for period=976: 2*976+180 = 2132s.
+        self.write_reach("good", "wrapper", {
+            "session_id": "good", "leg": "wrapper",
+            "ts": "2020-01-01T00:00:00.000Z", "outcome": "http-409",
+        })
+        ok, _, _, detail = self.mod.check("good")
+        self.assertFalse(ok)
+        self.assertIn("past the 2132s window", detail)
+
+    def test_the_mcp_leg_is_reported_but_never_gates(self):
+        # ⚠️ The operator's decision, pinned. A manager that answers parks fine on the wrapper
+        # route is not the failure this refuses, so an absent mcp leg must not refuse it.
+        self.write_registration("good", {"subject": "A Goal", "branch": "goal"})
+        self.mod.LIVENESS = fake_liveness(self.tmp, "OK\tgoal--a-goal\tage=11s period=976s(observed)\n")
+        self.write_fresh_wrapper_reach("good")
+        ok, _, _, detail = self.mod.check("good")
+        self.assertTrue(ok, detail)
+        self.assertIn("mcp=absent", detail)
+        self.assertIn("mcp reported only", detail)
+
     def test_ok_detail_carries_the_reach_report(self):
         self.write_registration("good", {"subject": "A Goal", "branch": "goal"})
-        self.mod.LIVENESS = fake_liveness(self.tmp, "OK\tgoal--a-goal\tfresh\n")
+        self.write_fresh_wrapper_reach("good")
+        self.mod.LIVENESS = fake_liveness(self.tmp, "OK\tgoal--a-goal\tage=11s period=976s(observed)\n")
         ok, _, _, detail = self.mod.check("good")
         self.assertTrue(ok)
         self.assertIn("reach: mcp=", detail)
