@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.296.2
 
 - fix: **`manager-liveness.py --arm` now emits the session's `wrapper` answer-reach, so one command arms and proves the answer route.** The wrapper leg was a `curl` plus a recorder call in `commands/steps/re-arm.md`, and across days of measurement managers ran the tool call and not those two commands — 4 fresh `mcp` reaches against **1** fresh `wrapper` reach on 2026-11-13. An instruction the fleet reliably does not follow is not a gate it can pass, so the arm emits it.
   ⚠️ **Best-effort and off the arm's own path.** The emission runs in a thread joined after `arm()` returns, because `arm()` is the liveness reading and its epochs are what `observed_period` measures: an inline call lengthened every arm-to-arm gap by its own latency and moved an observed period from 2250 s to 2251 s, breaking a test that asserts exact seconds (and adding ~100 s to the suite). A missing session id, an unreachable wrapper or a non-404/409 status all leave the arm intact and write no reach — the correct signal, since the session then has not shown it can reach the route.
