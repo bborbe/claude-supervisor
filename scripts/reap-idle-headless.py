@@ -36,7 +36,9 @@ Eleven refusals, each exit 1 with a stable token as the first line of output:
   busy-target           registry `status` is not `idle` — the worker is mid-turn.
   not-idle-long-enough  idle less than `IDLE_FLOOR` (15 min) per `statusUpdatedAt`.
   wrapper-busy          the wrapper record is unreadable, or reads a non-idle state, a
-                        `pending_turns` that is not 0, or a parked `question`.
+                        `pending_turns` that is not 0, or a `question` parked for less
+                        than the bound. A question parked PAST the bound no longer
+                        refuses — the park clock governs it (see `question_age_seconds`).
   gate-held             the session has an open attention card; closing it orphans a
                         question a person is about to answer.
   watcher-alive         a surviving child of the worker is not one of its MCP/stdio
@@ -54,6 +56,7 @@ common case, it is not a proof.
 Exit codes: 0 reaped, 1 refusal or operational error, 2 usage error.
 """
 import argparse
+import datetime
 import glob
 import importlib.util
 import json
@@ -182,6 +185,31 @@ def idle_seconds(rec, now=None):
     if not isinstance(stamp, (int, float)):
         return None
     return max(0.0, (now if now is not None else time.time()) - stamp / 1000.0)
+
+
+def question_age_seconds(question, now=None):
+    """Seconds since the wrapper registered this park, or None when it cannot be aged.
+
+    The clock is `question.requested_at`, the wrapper's own registration time
+    (`claude-wrapper` `pkg/session.go:178`). ⚠️ **Never `last_event_age_seconds`** — that
+    field measures stream silence, and the wrapper's own comment says "State is never
+    derived from this value"; a child busy inside a long tool call is silent too.
+
+    `None` means "cannot be aged", and the caller fails CLOSED on it: an unageable park is
+    kept, never reaped on a guess.
+    """
+    if not isinstance(question, dict):
+        return None
+    raw = question.get("requested_at")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        stamp = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+    return max(0.0, (now if now is not None else time.time()) - stamp.timestamp())
 
 
 def is_helper(args):
@@ -391,11 +419,31 @@ def guard(rec, now=None, wrapper=None, cards=None, cards_readable=True, children
     status = (rec.get("status") or "").strip()
     if status != "idle":
         return ("busy-target", f"registry status is {status or '(none)'!r}, not 'idle'")
-    idle = idle_seconds(rec, now)
-    if idle is None:
-        return ("not-idle-long-enough", "the entry carries no statusUpdatedAt/updatedAt")
-    if idle < IDLE_FLOOR:
-        return ("not-idle-long-enough", f"idle {int(idle)}s < {IDLE_FLOOR}s floor")
+    # ⚠️ A parked wrapper session is aged by its PARK clock, not the registry's idle clock.
+    # `statusUpdatedAt` says when the session last went idle, which can be hours before the
+    # question was asked; using it would close a session minutes into a fresh park. The
+    # park clock is resolved FIRST, and the registry clock below is skipped entirely for a
+    # parked question — the two clocks are not alternatives, the park clock replaces it.
+    question = wrapper.get("question") if isinstance(wrapper, dict) else None
+    if question:
+        park_age = question_age_seconds(question, now)
+        if park_age is None:
+            return (
+                "wrapper-busy",
+                "a question is parked on the wrapper record and its requested_at cannot be aged",
+            )
+        if park_age < IDLE_FLOOR:
+            return (
+                "wrapper-busy",
+                f"a question has been parked for {int(park_age)}s < {IDLE_FLOOR}s floor",
+            )
+        # Past the bound: the park clock has governed. The registry idle clock is bypassed.
+    else:
+        idle = idle_seconds(rec, now)
+        if idle is None:
+            return ("not-idle-long-enough", "the entry carries no statusUpdatedAt/updatedAt")
+        if idle < IDLE_FLOOR:
+            return ("not-idle-long-enough", f"idle {int(idle)}s < {IDLE_FLOOR}s floor")
     if wrapper is None:
         return ("wrapper-busy", "the wrapper record could not be read")
     if wrapper.get("state") != "idle":
@@ -405,8 +453,10 @@ def guard(rec, now=None, wrapper=None, cards=None, cards_readable=True, children
             "wrapper-busy",
             f"wrapper pending_turns {wrapper.get('pending_turns')!r}, expected 0",
         )
-    if wrapper.get("question"):
-        return ("wrapper-busy", "a question is parked on the wrapper record")
+    # ⚠️ The `question` refusal that used to sit here is gone: the park clock above decided
+    # it. `gate-held` is untouched and still refuses at every age — closing a card-holding
+    # session loses a question a person is about to answer (operator decision
+    # `d09d23f5bdd857734714dbdc6a1d5f07`).
     if not cards_readable:
         return ("gate-held", "the attention store could not be read; failing closed")
     if cards:

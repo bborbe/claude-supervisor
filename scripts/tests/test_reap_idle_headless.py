@@ -18,6 +18,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 """
 
 import http.server
+import datetime
 import importlib.util
 import json
 import os
@@ -56,6 +57,35 @@ class TestIdleSeconds(unittest.TestCase):
 
     def test_no_stamp_is_unknown(self):
         self.assertIsNone(reap.idle_seconds({}, 1_000_000.0))
+
+
+class TestQuestionAgeSeconds(unittest.TestCase):
+    """The park clock: `question.requested_at`, and an unageable park fails closed."""
+
+    def test_requested_at_is_the_clock(self):
+        now = 1_000_000.0
+        stamp = datetime.datetime.fromtimestamp(now - 900, datetime.timezone.utc)
+        self.assertAlmostEqual(
+            reap.question_age_seconds({"requested_at": stamp.isoformat()}, now), 900, places=1
+        )
+
+    def test_a_trailing_z_parses(self):
+        now = 1_000_000.0
+        stamp = datetime.datetime.fromtimestamp(now - 60, datetime.timezone.utc)
+        raw = stamp.isoformat().replace("+00:00", "Z")
+        self.assertAlmostEqual(reap.question_age_seconds({"requested_at": raw}, now), 60, places=1)
+
+    def test_a_non_dict_is_unageable(self):
+        self.assertIsNone(reap.question_age_seconds("yes?"))
+
+    def test_a_missing_requested_at_is_unageable(self):
+        self.assertIsNone(reap.question_age_seconds({}))
+
+    def test_an_unparseable_stamp_is_unageable(self):
+        self.assertIsNone(reap.question_age_seconds({"requested_at": "not-a-date"}))
+
+    def test_the_shipped_bound_is_fifteen_minutes(self):
+        self.assertEqual(reap.IDLE_FLOOR, 900)
 
 
 class TestHelperFilter(unittest.TestCase):
@@ -192,6 +222,76 @@ class TestGuard(unittest.TestCase):
             children=[],
         )
         self.assertEqual(verdict[0], "wrapper-busy")
+
+    def _parked(self, age_seconds):
+        stamp = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+            seconds=age_seconds
+        )
+        return {
+            "state": "idle",
+            "pending_turns": 0,
+            "question": {"requested_at": stamp.isoformat().replace("+00:00", "Z")},
+        }
+
+    def test_parked_question_past_the_bound_reaps(self):
+        """The limb: a question parked past the bound no longer refuses."""
+        verdict = reap.guard(
+            self.rec(),
+            wrapper=self._parked(1200),
+            cards=[],
+            cards_readable=True,
+            children=[],
+        )
+        self.assertIsNone(verdict)
+
+    def test_parked_question_within_the_bound_refuses(self):
+        verdict = reap.guard(
+            self.rec(),
+            wrapper=self._parked(300),
+            cards=[],
+            cards_readable=True,
+            children=[],
+        )
+        self.assertEqual(verdict[0], "wrapper-busy")
+
+    def test_an_unageable_question_fails_closed(self):
+        verdict = reap.guard(
+            self.rec(),
+            wrapper={"state": "idle", "pending_turns": 0, "question": {"requested_at": "nope"}},
+            cards=[],
+            cards_readable=True,
+            children=[],
+        )
+        self.assertEqual(verdict[0], "wrapper-busy")
+
+    def test_the_park_clock_governs_not_the_registry_clock(self):
+        """2 h registry-idle + 5 min park is KEPT; 5 min registry-idle + 20 min park REAPS."""
+        kept = reap.guard(
+            self.rec(statusUpdatedAt=int((time.time() - 7200) * 1000)),
+            wrapper=self._parked(300),
+            cards=[],
+            cards_readable=True,
+            children=[],
+        )
+        self.assertEqual(kept[0], "wrapper-busy")
+        reaped = reap.guard(
+            self.rec(statusUpdatedAt=int((time.time() - 300) * 1000)),
+            wrapper=self._parked(1200),
+            cards=[],
+            cards_readable=True,
+            children=[],
+        )
+        self.assertIsNone(reaped)
+
+    def test_a_card_still_refuses_past_the_bound(self):
+        verdict = reap.guard(
+            self.rec(),
+            wrapper=self._parked(1200),
+            cards=[{"item_id": "a" * 32}],
+            cards_readable=True,
+            children=[],
+        )
+        self.assertEqual(verdict[0], "gate-held")
 
     def test_unreadable_wrapper_fails_closed(self):
         verdict = reap.guard(
