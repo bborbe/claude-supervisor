@@ -1831,6 +1831,50 @@ class RearmShapeReadsEpochsOnly(unittest.TestCase):
         self.assertTrue(self.m.rearm_shape(p, 1794141600, 1794141700))
 
 
+class RearmShapeCountsHeadBeatsOnly(unittest.TestCase):
+    """A tail beat must not pay the `re-arm` step for a round that never armed its head.
+
+    Since the round grew a closing beat, one round writes two epochs into the same
+    `<slug>.arms` ring inside the same window. Counting them alike let the tail beat
+    clear a head arm that never ran: `--check` reports `skipped: re-arm`, then
+    `output-shape.md` item 13's row-20 `--debt` re-reads the ring, finds the tail epoch
+    inside the window, and pays the debt — so the round that skipped its head arm reads
+    complete one step later, which is the false green this predicate exists to prevent.
+
+    The shape that discriminates: a ring whose ONLY in-window epoch carries the tail
+    marker. It must not satisfy the step; the same epoch unmarked must.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.live = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name, self.live.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        self.live.cleanup()
+        os.environ.pop("MANAGER_RECEIPT_STATE_DIR", None)
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def arms(self, text):
+        p = os.path.join(self.live.name, "fleet--fleet-manager.arms")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return p
+
+    def test_a_tail_marked_epoch_does_not_pay_the_step(self):
+        p = self.arms("1794141605 900 tail\n")
+        self.assertFalse(self.m.rearm_shape(p, 1794141600, 1794141700))
+
+    def test_the_same_epoch_unmarked_does_pay_the_step(self):
+        p = self.arms("1794141605 900\n")
+        self.assertTrue(self.m.rearm_shape(p, 1794141600, 1794141700))
+
+    def test_a_head_beside_a_tail_still_pays(self):
+        p = self.arms("1794141605 900\n1794141650 900 tail\n")
+        self.assertTrue(self.m.rearm_shape(p, 1794141600, 1794141700))
+
+
 class GatedState(unittest.TestCase):
     """A step the frozen-tree predicate suppressed is excused for THAT round only.
 

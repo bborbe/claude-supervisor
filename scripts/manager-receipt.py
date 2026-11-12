@@ -960,10 +960,21 @@ def rearm_shape(artifact: str, started: float, now: float) -> bool:
     Each line carries `<epoch> <interval>` now, and a flat split puts the interval on
     the epoch list — where a small number lands inside a narrow window and reports an
     arm that never happened. This file asks only *when*, so it wants the epochs.
+
+    ⚠️ **HEAD beats only — a tail beat is a different write and must not pay this step.**
+    Since the round grew a closing beat, a round writes an epoch at its head AND one at
+    its tail, and both land in the same ring inside the same window. Counting them alike
+    made the tail beat able to CLEAR a head arm that never ran: `--check` correctly reports
+    `skipped: re-arm` when the round's head is missing, and then `output-shape.md` item
+    13's row-20 `--debt` re-evaluation re-reads the ring, finds the tail epoch inside the
+    window, and pays the debt — so the round that skipped its head arm reads complete one
+    step later. That is the precise false green this predicate exists to prevent, and it
+    is why the tail marker has to be honoured here rather than only in `observed_period`.
     """
     try:
         with open(artifact, encoding="utf-8") as fh:
-            vals = [epoch for epoch, _, _ in liveness().parse_arm_lines(fh.read())]
+            vals = [epoch for epoch, _, tail in liveness().parse_arm_lines(fh.read())
+                    if not tail]
     except OSError:
         return False
     # The ring stores WHOLE seconds, so both bounds are floored to that resolution: an arm
