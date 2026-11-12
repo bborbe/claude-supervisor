@@ -82,6 +82,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -505,11 +506,19 @@ def _grep_task(session_id, dirs, timeout=15):
     Split out of `find_task` so the two passes share one matcher and the ownership rule
     (`claude_session_id` beats a `metrics_sessions` membership) stays in a single place.
     """
+    # ⚠️ **ripgrep when it exists, and the difference is not cosmetic.** `grep -rl` over the
+    # 11 375-file `private-personal/25 Tasks` measured **19.6 s** on 2026-11-12 — past this
+    # call's 15 s timeout — and a timeout here is indistinguishable from "no task claims this
+    # session". That is the false `task-unresolved` the `find_task` docstring records, and for
+    # the resume guard it is worse: `task is None` reads as "no anchor, allow the resume", so
+    # the terminal-task guard went silently inert for a task that was plainly there.
+    # `rg -l -F` over the same directory: **0.7 s**. The fallback keeps a host without rg
+    # working, with grep's known cost.
+    rg = shutil.which("rg")
+    argv = (["rg", "-l", "-F", session_id, *dirs] if rg
+            else ["grep", "-rl", "--fixed-strings", session_id, *dirs])
     try:
-        found = subprocess.run(
-            ["grep", "-rl", "--fixed-strings", session_id, *dirs],
-            capture_output=True, text=True, timeout=timeout,
-        )
+        found = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except Exception:
         return None, None
     handed_off = None
