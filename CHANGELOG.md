@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.295.0
 
 - fix: **`restart-worker.py` gains `--allow-busy-lapse`, so the answer-gated `restart fresh` can recover a lapsed manager that is still busy.** The `busy-target` guard refuses any target whose registry status is not `idle`, and a lapsed manager is usually still busy — the 4.4 h stall on 2026-11-10 was a live manager answering messages with its context exhausted and writing no digest, which is exactly the shape the guard refuses. Measured 2026-11-12: 30 of 30 direct attempts refused `busy-target` because the Fleet Manager runs fleet rounds continuously and never presents `idle`. Operator ruling 2026-11-12: on the lapse card the operator's answer IS the judgement that separates a lapse from a slow round, so a blanket refusal overrides a decision the human has already made. The flag is confined by an argument check to `--reason lapse` AND `--fresh-prompt`, so it can never widen a code-staleness restart or a plain resume; every other refusal (held, headless, role-undetermined, ambiguous-pid) still applies, and the lift prints a line naming itself so the kill is never silent about why it was permitted. `fleet-keeper.py` passes it only from `restart_fresh_session`. Change set: `scripts/restart-worker.py`, `scripts/fleet-keeper.py`, `scripts/tests/test_restart_worker.py`, `scripts/tests/test_fleet_keeper.py`, `CHANGELOG.md`.
 
