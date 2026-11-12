@@ -15,15 +15,24 @@ machine wait is not a stalled row, so the only nudge path skipped exactly the
 population the park rule targets. This script is the enforcement point the
 round's keep-alive leg runs beside the park-watch resume.
 
-WHAT IT SELECTS. A row is a candidate only when its bucket is exactly
-`watching` AND its `watching_min` — the span from the first `🟡 WAITING` closer
-of its CURRENT watching episode, published by `session-activity.py` — exceeds
-`park-event.py`'s threshold. The comparison is strict: 15 min is inside the
-allowance, 16 is not. The bucket is the gate, not the duration. A `working`,
-`light`, `gated`, `idle` or `unclassified` row is never a candidate however long
-it has waited: `gated` waits on the operator, and the others are not declared
-machine waits. A row with no `watching_min` (the instrument could not measure it)
-is skipped, never treated as 0.
+WHAT IT SELECTS. A row is a candidate when its `watching_min` — the span from
+the first `🟡 WAITING` closer of its CURRENT watching episode, published by
+`session-activity.py` — exceeds `park-event.py`'s threshold. The comparison is
+strict: 15 min is inside the allowance, 16 is not.
+
+⚠️ THE DURATION IS THE GATE, NOT THE BUCKET. `session-activity.py` awards the
+`watching` bucket only when a background shell is running, so a session parked on
+a clock or a `defer_date` with no shell reads `idle` — yet it still holds a spawn
+slot and an open `🟡 WAITING` episode, and its `watching_min` keeps growing. Those
+are exactly the rows that used to sit for hours while the bucket gate skipped
+them, so an `idle` row is a candidate whenever its `watching_min` is measurable
+(its episode is open). A `watching` row is always a candidate, measured or not,
+because the summary's `watching` count reconciles with the reading's own
+`counts.watching`. A `working`, `light`, `gated` or `unclassified` row is never a
+candidate however long it has waited: `gated` waits on the operator, `working` /
+`light` have no open episode, and `unclassified` names no declared machine wait.
+A row with no `watching_min` (the instrument could not measure it) is skipped,
+never treated as 0.
 
 ⚠️ THE DURATION IS NOT `quiet_min`. Transcript silence resets on every watcher
 re-arm, so a session parked 3 h 34 m across 20+ re-arms read `quiet 12m` and was
@@ -35,8 +44,9 @@ SUPPRESSION: ONE NUDGE PER WATCHING EPISODE. Keyed on the session id AND the
 episode's first-closer timestamp (`watching_since`), never on the duration —
 `watching_min` grows every round, so a key carrying it never matches twice and
 the session would be re-nudged every tick. An episode ends, and the session
-becomes nudgeable again, when the session is seen outside the `watching` bucket,
-is absent from the reading, or the reading carries a DIFFERENT `watching_since`
+becomes nudgeable again, when the session is seen outside the candidate
+population (`watching` or `idle`), is absent from the reading, or the reading
+carries a DIFFERENT `watching_since`
 — a new park began. Keying on the timestamp rather than on the duration dropping
 matters: the round cadence is 15 minutes and rounds are routinely skipped, so a
 reading can land after one park ended and the next began, where the duration
@@ -171,19 +181,28 @@ def same_episode(prev: dict, row: dict, quiet: int) -> bool:
 def evaluate(sessions: list, ledger: dict, limit_s: int, exit_script: str):
     """Pure decision over one reading. Returns (nudges, next_ledger, stats).
 
-    The next ledger carries ONLY sessions seen `watching` in this reading, so a
-    session that left the bucket or the fleet loses its entry, and that loss is
-    what lets a later re-entry be nudged again."""
+    The next ledger carries ONLY sessions seen in the candidate population
+    (`watching` or `idle`) in this reading, so a session that left the population
+    or the fleet loses its entry, and that loss is what lets a later re-entry be
+    nudged again."""
     nudges, nxt = [], {}
     stats = dict(watching=0, over=0, suppressed=0, within=0)
     limit_min = limit_s // 60
     for row in sessions:
-        if row.get("bucket") != "watching":
+        bucket = row.get("bucket")
+        # An `idle` row is a clock/defer park whose background shell is not
+        # running: it still holds a spawn slot and an open `🟡 WAITING` episode,
+        # and it is exactly the population the old bucket gate skipped for hours.
+        # It is admitted here and the duration check below decides, like any
+        # other row. `gated` waits on the operator; `working`/`light` have no
+        # open episode; `unclassified` names no declared machine wait.
+        if bucket not in ("watching", "idle"):
             continue
-        # Counted before the sid and measurement guards: the reading's own
-        # `counts.watching` counts every watching row, and a summary that
-        # disagrees with it is a number the operator cannot reconcile.
-        stats["watching"] += 1
+        # The summary's `watching` count reconciles with the reading's own
+        # `counts.watching`, so it counts the watching bucket only — an admitted
+        # `idle` row is not a `watching` row.
+        if bucket == "watching":
+            stats["watching"] += 1
         sid = row.get("sid") or ""
         if not sid:
             continue
