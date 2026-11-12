@@ -102,6 +102,43 @@ class FreeableTabsArtifactTest(unittest.TestCase):
         self.assertEqual(code, 0, out + err)
         self.assertIn("freeable-tabs: rows 1 · acted 0 · missing 0", out)
 
+    def test_a_long_wait_row_with_a_link_is_never_a_deficit(self):
+        """`long-wait <age>` rows are excluded by contract: closing one destroys a live wait.
+
+        A resolved link on such a row is a CORRECT non-close. Counting it would report a
+        deficit on every round that has one, which is how a guard stops being read.
+        """
+        payload = QUIET_PAYLOAD.replace(
+            "  Every Session Records Its State and What It Waits On · deferred 2026-11-12T09:00 · no pane — digest carried —",
+            "  A Parked Worker Holding A Wait · long-wait 14h · http://127.0.0.1:1337/jump?pane=12&t=q",
+        )
+        drive = self._write("lw.drive", payload)
+        code, out, err = run(["--drive", drive])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("freeable-tabs: rows 1 · acted 0 · missing 0", out)
+
+    def test_a_skipped_entry_counts_as_acted(self):
+        """A refusal token is a legitimate outcome — the row is left for the next round."""
+        drive = self._write("2026-11-12T10-08-16Z.drive", DEFECT_PAYLOAD)
+        self._write(
+            "2026-11-12T10-08-16Z.sent",
+            "skipped\tUpdate All Service Repos Go Modules 2026-11\n",
+        )
+        code, out, err = run(["--drive", drive])
+        self.assertEqual(code, 0, out + err)
+        self.assertIn("missing 0", out)
+
+    def test_a_bare_sent_entry_is_not_an_act_on_a_freeable_row(self):
+        """A plain name is a `sent` entry — messaging a freeable row is the defect itself."""
+        drive = self._write("2026-11-12T10-08-16Z.drive", DEFECT_PAYLOAD)
+        self._write(
+            "2026-11-12T10-08-16Z.sent",
+            "Update All Service Repos Go Modules 2026-11\n",
+        )
+        code, out, err = run(["--drive", drive])
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("missing 1", out)
+
     def test_a_no_pane_row_is_never_a_deficit(self):
         """The denominator is resolved links only, so an unlinked row cannot read as a miss."""
         drive = self._write("2026-11-12T11-01-24Z.drive", QUIET_PAYLOAD)

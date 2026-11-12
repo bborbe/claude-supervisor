@@ -95,6 +95,15 @@ FREEABLE_ROW = re.compile(r"^\s*(?P<name>[^·]+?)\s*·")
 #: A resolved pane link. The absence of this is what `no pane — <reason>` renders.
 RESOLVED_LINK = "http://"
 
+#: The row class the close contract excludes. A `long-wait <age>` row is a parked worker
+#: holding a live wait, and `commands/steps/drive.md` forbids closing it — so a resolved link
+#: on one is a correct non-close, never a miss.
+LONG_WAIT_CLASS = "long-wait"
+
+#: The action-record entries that count as acting on a freeable row. A close and a reported
+#: refusal are both outcomes; only silence is a defect.
+ACTED_ACTIONS = ("closed", "skipped")
+
 
 def _norm_name(name):
     """Casefolded, decoration-stripped label, for the row/record join.
@@ -110,7 +119,13 @@ def _norm_name(name):
 
 
 def freeable_rows(text):
-    """(name, has_resolved_link) per row under `FREEABLE TABS`, in payload order."""
+    """(name, row_class, has_resolved_link) per row under `FREEABLE TABS`, in payload order.
+
+    `row_class` is the row's second field (`finished`, `deferred <date>`, `long-wait <age>`).
+    It is carried because the close contract excludes `long-wait <age>` — those rows hold a
+    live wait and closing one destroys it — so a resolved link on a `long-wait` row is a
+    permanent, correct non-close and must never read as a deficit.
+    """
     rows = []
     block = None
     for line in text.splitlines():
@@ -132,13 +147,21 @@ def freeable_rows(text):
         if not match:
             continue
         name = match.group("name").strip()
-        if name:
-            rows.append((name, RESOLVED_LINK in line))
+        if not name:
+            continue
+        fields = [field.strip() for field in stripped.split("·")]
+        row_class = fields[1] if len(fields) > 1 else ""
+        rows.append((name, row_class, RESOLVED_LINK in line))
     return rows
 
 
-def closed_names(path):
-    """Normalised names the round closed, or None when the record exists but is unreadable.
+def acted_names(path):
+    """Normalised names the round closed OR refused, or None when the record is unreadable.
+
+    Both actions count. A refusal token is a legitimate outcome — the row is left for the next
+    round by contract — so counting only `closed` would report a refused row as a miss on
+    every round, which is the cry-wolf this guard must not become. A bare `<name>` line is a
+    sent entry and is NOT an act on a freeable row, so it is deliberately excluded.
 
     A missing file is **nothing recorded, not an unknown** -- the record is per-round by
     design, so its absence is a statement about this round. `None` is reserved for a file
@@ -156,7 +179,7 @@ def closed_names(path):
         if not entry or entry.startswith("#"):
             continue
         action, tab, recipient = entry.partition("\t")
-        if tab and action.strip() == "closed":
+        if tab and action.strip() in ACTED_ACTIONS:
             out.add(_norm_name(recipient.strip()))
     return out
 
@@ -214,12 +237,20 @@ def artifact_failures(drive_path, sent_path):
         return ["payload unreadable: %s" % exc], "", True
 
     rows = freeable_rows(text)
-    closed = closed_names(sent_path)
-    if closed is None:
+    acted = acted_names(sent_path)
+    if acted is None:
         return ["action record unreadable: %s" % sent_path], "", True
 
-    actionable = [name for name, linked in rows if linked]
-    missing = [name for name in actionable if _norm_name(name) not in closed]
+    # `long-wait <age>` rows are excluded by the close contract: they hold a live wait and
+    # closing one destroys it. A resolved link on such a row is a correct non-close, so
+    # counting it would report a deficit on every round that has one -- the cry-wolf that
+    # makes a guard stop being read.
+    actionable = [
+        name
+        for name, row_class, linked in rows
+        if linked and not row_class.startswith(LONG_WAIT_CLASS)
+    ]
+    missing = [name for name in actionable if _norm_name(name) not in acted]
     line = "freeable-tabs: rows %d · acted %d · missing %d" % (
         len(rows),
         len(actionable) - len(missing),
@@ -228,8 +259,9 @@ def artifact_failures(drive_path, sent_path):
     if missing:
         return (
             [
-                "%d freeable row(s) carried a resolved link and no `closed` entry: %s -- the "
-                "round listed them and did not close them, which is the 2026-11-12 defect"
+                "%d freeable row(s) carried a resolved link and no `closed` or `skipped` "
+                "entry: %s -- the round listed them and neither closed nor refused them, "
+                "which is the 2026-11-12 defect"
                 % (len(missing), "; ".join(missing[:3]))
             ],
             line,
