@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.302.1
 
 - fix: **the answer-path refusal no longer tells a manager to open an agent row interactive.** `commands/open.md:211` offered one remedy for every role — *open the row `interactive`, or arm this session's manager loop and re-run* — and for a `role: agent` row the first is the outcome the fleet forbids (`docs/role-mode-matrix.md` Rule 2) and the cheaper one, so a refused spawner took it. Measured 2026-11-12: **24 of the 90** `role: agent` new-worker spawns opened as tabs in 24 h, every one `mode_source=argument`. The remedy is now role-aware, and its one home is the new `docs/role-mode-matrix.md` § Answer-path remedy: `role: agent` gets *arm this session's manager loop and re-run*, or a recorded `refused` for the tick when no loop can be armed; `human` / `manager` keep the interactive route. `commands/open.md:211` cites that section rather than restating it. The plugin's JS `ANSWER_PATH_REMEDY` constant gains the same split (`ANSWER_PATH_REMEDY_AGENT`, which the drill surface's refusal now uses) so the drill cannot drift, and `server/answer-path.test.mjs` pins both shapes. ⚠️ The bound supervisor is the Go `claude-wrapper` daemon, whose spawn path carries no answer-path guard — that refusal is a separate row, not this change. Change set: `commands/open.md`, `docs/role-mode-matrix.md`, `server/answer-path.mjs`, `server/answer-path.test.mjs`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
 
