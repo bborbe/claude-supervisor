@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.302.4
 
 - fix: **a manager tab opened or resumed by a HEADLESS leg no longer registers as `sdk-cli`.** `wezterm cli spawn` forwards the CALLER's environment into the new pane (measured 2026-11-12: a spawn from a `cli` session reads `cli` back inside the pane, and the mux server carries no such variable), so a manager resumed by a headless leg came up with a real WezTerm pane and a headless entrypoint. Two consequences, both measured on five live goal managers at once: the session census charted them `invalid / headless` — it flags a manager whose mode is headless, because a manager cannot be headless — and `closer-gate-lint.py` read the same variable as its paneless test, so those managers' `Shift+Tab` and `/reload-plugins` closers were refused as unactionable asks. All five recipe copies now carry `CLAUDE_CODE_ENTRYPOINT=cli` as a positive `env` assignment beside the writer path — `commands/open.md` ×3, `scripts/restart-worker.py`, `docs/fleet-surface.md` — set rather than added to the `unset` list, so the result does not depend on Claude Code deriving the entrypoint itself. ⚠️ The four docs sites that asserted the opposite mechanism (the pane inherits wezterm's *mux server* environment) are corrected: that claim is what made the four-variable `unset` list look sufficient, and it is false. Change set: `commands/open.md`, `scripts/restart-worker.py`, `scripts/tests/test_restart_worker.py`, `docs/fleet-surface.md`, `docs/restart-worker.md`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
 
