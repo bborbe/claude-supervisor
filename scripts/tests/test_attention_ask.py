@@ -790,7 +790,6 @@ ANSWERED_ITEM = {
 }
 
 
-
 class PollTest(unittest.TestCase):
     def poll(self, item, answered_at=False):
         with mock.patch.object(
