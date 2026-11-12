@@ -70,6 +70,8 @@ FIELDS = {
     "unverifiable_round",
     "unverifiable_action",
     "unverifiable_observation",
+    # The stuck probe's reading, compared by the NEXT round's --previous-mtime.
+    "transcript_mtime",
 }
 
 FLAT_ONLY = tuple("flat%05d" % i for i in range(13))
