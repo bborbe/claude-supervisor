@@ -52,10 +52,12 @@ same count as `headless=<H>` on its payload header and counts line.
 |---|---|---|
 | `ask` | any closer that is neither a routine turn end nor a clock-bound park — a real `pick` / `review:` / `you run:` / `approve:`, **or a plain status line** (`done — all green`, `waiting for CI`) | **blocked**, unless the routine-continue table below passes on its text |
 | `routine` | `👤 You: nothing …` — the session asked nothing | **revive** — a read-only nudge is allowed |
-| `parked-wait` | `later (on …)` — names the event that resumes the work | **unverifiable** — nothing to nudge until it fires |
+| `parked-wait` | `later (on …)` — names the event that resumes the work | **unverifiable** while the declaration is live — nothing to nudge until it fires; **revive** once `scripts/declared-wait.py` rates the declaration `expired` |
 | `none` | no **readable** closer line — a missing or unreadable transcript reads the same as a turn that rendered none | **unverifiable** — captured, and there is no closer |
 
 `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/closer-verdict.py --class <class>` prints the verdict and its reason. The table above and that script's `VERDICTS` are two copies of one mapping, and `scripts/tests/test_closer_verdict.py` pins them together (`set(CLOSER_CLASSES) == set(VERDICTS)`) so a class added to one cannot silently miss the other.
+
+⚠️ **`parked-wait` carries a second input, so the class alone is not its verdict.** Pass the session id — `--class parked-wait --session <id or 8-char prefix>` — and the script resolves the session's newest `⏰ Ends:` declaration through `scripts/declared-wait.py`. The static `VERDICTS` map is the existing path and is resolved first; the declaration may only **widen** it, and only for `parked-wait`: `expired` → `revive`, everything else (live, absent, unreadable, ambiguous prefix) → the static `unverifiable`. That is why `test_only_routine_revives` still pins exactly one reviving class — the widening is dynamic and is pinned separately by `test_closer_verdict.py`'s `ExpiredDeclaration` class.
 
 ⚠️ **A `nothing …` closer that still names a destructive verb is classed `ask`, not `routine`.** No later test can catch it: a `nothing …` closer is never promoted to a `BLOCKED` row, so step 4a test 4 never fires, and the routine-continue table's test 3 would be skipped entirely. The capture therefore applies that blacklist itself, before it will call a row routine.
 

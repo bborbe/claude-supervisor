@@ -29,8 +29,18 @@ It prints `INCOMPLETE ROUND — skipped: <step> — <why>` for every field that 
 Measured 2026-11-07 on `~/.claude/state/fleet-handback/2026-11-06T23-46Z.digest`: its `LEGS` section still held the sweep's seed, carried no `unactioned:` line, and `--check` exited **1** naming all three keys. A correct verdict nobody read.
 
 ```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --status --digest "<this round's digest>"
+```
+
+⚠️ **`--status` is the verdict the round copies; `--check` is the guard behind it.** Run `--status` here, capture its one line and its exit code, and carry both to the `Legs` render at row 20 — the render prints that line **verbatim**, because a verdict a model paraphrases is a verdict it can soften, and a softened verdict is how a failed round reads as a clean one. `--check` remains the mechanical guard and is what the shape item's exit-code branch describes; `--status` is the same computation in one copyable string.
+
+```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --check --digest "<this round's digest>" 2>&1
 ```
+
+⚠️ **A round whose verdict is `legs: INCOMPLETE` is a FAILED round, not a quiet one.** The operator's ruling is that the flagged check runs every round and that a skipped check is a defect. So an `INCOMPLETE` verdict must reach the round's own closer — the line that names the next tick — not only the `Legs` block. A round that prints `legs: INCOMPLETE` and then closes as if it had done its work has replaced one silence with another, which is the failure this whole section exists to end.
+
+⚠️ **Still never a brake on the arm.** Failing the round in its render and re-arming are not in tension: `fleet-keeper.py` resumes a lapsed round, so a refused arm becomes a crash loop rather than a recovery. The verdict is loud, the arm proceeds, and the next round is the one that can fix it.
 
 ⚠️ **Run it here and carry the exit code to the `Legs` render at row 20.** This section owns the call and the branch; `commands/steps/output-shape.md` item 14 owns what each exit code renders and every format string — read it there and never restate it here.
 
