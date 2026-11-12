@@ -46,6 +46,12 @@ Usage:
     blocked-row-routing.py --closer "waiting on someone" --task "<task title>"
     blocked-row-routing.py --closer "..." --row "<whole closer message>" --task "<title>"
     blocked-row-routing.py --closer "..." --task "<title>" --manager "<resolved name>"
+    blocked-row-routing.py --closer "..." --task "<title>" --manager "<name>" --source chain
+
+⚠️ **`--source` defaults to `supplied`.** A caller that resolved the name through the
+four-tier chain should pass `--source chain` so the digest's route record says where the
+manager came from — a reader cannot otherwise tell a chain resolution from a hand-typed
+name, and only the former is reproducible on the next round.
 
 Prints `ROUTE\\t<manager>\\t<source>` or `NO-ROUTE\\t<why>`. Exit 0 for either; 2 when the
 manager cannot be resolved (an unreadable board is not "no routing").
