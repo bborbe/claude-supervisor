@@ -28,13 +28,16 @@ def rec(sid, pid, name="worker", alive=True):
 
 
 class PlanTest(unittest.TestCase):
-    def _plan(self, sids, records, screens=None, cards=(), self_session=None, self_pane=None):
+    def _plan(self, sids, records, screens=None, cards=(), self_session=None, self_pane=None,
+              states=None):
         panes = {"10": {"tty": "/dev/ttys010"}, "11": {"tty": "/dev/ttys011"}, "12": {"tty": "/dev/ttys012"}}
         pid_ttys = {100: "ttys010", 101: "ttys011", 102: "ttys012"}
         screens = screens or {}
+        states = states or {}
         return wake.plan(sids, records=records, panes=panes, pid_ttys=pid_ttys,
                          read=lambda p: screens.get(p, IDLE),
                          card=lambda s: (s + ".open.json") if s in cards else None,
+                         state=lambda s: states.get(s),
                          self_session=self_session, self_pane=self_pane)
 
     def test_idle_tab_session_is_a_target_with_its_join(self):
@@ -69,6 +72,47 @@ class PlanTest(unittest.TestCase):
         [row] = self._plan(["a"], [rec("a", 100)], screens={"10": MODAL})
         self.assertIn(row["verdict"], ("skip:modal-select", "skip:option-list", "skip:modal-cancel"))
 
+    def test_sleeping_subject_is_never_a_target(self):
+        # The whole defect: an idle screen plus a SLEEPING subject used to read `wake`.
+        [row] = self._plan(["a"], [rec("a", 100)], states={"a": "SLEEPING"})
+        self.assertEqual((row["verdict"], row["subject_state"]), ("skip:sleeping", "SLEEPING"))
+
+    def test_unknown_state_falls_through_to_the_screen_verdict(self):
+        # Negative direction: a failed/absent state read must NOT suppress the wake —
+        # otherwise a broken manager-liveness would silently stop every fleet wake.
+        [row] = self._plan(["a"], [rec("a", 100)], states={})
+        self.assertEqual((row["verdict"], row["subject_state"]), ("wake", None))
+
+
+class SubjectStateTest(unittest.TestCase):
+    def test_failed_read_is_none_not_a_state(self):
+        def run(cmd, **kw):
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        self.assertIsNone(wake.read_subject_state("a", subject_of=lambda s: ("T", "goal"), run=run))
+
+    def test_unresolvable_subject_is_none(self):
+        self.assertIsNone(wake.read_subject_state("a", subject_of=lambda s: None))
+
+    def test_state_is_the_first_field(self):
+        def run(cmd, **kw):
+            return types.SimpleNamespace(returncode=0, stdout="SLEEPING\tslug\tuntil X\n", stderr="")
+        self.assertEqual(
+            wake.read_subject_state("a", subject_of=lambda s: ("T", "goal"), run=run), "SLEEPING")
+
+    def test_record_without_subject_or_branch_is_none(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            p = pathlib.Path(tmp, "a.json")
+            p.write_text('{"subject": "T"}', encoding="utf-8")
+            self.assertIsNone(wake.subject_of("a", state_dir=tmp))
+            p.write_text('{"subject": "T", "branch": "goal"}', encoding="utf-8")
+            self.assertEqual(wake.subject_of("a", state_dir=tmp), ("T", "goal"))
+
+    def test_missing_record_is_none(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(wake.subject_of("nobody", state_dir=tmp))
+
 
 class OpenCardTest(unittest.TestCase):
     def _card(self, records, poll=lambda i: "OPEN"):
@@ -96,7 +140,7 @@ class OpenCardTest(unittest.TestCase):
 
 
 class SendTest(unittest.TestCase):
-    def _run(self, screens_after_activate):
+    def _run(self, screens_after_activate, subject_state=None):
         calls = []
         seq = list(screens_after_activate)
 
@@ -107,7 +151,8 @@ class SendTest(unittest.TestCase):
         def read(_pane):
             return seq.pop(0) if len(seq) > 1 else seq[0]
 
-        outcome = wake.send("10", "hello", run=run, read=read, sleep=lambda s: None)
+        outcome = wake.send("10", "hello", run=run, read=read, sleep=lambda s: None,
+                            subject_state=subject_state)
         typed = [c for c in calls if c[:3] == ["wezterm", "cli", "send-text"]]
         return outcome, typed
 
@@ -125,6 +170,13 @@ class SendTest(unittest.TestCase):
     def test_modal_opened_since_plan_types_nothing(self):
         outcome, typed = self._run([MODAL])
         self.assertTrue(outcome.startswith("failed:guard-flipped"))
+        self.assertEqual(typed, [])
+
+    def test_sleeping_subject_types_nothing(self):
+        # The re-check in `send` must carry the plan's state, not re-read it: a sleeper
+        # that became sleeping after the plan is still never typed into.
+        outcome, typed = self._run([IDLE], subject_state="SLEEPING")
+        self.assertTrue(outcome.startswith("failed:guard-flipped skip:sleeping"))
         self.assertEqual(typed, [])
 
 
