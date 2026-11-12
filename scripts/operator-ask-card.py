@@ -65,7 +65,10 @@ UNKNOWN = "UNKNOWN"
 
 #: The four verbs whose turn end leaves a session waiting on an operator answer. A
 #: `later (on …)` closer is deliberately NOT one: it waits on a named event, not a card.
-WAITING_VERB_RE = re.compile(r"^(?:pick|review|you\s+run|approve)\b", re.IGNORECASE)
+#: ⚠️ `pick` is the only colon-less verb; the other three are written `review:`, `approve:`,
+#: `you run:`. A bare `review\b` matched "Review complete — nothing needed" and turned a
+#: FINISHED session into a NO-CARD accusation — the direction this must never fail in.
+WAITING_VERB_RE = re.compile(r"^(?:pick\b|review:|approve:|you\s+run:)", re.IGNORECASE)
 
 #: A full 32-hex item id — the only shape the store keys on. Case-insensitive because a
 #: closer may uppercase it; store ids are lowercase, so the lookup lowercases too.
@@ -83,8 +86,10 @@ def normalize_closer(text):
     """The closer body with its `👤 You:` prefix, entities and leading markers removed.
 
     ⚠️ Load-bearing, not cosmetic: the verb is anchored at the body's start, and the
-    documented input is the whole panel line. `manager-attention-watch.py` carries the same
-    normalisation for the same reason — panes have emitted `👤 You: &nbsp;&nbsp;nothing`.
+    documented input is the whole panel line — panes have emitted `👤 You: &nbsp;&nbsp;nothing`.
+    `manager-attention-watch.py` splits the same problem across two helpers (`closer_line()`
+    extracts the line, `normalize_closer()` unescapes it); this one does both in a pass,
+    and additionally strips leading markers, because `⚠️ pick — …` is a real panel shape.
     """
     s = html.unescape(text or "")
     s = _CLOSER_PREFIX_RE.sub("", s)
@@ -109,17 +114,27 @@ def _require_readable(items):
             raise ValueError(f"item {i} is not an object")
 
 
-def fetch_open(store=STORE, timeout=None):
-    """The store's open items. Raises on any failure — the caller turns that into UNKNOWN."""
-    url = f"{(store or STORE).rstrip('/')}/api/1.0/attention"
-    with urllib.request.urlopen(url, timeout=TIMEOUT if timeout is None else timeout) as resp:
-        items = json.load(resp)
+def _open_items(items):
+    """Validate and filter — ONE implementation, because two copies drift.
+
+    ⚠️ `fetch_open` and `load_fixture` were byte-identical copies, and the divergence
+    between them was a review finding: a fixture certifying behaviour the live read cannot
+    produce. Extracting the filter makes that class of drift impossible rather than merely
+    untested — a change here reaches both paths by construction.
+    """
     _require_readable(items)
     open_items = [i for i in items if i.get("state") == "open"]
     for item in open_items:
         if not item.get("item_id"):
             raise ValueError("an open item carries no item_id")
     return open_items
+
+
+def fetch_open(store=STORE, timeout=None):
+    """The store's open items. Raises on any failure — the caller turns that into UNKNOWN."""
+    url = f"{(store or STORE).rstrip('/')}/api/1.0/attention"
+    with urllib.request.urlopen(url, timeout=TIMEOUT if timeout is None else timeout) as resp:
+        return _open_items(json.load(resp))
 
 
 def load_fixture(path):
@@ -130,13 +145,7 @@ def load_fixture(path):
     fixture: it passes a test the live read would fail.
     """
     with open(path, encoding="utf-8") as f:
-        items = json.load(f)
-    _require_readable(items)
-    open_items = [i for i in items if i.get("state") == "open"]
-    for item in open_items:
-        if not item.get("item_id"):
-            raise ValueError("an open item carries no item_id")
-    return open_items
+        return _open_items(json.load(f))
 
 
 def card_for_session(items, sid):

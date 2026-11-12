@@ -118,6 +118,19 @@ class CloserShape(unittest.TestCase):
     def test_a_nothing_closer_is_not_a_waiting_ask(self):
         self.assertEqual(oac.verdict("👤 You: nothing", SID_A, [])[0], oac.NOT_AN_ASK)
 
+    def test_a_finished_review_line_is_not_an_ask(self):
+        # `review\\b` matched this and turned a FINISHED session into a NO-CARD accusation —
+        # the direction this must never fail in. The colon is what makes it a waiting verb.
+        self.assertEqual(
+            oac.verdict("👤 You: Review complete — nothing needed", SID_A, [])[0],
+            oac.NOT_AN_ASK)
+
+    def test_a_whole_panel_is_out_of_contract_and_reads_not_an_ask(self):
+        # `--closer` takes the LINE, not the panel. Pinned so a future wiring cannot feed a
+        # whole panel by accident and have every session silently read NOT-AN-ASK.
+        panel = "📌 Task: foo — execution\n👤 You: pick — 1. X"
+        self.assertEqual(oac.verdict(panel, SID_A, [])[0], oac.NOT_AN_ASK)
+
     def test_a_status_line_is_deliberately_not_an_ask(self):
         # Narrower than `closer-classes.md`'s `ask` class on purpose: neither waits on a card.
         for closer in ("done — all green", "waiting for CI"):
@@ -155,6 +168,19 @@ class NeverAccuseOnAFailedRead(unittest.TestCase):
         _, verdict, line = _run(["--closer", "👤 You: pick — 1. x", "--session", "",
                                  "--fixture", _fixture([])])
         self.assertEqual(verdict, oac.UNKNOWN, line)
+
+
+class LoadersShareOneFilter(unittest.TestCase):
+    """⚠️ The two loaders were byte-identical copies and diverged once already (a fixture
+    certifying behaviour the live read cannot produce). One helper, so they cannot drift."""
+
+    def test_both_loaders_apply_the_same_filter(self):
+        rows = [{"item_id": "5" * 32, "state": "answered", "producer_id": SID_A},
+                {"item_id": "6" * 32, "state": "open", "producer_id": SID_A}]
+        path = _fixture(rows)
+        self.addCleanup(os.unlink, path)
+        self.assertEqual(oac.load_fixture(path), oac._open_items(rows))
+        self.assertEqual([i["item_id"] for i in oac.load_fixture(path)], ["6" * 32])
 
 
 class FixtureMatchesTheLivePath(unittest.TestCase):
