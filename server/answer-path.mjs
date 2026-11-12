@@ -104,10 +104,15 @@ export function runProbe(sessionId, { path = PROBE_PATH, exec = spawnSync } = {}
 // `opensInteractive` is the RESOLVED mode (see `resolveSpawnMode`), never the raw argument:
 // an absent argument is a real mode, and a caller that omitted it must still be checked.
 //
-// The remedy is the AGENT shape, always: this module serves the drill surface, whose
-// sessions are agent sessions (see the header). A `human` / `manager` row never reaches a
-// refusal here — `resolveSpawnMode` forces those roles interactive, so the first line
-// returns before the probe is consulted.
+// ⚠️ **The remedy is the AGENT shape, always, and the reason is a boundary this module
+// cannot see.** `resolveSpawnMode` reads the argument, the env, the config and the default —
+// it never reads `role`, so a `human` / `manager` row spawned with an explicit
+// `interactive: false` reaches this refusal and is indistinguishable from an agent row here.
+// The role split is made one layer up: `commands/open.md` § Step 0.6 resolves the mode from
+// `role` and writes it, and `docs/role-mode-matrix.md` § Answer-path remedy owns the
+// per-role wording. This module serves the drill surface, whose sessions are agent
+// sessions, so it renders the shape that can never produce a tab — the conservative
+// direction when the role is unknown.
 export function answerPathRefusal({ opensInteractive, sessionId, probe = runProbe }) {
   if (opensInteractive) return null
   if (!sessionId) {
