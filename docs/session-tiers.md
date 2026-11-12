@@ -59,15 +59,14 @@ nothing new, while opening one decides who supervises. Four rules follow:
    half of healthy rounds cross it. No settle window fixes that: one under ~40 min kills healthy
    managers, and one above it leaves any restart cap unreachable. Restarting the Fleet Manager
    stays a human decision, prompted by the card.
-2. **A flagged page is opened automatically by the tier above it** — `flag: true` means
-   *"open me"*, and **provenance is not read**. Operator ruling 2026-10-30: *"in the end it
-   should not matter how set the flag … if flag, should be open if claude session limit allow
-   it"* — so `flag_set_by` is a note, not a gate, and the only bound after the flag is
-   capacity. ⚠️ **The consequence is deliberate:** an agent may flag its own page and get
-   something opened for it, limited only by the cap. ⚠️ **The boundary is the WRITE, not the
-   tier:** `/supervisor:open --flagged` alone keeps a provenance gate, because it writes
-   `approved_by: operator`. **Which legs read the flag alone and which read `flag_set_by` has
-   one home — `docs/fleet-surface.md` § Approval provenance; read the split there.** A flag on
+2. **An operator-flagged page is opened automatically by the tier above it** — `flag: true` means
+   *"open me"*, and **provenance is read at every tier**. Ruled 2026-09-28 (*"an agent-set
+   `flag: true` is never an approval and opens nothing"*) and generalised to every tier on
+   2026-11-10, attention card `f8cd8b41`: the 2026-10-30 ruling governs *which* flagged row may
+   be opened, not *who* may set the flag. ⚠️ **The consequence is deliberate:** an agent that
+   flags its own page gets nothing opened, at any tier, and the round prints a refusal rather
+   than a silent `OPEN`. **The surfaces, the rulings and the measured basis have one home —
+   `docs/fleet-surface.md` § Approval provenance; read it there.** A flag on
    a page no leg reads is inert, which is the defect `--topic-open` was added to remove.
 3. **An approved worker is opened automatically**, up to `spawn.maxWorkerSoft`.
 4. **A manager is never opened fresh on the operator's behalf** — not by a loop, not by a
@@ -348,7 +347,7 @@ output — the fleet table.
   § Session roles attaches to the worker-side prohibition, so do not go hunting for an
   enforcement that does not exist.
 - **A topic manager starts a goal manager with `/supervisor:open --goal "<goal>"`**, and only
-  for a goal its own `## Goals` list declares **and that carries the flag** (whoever set it). `commands/topic-spawn.md`
+  for a goal its own `## Goals` list declares **and that carries an operator-set flag**. `commands/topic-spawn.md`
   owns the five refusals (`goal-not-in-scope`, `goal-not-startable`, `goal-terminal`,
   `goal-unflagged`, `manager-cap`), the ranking that picks which goals get one of the N slots, and
   the keep-alive contract. It holds no `spawn_agent` tool.

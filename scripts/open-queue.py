@@ -64,7 +64,7 @@ the round itself, which prints the opened set in order.
 
 The gate: the flag, and only the flag
 -------------------------------------
-`flag: true` — **whoever set it** — is the ADMISSION predicate, not a ranking hint. A row
+`flag: true`, **set by an opening actor**, is the ADMISSION predicate, not a ranking hint. A row
 that is approved, eligible and un-flagged is **never** selected, at any position: it is
 skipped with reason `not flagged`, so the round reports it rather than silently dropping
 it.
@@ -77,12 +77,14 @@ cap. The flag is the bound. `docs/session-tiers.md` § rule 2 states the same ru
 up: *"A flagged page is opened automatically by the tier above it … the only bound after
 the flag is capacity."*
 
-⚠️ **The 2026-10-30 provenance ruling is narrower than it was read.** *"in the end it
-should not matter how set the flag"* governs WHICH flagged row may be opened —
-`flag_set_by` is a note, never a gate — and it does not admit an unflagged row. Provenance
-is not read here; the flag itself is. ⚠️ **This remains deliberately wider than
-`commands/open.md` Step 0.5's batch selector on provenance**, which keeps its gate because
-that batch writes `approved_by: operator`; `docs/session-tiers.md` § rule 2 owns the split.
+⚠️ **Provenance is read here, and at every tier.** The 2026-10-30 ruling (*"in the end it
+should not matter how set the flag"*) governs WHICH flagged row may be opened once it is
+admitted; it never made an agent-set flag an approval. The 2026-09-28 rule — *"an agent-set
+`flag: true` is never an approval and opens nothing"* — was generalised to every tier on
+2026-11-10 (attention card `f8cd8b41`), so a `flag_set_by` outside `OPENING_ACTORS`, absent
+included, is refused here exactly as `commands/open.md` § Step 0.5 refuses it. The one
+decision is `scripts/flag_provenance.py`; `docs/fleet-surface.md` § Approval provenance owns
+the statement.
 
 Rank — among the admitted rows
 ------------------------------
@@ -141,6 +143,11 @@ def _load(name, filename):
 
 #: `defer_date` is an instant, not a date — see `defer-date.py` for the accepted shapes.
 defer_date = _load("defer_date", "defer-date.py")
+
+#: The one flag predicate — see `scripts/flag_provenance.py`. Loaded by path for the
+#: same reason as `defer_date`: this module is itself loaded by path, so `scripts/` is
+#: not guaranteed on `sys.path`.
+flag_provenance = _load("flag_provenance", "flag_provenance.py")
 
 #: The row's session-id set (`claude_session_id` + every `metrics_sessions` id) and the
 #: `⏰ Ends:` pattern both have one home each; reuse them rather than re-deriving.
@@ -209,16 +216,20 @@ def read_frontmatter(tasks_dir, name):
 
 
 def is_flagged(block):
-    """`flag: true` — **whoever set it**. This is the ADMISSION predicate.
+    """Does this row's flag admit it? Delegates to `flag_provenance.flag_admits()`.
 
-    Operator ruling 2026-10-30: *"in the end it should not matter how set the flag … if flag,
-    should be open if claude session limit allow it"*. `flag_set_by` is a note, never a gate,
-    so a bare `flag: true` with no setter is admitted exactly as one written `--by operator`.
-    A row this returns False for is never selected, at any position (`select()` skips it as
-    `not flagged`); the flag decides WHETHER a row opens, and `rank_key` decides only the
-    order among the rows this admits.
+    This is the ADMISSION predicate: a row it refuses is never selected, at any position
+    (`select()` skips it as `not flagged`); the flag decides WHETHER a row opens, and
+    `rank_key` decides only the order among the rows this admits.
+
+    ⚠️ **Provenance is read, for every kind.** Until the operator's 2026-11-10 ruling
+    (attention card `f8cd8b41…`) this function answered `flag: true` *whoever set it* —
+    the 2026-10-30 reading, which governs WHICH flagged row may be opened once it is
+    operator-set but never made an agent-set flag an approval. A row whose `flag_set_by`
+    is outside `OPENING_ACTORS`, absent included, is now refused here exactly as
+    `commands/open.md` § Step 0.5 refuses it.
     """
-    return (field(block, "flag") or "").strip().lower() in TRUTHY
+    return flag_provenance.flag_admits(block, "task")
 
 
 def priority_of(block):

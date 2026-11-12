@@ -164,7 +164,11 @@ class TestFlaggedRows(unittest.TestCase):
         self.fr = load("flagged-rows.py")
 
     def page(self, defer):
-        return f'flag: true\nstatus: in_progress\ndefer_date: "{defer}"\n'
+        # `flag_set_by: operator` because an absent setter now refuses at every tier
+        # (operator ruling 2026-11-10); without it `eligible()` would report
+        # `not flagged` and never reach the deferral these tests are about.
+        return (f'flag: true\nflag_set_by: operator\nstatus: in_progress\n'
+                f'defer_date: "{defer}"\n')
 
     def test_a_defer_later_today_is_not_eligible(self):
         self.assertEqual(

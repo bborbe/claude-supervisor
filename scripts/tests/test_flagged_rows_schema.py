@@ -106,8 +106,8 @@ def fixture_row(**overrides):
     os.makedirs(tasks)
     page = os.path.join(tasks, "A Task.md")
     with open(page, "w", encoding="utf-8") as handle:
-        handle.write("---\npage_type: task\nflag: true\nstatus: in_progress\n"
-                     "role: agent\n---\n")
+        handle.write("---\npage_type: task\nflag: true\nflag_set_by: operator\n"
+                     "status: in_progress\nrole: agent\n---\n")
     cfg = {"tasks_dir": "25 Tasks", "path": root,
            "worker_launcher": "/opt/launchers/cc-v",
            "manager_launcher": "/opt/launchers/cc-m",
