@@ -153,9 +153,25 @@ class CheckSpawnLedgerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_role_absent_is_not_an_offence(self):
-        """The `role` field arrived with the ruling, so every older record lacks it.
-        Failing those would make the gate unusable against any pre-ruling ledger — the
-        same ground on which a missing `mode_source` is not an offence."""
+        """The `role` field predates the ruling, but only a record written before the field
+        existed carries null — and failing those would make the gate unusable against any
+        older ledger, the same ground on which a missing `mode_source` is not an offence.
+
+        ⚠️ **The key is deleted, not set to `""`.** A present-but-blank `role` and an absent
+        one behave identically through `dict.get`, so a `role=""` fixture would pass whether
+        or not the reader distinguishes them — it would pin nothing. Deleting the key is the
+        shape the docstring claims to test.
+        """
+        absent = row(SID, mode="interactive", mode_source="argument", resumed_from=None,
+                     spawned_at=at(1))
+        del absent["role"]
+        with FixtureEndpoint(ledger_rows=[absent]) as fx:
+            result = run(fx.url)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_blank_role_is_not_an_offence(self):
+        """The companion case: `vault-cli task set "<task>" role ""` writes a present key
+        holding an empty value, and it is not an agent row either."""
         with FixtureEndpoint(ledger_rows=[row(SID, role="", mode="interactive",
                                               mode_source="argument", resumed_from=None,
                                               spawned_at=at(1))]) as fx:

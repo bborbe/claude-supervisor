@@ -355,7 +355,11 @@ that morning: 3 workers killed, 7 more found under two other managers). The file
 once at server start — restart the MCP server after editing it. The spawn response reports
 `mode_source` (`argument`/`env`/`config`/`default`) when you need to know which source
 decided. Pass `interactive` as a per-call override in one case only: `true` to watch one
-worker's screen live. ⚠️ **Local rows only** — a `docker` / `k8s` row refuses the argument
+worker's screen live — ⚠️ **and never for a `role: agent` row**, which is `headless` always
+(matrix Rule 2): a worker is `role: agent` by definition, so the override reaches only a
+`human` / `manager` row. `scripts/check-spawn-ledger.py` fails on a `role: agent` +
+`mode=interactive` record, so the pair is caught after the fact rather than refused at the
+call boundary. ⚠️ **Local rows only** — a `docker` / `k8s` row refuses the argument
 entirely (item 7 above).
 
 ⚠️ **The `mode:` case is a carve-out, not an override, and it runs in both directions.** Pass the argument whenever the task's `mode:` field is present — `interactive=false` for `headless`, `interactive=true` for `interactive` (item 6 above). ⚠️ **Local rows only** — a `docker` / `k8s` row refuses `interactive` whenever it is present, so this carve-out does not reach it (item 7 above). An absent `mode:` still means *omit the argument entirely* — never *pass `interactive`* — so the config keeps deciding for every task that has not opted out, and the one-place-to-change property survives. **If this file writes the field, this file must honour it in both directions.** Passing it only for `headless` — which is what this file did until 2026-09-24 — leaves `mode: interactive` inert: a task that explicitly declared itself interactive flips to headless the moment `spawn.mode` moves, and the omitted argument reports `mode_source=config`, so a **wired spawn becomes indistinguishable from an unwired one in the ledger**. **A `mode:` honoured in one direction is the deleted mode column wearing a different hat.**
