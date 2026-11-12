@@ -31,8 +31,10 @@ goal. That is why three cases carry a goal and **two** are `owner-unknown`.
 ## What the stubs reproduce
 
 `registry/` holds **only** this manager, so every foreign spawner reads `dead-manager`. That is
-the firing-time shape: the filter emits a foreign gate whenever the live chain does not resolve
-— a dead spawner, an unresolved `parent_session`, or an unreadable ledger all land on `EMIT`.
+the firing-time shape: the filter routes a foreign gate whenever the live chain does not resolve
+— a dead spawner, an unresolved `parent_session`, or an unreadable ledger all land on a
+**routed** verdict (`drop` for a goal manager, `emit` only for the live Fleet Manager) rather
+than the broadcast `emit` this fixture was written against.
 The same five panes read `peer-manager` on a later live run, which is precisely why the fix
 keys on the vault rather than on that chain.
 
