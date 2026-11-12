@@ -16,7 +16,9 @@ prints as a zero, and the dead-worker count never prints as a bare measurement.
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
+import io
 import os
 import tempfile
 import unittest
@@ -77,7 +79,7 @@ class Base(unittest.TestCase):
         self.run_legs("--leg", "lapsed-managers", "--count", str(lapsed))
         self.run_legs("--leg", "topicless-goal-managers", "--count", str(topicless))
         self.run_legs("--leg", "dead-workers", "--count", str(dead), "--exact")
-        self.run_legs("--leg", "operator-flagged", "--count", str(flagged))
+        self.run_legs("--leg", "operator-flagged", "--count", str(flagged), "--not-invoked")
 
 
 class TestCheck(Base):
@@ -114,7 +116,7 @@ class TestCheck(Base):
             + "  keep-alive: unactioned: 0 lapsed-managers\n"
             + "  keep-alive: unactioned: 1 lapsed-managers\n"
             + "  keep-alive: unactioned: 0 dead-workers\n"
-            + "  flagged-open: unactioned: 0 operator-flagged\n"
+            + "  flagged-open: unactioned: 0 operator-flagged (batch not invoked)\n"
         )
         self.assertEqual(self.run_legs("--check"), legs.EXIT_INCOMPLETE)
 
@@ -124,7 +126,7 @@ class TestCheck(Base):
             + "LEGS\n"
             + "  keep-alive: unactioned: 0 lapsed-managers\n"
             + "  keep-alive: unactioned: 0 dead-workers\n"
-            + "  keep-alive: unactioned: 0 operator-flagged\n"
+            + "  keep-alive: unactioned: 0 operator-flagged (batch not invoked)\n"
         )
         self.assertEqual(self.run_legs("--check"), legs.EXIT_INCOMPLETE)
 
@@ -157,13 +159,13 @@ class TestCount(Base):
         self.assertEqual(self.run_legs("--leg", "lapsed-managers", "--count", "0"), 0)
         self.assertEqual(self.run_legs("--leg", "topicless-goal-managers", "--count", "1"), 0)
         self.assertEqual(self.run_legs("--leg", "dead-workers", "--count", "0", "--exact"), 0)
-        self.assertEqual(self.run_legs("--leg", "operator-flagged", "--count", "3"), 0)
+        self.assertEqual(self.run_legs("--leg", "operator-flagged", "--count", "3", "--not-invoked"), 0)
         text = self.read()
         self.assertEqual(text.count("unactioned:"), 4)
         self.assertIn("keep-alive: unactioned: 0 lapsed-managers", text)
         self.assertIn("keep-alive: unactioned: 1 topicless-goal-managers", text)
         self.assertIn("keep-alive: unactioned: 0 dead-workers", text)
-        self.assertIn("flagged-open: unactioned: 3 operator-flagged", text)
+        self.assertIn("flagged-open: unactioned: 3 operator-flagged (batch not invoked)", text)
         self.assertEqual(self.run_legs("--check"), 0)
 
     def test_the_floor_marker_renders_on_the_dead_worker_line(self):
@@ -224,7 +226,7 @@ class TestNotRun(Base):
         """The whole point: suppressed and empty must be distinguishable."""
         self.write(digest_with_legs())
         self.run_legs("--leg", "keep-alive", "--not-run", "debt gate (re-arm, exit 12)")
-        self.run_legs("--leg", "operator-flagged", "--count", "0")
+        self.run_legs("--leg", "operator-flagged", "--count", "0", "--not-invoked")
         suppressed = self.read()
 
         self.write(digest_with_legs())
@@ -298,11 +300,197 @@ class TestDigestPreservation(Base):
         self.assertEqual(int(os.stat(self.path).st_mtime), 1700000000)
     def test_the_rest_of_the_digest_is_untouched(self):
         self.write(digest_with_legs())
-        self.run_legs("--leg", "operator-flagged", "--count", "1")
+        self.run_legs("--leg", "operator-flagged", "--count", "1", "--not-invoked")
         text = self.read()
         self.assertTrue(text.startswith("DIGEST 2026-11-06T19:10Z"))
         self.assertIn("CLASSIFICATION  24 classified", text)
         self.assertIn("NOTES   none", text)
+
+
+class TestPerKind(Base):
+    """The flagged-open reading, per kind.
+
+    A single `unactioned: <n>` cannot say whether the operator's flag reached tasks, goals or
+    topics: a round that opened three topics and a round that opened nothing printed the same
+    line, so the flag could be silently unhonoured and the digest still read clean. The
+    per-kind shape carries `opened/declined/eligible` for each kind, which makes
+    `opened + declined == eligible` checkable rather than asserted once for all three.
+    """
+
+    GOOD = "tasks=1/2/3 goals=0/1/1 topics=0/0/0"
+
+    def test_the_per_kind_line_renders_all_three_kinds(self):
+        self.write(digest_with_legs())
+        self.assertEqual(
+            self.run_legs("--per-kind", self.GOOD, "--invoked"), 0
+        )
+        self.assertIn("flagged-open: tasks=1/2/3 goals=0/1/1 topics=0/0/0 (batch invoked)", self.read())
+
+    def test_the_per_kind_line_covers_the_flagged_key_so_check_passes(self):
+        self.write(digest_with_legs())
+        self.run_legs("--leg", "keep-alive", "--not-run", "debt gate (exit 12)")
+        self.assertEqual(self.run_legs("--per-kind", self.GOOD, "--invoked"), 0)
+        self.assertEqual(self.run_legs("--check"), 0)
+
+    def test_the_per_kind_line_supersedes_the_single_count(self):
+        """Both cover operator-flagged, and two lines for one key is the duplicate --check refuses."""
+        self.write(digest_with_legs())
+        self.run_legs("--leg", "operator-flagged", "--count", "3", "--invoked")
+        self.assertEqual(self.run_legs("--per-kind", self.GOOD, "--invoked"), 0)
+        text = self.read()
+        self.assertNotIn("unactioned:", text)
+        self.assertEqual(text.count("flagged-open:"), 1)
+
+    def refused(self, *argv):
+        """A refused write returns EXIT_FAILED and leaves the digest untouched."""
+        self.assertEqual(self.run_legs(*argv), legs.EXIT_FAILED)
+
+    def test_a_triple_that_does_not_add_up_is_refused(self):
+        """The assertion the three numbers exist for: opened + declined == eligible."""
+        self.write(digest_with_legs())
+        self.refused(
+            "--per-kind", "tasks=1/2/4 goals=0/1/1 topics=0/0/0", "--invoked"
+        )
+        self.assertIn("no reading recorded this round", self.read())
+
+    def test_a_per_kind_line_without_a_batch_marker_is_refused(self):
+        """Without the marker an unactioned count reads as a batch that ran and found nothing."""
+        self.write(digest_with_legs())
+        self.refused("--per-kind", self.GOOD)
+        self.assertIn("no reading recorded this round", self.read())
+
+    def test_the_kinds_must_appear_once_each_in_order(self):
+        """A transposed pair would write a line whose labels are a lie."""
+        self.write(digest_with_legs())
+        self.refused(
+            "--per-kind", "goals=0/1/1 tasks=1/2/3 topics=0/0/0", "--invoked"
+        )
+        self.assertIn("no reading recorded this round", self.read())
+
+    def test_a_missing_kind_is_refused(self):
+        self.write(digest_with_legs())
+        self.refused("--per-kind", "tasks=1/2/3 goals=0/1/1", "--invoked")
+
+    def test_integer_forms_the_reader_rejects_are_refused_at_the_writer(self):
+        """`int()` accepts `+1`, `01` and `1_0`; the reader's `\\d+/\\d+/\\d+` does not.
+
+        A writer that trusted `int()` would emit a line it reports as written and `--check`
+        then refuses — a write that succeeds and a digest that stays broken.
+        """
+        for bad in ("tasks=+1/2/3", "tasks=1_0/2/3", "tasks= 1/2/3"):
+            with self.subTest(bad=bad):
+                self.write(digest_with_legs())
+                self.refused(
+                    "--per-kind", "%s goals=0/1/1 topics=0/0/0" % bad, "--invoked"
+                )
+                self.assertIn("no reading recorded this round", self.read())
+
+    def test_the_writer_and_the_reader_agree_on_what_a_triple_is(self):
+        """The one invariant behind the previous test, asserted directly."""
+        for triple in ("1/2/3", "0/0/0", "10/5/15", "01/2/3"):
+            self.assertTrue(legs.per_kind_adds_up(triple), triple)
+            self.assertTrue(legs.PER_KIND_RE.match(
+                "flagged-open: tasks=%s goals=0/0/0 topics=0/0/0 (batch invoked)" % triple
+            ), triple)
+        for triple in ("+1/2/3", "1_0/2/3", "1/2", "1/2/3/4", "-1/2/1"):
+            self.assertFalse(legs.per_kind_adds_up(triple), triple)
+
+    def test_a_hand_written_per_kind_line_without_a_marker_fails_check(self):
+        """The reader's own guard, reached only by a line the writer did not produce.
+
+        The writer refuses a marker-less `--per-kind`, so a test that goes through it proves
+        the writer and never the reader — a hand-edited digest is the case the reader exists
+        for, and it must not read as a recorded reading.
+        """
+        self.write(
+            PREFIX_DIGEST
+            + "LEGS\n"
+            + "  keep-alive: not run — debt gate (exit 12)\n"
+            + "  flagged-open: tasks=1/2/3 goals=0/1/1 topics=0/0/0\n"
+        )
+        self.assertEqual(self.run_legs("--check"), legs.EXIT_INCOMPLETE)
+
+    def test_a_hand_written_per_kind_line_that_does_not_add_up_fails_check(self):
+        self.write(
+            PREFIX_DIGEST
+            + "LEGS\n"
+            + "  keep-alive: not run — debt gate (exit 12)\n"
+            + "  flagged-open: tasks=1/2/4 goals=0/1/1 topics=0/0/0 (batch invoked)\n"
+        )
+        self.assertEqual(self.run_legs("--check"), legs.EXIT_INCOMPLETE)
+
+    def test_a_per_kind_line_on_another_leg_is_unparseable(self):
+        """The shape belongs to the leg whose single count it replaces."""
+        self.write(
+            PREFIX_DIGEST
+            + "LEGS\n"
+            + "  keep-alive: tasks=1/2/3 goals=0/1/1 topics=0/0/0 (batch invoked)\n"
+            + "  flagged-open: not run — debt gate (exit 12)\n"
+        )
+        self.assertEqual(self.run_legs("--check"), legs.EXIT_INCOMPLETE)
+
+    def test_per_kind_takes_no_leg_flag(self):
+        """Mutual exclusion is an argument-shape error, so argparse owns it and exits 2."""
+        self.write(digest_with_legs())
+        with self.assertRaises(SystemExit) as ctx:
+            self.run_legs(
+                "--leg", "operator-flagged", "--per-kind", self.GOOD, "--invoked"
+            )
+        self.assertEqual(ctx.exception.code, 2)
+
+
+class TestStatus(Base):
+    """The round's verdict as ONE string the render copies, not a sentence to remember.
+
+    `--check`'s answer arrives as stderr lines plus an exit code; a render told to "render it
+    as INCOMPLETE" is a sentence a model is asked to recall, and a softened transcription is
+    exactly how a failed round reads as a clean one. `--status` returns the line itself.
+    """
+
+    def status_of(self, *argv):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = self.run_legs(*argv)
+        return buf.getvalue().strip(), code
+
+    def test_a_complete_reading_is_ok(self):
+        self.write(digest_with_legs())
+        self.record_all(lapsed=0, topicless=1, dead=0, flagged=2)
+        line, code = self.status_of("--status")
+        self.assertEqual(code, 0)
+        self.assertTrue(line.startswith("legs: OK"))
+
+    def test_the_sweep_seed_is_incomplete_and_names_why(self):
+        self.write(digest_with_legs())
+        line, code = self.status_of("--status")
+        self.assertEqual(code, legs.EXIT_INCOMPLETE)
+        self.assertTrue(line.startswith("legs: INCOMPLETE — "))
+        self.assertIn("no reading recorded", line)
+
+    def test_a_missing_section_is_incomplete(self):
+        self.write(PREFIX_DIGEST)
+        line, code = self.status_of("--status")
+        self.assertEqual(code, legs.EXIT_INCOMPLETE)
+        self.assertIn("no LEGS section", line)
+
+    def test_an_unreadable_digest_is_unknown_not_incomplete(self):
+        """A failed read and a suppressed leg must not print the same verdict — or nothing.
+
+        The line is asserted, not only the exit code: `--status` must run BEFORE the shared
+        digest read, because a verdict that never prints is indistinguishable from one that
+        said nothing, and an exit code alone cannot tell the two apart.
+        """
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = legs.main(["--digest", "/nope/x.digest", "--status"])
+        self.assertEqual(code, legs.EXIT_FAILED)
+        self.assertTrue(buf.getvalue().strip().startswith("legs: UNKNOWN — "))
+
+    def test_status_takes_no_write_flag(self):
+        self.write(digest_with_legs())
+        with self.assertRaises(SystemExit) as ctx:
+            self.run_legs("--status", "--leg", "lapsed-managers", "--count", "1")
+        self.assertEqual(ctx.exception.code, 2)
 
 
 class TestSingleHome(unittest.TestCase):
@@ -315,7 +503,7 @@ class TestSingleHome(unittest.TestCase):
         self.assertIn("keep-alive: unactioned: <n> lapsed-managers", text)
         self.assertIn("keep-alive: unactioned: <n> topicless-goal-managers", text)
         self.assertIn("keep-alive: unactioned: <n> dead-workers", text)
-        self.assertIn("flagged-open: unactioned: <n> operator-flagged", text)
+        self.assertIn("flagged-open: unactioned: <n> operator-flagged (batch invoked|batch not invoked)", text)
         self.assertIn("(lower bound, scan incomplete)", text)
         self.assertIn("not run — <reason>", text)
         self.assertIn("fleet-legs.py", text)
@@ -336,6 +524,67 @@ class TestSingleHome(unittest.TestCase):
         self.assertIn("LEGS", text)
         self.assertIn("keep-alive: not run — no reading recorded this round", text)
         self.assertIn("flagged-open: not run — no reading recorded this round", text)
+
+
+class TestBatchMarker(Base):
+    """The flagged-open count must say whether the batch ran.
+
+    One bare number meant both "the leg ran and left N" and "the leg never ran, N
+    are waiting" — the second is the failure the leg exists to remove.
+    """
+
+    def test_an_unlabelled_operator_flagged_count_is_refused(self):
+        self.write(digest_with_legs())
+        self.assertNotEqual(self.run_legs("--leg", "operator-flagged", "--count", "3"), 0)
+
+    def test_an_unlabelled_other_count_is_unaffected(self):
+        self.write(digest_with_legs())
+        self.assertEqual(self.run_legs("--leg", "lapsed-managers", "--count", "3"), 0)
+
+    def test_the_marker_distinguishes_invoked_from_not_invoked(self):
+        self.write(digest_with_legs())
+        self.run_legs("--leg", "operator-flagged", "--count", "3", "--invoked")
+        self.assertIn(
+            "flagged-open: unactioned: 3 operator-flagged (batch invoked)", self.read()
+        )
+        self.run_legs("--leg", "operator-flagged", "--count", "3", "--not-invoked")
+        self.assertIn(
+            "flagged-open: unactioned: 3 operator-flagged (batch not invoked)", self.read()
+        )
+
+    LEGS_ALL = (
+        "DIGEST 2026-11-06T19:10Z\nLEGS\n"
+        "  keep-alive: unactioned: 0 lapsed-managers\n"
+        "  keep-alive: unactioned: 0 topicless-goal-managers\n"
+        "  keep-alive: unactioned: 0 dead-workers\n"
+    )
+
+    def test_the_marker_is_refused_on_a_key_with_no_batch(self):
+        self.write(digest_with_legs())
+        self.assertNotEqual(
+            self.run_legs("--leg", "lapsed-managers", "--count", "3", "--invoked"), 0
+        )
+
+    def test_check_accepts_a_labelled_flagged_line(self):
+        self.write(
+            self.LEGS_ALL
+            + "  flagged-open: unactioned: 3 operator-flagged (batch not invoked)\n"
+        )
+        self.assertEqual(self.run_legs("--check"), 0)
+
+    def test_check_rejects_a_bare_operator_flagged_line(self):
+        self.write(self.LEGS_ALL + "  flagged-open: unactioned: 3 operator-flagged\n")
+        self.assertEqual(self.run_legs("--check"), 1)
+
+    def test_check_rejects_a_marker_on_a_key_with_no_batch(self):
+        self.write(
+            "DIGEST 2026-11-06T19:10Z\nLEGS\n"
+            "  keep-alive: unactioned: 0 lapsed-managers (batch invoked)\n"
+            "  keep-alive: unactioned: 0 topicless-goal-managers\n"
+            "  keep-alive: unactioned: 0 dead-workers\n"
+            "  flagged-open: unactioned: 3 operator-flagged (batch invoked)\n"
+        )
+        self.assertEqual(self.run_legs("--check"), 1)
 
 
 if __name__ == "__main__":

@@ -647,12 +647,8 @@ Then pass the pair to whichever spawn path runs:
 ### 3.1 Spawn — the wezterm path (fallback, resume's tab arm)
 
 ```bash
-# Pace the start FIRST, and never skip this line on this branch. The resume branch bypasses
-# the server, so this is the ONLY thing that throttles it — a batch of resumes issued without
-# it is exactly the 2026-10-10 burst (22 starts in 2.8 min). It reserves a slot and sleeps
-# until it, so no timing logic belongs here; exit 1 means the rate refused the start and the
-# reason is on stderr. The rule's single home is `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md`
-# § Spawn a worker item 5 — this is the call site, not the recipe.
+# Pace the start FIRST: the resume branch bypasses the server, so this is the only throttle.
+# Rule's single home: `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 5.
 #
 # ⚠️ RUN THIS WITH A TIMEOUT OF AT LEAST 300s — never under the Bash tool's 120s default. The
 # script may sleep to MAX_START_DELAY_MS (300s) and it writes the reservation BEFORE sleeping,
@@ -669,6 +665,9 @@ node "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor
 RESOLVED=$(python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/resolve-launcher.py" "<session_id>" --cwd "<cwd>") || exit 1
 LAUNCHER=$(printf '%s' "$RESOLVED" | cut -f1)
 CHIP=$(printf '%s' "$RESOLVED" | cut -f4)
+
+# Terminal-task guard: read-only, spawns nothing; `task-terminal` means stop the row.
+python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/restart-worker.py" "<session_id>" --task-guard --cwd "<cwd>" || exit 1
 
 wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- env SESSION_EXIT_RECORD="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-exit-record.py" bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; _sx() { rc=$?; "$SESSION_EXIT_RECORD" append --session "<session_id>" --pid $$ --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn --session "<session_id>" --pid $$ || true; "$SESSION_EXIT_RECORD" observe --pid $$ --session "<session_id>" || true; trap _sx EXIT; "'"$LAUNCHER"'" --resume <session_id> -n "<title>" "/color '"$CHIP"'"'
 ```
@@ -687,7 +686,7 @@ wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} --cwd "<cwd>" -- env SE
 
 **`--window-id` is what puts the tab in the right window** — without it the new tab inherits `WEZTERM_PANE` from the calling session. `${WINDOW_ID:+...}` keeps the flag off entirely when the map is unavailable.
 
-**`--cwd` is the other half of the same trap, and it is not inherited either.** Without it the tab inherits *wezterm's* working directory. Read the value from the shared reader (`session-liveness.py --list --json`, field `cwd`) and resolve it **before** the spawn; never guess, and refuse rather than spawn into the wrong tree.
+**`--cwd` is the other half of the same trap, and it is not inherited either.** Without it the tab inherits *wezterm's* working directory — `$HOME` for a server started from a home directory — and Claude Code stops on *"Accessing workspace /Users/&lt;user&gt; — do you trust this folder?"* before registering a pid, so a resume that worked reads as a no-op. Resolve the value **before** the spawn, and never guess it. ⚠️ **The resolution rule — its two sources, its orphan branch, and the refusal — has its single home in [`docs/fleet-surface.md` § Spawn a worker](../docs/fleet-surface.md#spawn-a-worker), at *the resume decisions list, item 3* — "`cwd` (or `vault`) is not inherited on a resume". Read it there; state no resolution rule here.** ⚠️ **Cite it by that name, never as a bare "item 3":** § Spawn a worker holds two numbered lists, and a bare `item N` in this repo means the **readiness ladder**, whose item 3 is an unrelated check. ⚠️ **In particular, `session-liveness.py --list --json` is NOT that rule** — it lists live sessions only, and this block is § 3.1, *the resume branch*, whose session is by definition one whose liveness could not be determined. A live-only source is structurally empty for exactly the case this block exists to serve.
 
 **Order matters here: pass `/color` as the spawn prompt → send the work command after.** The colour is the *only* thing that belongs in this spawn's prompt argument. Do NOT pass the work prompt there — a session spawned with it is busy from its first instant.
 

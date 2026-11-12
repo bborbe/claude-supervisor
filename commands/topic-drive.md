@@ -58,7 +58,7 @@ tiers). A worker row is reported downward.
 | 4c | Closure — close what the evidence already finished | every tick, after the sweep | `${CLAUDE_PLUGIN_ROOT}/commands/steps/goal-closure.md` |
 | 5 | Keep alive — resume, restart or leave, per goal | every tick, after the sweep | *inline — § Keep alive below* |
 | 6 | Start — the ranking, then `topic-spawn` | the keep-alive left a slot free **and a flagged startable goal is held** | *inline — § Start below* |
-| 12 | Tail — `noop` and re-arm | end of every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-tail.md` |
+| 12 | Tail — re-arm the `Monitor` channels | end of every tick | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-tail.md` |
 | 13 | Self-improvement | before the session ends, or a sweep exposes a gap | `${CLAUDE_PLUGIN_ROOT}/commands/steps/round-self-improvement.md` |
 
 ⚠️ **The rules do not live here, and that is deliberate.** Every always-hold invariant and
@@ -72,8 +72,8 @@ arm or the step file — do not act from memory of a previous round.
 - **`$1` (optional — resolved from the session when omitted):** the **topic name**. A goal
   name is the wrong tier — print `❌ "<name>" is a goal, not a topic — use
   /supervisor:goal-drive.` and stop.
-- **`--interval <N>m`** is the **arm's**, not this command's: it is accepted solely so the
-  wakeup's prompt parses. Step 12 still makes one `ScheduleWakeup` call to correct `noop`.
+- **`--interval <N>m`** is the **arm's**, not this command's: accepted so the wakeup's
+  prompt parses. Step 12 re-arms only the `Monitor` channels (no `noop` correction).
 
 ## Keep alive — inline, because it runs every tick
 

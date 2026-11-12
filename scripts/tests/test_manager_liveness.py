@@ -24,6 +24,10 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 
 def load(state_dir):
     os.environ["MANAGER_LIVENESS_STATE_DIR"] = state_dir
+    # Isolate the gate heartbeat read from the real detached loop, so a live loop on the
+    # host can never make a synthetic stale subject read OK. Not created here: the
+    # unreadable-state-dir test relies on the path staying absent.
+    os.environ["MANAGER_GATE_LOOP_STATE_DIR"] = os.path.join(state_dir, "gate-loop")
     spec = importlib.util.spec_from_file_location(
         "manager_liveness", os.path.join(os.path.dirname(_HERE), "manager-liveness.py")
     )
@@ -464,6 +468,106 @@ class Liveness(unittest.TestCase):
         # every machine today is head-only, and their periods must be untouched.
         self.plant_arms("Manager Layer", [2700, 1800, 900, 0])
         self.assertEqual(int(self.m.observed_period("goal--manager-layer")), 900)
+
+    def plant_tail_store(self, topic, epochs):
+        """Mark epochs as tail beats in `<slug>.tail`, leaving the ring untouched."""
+        s = self.m.slug(topic, "goal")
+        with open(self.m.path(s, "tail"), "w") as fh:
+            fh.write("".join(f"{e:.0f}\n" for e in epochs))
+
+    def two_tuple_rebuild(self, topic, interval):
+        """The pre-upgrade `arm()` rebuild, verbatim from 0.263.0:839-843.
+
+        A session still running that version appends `(time.time(), interval)` and
+        rewrites every line as `{epoch} {interval}` — no third column, and no
+        awareness that `<slug>.tail` exists.
+        """
+        s = self.m.slug(topic, "goal")
+        p, _ = self.m.resolve(s, "arms")
+        try:
+            with open(p) as fh:
+                prior = self.m.parse_arm_lines(fh.read())
+        except OSError:
+            prior = []
+        pairs = ([(e, iv) for e, iv, _ in prior]
+                 + [(time.time(), interval)])[-self.m.ARMS_KEEP:]
+        with open(p, "w") as fh:
+            fh.write("".join(f"{e:.0f} {iv}\n" for e, iv in pairs))
+
+    def test_the_tail_marker_survives_a_two_tuple_rebuild(self):
+        # SC1(a). The store is a file the pre-upgrade writer never opens, so its
+        # entries cannot be erased by a ring rebuild — which is the whole defect.
+        s = self.m.slug("Manager Layer", "goal")
+        now = time.time()
+        self.plant_arms("Manager Layer", [2700, 1800, 900, 0])
+        self.plant_tail_store("Manager Layer", [now - 1800, now - 900, now])
+        self.assertEqual(len(self.m.read_tail_epochs(s)), 3)
+        self.two_tuple_rebuild("Manager Layer", 900)
+        self.assertEqual(len(self.m.read_tail_epochs(s)), 3)
+
+    def test_a_tail_arm_marks_the_store_and_leaves_two_columns(self):
+        # SC1(b). Half (b) is what separates a real move from a decoy file: the newest
+        # ring line must carry exactly two fields, i.e. the column is really gone.
+        s = self.m.slug("Manager Layer", "goal")
+        self.plant_arms("Manager Layer", [2700, 1800, 900, 0])
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", "goal", 900, beat="tail")
+        self.assertEqual(len(self.m.read_tail_epochs(s)), 1)
+        p, _ = self.m.resolve(s, "arms")
+        with open(p) as fh:
+            newest = fh.read().splitlines()[-1]
+        self.assertEqual(len(newest.split()), 2)
+
+    def test_a_legacy_column_marker_migrates_into_the_store_on_the_next_arm(self):
+        # This writer drops the third column. A marker left only there must be carried
+        # into the store by the same arm that strips it, or the migration is itself the
+        # erasure — the defect this task closes, one surface in.
+        s = self.m.slug("Manager Layer", "goal")
+        now = time.time()
+        with open(self.m.path(s, "arms"), "w") as fh:
+            fh.write("".join([
+                f"{now - 1800:.0f} 900\n",
+                f"{now - 900:.0f} 900 tail\n",
+                f"{now:.0f} 900\n",
+            ]))
+        with redirect_stdout(io.StringIO()):
+            self.m.arm("Manager Layer", "goal", 900)
+        self.assertEqual(self.m.read_tail_epochs(s), {f"{now - 900:.0f}"})
+        p, _ = self.m.resolve(s, "arms")
+        with open(p) as fh:
+            lines = fh.read().splitlines()
+        self.assertTrue(all(len(line.split()) == 2 for line in lines))
+
+    def test_observed_period_reads_tail_beats_from_the_store(self):
+        # SC2. The fixture carries the marker ONLY in `<ring>.tail`; its `.arms` lines
+        # have no third column. The post-change reader must still measure the
+        # ROUND-to-round cadence, while a pre-upgrade reader — no tail concept at all —
+        # collapses to 300 on the same ring. Agreement would mean the marker is unread.
+        s = self.m.slug("Manager Layer", "goal")
+        now = time.time()
+        heads = [now - (5 - r) * 900 for r in range(6)]
+        tails = [h + 120 for h in heads]
+        with open(self.m.path(s, "arms"), "w") as fh:
+            fh.write("".join(f"{e:.0f} 900\n" for e in sorted(heads + tails)))
+        self.plant_tail_store("Manager Layer", tails)
+        self.assertEqual(int(self.m.observed_period("goal--manager-layer")), 900)
+        mixed = [(e, 900) for e in sorted(heads + tails)]
+        spans = [(b[0] - a[0], a[1]) for a, b in zip(mixed, mixed[1:])]
+        gaps = sorted(g for g, _ in spans)
+        pre = min(self.m.percentile(gaps, 0.90),
+                  self.m.PERIOD_CAP * self.m.median(gaps))
+        self.assertEqual(int(pre), 300)
+
+    def test_a_marker_free_ring_is_not_misread_as_all_tails(self):
+        # SC3(a). With no store, the reader must compute exactly what it did before:
+        # treating every arm as a head. A filter that flipped the default would turn
+        # this ring into "no heads" and fall back to the declared interval.
+        s = self.m.slug("Manager Layer", "goal")
+        now = time.time()
+        with open(self.m.path(s, "arms"), "w") as fh:
+            fh.write("".join(f"{now - 900 * (5 - i):.0f} 900\n" for i in range(6)))
+        self.assertEqual(int(self.m.observed_period("goal--manager-layer")), 900)
+        self.assertFalse(os.path.exists(self.m.path(s, "tail")))
 
     def test_a_legacy_two_column_line_reads_as_a_head_beat(self):
         # The original single-column format carries no marker at all. It must keep
@@ -1412,3 +1516,135 @@ class StoodDownPast(unittest.TestCase):
                 rc = m.stood_down_past(60)
         self.assertEqual(2, rc)
         self.assertIn("state dir unreadable", err.getvalue())
+
+
+class GateDrivenLiveness(unittest.TestCase):
+    """A goal manager whose only wake source is the detached sweep gate.
+
+    Removing the model cadence leaves `.cadence` ageing between gate wakes. The gate's
+    own per-subject heartbeat is then the liveness signal, so a watched manager reads
+    OK instead of STALE — the reading that makes `topic-keepalive.py` restart it.
+    """
+
+    SUBJECT = "Gate Driven Subject"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name)
+        self.s = self.m.slug(self.SUBJECT, "goal")
+        self.gate_dir = os.path.join(self.m.GATE_LOOP_STATE_DIR, "private-personal")
+        os.makedirs(self.gate_dir, exist_ok=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+        os.environ.pop("MANAGER_GATE_LOOP_STATE_DIR", None)
+
+    def stale_arm(self, branch="goal", age=5000):
+        with redirect_stdout(io.StringIO()):
+            self.m.arm(self.SUBJECT, branch, 900)
+        p = self.m.path(self.m.slug(self.SUBJECT, branch), "cadence")
+        t = time.time() - age
+        os.utime(p, (t, t))
+
+    def heartbeat(self, name, age):
+        p = os.path.join(self.gate_dir, name)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("0 x rc=0\n")
+        t = time.time() - age
+        os.utime(p, (t, t))
+
+    def test_a_watched_goal_with_a_stale_cadence_reads_ok(self):
+        self.stale_arm()
+        now = time.time()
+        self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 5)
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        state, detail = self.m.classify(self.s, now)
+        self.assertEqual("OK", state)
+        self.assertIn("gate-driven", detail)
+
+    def test_a_stale_cadence_without_any_heartbeat_stays_stale(self):
+        self.stale_arm()
+        self.assertEqual("STALE", self.m.classify(self.s, time.time())[0])
+
+    def test_a_dead_gate_reads_ok_gate_down_not_stale(self):
+        """A dead gate must not turn into an uncapped restart storm across the tier."""
+        self.stale_arm()
+        self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 4000)
+        self.heartbeat("some-other-subject.heartbeat", 4000)
+        state, detail = self.m.classify(self.s, time.time())
+        self.assertEqual("OK", state)
+        self.assertIn("gate-down", detail)
+
+    def test_an_expired_sleep_with_a_fresh_gate_heartbeat_stays_stale(self):
+        """The gate cannot see a `defer_date` arrive, so the expired-sleep STALE that
+        `topic-keepalive.py` recovers off must survive the gate-driven fallback."""
+        self.stale_arm()
+        with redirect_stdout(io.StringIO()):
+            self.m.sleep(
+                self.SUBJECT,
+                "goal",
+                (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat(),
+            )
+        now = time.time()
+        self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 5)
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        self.assertEqual("STALE", self.m.classify(self.s, now)[0])
+
+    def test_a_dropped_subject_is_not_gate_driven(self):
+        self.stale_arm()
+        self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 8000)
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        self.assertEqual("STALE", self.m.classify(self.s, time.time())[0])
+
+    def test_the_topic_tier_is_not_gate_driven(self):
+        self.stale_arm(branch="topic")
+        now = time.time()
+        self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 5)
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        self.assertEqual(
+            "STALE", self.m.classify(self.m.slug(self.SUBJECT, "topic"), now)[0]
+        )
+
+    def test_check_does_not_report_a_gate_driven_goal(self):
+        """`--check` goes through `classify()`, so it must not flag a watched goal."""
+        self.stale_arm()
+        now = time.time()
+        self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 5)
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = self.m.check(now)
+        self.assertEqual((rc, out.getvalue()), (0, ""))
+
+    def test_a_same_named_heartbeat_in_another_vault_masks_the_subject(self):
+        """Known limitation, pinned: the heartbeat match is by bare filename across
+        vaults (the liveness namespace is deliberately flat)."""
+        self.stale_arm()
+        other = os.path.join(self.m.GATE_LOOP_STATE_DIR, "another-vault")
+        os.makedirs(other, exist_ok=True)
+        now = time.time()
+        p = os.path.join(other, f"{self.m.base_slug(self.SUBJECT)}.heartbeat")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("0 x rc=0\n")
+        os.utime(p, (now, now))
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        self.assertEqual("OK", self.m.classify(self.s, now)[0])
+
+    def test_an_unparseable_sleep_marker_with_a_fresh_gate_stays_stale(self):
+        """A corrupt `.sleeping` file still records a sleep; the gate cannot wake it, so
+        the fallback must not return OK."""
+        self.stale_arm()
+        with open(self.m.path(self.s, "sleeping"), "w", encoding="utf-8") as fh:
+            fh.write("someday\n")
+        now = time.time()
+        self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 5)
+        self.heartbeat("some-other-subject.heartbeat", 5)
+        self.assertEqual("STALE", self.m.classify(self.s, now)[0])
+
+    def test_an_absent_gate_tree_stays_stale(self):
+        """A fresh install has no gate tree; the safe direction is STALE, not OK."""
+        self.stale_arm()
+        os.rmdir(self.gate_dir)
+        os.rmdir(self.m.GATE_LOOP_STATE_DIR)
+        self.assertEqual("STALE", self.m.classify(self.s, time.time())[0])

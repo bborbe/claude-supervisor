@@ -86,11 +86,21 @@ step 2 of the goal round and of the topic round alike; nothing here is tier-spec
      looked at. A `clear` that came from a member nobody resolved is the silent direction this
      whole leg exists to remove.
    - **Every tracked member appears exactly once, and the row count is
-     `resolution.resolved_rows` plus `len(resolution.unresolved)`** — **not** the tracked-set
-     line count. A member may be a GOAL, and one goal admits many task rows, so two rows behind
-     a one-line tracked set is correct. A row the document dropped, or one member carrying two
-     rows, is the caller bug.
-   - **Every verdict is one of its family's three values**, and `unread` is **never** folded
+     `resolution.resolved_rows` plus `len(resolution.unresolved)` plus
+     `len(resolution.unrecorded)`** — **not** the tracked-set line count. A member may be a
+     GOAL, and one goal admits many task rows, so two rows behind a one-line tracked set is
+     correct. A row the document dropped, or one member carrying two rows, is the caller bug.
+   - **A live session no page records carries a row of its own.** These are
+     `resolution.unrecorded`: sessions in this vault the registry knows and no task page
+     stamps, so the derivation above could never reach them. Each is a real row keyed
+     `unrecorded:<sid8>`, with `unrecorded: true` and `resolved: false`, classified by the
+     same `in_flight()` / `liveness()` / `external_wait()` functions as every other row —
+     so a parked one reads `in_flight: parked` and counts under `parked=`. ⚠️ **Never
+     reconcile these away as a caller bug, and never treat a `waiting` session absent from
+     `rows` as outside the fleet:** measured 2026-11-11, session `1c05c414` sat `waiting`
+     while the round rendered `parked=0`, because no page carried it. An unrecorded park
+     dropped, or read as `quiet`, is a clean fleet reported over a worker waiting on a gate.
+   - **Every verdict is one of its family's values**, and `unread` is **never** folded
      into a negative (`clear`, `none`, `quiet`). A store that could not be reached is `unread`;
      reading it as *no gate* is the silent direction this whole leg exists to remove.
    - **The `⏰ Ends:` verdict comes from the newest `Stop` record.** The attention log is
@@ -157,23 +167,29 @@ form.
 
 ```text
 readings=written|REFUSED · rows=<n> · payload=<path>
-resolution=resolved|partial|unresolved|empty · tracked=<n> · unresolved=<n>
-live=<n> · absent=<n> · unknown=<n> · inflight=<n> · quiet=<n> · inflight-unread=<n>
+resolution=resolved|partial|unresolved|empty · tracked=<n> · unresolved=<n> · unrecorded=<n>
+live=<n> · absent=<n> · unknown=<n> · inflight=<n> · parked=<n> · quiet=<n> · inflight-unread=<n>
 gated=<n> · clear=<n> · unread=<n> · external=<n> · none=<n> · external-unread=<n> · stuck=<n>
 ```
 
 ⚠️ **`resolution=` leads the second line and `unresolved=` is the count of members that admitted
 no task** — the two fields a caller needs to tell a quiet fleet from a set that was never read.
-`rows=` is `resolution.resolved_rows` plus `len(resolution.unresolved)`, never the tracked-set
-line count (a goal member admits many rows).
+`rows=` is `resolution.resolved_rows` plus `len(resolution.unresolved)` plus
+`len(resolution.unrecorded)`, never the tracked-set line count (a goal member admits many rows).
 
-⚠️ **Every family carries all three of its values, including the zeros** — the caller's render
+⚠️ **`unrecorded=` is the count of live sessions in this vault that no page records** — sessions
+the registry knows and no task page stamps, which the tracked-set derivation cannot reach. Each
+carries a row of its own (see step 3), so they are already inside `rows=` and their verdicts
+inside every family count. Emit the count so a round that saw an unrecorded park says so in the
+hand-back rather than only inside the payload.
+
+⚠️ **Every family carries all of its values, including the zeros** — the caller's render
 tests the counts, and a missing key is a cell it cannot evaluate. ⚠️ **A family whose read
 failed carries its `unread` count, never a `0` in the `clear`/`none`/`quiet` slot.** ⚠️ **Each
 family's `unread` has its own key:** `unread=` is the **feed** family's, while the in-flight and
 external-wait families carry `inflight-unread=` and `external-unread=` — `in_flight()` and
-`external_wait()` both return `unread`, and one shared key would lose two of the three values
-each family can take, which `docs/handback-contract.md` § The shape — the readings leg's
+`external_wait()` both return `unread`, and one shared key would lose values in both
+families, which `docs/handback-contract.md` § The shape — the readings leg's
 required set — requires be emitted. ⚠️
 **`stuck=<n>` counts the rows whose stuck verdict fired** (a denial marker, a frozen transcript,
 a park past its threshold); name those rows on one line under the counts,
@@ -189,8 +205,9 @@ not the rows, are what your hand-back carries.
 - `round-readings.py` was run once, with the caller's own inputs, and its path quoted.
 - The receipt carries a `readings` record naming that path.
 - Every tracked member appears exactly once in the document, and every verdict is one of its
-  family's three values with `unread` never folded into a negative. `resolution.state` is
-  reported, and `unresolved`/`empty` is a `readings=REFUSED`, never a quiet fleet.
+  family's values with `unread` never folded into a negative. `resolution.state` is
+  reported, and `unresolved`/`empty` is a `readings=REFUSED`, never a quiet fleet. A live
+  session no page records is a row of its own under `resolution.unrecorded`, never an absence.
 - The hand-back is ≤ 1 KB, carries every key above including the zeros, and names the `stuck`
   rows rather than only counting them.
 - No ad-hoc probe, no feed read, no act.

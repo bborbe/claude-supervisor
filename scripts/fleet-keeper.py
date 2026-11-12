@@ -33,6 +33,21 @@ on it is load-bearing:
   * the resume is `restart-worker.py --absent`, which refuses unless the process is gone and
     signals nothing.
 
+⚠️ **A second exception, by operator decision (2026-11-10, task "A Stalled Fleet Loop Is
+Restarted Automatically Instead of Going Unnoticed for Hours"): `restart fresh`, gated on the
+operator's answer to the LAPSE card.** Measured 2026-11-10: the Fleet Manager stayed alive and
+busy for 4.4 h with its context at the limit and wrote no digest; the lapse card was posted and
+answered `acknowledge`, and nothing could recover it. So the lapse card for a LIVE manager now
+offers `restart fresh`:
+
+  * nothing runs without the answer — `restart_fresh_session` has a single call site, in
+    `act_on_fresh_answer`, reached only from the lapse branch with the card's own item id;
+  * once per card, marked in `lapse.json` (`fresh_consumed`) BEFORE it runs;
+  * it calls `restart-worker.py <sid> --reason lapse --fresh-prompt /supervisor:fleet-loop`,
+    which keeps every restart-worker refusal (held, busy, headless, role-undetermined) — a
+    mid-turn manager is refused, never killed mid-turn — and starts a NEW session rather than
+    `--resume`, because a resumed session carries the exhausted context back.
+
 The pin is narrowed, not deleted: outside `resume_absent_session` the source still matches no
 kill, resume or spawn shape, and that function may hold only the `--absent` resume.
 
@@ -350,6 +365,9 @@ def _save_episodes(rec):
 #: "add a resume option to the keeper's card, gated on your answer". It narrows the
 #: 2026-11-01 report-only ruling (card efc771fb) by exactly this one gated path.
 RESUME_OPTION = "resume it"
+#: The lapse card's answer-gated recovery (operator ruling 2026-11-10; see module docstring).
+FRESH_OPTION = "restart fresh"
+FRESH_PROMPT = "/supervisor:fleet-loop"
 
 #: How long the dead session's transcript must have been silent before a resume may run.
 #: The third limb of the death corroboration below.
@@ -554,6 +572,74 @@ def act_on_answer(sid, condition, item, now):
     return done
 
 
+def restart_fresh_session(sid):
+    """Kill a LAPSED fleet manager and start a fresh one. The only kill this file holds.
+
+    Reached from exactly one place — `act_on_fresh_answer`, behind the operator's
+    `restart fresh` answer to that lapse's own card. Returns `(ok, detail)`.
+    """
+    script = os.path.join(HERE, "restart-worker.py")
+    try:
+        out = subprocess.run([sys.executable, script, sid, "--reason", "lapse",
+                              "--fresh-prompt", FRESH_PROMPT],
+                             capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        return False, ("outcome UNKNOWN — restart-worker did not finish within 120 s, so the "
+                       "manager may be stopped and a pane spawned; check before answering again")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"could not run restart-worker, nothing was signalled: {exc}"
+    lines = [ln for ln in (out.stdout or "").splitlines() if ln.strip()]
+    stderr = (out.stderr or "").strip()
+    if out.returncode == 0:
+        return True, lines[-1].strip() if lines else "restarted fresh"
+    # ⚠️ The ERROR line, never `lines[0]`. restart-worker prints a header first and its
+    # `❌ error:` / `   killing-pid` lines after it, so `lines[0]` is always the header and
+    # reporting it hides the cause completely. Measured 2026-11-11: the keeper logged
+    # "exit 1: 🔄 restart-worker · session ac24db61 · pid 21437 · 'Fleet Manager'" for a
+    # failure whose real cause was a bare `wezterm` missing from launchd's PATH — the header
+    # was reported as the finding and the actual error sat one line lower.
+    errors = [ln for ln in lines if ln.lstrip().startswith("❌")]
+    reason = (errors[-1] if errors
+              else lines[-1] if lines
+              else (stderr.splitlines()[-1] if stderr else "no output"))
+    return False, f"exit {out.returncode}: {reason.strip()}"
+
+
+def act_on_fresh_answer(sid, lapse, now):
+    """Run `restart fresh` once for this lapse card, only on that answer. Returns None when
+    nothing ran, else the executor's ok flag."""
+    item = lapse.get("reported")
+    if not item or not sid or lapse.get("fresh_consumed") == item:
+        return None
+    option, _answered = answer_of(item)
+    if option != FRESH_OPTION:
+        return None
+    lapse["fresh_consumed"] = item
+    if not save_lapse(lapse):
+        log(f"cannot persist the fresh-restart marker for {sid[:8]}; refusing to restart", now)
+        return None
+    done, detail = restart_fresh_session(sid)
+    first = lapse.setdefault("fresh_first_try", now)
+    if not done and "busy-target" in detail and now - first < RESUME_DEFER_MAX:
+        # A mid-turn manager is refused, never killed. Re-arm the SAME answer for the next tick
+        # rather than spend it, bounded like the resume's wait so it can never fire hours later.
+        lapse["fresh_consumed"] = None
+        save_lapse(lapse)
+        log(f"fresh restart of {sid[:8]} waiting — manager mid-turn ({int(now - first)}s of "
+            f"{RESUME_DEFER_MAX}s)", now)
+        return None
+    log(f"fresh restart of {sid[:8]} on answer {item}: {'ok' if done else 'FAILED'} — {detail}", now)
+    notify(f"fleet-keeper-fresh-{item}",
+           (f"Restarted the fleet manager fresh on your answer (old session {sid[:8]}): {detail}. "
+            f"The new session's first turn arms /supervisor:fleet-loop.")
+           if done else
+           (f"The fresh restart you asked for did NOT complete for session {sid[:8]}: {detail}. "
+            f"If it was refused as busy, the manager was mid-turn and was not killed; the answer "
+            f"is used up — answer the next lapse card again."),
+           ["acknowledge"])
+    return done
+
+
 def raise_once(condition, payload, now, detail="", options=("acknowledge",)):
     """Post ONE card per episode of `condition`. Returns the item id (existing or new), or None.
 
@@ -707,12 +793,15 @@ def main(argv):
 
     lapse_day = int(held // 86400)
     if lapse.get("reported") and lapse.get("reported_day", 0) == lapse_day:
+        if live == "LIVE":
+            act_on_fresh_answer(sid, lapse, now)
         report("reported",
                f"lapse since {time.strftime('%H:%M:%SZ', time.gmtime(lapse['since']))} already "
                f"reported{card(lapse['reported'])}; nothing more until it recovers", now)
         return 1
 
     who = f"session {sid[:8]}" if sid else "no registered fleet manager"
+    fresh = bool(sid) and live == "LIVE"
     # An unreadable stop state is said ON THE CARD, not only in the log: the operator reading the
     # card is the one who must know this might be a deliberate stop the keeper could not see.
     caveat = (" ⚠️ The keeper could not read whether the fleet was stood down on purpose, so "
@@ -720,10 +809,13 @@ def main(argv):
     item = notify(
         f"fleet-keeper-lapse-{int(lapse['since'])}-d{lapse_day}",
         f"The fleet round has been stale for {int(held // 60)} min ({who}). That is past the "
-        f"longest healthy round measured, so this is a lapse, not a slow round. The keeper does "
-        f"not restart the fleet manager: check its tab and re-arm its loop "
-        f"(/supervisor:fleet-loop), or restart it deliberately.{caveat}",
-        ["acknowledge"], context=detail,
+        f"longest healthy round measured, so this is a lapse, not a slow round. "
+        + (f"Answer '{FRESH_OPTION}' to have the keeper stop it and start a NEW fleet manager "
+           f"(fresh context, first turn /supervisor:fleet-loop) once; it never does so on its own. "
+           if fresh else
+           "Check its tab and re-arm its loop (/supervisor:fleet-loop), or restart it deliberately. ")
+        + caveat.lstrip(),
+        [FRESH_OPTION, "acknowledge"] if fresh else ["acknowledge"], context=detail,
     )
     note = " (stop state unreadable)" if stood is None else ""
     if item:

@@ -212,3 +212,27 @@ def read_ledger(endpoint=None, timeout=_HTTP_TIMEOUT, on_failure=None):
         if session_id:
             known[session_id] = row
     return known
+
+
+def _main(argv):
+    """CLI: print the ledger as one JSON object (session_id -> wire row), or fail closed.
+
+    Exists because a module with only `read_ledger()` cannot be used from an agent's
+    Bash step: `python3 spawn-ledger.py` printed nothing and exited 0, so a caller read
+    an empty stdout as "no rows" — the same silent-no-op class the guard around this
+    file exists to remove. `--json` is the only output shape: `None` (unreadable) is
+    exit 2, never `{}`, for the reason the module docstring gives.
+    """
+    if len(argv) > 1 or (argv and argv[0] != "--json"):
+        print("usage: spawn-ledger.py --json", file=sys.stderr)
+        return 2
+    rows = read_ledger()
+    if rows is None:
+        print("spawn-ledger: unreadable", file=sys.stderr)
+        return 2
+    print(json.dumps(rows, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main(sys.argv[1:]))

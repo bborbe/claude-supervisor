@@ -54,6 +54,12 @@ class HealDecideTest(unittest.TestCase):
         self.assertEqual(heal.decide("permission-channel", 0), "resume-headless")
         self.assertEqual(heal.decide("permission-channel", 1), "reopen-interactive")
 
+    def test_an_idle_worker_with_no_wait_takes_the_same_ladder(self):
+        # The fleet round's cause: no death to observe, so no gate is ever raised —
+        # one fresh process on the same id, then the tab rung.
+        self.assertEqual(heal.decide("idle-no-wait", 0), "resume-headless")
+        self.assertEqual(heal.decide("idle-no-wait", 1), "reopen-interactive")
+
     def test_an_unknown_kind_is_reported_not_guessed(self):
         self.assertEqual(heal.decide("something-new", 0), "report-only")
 

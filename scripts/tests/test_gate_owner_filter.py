@@ -49,6 +49,19 @@ from endpoint_fixture import FixtureEndpoint, dead_url, ledger_row  # noqa: E402
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "gate-owner-filter.py")
 
+# ⚠️ Isolate the two state roots this suite can WRITE and READ, before the module is
+# imported so the constants pick them up and before any subprocess inherits them.
+#
+# Without this, every subprocess test that passes `--self` appends to the operator's live
+# `~/.claude/state/manager-attention-watch/<fixture id>/feed-emissions.jsonl` — measured
+# 2026-11-11, one suite run left 67 KB there — and every `evaluate_panes` call reads the
+# real `~/.claude/state/worker-manager/`, so a real fleet registration colliding with a
+# fixture id would flip a verdict. That is the same machine-dependence `OwnerStub` below
+# exists to remove, reached through a second door.
+_TEST_STATE = tempfile.mkdtemp(prefix="gate-owner-filter-tests-")
+os.environ["GATE_EMISSIONS_DIR"] = os.path.join(_TEST_STATE, "emissions")
+os.environ["SUPERVISOR_WORKER_MANAGER_DIR"] = os.path.join(_TEST_STATE, "worker-manager")
+
 _spec = importlib.util.spec_from_file_location("gate_owner_filter", _SCRIPT)
 gf = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gf)
@@ -277,6 +290,286 @@ class Verdict(unittest.TestCase):
             self.call("w-null", None, ledger=ledger, live={"w-null"}),
             (gf.EMIT, "unowned"),
         )
+
+
+class UnownedIsRoutedToTheFleetManager(unittest.TestCase):
+    """The unowned class goes to ONE destination, and the fail-open limb is the safety property.
+
+    Measured 2026-11-11: >10 foreign wakes in ~2 h on one goal manager, every one from a
+    producer with no spawner and no session id. `unowned` used to emit to every manager, so
+    the class had no destination and every manager inherited all of it. These four cases pin
+    all four answers, because three of them are wrong in opposite directions: emitting to
+    everyone is the flood, dropping everywhere is a black hole, and routing to a dead
+    session is a black hole with extra steps.
+    """
+
+    LEDGER = {"worker-1": {"session_id": "worker-1", "parent_session": "manager-x"}}
+    LIVE = {"worker-1", "fleet-live", "manager-x", "manager-y"}
+    FLEET = "fleet-live"
+    ME = "manager-x"
+
+    def call(self, session_id=None, spawner=None, me=_UNSET, fleet=_UNSET, claims=None,
+             ledger=_UNSET):
+        return gf.verdict(
+            session_id,
+            spawner,
+            self.LEDGER if ledger is _UNSET else ledger,
+            self.LIVE,
+            self.ME if me is _UNSET else me,
+            claims,
+            None,
+            self.FLEET if fleet is _UNSET else fleet,
+        )
+
+    def test_a_dead_spawners_gate_is_routed_too(self):
+        """The OTHER emit that means "nobody can act on this".
+
+        `dead-manager` fires when the pane's spawner IS a manager that is no longer live.
+        Measured 2026-11-11 in SC1's after-window: after the unowned class was routed, this
+        branch was the ONLY foreign wake left — one orphaned worker pane from 2026-11-07.
+        Routing one class and not the other fixes half the defect.
+        """
+        ledger = {"w-dead": {"session_id": "w-dead", "parent_session": "mgr-dead"}}
+        self.assertEqual(
+            self.call("w-dead", "mgr-dead", ledger=ledger),
+            (gf.DROP, "dead-manager-fleet"),
+        )
+        self.assertEqual(
+            self.call("w-dead", "mgr-dead", ledger=ledger, me=self.FLEET),
+            (gf.EMIT, "dead-manager-fleet"),
+        )
+        # Fail-open is per-class: the reason keeps its own spelling, so a routed row is
+        # never confused with an un-routed one in the ledger.
+        self.assertEqual(
+            self.call("w-dead", "mgr-dead", ledger=ledger, fleet=None),
+            (gf.EMIT, "dead-manager"),
+        )
+
+    def test_a_dead_claimants_pane_is_routed_too(self):
+        """The THIRD sibling: the manager that CLAIMED this pane is gone.
+
+        `claim-dead` fires when a live manager recorded a claim and then died, so nobody can
+        act on the pane — the same defect as `unowned` and `dead-manager`, reached through
+        the claim block. It did NOT appear in either SC1 window measured on 2026-11-11, and
+        that is the argument for routing it now rather than after it fires on some later
+        hour and fails the same criterion the other two already failed.
+        """
+        self.assertEqual(
+            self.call("worker-1", None, claims={"worker-1": "mgr-gone"}),
+            (gf.DROP, "claim-dead-fleet"),
+        )
+        self.assertEqual(
+            self.call("worker-1", None, claims={"worker-1": "mgr-gone"}, me=self.FLEET),
+            (gf.EMIT, "claim-dead-fleet"),
+        )
+        self.assertEqual(
+            self.call("worker-1", None, claims={"worker-1": "mgr-gone"}, fleet=None),
+            (gf.EMIT, "claim-dead"),
+        )
+
+    def test_a_live_claimant_still_owns_the_pane(self):
+        """A live peer's claim is a RESOLVED owner and must not be routed away.
+
+        The routed limb is reached only after this branch, so a live claimant keeps
+        `claimed` and a claim by this watcher keeps `own-claim` — the ordering the previous
+        review found broken.
+        """
+        self.assertEqual(
+            self.call("worker-1", None, claims={"worker-1": "manager-y"}),
+            (gf.DROP, "claimed"),
+        )
+
+    def test_a_goal_manager_drops_an_unowned_gate(self):
+        """The fix: the class leaves every goal manager's feed."""
+        self.assertEqual(self.call("worker-1", None), (gf.DROP, gf.UNOWNED_FLEET))
+
+    def test_a_gate_with_no_session_id_is_routed_too(self):
+        """The OTHER unowned site, and the highest-volume producer class.
+
+        `sweep-gate` / `fleet-keeper` / `drive-escalate` post with no session id at all,
+        which is the early return at the top of `verdict()` rather than the spawner path.
+        Without this case a change that routed only the spawnerless site passes every other
+        test in this class.
+        """
+        self.assertEqual(self.call(None, None), (gf.DROP, gf.UNOWNED_FLEET))
+        self.assertEqual(
+            self.call(None, None, me=self.FLEET), (gf.EMIT, gf.UNOWNED_FLEET)
+        )
+
+    def test_an_adopted_pane_keeps_its_gate(self):
+        """A goal manager that ADOPTED a spawnerless pane must still see it.
+
+        The adoption contract (`commands/steps/adopt.md`): `ownership-claim.py` records the
+        adoption precisely so the adopting manager keeps seeing a spawnerless pane. An
+        earlier cut of this fix returned the routed drop before the claim block, which broke
+        that silently — the routed drop outranked the claim.
+        """
+        self.assertEqual(
+            self.call("worker-1", None, claims={"worker-1": self.ME}),
+            (gf.EMIT, "own-claim"),
+        )
+
+    def test_a_peer_claim_still_owns_the_pane(self):
+        """A claim a live peer holds drops the pane as `claimed`, not `unowned-fleet`.
+
+        The routed limb sits below the claim block for this reason: the file's asymmetry is
+        that a claim may ADD a drop, so a new drop must not be inserted ahead of one.
+        """
+        self.assertEqual(
+            self.call("worker-1", None, claims={"worker-1": "manager-y"}),
+            (gf.DROP, "claimed"),
+        )
+
+    def test_a_peer_managers_own_gate_is_not_relabelled(self):
+        """Hop 3b still wins: a live peer manager's own gate drops as `peer-manager-own`.
+
+        Same verdict, different bucket — and the bucket is what `counts_line` and
+        `--explain` report, so relabelling it would misattribute the drop.
+        """
+        self.assertEqual(
+            self.call("manager-y", None), (gf.DROP, "peer-manager-own")
+        )
+
+    def test_the_fleet_manager_emits_the_same_gate(self):
+        """The destination: exactly one manager receives it, so it is routed, not silenced."""
+        self.assertEqual(
+            self.call("worker-1", None, me=self.FLEET),
+            (gf.EMIT, gf.UNOWNED_FLEET),
+        )
+
+    def test_no_live_fleet_manager_falls_open_to_every_manager(self):
+        """An unresolvable destination is not a licence to silence a gate."""
+        self.assertEqual(self.call("worker-1", None, fleet=None), (gf.EMIT, gf.UNOWNED))
+
+    def test_a_diagnostic_run_with_no_self_still_emits(self):
+        """`--pane` with no `--self` has no reader to route FOR, and a silent probe reads
+        as "this pane is fine"."""
+        self.assertEqual(self.call("worker-1", None, me=None), (gf.EMIT, gf.UNOWNED))
+
+    def test_the_routed_drop_never_reaches_a_resolved_drop(self):
+        """A peer-manager drop is a resolved fact and must not be re-routed.
+
+        The new branch may only re-route an `unowned` emit; a claim may add a drop and never
+        remove one, and the same asymmetry holds here in the other direction.
+        """
+        self.assertEqual(
+            self.call("worker-1", "manager-y", fleet=self.FLEET),
+            (gf.DROP, "peer-manager"),
+        )
+
+    def test_fleet_resolution_skips_a_dead_registration(self):
+        """A registration whose session is not live resolves nothing.
+
+        Routing the class to a dead session would take the gate out of every goal manager's
+        feed and deliver it nowhere — strictly worse than the flood.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            for sid, at in (("fleet-dead", "2026-11-11T10:00:00+00:00"),
+                            ("fleet-live", "2026-11-11T09:00:00+00:00")):
+                with open(os.path.join(directory, f"{sid}.json"), "w", encoding="utf-8") as h:
+                    json.dump({"branch": "fleet", "resolved_at": at}, h)
+            self.assertEqual(gf.fleet_manager(self.LIVE, directory), "fleet-live")
+            self.assertIsNone(gf.fleet_manager({"nobody"}, directory))
+            self.assertIsNone(gf.fleet_manager(None, directory))
+
+    def test_fleet_resolution_prefers_the_newest_registration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for sid, at in (("fleet-old", "2026-11-10T10:00:00+00:00"),
+                            ("fleet-live", "2026-11-11T09:00:00+00:00")):
+                with open(os.path.join(directory, f"{sid}.json"), "w", encoding="utf-8") as h:
+                    json.dump({"branch": "fleet", "resolved_at": at}, h)
+            self.assertEqual(
+                gf.fleet_manager({"fleet-old", "fleet-live"}, directory), "fleet-live"
+            )
+
+
+class EmissionsLedger(unittest.TestCase):
+    """One record per decision, with a `ts` so a window can be cut out of the file.
+
+    ⚠️ The `ts` is the whole point: the ledger lives as long as the manager session, so
+    without a timestamp every count is a whole-file count and a `0` could come from before
+    the fix it is meant to certify.
+    """
+
+    def rows(self):
+        return [
+            {"pane": "1", "verdict": gf.EMIT, "reason": "own-worker",
+             "session_id": "w-own", "spawner": "me"},
+            {"pane": "2", "verdict": gf.DROP, "reason": gf.UNOWNED_FLEET,
+             "session_id": "w-foreign", "spawner": None},
+        ]
+
+    def test_one_line_per_decision_carrying_ts_and_the_resolved_owner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = gf.emissions_path("me", directory)
+            self.assertIsNone(gf.log_emissions(self.rows(), [], _Scope(), "me", root=directory))
+            with open(path, encoding="utf-8") as handle:
+                records = [json.loads(line) for line in handle if line.strip()]
+            self.assertEqual(len(records), 2)
+            for record in records:
+                self.assertTrue(record["ts"])
+            emitted = [r for r in records if r["decision"] == gf.EMIT]
+            self.assertEqual(len(emitted), 1)
+            self.assertEqual(emitted[0]["task"], "A Task")
+            self.assertEqual(emitted[0]["goal"], "A Goal")
+            dropped = [r for r in records if r["decision"] == gf.DROP]
+            self.assertEqual(dropped[0]["reason"], gf.UNOWNED_FLEET)
+
+    def test_an_unattributed_session_records_no_task_and_no_goal(self):
+        """A gate whose session resolves to no page is recorded as unattributed, never
+        silently attributed to whatever page happened to be first."""
+        with tempfile.TemporaryDirectory() as directory:
+            rows = [{"pane": "9", "verdict": gf.EMIT, "reason": gf.UNOWNED,
+                     "session_id": "nobody", "spawner": None}]
+            gf.log_emissions(rows, [], _Scope(), "me", root=directory)
+            with open(gf.emissions_path("me", directory), encoding="utf-8") as handle:
+                record = json.loads(handle.readline())
+            self.assertIsNone(record["task"])
+            self.assertIsNone(record["goal"])
+
+    def test_no_self_id_writes_nothing(self):
+        """No manager, no ledger — a diagnostic run must not invent one."""
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertIsNone(gf.emissions_path(None, directory))
+            self.assertIsNone(gf.log_emissions(self.rows(), [], _Scope(), None, root=directory))
+            self.assertEqual(os.listdir(directory), [])
+
+    def test_the_ledger_is_bounded(self):
+        """Append-only for the life of a session, so it needs a bound.
+
+        Measured 2026-11-11 on a live manager: ~25 k records/day with no rotation at all.
+        The trim keeps the NEWEST lines, so a window cut after a rotation still reads the
+        recent past and loses only history older than the bound.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            path = gf.emissions_path("me", directory)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("".join('{"n": %d}\n' % i for i in range(50)))
+            self.assertTrue(gf.trim_emissions(path, keep=10))
+            with open(path, encoding="utf-8") as handle:
+                lines = handle.readlines()
+            self.assertEqual(len(lines), 10)
+            self.assertIn('"n": 49', lines[-1])
+            # A file already inside the bound is left untouched rather than rewritten.
+            self.assertFalse(gf.trim_emissions(path, keep=10))
+
+
+class _Entry:
+    def __init__(self, title, goals):
+        self.title = title
+        self.kind = "task"
+        self.goals = goals
+
+
+class _Scope:
+    """The two sessions the ledger tests use: one attributed, one not."""
+
+    def __init__(self):
+        self.sessions = {
+            "w-own": [_Entry("A Task", ["A Goal"])],
+            "w-foreign": [_Entry("B Task", ["B Goal"])],
+        }
 
 
 class IsManager(unittest.TestCase):
@@ -932,6 +1225,28 @@ class SummaryLine(unittest.TestCase):
         with open(os.path.join(self.registry, "p.json"), "w", encoding="utf-8") as handle:
             json.dump({"sessionId": "own-mgr"}, handle)
         self.endpoint.add_ledger_row(ledger_row("w1", spawner_session_id="own-mgr"))
+
+    def test_the_fleet_routed_bucket_covers_every_routed_class(self):
+        """ONE bucket for all three routed classes, and an EMIT is not a drop.
+
+        The bucket answers "how much left this feed for the Fleet Manager", not "which hop
+        found it" — the specific reason stays on the row for `--explain` and the ledger.
+        Pinning all three classes in one run is what stops a class added later from landing
+        in no bucket at all, which would read as a clean filter.
+        """
+        rows = [
+            {"verdict": gf.DROP, "reason": "unowned-fleet"},
+            {"verdict": gf.DROP, "reason": "dead-manager-fleet"},
+            {"verdict": gf.DROP, "reason": "claim-dead-fleet"},
+            {"verdict": gf.DROP, "reason": "peer-manager"},
+            # The Fleet Manager RECEIVING a routed gate is an emit, not a drop — counting it
+            # as routed would report the gate as leaving the feed it just arrived in.
+            {"verdict": gf.EMIT, "reason": "unowned-fleet"},
+        ]
+        line = gf.counts_line(rows)
+        self.assertIn("dropped(fleet-routed): 3", line, line)
+        self.assertIn("dropped(peer-manager): 1", line, line)
+        self.assertIn("emit: 1", line, line)
 
     def test_each_drop_bucket_is_counted_under_its_own_reason(self):
         result = subprocess.run(

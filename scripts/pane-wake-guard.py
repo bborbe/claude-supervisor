@@ -21,6 +21,7 @@ Verdicts (one line on stdout):
   skip:composer-not-empty  the input box holds typed (non-dim) text — possibly the operator's own
   skip:no-composer         no `❯` prompt on screen, so idleness is unproven
   skip:machine-wait        the last turn declared a machine wait (`🟡 WAITING` / `⏰ Ends:`)
+  skip:sleeping            the subject is date-gated asleep (`manager-liveness.py --state`)
   error:<reason>           the pane could not be read
 
 Exit status: 0 for `wake` / `wake:suggestion`, 1 for any `skip:*`, 2 for `error:*`.
@@ -52,6 +53,7 @@ MODAL_SELECT = "Enter to select"
 MODAL_CANCEL = "Esc to cancel"
 OPTION_ROW = re.compile("^" + PROMPT_GLYPH + r"\s*1\.")
 MACHINE_WAIT = ("\U0001f7e1 WAITING", "⏰ Ends:")
+SLEEPING = "SLEEPING"
 OPERATOR_ASK = "\U0001f464 You:"  # 👤 You:
 
 # The escape stripper and the faint parser are REUSED from the reload lever, never
@@ -84,8 +86,25 @@ def _lead_stripped(line):
     return line.lstrip(LEAD)
 
 
-def verdict(text):
-    """Return the verdict string for one captured screen. Pure — no I/O."""
+def verdict(text, allow_machine_wait=False, subject_state=None):
+    """Return the verdict string for one captured screen. Pure — no I/O.
+
+    `allow_machine_wait` carves out the one caller a declared machine wait is
+    waiting for: a sweep-gate wake. A goal manager's resting state IS a machine wait
+    (the loop cadence is the machine), so refusing it would make the gate unable to
+    wake the sessions it exists to wake. An operator ask still blocks — that check
+    runs after this one, so a pane that is both stays refused.
+
+    `subject_state` is `manager-liveness.py --state`'s first field, read by the
+    caller and passed in (this function stays pure). A `SLEEPING` subject is idle by
+    definition — the sleep exists to produce exactly that state — so it is refused
+    before the screen is even considered. A sleeping pane shows an empty composer and
+    no `👤 You:` ask, which is why the screen checks cannot tell it from a lapse.
+    `None` means the state read failed or resolved nothing; that is NOT a state, so
+    the screen verdict decides, exactly as before this parameter existed.
+    """
+    if subject_state == SLEEPING:
+        return "skip:sleeping"
     if text is None:
         return "error:unreadable"
     if not text.strip():
@@ -120,7 +139,7 @@ def verdict(text):
     else:
         suggestion = False
 
-    if any(m in ln for ln in lines for m in MACHINE_WAIT):
+    if any(m in ln for ln in lines for m in MACHINE_WAIT) and not allow_machine_wait:
         return "skip:machine-wait"
 
     # The last closer on screen asks the operator for something: the pane is waiting on a
@@ -154,6 +173,12 @@ def main(argv=None):
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--pane-id")
     src.add_argument("--text-file")
+    ap.add_argument("--allow-machine-wait", action="store_true",
+                    help="a sweep-gate wake may pass a declared machine wait "
+                         "(an operator ask still blocks)")
+    ap.add_argument("--subject-state", default=None,
+                    help="`manager-liveness.py --state`'s first field for the subject; "
+                         "`SLEEPING` refuses the wake")
     args = ap.parse_args(argv)
 
     if args.pane_id is not None:
@@ -165,7 +190,8 @@ def main(argv=None):
         except OSError:
             text = None
 
-    v = verdict(text)
+    v = verdict(text, allow_machine_wait=args.allow_machine_wait,
+                subject_state=args.subject_state)
     print(v)
     if v.startswith("wake"):
         return 0

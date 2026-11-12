@@ -75,10 +75,10 @@ SAMPLES = {
 ⏰ Next: next tool round""",
     ],
     "external": [
-        """State: external 🟡 · /github-pr-watch armed on PR 412
+        """State: external 🟡 · /github-pr-watch armed on bborbe/claude-supervisor#412
 🟡 WAITING · 1 running (github-pr-watch) · nothing needed
 👤 You: nothing
-⏰ Ends: the bot review lands or the watch times out (github-pr-watch, PR 412)""",
+⏰ Ends: the bot review lands or the watch times out (github-pr-watch, bborbe/claude-supervisor#412)""",
         """State: external 🟡 · ScheduleWakeup armed for the deploy check
 🟡 WAITING · nothing running (clock-bound) · nothing needed
 👤 You: nothing

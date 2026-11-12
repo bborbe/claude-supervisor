@@ -202,6 +202,19 @@ EXIT_STALE = 10
 # `--state` for a subject that resolves no record under any branch and no page: a refusal,
 # distinct from argparse's 2 so a caller can tell "unresolvable name" from "bad flags".
 EXIT_UNRESOLVED = 3
+# The detached sweep gate is the goal tier's sole wake source once the model cadence is
+# removed, so a goal manager legitimately sits with an ageing `.cadence` between gate
+# wakes. Its liveness is then the gate's own per-subject heartbeat — written model-free
+# on every tick to `~/.claude/state/sweep-gate-loop/<vault>/<base>.heartbeat` — not the
+# model round that used to refresh `.cadence`. `--state` reads it so a gate-driven
+# manager is `OK` rather than `STALE`; a STALE reading is what makes
+# `topic-keepalive.py` restart a healthy manager. Scope is the `goal--` branch only:
+# the topic and fleet tiers still arm their own cadence.
+GATE_LOOP_STATE_DIR = os.path.expanduser(
+    os.environ.get("MANAGER_GATE_LOOP_STATE_DIR", "~/.claude/state/sweep-gate-loop")
+)
+GATE_ALIVE = 1800  # seconds: the loop is alive if ANY subject heartbeat is this fresh
+GATE_SUBJECT_FRESH = 7200  # seconds: a subject's own heartbeat this old is not being ticked
 
 
 def base_slug(subject: str) -> str:
@@ -270,9 +283,12 @@ def parse_arm_lines(text: str) -> list:
 
     Three formats are on disk and all keep working: the original single column, the
     `<epoch> <interval>` written since per-arm recording, and `<epoch> <interval> tail`
-    written by the round's closing beat. A line carrying no interval is LEGACY and
-    reads as None rather than a guess — a guessed value would either floor a subject
-    that never lengthened its interval or hide a real lapse.
+    written by the round's closing beat before the marker moved to `<slug>.tail`. That
+    third column is now READ-ONLY legacy — `arm()` no longer writes it, because a
+    pre-upgrade session rebuilds the ring from two-tuples and erases it. A line
+    carrying no interval is LEGACY and reads as None rather than a guess — a guessed
+    value would either floor a subject that never lengthened its interval or hide a
+    real lapse.
 
     `is_tail` is what lets `observed_period` measure ROUND-to-round. A tail beat is the
     same round's closing write, so the gap ending on one is intra-round and must stay
@@ -298,14 +314,56 @@ def parse_arm_lines(text: str) -> list:
     return out
 
 
+def tail_store_path(s: str) -> str:
+    """`<slug>.tail` — the tail-marker store, the `<slug>.arms` ring's sibling."""
+    return path(s, "tail")
+
+
+def read_tail_epochs(s: str) -> set:
+    """Epoch keys marked as tail beats, one per line, formatted like the ring column."""
+    try:
+        with open(tail_store_path(s), encoding="utf-8") as fh:
+            return {line.strip() for line in fh if line.strip()}
+    except OSError:
+        return set()
+
+
+def write_tail_epochs(s: str, epochs) -> None:
+    """Rewrite the store; an empty set removes the file rather than leaving it blank."""
+    p = tail_store_path(s)
+    if not epochs:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+        return
+    write_atomic(p, "".join(f"{e}\n" for e in sorted(epochs)))
+
+
 def read_arm_pairs(s: str) -> list:
-    """(epoch, interval-or-None) pairs from the subject's `<slug>.arms` ring."""
+    """(epoch, interval-or-None, is_tail) from the ring, marker from its own store.
+
+    The tail marker lives in `<slug>.tail`, NOT in a third column of the ring: a
+    session still running a pre-upgrade copy of this script rebuilds the ring from
+    two-tuples and writes `{epoch} {interval}`, which erases a column marker on every
+    arm it takes. A separate file is the one home that writer never touches.
+
+    A third column is still honoured when present. Rings written before the move carry
+    `tail` there, and dropping it would silently turn every one of those tail beats
+    into a head — collapsing the median and manufacturing the false STALE the marker
+    exists to prevent.
+    """
     p, _ = resolve(s, "arms")
     try:
         with open(p, encoding="utf-8") as fh:
-            return parse_arm_lines(fh.read())
+            text = fh.read()
     except OSError:
         return []
+    stored = read_tail_epochs(s)
+    return [
+        (epoch, interval, column_tail or f"{epoch:.0f}" in stored)
+        for epoch, interval, column_tail in parse_arm_lines(text)
+    ]
 
 
 def read_arms(s: str) -> list:
@@ -888,15 +946,30 @@ def arm(subject: str, branch: str, interval: int, resume: bool = False,
     reset_path, _ = resolve(s, "reset")
     has_reset = os.path.exists(reset_path)
     prior = [] if has_reset else read_arm_pairs(s)
-    arms = (prior + [(time.time(), interval, beat)])[-ARMS_KEEP:]
-    # A tail marker survives the rebuild — dropping it would silently turn every tail
-    # beat into a head on the next arm, which is the period corruption this marker
-    # exists to prevent. A legacy line (no interval) keeps its single-column shape.
+    now = time.time()
+    # `beat` arrives as a string ("head" / "tail"); store a bool so every entry in the
+    # ring carries the same shape and `if b` cannot read "head" as marked.
+    arms = (prior + [(now, interval, beat == "tail")])[-ARMS_KEEP:]
+    # The ring keeps TWO columns: the tail marker moved to `<slug>.tail`, because a
+    # session still running a pre-upgrade copy rebuilds this ring from two-tuples and
+    # erases a third-column marker on every arm it takes. A legacy line (no interval)
+    # keeps its single-column shape.
+    #
+    # The store is rebuilt from `arms`' own beat flags, so it stays bounded by
+    # ARMS_KEEP — and those epochs SURVIVE the two-tuple rebuild, which is what makes
+    # the marker outlive it. `read_arm_pairs` already ORs a stored marker into the
+    # flag, so this is the union of store-marked and legacy column-marked arms,
+    # pruned to the ring. Seeding from the store alone would be wrong: this writer
+    # drops the legacy third column, so a pre-move marker not carried over here would
+    # be erased by the very arm meant to preserve it.
+    tail_keys = {f"{epoch:.0f}" for epoch, _, b in arms if b}
+    if beat == "tail":
+        tail_keys.add(f"{now:.0f}")
     write_atomic(path(s, "arms"), "".join(
-        f"{epoch:.0f}\n" if iv is None else
-        (f"{epoch:.0f} {iv}\n" if b != "tail" else f"{epoch:.0f} {iv} tail\n")
-        for epoch, iv, b in arms
+        f"{epoch:.0f}\n" if iv is None else f"{epoch:.0f} {iv}\n"
+        for epoch, iv, _ in arms
     ))
+    write_tail_epochs(s, tail_keys)
     # BEFORE the reset is consumed, so a pre-split `.reset` is migrated (and reported)
     # rather than silently deleted by the consumption a line below.
     migrate_legacy(subject, s)
@@ -987,6 +1060,48 @@ def stood_down_past(minutes: float, now: float | None = None) -> int:
     return 0
 
 
+def gate_watched(s: str, now: float):
+    """`(subject_age, loop_alive)` from the detached gate's heartbeats, or `(None, None)`.
+
+    The detached sweep gate writes one `<base>.heartbeat` per subject on every tick,
+    model-free. A goal manager has no model cadence any more, so its `.cadence` ages
+    between gate wakes; the gate heartbeat is the live signal. `loop_alive` says whether
+    ANY subject was ticked within `GATE_ALIVE` (a dead loop), and `subject_age` says how
+    long ago THIS subject was ticked (a subject dropped from enumeration, whose old
+    heartbeat would otherwise read as watched forever). The two are separate so the
+    caller can tell "the gate is down" from "the gate is up but not watching this
+    subject": the first must not restart-storm the tier, the second is a real lapse.
+
+    ⚠️ **Known limitation: the match is by bare filename across every vault directory.**
+    The liveness namespace is deliberately flat (see `STATE_DIR`'s note), and `classify`
+    has no vault to scope by, so a same-named goal in another vault can keep this
+    subject's heartbeat fresh for up to `GATE_SUBJECT_FRESH`. Bounded, not new.
+    """
+    base = s.split("--", 1)[1] if "--" in s else s
+    subject_hb = None
+    newest = None
+    try:
+        for vdir in os.listdir(GATE_LOOP_STATE_DIR):
+            d = os.path.join(GATE_LOOP_STATE_DIR, vdir)
+            if not os.path.isdir(d):
+                continue
+            for f in os.listdir(d):
+                if not f.endswith(".heartbeat"):
+                    continue
+                try:
+                    m = os.path.getmtime(os.path.join(d, f))
+                except OSError:
+                    continue
+                newest = m if newest is None else max(newest, m)
+                if f == f"{base}.heartbeat":
+                    subject_hb = m if subject_hb is None else max(subject_hb, m)
+    except OSError:
+        return (None, None)
+    if subject_hb is None or newest is None:
+        return (None, None)
+    return (int(now - subject_hb), (now - newest) <= GATE_ALIVE)
+
+
 def classify(s: str, now: float) -> tuple:
     """(state, detail) for one subject: OK, STALE, STOPPED, SLEEPING, UNARMED or INVALID.
 
@@ -1011,6 +1126,17 @@ def classify(s: str, now: float) -> tuple:
     until, until_text = read_sleep(s)
     if until is not None and now < until:
         return "SLEEPING", f"until {until_text} ({int(until - now)}s remaining)"
+    # A sleep marker that has EXPIRED (only `--arm` removes it) must stay STALE: the gate
+    # cannot see a `defer_date` arrive (`manager-predispatch.digest_of` carries no
+    # defer_date), so `topic-keepalive.py` recovers the manager off the STALE reading. The
+    # gate-driven OK fallback below must not suppress that, or a date-gated goal manager
+    # sleeps for ever.
+    # Keyed on the FILE's existence, not the parsed instant: an unparseable `.sleeping`
+    # marker reads as absent from `read_sleep`, and keying on the parse would let the
+    # gate-driven fallback return OK for a date-gated goal the gate cannot wake. The file
+    # existing is the fact that a sleep was recorded; its contents are only how long.
+    sleep_path, _ = resolve(s, "sleeping")
+    sleep_pending = os.path.exists(sleep_path)
     p, legacy = resolve(s, "cadence")
     try:
         with open(p, encoding="utf-8") as fh:
@@ -1040,7 +1166,23 @@ def classify(s: str, now: float) -> tuple:
         # split, and the age is measured against a file nothing will refresh.
         basis += " legacy-record"
     detail = f"age={age}s limit={int(limit)}s {basis}"
-    return ("STALE" if age > limit else "OK"), detail
+    if age > limit:
+        # Goal tier only: the detached sweep gate is its sole wake source, so an ageing
+        # `.cadence` between gate wakes is expected, not a lapse. A fresh gate heartbeat
+        # means the manager is watched; without it, STALE stands. An EXPIRED sleep marker
+        # is the exception (see above): it stays STALE so `topic-keepalive.py` recovers it.
+        if s.startswith("goal--") and not sleep_pending:
+            subject_age, loop_alive = gate_watched(s, now)
+            if loop_alive and subject_age is not None and subject_age <= GATE_SUBJECT_FRESH:
+                return "OK", detail + f" gate-driven (gate tick {subject_age}s ago)"
+            if loop_alive is False:
+                # The gate is down: the manager cannot be woken, but restarting it will not
+                # help, and reporting STALE here turns one dead gate into an uncapped
+                # restart storm across the tier. The gate's own stale watcher alerts on the
+                # outage; this reading names it without acting on it.
+                return "OK", detail + " gate-down (no gate tick in the window)"
+        return "STALE", detail
+    return "OK", detail
 
 
 def emit_lapse(state: str, subject: str, detail: str, entry: dict) -> None:

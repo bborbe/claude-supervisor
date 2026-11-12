@@ -200,8 +200,40 @@ class VerdictTest(unittest.TestCase):
     def test_machine_wait_skips(self):
         self.assertEqual(guard.verdict(MACHINE_WAIT), "skip:machine-wait")
 
+    def test_machine_wait_passes_with_the_sweep_gate_carve_out(self):
+        # A sweep-gate wake is precisely what a manager's declared machine wait is
+        # waiting for; without this the gate could never wake a resting goal manager.
+        self.assertEqual(guard.verdict(MACHINE_WAIT, allow_machine_wait=True), "wake")
+
+    def test_operator_ask_still_blocks_with_the_carve_out(self):
+        # The operator-ask check runs AFTER the machine-wait branch, so the carve-out
+        # must not swallow it.
+        text = MACHINE_WAIT + "\n👤 You: approve: rm -rf /"
+        self.assertEqual(guard.verdict(text, allow_machine_wait=True), "skip:operator-ask")
+
     def test_unreadable_is_an_error(self):
         self.assertEqual(guard.verdict(None), "error:unreadable")
+
+    def test_sleeping_subject_skips_an_otherwise_wakeable_pane(self):
+        # A date-gated sleeper is idle BY DEFINITION — empty composer, no `👤 You:` ask,
+        # nothing on screen that tells it from a lapse. Only the state does.
+        self.assertEqual(guard.verdict(IDLE, subject_state="SLEEPING"), "skip:sleeping")
+
+    def test_sleeping_subject_skips_a_dirty_composer_too(self):
+        self.assertEqual(guard.verdict(DIRTY_COMPOSER, subject_state="SLEEPING"), "skip:sleeping")
+
+    def test_sleeping_subject_skips_even_an_unreadable_pane(self):
+        # The state is authoritative and independent of the screen: a failed pane read
+        # must not turn a correct sleep into a wakeable target.
+        self.assertEqual(guard.verdict(None, subject_state="SLEEPING"), "skip:sleeping")
+
+    def test_awake_subject_still_wakes_the_same_pane(self):
+        # The negative direction, named for itself: the SAME screen with any non-sleeping
+        # state must still wake, or the new arm would have swallowed every wake while
+        # reading as success.
+        for state in ("OK", "STALE", "STOPPED", "UNARMED", "INVALID", None):
+            with self.subTest(state=state):
+                self.assertEqual(guard.verdict(IDLE, subject_state=state), "wake")
 
 
 class ExitStatusTest(unittest.TestCase):
@@ -218,6 +250,16 @@ class ExitStatusTest(unittest.TestCase):
             self.assertEqual(self._run(IDLE, tmp), 0)
             self.assertEqual(self._run(SPINNER, tmp), 1)
             self.assertEqual(guard.main(["--text-file", str(pathlib.Path(tmp) / "missing.txt")]), 2)
+
+    def test_subject_state_flag_skips_an_idle_pane(self):
+        import tempfile
+        from contextlib import redirect_stdout
+        import io
+        with tempfile.TemporaryDirectory() as tmp, redirect_stdout(io.StringIO()):
+            p = pathlib.Path(tmp) / "pane.txt"
+            p.write_text(IDLE, encoding="utf-8")
+            self.assertEqual(guard.main(["--text-file", str(p), "--subject-state", "SLEEPING"]), 1)
+            self.assertEqual(guard.main(["--text-file", str(p), "--subject-state", "OK"]), 0)
 
 
 if __name__ == "__main__":
