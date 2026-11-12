@@ -10,8 +10,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- The fleet sweep now reports, in its digest, whether each parked operator ask has a live card and which manager each ownerless `🔴 BLOCKED` row routes to: `scripts/operator-ask-card.py`'s verdict fills a new `<ask>` field on every `CLOSERS` row and `scripts/blocked-row-routing.py`'s record fills a new `<route>` field on every `BLOCKED` row, with `asks_nocard` / `blocked_routed` counts added to the hand-back. Both detectors shipped earlier and had no caller; this is the wiring.
-- `blocked-row-routing.py` gains `--manager` / `--source`, so a caller that already holds the chain resolution skips `escalation-manager.py` — re-measured 2026-11-12 at **3 min 0.18 s** per call, which makes a per-row call unaffordable in a sweep.
+- feat: **the fleet sweep reports each parked operator ask's card state and each ownerless `🔴 BLOCKED` row's routing record.** `scripts/operator-ask-card.py`'s verdict fills a new `<ask>` field on every `CLOSERS` row and `scripts/blocked-row-routing.py`'s record fills a new `<route>` field on every `BLOCKED` row, with `asks_nocard` / `blocked_routed` added to the hand-back. Both detectors shipped earlier and had no caller; this is the wiring.
+- feat: **`blocked-row-routing.py` gains `--manager` / `--source`,** so a caller that already holds the chain resolution skips `escalation-manager.py` — re-measured 2026-11-12 at **3 min 0.18 s** per call, which makes a per-row call unaffordable in a sweep.
 
 ## v0.297.1
 
