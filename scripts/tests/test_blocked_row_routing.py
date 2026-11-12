@@ -91,10 +91,13 @@ class ComposesTheLint(unittest.TestCase):
         self.assertIsNone(brr.routing("waiting on the build", "", TASK, resolver=_resolver()))
 
     def test_a_lint_that_says_no_owner_routes(self):
-        # The inverse: a private regex returning False everywhere would also pass the first
-        # test, so both directions are pinned.
+        # The inverse, and the fixture is chosen for it: `the manager is on it` is a body a
+        # private copy of `OWNER_RE` DOES match (its `\bmanager\b` arm). So a `routing()`
+        # that ORed in a private regex returns None here and fails — where a fixture no
+        # private copy matches ("waiting on the build") would pass and leave that drift
+        # undetected. This is the direction that catches an ADDED copy, not only a replaced one.
         self._with_fake_lint(False)
-        rec = brr.routing("waiting on the build", "", TASK, resolver=_resolver())
+        rec = brr.routing("the manager is on it", "", TASK, resolver=_resolver())
         self.assertIsNotNone(rec)
         self.assertEqual(rec["manager"], "Topic Manager")
 
@@ -147,6 +150,24 @@ class UnresolvableIsNotSilence(unittest.TestCase):
                              "--task", TASK])
         self.assertEqual(code, 0, buf.getvalue())
         self.assertIn("NO-ROUTE", buf.getvalue())
+
+    def test_cli_prints_route_when_the_row_is_ownerless(self):
+        # The ROUTE path through `main` — otherwise only NO-ROUTE and exit 2 are exercised
+        # there. A fake escalation-manager module keeps it board-free.
+        class FakeEscalation:
+            @staticmethod
+            def resolve(title):
+                return "Topic Manager", "chain"
+
+        original = brr._load
+        brr._load = lambda f, n: FakeEscalation if f == "escalation-manager.py" else original(f, n)
+        self.addCleanup(setattr, brr, "_load", original)
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            code = brr.main(["--closer", "waiting on the build", "--task", TASK])
+        self.assertEqual(code, 0, buf.getvalue())
+        self.assertIn("ROUTE\tTopic Manager\tchain", buf.getvalue())
 
     def test_cli_prints_no_route_for_a_closer_that_names_an_owner(self):
         buf = io.StringIO()

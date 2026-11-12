@@ -22,8 +22,8 @@ routes it, rather than treating the phrase as a recipient.
 
 ⚠️ **`--closer` takes the BODY, never the whole `👤 You:` line.** `OWNER_RE`'s operator-verb
 and `later (on` arms are line-anchored, so a prefixed body defeats exactly the closers they
-exist for and every one of them routes. `closer-gate-lint.py`'s `closer_body()` is what
-produces this input in production.
+exist for and every one of them routes. `closer-gate-lint.py`'s `closer_body()` is the producer
+a wiring must use — nothing calls this script yet.
 
 ⚠️ **KNOWN FALSE NEGATIVE — a hex run in the closer reads as an owner.** `OWNER_RE`'s first
 arm is `\b[0-9a-f]{8,32}\b`, so `waiting on commit 64b708ab`, `waiting on 20261112 nightly`
