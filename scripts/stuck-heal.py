@@ -83,7 +83,67 @@ KIND_PERMISSION_CHANNEL = "permission-channel"
 KIND_IDLE_NO_WAIT = "idle-no-wait"
 HEALABLE_KINDS = (KIND_STREAM_CLOSED, KIND_PERMISSION_CHANNEL, KIND_IDLE_NO_WAIT)
 
+#: The refusal a restart answers with when the target carries an open operator card.
+#: Its own token, not a report-only verdict: a report-only line reads as "nothing to do",
+#: while this is "do not touch it", and the two must not look alike.
+REFUSAL_OPEN_CARD = "open-card"
+REFUSAL_STORE_UNREACHABLE = "store-unreachable"
+
 _SPAWN_LEDGER = None
+_WHO_NEEDS_ME = None
+
+
+def _who_needs_me():
+    """Import `who-needs-me.py` — the one reader of the store's OPEN items."""
+    global _WHO_NEEDS_ME
+    if _WHO_NEEDS_ME is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "who-needs-me.py")
+        spec = importlib.util.spec_from_file_location("who_needs_me", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _WHO_NEEDS_ME = mod
+    return _WHO_NEEDS_ME
+
+
+def open_card(session_id, endpoint=None):
+    """(item id or None, error or None) for an OPEN attention card on this session.
+
+    ⚠️ **An open card is a refusal, not a report.** Restarting a session that is
+    waiting on an operator discards the question they were about to answer — the same
+    reason `close-worker.py` carries `gate-held` and `restart-worker.py` carries
+    `held-session`. The ladder's rungs are all *actions*, so this check sits ahead of
+    `decide()`: a session with a live card is never resumed, whatever the cause.
+
+    ⚠️ **An unreadable store is a refusal too, never a clearance.** A gate that
+    cannot be read is not a gate that is absent, and the fail-open direction here
+    restarts a worker whose operator is mid-answer.
+    """
+    wn = _who_needs_me()
+    if endpoint:
+        wn.STORE = endpoint
+    try:
+        items = wn.store_items()
+    except Exception as exc:  # StoreUnreachable, and any parse failure behind it
+        return None, str(exc)
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        # ⚠️ **`producer_id` is the store's own field for the asking session.** Reading
+        # `session_id` here was the defect: that name exists only on `who-needs-me.py`'s
+        # NORMALISED rows (`normalize_store_item`), while `store_items()` hands back the
+        # raw wire shape, so the gate matched nothing and refused nothing — a no-op that
+        # its own fixture could not catch, because the fixture invented the normalised
+        # spelling. `session_id` stays as a fallback for a caller that passes normalised
+        # rows.
+        producer = str(item.get("producer_id") or item.get("session_id") or "")
+        if not producer:
+            continue
+        # ⚠️ **A PREFIX, not equality.** `--session` is an 8-char display handle — the
+        # form the watcher prints and the manager holds — while `producer_id` is a full
+        # uuid. Equality would never match, which is the second half of the same no-op.
+        if producer == session_id or producer.startswith(session_id):
+            return item.get("item_id") or item.get("id"), None
+    return None, None
 
 
 def _spawn_ledger():
@@ -244,6 +304,27 @@ def main(argv=None):
     if len(args.session) < 8:
         # A short or empty id prefix-matches every ledger record.
         ap.error("--session must be at least 8 characters of the session id")
+
+    # ⚠️ **The card check runs BEFORE the ladder.** Every rung is an action, and a
+    # session with a live operator card is waiting on a person: restarting it discards
+    # the question they were about to answer. Two lines, token first, so a caller can
+    # branch on the first line alone — the same shape the rest of this repo's refusals
+    # use.
+    card, store_error = open_card(args.session, args.endpoint)
+    if store_error is not None:
+        print(REFUSAL_STORE_UNREACHABLE)
+        print(
+            "%s: the attention store could not be read (%s) -- restart refused rather "
+            "than cleared" % (args.session, store_error)
+        )
+        return 1
+    if card:
+        print(REFUSAL_OPEN_CARD)
+        print(
+            "%s: open operator card %s -- restart refused, the session is waiting on a "
+            "person" % (args.session, card)
+        )
+        return 1
 
     deaths = deaths_from_ledger(args.session, args.endpoint)
     action = decide(args.kind, deaths)
