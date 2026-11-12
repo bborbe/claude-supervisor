@@ -52,7 +52,7 @@ anything is signalled, so no code path reaches `os.kill` on a target it has not 
 | `held-session` | The session carries an operator hold (`~/.claude/state/session-holds.json`, written by `/supervisor:hold`). | A hold says the session is not yours to touch at all, which outranks `busy-target`'s "the moment is wrong". Restarting is exactly the act the hold prevents, and only the operator releases it. |
 | `role-undetermined` | No role signal could be read. | Fail closed. An unreadable index proves nothing about a role; never assume worker. |
 | `stale-load-path` | None of the three inputs — newest load-path copy, the worker's MCP config file(s), the launcher script — is newer than the session's own start, or the session carries no parseable start time. | Nothing would load differently — the restart buys nothing. |
-| `task-terminal` | The session's anchored task reads `completed`, `aborted` or `hold`, or carries a `defer_date` in the future. The message names the task and its status. | The work is finished, so a resume restarts a session for a closed task and undoes the close. Measured 2026-11-11: session `2e540d65` was reaped at 07:18:34Z with a `completed` task and was live again at 07:33:55Z. The status is read from disk at resume time, never from a census taken earlier in the round — a task that flips between enumeration and the spawn must be refused. |
+| `task-terminal` | The session's anchored task reads `completed`, `aborted` or `hold`, or carries a `defer_date` in the future. The message names the session id, the task and its status. | The work is finished, so a resume restarts a session for a closed task and undoes the close. Measured 2026-11-11: session `2e540d65` was reaped at 07:18:34Z with a `completed` task and was live again at 07:33:55Z. The status is read from disk at resume time, never from a census taken earlier in the round — a task that flips between enumeration and the spawn must be refused. |
 
 ## Operational failures — not refusals
 
@@ -219,8 +219,13 @@ leave the eight above unchanged:
 | `unknown-session-id` | no manager registration, so no vault to resume into |
 | `task-terminal` | the session's anchored task is already finished — the same guard and the same token as on the normal path, because this is the only resume this script performs for a headless worker and it is the path the 2026-11-11 incident took |
 
-An unresolvable vault or launcher is an `❌ error:` operational failure, never a refusal, and
-fires before anything is spawned.
+An unresolvable vault or launcher **for this session** is an `❌ error:` operational failure
+(exit 1), never a refusal, and fires before anything is spawned. ⚠️ On this path a missing
+`vault-cli` does **not** produce the `environment-fault` (exit 3) row in the [exit-code
+table](#exit-codes): `vault_configs()` returns `None` before any launcher is resolved, so the
+run reports the exit-1 `❌ error:` above, naming the vault rather than the missing binary.
+Exit 3 stays reachable on the normal restart path, where the cwd comes from the registry
+entry rather than from `vault-cli`.
 
 ## Which launcher the resume runs
 

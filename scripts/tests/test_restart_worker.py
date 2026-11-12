@@ -1019,6 +1019,41 @@ class Cli(unittest.TestCase):
         self.assertEqual(code, 0, lines)
         self.assertIn("would kill", "\n".join(lines))
 
+    def test_the_restart_header_names_the_full_session_id(self):
+        """The round joins a close line and a refusal line on the full id, so the resume
+        header must carry it too — a truncated one leaves both unjoinable."""
+        sid = "aaaa1111-2222-4333-8444-555566667777"
+        self.write(1, entry(sid, name="Some Worker"))
+        code, lines = self.run_cli(sid)
+        self.assertEqual(code, 0, lines)
+        self.assertIn(f"session {sid}", "\n".join(lines))
+
+    def test_a_terminal_task_is_refused_on_the_normal_path(self):
+        """Entry point A: the normal restart refuses before the kill when the anchored task
+        is finished. The probe is the CLI, so it asserts the token a caller branches on."""
+        sid = "bbbb2222-3333-4444-8555-666677778888"
+        self.write(1, entry(sid, name="Some Worker", cwd=self.dir))
+        tasks = os.path.join(self.dir, "25 Tasks")
+        os.makedirs(tasks, exist_ok=True)
+        with open(os.path.join(tasks, "A Task.md"), "w") as fh:
+            fh.write("---\nstatus: completed\nclaude_session_id: " + sid + "\n---\n\n# Summary\n")
+        cfg = os.path.join(self.dir, "vaults.json")
+        with open(cfg, "w") as fh:
+            json.dump([{"name": "v", "path": self.dir, "tasks_dir": "25 Tasks"}], fh)
+        prev = os.environ.get("SUPERVISOR_VAULT_CONFIG")
+        os.environ["SUPERVISOR_VAULT_CONFIG"] = cfg
+
+        def restore():
+            if prev is None:
+                os.environ.pop("SUPERVISOR_VAULT_CONFIG", None)
+            else:
+                os.environ["SUPERVISOR_VAULT_CONFIG"] = prev
+
+        self.addCleanup(restore)
+        code, lines = self.run_cli(sid)
+        self.assertEqual(code, 1, lines)
+        self.assertEqual(lines[0], "task-terminal", lines)
+
     def test_help_exits_zero(self):
         out = subprocess.run(
             [sys.executable, SCRIPT, "--help"], capture_output=True, text=True
@@ -1139,6 +1174,13 @@ class AbsentMode(unittest.TestCase):
         code, lines = self.run_absent(dry=False)
         self.assertEqual(code, 0, lines)
         self.assertTrue(os.path.exists(self.spawned), "a permitted resume must spawn")
+
+    def test_the_absent_header_names_the_full_session_id(self):
+        self.register()
+        self.write_task("in_progress")
+        code, lines = self.run_absent(dry=True)
+        self.assertEqual(code, 0, lines)
+        self.assertIn(f"session {self.SID}", "\n".join(lines))
 
     def test_a_dead_registered_manager_resumes_into_its_vault_on_its_manager_launcher(self):
         self.register()
@@ -1476,6 +1518,9 @@ class TaskTerminalRefusal(unittest.TestCase):
         token, detail = self._refusal("completed")
         self.assertEqual(token, "task-terminal")
         self.assertIn("completed", detail)
+        # The close record names the full id, so the refusal must too — the round joins the
+        # two lines on it. A refusal naming only the task basename cannot be joined.
+        self.assertIn(self.SID, detail)
 
     def test_aborted_is_refused(self):
         self.assertEqual(self._refusal("aborted")[0], "task-terminal")

@@ -106,7 +106,9 @@ own: the record, not the count, is what makes it legitimate.
 § Drove) must read `pane:<resolution>`, meaning `pane-wake.py --send` returned `delivered`. A tab
 row whose only action was `sendmessage` stays in `STUCK`, because that message was never read. A
 `none:<skip>` row stays STUCK unless the skip names a valid wait: `skip:operator-ask` or
-`skip:open-card` → it belongs in OPERATOR with its card; `skip:machine-wait` → EXTERNAL;
+`skip:open-card` → it belongs in OPERATOR with its card; `skip:machine-wait` or
+`skip:sleeping` → EXTERNAL (a date-gated sleeper waits on its own clock, and `--state` is what
+proves it);
 `skip:spinner` → WORKING. ⚠️ Never count `unverified` as driven.
 
 **Green requires all five of:** `STUCK == 0`, `UNCARDED == 0`, `FINISHED-OPEN == 0`,
