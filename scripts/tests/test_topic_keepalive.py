@@ -64,8 +64,8 @@ class KeepAliveTest(unittest.TestCase):
             self.state / f"{branch}--{self.k.base_slug(subject)}.json"
         )
         # ⚠️ The stand-down marker must never reach the REAL store: an unpatched
-        # `flagged_path` writes `~/.claude/state/manager-flagged/…`, and a marker left
-        # there makes an unrelated later run stand a live manager down.
+        # `flagged_path` writes under the live state dir, and a marker left there makes
+        # an unrelated later run stand a live manager down.
         self.k.flagged_path = lambda vault, subject, branch="goal": str(
             self.state / f"{branch}--{self.k.base_slug(subject)}.flagged"
         )
@@ -181,15 +181,24 @@ class KeepAliveTest(unittest.TestCase):
         self.assertTrue(self._marker().exists())
 
     def test_clearing_the_flag_stands_the_manager_down(self):
-        """M1 — unflagging retires the live manager at the next round, once."""
+        """M1 — unflagging retires the live manager at the next round."""
         self._marker().write_text("2026-11-12T00:00:00+0100\n", encoding="utf-8")
         self.page(sid="sid-1")  # the flag was cleared
         rc, out = self.run_keepalive(live="LIVE")
         self.assertEqual(0, rc)
         self.assertEqual("stand-down", out[0])
         self.assertIn("--stop", out[1])
-        self.assertFalse(self._marker().exists(),
-                         "the marker is consumed, so a subject stands down once")
+        self.assertTrue(self._marker().exists(),
+                        "the marker is kept, so a round that skips the stop retries")
+
+    def test_a_stopped_loop_leaves_and_does_not_re_stand_down(self):
+        """The retry terminates by itself: once `--stop` lands the loop reads STOPPED, and
+        the `loop-stopped` arm returns before the stand-down branch is reached."""
+        self._marker().write_text("2026-11-12T00:00:00+0100\n", encoding="utf-8")
+        self.page(sid="sid-1")
+        rc, out = self.run_keepalive(live="LIVE", cadence="STOPPED")
+        self.assertEqual(0, rc)
+        self.assertEqual("leave", out[0])
 
     def test_a_never_flagged_subject_is_not_stood_down(self):
         """⚠️ The regression guard, measured 2026-11-12: of 84 live goal pages carrying a

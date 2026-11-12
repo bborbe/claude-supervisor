@@ -204,13 +204,6 @@ def _remember_flagged(marker: str) -> None:
         pass
 
 
-def _forget_flagged(marker: str) -> None:
-    try:
-        os.remove(marker)
-    except OSError:
-        pass
-
-
 _RECEIPT_MOD = None
 
 
@@ -389,13 +382,18 @@ def main(argv: list[str]) -> int:
     # pages carrying a `claude_session_id`, **64 carry no flag at all**, so that predicate
     # would stand down 83 of 84 live managers. This is a TRANSITION detector instead — an
     # admitted flag writes a marker, and a later round that finds the page no longer
-    # admitted consumes it and stands the manager down. A subject never seen flagged is
-    # untouched, which is what makes the rule safe against the live corpus.
+    # admitted prints the stand-down. A subject never seen flagged is untouched, which is
+    # what makes the rule safe against the live corpus.
+    #
+    # ⚠️ **The marker is NOT consumed.** This script only PRINTS the stop command; the
+    # round runs it. Consuming on print would lose the signal for good if that run is
+    # skipped, and the subject would never stand down. Keeping it makes the stand-down
+    # retry each round — and it terminates on its own, because once `--stop` lands the loop
+    # reads `STOPPED` and the `loop-stopped` arm above returns before reaching here.
     marker = flagged_path(a.vault, a.subject, a.branch)
     if flagged(fm):
         _remember_flagged(marker)
     elif sid and os.path.exists(marker):
-        _forget_flagged(marker)
         print("stand-down")
         print(f'python3 scripts/manager-liveness.py --stop --subject "{a.subject}" '
               f'--branch {a.branch}  (the flag was cleared — the manager is retired and '
