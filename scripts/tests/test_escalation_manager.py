@@ -95,6 +95,26 @@ class EscalationManagerTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.mod.resolve("T", board=board)
 
+    def test_resolve_many_builds_the_grouping_once_for_every_title(self):
+        builds = []
+
+        class CountingBoard(FakeBoard):
+            def build_grouping(self, *_a, **_k):
+                builds.append(1)
+                return FakeGrouping()
+
+        board = CountingBoard({"abc123": {"name": "Some Goal Manager"}}, manager="abc123")
+        out = self.mod.resolve_many(["A", "B", "A"], board=board)
+        self.assertEqual(1, len(builds), "one build for N titles, not one per title")
+        self.assertEqual({"A", "B"}, set(out))
+        self.assertEqual(("Some Goal Manager", "chain"), out["A"])
+
+    def test_resolve_many_renders_fleet_per_title(self):
+        board = FakeBoard({"abc123": {"name": "x"}}, manager=None)
+        out = self.mod.resolve_many(["A", "B"], board=board)
+        self.assertEqual(("fleet", "fleet"), out["A"])
+        self.assertEqual(("fleet", "fleet"), out["B"])
+
     def test_main_exits_non_zero_on_a_failed_read(self):
         original = self.mod.resolve
 
