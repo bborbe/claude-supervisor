@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.295.1
 
 - fix: **the parked row's page-less limb names the TRACKED set, so it stops claiming no page records a session a page does record.** `covered` is built from `out_rows` — the round's tracked set — so a session recorded on a page outside that set entered `unrecorded` too, and its limb read `(no page records this session)` for a session a page under `25 Tasks/` demonstrably records. A reader chasing that limb would create a page that already exists, and `unrecorded` became untrustworthy in exactly the direction it exists to answer. The limb now reads `(no tracked page records this session)`, and `resolution.unrecorded`, its row marker and the reader contract say the same. Measured 2026-11-12T09:02+01:00: **18 of 33** claiming rows named a session a page under `25 Tasks/` records (an earlier probe read 6 of 32 twenty minutes before, so the population grows with the fleet). ⚠️ **The fix relabels; it does not exclude.** Dropping these sessions from `unrecorded` would make a park on a page outside the tracked set invisible again — the regression the unrecorded path exists to prevent — so the row stays and only the claim is corrected. Change set: `scripts/round-readings.py`, `scripts/tests/test_round_readings.py`, `agents/round-readings-reader.md`, `docs/handback-contract.md`, `CHANGELOG.md`.
 
