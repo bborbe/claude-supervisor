@@ -49,8 +49,8 @@ Usage:
     blocked-row-routing.py --closer "..." --task "<title>" --manager "<name>" --source chain
 
 ⚠️ **`--source` defaults to `supplied`.** A caller that resolved the name through the
-four-tier chain should pass `--source chain` so the digest's route record says where the
-manager came from — a reader cannot otherwise tell a chain resolution from a hand-typed
+four-tier chain passes `--source chain`, so the printed record says where the manager came
+from — a reader of the raw output cannot otherwise tell a chain resolution from a hand-typed
 name, and only the former is reproducible on the next round.
 
 Prints `ROUTE\\t<manager>\\t<source>` or `NO-ROUTE\\t<why>`. Exit 0 for either; 2 when the
@@ -107,6 +107,13 @@ def main(argv=None):
     row = args.row if args.row is not None else args.closer
     resolver = None
     if args.manager is not None:
+        # A blank `--manager` is not a manager. Rendering it would print `ROUTE \t` — a
+        # routing record naming nobody, which is the failure this script exists to end —
+        # so it refuses rather than falling back to the three-minute board read.
+        if not args.manager.strip():
+            print("blocked-row-routing: --manager is blank — routing UNKNOWN, not skipped",
+                  file=sys.stderr)
+            return 2
         resolver = lambda _title: (args.manager, args.source)
     try:
         record = routing(args.closer, row, args.task, resolver=resolver)

@@ -246,6 +246,19 @@ class SuppliedManagerSkipsTheBoard(unittest.TestCase):
         self.assertEqual(code, 0, buf.getvalue())
         self.assertIn("ROUTE\tFleet Manager\tchain", buf.getvalue())
 
+    def test_a_blank_manager_refuses_rather_than_routing_to_nobody(self):
+        # `ROUTE \t supplied` would be a routing record naming no recipient — the failure
+        # this script exists to end, reached through its own escape hatch. It must not
+        # silently fall back to the board read either, which would hide the caller's bug
+        # behind three minutes.
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            code = brr.main(
+                ["--closer", "waiting on the build", "--task", TASK, "--manager", "   "]
+            )
+        self.assertEqual(code, 2, err.getvalue())
+        self.assertIn("blank", err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
