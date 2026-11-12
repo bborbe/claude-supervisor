@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.298.4
 
 - fix: **`--tokens` measures the COMPLETED previous round, not the round it runs inside.** The current turn's transcript is written as the turn progresses, so a window ending "now" cannot see the round's own spend — a gated tick printed `spent: 0` however long it took (measured 2026-11-12). `--start` now carries `previous_round_started_at`, `--tokens` windows `previous_round_started_at → round_started_at`, and the first tick prints `n/a (baseline)`, never `0`. The spend-per-change line moves to the head (`commands/steps/round-readings.md` step 1b), before the sweep's snapshot, so `--count` reads the previous round's moved rows against that round's own `.prev` — if the order slips, numerator and denominator describe different rounds. One-tick lag, which SC3a permits. Change set: `scripts/manager-receipt.py`, `scripts/tests/test_manager_receipt.py`, `commands/steps/round-readings.md`, `commands/steps/round-tail.md`, `CHANGELOG.md`.
 
