@@ -99,6 +99,8 @@ Optional: `persist: false` — a **read-only** round. Skip step 9 entirely: writ
 
 7c. **Unclaimable tasks (Step 2e).** `python3 $P/unclaimable-tasks.py --since 2026-11-01 --limit 5`. A task with an empty `target_vault` is claimed by no controller, so no pod is scheduled and nothing reports it; since v0.26.12 the create path refuses it, so **a recent hit means a producer still omits the field** and the historical count is legacy. ⚠️ Session-independent on purpose — the defect case has no session to key a row on. ⚠️ Never window on mtime (the clone date; measured 9,624 false "recent" against a true 0). Non-zero exit → `UNKNOWN (pass not run)`.
 
+7d. **Operator asks and blocker routing (Step 3d).** Per `CLOSERS` row whose class is an ask, run `python3 $P/operator-ask-card.py --closer "<👤 You: line>" --session <sid>`; its verdict fills `<ask>`, and `NO-CARD` is the defect this surfaces. Per `BLOCKED` row, run `python3 $P/blocked-row-routing.py --closer "<👤 You: body>" --row "<closer>" --task "<title>" --manager "<manager_on_chain>"`; `ROUTE <manager>` fills `<route>`, `NO-ROUTE` renders `—`. ⚠️ **Always pass `--manager`**, resolved once per round through `fleet-board.py`'s `manager_on_chain`: without it the script calls `escalation-manager.py`, measured **3 min per call**, so eight blocked rows would cost half an hour. Non-zero exit → `UNKNOWN`, never `—`.
+
 8. **Classify (Step 3).**
 
    | Signal | Reading |
@@ -157,9 +159,9 @@ DIGEST <round timestamp> · <N> sessions · snapshot written: <swept_at from fle
 CLASSIFICATION  <total> classified · <class>=<n> · <class>=<n> …    — or: UNKNOWN (pass not run)
   <name> [<session id 8>] · <status> · <age — transcript, from --ages> · <class> · <task file basename | —> · <open boxes | —> · <link | —>        ← only non-progressing rows
 BLOCKED (feed, raised — not verified open)
-  <name> · pane <id> · <link> · <gate text, ≤80 chars>
+  <name> · pane <id> · <link> · <route> · <gate text, ≤80 chars>
 CLOSERS (last-turn closer and class)
-  <name> · pane <id|hst> · <link|—> · <class> · <closer text, ≤80 chars>  ← live sessions, joined by id; ONE ROW PER LIVE SESSION, never a count summary
+  <name> · pane <id|hst> · <link|—> · <class> · <ask> · <closer text, ≤80 chars>  ← live sessions, joined by id; ONE ROW PER LIVE SESSION, never a count summary
 ORPHAN CANDIDATES (park filter + 7d bound applied)  — or: UNKNOWN (check failed)
   <task> · claimed by <session id 8> · file age <h>
 REAP CANDIDATES (3 disk facts read this run)
@@ -193,8 +195,10 @@ NOTES   runbook/command disagreements, unreadable inputs
 ```text
 sessions=<N> · snapshot=written|skipped|UNKNOWN · payload=<path>
 progressing=<n> · stalled=<n> · parked=<n> · parked-on-watcher=<n> · waiting-on-human=<n> · held=<n> · stood-down=<n> · lapsed=<n> · finished=<n> · unclassified=<n>
-blocked=<n> · closers=<n> · orphan=<n> · reap=<n> · collision=<n> · unmanaged=<n> · context70=<n> · ledger=<n>
+blocked=<n> · closers=<n> · orphan=<n> · reap=<n> · collision=<n> · unmanaged=<n> · context70=<n> · ledger=<n> · asks_nocard=<n> · blocked_routed=<n>
 ```
+
+⚠️ **`asks_nocard` counts the `CLOSERS` rows rendered `NO-CARD`; `blocked_routed` the `BLOCKED` rows rendered `ROUTE <manager>`** — counts of printed rows, the reconciliation rule `CLASSIFICATION` already carries.
 
 ⚠️ **Every class the render's `CLASSIFICATION` line emits needs a key here, `held` included.** The hand-back is the caller's only view of the bucket set, so a class that appears in the render and is absent here is a bucket the caller cannot see at all — and `held` is the one class the render treats as winning over every other, which makes its absence the most misleading of the set.
 

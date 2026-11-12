@@ -177,5 +177,75 @@ class UnresolvableIsNotSilence(unittest.TestCase):
         self.assertIn("NO-ROUTE", buf.getvalue())
 
 
+class SuppliedManagerSkipsTheBoard(unittest.TestCase):
+    """`--manager` is what makes a per-row call affordable in a sweep.
+
+    `resolve()` was re-measured 2026-11-12 at **3 min 0.18 s** (it reads the fleet board and
+    the full historical session corpus). A sweep that called it once per BLOCKED row would
+    spend tens of minutes per round, so the caller resolves once through
+    `fleet-board.py`'s `manager_on_chain` and passes the name in.
+    """
+
+    def test_supplied_manager_routes_without_loading_escalation_manager(self):
+        # Assert on the LOAD, not only on the output: a version that printed the supplied
+        # name but still called `resolve()` first would pass an output-only test while
+        # keeping the three-minute cost the flag exists to remove.
+        loaded = []
+        original = brr._load
+
+        def tracking(filename, module_name):
+            loaded.append(filename)
+            return original(filename, module_name)
+
+        brr._load = tracking
+        self.addCleanup(setattr, brr, "_load", original)
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            code = brr.main(
+                ["--closer", "waiting on the build", "--task", TASK, "--manager", "Topic Manager"]
+            )
+
+        self.assertEqual(code, 0, buf.getvalue())
+        self.assertIn("ROUTE\tTopic Manager\tsupplied", buf.getvalue())
+        self.assertNotIn("escalation-manager.py", loaded)
+
+    def test_supplied_manager_does_not_override_the_owner_decision(self):
+        # The owner test is still the lint's. A supplied manager must not turn a row that
+        # already names an owner into a routed one — that would double-route it.
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            code = brr.main(
+                [
+                    "--closer",
+                    "approve: card " + "7e55adaf" * 4,
+                    "--task",
+                    TASK,
+                    "--manager",
+                    "Topic Manager",
+                ]
+            )
+        self.assertEqual(code, 0, buf.getvalue())
+        self.assertIn("NO-ROUTE", buf.getvalue())
+
+    def test_the_source_is_reported_so_a_reader_can_tell_the_paths_apart(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            code = brr.main(
+                [
+                    "--closer",
+                    "waiting on the build",
+                    "--task",
+                    TASK,
+                    "--manager",
+                    "Fleet Manager",
+                    "--source",
+                    "chain",
+                ]
+            )
+        self.assertEqual(code, 0, buf.getvalue())
+        self.assertIn("ROUTE\tFleet Manager\tchain", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
