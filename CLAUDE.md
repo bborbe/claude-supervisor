@@ -213,6 +213,15 @@ agents/gate-relay-read.md                the manager's gate relay, read leg — 
 agents/gate-relay-send.md                the manager's gate relay, send leg — the operator's answer into a tab worker's pane; never drives a selection modal
 server/supervisor.mjs                    the DEPRECATED MCP server — drill scripts only; the live tool is the Go claude-wrapper daemon
 server/policy.json                       bundled approval rules (see README § The approval policy)
+launchd/com.bborbe.fleet-keeper.plist    the fleet keeper — one tick a minute, no Claude session as its parent
+launchd/com.bborbe.idle-reaper.plist     the idle reaper
+launchd/com.bborbe.rebase-agent.plist    the rebase agent
+launchd/com.bborbe.session-exit-daily.plist  the daily session exit
+launchd/com.bborbe.fleet-pusher.plist    the CHEAP wake cadence — StartInterval 900, no model turn (docs/fleet-pusher.md)
+launchd/com.bborbe.fleet-pusher-watch.plist  its watchdog — StartInterval 300, reports a dead cadence
+scripts/fleet-pusher-tick.sh             one pusher pass, exits; resolves the NEWEST installed supervisor, never a pinned version
+scripts/fleet-pusher-watch.sh            reads the pusher's heartbeat, posts one `ack` card once it ages past 1800 s
+docs/fleet-pusher.md                     the pusher's two layers, its install, and the five things that look healthy and are not
 ```
 
 ## Changelog fold guard

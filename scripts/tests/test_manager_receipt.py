@@ -16,6 +16,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 """
 
 import contextlib
+import datetime
 import importlib.util
 import io
 import json
@@ -1831,6 +1832,66 @@ class RearmShapeReadsEpochsOnly(unittest.TestCase):
         self.assertTrue(self.m.rearm_shape(p, 1794141600, 1794141700))
 
 
+class RearmShapeCountsHeadBeatsOnly(unittest.TestCase):
+    """A tail beat must not pay the `re-arm` step for a round that never armed its head.
+
+    Since the round grew a closing beat, one round writes two epochs into the same
+    `<slug>.arms` ring inside the same window. Counting them alike let the tail beat
+    clear a head arm that never ran: `--check` reports `skipped: re-arm`, then
+    `output-shape.md` item 13's row-20 `--debt` re-reads the ring, finds the tail epoch
+    inside the window, and pays the debt — so the round that skipped its head arm reads
+    complete one step later, which is the false green this predicate exists to prevent.
+
+    The shape that discriminates: a ring whose ONLY in-window epoch carries the tail
+    marker. It must not satisfy the step; the same epoch unmarked must.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.live = tempfile.TemporaryDirectory()
+        self.m = load(self.tmp.name, self.live.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        self.live.cleanup()
+        os.environ.pop("MANAGER_RECEIPT_STATE_DIR", None)
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def arms(self, text):
+        p = os.path.join(self.live.name, "fleet--fleet-manager.arms")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return p
+
+    def tail(self, text):
+        p = os.path.join(self.live.name, "fleet--fleet-manager.tail")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return p
+
+    def test_a_stored_tail_epoch_does_not_pay_the_step(self):
+        # The production shape: a TWO-column ring with the marker in the sibling store.
+        # A reader that honours only the retired third column sees is_tail False here
+        # and counts the closing beat as a head — the no-op this test exists to catch.
+        p = self.arms("1794141605 900\n")
+        self.tail("1794141605\n")
+        self.assertFalse(self.m.rearm_shape(p, 1794141600, 1794141700))
+
+    def test_the_same_epoch_with_no_store_does_pay_the_step(self):
+        p = self.arms("1794141605 900\n")
+        self.assertTrue(self.m.rearm_shape(p, 1794141600, 1794141700))
+
+    def test_a_head_beside_a_stored_tail_still_pays(self):
+        p = self.arms("1794141605 900\n1794141650 900\n")
+        self.tail("1794141650\n")
+        self.assertTrue(self.m.rearm_shape(p, 1794141600, 1794141700))
+
+    def test_a_legacy_third_column_tail_is_also_excluded(self):
+        # Rings written before the marker moved carry it as a third column.
+        p = self.arms("1794141605 900 tail\n")
+        self.assertFalse(self.m.rearm_shape(p, 1794141600, 1794141700))
+
+
 class GatedState(unittest.TestCase):
     """A step the frozen-tree predicate suppressed is excused for THAT round only.
 
@@ -1880,20 +1941,44 @@ class RenderCached(unittest.TestCase):
     Replaying the cached payload verbatim prints a header claiming a time the tick did
     not run, which makes a dead loop and a gated one look identical. The marker is part
     of the frame (`docs/sweep-output.md`), so it is replaced, never kept.
+
+    ⚠️ **The two tiers' payloads have different first lines.** The topic payload opens
+    with a marker (`22:12 ✓ T — 53 goals`); the goal payload, written by
+    `--write-payload`, opens with the box's own TOP BORDER. A renderer that dropped
+    `lines[0]` unconditionally printed a goal-tier box with no top edge.
+
+    ⚠️ **A missing payload is not an empty tick.** Before the fallback the renderer
+    exited 1 and printed nothing, so a subject that had never swept printed no table
+    at all — the failure `Manager Session` § Sweep output records from the first
+    implementation, and the one the operator's 2026-09-15 / 2026-09-20 rulings forbid.
     """
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        # `payload_file()` and `tracked_names()` resolve through the PRODUCER's own
+        # paths (`manager-predispatch.payload_path` / `tracked_path`), so the
+        # predispatch store points at the same temp tree the receipt uses.
+        os.environ["MANAGER_PREDISPATCH_STATE_DIR"] = self.tmp
         self.m = load(self.tmp, self.tmp)
 
-    def payload(self, text):
-        with open(os.path.join(self.tmp, "t.sweep"), "w", encoding="utf-8") as fh:
+    def tearDown(self):
+        os.environ.pop("MANAGER_PREDISPATCH_STATE_DIR", None)
+        os.environ.pop("MANAGER_RECEIPT_STATE_DIR", None)
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def payload(self, text, tier="topic"):
+        name = "t.sweep" if tier == "topic" else "t.table"
+        with open(os.path.join(self.tmp, name), "w", encoding="utf-8") as fh:
             fh.write(text)
 
-    def render(self):
+    def tracked(self, names):
+        with open(os.path.join(self.tmp, "t.tracked.txt"), "w", encoding="utf-8") as fh:
+            fh.write("\n".join(names) + "\n")
+
+    def render(self, tier="topic"):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            rc = self.m.render_cached("T")
+            rc = self.m.render_cached("T", tier=tier)
         return rc, buf.getvalue()
 
     def test_the_stale_marker_is_replaced(self):
@@ -1909,11 +1994,317 @@ class RenderCached(unittest.TestCase):
         self.assertIn("│ row│", out)
         self.assertIn("└────┘", out)
 
-    def test_a_missing_payload_is_an_error_not_an_empty_table(self):
-        # An empty render would read as "the table printed and had no rows".
+    def test_the_goal_payload_keeps_its_top_border(self):
+        # No marker line on this tier: the payload IS the box, so dropping the first
+        # line deleted the top border of every gated goal tick.
+        self.payload("┌────┐\n│ row│\n└────┘\n", tier="goal")
+        rc, out = self.render(tier="goal")
+        self.assertEqual(rc, 0)
+        self.assertIn("┌────┐", out)
+        self.assertIn("│ row│", out)
+
+    def test_a_missing_payload_still_prints_a_full_box(self):
+        self.tracked(["One task", "Two task"])
         rc, out = self.render()
-        self.assertEqual(rc, 1)
+        self.assertEqual(rc, 0)
+        self.assertIn("no cached table yet", out)
+        self.assertIn("2 row(s) from the tracked set", out)
+        self.assertIn("│ Goal ", out)          # the topic frame's header
+        self.assertIn("│ One task", out)
+        self.assertIn("│ Two task", out)
+        self.assertIn("┌", out)
+        self.assertIn("└", out)
+
+    def test_the_goal_tier_fallback_uses_the_goal_frame(self):
+        # Five columns, `Topic / Goal / Task | Session | Status | Phase | Met` — NOT
+        # the topic frame. The subject leads and its tracked rows indent beneath it.
+        self.tracked(["One task"])
+        rc, out = self.render(tier="goal")
+        self.assertEqual(rc, 0)
+        self.assertIn("Topic / Goal / Task", out)
+        self.assertNotIn("│ Manager", out)
+        lines = out.splitlines()
+        subject_row = [i for i, ln in enumerate(lines) if ln.startswith("│ T ")]
+        task_row = [i for i, ln in enumerate(lines) if ln.startswith("│    One task")]
+        self.assertEqual(len(subject_row), 1, out)
+        self.assertEqual(len(task_row), 1, out)
+        self.assertLess(subject_row[0], task_row[0])
+
+    def test_an_empty_payload_falls_back_too(self):
+        self.payload("")
+        self.tracked(["One task"])
+        rc, out = self.render()
+        self.assertEqual(rc, 0)
+        self.assertIn("carries no box", out)
+        self.assertIn("│ One task", out)
+
+    def test_a_marker_only_payload_falls_back(self):
+        self.payload("22:12 ✓ T — 53 goals\n")
+        rc, out = self.render()
+        self.assertEqual(rc, 0)
+        self.assertIn("carries no box", out)
+        self.assertIn("┌", out)
+
+
+class SpendReadout(unittest.TestCase):
+    """`--tokens`, `--snapshot` and `--count` — the spend-per-change readout.
+
+    The two halves are deliberately independent: the numerator comes from the
+    transcripts, the denominator from the sweep payload's own diff. A test that let
+    either read the other would pass on the defect the criteria name — a census echo
+    in the numerator, or a leg certifying its own moved-row count.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.live = tempfile.TemporaryDirectory()
+        self.projects = tempfile.TemporaryDirectory()
+        os.environ["MANAGER_RECEIPT_PROJECTS_ROOT"] = self.projects.name
+        # The goal tier's payload is `manager-predispatch/<slug>.table`, resolved through
+        # the producer's own `payload_path()`, so its state dir points at the same temp
+        # tree the receipt uses.
+        os.environ["MANAGER_PREDISPATCH_STATE_DIR"] = self.tmp.name
+        self.m = load(self.tmp.name, self.live.name)
+        self.topic = "Recurring Operator Gates"
+        self.slug = "recurring-operator-gates"
+        self.session = "11111111-2222-3333-4444-555555555555"
+        # The lag window's two ends: the previous round started 600 s ago and the
+        # current round started 300 s ago, so records in [started, ended) belong to
+        # the previous round.
+        self.started = time.time() - 600
+        self.ended = time.time() - 300
+
+    def tearDown(self):
+        for t in (self.tmp, self.live, self.projects):
+            t.cleanup()
+        os.environ.pop("MANAGER_RECEIPT_STATE_DIR", None)
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+        os.environ.pop("MANAGER_RECEIPT_PROJECTS_ROOT", None)
+        os.environ.pop("MANAGER_PREDISPATCH_STATE_DIR", None)
+
+    # --- helpers ---------------------------------------------------------------
+
+    def cli(self, *argv):
+        out, err, old = io.StringIO(), io.StringIO(), sys.argv
+        sys.argv = ["manager-receipt.py", *argv]
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        return rc, out.getvalue()
+
+    def open_round(self):
+        """The receipt for a round whose PREVIOUS round is the measured window."""
+        p = os.path.join(self.tmp.name, self.slug + ".json")
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({"topic": self.topic, "round_started_at": self.ended,
+                       "previous_round_started_at": self.started, "fields": {}}, fh)
+        return p
+
+    def first_tick(self):
+        """A receipt with no previous round — the first tick."""
+        p = os.path.join(self.tmp.name, self.slug + ".json")
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump({"topic": self.topic, "round_started_at": self.ended,
+                       "fields": {}}, fh)
+        return p
+
+    def transcript(self, relpath, records):
+        p = os.path.join(self.projects.name, "proj", relpath)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as fh:
+            for r in records:
+                fh.write(json.dumps(r) + "\n")
+        return p
+
+    @staticmethod
+    def rec(mid, tokens, epoch):
+        """A transcript record in the real shape: `timestamp` (Z) + `message.usage`."""
+        ts = datetime.datetime.fromtimestamp(epoch, tz=datetime.timezone.utc)
+        return {"timestamp": ts.isoformat().replace("+00:00", "Z"),
+                "message": {"id": mid, "usage": {"output_tokens": tokens}}}
+
+    def payload(self, rows, marker="09:00 ✓ T — no change"):
+        """A rendered sweep payload at the GOAL tier's own path (`<slug>.table`)."""
+        out = [marker,
+               "  ┌──────┬────────┬────────┬────────┬──────────┐",
+               "  │ Goal │ Status │ Phase  │ Met    │ Manager  │",
+               "  ├──────┼────────┼────────┼────────┼──────────┤"]
+        for goal, status, phase, met, mgr in rows:
+            out.append("  │ %-4s │ %-6s │ %-6s │ %-6s │ %-8s │"
+                       % (goal, status, phase, met, mgr))
+        out.append("  └──────┴────────┴────────┴────────┴──────────┘")
+        p = os.path.join(self.tmp.name, self.slug + ".table")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(out) + "\n")
+        return p
+
+    def goal_payload(self, rows):
+        """A GOAL-tier payload: `Topic / Goal / Task | Session | Status | Phase | Met`.
+
+        The exact frame `manager-predispatch --write-payload` renders for the goal
+        tier — different columns from the topic tier's, which is the shape the first
+        `_sweep_rows` missed.
+        """
+        out = ["┌────┬────┬────┬────┬────┐",
+               "│ Topic / Goal / Task │ Session │ Status │ Phase │ Met │",
+               "├────┼────┼────┼────┼────┤"]
+        for name, sess, status, phase, met in rows:
+            out.append("│ %s │ %s │ %s │ %s │ %s │" % (name, sess, status, phase, met))
+        out.append("└────┴────┴────┴────┴────┘")
+        p = os.path.join(self.tmp.name, self.slug + ".table")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(out) + "\n")
+        return p
+
+    # --- the numerator ---------------------------------------------------------
+
+    def test_tokens_sums_parent_and_subagent_files(self):
+        self.open_round()
+        self.transcript(self.session + ".jsonl",
+                        [self.rec("msg_p", 100, self.started + 100)])
+        self.transcript(os.path.join(self.session, "subagents", "a.jsonl"),
+                        [self.rec("msg_a", 200, self.started + 90)])
+        rc, out = self.cli("--tokens", "--topic", self.topic, "--session", self.session)
+        self.assertEqual(rc, 0)
+        # 300, not 100: the parent alone omits the subagent leg.
+        self.assertEqual(out.strip(), "300")
+
+    def test_tokens_dedups_by_message_id(self):
+        self.open_round()
+        # One assistant message spans several records that repeat `usage` verbatim.
+        self.transcript(self.session + ".jsonl",
+                        [self.rec("msg_same", 100, self.started + 100),
+                         self.rec("msg_same", 100, self.started + 99),
+                         self.rec("msg_other", 50, self.started + 98)])
+        rc, out = self.cli("--tokens", "--topic", self.topic, "--session", self.session)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "150")
+
+    def test_tokens_windows_the_previous_round(self):
+        self.open_round()
+        self.transcript(self.session + ".jsonl",
+                        [self.rec("msg_before", 999, self.started - 60),
+                         self.rec("msg_inside", 42, self.started + 60),
+                         self.rec("msg_after", 777, self.ended + 10)])
+        rc, out = self.cli("--tokens", "--topic", self.topic, "--session", self.session)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "42")
+
+    def test_tokens_first_tick_is_baseline(self):
+        # No previous round: `n/a (baseline)`, never `0`.
+        self.first_tick()
+        rc, out = self.cli("--tokens", "--topic", self.topic, "--session", self.session)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "n/a (baseline)")
+
+    def receipt(self):
+        with open(os.path.join(self.tmp.name, self.slug + ".json"), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_start_carries_the_previous_round_started_at(self):
+        # The core of the fix: `start()` reads the prior receipt and carries its
+        # `round_started_at` into `previous_round_started_at`. If that carry
+        # regressed, `--tokens` would silently print `n/a (baseline)` forever and no
+        # other test would fail — `open_round()` hand-writes the field.
+        self.cli("--start", "--topic", self.topic)
+        first = self.receipt()
+        self.assertNotIn("previous_round_started_at", first)
+        self.cli("--start", "--topic", self.topic)
+        second = self.receipt()
+        self.assertEqual(second["previous_round_started_at"], first["round_started_at"])
+
+    def test_tokens_without_a_round_refuses(self):
+        rc, out = self.cli("--tokens", "--topic", self.topic, "--session", self.session)
+        self.assertEqual(rc, 2)
         self.assertEqual(out, "")
+
+    def test_tokens_with_no_transcript_files_refuses(self):
+        # A missing transcript must not read as "spent nothing".
+        self.open_round()
+        rc, out = self.cli("--tokens", "--topic", self.topic, "--session", self.session)
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "")
+
+    # --- the denominator -------------------------------------------------------
+
+    def test_count_prints_baseline_when_no_prev(self):
+        self.payload([("A", "done", "done", "SC 2/2", "OK")])
+        rc, out = self.cli("--count", "--topic", self.topic)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "n/a (baseline)")
+
+    def test_snapshot_then_count_reports_a_moved_row(self):
+        self.payload([("A", "done", "done", "SC 2/2", "OK"),
+                      ("B", "ready", "exec", "SC 1/2", "OK")])
+        self.cli("--snapshot", "--topic", self.topic)
+        self.payload([("A", "done", "done", "SC 2/2", "OK"),
+                      ("B", "waiting", "exec", "SC 1/2", "OK")])
+        rc, out = self.cli("--count", "--topic", self.topic)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "1")
+
+    def test_count_ignores_the_manager_column(self):
+        # A Manager-column churn (`STALE → OK`) is liveness, not change.
+        self.payload([("A", "done", "done", "SC 2/2", "STALE")])
+        self.cli("--snapshot", "--topic", self.topic)
+        self.payload([("A", "done", "done", "SC 2/2", "OK")])
+        _, out = self.cli("--count", "--topic", self.topic)
+        self.assertEqual(out.strip(), "0")
+
+    def test_count_is_zero_on_no_change(self):
+        rows = [("A", "done", "done", "SC 2/2", "OK")]
+        self.payload(rows)
+        self.cli("--snapshot", "--topic", self.topic)
+        self.payload(rows)
+        _, out = self.cli("--count", "--topic", self.topic)
+        self.assertEqual(out.strip(), "0")
+
+    def test_count_reads_the_goal_tiers_own_frame(self):
+        # The goal tier renders `Topic / Goal / Task | Session | Status | Phase | Met`,
+        # not the topic tier's `Goal | Status | Phase | Met | Manager`. Recognising
+        # only the latter made a goal-tier `--count` read 0 on every tick, so the
+        # headline criterion could never fire.
+        name = "Manager Rounds Cost What They Change"
+        self.goal_payload([(name, "—", "progressing", "—", "0/3")])
+        self.cli("--snapshot", "--topic", self.topic)
+        self.goal_payload([(name, "—", "progressing", "—", "1/3")])
+        rc, out = self.cli("--count", "--topic", self.topic)
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "1")
+
+    def test_count_refuses_an_unparseable_frame(self):
+        # A shape change must error, never read as `0 moved` — the silent zero this
+        # counter exists to avoid.
+        self.payload([("A", "done", "done", "SC 2/2", "OK")])
+        self.cli("--snapshot", "--topic", self.topic)
+        with open(os.path.join(self.tmp.name, self.slug + ".table"),
+                  "w", encoding="utf-8") as fh:
+            fh.write("not a table\n")
+        rc, out = self.cli("--count", "--topic", self.topic)
+        self.assertEqual(rc, 2)
+        self.assertEqual(out, "")
+
+    def test_count_does_not_re_snapshot_before_diffing(self):
+        # The load-bearing order: snapshot → sweep → diff. A `--count` that
+        # re-snapshotted first would overwrite `.prev` and read 0 forever.
+        self.payload([("A", "done", "done", "SC 2/2", "OK")])
+        self.cli("--snapshot", "--topic", self.topic)
+        self.payload([("A", "waiting", "done", "SC 2/2", "OK")])
+        _, first = self.cli("--count", "--topic", self.topic)
+        _, second = self.cli("--count", "--topic", self.topic)
+        self.assertEqual(first.strip(), "1")
+        self.assertEqual(second.strip(), "1")
+
+
+    def test_payload_file_matches_the_producer_per_tier(self):
+        # The defect this pins: `render_cached()` opened a `.sweep` path no goal-tier
+        # round writes, so a goal-tier round printed a denominator nothing produced.
+        goal = self.m.payload_file(self.topic, "goal")
+        self.assertTrue(goal.endswith(self.slug + ".table"), goal)
+        topic = self.m.payload_file(self.topic, "topic")
+        self.assertTrue(topic.endswith(self.slug + ".sweep"), topic)
 
 
 if __name__ == "__main__":
