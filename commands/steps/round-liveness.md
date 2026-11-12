@@ -42,7 +42,7 @@ When: every round, before the pre-dispatch gate
   **Leg `mcp` is ONE tool call, and it must actually be made.** `answer_permission` with a sentinel `request_id` that no worker holds. The server finds no park, consults the wrapper (which returns "consulted, no answer" without issuing a POST for an id it does not hold), and replies with the foreign-park message — **that reply is the reach**, and it is the only place the `mcp` leg is written.
 
   ```
-  mcp__supervisor__answer_permission(request_id="answer-path-reach-sentinel", behavior="deny")
+  mcp__supervisor__answer_permission(agent_id="answer-path-reach-sentinel", request_id="answer-path-reach-sentinel", behavior="deny")
   ```
 
   ⚠️ **On the current server, any `answer_permission` call writes this leg — but a manager that answers no parks writes nothing, so the call is still required.** The Go handler records the reach **on entry**, before decoding arguments or looking the request id up (`claude-wrapper/pkg/roster_mcp.go` `answerPermission`). ⚠️ **An earlier version of this paragraph said the opposite** — that real parks settle on another arm and never write the leg. That was true of the retired JS `server/supervisor.mjs` and is false here; it was carried over by mistake.

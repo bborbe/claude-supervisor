@@ -37,8 +37,10 @@ When: every tick — arm `ScheduleWakeup` FIRST, before the read half
   **Leg `mcp` is ONE tool call.** `answer_permission` with a sentinel `request_id` that no worker holds; the server finds no park, consults the wrapper, replies with the foreign-park message, and **that reply writes the reach**. If the call is refused before it reaches the server — a classifier denial, the outage case the Impact names — no record is written, which is the correct outcome.
 
   ```
-  mcp__supervisor__answer_permission(request_id="answer-path-reach-sentinel", behavior="deny")
+  mcp__supervisor__answer_permission(agent_id="answer-path-reach-sentinel", request_id="answer-path-reach-sentinel", behavior="deny")
   ```
+
+  ⚠️ **All three arguments are REQUIRED, `agent_id` included.** The tool's schema declares `{agent_id, request_id, behavior}` required, so a call naming only `request_id` is **rejected by the MCP layer before the handler runs** — no reach is written, and the manager sees `agent_id and request_id are required`. ⚠️ This step previously documented the two-argument form, which cannot work; measured 2026-11-12, a manager following it literally got the validation error and no leg. A sentinel `agent_id` is enough: the handler records the reach, then replies `unknown session`.
 
   ⚠️ **On the current server this leg is written by ANY `answer_permission` call, real park or sentinel.** The Go handler (`claude-wrapper/pkg/roster_mcp.go` `answerPermission`) records the reach **on entry**, before it decodes its arguments or looks the request id up — so a manager that answered a real park this round already wrote the leg. ⚠️ **This paragraph previously claimed the opposite**, carrying over the JS server's settle-path reasoning ("a real park never reaches the foreign-park arm"); that was true of the retired `server/supervisor.mjs` and is **false of the server the fleet runs**. The sentinel is still required, because a manager that answers no parks would otherwise write nothing.
 
