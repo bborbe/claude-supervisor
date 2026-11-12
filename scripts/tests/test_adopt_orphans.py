@@ -75,10 +75,25 @@ class Base(unittest.TestCase):
         self.registry_dir = os.path.join(self.tmp, "registry")
         self.heartbeat_dir = os.path.join(self.tmp, "heartbeat")
         self.subjects_dir = os.path.join(self.tmp, "worker-manager")
-        for path in (self.registry_dir, self.heartbeat_dir, self.subjects_dir):
+        # ⚠️ **The stand-down store must never be the operator's real one.** A
+        # `<branch>--<slug>.stopped` marker there would skip a case for the wrong reason,
+        # and a case that planted one would stand a live manager down.
+        self.state_dir = os.path.join(self.tmp, "sweep-gate")
+        for path in (self.registry_dir, self.heartbeat_dir, self.subjects_dir, self.state_dir):
             os.makedirs(path)
+        # ⚠️ **Both halves of the store redirection.** `run_script()` passes the env var to
+        # the subprocess, and the in-process `ao.main()` cases read the module attribute —
+        # which is captured at import, so the env var alone cannot move it. Without this a
+        # real `goal--manager-layer.stopped` in the operator's store would skip a case for
+        # a reason the case never set up.
+        self._saved_state = ao.ml.STATE_DIR
+        ao.ml.STATE_DIR = self.state_dir
+        self.addCleanup(self._restore_state)
         self.claims_file = os.path.join(self.tmp, "ownership-claims.json")
         self._pids = 0
+
+    def _restore_state(self):
+        ao.ml.STATE_DIR = self._saved_state
 
     def spawn(self, session_id, parent=None, role=None):
         """A spawn ledger row. `role` is written only when given.
@@ -150,6 +165,7 @@ class Base(unittest.TestCase):
             + list(extra),
             capture_output=True,
             text=True,
+            env=dict(os.environ, MANAGER_LIVENESS_STATE_DIR=self.state_dir),
         )
 
     def holders(self):
@@ -509,6 +525,63 @@ class Parked(Base):
 
     def test_a_worker_with_no_registry_record_is_not_parked(self):
         self.assertEqual(ao.parked_workers(["nobody"], {}), [])
+
+
+class StoodDown(Base):
+    """SC4 — a stood-down subject's stranded workers are not adopted, and the skip is named.
+
+    `/supervisor:stop` says the subject's work is not to be picked up; adopting its
+    workers would hand that work to a new owner and re-open it by another door. The skip
+    must be REPORTED: a silent one is indistinguishable from a leg that found nothing.
+    """
+
+    def marker(self, name):
+        with open(os.path.join(self.state_dir, name), "w", encoding="utf-8") as fh:
+            fh.write("2026-11-12T20:45:58+0100\n")
+
+    def test_a_stood_down_subject_is_skipped_and_named(self):
+        self.spawn(WORKER, parent=EXITED)
+        self.live(WORKER)
+        self.subject(EXITED, SUBJECT)
+        self.marker("goal--manager-layer.stopped")
+
+        proc = self.run_script("--json")
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rows = json.loads(proc.stdout)
+        self.assertEqual(rows[0]["adopted"], [])
+        self.assertEqual(rows[0]["skipped"]["subject"], SUBJECT.lower())
+        self.assertEqual(rows[0]["skipped"]["marker"], "goal--manager-layer.stopped")
+        self.assertEqual(self.holders(), {})
+
+    def test_the_text_line_names_the_subject_and_the_marker(self):
+        self.spawn(WORKER, parent=EXITED)
+        self.live(WORKER)
+        self.subject(EXITED, SUBJECT)
+        self.marker("goal--manager-layer.stopped")
+
+        proc = self.run_script()
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(
+            'skipped: manager %s — subject "%s" stood down (goal--manager-layer.stopped)'
+            % (EXITED[:8], SUBJECT.lower()),
+            proc.stdout,
+        )
+        self.assertNotIn("workers adopted", proc.stdout)
+
+    def test_clearing_the_marker_adopts_again(self):
+        """The other direction — a skip that fires on everything passes the first two."""
+        self.spawn(WORKER, parent=EXITED)
+        self.live(WORKER)
+        self.subject(EXITED, SUBJECT)
+
+        proc = self.run_script("--json")
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rows = json.loads(proc.stdout)
+        self.assertEqual(rows[0]["adopted"], [WORKER])
+        self.assertNotIn("skipped", rows[0])
 
 
 if __name__ == "__main__":
