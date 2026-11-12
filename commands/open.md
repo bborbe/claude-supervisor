@@ -214,7 +214,7 @@ Writing them is the point, not a side effect. The next batch reads the fields in
 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/answer-path-check.py" --session-id "$CLAUDE_CODE_SESSION_ID"
 ```
 
-This is the same probe `server/supervisor.mjs`'s `spawnAgent` enforces, so a spawn that skips this step is still refused — this step exists so the refusal is seen before the row is opened rather than as an error after it. A headless worker's prompts park with **this** session and die unanswered after 15 minutes (§ Spawn a worker item 6, constraint (a)).
+The plugin's JS `server/supervisor.mjs` enforces this probe — but that is the **drill** surface. The live Go daemon has no answer-path guard, so a skipped probe is **not** caught downstream. A headless worker's prompts park with **this** session and die unanswered after 15 minutes (§ Spawn a worker item 6, constraint (a)).
 
 ⚠️ **A machine-written role is indistinguishable from an operator-written one on disk.** Nothing in the frontmatter records who decided. So **print every auto-filled row distinctly** (`🏷️ filled now` if classified, `🏷️ defaulted <field>=<value>` per defaulted field, nothing if on disk) instead of folding it into the opened count. That report line is the only provenance this decision has, and it exists for exactly one read — the first one, while objecting is still cheap.
 
