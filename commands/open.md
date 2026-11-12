@@ -602,7 +602,7 @@ The rule that *produces* the value is not restated here — its home is matrix R
 
 **Do NOT add `policy` while `defaultMode` is `auto`** — `auto` is in `POLICY_UNREACHABLE_MODES`, so the spawn refuses a named policy. Omit it; the overlay needs `acceptEdits`.
 
-**`interactive` is the debug escape hatch.** Pass `interactive=true` to watch a worker live, `interactive=false` to force one headless worker; it overrides the fleet default for that spawn. ⚠️ **Local rows only.** ⚠️ **Not on a `role: agent` spawn** — the server refuses `role: agent` together with `interactive=true`, so the hatch reaches only a spawn that passes no `role`, which this file never does.
+**`interactive` is the debug escape hatch.** Pass `interactive=true` to watch a worker live, `interactive=false` to force one headless worker; it overrides the fleet default for that spawn. ⚠️ **Local rows only.** ⚠️ **Never on a `role: agent` spawn** — the server does **not** refuse the pair (a refusal in `server/supervisor.mjs` would be dead code: the live `spawn_agent` is the Go `claude-wrapper` daemon), so nothing stops it at the call boundary and the mistake reaches disk. `scripts/check-spawn-ledger.py` is what catches it, after the fact, as a `role: agent` + `mode=interactive` record.
 
 Requires `mcp__supervisor__*` in this session — its absence fails silently.
 

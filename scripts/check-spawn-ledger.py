@@ -156,10 +156,11 @@ def role_mode_offenders(recs, since):
     the same ground as above — a resume is not a new-worker decision, and a resumed
     agent row's recorded mode describes the session it continued, not a fresh choice.
 
-    A record whose `role` is absent is NOT an offence: the field arrived with this
-    ruling, so every older record lacks it, and failing them would make the gate
-    unusable against any ledger that predates the field — the same reason a missing
-    `mode_source` is not an offence in `offenders`.
+    A record whose `role` is absent is NOT an offence: the field predates this ruling
+    (the ledger carried it by 2026-10-06), so only a record written before the field
+    existed carries null — and failing those would make the gate unusable against any
+    older ledger, the same reason a missing `mode_source` is not an offence in
+    `offenders`.
     """
     for path, record in recs:
         if record.get("resumed_from"):
