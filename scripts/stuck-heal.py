@@ -22,6 +22,15 @@ The ladder, and why it stops:
   resumed already → reopen as an INTERACTIVE tab. The first resume did not hold,
                     so the cause is the channel, not the blip.
 
+⚠️ **`idle-no-wait` is not a death and takes the same ladder.** A headless worker
+whose turn ended with no declared wait and whose transcript has not moved for two
+fleet rounds is idle rather than dead: the fleet's own end-of-life
+(`reap-idle-headless.py`) closes its process at 15 minutes and nothing resumed it,
+so the task sits with open boxes and no live owner. The remedy is the same fresh
+process on the SAME session id, then a tab if that did not hold. The decision
+lives here rather than in the drive leg so `fleet-drive` and the attention
+watcher cannot drift into two ladders.
+
 ⚠️ There is no third rung, and that is structural rather than an omission. The
 spawn ledger is keyed by session id and a resume keeps the SAME id, so a resume
 OVERWRITES its record in place: the ledger can say "resumed at least once" and
@@ -66,7 +75,13 @@ ACTION_REPORT_ONLY = "report-only"
 # cause exists to name.
 KIND_STREAM_CLOSED = "stream-closed"
 KIND_PERMISSION_CHANNEL = "permission-channel"
-HEALABLE_KINDS = (KIND_STREAM_CLOSED, KIND_PERMISSION_CHANNEL)
+# ⚠️ **`idle-no-wait` is the fleet round's cause, not the watcher's.** The watcher
+# raises `stuck:` only on a death it can observe; a worker that simply stopped —
+# turn ended, no declared wait, transcript frozen for two rounds — raises no gate at
+# all, which is the gap this kind closes. It is healable for the same reason the
+# deaths are: one fresh process on the same session id, bounded by the same ladder.
+KIND_IDLE_NO_WAIT = "idle-no-wait"
+HEALABLE_KINDS = (KIND_STREAM_CLOSED, KIND_PERMISSION_CHANNEL, KIND_IDLE_NO_WAIT)
 
 _SPAWN_LEDGER = None
 

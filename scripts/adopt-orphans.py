@@ -117,8 +117,13 @@ def subject_of(session_id, subjects_dir=SUBJECTS):
     return normalise(record.get("subject")) or None
 
 
-def live_session_ids(registry_dir=None, heartbeat_dir=None):
+def live_session_ids(registry_dir=None, heartbeat_dir=None, registry_out=None):
     """Registry ∪ heartbeat as a set of session ids, or None when a store is unreadable.
+
+    `registry_out` is an optional dict this fills with the registry records it read, so a
+    caller that also needs a worker's own `status` does not re-read the same store. It is
+    an out-parameter rather than a second return value so every existing caller and test
+    keeps its signature.
 
     None is not "nothing is live" -- it is unknown, and the caller must refuse rather than
     adopt. A missing registry would otherwise read every manager as exited and hand its
@@ -136,6 +141,8 @@ def live_session_ids(registry_dir=None, heartbeat_dir=None):
     heartbeats = lw.read_live(store, ttl=lw.TTL_SECONDS)
     if heartbeats is None:
         return None
+    if registry_out is not None:
+        registry_out.update(registry)
     live = set(registry)
     for stamp in heartbeats:
         session_id = stamp.get("session_id")
@@ -172,6 +179,29 @@ def stranded_workers(ledger, live):
             continue
         out.setdefault(parent, []).append(session_id)
     return {parent: sorted(workers) for parent, workers in out.items()}
+
+
+def parked_workers(workers, registry):
+    """The adopted workers parked on a prompt whose responder is gone — E13's population.
+
+    ⚠️ **Adoption gives a worker an owner for its NEXT gate; it does not answer the one it
+    is sitting on.** A parked prompt is held by the spawning session's own server process,
+    so when that process exits the request has no responder at all: the worker waits out
+    the 15-minute auto-deny and then continues on a denial nobody was ever asked about.
+    The recovery is therefore a RESUME, not a claim — the fresh process re-raises the
+    request against the live spawner the adoption just named.
+
+    ⚠️ **`waiting` is the registry's own word for parked**, the same field
+    `manager-attention-watch.py` reads for `registry:waiting`. A worker that is `busy` is
+    mid-turn and a worker that is `idle` is between turns; neither is waiting on an answer
+    that will never come, so neither belongs here.
+    """
+    out = []
+    for worker in workers:
+        record = registry.get(worker) or {}
+        if isinstance(record, dict) and record.get("status") == "waiting":
+            out.append(worker)
+    return out
 
 
 def already_owned(worker, claims, live):
@@ -290,7 +320,8 @@ def main(argv=None):
         )
         return 1
 
-    live = live_session_ids(args.registry_dir, args.heartbeat_dir)
+    registry = {}
+    live = live_session_ids(args.registry_dir, args.heartbeat_dir, registry)
     if live is None:
         sys.stderr.write(
             "adopt-orphans: registry or heartbeat store unreadable -- liveness is unknown, "
@@ -339,6 +370,7 @@ def main(argv=None):
                 "workers": workers,
                 "adopted": adopted,
                 "held": held,
+                "parked": parked_workers(workers, registry),
             }
         )
 
@@ -366,6 +398,15 @@ def main(argv=None):
             print(
                 "%d workers already held by a live manager (exited manager %s)"
                 % (len(row["held"]), sid8(row["exited"]))
+            )
+        # ⚠️ A parked worker is the adoption's LOOSE END, and it is printed as its own
+        # line so the round cannot read "adopted: 1" as "recovered". The claim routes the
+        # worker's next gate; the prompt it is sitting on died with the spawner, so the
+        # recovery is a resume (E13).
+        for worker in row["parked"]:
+            print(
+                "  parked: %s -- its prompt died with the spawner; resume it"
+                % sid8(worker)
             )
 
     # Loud on the count, so an empty run reads as "nothing stranded" rather than as a
