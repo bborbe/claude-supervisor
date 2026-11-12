@@ -7,7 +7,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MAJOR version when you make incompatible API changes,
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
-## Unreleased
+## v0.290.2
 
 - fix: **the nudge gate joins a `.sent` record to its drafted `TO:` recipients on the normalised name, so a decorated record entry no longer reads as a lost send.** Measured 2026-11-11 on round `2026-11-11T20-56-50Z`: the round's `.sent` carried `⚙ Serve the git-rest Protocols vault-api Clients Still Need` while the payload's `TO:` line carried the same name **undecorated**, and `artifact_failures()`'s raw `name in drafted` intersection reported `nudges: drafted 6 · sent 5 · missing 1 · unexpected sent 1`, rc=1 — a lost send *and* an over-send manufactured out of one correctly-sent nudge, which the round then "repaired" by rewriting its own record five seconds later. Both sides now strip a leading `^[^\w(]+` run and casefold, mirroring `fleet-board.py`'s `_norm_session_name`; the `drafted` list stays raw and first-seen-deduped, so two genuinely distinct recipients are not collapsed into one denominator. ⚠️ The reproduction is a **constructed** fixture, not the round's own `.sent` — that file was overwritten at 21:20:46Z and already read `missing 0` against the unfixed gate, so it could never have served as a "before". Change set: `scripts/check-drive-nudges-sent.py`, `scripts/tests/test_check_drive_nudges_sent.py`, `CHANGELOG.md`.
 
