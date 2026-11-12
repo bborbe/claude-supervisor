@@ -88,3 +88,37 @@ It prints `debt: <step>` per open step and exits **12** while any step is owed, 
 - **Does NOT catch: a round that skips a step and reaches neither this check nor a gated leg.** The debt is written by `check()` **and by `--debt`**, so a round that runs any of the three gated legs records its own skip even when it never reaches the tail. The call sites that write it are **six**: this check (row 19), the three gated legs (rows 5 / 5b / 5c), the `--debt` call inside `output-shape.md` item 13 (row 20), and `--abandon`. Item 13 runs on every tick, so a round that skips its sweep but still renders its output records its own skip there. A round that makes *none* of those six calls — no gated leg, no render, no tail, no abandon — records nothing of its own, and `--debt` fires on the round after it only when an *earlier* evaluation left the debt open. Read the two halves separately: the **read** never depended on the tail having run, and the **write** now needs only one of six calls rather than the one at the end. That residual is why the arm is never blocked and why `fleet-digest.py --check` still exists — the debt carries a skip that was seen, it does not manufacture one that nothing looked at.
 - **Does NOT catch: a round that skipped `--start` itself.** The previous round's `round_started_at` and `fields` survive, the new arm and digest are recorded into that stale receipt, and both predicates resolve against the *previous* window — so one such round can read green. It is bounded: the stale window lapses within `period + 180` (≈18 min at a 15-minute cadence), so at most one round is masked before `skipped: receipt` starts firing. Closing it needs a witness outside the receipt — a per-round id compared against the `.arms` ring — and a wrong guess there produces a false red on a healthy round, which is the failure this whole check exists to prevent. Named here rather than fixed blind.
 - **Does NOT catch: a round that never ran at all** — a hand-assembled substitute never reads this router table, so no tail row fires. That shape is `scripts/fleet-digest.py --check`'s job: it ages the newest digest independently of any round, and re-fires while the age keeps rising (`scripts/fleet-digest.py` § `--check`). Neither check substitutes for the other.
+
+## The closing liveness beat — so a round that outruns its limit never ends reading `STALE`
+
+The head arm in `commands/steps/re-arm.md` is the round's only liveness write, so a round long enough that its tail sits past `period + SLACK` reaches its own end with the record already aged past the limit — a live, working manager reading `STALE` to every session that checks `--state` mid-round. This section writes the round's second beat.
+
+⚠️ **After the receipt `--check` above, never before it.** That check is what proves the round ran its legs; a beat written ahead of it would make a skipped leg invisible. Like every check on this page it is a report, not a brake: the arm runs on `--debt` exit `0`, `12` and `2` alike.
+
+⚠️ **`--beat tail` is load-bearing, not cosmetic.** `observed_period()` is a p90 capped at 2.5× the median, so two *unmarked* beats in one round make the gap population `[D, I−D]`, the median collapses to the smaller gap, and the cap lands below the round-to-round gap — a false `STALE` on every quiet round. `observed_period()` therefore counts **head beats only**, and the marker is the only honest discriminator: a tail sits wherever the round happened to end, so gap size cannot tell the two apart. **Do not drop the marker.**
+
+⚠️ **This beat does not pay the `re-arm` step.** `manager-receipt.py`'s `rearm_shape` counts **head beats only**, so a round that skipped its head arm still reports `skipped: re-arm` after this tail runs — the closing beat cannot clear that debt. That is deliberate: the debt exists to catch a round that never armed, and a closing beat is not an opening one.
+
+⚠️ **This is the fleet round's only CONDITIONAL arm, and it is why there is no allow-list to copy.** The head arm arms unconditionally and reads no state at all, so the tail reads `--state` itself. Only `OK`, `STALE`, `UNARMED` and `INVALID` arm. `STOPPED`, `SLEEPING`, `WRONG-BRANCH` and an empty reading do not — `arm()` removes `<slug>.sleeping` unconditionally (`scripts/manager-liveness.py` § `arm`, `:1076`), so an unguarded tail arm would wake a date-gated subject mid-round. A `.stopped` subject needs no guard here: `arm()` never touches that marker (`:1002`) and only `--resume` clears it (`:1067`).
+
+⚠️ **Never `--resume`.** That verb is the explicit "this subject is being restarted" signal; a liveness record is not a restart, and passing it would clear a stand-down marker a deliberate stop wrote.
+
+⚠️ **`--interval` is required, and it is the head's clamped value.** `--arm` errors with `--arm needs --interval > 0` (`scripts/manager-liveness.py:1463`), so the tail passes the same clamped seconds `re-arm.md` passed at the head. Omit it and the step fails on every round.
+
+```bash
+STATE="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-liveness.py" --state --subject "Fleet Manager" --branch fleet 2>/dev/null | cut -f1)"
+case "$STATE" in
+OK|STALE|UNARMED|INVALID)
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-liveness.py" --arm --subject "Fleet Manager" --branch fleet --interval "<clamped-seconds>" --beat tail
+;;
+*)
+echo "tail beat skipped: state=${STATE:-none}"
+;;
+esac
+```
+
+⚠️ **Keep the arm on one line, starting at column 0 with `python3`.** The block above is written that way deliberately: the invocation stays greppable as a single match, and a backslash continuation puts the beat flag on the next line, where a reader looking for the arm will not see it.
+
+⚠️ **Two arms per round halve the ring's round history.** `ARMS_KEEP = 12` (`:200`) covers six rounds instead of twelve, so `observed_period()`'s p90 runs over five head gaps rather than eleven. That still clears the ≥4-head / ≥3-span floor (`:498–503`), so the period keeps resolving — a consequence to know, not a defect to fix.
+
+⚠️ **This beat does not shorten a round.** A round longer than the limit still reads `STALE` for its duration; what the tail fixes is the reading **after** it, and the wait that follows, because the clock restarts at the round's end. A mid-round beat would shorten the gap instead — that is a different change and is not made here.
