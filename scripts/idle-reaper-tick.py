@@ -95,7 +95,7 @@ def tick(sessions_dir=None, dry_run=False, reaper=None, reaper_path=REAPER, clos
     return rows, ok
 
 
-def summary_line(rows, dry_run=False):
+def summary_line(rows):
     """The tick's accounting, derived from the per-session lines it just wrote.
 
     `rows` IS those lines, so each count is a filter over them rather than a second tally
@@ -104,9 +104,11 @@ def summary_line(rows, dry_run=False):
     `close-worker.py`, so there is no no-wait close path in this tick and the second count
     is 0 by construction. It is printed anyway: a future no-wait path then shows up as a
     non-zero instead of silently redefining the first count.
+
+    The `dry-run` marker is the caller's to prefix, not this function's: it describes the
+    run, while every count here is the same whether or not anything was signalled.
     """
     closed = [row for row in rows if row[2] in ("closed", "would-close")]
-    mode = " dry-run" if dry_run else ""
     return (
         f"candidates={len(rows)} "
         f"closed {len(closed)} past the 15-min trigger · closed 0 with no wait"
@@ -141,7 +143,7 @@ def main(argv=None):
         print(f"{stamp} idle-reaper-tick session={session_id} verb={verb} outcome={outcome}")
     # Accounting, reconciled against the per-session lines this tick just wrote.
     mode = " dry-run" if args.dry_run else ""
-    print(f"{stamp} idle-reaper-tick{mode} {summary_line(rows, args.dry_run)}")
+    print(f"{stamp} idle-reaper-tick{mode} {summary_line(rows)}")
     return 0 if ok else 1
 
 

@@ -176,7 +176,7 @@ class TestMain(unittest.TestCase):
 
     def test_a_dry_run_summary_counts_would_close_as_a_close(self):
         rows = [("sid-a", "reap", "would-close"), ("sid-b", "reap", "watcher-alive")]
-        self.assertIn("candidates=2 closed 1 past the 15-min trigger", tick_mod.summary_line(rows, dry_run=True))
+        self.assertIn("candidates=2 closed 1 past the 15-min trigger", tick_mod.summary_line(rows))
 
     def test_a_missing_vault_cli_is_a_fault_not_a_quiet_tick(self):
         """Measured 2026-11-10: with no `vault-cli` on PATH, every candidate reads
