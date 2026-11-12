@@ -178,6 +178,28 @@ class CheckSpawnLedgerTest(unittest.TestCase):
             result = run(fx.url)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_resumed_agent_interactive_row_is_not_an_offence(self):
+        """Pins `role_mode_offenders`'s `resumed_from` guard. The existing resume case uses
+        `mode=headless`, so it would still pass if that guard were deleted — this is the
+        only case that exercises it on the role class."""
+        with FixtureEndpoint(ledger_rows=[row(SID, role="agent", mode="interactive",
+                                              mode_source="argument",
+                                              resumed_from="deadbeef", spawned_at=at(1))]) as fx:
+            result = run(fx.url)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_a_row_failing_both_classes_reports_both_sections(self):
+        """A row that is both `mode_source=config` and `role: agent` + `interactive` must
+        render both FAIL sections — the earlier coverage exercised this path only
+        incidentally and asserted one section."""
+        with FixtureEndpoint(ledger_rows=[row(SID, role="agent", mode="interactive",
+                                              mode_source="config", resumed_from=None,
+                                              spawned_at=at(1))]) as fx:
+            result = run(fx.url)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("with no mode decision", result.stdout)
+        self.assertIn("opened interactive", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
