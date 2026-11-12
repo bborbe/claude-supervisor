@@ -170,10 +170,14 @@ nothing, report the reason, and record this half `not-run` at key granularity.
 
 ## 4. Record the count — in the digest, not only in chat
 
-`python3 "$P/fleet-legs.py" --digest "<this round's digest>" --leg operator-flagged --count <n>`,
+`python3 "$P/fleet-legs.py" --digest "<this round's digest>" --leg operator-flagged --count <n> --invoked`,
 with `<n>` the flagged subjects this leg **declined to act on**: the tasks the batch refused,
 held or skipped, plus every goal or topic the selector reported `DEFERRED`, `WAITING`, `CARDED`
-or `UNKNOWN`. ⚠️ **`MANAGED` and `COVERED` are excluded** — a live manager already owning the
+or `UNKNOWN`. ⚠️ **`--invoked` is mandatory and is the truth about this leg, not a formality** —
+it renders `(batch invoked)`, which is what separates "the batch ran and left N" from "the batch
+never ran and N are waiting". A leg that only counted the debt without invoking
+`/supervisor:open --flagged` writes `--not-invoked` and is the read-only failure `# 3` already
+tells you to refuse. ⚠️ **`MANAGED` and `COVERED` are excluded** — a live manager already owning the
 subject, and a goal whose topic opened this round, are both the leg working correctly, and
 counting them would render a healthy round as a regression in the `# Regression metric`. The
 line's format and its not-run form have their **single home in `commands/steps/output-shape.md`

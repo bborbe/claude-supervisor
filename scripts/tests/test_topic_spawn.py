@@ -529,5 +529,42 @@ class FleetGoalManagersTest(unittest.TestCase):
             self.assertEqual(2, ts.live_goal_managers(str(vault), "", ["Alpha"]))
 
 
+class FleetManagerCeilingTest(unittest.TestCase):
+    """The ceiling reader accepts either spelling of the manager key.
+
+    Reading only the current name would return None on an operator's existing config, both
+    `ceiling is not None` guards would be skipped, and the fleet ceiling would silently
+    stop binding — on the goal-manager path that matters because the spawn is a raw
+    `wezterm cli spawn` that never reaches `resolveMaxManagers` either.
+    """
+
+    def _ceiling(self, spawn):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = pathlib.Path(d) / ".config" / "claude-supervisor"
+            cfg.mkdir(parents=True)
+            (cfg / "config.json").write_text(json.dumps({"spawn": spawn}), encoding="utf-8")
+            orig = ts.os.path.expanduser
+            ts.os.path.expanduser = (
+                lambda p: str(pathlib.Path(d) / p.lstrip("~/")) if p.startswith("~") else p
+            )
+            try:
+                return ts.fleet_manager_ceiling()
+            finally:
+                ts.os.path.expanduser = orig
+
+    def test_reads_the_current_name(self):
+        self.assertEqual(self._ceiling({"maxManagersSoft": 7}), 7)
+
+    def test_reads_the_pre_rename_name(self):
+        self.assertEqual(self._ceiling({"maxManagers": 7}), 7)
+
+    def test_the_current_name_wins_when_both_are_present(self):
+        self.assertEqual(self._ceiling({"maxManagersSoft": 7, "maxManagers": 3}), 7)
+
+    def test_zero_and_absent_are_no_ceiling(self):
+        self.assertIsNone(self._ceiling({"maxManagersSoft": 0}))
+        self.assertIsNone(self._ceiling({}))
+
+
 if __name__ == "__main__":
     unittest.main()

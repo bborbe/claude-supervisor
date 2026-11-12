@@ -58,7 +58,7 @@ export const MAX_START_DELAY_MS = 5 * 60 * 1000
 // Validation follows `resolveSpawnMode` and `resolveMaxConcurrent` exactly: every source is
 // checked, not only the winner, so a typo in config.json cannot stay invisible merely because
 // this particular spawn was paced by the environment instead. `0` is the off switch, matching
-// `spawn.maxConcurrent`'s documented meaning for the same value — an operator reaching for
+// `spawn.maxWorkerSoft`'s documented meaning for the same value — an operator reaching for
 // "turn this off" must not meet a syntax error.
 export function resolveMaxStarts({ env, file, path = 'the supervisor config' } = {}) {
   const sources = []

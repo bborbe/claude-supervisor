@@ -6,7 +6,21 @@ user-invocable: false
 
 # Readings
 
-When: every tick — take all six readings (commands in the step)
+When: every tick — take all seven readings (commands in the step)
+
+## The plugin staleness reading — who is executing an old body
+
+Every tick prints the fleet's spread across plugin versions:
+
+    plugin-stale: 21 of 43 live (8 versions · installed 0.274.1)
+
+Read the counts from the script's default render — `installed: <X> · live: <N> · stale: <S>` (plus `· unknown: <U>` when any live session carries no marker) — and the per-session rows from `python3 $P/plugin-version-census.py --json`, whose shape is `{"installed": …, "rows": [{"sid8", "name", "loaded", "state", "pane"}]}`. ⚠️ **`live` and `stale` are render counts, not JSON keys** — derive them from `rows[]` (`state == "stale"`) only if you need them programmatically, and never cite a key the payload does not carry.
+
+⚠️ **This is the only reading whose observer is not its subject, and that is the whole point.** A rule that lives inside a step body cannot detect that its own body is stale: the session holding an old body is exactly the one that never prints the new rule. Measured 2026-11-10: eight plugin versions in flight across one fleet, with the in-body staleness rules shipped in every one of them — the fleet was still spread over all eight. So the fleet round reports the spread from a session that can see it, rather than asking each session to notice itself.
+
+⚠️ **The lever is `--reload`, and this reading never runs it.** It types `/reload-plugins` into every stale session whose pane resolves — a production-touching act on live sessions, several of them mid-turn — so the round **reports the number and names the lever**; pulling it is the operator's call, not the round's.
+
+⚠️ **`unknown` is never `stale`.** A headless worker and a cluster worker may hold no local `.in_use` marker, and reporting them stale would name a fix for a session the lever cannot reach. The script draws that line itself; never re-derive it here.
 
 ## The saturation reading — the ratio, not tok/s
 
@@ -18,7 +32,7 @@ Read it from `python3 $P/fleet-board.py --json` → `saturation`, which carries 
 
 **The ratio is the signal, not tok/s.** Measured 2026-09-20 (Fleet Manager session `b700c650`): output throughput swung 629 → 905 tok/s in 45 minutes while the ratio moved only 44% → 42%. Throughput tracks whichever model happens to be mid-response at the moment of the read; the ratio does not. Print the tok/s figure beside it for context only — `~/.claude/scripts/claude-metrics.sh` reads `out_tok/s` — and never act on it as the number.
 
-**Open Questions 1 and 2 — ANSWERED 2026-10-01, and neither answer is a ratio.** Both asked whether a *ratio threshold* should trigger a spawn. The operator's design of 2026-10-01 replaces the ratio as the capacity signal outright: the trigger is the fleet-wide **worker target** (`spawn.maxConcurrent`, whose single home is `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 5 — **read the number there and never restate it here**), read as live workers against that number and printed as `workers: <live>/<target>` (Output shape item 1).
+**Open Questions 1 and 2 — ANSWERED 2026-10-01, and neither answer is a ratio.** Both asked whether a *ratio threshold* should trigger a spawn. The operator's design of 2026-10-01 replaces the ratio as the capacity signal outright: the trigger is the fleet-wide **worker target** (`spawn.maxWorkerSoft`, whose single home is `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 5 — **read the number there and never restate it here**), read as live workers against that number and printed as `workers: <live>/<target>` (Output shape item 1).
 
 - **Open Question 1 is superseded rather than answered with a threshold.** No ratio value triggers a spawn, and none is to be inferred from this line. The ratio stays a *diagnostic* — it is what tells you the fleet is saturated, or human-queued — while the target is what decides whether a manager proposes work.
 - **Open Question 2 is answered: capacity does drive action — but through the target, not through this ratio.** A manager tick below the target with no ready row proposes the next most important rows to approve (`commands/goal-loop.md` step 4). **This line itself stays read-only**, exactly as the measurement argued.

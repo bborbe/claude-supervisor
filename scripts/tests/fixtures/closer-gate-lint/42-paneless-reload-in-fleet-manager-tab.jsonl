@@ -1,0 +1,1 @@
+{"type": "assistant", "timestamp": "2026-11-11T09:30:00Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "Released supervisor v0.257.0.\n\ud83d\udc64 You: you run: `/reload-plugins` \u2014 in the Fleet Manager tab\n"}]}}

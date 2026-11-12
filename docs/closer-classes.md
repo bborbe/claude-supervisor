@@ -97,6 +97,12 @@ lint does not match are still real gates, and classifying one as a routine conti
 resume a session straight past it. The lint narrows what reaches the sweep; it does not
 change what the sweep must treat as a gate.
 
+The lint also blocks a closer from a **paneless** session (`CLAUDE_CODE_ENTRYPOINT=sdk-cli`)
+that asks the operator for a pane-only action: Shift+Tab, `/reload-plugins`, `/exit`,
+`/rename`. Nobody can take that action, so the stop is refused and the worker is told to
+route it (an `approve-run.py` card for one command, its manager otherwise). The same
+closer from a tab still reaches the sweep as an ordinary gate.
+
 ⚠️ Test 4 must exclude the closer itself. The attention feed lists a rendered
 `approve:` closer under `BLOCKED` as well as `CLOSERS`, so "not in `BLOCKED` at all"
 fails every `approve:` closer by construction and makes this table unreachable —

@@ -58,7 +58,7 @@ owns them: the cap from `resolveMaxManagers` via `scripts/propose-managers.py:re
 `live_manager_labels()` over one `fleet-board.py --json` read (the board's manager
 classification, Fleet Manager excluded). No number is restated here.
 
-⚠️ **`hard is None` is UNLIMITED, not zero** — the operator's `spawn.maxManagers: 0` off
+⚠️ **`hard is None` is UNLIMITED, not zero** — the operator's `spawn.maxManagersSoft: 0` off
 switch resolves `hardLimit: null`, and reading that as "no free slot" turns the off switch
 into permanent silence.
 
@@ -71,7 +71,7 @@ then by approved live work (more first), then by name — the ranking
 `propose-managers.py:qualify()` already applies.
 
 ⚠️ **Tasks are not in this script at all.** They spend the **worker** budget
-(`spawn.maxConcurrent`), a different cap from the manager one, so tasks and managers never
+(`spawn.maxWorkerSoft`), a different cap from the manager one, so tasks and managers never
 compete for the same slot. `/supervisor:open --flagged` keeps opening them, unchanged — the
 ordering question between tasks, goals and topics therefore has no shared budget to decide.
 

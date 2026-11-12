@@ -40,7 +40,7 @@ Exit 0 = allowed (prints `spawn-ok: <goal>` and, with `--print`, the `/superviso
 line to run). Exit 2 = usage error, which is never a verdict.
 
 ⚠️ **The fleet ceiling always wins over N.** N = 3 is a per-topic share; the fleet-wide
-`spawn.maxManagers` is the outer bound, and six topics at N = 3 would want eighteen
+`spawn.maxManagersSoft` is the outer bound, and six topics at N = 3 would want eighteen
 managers against a ceiling of ten. The cap is never raised to make room.
 
 ⚠️ **Startability is the operator's approval, read from disk, never inferred.** A goal at
@@ -291,14 +291,21 @@ def live_goal_managers(vault: str, topics_dir: str, goals: list[str]) -> int:
 
 
 def fleet_manager_ceiling() -> int | None:
-    """`spawn.maxManagers` as the server resolves it, or None when it cannot be read."""
+    """`spawn.maxManagersSoft` as the server resolves it, or None when it cannot be read.
+
+    Both spellings, current first — the same fold `resolveMaxManagers` applies. Reading only
+    the current name would return None for an operator's existing config, both `ceiling is
+    not None` guards would be skipped, and the fleet ceiling would silently stop binding.
+    """
     cfg = os.path.expanduser("~/.config/claude-supervisor/config.json")
     try:
         with open(cfg, encoding="utf-8") as fh:
             spawn = (json.load(fh) or {}).get("spawn") or {}
     except (OSError, ValueError):
         return None
-    value = spawn.get("maxManagers")
+    value = spawn.get("maxManagersSoft")
+    if value is None:
+        value = spawn.get("maxManagers")
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
     return value
@@ -610,7 +617,7 @@ def main(argv: list[str]) -> int:
     if ceiling is not None and live is not None and live >= ceiling:
         return refuse(
             REFUSE_CAP,
-            f"{live} managers live fleet-wide, ceiling spawn.maxManagers = {ceiling}. "
+            f"{live} managers live fleet-wide, ceiling spawn.maxManagersSoft = {ceiling}. "
             f"N is a per-topic share; the ceiling is the outer bound and is never raised "
             f"to make room.",
             bound="manager-cap",

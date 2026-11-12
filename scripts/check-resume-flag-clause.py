@@ -69,6 +69,11 @@ KNOWN_CLAUSES = (
     "task `status: in_progress` AND",
     "the task's **id set is non-empty**",
     "**not parked**",
+    # Reads a page field only — `stopped: true` — and no flag, no provenance. Registered
+    # 2026-11-10 with the clause it pins; the `not parked` conjunct grammar above does not
+    # apply to it, and clause 2's field-naming rule does not fire because the bullet names
+    # neither `flag` nor `approved_*`.
+    "**not stopped**",
     "**no live id on ANY id in the set**",
     "**not shared**",
     "**not on roster**",

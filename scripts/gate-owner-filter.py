@@ -243,6 +243,7 @@ purpose: see § GOAL SCOPE.
 """
 
 import argparse
+import datetime
 import glob
 import hashlib
 import importlib.util
@@ -350,10 +351,70 @@ FEED_STATE_DIR = os.environ.get("GATE_FEED_STATE_DIR") or os.path.expanduser(
 # residual class going unre-driven.
 REEMIT_SECONDS = int(os.environ.get("GATE_FEED_REEMIT_SECONDS") or 3600)
 
+# ⚠️ WHERE AN UNOWNED GATE GOES, AND WHY IT IS A DESTINATION RATHER THAN A SILENCE.
+# `unowned` used to EMIT to every manager, on the rule that "unresolvable is never
+# foreign" -- right in principle, because an unowned gate might be the reader's own.
+# It is wrong for the producer class this row is named for: a `Monitor` producer
+# (`sweep-gate`, `fleet-keeper`, `drive-escalate`) has NO spawner and NO session id,
+# which is exactly the two inputs that produce `unowned` (:789, :816) -- so no manager
+# can ever be its owner, and every manager inherits all of its traffic. Measured
+# 2026-11-11 on one goal manager: >10 foreign wakes in ~2 h, each a full model round,
+# which kept the REPL busy and starved the round cadence itself (no round in 3 h 14 min
+# against a 15-minute cadence).
+#
+# So the class is ROUTED to exactly one destination: the live Fleet Manager. The
+# fail-open limb is the whole safety property -- with no live Fleet Manager the gate is
+# emitted to every manager exactly as before, because an unresolvable destination is not
+# a licence to silence a gate. A fix that dropped the class outright would trade a flood
+# for a black hole, and the gates nobody owns would be answered by nobody.
+#
+# The fleet tier manages no subject page, so `owner.py`'s page resolution cannot answer
+# "who is the Fleet Manager" -- `scripts/fleet-register.py` writes that registration and
+# this is the reader for it. Same env overrides as the writer, deliberately: a writer
+# pointed at one directory while every reader reads another is a silent no-op.
+WORKER_MANAGER_DIR = os.path.expanduser(
+    os.environ.get("SUPERVISOR_WORKER_MANAGER_DIR")
+    or os.environ.get("WORKER_MANAGER_STATE_DIR")
+    or "~/.claude/state/worker-manager"
+)
+FLEET_BRANCH = "fleet"
+UNOWNED = "unowned"
+#: The pane's spawner IS a manager, but that manager is no longer live. The old rule emitted
+#: on the reasoning that "a dead manager cannot act on its own gate, so nothing duplicates
+#: this wake" -- right about duplication, wrong about cost: it hands the gate to EVERY
+#: manager instead of the one whose job is unowned work. Measured 2026-11-11 in SC1's
+#: after-window: one orphaned worker pane (`088ab282`, spawned 2026-11-07, ledger still
+#: `running`) was the only foreign wake left, and it arrived through this branch.
+DEAD_MANAGER = "dead-manager"
+#: Appended to a routed reason, so `--explain` and the ledger keep WHICH class was routed
+#: while the counts line can bucket them together. `unowned` -> `unowned-fleet`.
+FLEET_SUFFIX = "-fleet"
+#: The routed spelling of `unowned`, kept as its own name because it is the one the SC2
+#: criterion quotes.
+UNOWNED_FLEET = UNOWNED + FLEET_SUFFIX
+
+#: One manager's per-decision ledger. Shares the per-session root the tracked-set arm
+#: writes its `events.jsonl` into, so both arms of the same manager sit together.
+EMISSIONS_ROOT = os.environ.get("GATE_EMISSIONS_DIR") or os.path.expanduser(
+    "~/.claude/state/manager-attention-watch"
+)
+#: ⚠️ The ledger is append-only and lives for the life of the manager session, so it needs a
+#: bound. Measured 2026-11-11 on a live manager: 276 records in 15.6 minutes, i.e. ~25 k
+#: records/day (~6 MB/day) with no rotation at all — the sibling `gate-feed/<sid>.json` is
+#: pruned by `emit_decisions`, this file is not. Rotation is by SIZE and keeps the newest
+#: lines, so a window cut after a rotation still reads the recent past and only loses history
+#: older than the bound.
+EMISSIONS_MAX_BYTES = int(os.environ.get("GATE_EMISSIONS_MAX_BYTES") or 5_000_000)
+EMISSIONS_KEEP_LINES = int(os.environ.get("GATE_EMISSIONS_KEEP_LINES") or 20000)
+
 
 _SPAWN_LEDGER = None
 _SESSION_SCOPE = None
 _OWNER = None
+#: Distinguishes "the caller did not supply a fleet manager" from "the caller supplied
+#: `None`, meaning none resolved". Without it a test could not force the fail-open limb,
+#: and `None` would silently mean "go and look it up".
+_UNSET = object()
 
 
 def _owner():
@@ -578,6 +639,69 @@ def live_ids(registry_dir=REGISTRY):
     return out
 
 
+def fleet_manager(live, directory=None):
+    """The live Fleet Manager's session id, or None when none resolves.
+
+    Reads the registration `scripts/fleet-register.py` writes. Newest `resolved_at` wins,
+    and a registration whose session is not live is SKIPPED rather than used: routing the
+    unowned class to a dead session would be a black hole with extra steps — the gate would
+    leave every other manager's feed and arrive nowhere.
+
+    `live is None` (the registry could not be read) resolves nothing, which sends the
+    caller down the fail-open limb. That is the same "unknown is not empty" rule every
+    other ownership input here takes.
+    """
+    if live is None:
+        return None
+    best, best_at = None, ""
+    for path in glob.glob(os.path.join(directory or WORKER_MANAGER_DIR, "*.json")):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                rec = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(rec, dict) or rec.get("branch") != FLEET_BRANCH:
+            continue
+        sid = os.path.basename(path)[: -len(".json")]
+        if sid not in live:
+            continue
+        at = str(rec.get("resolved_at") or "")
+        if at >= best_at:
+            best, best_at = sid, at
+    return best
+
+
+def route_to_fleet(self_id, fleet, reason):
+    """`(verdict, reason)` for a gate no manager can act on, so exactly one should see it.
+
+    Every class the caller routes here shares one property: the reader cannot answer it and
+    no other manager owns it, so leaving it in every feed is cost without work. The reason
+    is preserved with `FLEET_SUFFIX` appended, so a routed row still says WHICH class it was
+    while the counts line buckets them together.
+
+    Four answers, and every one of them is deliberate:
+
+      * no `--self` — a diagnostic run, not a manager's arm: emit, exactly as before.
+        There is no reader to route FOR, and a `--pane` probe that printed nothing would
+        read as "this pane is fine".
+      * no live Fleet Manager — emit. The fail-open limb: an unresolvable destination is
+        not a licence to silence a gate.
+      * this watcher IS the Fleet Manager — emit. It is the destination.
+      * anything else — drop, so the row says where it went.
+    """
+    if not self_id or not fleet:
+        return EMIT, reason
+    routed = reason + FLEET_SUFFIX
+    if self_id == fleet:
+        return EMIT, routed
+    return DROP, routed
+
+
+def route_unowned(self_id, fleet):
+    """The `unowned` class, routed. Kept as its own name because SC2 quotes it."""
+    return route_to_fleet(self_id, fleet, UNOWNED)
+
+
 def log_items(state_dir=STATE):
     """Every item the event logs carry, newest write per item, open or closed.
 
@@ -786,17 +910,23 @@ def spawner_verdict(spawner, ledger, live):
     does not reach a verdict this path already resolved.
     """
     if not spawner:
-        return EMIT, "unowned"
+        # Unresolved, NOT foreign: the routing decision needs this watcher's own id and the
+        # live Fleet Manager, neither of which is an input here, so `verdict()` applies it
+        # via `route_unowned()`. Returning a verdict here would either duplicate that rule
+        # or let the two drift.
+        return EMIT, UNOWNED
     if not is_manager(spawner, ledger):
         return EMIT, "worker-spawner"
     if live is None:
         return EMIT, "liveness-unknown"
     if spawner not in live:
-        return EMIT, "dead-manager"
+        # Routed by `verdict()` via `route_to_fleet`, for the same reason `unowned` is: the
+        # spawner is gone, so nobody can act on this gate and every manager would inherit it.
+        return EMIT, DEAD_MANAGER
     return DROP, "peer-manager"
 
 
-def verdict(session_id, spawner, ledger, live, self_id, claims=None, scope=None):
+def verdict(session_id, spawner, ledger, live, self_id, claims=None, scope=None, fleet=None):
     """(emit|drop|exclude, reason) for one gated session.
 
     The keep-set is wide on purpose: drop ONLY on a live peer manager -- reached
@@ -813,7 +943,7 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None, scope=None)
     the only one that names the real owner.
     """
     if not session_id:
-        return EMIT, "unowned"
+        return route_unowned(self_id, fleet)
     if self_id and session_id == self_id:
         return EMIT, "self"
 
@@ -860,6 +990,19 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None, scope=None)
     call, reason = spawner_verdict(spawner, ledger, live)
     if call == DROP:
         return call, reason
+    # ⚠️ The routed limb is applied LAST, after hop 3b and after the claim block, and the
+    # placement is load-bearing rather than tidy. An earlier cut returned the routed drop
+    # HERE, and that silently broke the adoption contract: a goal manager that adopted a
+    # spawnerless pane (`own-claim`) lost the gate the moment a Fleet Manager was live,
+    # because the routed drop outranked the claim. That is the same hazard the
+    # `adopted_by_self` guards exist to prevent, reached through a new door. The file's own
+    # asymmetry is "a claim may only ADD a drop, never remove one" -- so a new drop must
+    # never be inserted AHEAD of the claim either, or the two rules contradict.
+    #
+    # Sitting here, every prior hop has already had its say: `peer-manager`, `own-worker`,
+    # `self`, the scope exclusion, `peer-manager-own`, `claimed` and `own-claim` all return
+    # before this line. What reaches it is a pane nobody owns -- which is exactly the class
+    # to route.
 
     # HOP 3b -- the GATED SESSION is itself the manager. Hop 3 reads the spawn
     # edge, and a manager's own gate has none: an operator-started manager was
@@ -900,10 +1043,14 @@ def verdict(session_id, spawner, ledger, live, self_id, claims=None, scope=None)
             if holder not in live:
                 return EMIT, "claim-dead"
             return DROP, "claimed"
+    # Nothing above resolved this pane, so the routed limb decides — LAST, for the reason
+    # in the comment above hop 3b.
+    if reason in (UNOWNED, DEAD_MANAGER):
+        return route_to_fleet(self_id, fleet, reason)
     return call, reason
 
 
-def evaluate(pane, ledger, live, items, self_id, claims=None, scope=None):
+def evaluate(pane, ledger, live, items, self_id, claims=None, scope=None, fleet=None):
     """(verdict, reason, session_id, spawner) for one pane."""
     session_id = session_for_pane(pane, items)
     # ⚠️ **Two spellings, one field, and only one of them is on the wire.** The file record
@@ -916,7 +1063,7 @@ def evaluate(pane, ledger, live, items, self_id, claims=None, scope=None):
     # would silently drop the whole fleet's gates.
     record = ledger.get(session_id) or {}
     spawner = (record.get("spawner_session_id") or record.get("parent_session")) if session_id else None
-    call, reason = verdict(session_id, spawner, ledger, live, self_id, claims, scope)
+    call, reason = verdict(session_id, spawner, ledger, live, self_id, claims, scope, fleet)
     return call, reason, session_id, spawner
 
 
@@ -1208,7 +1355,8 @@ def producer_exit(producer, returncode):
 NOT_OPEN_REASON = "not-open"
 
 
-def evaluate_panes(panes, ledger, live, items, self_id, claims, scope=None, states=None):
+def evaluate_panes(panes, ledger, live, items, self_id, claims, scope=None, states=None,
+                   fleet=_UNSET):
     """One row per `(pane, replayed)` pair.
 
     `states` is `store_states()`'s answer. A headless key the store read
@@ -1216,12 +1364,19 @@ def evaluate_panes(panes, ledger, live, items, self_id, claims, scope=None, stat
     a closed or answered card is not a gate, whoever owned it. A key the store could not
     read keeps its ownership verdict and carries `store: unread`, so `render` can say so —
     that is the fail-open branch, and it must stay visibly distinct from a live gate.
+
+    `fleet` is resolved ONCE here rather than per row: it is a directory glob plus a
+    liveness intersection, and a poll can carry dozens of panes. Passing `None` explicitly
+    means "no Fleet Manager resolved" and takes the fail-open limb; omitting it means
+    "resolve it".
     """
     states = states or {}
+    if fleet is _UNSET:
+        fleet = fleet_manager(live)
     rows = []
     for pane, replayed in panes:
         call, reason, session_id, spawner = evaluate(
-            pane, ledger, live, items, self_id, claims, scope
+            pane, ledger, live, items, self_id, claims, scope, fleet
         )
         state = states.get(pane)
         if state == STORE_NOT_OPEN:
@@ -1348,6 +1503,10 @@ def counts_line(rows):
     dropped_own = [r for r in dropped if r["reason"] == "peer-manager-own"]
     dropped_claimed = [r for r in dropped if r["reason"] == "claimed"]
     dropped_not_open = [r for r in dropped if r["reason"] == NOT_OPEN_REASON]
+    # ONE bucket for every routed class, because the bucket answers "how much left this
+    # feed for the Fleet Manager", not "which hop found it". The specific reason stays on
+    # the row (`--explain`, `--json`, and the ledger's `reason`), so nothing is lost.
+    dropped_fleet = [r for r in dropped if r["reason"].endswith(FLEET_SUFFIX)]
     excluded = [r for r in rows if r["verdict"] == EXCLUDE]
     excluded_goal = [r for r in excluded if r["reason"].startswith("foreign-goal:")]
     excluded_unknown = [r for r in excluded if r["reason"] == "owner-unknown"]
@@ -1358,6 +1517,7 @@ def counts_line(rows):
         f"dropped(peer-manager-own): {len(dropped_own)}  "
         f"dropped(claimed): {len(dropped_claimed)}  "
         f"dropped(not-open): {len(dropped_not_open)}  "
+        f"dropped(fleet-routed): {len(dropped_fleet)}  "
         f"excluded(foreign-goal): {len(excluded_goal)}  "
         f"excluded(owner-unknown): {len(excluded_unknown)}  "
         f"excluded(role-human): {len(excluded_human)}"
@@ -1382,6 +1542,9 @@ def one_shot(panes, args, ledger, live, items, claims, missing=(), scope=None):
     if args.explain:
         for pane in missing:
             print(f"no feed gate for pane {pane}")
+    ledger_error = log_emissions(rows, items + records, scope, args.self_id)
+    if ledger_error is not None:
+        print(f"STATE  emissions ledger unwritable: {ledger_error}", file=sys.stderr)
     print(counts_line(rows), file=sys.stderr)
     return 0
 
@@ -1426,6 +1589,114 @@ def emit_decisions(kept, stored, items, now, reemit_after):
         else:
             next_state[pane] = prior
     return new_panes, next_state
+
+
+def emissions_path(self_id, root=None):
+    """This manager's per-decision ledger, or None when there is no manager to key it by."""
+    if not self_id:
+        return None
+    return os.path.join(root or EMISSIONS_ROOT, self_id, "feed-emissions.jsonl")
+
+
+def gate_owner(scope, session_id):
+    """`(task, goal)` the gated session's own page declares, or `(None, None)`.
+
+    Resolved from `session-scope.py`'s reverse index rather than a second vault walk:
+    `Scope.sessions` is already `{session_id: [Entry]}` over every task page in every
+    configured vault. A session stamped on two pages, or on none, is unattributed — the
+    same answer `Scope.exclusion` gives, for the same reason, and the same fail-open
+    direction.
+
+    ⚠️ **This is a RESOLUTION, never a copy.** The attention record carries `item_id`,
+    `session_id`, `pane`, `detail`, `context` and no `task` field, so a ledger that
+    copied one would record nothing.
+    """
+    entries = (scope.sessions.get(session_id) if scope is not None else None) or []
+    titles = {entry.title for entry in entries}
+    if len(titles) != 1:
+        return None, None
+    entry = entries[0]
+    return entry.title, (entry.goals[0] if entry.goals else None)
+
+
+def trim_emissions(path, keep=None):
+    """Keep only the newest `keep` lines. Called when the file passes its size bound.
+
+    Trim IN PLACE rather than rotate to a sibling: the window is cut by `ts` from one
+    path, so a second file would make the operator join two to answer one question. The
+    cost of losing the oldest history is bounded and stated; an unbounded file's is not.
+
+    The rewrite goes through a temp file and `os.replace`, matching every other state
+    writer here — a plain truncating write would leave the ledger half-empty if the
+    process died mid-rewrite.
+    """
+    limit = keep or EMISSIONS_KEEP_LINES
+    with open(path, encoding="utf-8") as handle:
+        lines = handle.readlines()
+    if len(lines) <= limit:
+        return False
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.writelines(lines[-limit:])
+    os.replace(tmp, path)
+    return True
+
+
+def log_emissions(rows, items, scope, self_id, now=None, root=None):
+    """Append one record per DECISION to this manager's `feed-emissions.jsonl`.
+
+    The feed arm's only history. `gate-feed/<sid>.json` is a pruned current-state map —
+    `emit_decisions` drops every entry whose pane has left the kept set — so it cannot
+    answer "how many foreign gates did this manager's feed carry in the last hour", which
+    is the number this ledger exists to produce. Append-only, one line per row per poll.
+
+    ⚠️ **`ts` is not decoration, and it is why this function exists at all.** Without it
+    every count is a whole-file count against a file that lives as long as the manager
+    session, so a `0` could come from history rather than from the window being quoted.
+    The window is cut from this field.
+
+    A write that fails returns the error and is never raised: a ledger that cannot be
+    written must not take the wake path down with it.
+    """
+    path = emissions_path(self_id, root)
+    if not path:
+        return None
+    stamp = (now or datetime.datetime.now(datetime.timezone.utc)).isoformat()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            for row in rows:
+                record = newest_item_for_pane(row["pane"], items)
+                task, goal = gate_owner(scope, row.get("session_id"))
+                handle.write(
+                    json.dumps(
+                        {
+                            "ts": stamp,
+                            "decision": row["verdict"],
+                            "reason": row["reason"],
+                            "item_id": (record or {}).get("item_id"),
+                            "pane": row["pane"],
+                            "session_id": row.get("session_id"),
+                            "spawner": row.get("spawner"),
+                            "task": task,
+                            "goal": goal,
+                        },
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+        # Cheap stat, not a read: the trim only pays its cost once per bound crossing.
+        if os.path.getsize(path) > EMISSIONS_MAX_BYTES:
+            trim_emissions(path)
+        return None
+    except (OSError, TypeError, ValueError) as exc:
+        # ⚠️ Wider than `OSError` on purpose. A ledger record is built from parsed store
+        # data (`newest_item_for_pane` sorts on `ts`, `json.dumps` serialises whatever the
+        # store returned), so a malformed record raises `TypeError`/`ValueError` — and this
+        # call sits on the wake path, where a raise kills the arm instead of costing one
+        # line of instrumentation. The docstring promises the ledger cannot take the wake
+        # path down; this is what makes that true.
+        return exc
 
 
 def poll(args, items, scope=None):
@@ -1481,6 +1752,7 @@ def poll(args, items, scope=None):
     """
     state_path = feed_state_path(args.self_id, args.feed_state_dir)
     store_warned = False
+    emissions_warned = False
     polls = 0
     while True:
         proc = subprocess.run(
@@ -1545,6 +1817,25 @@ def poll(args, items, scope=None):
         )
         sys.stderr.flush()
         sys.stdout.flush()
+
+        # ⚠️ AFTER the heartbeat, deliberately. The ledger is instrumentation: if building a
+        # record raises despite `log_emissions`'s own catch, the poll's LIVENESS line must
+        # already be on disk so the arm reads as alive-with-a-gap rather than as dead.
+        #
+        # Written per poll, not per wake: the ledger records DECISIONS, and a suppressed gate
+        # is exactly the decision this row exists to make visible. A ledger written only on
+        # emit would read `0` on a quiet hour against a completely unfixed filter — the
+        # failure the criterion's candidate floor was added for.
+        # Attempted EVERY poll, reported ONCE: a transient failure that clears must resume
+        # the ledger rather than leave a permanent hole the window cannot see.
+        emissions_error = log_emissions(rows, poll_items, scope, args.self_id)
+        if emissions_error is not None and not emissions_warned:
+            emissions_warned = True
+            print(
+                f"STATE  emissions ledger unwritable: {emissions_error} — the "
+                f"window's counts will be unavailable",
+                file=sys.stderr,
+            )
 
         # ⚠️ The bound is checked BEFORE the sleep, so `--max-polls 1` is a real
         # single poll rather than one poll plus an interval of dead waiting. It
