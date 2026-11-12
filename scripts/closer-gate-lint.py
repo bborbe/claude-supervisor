@@ -187,7 +187,22 @@ OWNER_RE = re.compile(
     r"\b[0-9a-f]{8,32}\b"                        # card id, or a session-id prefix
     r"|\bmanager\b|\bsupervisor\b"               # a role that can actually be reached
     r"|⏰\s*Ends:"                                # a declared, re-checkable observable
-    r"|^\s*(?:approve|review|you run|pick)\b",   # an operator verb names the operator
+    r"|^\s*(?:approve|review|you run|pick)\b"    # an operator verb names the operator
+    # ⚠️ `later (on <trigger>):` is the `parked-wait` closer (`docs/closer-classes.md`), and
+    # the Async State Closer treats the VERB as a legal closer — the operator has deferred to
+    # a named trigger, so it names an owner exactly as `pick` does. Without this arm the lint
+    # refused a `🔴 BLOCKED` line over one, which is a false positive on a legal shape.
+    #
+    # ⚠️ **Not "the PARKED closer".** `reap-closer.py`'s `PARKED_RE` is `pick|approve` and
+    # carries an operator ruling that such a row is NOT reaped — a different, load-bearing
+    # meaning in the same repo. `parked-wait` is this shape's own class name.
+    #
+    # ⚠️ The arm is needed even though some recorded parked-waits already pass: those carry a
+    # 32-hex card id, which the first arm matches. The ones the old regex REFUSED carry a
+    # PROSE trigger — `later (on either blocker landing)`, `later (on accept edits granted)`,
+    # `later (on a free interactive worker slot)` — none of which is hex, a role, or an
+    # `⏰ Ends:`.
+    r"|^\s*later\s*\(on\b",
     re.IGNORECASE | re.MULTILINE)
 
 STORE_PROBE_ENV = "SUPERVISOR_CLOSER_GATE_LINT_STORE"
@@ -830,9 +845,13 @@ def _blocked_owner_message():
         "closer-gate-lint: this closer reports `🔴 BLOCKED` but names no owner. A block "
         "nobody owns is invisible: the fleet round can only route it to a manager or "
         "re-check an observable if the closer names one. CLAUDE.md § Async State Closer — "
-        "name the owner in the `👤 You:` line: the full 32-hex card id the operator must "
-        "answer, the manager or supervisor that owns it, or a re-checkable `⏰ Ends:` "
-        "observable. `waiting on someone` is not an owner.\n"
+        "name the owner in the `👤 You:` line. ⚠️ **All five arms `OWNER_RE` accepts**, "
+        "because this message steers what the next model writes and naming three of them "
+        "sent it to mint a card where a cheaper form already passes: the full 32-hex card "
+        "id or session-id prefix the operator must answer; the manager or supervisor that owns it; a re-checkable "
+        "`⏰ Ends:` observable; an operator verb (`pick` / `approve:` / `review:` / "
+        "`you run:`); or the `parked-wait` form `later (on <trigger>): …`. "
+        "`waiting on someone` is not an owner.\n"
     )
 
 
