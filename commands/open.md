@@ -173,8 +173,8 @@ The count is a property of the day, not of the command — **never hardcode it a
 
 Resolve the task in this order — each selected row on the batch path, the single resolved task otherwise:
 
-1. **`role:` present** → use it. Never re-derive over a value already on disk; the field exists so the decision is made once. **`role: manager` is never a spawn target** — render `👤 YOURS` and skip the row (see the manager guard below).
-2. **`role:` absent** → classify it now from the task's **body** per matrix Rule 1, then write the result.
+1. **`role:` present and non-blank** → use it. Never re-derive over a value already on disk; the field exists so the decision is made once. **`role: manager` is never a spawn target** — render `👤 YOURS` and skip the row (see the manager guard below).
+2. **`role:` absent, or present but blank** → classify it now from the task's **body** per matrix Rule 1, then write the result. A key holding `""` is the same state as no key — `vault-cli task set "<task>" role ""` writes one, and using it would open the row with no role at all.
 3. **Body gives no basis to decide** → the default (below) — never a refusal.
 
 **The classifying question and the three `human` signals are matrix Rule 1** — read them there, never restated here.
@@ -187,7 +187,7 @@ Resolve the task in this order — each selected row on the batch path, the sing
 
 **The classifier is not restated here.** The `role` → `mode` mapping is matrix Rule 2 ([`docs/role-mode-matrix.md`](../docs/role-mode-matrix.md)); the five watch-need signals it reads live in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker **item 6**. ⚠️ **This line previously described item 6 as carrying *"the asymmetry that makes `interactive` a floor rather than a tie-break"* — the rule this change flipped** — and that wording is recorded rather than quietly dropped, because a reader following it would classify exactly backwards at the one section that decides `mode`.
 
-What this file owns is the **storage and the write**: resolve `mode` per that rule, write the field, and read it back at Step 3.
+What this file owns is the **storage and the write**: resolve `mode` per that rule, write the field, and read it back at Step 3. **A blank `mode:` is absent, not a value** — resolve it per Rule 2 and write the result.
 
 ```bash
 vault-cli --vault "<vault>" task set "<task>" mode <interactive|headless>
@@ -204,7 +204,7 @@ vault-cli --vault "<vault>" task set "<task>" mode <interactive|headless>
 
 Writing them is the point, not a side effect. The next batch reads the fields instead of re-deciding, so one task cannot be classified one way today and the other way tomorrow. It also makes the call reviewable — a wrong value is visible on disk and the operator corrects it with that same one-line command.
 
-⚠️ **`role: agent` overrides a stored `mode: interactive`.** An agent row carrying none of item 6's five watch-need signals opens `headless` even when the field on disk says `interactive` (operator ruling 2026-11-07; matrix Rule 2 carries the narrowing). Rewrite the field and print `normalised mode interactive -> headless`. Every other case keeps item 6's both-ways carve-out — `human`, `manager`, and an `agent` row that *does* carry a signal all honour what is on disk.
+⚠️ **`role: agent` overrides a stored `mode: interactive`.** An agent row carrying none of item 6's five watch-need signals opens `headless` even when the field on disk says `interactive` (operator ruling 2026-11-07; matrix Rule 2 carries the narrowing). Rewrite the field and print `normalised mode interactive -> headless`. Every other case keeps item 6's both-ways carve-out — `human`, `manager`, and an `agent` row that *does* carry a signal all honour what is on disk **when that value is non-blank**.
 
 **`shipping:` is read here and passed at Step 3 — never inferred.** Pass `shipping: true` to `spawn_agent` only when the field reads `true`; omit it otherwise. Rule: § Spawn a worker item 9.
 
