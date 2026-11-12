@@ -75,9 +75,11 @@ def sessions_of(document):
     """
     if not isinstance(document, dict):
         return None
-    inner = document.get("sessions")
-    if isinstance(inner, dict):
-        return inner
+    if "sessions" in document:
+        # ⚠️ A present-but-non-object `sessions` is a shape this cannot read, and reading
+        # the wrapper as a session map would turn `swept_at` into an accused session.
+        inner = document.get("sessions")
+        return inner if isinstance(inner, dict) else None
     return document
 
 
@@ -204,7 +206,7 @@ def render(no_card, routing, unknown, carded, total, chain_error=None):
     census, and a denominator counting only detections cannot support it.
     """
     lines = [
-        f"DETECTORS  {total} sessions · no-card={len(no_card)} · routing={len(routing)}"
+        f"DETECTORS  {total} closers · no-card={len(no_card)} · routing={len(routing)}"
         f" · carded={carded} · unknown={len(unknown)}"
     ]
     lines.append("NO-CARD (parked ask, no live card in the store)")

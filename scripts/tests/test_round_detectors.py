@@ -252,10 +252,21 @@ class Main(unittest.TestCase):
         self.assertEqual(2, rc)
         self.assertIn("UNKNOWN", out)
 
+    def test_a_snapshot_wrapper_with_a_non_object_sessions_exits_two(self):
+        # Reading the wrapper as a session map would turn `swept_at` into an accused session.
+        rc, out = self._run(["--stdin"], stdin_text='{"swept_at": "x", "sessions": null}')
+        self.assertEqual(2, rc)
+        self.assertIn("UNKNOWN", out)
+
+    def test_a_snapshot_wrapper_unwraps_its_sessions(self):
+        rc, out = self._run(["--stdin"], stdin_text='{"swept_at": "x", "sessions": {}}')
+        self.assertEqual(0, rc)
+        self.assertIn("DETECTORS  0 closers", out)
+
     def test_an_empty_document_renders_a_complete_block(self):
         rc, out = self._run(["--stdin"], stdin_text="{}")
         self.assertEqual(0, rc)
-        self.assertIn("DETECTORS  0 sessions", out)
+        self.assertIn("DETECTORS  0 closers", out)
         self.assertIn("NO-CARD", out)
         self.assertIn("ROUTING", out)
 
