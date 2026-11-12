@@ -38,8 +38,18 @@ MAX_AGE=1800
 # Post one card, and FAIL LOUDLY when the post itself fails. The previous form sent every post
 # through `>/dev/null 2>&1` and ignored the exit status, so a broken `attention-ask.py` made the
 # watchdog silent in exactly the situation it exists for — a dead cadence, reported to nobody.
+#
+# ⚠️ `--producer-id` is REQUIRED here, not decoration. `attention-ask.py` defaults it to
+# `$CLAUDE_CODE_SESSION_ID`, and launchd provides no such variable — so without this flag every
+# post is REFUSED ("this item would have no producer to poll it back") and the watchdog would be
+# structurally unable to report anything. Measured 2026-11-12:
+#   post, no --producer-id → REFUSED: no --producer-id and CLAUDE_CODE_SESSION_ID is unset
+#   post --producer-id …  → reaches the store
+# The value is a fixed slug, not a session id: it names the agent, so every card this job posts
+# carries the same producer and the same `owner:` liveness ref (which is never pruned).
 post() {
   if ! python3 "$ASK" post \
+      --producer-id fleet-pusher-watch \
       --dedup-key "$1" \
       --producer-kind cron \
       --mechanism ack \
@@ -49,6 +59,23 @@ post() {
     exit 1
   fi
 }
+
+# STARTUP GRACE: right after a boot the cadence has not had a chance to tick yet, so an absent or
+# old heartbeat is expected rather than a dead agent. Stay quiet while the machine has been up for
+# less than MAX_AGE. Without this the watchdog fires once on every reboot — a watchdog that cries
+# wolf on a normal event is the failure it exists to prevent.
+#
+# Residual, named rather than hidden: a long SLEEP is not covered by boot time. launchd runs the
+# missed tick promptly on wake, but a watchdog pass landing first can still post one card. That
+# direction is deliberate — one false card is cheaper than a silent dead cadence.
+UPTIME_NOW=$(date -u +%s)
+# `FLEET_PUSHER_BOOT_EPOCH` is a test seam, not a configuration knob: the suite pins it to 0 so
+# the grace branch does not depend on how long the machine running the tests has been up.
+BOOT="${FLEET_PUSHER_BOOT_EPOCH:-$(sysctl -n kern.boottime 2>/dev/null | sed -nE 's/.*sec = ([0-9]+).*/\1/p')}"
+if [ -n "${BOOT:-}" ] && [ "$((UPTIME_NOW - BOOT))" -lt "$MAX_AGE" ]; then
+  echo "$(date +%H:%M:%S) ok — up $((UPTIME_NOW - BOOT))s, inside the ${MAX_AGE}s startup grace"
+  exit 0
+fi
 
 if [ ! -f "$HB" ]; then
   echo "$(date +%H:%M:%S) heartbeat missing — posting"

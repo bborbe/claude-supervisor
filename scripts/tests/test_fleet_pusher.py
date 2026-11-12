@@ -262,8 +262,14 @@ class Watchdog(unittest.TestCase):
         shutil.copy(_WATCH, os.path.join(self.script_dir, "fleet-pusher-watch.sh"))
         _write(
             os.path.join(self.script_dir, "attention-ask.py"),
+            # The real tool refuses a post with no producer id when CLAUDE_CODE_SESSION_ID is
+            # unset — which is exactly the launchd environment. Modelling that here makes the
+            # producer-id assertion behavioural: a watchdog that drops the flag records no call.
             "#!/usr/bin/env python3\n"
             "import os, sys\n"
+            "if '--producer-id' not in sys.argv:\n"
+            "    print('REFUSED: no --producer-id and CLAUDE_CODE_SESSION_ID is unset', file=sys.stderr)\n"
+            "    sys.exit(1)\n"
             "open(os.environ['WATCH_CALLS'], 'a').write(' '.join(sys.argv[1:]) + '\\n')\n",
             executable=True,
         )
@@ -273,7 +279,8 @@ class Watchdog(unittest.TestCase):
         os.makedirs(os.path.dirname(self.heartbeat), exist_ok=True)
 
     def _run(self):
-        env = dict(os.environ, HOME=self.home, WATCH_CALLS=self.calls)
+        env = dict(os.environ, HOME=self.home, WATCH_CALLS=self.calls,
+                   FLEET_PUSHER_BOOT_EPOCH="0")  # pin the boot grace out of the way
         return subprocess.run(
             ["bash", os.path.join(self.script_dir, "fleet-pusher-watch.sh")],
             env=env, capture_output=True, text=True, timeout=120,
@@ -312,6 +319,22 @@ class Watchdog(unittest.TestCase):
         self.assertEqual(len(calls), 1, calls)
         self.assertIn("--dedup-key fleet-pusher-heartbeat-stale", calls[0])
         self.assertIn("old", calls[0])
+        # The post is REFUSED without this flag under launchd (no CLAUDE_CODE_SESSION_ID), so a
+        # watchdog that omits it detects a dead cadence and tells nobody.
+        self.assertIn("--producer-id fleet-pusher-watch", calls[0])
+
+    def test_the_boot_grace_suppresses_a_card(self):
+        """A reboot is not a dead cadence: right after boot the tick has had no chance to run."""
+        _write(self.heartbeat, self._stamp(1800 + 60))
+        env = dict(os.environ, HOME=self.home, WATCH_CALLS=self.calls,
+                   FLEET_PUSHER_BOOT_EPOCH=str(int(time.time()) - 60))
+        result = subprocess.run(
+            ["bash", os.path.join(self.script_dir, "fleet-pusher-watch.sh")],
+            env=env, capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("startup grace", result.stdout)
+        self.assertEqual(self._calls(), [])
 
     def test_a_missing_heartbeat_posts_the_missing_key(self):
         result = self._run()

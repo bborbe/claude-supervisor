@@ -54,6 +54,22 @@ Three dedup keys, one per failure mode:
 | `fleet-pusher-heartbeat-unparseable` | the file holds something that is not an ISO-8601 UTC stamp |
 | `fleet-pusher-heartbeat-stale` | the stamp is older than 1800 s — the cadence has stopped |
 
+## Two things the watchdog needs to actually work
+
+Both were found in review, and either one alone makes the watchdog decorative.
+
+**`--producer-id` is mandatory.** `attention-ask.py` defaults the producer to
+`$CLAUDE_CODE_SESSION_ID`, and launchd provides no such variable, so a post without the flag is
+**refused** — the watchdog would detect a dead cadence and report it to nobody. It passes a fixed
+slug, `--producer-id fleet-pusher-watch`, which also makes every card carry the same `owner:`
+liveness ref (never pruned).
+
+**A boot is not a dead cadence.** Right after a reboot the tick has had no chance to run, so an
+absent or ageing heartbeat is expected. The watchdog stays quiet while the machine has been up for
+less than 1800 s. Residual, stated rather than hidden: a long **sleep** is not covered by boot
+time — launchd runs the missed tick promptly on wake, but a watchdog pass landing first can still
+post one card. That direction is deliberate: one false card is cheaper than a silent dead cadence.
+
 ## Five things that look healthy and are not
 
 Every one of these was measured on this machine. Items 1, 2, 4 and 5 are each pinned by a named
