@@ -47,10 +47,13 @@ topic round, `fleet` is the fleet round, whose slug carries the branch exactly a
 
 The spend-per-change readout — the round's own `tokens spent ÷ cells moved` line:
 
-  --tokens  --topic T           print the round's output-token spend: the parent
-                                transcript PLUS `<session-id>/subagents/*.jsonl`,
-                                windowed `round_started_at` → now and deduped by
-                                `message.id`. The parent alone omits both legs.
+  --tokens  --topic T           print the COMPLETED PREVIOUS round's output-token
+                                spend: the parent transcript PLUS
+                                `<session-id>/subagents/*.jsonl`, windowed
+                                `previous_round_started_at` → `round_started_at`
+                                (one-tick lag — a same-instant window cannot see the
+                                current turn's own spend) and deduped by
+                                `message.id`. `n/a (baseline)` on the first tick.
   --snapshot --topic T          copy the tier's sweep payload (`manager-predispatch/
                                 <slug>.table` on the goal tier, `manager-receipts/
                                 <slug>.sweep` on the topic tier) to `<payload>.prev` —
@@ -804,24 +807,36 @@ def _transcript_files(session: str) -> list:
 
 
 def spend_tokens(topic: str, branch: str = "", session: str = "", now: float = None) -> int:
-    """Print the round's output-token spend: parent transcript PLUS subagent files.
+    """Print the COMPLETED PREVIOUS round's output-token spend.
 
-    Windowed `round_started_at` → now and deduped by `message.id`. The parent alone
-    omits both legs (they are subagent dispatches), and one assistant message spans
-    several records that repeat `usage` verbatim, so both halves are mandatory.
+    Windowed `previous_round_started_at → round_started_at` and deduped by
+    `message.id`. The parent alone omits both legs (they are subagent dispatches), and
+    one assistant message spans several records that repeat `usage` verbatim, so both
+    halves are mandatory.
+
+    ⚠️ **The lag is structural, not a convenience.** The parent transcript for the
+    CURRENT turn is written as that turn progresses, so at the instant the round
+    prints, its own spend is not yet on disk — a same-instant window reads `0` on a
+    gated tick however long the round took (measured 2026-11-12). Measuring the
+    previous round at this round's head is the only window that can. On the first
+    tick there is no previous round: print `n/a (baseline)`, never `0`. Do not
+    "simplify" this back to a same-instant window.
     """
     s = slug(topic, branch)
     d = read_receipt(s)
-    started = d.get("round_started_at")
-    if not started:
+    ended = d.get("round_started_at")
+    started = d.get("previous_round_started_at")
+    if not ended:
         print(f"no round in progress for {s} — run --start first", file=sys.stderr)
         return 2
+    if not started:
+        print("n/a (baseline)")
+        return 0
     session = session or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
     if not session:
         print("--tokens needs a session: pass --session or set $CLAUDE_CODE_SESSION_ID",
               file=sys.stderr)
         return 2
-    now = time.time() if now is None else now
     files = _transcript_files(session)
     if not files:
         # A missing transcript must not read as "the round spent nothing" — that is a
@@ -843,7 +858,7 @@ def spend_tokens(topic: str, branch: str = "", session: str = "", now: float = N
                     except ValueError:
                         continue
                     ts = _record_epoch(rec)
-                    if ts is None or ts < started or ts > now:
+                    if ts is None or ts < started or ts >= ended:
                         continue
                     msg = rec.get("message")
                     if not isinstance(msg, dict):
@@ -884,7 +899,18 @@ def start(topic: str, branch: str = "") -> int:
     s = slug(topic, branch)
     # Fields are CLEARED, not carried: a receipt that survived its own round would
     # let a skipped round inherit the previous round's artifacts and pass.
-    write_atomic(path(s), json.dumps({"topic": topic, "round_started_at": time.time(), "fields": {}}) + "\n")
+    #
+    # `previous_round_started_at` is CARRIED, not cleared: it is the lag window's
+    # other end. The current turn's transcript is written as the turn progresses, so a
+    # window ending "now" cannot see the round's own spend — measured 2026-11-12, a
+    # gated tick printed `spent: 0` however long it took. `previous_round_started_at →
+    # round_started_at` is the only window that can measure a completed round, at the
+    # cost of a one-tick lag.
+    old = read_receipt(s).get("round_started_at")
+    d = {"topic": topic, "round_started_at": time.time(), "fields": {}}
+    if old:
+        d["previous_round_started_at"] = old
+    write_atomic(path(s), json.dumps(d) + "\n")
     print(f"started {s}")
     return 0
 
@@ -1551,9 +1577,10 @@ def main() -> int:
                            "2026-09-15 and 2026-09-20 rulings. The payload's own first line "
                            "is stale and is replaced, never replayed")
     mode.add_argument("--tokens", action="store_true",
-                      help="print the round's output-token spend: parent transcript plus "
-                           "subagents/*.jsonl, windowed round_started_at → now, deduped by "
-                           "message.id")
+                      help="print the COMPLETED PREVIOUS round's output-token spend: parent "
+                           "transcript plus subagents/*.jsonl, windowed "
+                           "previous_round_started_at → round_started_at (one-tick lag), "
+                           "deduped by message.id; n/a (baseline) on the first tick")
     mode.add_argument("--snapshot", action="store_true",
                       help="copy the tier's sweep payload to <payload>.prev — run at the "
                            "sweep leg's HEAD, before the leg rewrites the payload")
