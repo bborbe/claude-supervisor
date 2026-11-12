@@ -34,12 +34,18 @@ private copy is the drift this module forbids. `test_a_hex_wait_is_a_KNOWN_false
 pins the behaviour as documented-wrong, so a follow-up that wires this cannot read NO-ROUTE
 as "no recipient" without meeting the test.
 
-⚠️ **`resolve()` is unbounded.** A real call measured 270 s here (it reads the fleet board).
-A hang is neither exit 0 nor exit 2 — the one silence the contract below does not cover.
+⚠️ **`resolve()` is unbounded.** A real call measured 270 s here (it reads the fleet board);
+re-measured 2026-11-12 at **3 min 0.18 s**. A hang is neither exit 0 nor exit 2 — the
+one silence the contract below does not cover. **So a caller that already holds the manager
+must pass it in with `--manager`**, which skips the board read entirely and is what makes a
+per-row call affordable in a sweep. `agents/fleet-sweep-reader.md` resolves once per round
+through `fleet-board.py`'s `manager_on_chain` and passes the name here. Only a caller with no
+chain resolution of its own — a one-off from the shell — lets this script call `resolve()`.
 
 Usage:
     blocked-row-routing.py --closer "waiting on someone" --task "<task title>"
     blocked-row-routing.py --closer "..." --row "<whole closer message>" --task "<title>"
+    blocked-row-routing.py --closer "..." --task "<title>" --manager "<resolved name>"
 
 Prints `ROUTE\\t<manager>\\t<source>` or `NO-ROUTE\\t<why>`. Exit 0 for either; 2 when the
 manager cannot be resolved (an unreadable board is not "no routing").
@@ -80,11 +86,24 @@ def main(argv=None):
     parser.add_argument("--closer", required=True, help="the closer's 👤 You: body")
     parser.add_argument("--row", default=None, help="the whole closer message (for ⏰ Ends:)")
     parser.add_argument("--task", required=True, help="the subject's task title")
+    parser.add_argument(
+        "--manager",
+        default=None,
+        help="the manager the caller already resolved (skips the unbounded board read)",
+    )
+    parser.add_argument(
+        "--source",
+        default="supplied",
+        help="where --manager came from; rendered as the record's source",
+    )
     args = parser.parse_args(argv)
 
     row = args.row if args.row is not None else args.closer
+    resolver = None
+    if args.manager is not None:
+        resolver = lambda _title: (args.manager, args.source)
     try:
-        record = routing(args.closer, row, args.task)
+        record = routing(args.closer, row, args.task, resolver=resolver)
     except Exception as exc:
         # An unreadable board is NOT "no routing": silence would look like an owner was
         # found, which is the failure this script exists to end.
