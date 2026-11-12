@@ -220,10 +220,12 @@ leave the eight above unchanged:
 | `task-terminal` | the session's anchored task is already finished — the same guard and the same token as on the normal path, because this is the only resume this script performs for a headless worker and it is the path the 2026-11-11 incident took |
 
 An unresolvable vault or launcher **for this session** is an `❌ error:` operational failure
-(exit 1), never a refusal, and fires before anything is spawned. A `vault-cli` that cannot be
-found at all is the separate `environment-fault` (exit 3) — see the [exit-code
-table](#exit-codes) — checked before any session is considered, so it is not the per-session
-case above.
+(exit 1), never a refusal, and fires before anything is spawned. ⚠️ On this path a missing
+`vault-cli` does **not** produce the `environment-fault` (exit 3) row in the [exit-code
+table](#exit-codes): `vault_configs()` returns `None` before any launcher is resolved, so the
+run reports the exit-1 `❌ error:` above, naming the vault rather than the missing binary.
+Exit 3 stays reachable on the normal restart path, where the cwd comes from the registry
+entry rather than from `vault-cli`.
 
 ## Which launcher the resume runs
 
