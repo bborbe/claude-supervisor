@@ -833,8 +833,8 @@ that timestamp past the approval or the completion, and the row stops being a ca
 2026-11-12: a row resumed at 23:39:17Z took a turn at 23:50:26Z and disappeared from the next
 round's candidates.
 
-⚠️ **Kind (c) — a `defer_date` coming due — is not this leg.** `commands/steps/keepalive.md`
-§ *Resume the park watches whose re-check has passed* reads it from `park-event.py due`. Kind (b),
+⚠️ **Kind (c) — a `defer_date` coming due — is not this leg.** `agents/fleet-keepalive-actor.md`
+§ 2 *Resume the park watches whose re-check has passed* reads it from `park-event.py due`. Kind (b),
 an answered attention card, ships as its own task. Neither is re-implemented here.
 
 ⚠️ **An empty `blocked_by` is not a cleared wait**, and `hold` is not a finished dependency:
