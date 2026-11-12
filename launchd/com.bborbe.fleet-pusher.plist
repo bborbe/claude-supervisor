@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Fleet pusher — the CHEAP wake cadence. One pass every 15 minutes, no Claude session as its
+  parent and no model turn anywhere in it.
+
+  WHY A LAUNCHD AGENT: a detached loop is the failure mode com.bborbe.fleet-keeper.plist
+  documents — "one long-lived process that can die silently and take the supervision with it".
+  `StartInterval` gives a FRESH PROCESS per tick, so there is no loop to die. This agent is the
+  replacement for `/tmp/fleet-pusher-loop.sh`, which had no supervisor, was not running, and
+  would have evaporated on reboot.
+
+  THE TWO LAYERS, so neither is mistaken for the other:
+    * this agent — `pane-wake.py` in send mode, no model turn, every 15 minutes. Cheap, constant.
+    * `/supervisor:fleet-triage` — one model turn, on demand. Expensive. NEVER put it here:
+      each run is a model turn, and a session that runs it repeatedly fills its own context
+      until it can no longer do the job.
+
+  The agent's own liveness is a SEPARATE instrument — `~/.claude/state/fleet-pusher/heartbeat`,
+  rewritten at the top of every tick, read by `com.bborbe.fleet-pusher-watch`. The tick cannot
+  report its own death: if it stopped, nothing inside it runs.
+
+  Install:
+    cp launchd/com.bborbe.fleet-pusher.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.bborbe.fleet-pusher.plist
+
+  Reload after an upgrade:
+    launchctl kickstart -k gui/$UID/com.bborbe.fleet-pusher
+
+  The script path is the marketplace clone, not a version-pinned cache dir, for the same reason
+  com.bborbe.fleet-keeper.plist uses it: a cache path would pin the agent to one release and
+  silently run stale code after every upgrade. The tick itself resolves the NEWEST installed
+  cache version for `pane-wake.py`, so the clone is the stable entry point while the work it
+  drives is always current.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.bborbe.fleet-pusher</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/bborbe/.claude/plugins/marketplaces/claude-supervisor/scripts/fleet-pusher-tick.sh</string>
+    </array>
+
+    <!--
+      ⚠️ The PATH is not decoration: launchd gives a job no login shell, so it never reads
+      ~/.zshrc, and anything not on this list is simply not found.
+
+      `pane-wake.py` shells out to `wezterm cli list` to resolve session → pane, and wezterm
+      ships at /Applications/WezTerm.app/Contents/MacOS/wezterm — a path no system directory
+      contains. Measured 2026-11-12: with the system-only PATH every tick exited 0 and logged a
+      single `{"error": "wezterm cli list failed"}` line, so the agent was green and woke
+      nothing for ~35 minutes. The directory is appended LAST so nothing in it can shadow a
+      system tool.
+    -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin:/Applications/WezTerm.app/Contents/MacOS</string>
+    </dict>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/bborbe/Library/Logs/fleet-pusher.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/bborbe/Library/Logs/fleet-pusher.log</string>
+</dict>
+</plist>
