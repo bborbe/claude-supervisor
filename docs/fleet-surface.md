@@ -1110,23 +1110,30 @@ the split below. A surface that needs either half points here instead of restati
 
 | Surface | File | Reads `flag`? | Reads `flag_set_by`? |
 |---|---|---|---|
-| **Open** — `/supervisor:open --flagged` | `commands/open.md` § Step 0.5, `scripts/flagged-rows.py` | yes — selects | **yes, tasks only** — only `OPENING_ACTORS` (`operator`, `legacy`) open; an agent-set or absent setter is `REFUSED`. A goal or topic accepts any setter (`flagged-rows.py` `refusals()`) |
+| **Open** — `/supervisor:open --flagged` | `commands/open.md` § Step 0.5, `scripts/flagged-rows.py` | yes — selects | **yes, at every tier** — only `OPENING_ACTORS` (`operator`, `legacy`) open; an agent-set or absent setter is `REFUSED` with `agent-set-flag`. The decision is `scripts/flag_provenance.py:64` `flag_admits()`, and every open path routes through it |
 | **Operator-named marker** — the cap exemption | `commands/open.md` § Step 1.5 | yes | **yes** — `operator_named` needs the pair, `flag` true **and** an opening actor |
-| **Spawn** — a manager's `To open` rows | `commands/steps/goal-spawn.md` | yes — not a parked marker | **no** |
-| **Fleet open leg** — the fleet round's task opens | `agents/fleet-open-actor.md` § constraints, `scripts/open-queue.py` (the step dispatches the agent and reads no `flag`) | yes — **gates**: only a flagged row is selected; an unflagged one is skipped as `not flagged` | **no** |
-| **Goal / topic opens** | `scripts/topic-spawn.py --goal`, `--topic-open`; `scripts/topic-keepalive.py` | yes | **no** |
+| **Spawn** — a manager's `To open` rows | `commands/steps/goal-spawn.md`, `scripts/flagged-subjects.py` | yes — not a parked marker | **yes** — the selection routes through the shared predicate |
+| **Fleet open leg** — the fleet round's task opens | `agents/fleet-open-actor.md` § constraints, `scripts/open-queue.py` | yes — **gates**: only a flagged row is selected; an unflagged one is skipped as `not flagged` | **yes** — `open-queue.is_flagged()` delegates to the shared predicate |
+| **Goal / topic opens** | `scripts/topic-spawn.py --goal`, `--topic-open`; `scripts/topic-keepalive.py` | yes | **yes** — both `flagged()` helpers delegate to the shared predicate |
 | **Focus rank** — read-only ranking | `scripts/next-focus.py` | yes | **yes** — an operator-set flag ranks; it opens nothing |
 | **Resume** — the drive leg's auto-resume gate | `agents/goal-drive.md` step 3 | **no** — the `not parked` clause is phase and status only | **no** |
 
-**Why the open path alone reads it.** The `--flagged` batch writes `approved_by: operator` — an
-approval record — so it may only act on a flag the operator set (ruled 2026-09-28). Spawn and
-resume write no approval, so provenance is a note there, not a gate (ruled 2026-10-30: *"it
-should not matter how set the flag"*). Measured 2026-10-30 in the primary vault: of **684**
-flagged tasks, **0** were `human_review` or `hold` and **632** were `completed` — the flag
-never expressed the parked class; the two fields beside it do. A resumed row was already approved and already running;
-excluding it on `flag: true` stranded operator-approved rows with dead sessions — the operator
-ruled on 2026-11-03 that *"flag means approved"*, and on 2026-11-04 that the resume gate gains
-no `flag_set_by` check in its place.
+**Why every open path reads it, and resume does not.** Opening a subject — a task, a goal or a
+topic — spends a slot and a supervision decision the operator owns, so a flag only opens when
+the operator (or a `legacy` row from the 2026-09-30 disposition) set it. Ruled 2026-09-28
+(*"an agent-set `flag: true` is never an approval and opens nothing"*) and generalised to every
+tier on 2026-11-10, attention card `f8cd8b41`. The 2026-10-30 ruling governs *which* flagged
+row may be opened; it never made provenance irrelevant, and that literal reading is superseded.
+`scripts/flag_provenance.py` owns the decision and `scripts/tests/test_flag_opens_callers.py`
+pins all six open paths to it.
+
+⚠️ **Resume is the one gate that reads no provenance, deliberately.** Spawn and resume write
+no approval record, and a resumed row was already approved and already running; excluding it on
+`flag: true` stranded operator-approved rows with dead sessions. The operator ruled on
+2026-11-03 that *"flag means approved"*, and on 2026-11-04 that the resume gate gains no
+`flag_set_by` check in its place. Measured 2026-10-30 in the primary vault: of **684** flagged
+tasks, **0** were `human_review` or `hold` and **632** were `completed` — the flag never
+expressed the parked class; the two fields beside it do.
 
 ⚠️ **Guarded by `scripts/check-resume-flag-clause.py`**, which parses the gate's `not parked`
 bullet into a predicate and evaluates fixture rows through it and through Step 0.5's own

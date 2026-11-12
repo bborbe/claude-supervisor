@@ -23,11 +23,11 @@ on it without parsing prose, and the exit code is non-zero for every one of them
                            open question this gate does not decide. Stated here because a
                            docstring that claimed `hold` was terminal would describe
                            behaviour the code does not implement.
-  goal-unflagged         the goal does not carry `flag: true`. A flag is an intent signal
-                           whoever set it (operator ruling 2026-10-30), so provenance is
-                           not read — but an unflagged goal is reported with its rank and
-                           never started; its WORKERS are still opened by the fleet round's
-                           open leg.
+  goal-unflagged         the goal does not carry a `flag: true` the operator set. An
+                           agent-set or absent `flag_set_by` is refused (the 2026-09-28
+                           provenance rule, generalised to every tier 2026-11-10) — an
+                           unadmitted goal is reported with its rank and never started;
+                           its WORKERS are still opened by the fleet round's open leg.
   topic-unflagged        `--topic-open` only: the TOPIC page does not carry `flag: true`.
                            Same rule one tier up — a flagged topic is opened when the fleet
                            manager ceiling admits another manager.
@@ -87,25 +87,34 @@ REFUSE_CAP = "manager-cap"
 
 # YAML spells a boolean three ways. `operator_pin` below already accepts `yes`, so taking
 # only the literal `true` would report a page that IS flagged as "held for the flag".
-FLAG_TRUTHY = ("true", "yes", "on")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+#: The one flag predicate — see `scripts/flag_provenance.py`. Loaded by path because this
+#: script runs standalone out of the plugin cache, where `scripts/` is not on `sys.path`.
+_FLAG_SPEC = importlib.util.spec_from_file_location(
+    "flag_provenance", os.path.join(_HERE, "flag_provenance.py"))
+flag_provenance = importlib.util.module_from_spec(_FLAG_SPEC)
+_FLAG_SPEC.loader.exec_module(flag_provenance)
+
+FLAG_TRUTHY = flag_provenance.FLAG_TRUTHY
 
 
-def flagged(fm: str) -> bool:
-    """True when this page carries the flag — **whoever set it**.
+def flagged(fm: str, kind: str = "goal") -> bool:
+    """Does this page's flag admit it? Delegates to `flag_provenance.flag_admits()`.
 
-    ⚠️ **Provenance is deliberately NOT read.** Operator ruling 2026-10-30: *"in the end it
-    should not matter how set the flag … if flag, should be open if claude session limit
-    allow it"*. `flag_set_by` is a note, not a gate: the flag is an intent signal, and the
-    only bound on acting on it is capacity. ⚠️ **The consequence is deliberate** — an agent
-    may flag its own page and get a manager opened for it, limited only by the cap. That is
-    the trade the ruling makes, not an oversight; reading `flag_set_by` here again would
-    silently reinstate the provenance gate the ruling removed.
+    ⚠️ **Provenance IS read, for goals and topics alike.** Until the operator's
+    2026-11-10 ruling (attention card `f8cd8b41…`) this function deliberately ignored
+    `flag_set_by`, so an agent could flag its own goal and get a manager opened for it.
+    That ruling unifies the three tiers on *refuse*: a `flag_set_by` outside
+    `OPENING_ACTORS`, absent included, does not open a manager here any more than it
+    opens a task. The 2026-10-30 ruling governs WHICH flagged row may be opened; it never
+    made an agent-set flag an approval.
 
-    ⚠️ `scripts/topic-keepalive.py` carries the same predicate; `test_topic_keepalive.py`
-    asserts the two agree on the same page, because a split verdict between them would open
-    exactly the goal the other refuses.
+    ⚠️ `scripts/topic-keepalive.py` delegates to the same predicate;
+    `test_topic_keepalive.py` asserts the two agree on the same page, because a split
+    verdict between them would open exactly the goal the other refuses.
     """
-    return scalar(fm, "flag").lower() in FLAG_TRUTHY
+    return flag_provenance.flag_admits(fm, kind)
 
 
 def refuse(token: str, detail: str, bound: str | None = None) -> int:
@@ -511,13 +520,13 @@ def main(argv: list[str]) -> int:
         return 0
 
     # (2c) `--topic-open` answers the TOPIC tier's own question: may a manager be opened for
-    # this topic page? Operator ruling 2026-10-30 — a flag is an intent signal whoever set it,
-    # so the only two questions are whether the flag is present and whether the ceiling admits
-    # another manager. ⚠️ Without this, a flag on a topic page is read by nothing: `open.md`'s
+    # this topic page? The flag must be operator-set (2026-11-10, attention card f8cd8b41)
+    # and the ceiling must admit another manager. ⚠️ Without this, a flag on a topic page is
+    # read by nothing: `open.md`'s
     # topic branch gates on `phase: todo` alone, so the ruling had no executable leg one tier
     # up from where it was already enforced.
     if a.topic_open:
-        if not flagged(frontmatter(topic_text)):
+        if not flagged(frontmatter(topic_text), kind="topic"):
             return refuse(
                 REFUSE_TOPIC_UNFLAGGED,
                 f"<{a.topic}> is not flagged. Opening a topic manager is an open, and this "
@@ -574,9 +583,9 @@ def main(argv: list[str]) -> int:
         return refuse(
             REFUSE_UNFLAGGED,
             f"<{a.goal}> is not flagged. Opening a goal manager is an open, and this tier "
-            f"only opens what carries the flag — set `flag: true` on the goal page. Whoever "
-            f"sets it is not read. Its workers are opened by the fleet round's open leg "
-            f"regardless.",
+            f"only opens what carries the flag — set `flag: true` on the goal page. Only an "
+            f"operator-set flag opens; an agent-set or absent `flag_set_by` is refused. Its "
+            f"workers are opened by the fleet round's open leg regardless.",
         )
 
     # (5) Startability — the operator's approval, read from disk.
