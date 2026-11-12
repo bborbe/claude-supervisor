@@ -45,7 +45,7 @@ When: every round, before the pre-dispatch gate
   mcp__supervisor__answer_permission(request_id="answer-path-reach-sentinel", behavior="deny")
   ```
 
-  ⚠️ **A manager's ordinary `answer_permission` calls do NOT produce this leg.** They name a real park, which IS in the server's `pending` map, so the handler takes the settle path and never reaches the foreign-park arm. Measured 2026-11-10: the reach store held **18 `wrapper` reaches and 0 `mcp` reaches** because this step said the leg needed nothing — a claimed mechanism with no emitter. Do not remove this call on the reasoning that answering real parks covers it; it does not.
+  ⚠️ **On the current server, any `answer_permission` call writes this leg — but a manager that answers no parks writes nothing, so the call is still required.** The Go handler records the reach **on entry**, before decoding arguments or looking the request id up (`claude-wrapper/pkg/roster_mcp.go` `answerPermission`). ⚠️ **An earlier version of this paragraph said the opposite** — that real parks settle on another arm and never write the leg. That was true of the retired JS `server/supervisor.mjs` and is false here; it was carried over by mistake.
 
   **Leg `wrapper` is two calls, deliberately separate** so the curl keeps the exact command shape the permission classifier judges:
 

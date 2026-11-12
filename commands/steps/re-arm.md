@@ -40,7 +40,7 @@ When: every tick — arm `ScheduleWakeup` FIRST, before the read half
   mcp__supervisor__answer_permission(request_id="answer-path-reach-sentinel", behavior="deny")
   ```
 
-  ⚠️ **A manager's ordinary `answer_permission` calls do NOT produce this leg** — they name a real park, which is in the server's `pending` map, so the settle path runs and the foreign-park arm never does. Measured 2026-11-10: **18 `wrapper` reaches and 0 `mcp` reaches**, because this step previously said the leg needed nothing.
+  ⚠️ **On the current server this leg is written by ANY `answer_permission` call, real park or sentinel.** The Go handler (`claude-wrapper/pkg/roster_mcp.go` `answerPermission`) records the reach **on entry**, before it decodes its arguments or looks the request id up — so a manager that answered a real park this round already wrote the leg. ⚠️ **This paragraph previously claimed the opposite**, carrying over the JS server's settle-path reasoning ("a real park never reaches the foreign-park arm"); that was true of the retired `server/supervisor.mjs` and is **false of the server the fleet runs**. The sentinel is still required, because a manager that answers no parks would otherwise write nothing.
 
   **Leg `wrapper` is a Bash `curl`, in its own call, then the recorder in another.** Two calls, deliberately: folding the recorder onto the same line changes the command shape the permission classifier judges, and a green reach would then prove the wrong thing.
 
