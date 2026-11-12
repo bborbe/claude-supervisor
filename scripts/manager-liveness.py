@@ -168,7 +168,7 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
 `--check` reads files only: no model, no network. A host loop (launchd) runs it and
 turns exit 10 into a push.
 """
-import argparse, json, os, re, sys, time
+import argparse, json, os, re, subprocess, sys, threading, time, urllib.error, urllib.request
 from datetime import datetime
 
 # This namespace is the liveness layer's OWN. `arm`, `stop` and `check` all resolve
@@ -918,6 +918,61 @@ def sleep(subject: str, branch: str, until: str) -> int:
     return 0
 
 
+
+# The reach thread, joined at exit so a short-lived CLI cannot drop the write.
+_REACH_THREAD = None
+
+
+def join_reach_thread(timeout=20):
+    """Wait for the reach emission to finish, bounded. Never raises."""
+    if _REACH_THREAD is not None and _REACH_THREAD.is_alive():
+        _REACH_THREAD.join(timeout=timeout)
+
+
+def emit_wrapper_reach():
+    """Emit this session's `wrapper` answer-reach, best-effort, beside the arm.
+
+    ⚠️ **Folded into `--arm` on purpose.** The wrapper leg is a Bash `curl` plus a
+    recorder call, and across days of measurement managers ran the tool call and not
+    these two commands — 4 fresh `mcp` reaches against 1 fresh `wrapper` reach on
+    2026-11-13. An instruction the fleet reliably does not follow is not a gate it can
+    pass, so the arm emits it instead: one command, no extra step to skip.
+
+    ⚠️ **Best-effort, never fatal.** An arm is the liveness reading and must succeed
+    even when the wrapper is down, so every failure here is reported and swallowed.
+    A missing session id, an unreachable wrapper and a non-404/409 status all leave
+    the arm intact and simply write no reach — which is the correct signal for the
+    probe, since this session then has not shown it can reach the route.
+    """
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if not session_id:
+        return
+    base = os.environ.get("SUPERVISOR_WRAPPER_URL", "http://localhost:18090").rstrip("/")
+    body = b'{"request_id": "answer-path-reach-sentinel", "behavior": "allow"}'
+    request = urllib.request.Request(
+        f"{base}/api/1.0/sessions/{session_id}/answer",
+        data=body,
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            status = response.status
+    except urllib.error.HTTPError as err:
+        status = err.code
+    except (urllib.error.URLError, OSError) as err:
+        print(f"reach: wrapper call failed ({err}) — no wrapper reach written", file=sys.stderr)
+        return
+    recorder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "answer-reach.py")
+    try:
+        subprocess.run(
+            [sys.executable, recorder, "--session-id", session_id, "--status", str(status)],
+            check=False, capture_output=True, timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError) as err:
+        print(f"reach: recorder could not run ({err}) — no wrapper reach written", file=sys.stderr)
+
+
 def arm(subject: str, branch: str, interval: int, resume: bool = False,
         beat: str = "head") -> int:
     """Record a re-arm. **Never** resumes a stood-down subject unless `resume` is set.
@@ -932,6 +987,15 @@ def arm(subject: str, branch: str, interval: int, resume: bool = False,
     """
     s = slug(subject, branch)
     write_atomic(path(s, "cadence"), f"{interval}\n")
+    # ⚠️ **Fire-and-forget, in a daemon thread.** `arm()` is the liveness READING: the
+    # epochs it records are what `observed_period` measures, so a network call on this
+    # path would lengthen every arm-to-arm gap by its own latency and drift the period
+    # it is measuring. Measured 2026-11-13: an inline call moved an observed period from
+    # 2250s to 2251s and broke a test that asserts exact seconds. The reach is
+    # best-effort and must never delay or fail the reading.
+    global _REACH_THREAD
+    _REACH_THREAD = threading.Thread(target=emit_wrapper_reach, daemon=False)
+    _REACH_THREAD.start()
     # A re-arm after a stand-down starts a NEW cadence sample: the outage gap is not
     # cadence. That cannot be inferred from the marker any more — the arm preserves it —
     # so `--stop` leaves a separate `.reset` epoch and this is the one arm that consumes
@@ -1375,7 +1439,11 @@ def main() -> int:
     if a.arm:
         if not a.interval or a.interval <= 0:
             ap.error("--arm needs --interval > 0")
-        return arm(a.subject, a.branch, a.interval, resume=a.resume, beat=a.beat)
+        code = arm(a.subject, a.branch, a.interval, resume=a.resume, beat=a.beat)
+        # Bounded join so the reach lands before the CLI exits, without the network call
+        # sitting on the arm's own path.
+        join_reach_thread()
+        return code
     if a.resume:
         # Resuming is an ARM, never a stop: the flag clears a marker, so silently
         # ignoring it on `--stop` would leave the operator believing they had resumed.
