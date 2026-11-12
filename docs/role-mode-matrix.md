@@ -34,6 +34,17 @@ Ask of the task **body** (never the title or frontmatter): *does finishing this 
 
 **Why the strict form, measured 2026-11-12:** over 24 h, **24 of the 90 `role: agent` new-worker spawns opened as tabs**, every one recording `mode_source=argument` — the spawn sites did decide, and decided `interactive`. The signals were doing the selecting, and nearly every infrastructure task carries one (an approval gate, an "ask if unsure" step, a judgement reserved to the operator), so the classifier could not separate a task that needs watching from one that merely mentions a gate. Two roles need a screen — the operator and a manager — and that is the whole set.
 
+## Answer-path remedy
+
+`/supervisor:open` probes a **headless** row's answer path before the spawn (`scripts/answer-path-check.py`; exit 1 → refuse the row, print the probe's reason, open nothing). The probe carries the reason only — the remedy a spawn site adds is **role-aware**, because Rule 2 makes the two roles' permitted outcomes opposite:
+
+| `role` | Remedy |
+|---|---|
+| `agent` | *Arm this session's manager loop and re-run the spawn*; where no loop can be armed (no `worker-manager` registration), the row stays **refused** for the tick. **Never** *open interactive* — that is the tab Rule 2 forbids, and it is the cheaper remedy, so a refused spawner takes it (measured 2026-11-12, the same count Rule 2 records: **24 of the 90** `agent` new-worker spawns opened as tabs in 24 h, every one `mode_source=argument`). |
+| `human` / `manager` | Open the row `interactive`, or arm this session's manager loop and re-run — a tab is what the role is for. |
+
+⚠️ **The bound supervisor does not enforce this probe.** The live daemon is the Go `claude-wrapper` at `127.0.0.1:18090/supervisor/mcp`, and its spawn path carries no answer-path guard; the refusal belongs to the command, so a session that skips the step is not caught downstream.
+
 ## Rule 3 — `phase`
 
 A missing or empty `phase` is not decided here: it takes the existing entry path (`vault-cli task work-on` advances it; on the `--flagged` batch the operator's flag is the approval).
