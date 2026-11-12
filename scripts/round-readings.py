@@ -853,20 +853,28 @@ def compute(subject, tracked_path, vault, interval, now=None,
             "resolved": False,
         }
 
-    # A live session whose id appears on NO page is outside the derivation above: `rows`
-    # is built from resolved task files, and a session stamped on none of them enters no
-    # row's id set — so no `parked` row can be emitted for it however parked it is.
-    # Measured 2026-11-11: session `1c05c414` sat `waiting` on the fleet while the round
-    # rendered `parked=0`, because no page carried it. The failure direction is what makes
-    # this load-bearing: an unrecorded park silently dropped, or read as `quiet`, renders a
-    # clean fleet while a worker waits on a gate.
+    # A live session this round's TRACKED pages do not account for is outside the
+    # derivation above: `rows` is built from resolved task files, and a session stamped on
+    # none of them enters no row's id set — so no `parked` row can be emitted for it
+    # however parked it is. Measured 2026-11-11: session `1c05c414` sat `waiting` on the
+    # fleet while the round rendered `parked=0`, because no page carried it. The failure
+    # direction is what makes this load-bearing: an unrecorded park silently dropped, or
+    # read as `quiet`, renders a clean fleet while a worker waits on a gate.
+    #
+    # ⚠️ The condition is "no TRACKED page records this session", never "no page records
+    # this session". `covered` below is built from `out_rows` — this round's tracked set —
+    # so a session recorded on a page OUTSIDE that set lands here too, and the limb must
+    # say so. Measured 2026-11-12T09:02+01:00: 18 of 33 rows carrying the bare claim named
+    # a session a page under `25 Tasks/` records. The bare wording sent a reader looking
+    # for a page that already existed, and made `unrecorded` untrustworthy in exactly the
+    # direction it exists to answer.
     #
     # ⚠️ These rows are NOT the synthesised placeholders refused above — each carries a
     # real registry id, so every family on it is an observation rather than a default.
     # ⚠️ The id set is NOT re-derived here. `row["sessions"]` is `read_task`'s output from
     # `manager-predispatch.session_id_set` — the one home for "which fields are a session
-    # id" — and this block only READS that set to learn which sessions a page already
-    # accounts for. Nothing is added to any row, so a manager id arriving through
+    # id" — and this block only READS that set to learn which sessions a TRACKED page
+    # already accounts for. Nothing is added to any row, so a manager id arriving through
     # `metrics_sessions` stays exactly where it was: this does not widen that
     # contamination, it reuses the same set so a covered session is never double-reported.
     covered = set()
@@ -906,14 +914,14 @@ def compute(subject, tracked_path, vault, interval, now=None,
             "ids": ids,
             "liveness": live,
             "in_flight": fl,
-            "in_flight_limb": f"{limb} (no page records this session)",
+            "in_flight_limb": f"{limb} (no tracked page records this session)",
             "feed": fv,
             "external_wait": ew,
             "task_mtime": None,
             "stuck": sv,
             "stuck_reason": sreason,
-            # No page carries this session — the same marker an unresolved member row
-            # carries, and here it names WHY rather than reading as a lost task.
+            # No TRACKED page carries this session — the same marker an unresolved member
+            # row carries, and here it names WHY rather than reading as a lost task.
             "resolved": False,
             "unrecorded": True,
         }
@@ -966,8 +974,8 @@ def compute(subject, tracked_path, vault, interval, now=None,
             "matched_members": len(matched),
             "resolved_rows": len(rows),
             "unresolved": unresolved,
-            # Live sessions in this vault that no page records. They carry rows of their
-            # own above, so the document's row count is `resolved_rows` plus
+            # Live sessions in this vault that no TRACKED page records. They carry rows of
+            # their own above, so the document's row count is `resolved_rows` plus
             # `len(unresolved)` plus `len(unrecorded)` — the reader's invariant, widened
             # here so an unrecorded park cannot be reconciled away as a caller bug.
             "unrecorded": unrecorded,
