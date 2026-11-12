@@ -1003,5 +1003,66 @@ class TestTabKill(unittest.TestCase):
         self.assertIn("wezterm refused to close pane 238", out.getvalue())
 
 
+class TestGrepTask(unittest.TestCase):
+    """The task lookup must not silently miss a task that is there.
+
+    Measured 2026-11-12: `grep -rl` over the 11 375-file `private-personal/25 Tasks` took
+    19.6 s, past `_grep_task`'s 15 s timeout, and a timeout is indistinguishable from "no
+    task claims this session" — a false `task-unresolved` on the close side, and on the
+    resume side `task is None` means "no anchor, allow the resume", so the terminal-task
+    guard went inert for a task that was plainly there. `rg -l -F` over the same dir: 0.7 s.
+    """
+
+    def test_finds_a_matching_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "A Task.md")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("---\nclaude_session_id: abc-123\nstatus: completed\n---\n")
+            own, handed = cw._grep_task("abc-123", [d])
+            self.assertIsNotNone(own, "the matcher missed a task that is plainly there")
+            self.assertEqual(own[0], path)
+            self.assertIsNone(handed)
+
+    def test_prefers_ripgrep_when_it_is_installed(self):
+        seen = {}
+
+        class _Done:
+            stdout = ""
+            returncode = 1
+
+        def fake_run(argv, **kw):
+            seen["argv"] = argv
+            return _Done()
+
+        orig_which, orig_run = cw.shutil.which, cw.subprocess.run
+        cw.shutil.which = lambda name: "/opt/homebrew/bin/rg" if name == "rg" else None
+        cw.subprocess.run = fake_run
+        try:
+            cw._grep_task("sid", ["/tmp"])
+        finally:
+            cw.shutil.which, cw.subprocess.run = orig_which, orig_run
+        self.assertEqual(seen["argv"][0], "rg", seen["argv"])
+
+    def test_falls_back_to_grep_without_ripgrep(self):
+        seen = {}
+
+        class _Done:
+            stdout = ""
+            returncode = 1
+
+        def fake_run(argv, **kw):
+            seen["argv"] = argv
+            return _Done()
+
+        orig_which, orig_run = cw.shutil.which, cw.subprocess.run
+        cw.shutil.which = lambda name: None
+        cw.subprocess.run = fake_run
+        try:
+            cw._grep_task("sid", ["/tmp"])
+        finally:
+            cw.shutil.which, cw.subprocess.run = orig_which, orig_run
+        self.assertEqual(seen["argv"][0], "grep", seen["argv"])
+
+
 if __name__ == "__main__":
     unittest.main()
