@@ -56,12 +56,15 @@ SITE_NO_BINDING = (
     "See `docs/fleet-surface.md` § Spawn a worker item 6 for the rule.\n"
     "Never pass `interactive` here.\n"
 )
-#: The home fixture carries BOTH of the checker's pins, and the pair moved with the rule on
-#: 2026-10-22 — the closed list, and its exhaustiveness. A fixture left on the superseded
-#: phrases would keep this test green against a tree the checker now rejects.
+#: The home fixture carries ALL THREE of the checker's pins, and the trio moved with the rule
+#: on 2026-11-12 — the `role: agent` → `headless` mapping, its negative half (the signals are
+#: no longer a mode input), and the list's exhaustiveness. A fixture left on the superseded
+#: pair (`"five watch-need signals"`, `"no sixth, no \`etc.\`"`) would keep this test green
+#: against a tree the checker now rejects.
 HOME = (
-    "6. Decide the mode before you spawn — a `role: agent` task defaults to `headless`.\n\n"
+    "6. Decide the mode before you spawn — `role` decides it, and `role: agent` is `headless` always.\n\n"
     "**The five watch-need signals, and the list is exhaustive — no sixth, no `etc.`**\n"
+    "They are no longer a mode input anywhere.\n"
 )
 #: A resume: both keys present, so NOT a new-worker site.
 RESUME_CALL = 'mcp__supervisor__spawn_agent(prompt="<the answer>", resume="<sid>", interactive=false)\n'
@@ -182,13 +185,13 @@ class CheckSpawnModeTest(unittest.TestCase):
         self.assertIn("no longer defines it", result.stderr)
 
     def test_home_must_state_the_list_is_exhaustive(self):
-        """The second pin is load-bearing on its own: a home naming the signals but leaving
-        the list open-ended passes the first pin and is exactly the shape that grows a sixth
-        signal on the first edge case someone meets."""
+        """The third pin is load-bearing on its own: a home carrying the mapping and its
+        negative half but leaving the list open-ended passes the other two and is exactly the
+        shape that grows a sixth signal on the first edge case someone meets."""
         self.write(
             "docs/fleet-surface.md",
-            "6. Decide the mode before you spawn.\n\n"
-            "**The five watch-need signals** keep a `role: agent` row interactive.\n",
+            "6. Decide the mode before you spawn — `role: agent` is `headless` always.\n\n"
+            "**The five watch-need signals** are no longer a mode input.\n",
         )
         result = self.run_check()
         self.assertEqual(result.returncode, 1)

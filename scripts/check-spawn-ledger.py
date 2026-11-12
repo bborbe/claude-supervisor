@@ -37,8 +37,21 @@ task's SC3 uses.
 not to the mode decision. Counting it here would fail every fleet that resumed a
 worker.
 
-Exit 0 when every in-window new-worker record carries a decided mode, 1 otherwise,
-naming each offending record.
+⚠️ **A second offence class, added 2026-11-12: `role: agent` + `mode=interactive`.**
+Operator ruling — *"all agents should be headless … only interactive and manager
+should be tabs"*. This is a **different question** from `mode_source`: that one asks
+whether the site *decided*, this one asks whether the decision it made was the
+permitted one. Both are checked, because a site can decide correctly by accident
+under one and still be wrong under the other.
+
+Measured on 2026-11-12 over 24 h, before the rule changed: **24 of the 90
+`role: agent` new-worker spawns opened as tabs**, every one recording
+`mode_source=argument` — so the first class was green throughout and would have
+stayed green. That is the evidence for this second class, and the reason a gate
+that only ever printed `OK` was indistinguishable from one that could not fire.
+
+Exit 0 when every in-window new-worker record carries a decided mode AND no
+`role: agent` row opened interactive, 1 otherwise, naming each offending record.
 """
 import argparse
 import datetime
@@ -71,6 +84,13 @@ DECIDED = "argument"
 #: Wide enough to cover a working day, narrow enough that the verdict describes
 #: current behaviour rather than the ledger's history.
 DEFAULT_WINDOW_HOURS = 24
+
+#: Operator ruling 2026-11-12: `role: agent` is `headless` always. A record that says
+#: otherwise is an offence **whatever decided it** — the argument, the env, the config or
+#: the default — because the ruling is about the permitted outcome, not about whether the
+#: site took a decision. That is why this class ignores `mode_source` entirely.
+AGENT_ROLE = "agent"
+AGENT_FORBIDDEN_MODE = "interactive"
 
 
 def spawned_at(record):
@@ -129,6 +149,28 @@ def offenders(recs, since):
             yield path, record
 
 
+def role_mode_offenders(recs, since):
+    """In-window new-worker records where a `role: agent` row opened interactive.
+
+    The second offence class (operator ruling 2026-11-12). Resume rows are excluded on
+    the same ground as above — a resume is not a new-worker decision, and a resumed
+    agent row's recorded mode describes the session it continued, not a fresh choice.
+
+    A record whose `role` is absent is NOT an offence: the field arrived with this
+    ruling, so every older record lacks it, and failing them would make the gate
+    unusable against any ledger that predates the field — the same reason a missing
+    `mode_source` is not an offence in `offenders`.
+    """
+    for path, record in recs:
+        if record.get("resumed_from"):
+            continue
+        at = spawned_at(record)
+        if at is None or at < since:
+            continue
+        if record.get("role") == AGENT_ROLE and record.get("mode") == AGENT_FORBIDDEN_MODE:
+            yield path, record
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument(
@@ -168,32 +210,51 @@ def main(argv=None):
         if not r.get("resumed_from") and spawned_at(r) is not None and spawned_at(r) >= since
     ]
     bad = list(offenders(recs, since))
+    bad_role = list(role_mode_offenders(recs, since))
     undated = sum(1 for _, r in recs if spawned_at(r) is None)
 
-    if not bad:
+    if not bad and not bad_role:
         decided = sum(1 for _, r in in_window if r.get("mode_source") == DECIDED)
+        agent_rows = sum(1 for _, r in in_window if r.get("role") == AGENT_ROLE)
         print(
             f"OK: {len(recs)} records, {len(in_window)} new-worker spawn(s) in the last "
-            f"{args.since_hours:g}h, {decided} with a decided mode"
+            f"{args.since_hours:g}h, {decided} with a decided mode, "
+            f"{agent_rows} role=agent row(s) all headless"
         )
         if undated:
             print(f"note: {undated} record(s) carry no parseable spawned_at — not dated, not judged")
         return 0
 
-    print(
-        f"FAIL: {len(bad)} new-worker spawn(s) in the last {args.since_hours:g}h "
-        "with no mode decision"
-    )
-    for session_id, record in bad:
+    if bad:
         print(
-            f"  {session_id}: mode={record.get('mode')} "
-            f"mode_source={record.get('mode_source')} label={record.get('label')!r}"
+            f"FAIL: {len(bad)} new-worker spawn(s) in the last {args.since_hours:g}h "
+            "with no mode decision"
         )
-    print(
-        "\nEach row above was spawned without an explicit `interactive=` argument, so "
-        "the fleet config decided and the record cannot say whether the site was "
-        "wired-and-bypassed or never wired at all."
-    )
+        for session_id, record in bad:
+            print(
+                f"  {session_id}: mode={record.get('mode')} "
+                f"mode_source={record.get('mode_source')} label={record.get('label')!r}"
+            )
+        print(
+            "\nEach row above was spawned without an explicit `interactive=` argument, so "
+            "the fleet config decided and the record cannot say whether the site was "
+            "wired-and-bypassed or never wired at all."
+        )
+    if bad_role:
+        print(
+            f"FAIL: {len(bad_role)} `role: agent` new-worker spawn(s) in the last "
+            f"{args.since_hours:g}h opened interactive"
+        )
+        for session_id, record in bad_role:
+            print(
+                f"  {session_id}: role={record.get('role')} mode={record.get('mode')} "
+                f"mode_source={record.get('mode_source')} label={record.get('label')!r}"
+            )
+        print(
+            "\nA `role: agent` row is headless always (operator ruling 2026-11-12) — only "
+            "`human` and `manager` open as tabs. Each row above is a spawn site that "
+            "decided `interactive` for an agent, or a fleet config forcing it."
+        )
     if undated:
         print(f"note: {undated} record(s) carry no parseable spawned_at — not dated, not judged")
     return 1
