@@ -44,18 +44,7 @@ When: every tick — arm `ScheduleWakeup` FIRST, before the read half
 
   ⚠️ **On the current server this leg is written by ANY `answer_permission` call, real park or sentinel.** The Go handler (`claude-wrapper/pkg/roster_mcp.go` `answerPermission`) records the reach **on entry**, before it decodes its arguments or looks the request id up — so a manager that answered a real park this round already wrote the leg. ⚠️ **This paragraph previously claimed the opposite**, carrying over the JS server's settle-path reasoning ("a real park never reaches the foreign-park arm"); that was true of the retired `server/supervisor.mjs` and is **false of the server the fleet runs**. The sentinel is still required, because a manager that answers no parks would otherwise write nothing.
 
-  **Leg `wrapper` is a Bash `curl`, in its own call, then the recorder in another.** Two calls, deliberately: folding the recorder onto the same line changes the command shape the permission classifier judges, and a green reach would then prove the wrong thing.
-
-  ```bash
-  curl -s -o /dev/null -w '%{http_code}' -X POST \
-    "${SUPERVISOR_WRAPPER_URL:-http://localhost:18090}/api/1.0/sessions/${CLAUDE_CODE_SESSION_ID}/answer" \
-    -H 'content-type: application/json' \
-    -d '{"request_id":"answer-path-reach-sentinel","behavior":"allow"}'
-  ```
-
-  ```bash
-  python3 "${CLAUDE_PLUGIN_ROOT}/scripts/answer-reach.py" --status "<the status printed above>"
-  ```
+  **Leg `wrapper` is automatic — do nothing.** `manager-liveness.py --arm` emits it: the arm POSTs to the wrapper's answer route with a sentinel request id and records the reach only when the reply is `404` or `409`. ⚠️ **There is no separate curl or recorder call to run**, and adding one back is how this leg went unemitted for days (4 fresh `mcp` reaches against 1 fresh `wrapper` reach, measured 2026-11-13).
 
   ⚠️ **`SUPERVISOR_WRAPPER_URL` must be an ORIGIN, with no path.** `server/config.mjs` resolves it to `url.origin`, so a value carrying a path would have the server call `/api/1.0/...` while this curl posts to `<path>/api/1.0/...` — a route-level `404`, which the recorder accepts as a valid reach and which would therefore certify a route never reached.
 
