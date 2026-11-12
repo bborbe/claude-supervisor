@@ -6,12 +6,17 @@ Eligibility is the consumer's own gate, never "every page carrying a flag":
 Measured 2026-11-01 in `private-personal`: **776 flagged pages, 45 eligible** — a
 resolver that emitted the finished ones would spawn work on closed rows.
 
-⚠️ **The flag predicate differs by kind, and the difference is live.**
+⚠️ **The flag VALUE differs by kind, and the difference is live.**
 A **task** binds to `commands/open.md` § Step 0.5's strict `t.get('flag') is True`,
 which is what the consumer acts on. A **goal** or **topic** binds to
 `scripts/topic-spawn.py`'s `FLAG_TRUTHY` (`true` / `yes` / `on`, quoted or not) —
 **eight of `private-personal`'s nine flagged goals spell it `flag: "true"`**, and a
 strict reader drops every one.
+
+⚠️ **The flag's PROVENANCE does not differ by kind.** Since the operator's 2026-11-10
+ruling (attention card `f8cd8b41…`) an agent-set flag opens nothing at any tier; the one
+decision lives in `scripts/flag_provenance.py` and every open path calls it. Before that
+ruling a task refused an agent-set flag while a goal or topic accepted any provenance.
 
 ⚠️ **Vault discovery reads the vault-cli config, never a sibling guess.** Four vaults
 (`assistant-data`, `private-boss`, `private-family`, `private-starcitizen`) keep their
@@ -49,16 +54,18 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROLE_MAP = os.path.expanduser("~/.cache/wezterm-role-map.json")
 TEMPLATE_ROOT = os.path.expanduser("~/Documents/workspaces/nuke/task/recurring-schedules/prod")
 
-#: `scripts/topic-spawn.py`'s own predicate — goals and topics accept any spelling,
-#: because a YAML boolean has three.
-FLAG_TRUTHY = ("true", "yes", "on")
+#: The one flag predicate — see `scripts/flag_provenance.py`. Loaded by path because this
+#: module is loaded by path too (the test suite and `flagged-subjects.py` both do it), so
+#: `scripts/` is not guaranteed on `sys.path`.
+_FLAG_SPEC = importlib.util.spec_from_file_location(
+    "flag_provenance", os.path.join(HERE, "flag_provenance.py"))
+flag_provenance = importlib.util.module_from_spec(_FLAG_SPEC)
+_FLAG_SPEC.loader.exec_module(flag_provenance)
 
-#: `commands/open.md` § Step 0.5's `OPENING_ACTORS` — the only `flag_set_by` values a
-#: TASK admits. Everything else refuses, **including an absent field**: after the
-#: 2026-09-30 legacy disposition no live row should be missing it. A goal or topic
-#: accepts any provenance (`scripts/topic-spawn.py` `flagged()`), so this constant is
-#: consulted for tasks only.
-OPENING_ACTORS = ("operator", "legacy")
+#: Re-exported from `flag_provenance` so this module's callers and tests keep their
+#: names; the values live in exactly one place.
+FLAG_TRUTHY = flag_provenance.FLAG_TRUTHY
+OPENING_ACTORS = flag_provenance.OPENING_ACTORS
 
 #: The tokens `refused` may carry. Two producers: `refusals()` adds
 #: `agent-set-flag` from the per-kind provenance rule, `resolve_branch()` adds
@@ -130,29 +137,14 @@ open_queue = _load_open_queue()
 
 
 def flag_admits(block, kind):
-    """Does this page's `flag:` admit it, under its KIND's predicate?
+    """Delegates to the one shared predicate — `scripts/flag_provenance.py`.
 
-    A task is strict (`flag: true`, an unquoted YAML boolean), matching
-    `commands/open.md` § Step 0.5 — the predicate the consumer applies, so a row this
-    admits is a row the consumer would open. A goal or topic is truthy, matching
-    `scripts/topic-spawn.py`'s `FLAG_TRUTHY`.
-
-    ⚠️ The strict branch cannot use `field()`, which strips quotes: `flag: "true"` is a
-    STRING in YAML and is not `True`.
+    Kept as a thin re-export because `eligible()` below and the test suite import this
+    name. The decision itself lives in exactly one place: before the 2026-11-10 ruling
+    this function answered "is the flag set" and `refusals()` answered "did the operator
+    set it", for tasks only. Both questions are now one predicate, at every tier.
     """
-    raw = re.search(r"^flag:[ \t]*(.*)$", block, re.MULTILINE)
-    if not raw:
-        return False
-    value = raw.group(1).strip()
-    if kind == "task":
-        # `open.md` § Step 0.5 reads `t.get('flag') is True` off a PARSED file, so the
-        # set is the one a YAML loader resolves to boolean True — not the single
-        # lowercase token. A quoted scalar is a string in YAML, never a boolean, so it
-        # is rejected here as it is there.
-        if value.startswith(('"', "'")):
-            return False
-        return value in YAML_TRUE
-    return value.strip("\"'").lower() in FLAG_TRUTHY
+    return flag_provenance.flag_admits(block, kind)
 
 
 def eligible(block, kind, today):
@@ -530,17 +522,20 @@ def resolve_launcher(kind, role, block, cfg):
 
 
 def refusals(kind, block):
-    """The per-kind provenance refusals — not uniform, and the difference is live.
+    """The provenance refusal — identical at every tier, owned by `flag_provenance.py`.
 
-    A **task** refuses a flag an agent set: `flag_set_by` outside `OPENING_ACTORS`,
-    which includes an absent field. A **goal or topic** accepts any provenance
-    (`scripts/topic-spawn.py` `flagged()`), so applying the task rule to them would
-    wrongly refuse every goal whose flag the fleet set.
+    Before the 2026-11-10 ruling this returned `[]` for a goal or topic, so an agent-set
+    flag on a goal opened a manager while the byte-identical write on a task was
+    refused. That split is gone (operator ruling, attention card `f8cd8b41…`): the
+    reason is the same for all three subjects.
+
+    An **unflagged** row still returns `[]` here — "not flagged" is `eligible()`'s
+    reason, not a provenance refusal, and emitting it twice would put a spurious token
+    on every unflagged row.
     """
-    if kind != "task":
+    if not flag_provenance.flag_set(block, kind):
         return []
-    who = (open_queue.field(block, "flag_set_by") or "").strip()
-    return [] if who in OPENING_ACTORS else ["agent-set-flag"]
+    return [] if flag_provenance.flag_admits(block, kind) else ["agent-set-flag"]
 
 
 def blocked_by_of(block):

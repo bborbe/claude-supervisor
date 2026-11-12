@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- feat: one flag-provenance predicate for tasks, goals and topics — an agent-set or absent `flag_set_by` opens nothing at any tier, replacing the per-tier split where a task refused it and a goal or topic accepted it
+
 ## v0.268.1
 
 - fix: **the fleet round's open leg admits only FLAGGED rows — `select()` gates on the flag instead of ranking on it.** `open-queue.py` treated `flag: true` as an ordering hint and `approved_at` as the gate, so `select()` admitted ANY eligible approved row up to the worker target; with `bborbe/vault-cli#367` having removed the approved-row admission cap, nothing bounded the open set at all (2793 approved rows measured 2026-11-10). The operator's requirement, verbatim: *"we only want auto open for flagged items"*. `select()` now filters first — an approved, eligible, un-flagged row is never selected at any position and is reported with reason `not flagged` — and `rank_key` orders only the admitted rows (priority, then oldest approval; its flag component is gone because it is constant). Provenance is still not read (`flag_set_by` is a note, never a gate). The other three auto-open limbs needed no change and are recorded as already gated: goals (`topic-spawn.py` `goal-unflagged`), topics (`topic-unflagged`), and crashed-session resume, which is correctly liveness-only so a crash never silently drops work. Tests: the one-flagged/three-unflagged fixture, a flag-removal regression case, and an agreement table against `flagged-rows.py`'s `eligible()` with the two deliberate divergences (`phase: todo`, provenance) named rather than claimed as agreement. `scripts/open-queue.py`, `scripts/tests/test_open_queue.py`, `agents/fleet-open-actor.md`, `commands/steps/readings.md`, `docs/fleet-surface.md`.

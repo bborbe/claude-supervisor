@@ -34,7 +34,18 @@ def write(path, text):
     return path
 
 
-def page(front, body=""):
+def page(front, body="", provenance="operator"):
+    """A frontmatter page whose `flag:` carries provenance by default.
+
+    `flag_set_by: operator` is added whenever the front declares a `flag:` and names no
+    setter, because that is the shape of every live flagged row after the 2026-09-30
+    legacy disposition. Under the operator's 2026-11-10 ruling an absent setter now
+    REFUSES, so a fixture that omitted it would model a row the selector rejects rather
+    than the ordinary admitted row each of these tests is about. The refusal shape is
+    tested deliberately in `PerKindRefusal`, which passes `provenance=None`.
+    """
+    if provenance and "flag_set_by" not in front and "flag:" in front:
+        front = "%s\nflag_set_by: %s" % (front, provenance)
     return "---\n%s\n---\n%s" % (front, body)
 
 
@@ -629,7 +640,12 @@ class WindowIdIsNeverStale(unittest.TestCase):
 
 
 class PerKindRefusal(unittest.TestCase):
-    """SC4: the provenance rule is not uniform, and applying it to goals refuses live work."""
+    """The provenance rule is UNIFORM across the three subjects (operator ruling 2026-11-10).
+
+    Before that ruling a task refused an agent-set flag while a goal or topic accepted any
+    provenance — the split these tests used to pin. It is now one rule: an agent-set or
+    absent `flag_set_by` opens nothing at any tier.
+    """
 
     def test_an_agent_set_task_is_refused(self):
         self.assertEqual(
@@ -638,16 +654,25 @@ class PerKindRefusal(unittest.TestCase):
 
     def test_an_absent_flag_set_by_refuses_a_task(self):
         # After the 2026-09-30 legacy disposition no live row should be missing it.
-        self.assertEqual(fr.refusals("task", page("flag: true")), ["agent-set-flag"])
+        self.assertEqual(
+            fr.refusals("task", page("flag: true", provenance=None)),
+            ["agent-set-flag"])
 
     def test_operator_and_legacy_open_a_task(self):
         for actor in ("operator", "legacy"):
             self.assertEqual(
                 fr.refusals("task", page("flag: true\nflag_set_by: %s" % actor)), [])
 
-    def test_a_goal_accepts_any_provenance(self):
+    def test_a_goal_and_a_topic_refuse_an_agent_set_flag_too(self):
         self.assertEqual(
-            fr.refusals("goal", page("flag: 'true'\nflag_set_by: agent")), [])
+            fr.refusals("goal", page("flag: 'true'\nflag_set_by: agent")),
+            ["agent-set-flag"])
+        self.assertEqual(
+            fr.refusals("topic", page("flag: on\nflag_set_by: agent")),
+            ["agent-set-flag"])
+
+    def test_a_goal_and_a_topic_open_an_operator_set_flag(self):
+        self.assertEqual(fr.refusals("goal", page("flag: 'true'")), [])
         self.assertEqual(fr.refusals("topic", page("flag: on")), [])
 
     def test_the_two_tokens_can_coexist_on_one_row(self):

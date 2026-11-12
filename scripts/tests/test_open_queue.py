@@ -52,7 +52,16 @@ _fr_spec.loader.exec_module(flagged_rows)
 TODAY = "2026-10-30"
 
 
-def task_file(directory, name, frontmatter, body=""):
+def task_file(directory, name, frontmatter, body="", provenance="operator"):
+    """A task page whose `flag:` carries provenance by default.
+
+    Under the operator's 2026-11-10 ruling an absent `flag_set_by` refuses at every tier,
+    so a fixture that omitted it would model a refused row rather than the ordinary
+    admitted row most of these tests are about. Pass `provenance=None` for the refusal
+    shape — `test_a_bare_flag_is_refused` does exactly that.
+    """
+    if provenance and "flag:" in frontmatter and "flag_set_by" not in frontmatter:
+        frontmatter = "%s\nflag_set_by: %s" % (frontmatter, provenance)
     path = os.path.join(directory, name + ".md")
     with open(path, "w", encoding="utf-8") as handle:
         handle.write("---\n%s\n---\n%s\n" % (frontmatter, body))
@@ -173,26 +182,30 @@ class OpenQueueTest(unittest.TestCase):
         self.assertEqual(opened, [])
         self.assertEqual(skipped, [{"name": "row", "reason": "not flagged"}])
 
-    def test_a_bare_flag_is_admitted(self):
-        """Provenance is not read. Operator ruling 2026-10-30: "in the end it should not
-        matter how set the flag". A bare `flag: true` is admitted exactly as one written
-        `--by operator` — reading the setter here would reinstate the provenance gate."""
-        task_file(self.tasks, "bare", "status: in_progress\npriority: 1\nflag: true\n")
+    def test_a_bare_flag_is_refused(self):
+        """Provenance IS read. Operator ruling 2026-11-10 (card `f8cd8b41…`): an agent-set
+        or absent `flag_set_by` opens nothing at any tier. Before that ruling this row was
+        admitted — the 2026-10-30 reading treated the setter as a note. It governs WHICH
+        flagged row may be opened once it is operator-set; it never made an absent or
+        agent-set flag an approval."""
+        task_file(self.tasks, "bare",
+                  "status: in_progress\npriority: 1\nflag: true\n", provenance=None)
         task_file(self.tasks, "plain", "status: in_progress\npriority: 1\n")
         rows, _ = self.collect(["bare", "plain"])
 
         opened, _ = oq.select(rows, live=0, target=30)
 
-        self.assertEqual([r["name"] for r in opened], ["bare"])
+        self.assertEqual(opened, [])
 
-    def test_an_agent_set_flag_is_admitted_too(self):
-        """Same ruling: the setter is a note, never a gate."""
-        task_file(self.tasks, "agent", "status: in_progress\nflag: true\nflag_set_by: agent\n")
+    def test_an_agent_set_flag_is_refused_too(self):
+        """Same ruling, and this is the half that used to differ by tier."""
+        task_file(self.tasks, "agent",
+                  "status: in_progress\nflag: true\nflag_set_by: agent\n")
         rows, _ = self.collect(["agent"])
 
         opened, _ = oq.select(rows, live=0, target=30)
 
-        self.assertEqual([r["name"] for r in opened], ["agent"])
+        self.assertEqual(opened, [])
 
     def test_every_truthy_spelling_is_admitted(self):
         """`is_flagged()` accepts `true`/`yes`/`on`, matching `FLAG_TRUTHY` in
@@ -234,14 +247,15 @@ class OpenQueueTest(unittest.TestCase):
         selector's, so the fixture composes it — the table is about the VERDICT, not the
         mechanism that reached it.
 
-        ⚠️ **Two divergences are DELIBERATE and excluded from this table rather than
-        papered over:**
-          * `phase: todo` — the batch treats `flag: true` on a todo row as the approval
-            and opens it (`commands/open.md` § Step 0.6); `select()` must refuse it,
-            because the fleet round never approves.
-          * `flag_set_by` — the batch keeps `OPENING_ACTORS` because it writes
-            `approved_by: operator`; `select()` reads the flag alone (this task's Out of
-            Scope; `docs/session-tiers.md` § rule 2).
+        ⚠️ **One divergence is DELIBERATE and excluded from this table rather than
+        papered over:** `phase: todo` — the batch treats `flag: true` on a todo row as the
+        approval and opens it (`commands/open.md` § Step 0.6); `select()` must refuse it,
+        because the fleet round never approves.
+
+        ⚠️ **`flag_set_by` is NO LONGER a divergence.** Until the operator's 2026-11-10
+        ruling the batch kept `OPENING_ACTORS` while `select()` read the flag alone; both
+        now call `flag_provenance.flag_admits()`, so the provenance verdict is shared and
+        belongs in this table like every other one.
         """
         fixtures = [
             ("flagged", "status: in_progress\nflag: true\n"),
@@ -263,7 +277,13 @@ class OpenQueueTest(unittest.TestCase):
 
         batch_verdict = {}
         for name, block in fixtures:
-            reason = flagged_rows.eligible(block, "task", TODAY)
+            # The batch side is judged on the same effective frontmatter the fixture file
+            # carries — `task_file()` adds the default provenance, so a raw-block read
+            # here would compare a refused row against an admitted one.
+            effective = block
+            if block is not None and "flag:" in block and "flag_set_by" not in block:
+                effective = block + "flag_set_by: operator\n"
+            reason = flagged_rows.eligible(effective, "task", TODAY)
             if reason is None and block is not None and oq.has_blocked_by(block):
                 reason = "blocked"  # commands/open.md § Step 0.6 — ⛔ HOLD
             batch_verdict[name] = "admit" if reason is None else "refuse"

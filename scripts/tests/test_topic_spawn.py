@@ -202,25 +202,29 @@ class TopicSpawnTest(unittest.TestCase):
         self.assertEqual(1, rc)
         self.assertEqual("goal-unflagged", out[0])
 
-    def test_a_goal_flagged_by_a_non_operator_still_passes(self):
-        """Provenance is NOT read. Operator ruling 2026-10-30: "in the end it should not
-        matter how set the flag … if flag, should be open if claude session limit allow it".
-        Reading `flag_set_by` here again would silently reinstate the gate it removed."""
+    def test_a_goal_flagged_by_a_non_operator_is_refused(self):
+        """Provenance IS read. Operator ruling 2026-11-10 (card `f8cd8b41…`): an agent-set
+        flag opens nothing at any tier. Before that ruling this goal passed — the
+        2026-10-30 reading treated the setter as a note, which made an agent's own flag a
+        way to buy itself a manager."""
         self.goal("Delta", "planning", 4, setter="agent")
         rc, out = self.run_gate("--goal", "Delta")
-        self.assertEqual(0, rc)
-        self.assertEqual("spawn-ok: Delta", out[0])
+        self.assertEqual(1, rc)
+        self.assertEqual("goal-unflagged", out[0])
 
-    def test_a_goal_flagged_with_no_setter_still_passes(self):
-        """A bare `flag: true` is a flag. The setter is a note, not a condition."""
+    def test_a_goal_flagged_with_no_setter_is_refused(self):
+        """A bare `flag: true` with no setter is refused, not admitted.
+
+        After the 2026-09-30 legacy disposition no live row should be missing
+        `flag_set_by`; one that is means a writer that did not declare itself."""
         page = self.vault / "24 Goals" / "Delta.md"
         page.write_text(
             page.read_text(encoding="utf-8").replace("flag_set_by: operator\n", ""),
             encoding="utf-8",
         )
         rc, out = self.run_gate("--goal", "Delta")
-        self.assertEqual(0, rc)
-        self.assertEqual("spawn-ok: Delta", out[0])
+        self.assertEqual(1, rc)
+        self.assertEqual("goal-unflagged", out[0])
 
     def test_a_legacy_flag_still_passes(self):
         """193 rows were flagged before the field was written; they keep working."""
@@ -276,11 +280,13 @@ class TopicSpawnTest(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertEqual("open-ok: A Topic", out[0])
 
-    def test_a_topic_flagged_by_an_agent_still_opens(self):
+    def test_a_topic_flagged_by_an_agent_is_refused(self):
+        """The topic tier reads provenance too — the third tier the 2026-11-10 ruling
+        unified. Before it, an agent-set flag on a topic opened a fleet manager."""
         self._flag_topic(setter="agent")
         rc, out = self.run_gate("--topic-open")
-        self.assertEqual(0, rc)
-        self.assertEqual("open-ok: A Topic", out[0])
+        self.assertEqual(1, rc)
+        self.assertEqual("topic-unflagged", out[0])
 
     def test_a_flagged_topic_is_refused_at_the_fleet_ceiling(self):
         """The cap is the ONLY bound once the flag is present — that is the ruling."""

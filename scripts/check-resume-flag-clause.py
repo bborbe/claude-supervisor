@@ -255,10 +255,28 @@ def selector_shape_error(code):
 
 
 def resolver_actors(text):
+    """The admitted actors, following `flagged-rows.py`'s re-export to its single home.
+
+    The tuple used to be assigned literally in `flagged-rows.py`. Since the operator's
+    2026-11-10 ruling it lives in `scripts/flag_provenance.py` and `flagged-rows.py` only
+    re-exports it, so a `flag_provenance.OPENING_ACTORS` assignment is followed rather
+    than treated as an unreadable value. Retiring this check instead would have dropped
+    the only guard that `commands/open.md` § Step 0.5 and the shared predicate agree.
+    """
+    actors = _actors_assigned_in(text)
+    if actors is not None:
+        return actors
+    shared = REPO / "scripts/flag_provenance.py"
+    return _actors_assigned_in(shared.read_text(encoding="utf-8")) if shared.exists() else None
+
+
+def _actors_assigned_in(text):
     for node in ast.parse(text).body:
         if isinstance(node, ast.Assign) and any(
             isinstance(t, ast.Name) and t.id == "OPENING_ACTORS" for t in node.targets
         ):
+            if isinstance(node.value, ast.Attribute):
+                return None  # a re-export — the caller follows it
             return tuple(ast.literal_eval(node.value))
     return None
 

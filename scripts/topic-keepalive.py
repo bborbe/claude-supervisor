@@ -136,21 +136,26 @@ def session_id(fm: str) -> str:
     return _owner().page_session_id(fm)
 
 
-FLAG_TRUTHY = ("true", "yes", "on")
+#: The one flag predicate — see `scripts/flag_provenance.py`. Loaded by path because this
+#: script runs standalone out of the plugin cache, where `scripts/` is not on `sys.path`.
+_FLAG_SPEC = importlib.util.spec_from_file_location(
+    "flag_provenance", os.path.join(HERE, "flag_provenance.py"))
+flag_provenance = importlib.util.module_from_spec(_FLAG_SPEC)
+_FLAG_SPEC.loader.exec_module(flag_provenance)
+
+FLAG_TRUTHY = flag_provenance.FLAG_TRUTHY
 
 
-def flagged(fm: str) -> bool:
-    """The same predicate as `scripts/topic-spawn.py`'s `flagged` — flag present, provenance
-    not read.
+def flagged(fm: str, kind: str = "goal") -> bool:
+    """Delegates to `flag_provenance.flag_admits()` — the same predicate topic-spawn uses.
 
-    Operator ruling 2026-10-30: *"in the end it should not matter how set the flag … if flag,
-    should be open if claude session limit allow it"*. `flag_set_by` is a note, not a gate.
-
-    ⚠️ Duplicated deliberately — both scripts run standalone out of the plugin cache, so
-    there is no shared module to import. A split verdict between them would open exactly
-    the goal the spawn gate refuses, so `test_topic_keepalive.py` asserts the two agree.
+    ⚠️ **Provenance is read.** Until the operator's 2026-11-10 ruling (attention card
+    `f8cd8b41…`) this read the flag and ignored `flag_set_by`, so a keep-alive would
+    restart a manager for a subject an agent had flagged. Both scripts now call the one
+    shared predicate, so a split verdict is structurally impossible rather than merely
+    asserted by a test.
     """
-    return scalar(fm, "flag").lower() in FLAG_TRUTHY
+    return flag_provenance.flag_admits(fm, kind)
 
 
 def base_slug(text: str) -> str:

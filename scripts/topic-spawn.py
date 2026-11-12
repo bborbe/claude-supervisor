@@ -87,25 +87,34 @@ REFUSE_CAP = "manager-cap"
 
 # YAML spells a boolean three ways. `operator_pin` below already accepts `yes`, so taking
 # only the literal `true` would report a page that IS flagged as "held for the flag".
-FLAG_TRUTHY = ("true", "yes", "on")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+#: The one flag predicate — see `scripts/flag_provenance.py`. Loaded by path because this
+#: script runs standalone out of the plugin cache, where `scripts/` is not on `sys.path`.
+_FLAG_SPEC = importlib.util.spec_from_file_location(
+    "flag_provenance", os.path.join(_HERE, "flag_provenance.py"))
+flag_provenance = importlib.util.module_from_spec(_FLAG_SPEC)
+_FLAG_SPEC.loader.exec_module(flag_provenance)
+
+FLAG_TRUTHY = flag_provenance.FLAG_TRUTHY
 
 
-def flagged(fm: str) -> bool:
-    """True when this page carries the flag — **whoever set it**.
+def flagged(fm: str, kind: str = "goal") -> bool:
+    """Does this page's flag admit it? Delegates to `flag_provenance.flag_admits()`.
 
-    ⚠️ **Provenance is deliberately NOT read.** Operator ruling 2026-10-30: *"in the end it
-    should not matter how set the flag … if flag, should be open if claude session limit
-    allow it"*. `flag_set_by` is a note, not a gate: the flag is an intent signal, and the
-    only bound on acting on it is capacity. ⚠️ **The consequence is deliberate** — an agent
-    may flag its own page and get a manager opened for it, limited only by the cap. That is
-    the trade the ruling makes, not an oversight; reading `flag_set_by` here again would
-    silently reinstate the provenance gate the ruling removed.
+    ⚠️ **Provenance IS read, for goals and topics alike.** Until the operator's
+    2026-11-10 ruling (attention card `f8cd8b41…`) this function deliberately ignored
+    `flag_set_by`, so an agent could flag its own goal and get a manager opened for it.
+    That ruling unifies the three tiers on *refuse*: a `flag_set_by` outside
+    `OPENING_ACTORS`, absent included, does not open a manager here any more than it
+    opens a task. The 2026-10-30 ruling governs WHICH flagged row may be opened; it never
+    made an agent-set flag an approval.
 
-    ⚠️ `scripts/topic-keepalive.py` carries the same predicate; `test_topic_keepalive.py`
-    asserts the two agree on the same page, because a split verdict between them would open
-    exactly the goal the other refuses.
+    ⚠️ `scripts/topic-keepalive.py` delegates to the same predicate;
+    `test_topic_keepalive.py` asserts the two agree on the same page, because a split
+    verdict between them would open exactly the goal the other refuses.
     """
-    return scalar(fm, "flag").lower() in FLAG_TRUTHY
+    return flag_provenance.flag_admits(fm, kind)
 
 
 def refuse(token: str, detail: str, bound: str | None = None) -> int:
@@ -510,7 +519,7 @@ def main(argv: list[str]) -> int:
     # topic branch gates on `phase: todo` alone, so the ruling had no executable leg one tier
     # up from where it was already enforced.
     if a.topic_open:
-        if not flagged(frontmatter(topic_text)):
+        if not flagged(frontmatter(topic_text), kind="topic"):
             return refuse(
                 REFUSE_TOPIC_UNFLAGGED,
                 f"<{a.topic}> is not flagged. Opening a topic manager is an open, and this "

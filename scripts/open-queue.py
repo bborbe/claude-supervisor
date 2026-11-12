@@ -135,6 +135,11 @@ def _load(name, filename):
 #: `defer_date` is an instant, not a date — see `defer-date.py` for the accepted shapes.
 defer_date = _load("defer_date", "defer-date.py")
 
+#: The one flag predicate — see `scripts/flag_provenance.py`. Loaded by path for the
+#: same reason as `defer_date`: this module is itself loaded by path, so `scripts/` is
+#: not guaranteed on `sys.path`.
+flag_provenance = _load("flag_provenance", "flag_provenance.py")
+
 APPROVED = os.path.join(HERE, "approved-not-started.py")
 WORKER_SESSIONS = os.path.join(HERE, "worker-sessions.py")
 WORKER_TARGET = os.path.join(HERE, "worker-target.py")
@@ -183,16 +188,20 @@ def read_frontmatter(tasks_dir, name):
 
 
 def is_flagged(block):
-    """`flag: true` — **whoever set it**. This is the ADMISSION predicate.
+    """Does this row's flag admit it? Delegates to `flag_provenance.flag_admits()`.
 
-    Operator ruling 2026-10-30: *"in the end it should not matter how set the flag … if flag,
-    should be open if claude session limit allow it"*. `flag_set_by` is a note, never a gate,
-    so a bare `flag: true` with no setter is admitted exactly as one written `--by operator`.
-    A row this returns False for is never selected, at any position (`select()` skips it as
-    `not flagged`); the flag decides WHETHER a row opens, and `rank_key` decides only the
-    order among the rows this admits.
+    This is the ADMISSION predicate: a row it refuses is never selected, at any position
+    (`select()` skips it as `not flagged`); the flag decides WHETHER a row opens, and
+    `rank_key` decides only the order among the rows this admits.
+
+    ⚠️ **Provenance is read, for every kind.** Until the operator's 2026-11-10 ruling
+    (attention card `f8cd8b41…`) this function answered `flag: true` *whoever set it* —
+    the 2026-10-30 reading, which governs WHICH flagged row may be opened once it is
+    operator-set but never made an agent-set flag an approval. A row whose `flag_set_by`
+    is outside `OPENING_ACTORS`, absent included, is now refused here exactly as
+    `commands/open.md` § Step 0.5 refuses it.
     """
-    return (field(block, "flag") or "").strip().lower() in ("true", "yes", "on")
+    return flag_provenance.flag_admits(block, "task")
 
 
 def priority_of(block):
