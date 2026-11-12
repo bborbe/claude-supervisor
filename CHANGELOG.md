@@ -8,11 +8,14 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.295.3
+## Unreleased
 
 - fix: **the answer-reach sentinel call now passes `agent_id`, so it stops being rejected before it can record anything.** Both step files documented `answer_permission(request_id, behavior)`; the tool's schema declares `agent_id`, `request_id` and `behavior` all required, so the MCP layer refused the call above the handler — no request reached the server and no `mcp` reach was written. Measured 2026-11-12: a manager following the step literally got `agent_id and request_id are required` and wrote no leg; retrying with a sentinel `agent_id` produced the foreign-park reply and the reach.
 - fix: **every documented `answer_permission` call now names `agent_id`.** The same unusable two-argument form was in `commands/steps/worker-channels.md`, `commands/goal-answer.md`, `commands/goal-loop.md`, `docs/fleet-surface.md` and `agents/goal-wrangler.md`; all now carry `agent_id`, so no page teaches a call the schema rejects.
 - fix: **the steps no longer claim a real park cannot write the `mcp` reach.** That was true of the retired JS `server/supervisor.mjs` (real parks settle on another arm) and is false of the Go handler the fleet runs, which records the reach **on entry**, before it decodes arguments or looks the request id up. The sentinel is still required — a manager that answers no parks writes nothing — but the reason changed.
+
+## v0.295.3
+
 
 
 - fix: **the keeper's `restart-worker` budget is raised from 120 s to 400 s, because role resolution alone costs 170.6 s.** `restart-worker.py` resolves the session's role through `fleet-board.vault_index()`, which walks every vault's topic/goal/task pages and reads each task's frontmatter — measured 2026-11-12 at 170.6 s, on its own, before the kill or the spawn. At the old 120 s budget every restart reported `outcome UNKNOWN` and recovered nothing, and because the hang sits BEFORE the kill it aborted harmlessly, so no failure was visible. The new `RESTART_WORKER_TIMEOUT` constant is shared by both call sites — the answer-gated fresh restart and the `--absent` resume — since both pay the same index cost and a literal left behind on either is a live defect. Operator ruling 2026-11-12: raise the budget above the index cost rather than optimise the index here. Tests: `test_the_restart_budget_exceeds_the_measured_index_cost`. Change set: `scripts/fleet-keeper.py`, `scripts/tests/test_fleet_keeper.py`, `CHANGELOG.md`.
