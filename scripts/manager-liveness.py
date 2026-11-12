@@ -274,26 +274,31 @@ def resolve(s: str, ext: str):
     return prefixed, False
 
 
-def is_subject_stopped(subject: str, branch: str) -> bool:
-    """Has `/supervisor:stop` written this subject's `<branch>--<slug>.stopped` marker?
+def stopped_marker(subject: str, branch: str):
+    """The marker file that stands this subject down, or None — THE one marker read.
 
-    THE one marker read. `open-queue.py` (the goal and topic tiers) and
-    `adopt-orphans.py` call this rather than re-deriving the path: a second copy would
-    drift from `stop()`'s writer, and the drift is silent in the worst direction — the
-    fleet round would keep reopening a subject the operator had deliberately ended.
+    `open-queue.py` (the goal and topic tiers) and `adopt-orphans.py` call this rather
+    than re-deriving the path: a second copy would drift from `stop()`'s writer, and the
+    drift is silent in the worst direction — the fleet round would keep reopening a
+    subject the operator had deliberately ended.
 
     ⚠️ **Existence, not the timestamp.** Later stops rewrite the marker's content, so the
     file existing is the load-bearing fact; `--arm --resume` is the one verb that clears
-    it. A legacy pre-split record (`<slug>.stopped`, no branch prefix) counts too, through
-    `resolve()`: a subject stood down before the goal/topic split was still deliberately
-    stopped, and `migrate_legacy` only renames the file once the subject re-arms.
+    it. The RESOLVED path is returned, never a re-composed `<branch>--<slug>`: a legacy
+    pre-split record (`<slug>.stopped`, no branch prefix) counts too, through `resolve()`,
+    and a caller that re-derived the name would report a file that does not exist.
 
-    A branch outside `BRANCHES` raises rather than answering `False`: the caller named a
-    tier that does not exist, and a silent "not stopped" would hide that bug behind a
-    reopened row.
+    A branch outside `BRANCHES` raises rather than answering None: the caller named a tier
+    that does not exist, and a silent "not stopped" would hide that bug behind a reopened
+    row.
     """
     marker, _legacy = resolve(slug(subject, branch), "stopped")
-    return os.path.exists(marker)
+    return marker if os.path.exists(marker) else None
+
+
+def is_subject_stopped(subject: str, branch: str) -> bool:
+    """Is `stopped_marker()` non-None? The boolean form every consumer reads."""
+    return stopped_marker(subject, branch) is not None
 
 
 def write_atomic(p: str, text: str) -> None:

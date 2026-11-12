@@ -56,6 +56,9 @@ the round's act:
     up, so it carries the same ordering: ahead of every derived guard. Measured
     2026-11-12 — a stopped goal's flagged tasks were still selected and opened, because
     this script read only the task tier.
+    ⚠️ **This leg only.** `/supervisor:open --flagged` (`flagged-rows.eligible()`) is the
+    operator naming rows to open and does not apply this guard — nor the task tier's
+    `stopped:` field, nor `prior_wait()`. Same boundary, same reason.
   * **a `blocked_by`** — the row names a dependency that is not met.
   * **a future `defer_date`** — defer-UNTIL, not a due date: the row is deliberately
     parked, and `next-focus.py` reads the same distinction.
@@ -310,14 +313,33 @@ def is_stopped(block):
     return (field(block, STOPPED_KEY) or "").strip().lower() in TRUTHY
 
 
-#: The vault's topic folder, a SIBLING of the task folder — the same `23 Topics` the board
-#: reads. `collect()` derives it from `tasks_dir`'s parent unless the caller names one.
+#: The vault's topic and goal folders, SIBLINGS of the task folder — the same folders the
+#: board reads. `collect()` derives them from `tasks_dir`'s parent unless a caller names one.
 TOPICS_DIRNAME = "23 Topics"
+GOAL_DIRNAMES = ("24 Goals", "23 Goals")
 
 
 def default_topics_dir(tasks_dir):
     """The vault's `23 Topics/` beside `tasks_dir`, whether or not the folder exists."""
     return os.path.join(os.path.dirname(os.path.abspath(tasks_dir)), TOPICS_DIRNAME)
+
+
+def default_goals_dir(tasks_dir):
+    """The vault's goal folder beside `tasks_dir` — `24 Goals`, else the older `23 Goals`.
+
+    ⚠️ **The goal pages are read, not inferred.** A topic's `## Goals` entry that names a
+    goal page is a goal; one that names a task file is a task. Without the page set the
+    two are told apart by "not a task title", which inverts the partition on the ~5 titles
+    that are both (`Zero-Touch Container Build and Deploy` lists `builds are not tied to
+    the mac`, a goal AND a task) and leaves `goal_topics` missing the link — so a stopped
+    topic would not suppress that goal's tasks.
+    """
+    root = os.path.dirname(os.path.abspath(tasks_dir))
+    for name in GOAL_DIRNAMES:
+        candidate = os.path.join(root, name)
+        if os.path.isdir(candidate):
+            return candidate
+    return os.path.join(root, GOAL_DIRNAMES[0])
 
 
 def _page_titles(directory):
@@ -329,7 +351,7 @@ def _page_titles(directory):
     return {name[:-3].lower(): name[:-3] for name in names if name.endswith(".md")}
 
 
-def subject_index(tasks_dir, topics_dir, blocks):
+def subject_index(tasks_dir, topics_dir, blocks, goals_dir=None):
     """The task→goal→topic links the subject-tier stand-down read needs.
 
     Built from what is on disk rather than from `fleet-board.vault_index()`, which walks
@@ -342,13 +364,14 @@ def subject_index(tasks_dir, topics_dir, blocks):
     directory: `collect()` already has it, and a vault holds tens of thousands of task
     files this leg has no other reason to open.
 
-    The goal table is derived rather than read from goal pages (this function is not given
-    their directory): every body `## Goals` entry that is NOT a known task title is taken
-    as a goal. That is the partition `vault_index()` makes too — it just resolves the goal
-    half from the link instead of from the page.
+    The goal half is the vault's goal PAGES (`goals_dir`), with a topic's `## Goals` entry
+    that resolves to no page kept as a goal — a body entry that is neither a goal page nor
+    a task file cannot be a task, and dropping it would lose the suppression rather than
+    gain a truth.
     """
     task_titles = _page_titles(tasks_dir)
     topics = _page_titles(topics_dir)
+    goal_pages = _page_titles(goals_dir if goals_dir is not None else default_goals_dir(tasks_dir))
     task_goals, task_managed_by = {}, {}
     for name, block in blocks.items():
         if block is None:
@@ -360,7 +383,8 @@ def subject_index(tasks_dir, topics_dir, blocks):
         if owner:
             task_managed_by[name.lower()] = owner[0].strip()
 
-    goals, goal_topics, task_topics = {}, {}, {}
+    goals = dict(goal_pages)
+    goal_topics, task_topics = {}, {}
     for topic in topics.values():
         try:
             with open(
@@ -373,10 +397,16 @@ def subject_index(tasks_dir, topics_dir, blocks):
             key = link.strip().lower()
             if not key:
                 continue
-            if key in task_titles:
+            # ⚠️ **Goal page FIRST, then task file** — `vault_index()`'s own order. The
+            # reverse order sends a title that is both (`builds are not tied to the mac`
+            # exists in `24 Goals/` and `25 Tasks/`) into `task_topics` only, and the
+            # goal→topic link the suppression rides on is lost.
+            if key in goal_pages:
+                goal_topics.setdefault(key, []).append(topic)
+            elif key in task_titles:
                 task_topics.setdefault(key, []).append(topic)
             else:
-                goals[key] = link.strip()
+                goals.setdefault(key, link.strip())
                 goal_topics.setdefault(key, []).append(topic)
     return fleet_board.VaultIndex(
         topics.values(), goals.values(), task_titles.values(), task_goals, goal_topics,
@@ -392,16 +422,21 @@ def stopped_subject_of(task_title, index):
     container it belongs to was stood down: the marker is the operator's act on that
     container, so the rest of the container's work is no more openable than this row.
 
-    ⚠️ **Every candidate is resolved on its OWN branch, never through `index.subject()`.**
-    A goal and a topic may share a name, and asking the index which one a name is would
-    let a stopped topic suppress an unrelated goal's task — the collision
-    `docs/subject-resolution.md` requires exact-basename matching to avoid.
+    ⚠️ **`managed_by` is checked against BOTH branches, never resolved through
+    `index.subject()`.** That helper prefers topics, and a hand-authored `managed_by` names
+    one subject whose kind the string alone cannot settle — a goal and a topic may share a
+    name. Checking both is the conservative read: the operator stopped that name's work.
+
+    Every other candidate IS resolved on its own branch — `goals_of` gives goals,
+    `topics_of`/`topics_of_task` give topics — so a stopped topic cannot suppress an
+    unrelated same-named goal's task, the collision `docs/subject-resolution.md` requires
+    exact-basename matching to avoid.
     """
     managed = index.managed_by_of(task_title)
     if managed:
-        found = index.subject(managed)
-        if found and manager_liveness.is_subject_stopped(found[1], found[0]):
-            return found
+        for branch in ("goal", "topic"):
+            if manager_liveness.is_subject_stopped(managed, branch):
+                return (branch, managed)
     for goal in index.goals_of(task_title):
         if manager_liveness.is_subject_stopped(goal, "goal"):
             return ("goal", goal)
@@ -573,18 +608,20 @@ def run_scalar(cmd):
     return proc.stdout.strip(), None
 
 
-def collect(tasks_dir, today, approved_json=None, attention_dir=None, topics_dir=None):
+def collect(tasks_dir, today, approved_json=None, attention_dir=None, topics_dir=None,
+            goals_dir=None):
     """The ranked eligible rows (flagged and unflagged — `select()` applies the gate) plus
     the skipped ones with their reasons.
 
     `approved_json` is injectable so the suite can drive this without a live registry;
     production passes None and the script calls `approved-not-started.py` itself.
 
-    `topics_dir` is the vault's topic folder, and it defaults to the `23 Topics/` beside
-    `tasks_dir`. It is what makes the SUBJECT tier resolvable: a task's goal comes from its
-    own frontmatter, but the topic that contains that goal is only knowable from the topic
-    pages' body `## Goals` section. The index is built ONCE per call, from the payload
-    rows' own blocks, never per row.
+    `topics_dir` and `goals_dir` are the vault's topic and goal folders, defaulting to the
+    `23 Topics/` and `24 Goals/` beside `tasks_dir`. They are what makes the SUBJECT tier
+    resolvable: a task's goal comes from its own frontmatter, but the topic that contains
+    that goal is only knowable from the topic pages' body `## Goals` section, and telling a
+    goal entry from a task entry needs the goal pages. The index is built ONCE per call,
+    from the payload rows' own blocks, never per row.
     """
     if approved_json is None:
         payload, err = run_json([sys.executable, APPROVED, "--tasks-dir", tasks_dir, "--json"])
@@ -599,6 +636,7 @@ def collect(tasks_dir, today, approved_json=None, attention_dir=None, topics_dir
         tasks_dir,
         topics_dir if topics_dir is not None else default_topics_dir(tasks_dir),
         blocks,
+        goals_dir,
     )
 
     rows = []
@@ -710,6 +748,12 @@ def main(argv=None):
         default=None,
         help="the vault's topic directory (default: the '23 Topics' beside --tasks-dir)",
     )
+    parser.add_argument(
+        "--goals-dir",
+        default=None,
+        help="the vault's goal directory (default: '24 Goals', else '23 Goals', beside "
+             "--tasks-dir)",
+    )
     parser.add_argument("--now", default=None,
                         help="ISO date or datetime for the defer guard (default: now)")
     parser.add_argument("--vault", default=None,
@@ -737,7 +781,8 @@ def main(argv=None):
         print("open leg: unknown")
         print("❌ bad --now: %s" % args.now, file=sys.stderr)
         return 2
-    rows, skipped, err = collect(args.tasks_dir, today, topics_dir=args.topics_dir)
+    rows, skipped, err = collect(args.tasks_dir, today, topics_dir=args.topics_dir,
+                                 goals_dir=args.goals_dir)
     if err:
         print("open leg: unknown")
         print("⚠️ approved queue unreadable — %s" % err, file=sys.stderr)

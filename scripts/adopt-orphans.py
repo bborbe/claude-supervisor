@@ -274,15 +274,17 @@ def standdown_marker(subject):
     owns; a `task--<slug>.stopped` marker is honoured here all the same, because the
     marker's existence is the operator's act whatever tier wrote it.
 
-    The returned name is the marker FILE, not the subject, so the report can say what
-    evidence the skip rests on -- the operator's `/supervisor:stop` is otherwise invisible
-    from the adoption output.
+    The returned name is the marker FILE as `manager-liveness.stopped_marker()` resolved
+    it — never a re-composed `<branch>--<slug>`, which on the legacy path names a file that
+    does not exist — so the report can say what evidence the skip rests on and which file
+    to delete to undo it.
     """
     if not subject:
         return None
     for branch in ml.BRANCHES:
-        if ml.is_subject_stopped(subject, branch):
-            return "%s--%s.stopped" % (branch, ml.base_slug(subject))
+        marker = ml.stopped_marker(subject, branch)
+        if marker:
+            return os.path.basename(marker)
     return None
 
 
@@ -519,7 +521,7 @@ def main(argv=None):
             len(rows),
             sum(len(r["adopted"]) for r in rows),
             sum(len(r["held"]) for r in rows),
-            sum(1 for r in rows if r.get("skipped")),
+            sum(len(r["workers"]) for r in rows if r.get("skipped")),
         )
     )
     return 0

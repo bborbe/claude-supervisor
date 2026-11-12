@@ -115,8 +115,9 @@ class Base(unittest.TestCase):
         self.root = self._tmp.name
         self.tasks = os.path.join(self.root, "25 Tasks")
         self.topics = os.path.join(self.root, "23 Topics")
+        self.goals = os.path.join(self.root, "24 Goals")
         self.state = os.path.join(self.root, "sweep-gate")
-        for path in (self.tasks, self.topics, self.state):
+        for path in (self.tasks, self.topics, self.goals, self.state):
             os.makedirs(path)
         # ⚠️ Never the operator's real store: see the module docstring.
         self._saved_env = os.environ.get("MANAGER_LIVENESS_STATE_DIR")
@@ -139,13 +140,14 @@ class Base(unittest.TestCase):
     def clear(self, name):
         os.remove(os.path.join(self.state, name))
 
-    def run_collect(self, names, tasks_dir=None, topics_dir=None):
+    def run_collect(self, names, tasks_dir=None, topics_dir=None, goals_dir=None):
         """`collect()` → `select(live=0, target=10)`: the seam every SC probe uses."""
         rows, skipped, err = oq.collect(
             tasks_dir or self.tasks,
             TODAY,
             approved_json=approved(names),
             topics_dir=topics_dir or self.topics,
+            goals_dir=goals_dir or self.goals,
         )
         self.assertIsNone(err)
         opened, select_skipped = oq.select(rows, live=0, target=10)
@@ -254,7 +256,8 @@ class CrossVaultCollisionTest(Base):
         self.other = os.path.join(self.root, "other-vault")
         self.other_tasks = os.path.join(self.other, "25 Tasks")
         self.other_topics = os.path.join(self.other, "23 Topics")
-        for path in (self.other_tasks, self.other_topics):
+        self.other_goals = os.path.join(self.other, "24 Goals")
+        for path in (self.other_tasks, self.other_topics, self.other_goals):
             os.makedirs(path)
         task_page(self.tasks, "Shared Title", flagged(["Stopped Goal"]))
         task_page(self.other_tasks, "Shared Title", flagged(["Open Goal"]))
@@ -263,16 +266,78 @@ class CrossVaultCollisionTest(Base):
         self.marker("goal--stopped-goal.stopped")
 
         opened_a, skipped_a = self.run_collect(
-            ["Shared Title"], tasks_dir=self.tasks, topics_dir=self.topics
+            ["Shared Title"], tasks_dir=self.tasks, topics_dir=self.topics,
+            goals_dir=self.goals,
         )
         opened_b, skipped_b = self.run_collect(
-            ["Shared Title"], tasks_dir=self.other_tasks, topics_dir=self.other_topics
+            ["Shared Title"], tasks_dir=self.other_tasks, topics_dir=self.other_topics,
+            goals_dir=self.other_goals,
         )
 
         self.assertEqual(opened_a, [])
         self.assertEqual([row["reason"] for row in skipped_a], ["subject stood down"])
         self.assertEqual([row["name"] for row in opened_b], ["Shared Title"])
         self.assertEqual(skipped_b, [])
+
+
+class GoalPageCollisionTest(Base):
+    """A `## Goals` entry whose title is BOTH a goal page and a task file is a GOAL.
+
+    `fleet_board.vault_index()` tests the goal table first for exactly this reason, and the
+    live vault carries ~5 such titles (`Zero-Touch Container Build and Deploy` lists
+    `builds are not tied to the mac`, which exists in `24 Goals/` and `25 Tasks/`). Testing
+    the task table first sends the link into `task_topics` only, the goal→topic link is
+    lost, and a stopped topic stops suppressing that goal's tasks — silently.
+    """
+
+    TITLE = "Builds Are Not Tied To The Mac"
+
+    def setUp(self):
+        super().setUp()
+        # The collision: the same title as a goal page AND a task file.
+        task_page(self.goals, self.TITLE, "page_type: goal\nstatus: in_progress")
+        task_page(self.tasks, self.TITLE, "status: in_progress\nphase: planning")
+        topic_page(self.topics, "Zero-Touch Container Build", [self.TITLE])
+        task_page(self.tasks, "under-the-goal", flagged([self.TITLE]))
+
+    def test_a_stopped_topic_still_suppresses_through_a_colliding_title(self):
+        self.marker("topic--zero-touch-container-build.stopped")
+
+        opened, skipped = self.run_collect(["under-the-goal"])
+
+        self.assertEqual(opened, [])
+        self.assertEqual([row["reason"] for row in skipped], ["subject stood down"])
+
+
+class ManagedByGoalTest(Base):
+    """`managed_by` naming a goal page that no topic lists must still resolve.
+
+    The goal set is the vault's goal PAGES, not "every title some topic happens to list" —
+    otherwise a hand-authored `managed_by: [[Some Goal]]` resolves to nothing and the row
+    opens under a stopped goal.
+    """
+
+    def setUp(self):
+        super().setUp()
+        task_page(self.goals, "Some Goal", "page_type: goal\nstatus: in_progress")
+        task_page(self.tasks, "managed-row", flagged(extra="managed_by: '[[Some Goal]]'"))
+
+    def test_a_managed_by_goal_is_suppressed_without_any_topic_listing_it(self):
+        self.marker("goal--some-goal.stopped")
+
+        opened, skipped = self.run_collect(["managed-row"])
+
+        self.assertEqual(opened, [])
+        self.assertEqual([row["reason"] for row in skipped], ["subject stood down"])
+
+    def test_clearing_the_marker_restores_it(self):
+        self.marker("goal--some-goal.stopped")
+        self.clear("goal--some-goal.stopped")
+
+        opened, skipped = self.run_collect(["managed-row"])
+
+        self.assertEqual([row["name"] for row in opened], ["managed-row"])
+        self.assertEqual(skipped, [])
 
 
 class OneResolverTest(unittest.TestCase):

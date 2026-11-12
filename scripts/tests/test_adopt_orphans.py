@@ -81,8 +81,19 @@ class Base(unittest.TestCase):
         self.state_dir = os.path.join(self.tmp, "sweep-gate")
         for path in (self.registry_dir, self.heartbeat_dir, self.subjects_dir, self.state_dir):
             os.makedirs(path)
+        # ⚠️ **Both halves of the store redirection.** `run_script()` passes the env var to
+        # the subprocess, and the in-process `ao.main()` cases read the module attribute —
+        # which is captured at import, so the env var alone cannot move it. Without this a
+        # real `goal--manager-layer.stopped` in the operator's store would skip a case for
+        # a reason the case never set up.
+        self._saved_state = ao.ml.STATE_DIR
+        ao.ml.STATE_DIR = self.state_dir
+        self.addCleanup(self._restore_state)
         self.claims_file = os.path.join(self.tmp, "ownership-claims.json")
         self._pids = 0
+
+    def _restore_state(self):
+        ao.ml.STATE_DIR = self._saved_state
 
     def spawn(self, session_id, parent=None, role=None):
         """A spawn ledger row. `role` is written only when given.
