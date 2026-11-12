@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.293.0
 
 - feat: restart a stuck headless worker from the fleet round. `scripts/stuck-idle.py` reads the three conjuncts — transcript unchanged for two rounds, no tool call in flight, no declared wait — and `scripts/stuck-heal.py` gains `--kind idle-no-wait` on its existing ladder, so the remedy stays one fresh process on the SAME session id and never becomes a second resume mechanism. `agents/fleet-drive.md` step 5c assigns the new `stuck` verdict to a headless `revive` row and renders a `RESUMES` line carrying `stuck-heal.py`'s action; `commands/steps/drive.md` executes it through `spawn_agent(resume=…)`. ⚠️ The gap this closes: `reap-idle-headless.py` closes an idle headless worker's process at 15 minutes, and nothing resumed it — `close-idle-tab.py` refuses a headless row `not-tab`, so step 5b could only mark it `unverifiable`, and the task kept open boxes with no live owner. The two-round count is carried in from the drive ledger's `transcript_mtime`, never re-derived in prose. ⚠️ An unreadable task file reads `unknown`, never `no wait`, and a pending tool call is cleared only by its own `tool_use_id`.
 
