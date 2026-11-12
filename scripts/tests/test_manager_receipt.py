@@ -1881,22 +1881,44 @@ class RenderCached(unittest.TestCase):
     Replaying the cached payload verbatim prints a header claiming a time the tick did
     not run, which makes a dead loop and a gated one look identical. The marker is part
     of the frame (`docs/sweep-output.md`), so it is replaced, never kept.
+
+    ⚠️ **The two tiers' payloads have different first lines.** The topic payload opens
+    with a marker (`22:12 ✓ T — 53 goals`); the goal payload, written by
+    `--write-payload`, opens with the box's own TOP BORDER. A renderer that dropped
+    `lines[0]` unconditionally printed a goal-tier box with no top edge.
+
+    ⚠️ **A missing payload is not an empty tick.** Before the fallback the renderer
+    exited 1 and printed nothing, so a subject that had never swept printed no table
+    at all — the failure `Manager Session` § Sweep output records from the first
+    implementation, and the one the operator's 2026-09-15 / 2026-09-20 rulings forbid.
     """
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        # `payload_file()` and `tracked_names()` resolve through the PRODUCER's own
+        # paths (`manager-predispatch.payload_path` / `tracked_path`), so the
+        # predispatch store points at the same temp tree the receipt uses.
+        os.environ["MANAGER_PREDISPATCH_STATE_DIR"] = self.tmp
         self.m = load(self.tmp, self.tmp)
 
-    def payload(self, text):
-        with open(os.path.join(self.tmp, "t.sweep"), "w", encoding="utf-8") as fh:
+    def tearDown(self):
+        os.environ.pop("MANAGER_PREDISPATCH_STATE_DIR", None)
+        os.environ.pop("MANAGER_RECEIPT_STATE_DIR", None)
+        os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None)
+
+    def payload(self, text, tier="topic"):
+        name = "t.sweep" if tier == "topic" else "t.table"
+        with open(os.path.join(self.tmp, name), "w", encoding="utf-8") as fh:
             fh.write(text)
 
-    def render(self):
+    def tracked(self, names):
+        with open(os.path.join(self.tmp, "t.tracked.txt"), "w", encoding="utf-8") as fh:
+            fh.write("\n".join(names) + "\n")
+
+    def render(self, tier="topic"):
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            # This class exercises the TOPIC tier's cached render, whose payload is
-            # `manager-receipts/<slug>.sweep`; the goal tier's is `.table`.
-            rc = self.m.render_cached("T", tier="topic")
+            rc = self.m.render_cached("T", tier=tier)
         return rc, buf.getvalue()
 
     def test_the_stale_marker_is_replaced(self):
@@ -1912,11 +1934,56 @@ class RenderCached(unittest.TestCase):
         self.assertIn("│ row│", out)
         self.assertIn("└────┘", out)
 
-    def test_a_missing_payload_is_an_error_not_an_empty_table(self):
-        # An empty render would read as "the table printed and had no rows".
+    def test_the_goal_payload_keeps_its_top_border(self):
+        # No marker line on this tier: the payload IS the box, so dropping the first
+        # line deleted the top border of every gated goal tick.
+        self.payload("┌────┐\n│ row│\n└────┘\n", tier="goal")
+        rc, out = self.render(tier="goal")
+        self.assertEqual(rc, 0)
+        self.assertIn("┌────┐", out)
+        self.assertIn("│ row│", out)
+
+    def test_a_missing_payload_still_prints_a_full_box(self):
+        self.tracked(["One task", "Two task"])
         rc, out = self.render()
-        self.assertEqual(rc, 1)
-        self.assertEqual(out, "")
+        self.assertEqual(rc, 0)
+        self.assertIn("no cached table yet", out)
+        self.assertIn("2 row(s) from the tracked set", out)
+        self.assertIn("│ Goal ", out)          # the topic frame's header
+        self.assertIn("│ One task", out)
+        self.assertIn("│ Two task", out)
+        self.assertIn("┌", out)
+        self.assertIn("└", out)
+
+    def test_the_goal_tier_fallback_uses_the_goal_frame(self):
+        # Five columns, `Topic / Goal / Task | Session | Status | Phase | Met` — NOT
+        # the topic frame. The subject leads and its tracked rows indent beneath it.
+        self.tracked(["One task"])
+        rc, out = self.render(tier="goal")
+        self.assertEqual(rc, 0)
+        self.assertIn("Topic / Goal / Task", out)
+        self.assertNotIn("│ Manager", out)
+        lines = out.splitlines()
+        subject_row = [i for i, ln in enumerate(lines) if ln.startswith("│ T ")]
+        task_row = [i for i, ln in enumerate(lines) if ln.startswith("│    One task")]
+        self.assertEqual(len(subject_row), 1, out)
+        self.assertEqual(len(task_row), 1, out)
+        self.assertLess(subject_row[0], task_row[0])
+
+    def test_an_empty_payload_falls_back_too(self):
+        self.payload("")
+        self.tracked(["One task"])
+        rc, out = self.render()
+        self.assertEqual(rc, 0)
+        self.assertIn("carries no box", out)
+        self.assertIn("│ One task", out)
+
+    def test_a_marker_only_payload_falls_back(self):
+        self.payload("22:12 ✓ T — 53 goals\n")
+        rc, out = self.render()
+        self.assertEqual(rc, 0)
+        self.assertIn("carries no box", out)
+        self.assertIn("┌", out)
 
 
 class SpendReadout(unittest.TestCase):
