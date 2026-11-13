@@ -369,11 +369,11 @@ tab**: it reports the refusal and hands the restart over — a stall is `busy`, 
 the operator's alone.
 
 ⚠️ **`agents/goal-drive.md`'s orphan gate covers the same population; `worker-keepalive.py`
-enforces the exclusion itself, not via this prose.** Both legs record only **after** the
-instrument confirms `LIVE`, so a check-then-act race lets two resumes land before either cap
-arms. `scripts/owner.py` answers for each declared goal — the ONE ownership definition
-(`docs/session-tiers.md` § Keep-alive) — so only an **owner** (session `LIVE` **and** loop
-`OK`/`STALE`) returns `jump`, naming the evidence; a manager stood down with
+enforces the exclusion itself.** Both legs record only **after** the instrument confirms
+`LIVE`, so a check-then-act race lets two resumes land before either cap arms — the goal
+tier's and this leg's. `scripts/owner.py` answers for each declared goal — the ONE ownership
+definition (`docs/session-tiers.md` § Keep-alive) — so only an **owner** (session `LIVE`
+**and** loop `OK`/`STALE`) returns `jump`; a manager stood down with
 `/supervisor:stop` does not hold the row, and a `cannot-tell` is reported, never resumed.
 
 **Record the count — in the digest, and labelled as a floor while the scan cannot finish.**

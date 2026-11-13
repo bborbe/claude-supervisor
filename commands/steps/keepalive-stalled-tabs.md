@@ -75,10 +75,12 @@ population test, and the headless half needs no filter here: `restart-worker.py`
 **prefixes**, and a `for … do … done` matches none of them, so a shell loop escalates a
 permission prompt every round and the leg stops running unattended.
 
-⚠️ **The population is `class: stalled` AND `mode: interactive`.** The headless half is
-`scripts/stuck-heal.py`'s ladder and the fleet round's headless restart — a different
-population with a different mechanism. `restart-worker.py` refuses `headless-target` itself,
-so a mis-sent headless row is reported rather than acted on, but do not send one.
+⚠️ **The population is `stall_count >= 2` in the snapshot, and nothing else** — the code block
+above is the whole filter, and the snapshot carries no `class` or `mode` field to narrow on.
+The headless half is `scripts/stuck-heal.py`'s ladder and the fleet round's headless restart —
+a different population with a different mechanism. `restart-worker.py` refuses
+`headless-target` itself, so a headless row is reported rather than acted on, but do not add
+a filter for it: there is no field to filter on.
 
 ## Act on the verdict — the script's first line
 
