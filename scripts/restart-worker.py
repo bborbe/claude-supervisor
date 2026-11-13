@@ -12,7 +12,7 @@ rule (`docs/session-tiers.md`). A manager is restarted by this script too, in it
 colour, with a re-arm note; the name is kept because it is fixed by the shipped
 `commands/worker-restart.md`, `docs/restart-worker.md` and their allowlist rules.
 
-Seven refusals, each exit 1 with a stable reason token as the first line of output:
+Ten refusals, each exit 1 with a stable reason token as the first line of output:
 
   unknown-session-id  no registry entry carries that session id. The message says
                       whether the id was absent or the registry itself was unreadable
@@ -32,6 +32,16 @@ Seven refusals, each exit 1 with a stable reason token as the first line of outp
   stale-load-path     nothing would load differently: no load-path copy, no MCP config
                       file and no launcher script is newer than the session's own
                       start, so restarting it buys nothing.
+  task-terminal       the session's anchored task reads `completed`, `aborted` or `hold`,
+                      or carries a future `defer_date`. The work is finished, so a resume
+                      would undo the close. Read at resume time, never from a census.
+  no-task-anchor      `--fresh-prompt-task` was asked for and the session's task anchor
+                      could not be resolved, so a fresh session could not be bound to any
+                      work. Refusing beats spending a spawn slot on a session that drives
+                      nothing.
+  task-handed-off     `--fresh-prompt-task` was asked for and the task has moved to a
+                      successor; a fresh session would be a second worker on a row this
+                      one no longer owns.
 
 Exit codes: 0 success, 1 refusal, 2 usage error, 3 environment fault.
 
@@ -864,8 +874,9 @@ def resume_command(sid, title, chip, cwd, launcher, fresh_prompt=None,
         "unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN "
         "CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; "
         + trap
-        + (f'"{script}" -n "{title}" "{bash_dq_escape(fresh_prompt)}"' if fresh_prompt
-           else f'"{script}" --resume {sid} -n "{title}" "/color {chip}"')
+        + (f'"{script}" -n "{bash_dq_escape(title)}" "{bash_dq_escape(fresh_prompt)}"'
+           if fresh_prompt
+           else f'"{script}" --resume {sid} -n "{bash_dq_escape(title)}" "/color {chip}"')
     )
     argv = [wezterm, "cli", "spawn"]
     if cwd:
@@ -909,9 +920,9 @@ def fresh_prompt_for_task(sid, cwd):
     """`(prompt, None)` binding a restarted worker to its own task, or `(None, refusal)`.
 
     A fresh session starts with no conversation, so its first turn is the only thing that
-    can re-anchor it. The task is the one `task_terminal_refusal` already resolves — the
-    same `close-worker.py::find_task` join, never a second lookup that could disagree with
-    the guard that ran moments earlier on the same session.
+    can re-anchor it. The task is resolved through the SAME `close-worker.py::find_task`
+    join `task_terminal_refusal` uses — never a second definition of "which task owns this
+    session", which could drift from the guard that ran moments earlier.
 
     Refusals, each a first-line token + exit 1, both fired before anything is signalled:
       `no-task-anchor`   no task resolves for this session, so a fresh one could not be
@@ -921,13 +932,25 @@ def fresh_prompt_for_task(sid, cwd):
       `task-handed-off`  the task moved to a successor; restarting this session would put a
                          second worker on a row it no longer owns.
     """
+    # ⚠️ `find_task` returns `None` for a grep that TIMED OUT or errored as well as for a
+    # genuine absence, so this token covers "unreadable" too — which is why the detail says
+    # "could not be resolved" rather than "does not exist". It fails safe either way: nothing
+    # is signalled, and an unreadable lookup can only ever withhold a restart.
+    #
+    # ⚠️ This is a SECOND `find_task` call — `task_terminal_refusal` made the first moments
+    # earlier. That is a deliberate cost, not an oversight: the two answer different
+    # questions (is the work finished? / which task does this fresh session bind to?), and
+    # sharing one read would put the terminality verdict behind a cache the caller could
+    # forget to refresh. The window between them is covered by the terminal guard's own
+    # call-time read, which is the one that must not be stale.
     cw = load_sibling("close-worker.py")
     task = cw.find_task(sid, cwd)
     if task is None:
         return None, (
             "no-task-anchor",
-            f"session {sid} resolves no task anchor, so a fresh session could not be bound "
-            "to its own work; refusing rather than starting an unanchored worker",
+            f"session {sid}'s task anchor could not be resolved (absent or unreadable), so a "
+            "fresh session could not be bound to its own work; refusing rather than starting "
+            "an unanchored worker",
         )
     path, _fm, handed_off = task
     if handed_off:
@@ -937,6 +960,14 @@ def fresh_prompt_for_task(sid, cwd):
             "session would be a second worker on a row it no longer owns",
         )
     name = os.path.splitext(os.path.basename(path))[0]
+    # A newline survives double-quoting, so it would reach the launcher as a multi-line first
+    # turn. Refusing is the only safe direction: the prompt is a command line, not prose.
+    if "\n" in name or "\r" in name:
+        return None, (
+            "no-task-anchor",
+            f"session {sid}'s task name carries a newline ({name!r}); a fresh prompt is one "
+            "command line, so refusing rather than sending a malformed first turn",
+        )
     return f"{TASK_FRESH_PROMPT_COMMAND} {name}", None
 
 
@@ -1472,7 +1503,8 @@ def main():
                          "holds. Refuses `no-task-anchor` / `task-handed-off`")
     ap.add_argument("--allow-busy-lapse", action="store_true",
                     help="lift ONLY the busy-target refusal, and only for the lapse "
-                         "fresh-restart path: requires --reason lapse AND --fresh-prompt, so "
+                         "fresh-restart path: requires --reason lapse AND a fresh prompt "
+                         "(--fresh-prompt or --fresh-prompt-task), so "
                          "it can never widen a code-staleness restart or a plain resume. "
                          "Operator ruling 2026-11-12: on the lapse card the operator's answer "
                          "IS the judgement that separates a lapse from a slow round, so a "
