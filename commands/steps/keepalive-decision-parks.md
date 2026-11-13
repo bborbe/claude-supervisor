@@ -31,20 +31,19 @@ summary carrying `decision-candidates=`, `decision-resumed-a=`, `decision-resume
 digest key.
 
 ⚠️ **`--persist-beside` is what makes those four readings auditable, and passing it is not
-optional.** It writes them to `<the digest's directory>/<the digest's round>.decision` — the same
-round, the same sanitized filename — carrying the **same line** the script printed, so the artifact
-and the hand-back cannot disagree. Before 2026-11-13 they existed only in the hand-back message:
-`grep -rl decision-candidates ~/.claude/state/fleet-handback/` returned **0 files**, so a round's
-decision numbers died with the message and nobody — including the next round's manager — could
-re-read them. Pass the round's digest path exactly as the caller gave it; the script derives the
-sibling itself and **refuses** a path that is not a `.digest` rather than writing beside something
-else.
+optional.** Pass the round's digest path exactly as the caller gave it: the script derives the
+sibling `<round>.decision` itself, carries the **same line** it printed, and **refuses** a path that
+is not a `.digest` rather than writing beside something else. **What the artifact is, and which of
+this leg's readings are payload-persisted rather than message-only, has one home:
+`docs/handback-contract.md` § Which readings survive the round** — read it there, never restate it
+here. Before that file existed the four readings lived only in the hand-back message:
+`grep -rl decision-candidates ~/.claude/state/fleet-handback/` returned **0 files**.
 
 ⚠️ **Exit 3 means the readings were produced but could not be persisted** (a read-only or full
 state dir). The script still prints the summary and names the failure on stderr as
 `decision-persist: FAILED — <path>: <error>`. Report `decision-persist=FAILED` in the hand-back and
 never let the round read as clean: a leg that swallowed this would put the numbers back in a message
-only, which is the defect this file exists to close. Exit 0 is `decision-persist=written`.
+only. Exit 0 is `decision-persist=written`.
 
 ⚠️ **This was prose for six review rounds, and every round found a different real defect** — an
 `approved_at` read the population already guarantees, an empty `blocked_by` that is vacuously "all
