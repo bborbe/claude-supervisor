@@ -149,13 +149,21 @@ def subject_of(session_id, state_dir=WORKER_MANAGER_DIR):
 
 
 def read_subject_state(session_id, *, subject_of=subject_of, run=subprocess.run):
-    """`manager-liveness.py --state`'s first field for the session's subject, or None.
+    """The session's subject state, `guard.STATE_UNREADABLE`, or `None`.
 
-    ⚠️ **A failed read must never be representable as a state.** `None` means unknown —
-    no record, no subject, a non-zero exit, an unparseable line. The caller passes it
-    straight through to the guard, which falls back to the screen verdict. Never `""`,
-    `"OK"`, or an empty dict: the guard would read a fabricated `OK` as "awake" and a
-    fabricated `SLEEPING` would suppress every wake.
+    Three outcomes, and the difference between the last two is the whole point:
+
+    - a state string — the read succeeded;
+    - `guard.STATE_UNREADABLE` — a subject RESOLVED but the read failed (non-zero exit,
+      unparsable line, timeout). The guard refuses the wake on this, because a missed
+      wake re-arms a manager while a spurious one closes its pane for good;
+    - `None` — NO subject resolved (no record, or a record without subject/branch). The
+      screen verdict decides, exactly as before this parameter existed.
+
+    ⚠️ **A failed read must never be representable as a state.** Never `""`, `"OK"`, or
+    an empty dict: the guard would read a fabricated `OK` as "awake" and a fabricated
+    `SLEEPING` would suppress every wake. And never collapse `STATE_UNREADABLE` into
+    `None` — that is the fail-open that let three wakes through on 2026-11-13.
     """
     pair = subject_of(session_id)
     if pair is None:
@@ -166,11 +174,11 @@ def read_subject_state(session_id, *, subject_of=subject_of, run=subprocess.run)
                    "--state", "--subject", subject, "--branch", branch],
                   capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.SubprocessError):
-        return None
+        return guard.STATE_UNREADABLE
     lines = (res.stdout or "").strip().splitlines()
     if res.returncode != 0 or not lines:
-        return None
-    return lines[0].split("\t", 1)[0] or None
+        return guard.STATE_UNREADABLE
+    return lines[0].split("\t", 1)[0] or guard.STATE_UNREADABLE
 
 
 def plan(session_ids, *, records, panes, pid_ttys, read, card, state,

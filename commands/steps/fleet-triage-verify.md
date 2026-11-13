@@ -108,8 +108,9 @@ row whose only action was `sendmessage` stays in `STUCK`, because that message w
 `none:<skip>` row stays STUCK unless the skip names a valid wait: `skip:operator-ask` or
 `skip:open-card` → it belongs in OPERATOR with its card; `skip:machine-wait` or
 `skip:sleeping` → EXTERNAL (a date-gated sleeper waits on its own clock, and `--state` is what
-proves it);
-`skip:spinner` → WORKING. ⚠️ Never count `unverified` as driven.
+proves it); `skip:spinner` → WORKING. ⚠️ **`skip:state-unreadable` is deliberately NOT a valid
+wait** — a subject resolved but its state could not be read, so the row stays STUCK and surfaces
+the broken read rather than being excused by it. ⚠️ Never count `unverified` as driven.
 
 **Green requires all five of:** `STUCK == 0`, `UNCARDED == 0`, `FINISHED-OPEN == 0`,
 `NO-LOOP == 0`, and `accounted for == sessions` (every live session landed in exactly one row —

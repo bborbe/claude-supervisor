@@ -8,6 +8,7 @@ after activation, so a modal that opened since the plan read is not typed into.
 """
 import importlib.util
 import pathlib
+import subprocess
 import types
 import unittest
 
@@ -85,10 +86,28 @@ class PlanTest(unittest.TestCase):
 
 
 class SubjectStateTest(unittest.TestCase):
-    def test_failed_read_is_none_not_a_state(self):
+    def test_failed_read_is_the_unreadable_sentinel_not_a_state(self):
+        # A subject RESOLVED, so the read failing must fail CLOSED — 2026-11-13: three
+        # wakes landed in a SLEEPING window because this returned None and fell through.
         def run(cmd, **kw):
             return types.SimpleNamespace(returncode=1, stdout="", stderr="boom")
-        self.assertIsNone(wake.read_subject_state("a", subject_of=lambda s: ("T", "goal"), run=run))
+        self.assertEqual(
+            wake.read_subject_state("a", subject_of=lambda s: ("T", "goal"), run=run),
+            wake.guard.STATE_UNREADABLE)
+
+    def test_empty_output_is_the_unreadable_sentinel(self):
+        def run(cmd, **kw):
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        self.assertEqual(
+            wake.read_subject_state("a", subject_of=lambda s: ("T", "goal"), run=run),
+            wake.guard.STATE_UNREADABLE)
+
+    def test_timeout_is_the_unreadable_sentinel(self):
+        def run(cmd, **kw):
+            raise subprocess.SubprocessError("timed out")
+        self.assertEqual(
+            wake.read_subject_state("a", subject_of=lambda s: ("T", "goal"), run=run),
+            wake.guard.STATE_UNREADABLE)
 
     def test_unresolvable_subject_is_none(self):
         self.assertIsNone(wake.read_subject_state("a", subject_of=lambda s: None))
