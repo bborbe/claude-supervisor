@@ -234,17 +234,6 @@ class ResumeCommand(unittest.TestCase):
             rw.bash_dq_escape("/vault-cli:work-on-task A Stuck Tab Worker"),
         )
 
-    def test_allow_busy_lapse_accepts_the_task_fresh_prompt(self):
-        """Without this the lapse path cannot restart a stalled tab worker at all: a stalled
-        session is `busy`, and `--allow-busy-lapse` is the only lift. Exit 2 would be an
-        argparse usage error, i.e. the combination refused before any check ran."""
-        out = subprocess.run(
-            [sys.executable, SCRIPT, "sid", "--reason", "lapse", "--allow-busy-lapse",
-             "--fresh-prompt-task", "--dry-run"],
-            capture_output=True, text=True,
-        )
-        self.assertNotEqual(out.returncode, 2, out.stderr)
-
     def test_allow_busy_lapse_still_needs_a_fresh_prompt(self):
         """The flag's whole safety is its narrowness — it must never widen a plain resume."""
         out = subprocess.run(
@@ -1823,6 +1812,19 @@ class FreshPromptTaskRefusal(unittest.TestCase):
         self._task("status: in_progress", f"claude_session_id: {self.SID}")
         out = self._run("--dry-run")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("/vault-cli:work-on-task A Task", out.stdout)
+
+    def test_the_busy_lift_reaches_the_task_prompt(self):
+        """The property `--allow-busy-lapse` exists for, on a hermetic fixture: a `stalled`
+        session is `busy`, so without the lift this path could never restart one at all.
+        The default `entry()` is `idle`, which would pass the test above without ever
+        exercising the lift — hence the explicit `status="busy"` here."""
+        self._task("status: in_progress", f"claude_session_id: {self.SID}")
+        with open(os.path.join(self.reg, "4242.json"), "w", encoding="utf-8") as fh:
+            json.dump(entry(self.SID, cwd=self.vault, status="busy"), fh)
+        out = self._run("--dry-run")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("busy-target lifted by --allow-busy-lapse", out.stdout)
         self.assertIn("/vault-cli:work-on-task A Task", out.stdout)
 
 
