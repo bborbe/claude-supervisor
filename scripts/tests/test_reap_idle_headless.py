@@ -214,6 +214,10 @@ class TestGuard(unittest.TestCase):
         """The defect this guard change exists to close: `busy` with nothing in flight."""
         self.assertIsNone(self.ok(status="busy"))
 
+    def test_any_stale_non_idle_status_does_not_refuse(self):
+        """Not `busy` alone — `shell` is the other non-idle value the registry carries."""
+        self.assertIsNone(self.ok(status="shell"))
+
     def test_a_busy_status_with_an_open_tool_marker_still_refuses(self):
         verdict = self.ok(status="busy", in_flight=("Bash", 30.0))
         self.assertEqual(verdict[0], "busy-target")
@@ -404,9 +408,38 @@ class TestCandidateSessionIds(unittest.TestCase):
         self._write("a.json", sessionId="sid-a", entrypoint="cli", status="idle")
         self.assertEqual(reap.candidate_session_ids(self.dir), [])
 
-    def test_a_busy_worker_is_not(self):
-        self._write("a.json", sessionId="sid-a", entrypoint="sdk-cli", status="busy")
+    def test_a_fresh_busy_worker_is_not(self):
+        """A worker that moved moments ago is mid-turn; it must cost no refusal per tick."""
+        self._write(
+            "a.json",
+            sessionId="sid-a",
+            entrypoint="sdk-cli",
+            status="busy",
+            statusUpdatedAt=int(time.time() * 1000),
+        )
         self.assertEqual(reap.candidate_session_ids(self.dir), [])
+
+    def test_a_stuck_busy_worker_is_a_candidate(self):
+        """The whole point: filtering every non-idle record here makes the fix dead code."""
+        self._write(
+            "a.json",
+            sessionId="sid-a",
+            entrypoint="sdk-cli",
+            status="busy",
+            statusUpdatedAt=int((time.time() - 20 * 60) * 1000),
+        )
+        self.assertEqual(reap.candidate_session_ids(self.dir), ["sid-a"])
+
+    def test_a_stuck_shell_worker_is_a_candidate(self):
+        """Any non-idle status that stopped moving is a candidate, not `busy` alone."""
+        self._write(
+            "a.json",
+            sessionId="sid-a",
+            entrypoint="sdk-cli",
+            status="shell",
+            statusUpdatedAt=int((time.time() - 20 * 60) * 1000),
+        )
+        self.assertEqual(reap.candidate_session_ids(self.dir), ["sid-a"])
 
     def test_a_record_without_a_session_id_is_skipped(self):
         self._write("a.json", entrypoint="sdk-cli", status="idle")
@@ -908,14 +941,15 @@ class TestScript(unittest.TestCase):
         self.assertNotIn("🧹 reap-idle-headless", done.stdout)
         self.assertIsNone(child.poll(), "a tab worker must not be signalled")
 
-    def test_all_skips_a_busy_worker(self):
+    def test_all_skips_a_fresh_busy_worker(self):
+        """A worker that moved moments ago is mid-turn; `--all` must not even consider it."""
         child = self._spawn()
-        self._registry(child.pid, status="busy")
+        self._registry(child.pid, status="busy", statusUpdatedAt=int(time.time() * 1000))
         self._task()
         done = self._run_all()
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertNotIn("🧹 reap-idle-headless", done.stdout)
-        self.assertIsNone(child.poll(), "a busy worker must not be signalled")
+        self.assertIsNone(child.poll(), "a mid-turn worker must not be signalled")
 
     def test_all_over_an_empty_registry_exits_zero(self):
         """An empty fleet is not a usage error — a clock must not read it as one."""

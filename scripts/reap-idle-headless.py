@@ -163,13 +163,18 @@ def registry_entries(session_id, sessions_dir=None):
 
 
 def candidate_session_ids(sessions_dir=None):
-    """Every registry `sessionId` this verb can ever act on: headless, and currently idle.
+    """Every registry `sessionId` this verb can ever act on: headless, and not provably
+    mid-turn.
 
-    Filtered here rather than left to the guards. `not-headless` and `busy-target` would
-    refuse every other record, so a sweep over the whole registry would emit one refusal
-    per tab worker and per mid-turn worker on every tick — noise that buries the refusals
-    that carry information. The other nine guards still run per candidate; this filter
-    removes only the two that can never pass for the excluded records.
+    Filtered here rather than left to the guards. `not-headless` would refuse every tab
+    worker, so a sweep over the whole registry would emit one refusal per tab worker on
+    every tick — noise that buries the refusals that carry information.
+
+    ⚠️ **A non-`idle` record past `IDLE_FLOOR` IS a candidate.** Excluding every non-idle
+    record here would make `guard()`'s stale-status reading unreachable: a session stuck
+    at `busy` would never be handed to the guard chain at all. The age test keeps a
+    genuinely mid-turn worker out (so it still costs no refusal), and the guard re-reads
+    the wrapper and the tool marker before signalling.
 
     A record with no `sessionId` is skipped: nothing downstream could join it back.
     """
@@ -185,8 +190,16 @@ def candidate_session_ids(sessions_dir=None):
             continue
         if rec.get("entrypoint") != "sdk-cli":
             continue
+        # ⚠️ Not `status == "idle"` alone. A record whose status stopped moving is the
+        # population this verb exists for, and filtering it out here means `guard()`'s
+        # stale-status reading can never be reached — the fix would be dead code. The
+        # cheap age test keeps a genuinely mid-turn worker out of the candidate set (so
+        # it costs no refusal per tick); `guard()` then re-reads the wrapper record and
+        # the tool marker before anything is signalled.
         if rec.get("status") != "idle":
-            continue
+            age = idle_seconds(rec)
+            if age is None or age < IDLE_FLOOR:
+                continue
         if session_id not in ids:
             ids.append(session_id)
     return ids
