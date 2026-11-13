@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.303.2
 - fix: **a headless session stuck at a non-`idle` registry status no longer holds its spawn slot — the reaper checks the wrapper record and the tool marker before trusting the status field.** `reap-idle-headless.py`'s `busy-target` guard refused on the registry field alone, and that field is a claim written by the harness: it survives a turn that ended without a status update, so a session can sit at `busy` (or `shell`) with nothing in flight and never be reaped. ⚠️ **`candidate_session_ids()` filtered every non-`idle` record out before the guards ran**, so the guard change alone was unreachable; a record past `IDLE_FLOOR` is now a candidate, while a fresh one still costs no refusal. Measured 2026-11-13: 62 `busy-target` refusals across 41 sessions, 40 of which cleared on their own (so the guard is right for genuinely mid-turn rows), and a live read of 20 `busy` entries found exactly one past 20 minutes with no open tool marker. The new `_stale_busy()` falls through only when an idle wrapper record with `pending_turns == 0` and no parked `question` **and** no open tool marker inside `TOOL_MARKER_WINDOW` all say nothing is pending; a missing wrapper or marker reading still fails closed to `busy-target`. ⚠️ The reaper read no tool marker at all before this, so the guard reorder alone would have let a mid-call session through. Change set: `scripts/reap-idle-headless.py`, `scripts/tests/test_reap_idle_headless.py`, `CHANGELOG.md`.
 
 ## v0.303.1
