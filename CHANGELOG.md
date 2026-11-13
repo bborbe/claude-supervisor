@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.303.0
 
 - feat: **`restart-worker.py` can start a fresh worker bound to its own task, so a restarted tab worker re-anchors instead of coming back in the wrong role.** `--fresh-prompt` accepted exactly one value — `/supervisor:fleet-loop`, which is the *fleet manager's* loop — so a worker restarted through it came back running the wrong tier, and the alternative was an unanchored session. The new `--fresh-prompt-task` composes `/vault-cli:work-on-task <this session's anchored task>` from the task `close-worker.py::find_task` already resolves, and adds two refusals, `no-task-anchor` and `task-handed-off`, both fired before anything is signalled. ⚠️ **The allowlist property survives the task name:** the command is a constant (`TASK_FRESH_PROMPT_COMMAND`) and only the task name varies, escaped for the double-quoted `bash -lc` context by `bash_dq_escape` — no caller reaches the shell with a command of its own choosing. `--allow-busy-lapse` now accepts either fresh-prompt flag, because a stalled tab worker is `busy`/`shell` by definition and the lift is the only way to restart one at all. The same escaping is applied to the session `title` on both resume branches — it comes from the registry `name` and was embedded raw, so a name carrying `"` or `$(…)` could break the `bash -lc` string exactly as a task name could. Change set: `scripts/restart-worker.py`, `scripts/tests/test_restart_worker.py`, `docs/restart-worker.md`, `CHANGELOG.md`.
 ## v0.302.10
