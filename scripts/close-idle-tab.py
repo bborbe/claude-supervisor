@@ -34,7 +34,7 @@ Refusals, each exit 1 with a stable token as the first line of output:
   gate-held             the attention store could not be read, an open card is parked on
                         the session, or the transcript tail carries an unanswered
                         `👤 You:` gate. Closing discards a question nobody answered.
-  watcher-alive         a surviving child of the worker is not one of its MCP/stdio
+  watcher-alive         a surviving child of the worker is not one of its MCP/stdio/LSP
                         helpers — a backgrounded command would die with the pane.
   task-unresolved       no task page carries this session id as `claude_session_id`.
                         Absent evidence is not evidence of a parked task.

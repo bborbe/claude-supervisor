@@ -829,18 +829,25 @@ class TestScript(unittest.TestCase):
         link = os.path.join(bindir, "gopls")
         os.symlink("/usr/bin/yes", link)
         # The session process is the `sh`; the `gopls` is its CHILD, which is the shape
-        # `watchers()` scans. `yes` blocks forever on /dev/null, so the child stays alive
-        # exactly like the LSP child does, and its command line is the bare link path.
+        # `watchers()` scans. `yes` spins forever writing to /dev/null, so the child stays
+        # alive exactly like the LSP child does, and its command line is the bare link path.
         child = self._spawn(["/bin/sh", "-c", f"{link} > /dev/null"])
         time.sleep(0.3)
-        for pid in subprocess.run(
+        pids = subprocess.run(
             ["pgrep", "-P", str(child.pid)], capture_output=True, text=True
-        ).stdout.split():
+        ).stdout.split()
+        # ⚠️ Without this the test passes on the UNFIXED build whenever the child is absent
+        # or late: `watchers()` would read `[]` and the session would close for the wrong
+        # reason. The fixture must prove it produced the shape under test.
+        self.assertTrue(pids, "no `gopls` child: the fixture did not build the shape")
+        for pid in pids:
             self.addCleanup(
                 lambda p=pid: subprocess.run(["kill", "-9", p], capture_output=True)
             )
         entry = self._registry(child.pid)
         self._transcript()
+        for pid in pids:
+            os.kill(int(pid), 0)  # raises if it died — the child must still be there
         done = self._run()
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         self.assertNotIn("watcher-alive", done.stdout.splitlines()[0])
