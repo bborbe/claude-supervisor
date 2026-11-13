@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.302.8
 
 - fix: **the permission tier's classifier budget is now a measured multiple of one real spawn, and a timeout is pinned by a regression test instead of being rediscovered as a false routing failure.** `server/permission-tier.mjs` spawned `scripts/permission-tier.py` with a fixed 5 s ceiling. Measured 2026-11-09 on a loaded Mac the classifier took 1.78 s per call and the fixture run makes 40+ calls, so one spawn crossed the budget: the wrapper failed closed to `operator` (correct) and `server/permission-tier.test.mjs` reported `+ 'operator' - 'manager'` — a routing difference that does not exist — while the real fact, that the classifier never answered, was invisible. The budget is now `BUDGET_MULTIPLE` × one calibrated spawn, floored at 10 s and capped at 120 s, so a slow machine gets a proportional ceiling instead of a number chosen on an idle one; `permissionTierTimeoutMs()` exposes the formula, and two tests pin it plus the timeout failure mode (the `reason` names `ETIMEDOUT` and the `form` stays `unverifiable`, so the result cannot be read as a tier verdict). Change set: `server/permission-tier.mjs`, `server/permission-tier.test.mjs`, `CHANGELOG.md`.
 
