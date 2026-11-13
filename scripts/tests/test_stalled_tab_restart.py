@@ -399,6 +399,32 @@ class Cap(Base):
             keys,
         )
 
+    def test_a_decline_does_not_survive_a_generation_change(self):
+        """A stale decline would silence every later episode that reaches the same
+        generation — the leg going permanently quiet on the row it exists for."""
+        self.patch_control(poll="ANSWERED: option: leave it")
+        self.run_leg()                              # decline at generation 0
+        os.utime(self.task_path, (0, 10 ** 10))     # progress resets the cap
+        self.patch_control(poll="ANSWERED: option: restart it", post_id="item-2")
+        rc, lines = self.run_leg()
+        self.assertEqual(lines[0], "restart", "a stale decline silenced the new episode")
+
+    def test_the_escalation_is_posted_once(self):
+        """The store's suppression is open-scoped, so a fixed key re-alerts every tick for a
+        condition the operator has already acknowledged."""
+        def escalations():
+            return [a for a in self.calls("ask")
+                    if a[0] == "post" and any("stuck-tab-capped" in x for x in a)]
+
+        self.patch_control(poll="ANSWERED: option: restart it")
+        self.run_leg()
+        self.patch_control(poll="ANSWERED: option: restart it", post_id="item-2")
+        self.run_leg()
+        self.run_leg()                              # capped — escalates
+        self.assertEqual(1, len(escalations()))
+        self.run_leg()                              # capped again
+        self.assertEqual(1, len(escalations()), "the escalation re-posted")
+
     def test_progress_resets_the_cap(self):
         self.patch_control(poll="ANSWERED: option: restart it")
         self.run_leg()

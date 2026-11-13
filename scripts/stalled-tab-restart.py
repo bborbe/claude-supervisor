@@ -99,7 +99,8 @@ def state_path(vault, task):
 
 
 def fresh_state():
-    return {"restarts": 0, "progress_at": None, "consumed": [], "declined": None}
+    return {"restarts": 0, "progress_at": None, "consumed": [], "declined_at": None,
+            "escalated": None}
 
 
 def read_state(vault, task):
@@ -126,8 +127,17 @@ def read_state(vault, task):
         return None, f"state restarts is {type(restarts).__name__}, not int"
     if not isinstance(consumed, list) or not all(isinstance(c, str) for c in consumed):
         return None, "state consumed is not a list of strings"
-    return {"restarts": restarts, "progress_at": data.get("progress_at"),
-            "consumed": consumed, "declined": data.get("declined")}, None
+    # ⚠️ `progress_at` is compared with `>` against a float mtime. A JSON-valid string (or
+    # list, or dict) raises TypeError there — an unhandled crash, not the fail-closed
+    # `cannot-tell` this store discipline requires. It is validated with the rest.
+    progress_at = data.get("progress_at")
+    if progress_at is not None and (
+        not isinstance(progress_at, (int, float)) or isinstance(progress_at, bool)
+    ):
+        return None, f"state progress_at is {type(progress_at).__name__}, not a number"
+    return {"restarts": restarts, "progress_at": progress_at,
+            "consumed": consumed, "declined_at": data.get("declined_at"),
+            "escalated": data.get("escalated")}, None
 
 
 def write_state(vault, task, state):
@@ -410,6 +420,12 @@ def act(args):
         # Progress since the last restart resets the cap — the same reset condition
         # `worker-keepalive.py` uses, and the reason a capped row is not capped forever.
         state["restarts"] = 0
+        # ⚠️ A stale decline must not survive the generation change. Left in place, a
+        # `leave it` recorded at generation N silences every later episode that reaches N
+        # again — the leg goes permanently quiet on the one row it exists for, which is the
+        # failure this whole file is written to prevent.
+        state["declined_at"] = None
+        state["escalated"] = None
         if not write_state(args.vault, args.task, state):
             print("cannot-tell")
             print("the cap reset could not be recorded")
@@ -436,6 +452,14 @@ def act(args):
         return 0
 
     if state["restarts"] >= RESTART_CAP:
+        # ⚠️ **The escalation is remembered in OUR store, for the same reason a decline is:**
+        # the attention store's suppression is open-scoped, so once `acknowledge` is answered
+        # the fixed key mints a NEW card on the next round and the operator is re-alerted
+        # every tick for a condition they already acknowledged. One escalation per spent cap.
+        if state.get("escalated") == state["restarts"]:
+            print("capped")
+            print(f"{state['restarts']} restarts with no progress (already escalated)")
+            return 0
         # A failed escalation post must not print `capped` as though the operator had been
         # told — the verdict's whole content is "one card was posted, and nothing more will
         # happen". A silent failure there is the row going quiet at its worst moment.
@@ -444,6 +468,8 @@ def act(args):
             print(f"{state['restarts']} restarts with no progress, and the escalation "
                   "card could not be posted")
             return 0
+        state["escalated"] = state["restarts"]
+        write_state(args.vault, args.task, state)
         print("capped")
         print(f"{state['restarts']} restarts with no progress")
         return 0
@@ -453,9 +479,15 @@ def act(args):
     # operator is asked again every round — the exact failure the key generation was supposed
     # to prevent and does not. The decline has to live in our own store, scoped to the
     # episode: a restart starts a new generation, which is when asking again is correct.
-    if state.get("declined") == state["restarts"]:
+    # ⚠️ **Anchored on the task page's mtime, not the restart generation.** A generation
+    # comparison has no way out of the gen-0 case: a decline recorded before any restart
+    # leaves `declined == restarts == 0` and the cap reset never runs, because it needs a
+    # `progress_at` only a restart sets — so the leg goes permanently quiet on that row.
+    # The page moving is the real "this is a new episode" signal, and it exists from round 1.
+    declined_at = state.get("declined_at")
+    if declined_at is not None and (stamp is None or stamp <= declined_at):
         print("carded")
-        print(f"the operator declined this episode (generation {state['restarts']})")
+        print("the operator declined this episode and the task has not moved since")
         return 0
 
     item = post_card(args.task, args.session_id, detail, state)
@@ -482,7 +514,7 @@ def act(args):
         state["consumed"].append(item)
         # Remembered in OUR store: the attention store drops the suppression once the card
         # is answered, so without this the next round posts a fresh card and asks again.
-        state["declined"] = state["restarts"]
+        state["declined_at"] = stamp
         if not write_state(args.vault, args.task, state):
             print("cannot-tell")
             print("the answer could not be recorded")
@@ -513,6 +545,9 @@ def act(args):
 
     state["restarts"] += 1
     state["progress_at"] = stamp
+    # The generation advanced, so the previous episode's decline and escalation are spent.
+    state["declined_at"] = None
+    state["escalated"] = None
     if not write_state(args.vault, args.task, state):
         # The consumed marker already landed, so this cannot become a loop; what is lost is
         # the cap charge. Reported rather than swallowed: the next round reads the stale
