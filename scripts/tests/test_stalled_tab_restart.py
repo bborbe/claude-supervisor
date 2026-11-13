@@ -364,7 +364,12 @@ class Cap(Base):
         real = [a for a in self.calls("restart") if "--dry-run" not in a]
         self.assertEqual(2, len(real), "a third restart ran despite the cap")
         keys = [a[a.index("--dedup-key") + 1] for a in self.calls("ask") if a[0] == "post"]
-        self.assertIn("stuck-tab-capped:" + st.slug_for(self.TASK), keys)
+        # The generation rides the escalation key too: after a progress reset the cap can be
+        # spent again, and a bare slug would resolve to the consumed item and never re-alert.
+        self.assertTrue(
+            any(k.startswith("stuck-tab-capped:" + st.slug_for(self.TASK)) for k in keys),
+            keys,
+        )
 
     def test_progress_resets_the_cap(self):
         self.patch_control(poll="ANSWERED: option: restart it")

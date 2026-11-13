@@ -311,7 +311,10 @@ def escalate(task, session_id, restarts):
     try:
         out = subprocess.run(
             [sys.executable, ask, "post",
-             "--dedup-key", f"stuck-tab-capped:{slug_for(task)}",
+             # The generation is the restart count, exactly as `card_key`'s is: after a
+             # progress reset the cap can be spent again, and a bare slug would resolve to
+             # the already-consumed escalation and never re-alert.
+             "--dedup-key", f"stuck-tab-capped:{slug_for(task)}:{restarts}",
              "--payload", (f"STALLED TAB WORKER CAP: {task} ({session_id[:8]}) has been "
                            f"restarted {restarts} times with no progress. No further restart "
                            f"will run automatically. This needs a person."),
@@ -427,7 +430,14 @@ def act(args):
         return 0
 
     if state["restarts"] >= RESTART_CAP:
-        escalate(args.task, args.session_id, state["restarts"])
+        # A failed escalation post must not print `capped` as though the operator had been
+        # told — the verdict's whole content is "one card was posted, and nothing more will
+        # happen". A silent failure there is the row going quiet at its worst moment.
+        if not escalate(args.task, args.session_id, state["restarts"]):
+            print("cannot-tell")
+            print(f"{state['restarts']} restarts with no progress, and the escalation "
+                  "card could not be posted")
+            return 0
         print("capped")
         print(f"{state['restarts']} restarts with no progress")
         return 0
@@ -484,7 +494,14 @@ def act(args):
 
     state["restarts"] += 1
     state["progress_at"] = stamp
-    write_state(args.vault, args.task, state)
+    if not write_state(args.vault, args.task, state):
+        # The consumed marker already landed, so this cannot become a loop; what is lost is
+        # the cap charge. Reported rather than swallowed: the next round reads the stale
+        # count and would offer one more restart than the cap allows.
+        print("restart")
+        print(detail)
+        print("⚠️ the cap charge could not be recorded — the next round may allow one more")
+        return 0
     print("restart")
     print(detail)
     return 0

@@ -8,7 +8,7 @@ color: red
 ---
 
 <role>
-You perform the **keep-alive leg** of one fleet round: seven procedures, listed in
+You perform the **keep-alive leg** of one fleet round: eight procedures, listed in
 `commands/steps/keepalive.md` step 1.
 
 ⚠️ **This leg acts, and a read-only execution is not a run of it.** Every procedure restarts,
@@ -67,8 +67,8 @@ the gate and do not read the digest to decide whether you may act.
   skill's inline rule binds only a consumer that cannot inherit `${CLAUDE_PLUGIN_ROOT}`; this leg
   can, so a copy here would ignore the script's own `SUPERVISOR_SESSION_HOLDS` override.
 - **Never park, kill or exit a session yourself.** The nudge asks; the session acts.
-- **The three worker mechanisms are never merged** — `restart-worker.py`, `stuck-heal.py` and
-  this leg's `worker-keepalive.py` each own a different population (step 4's last clause).
+- **The worker mechanisms are never merged** — `restart-worker.py`, `stuck-heal.py`,
+  `worker-keepalive.py` and the stalled-tab steps file each own a different population.
 - **Your only writes are the ones the procedures name, and nothing else on disk:** the three digest
   counts (steps 1, 1b, 4), the per-key `--not-run` reason (step 5), the `--record-resume` stamps,
   step 2's `park-event.py release` and `register --repark` calls, and — only when the hand-back
@@ -360,12 +360,13 @@ never act.
 rule 3's approved-work path, not this leg's. Both resume paths continue the **recorded id** and
 neither opens a second worker (constraints, first bullet).
 
-⚠️ **Four worker mechanisms, four populations — never merge them.**
+⚠️ **Four worker mechanisms, four populations — never merge.**
 `scripts/restart-worker.py` restarts a **live, idle** session on stale code (refuses
 `busy-target` and `headless-target`); `scripts/stuck-heal.py` heals a **stuck** headless worker
-whose channel died while the session lives; this leg resumes one whose session is **gone**;
-`commands/steps/keepalive-stalled-tabs.md` reports a **stalled tab** and hands the restart over,
-because a stall is `busy` by definition and the lift is the operator's alone.
+whose channel died while it lives; this leg resumes one whose session is **gone**;
+**run `<plugin root>/commands/steps/keepalive-stalled-tabs.md`** (absolute) for a **stalled
+tab**: it reports the refusal and hands the restart over — a stall is `busy`, so the lift is
+the operator's alone.
 
 ⚠️ **`agents/goal-drive.md`'s orphan gate covers the same population; `worker-keepalive.py`
 enforces the exclusion itself, not via this prose.** Both legs record only **after** the

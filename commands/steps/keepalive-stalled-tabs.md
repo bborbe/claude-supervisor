@@ -26,25 +26,50 @@ So this leg **reports and hands over**; it never restarts on its own judgement.
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
 F=$(python3 "$P/resolve-folders.py" --vault "<vault>" --require tasks_dir)
 python3 -c '
-import json, subprocess, sys
+import json, os, subprocess, sys
 vault, f, script = sys.argv[1:4]
 if f.startswith("UNKNOWN"): sys.exit("folders: " + f)
 # ⚠️ Field 2, not 0. `resolve-folders.py` prints `topics|goals|tasks|vault-name`, so
 # `[0]` is the TOPICS directory and the leg would look for task pages among topic pages.
 tasks = f.split("|")[2]
-rows = json.load(sys.stdin)          # this round'"'"'s sweep rows
-for row in rows:
-    if row.get("class") != "stalled" or row.get("mode") != "interactive":
+# ⚠️ The snapshot, not a sweep payload. The sweep writes a markdown digest and
+# `~/.claude/state/fleet-snapshot.json` — `{"swept_at": ..., "sessions": {<sid>: {...}}}`
+# — and NO producer emits a list of rows carrying `class`/`mode`. Reading stdin raised on
+# every artifact this repo makes, which is how the first version of this step was a no-op.
+snap = os.environ.get("FLEET_SNAPSHOT_PATH") or os.path.expanduser(
+    "~/.claude/state/fleet-snapshot.json")
+with open(snap, encoding="utf-8") as fh:
+    sessions = (json.load(fh) or {}).get("sessions") or {}
+for sid, row in sorted(sessions.items()):
+    if not isinstance(row, dict):
         continue
-    out = subprocess.run(
-        [sys.executable or "python3", script, "--vault", vault, "--task", row["task"],
-         "--dir", tasks, "--session-id", row["session_id"],
-         "--stall-count", str(row.get("stall_count", 0))],
-        stdout=subprocess.PIPE, text=True).stdout
+    try:
+        count = int(row.get("stall_count") or 0)
+    except (TypeError, ValueError):
+        continue
+    if count < 2:
+        continue
+    task_file = row.get("task_file") or ""
+    if not task_file:
+        continue
+    task = os.path.splitext(os.path.basename(task_file))[0]
+    try:
+        out = subprocess.run(
+            [sys.executable or "python3", script, "--vault", vault, "--task", task,
+             "--dir", tasks, "--session-id", sid, "--stall-count", str(count)],
+            stdout=subprocess.PIPE, text=True, timeout=180).stdout
+    except Exception as error:      # one bad row must never abort the rest of the round
+        print(sid[:8] + "\tcannot-tell\t" + type(error).__name__, end="\n")
+        continue
     lines = out.split("\n")
-    print(row["session_id"][:8] + "\t" + "\n".join(lines[:2]).replace("\n", "\t"), end="\n")
-' "<vault>" "$F" "$P/stalled-tab-restart.py" < <this round's sweep JSON>
+    print(sid[:8] + "\t" + "\n".join(lines[:2]).replace("\n", "\t"), end="\n")
+' "<vault>" "$F" "$P/stalled-tab-restart.py"
 ```
+
+⚠️ **There is no `class` or `mode` field to filter on** — the snapshot carries `name`,
+`status`, `task_file`, `task_mtime` and `stall_count` only. `stall_count >= 2` is the whole
+population test, and the headless half needs no filter here: `restart-worker.py` refuses
+`headless-target` itself, so a headless row is reported rather than acted on.
 
 ⚠️ **One `python3` call, never a shell `for`.** `allowed-tools` grants fixed command
 **prefixes**, and a `for … do … done` matches none of them, so a shell loop escalates a
@@ -96,5 +121,6 @@ the failure `commands/steps/output-shape.md` item 14 exists to prevent.
 `CLAUDE.md:135` states it: *"A stall is a duration, not an event, and it issues no attention
 card."* `manager-attention-watch.py` renders `stuck-tab:` as a gate **reason** plus an
 incident-ledger row, and its only `attention-ask.py post` path is the park card
-(`--dedup-key park:<sid8>`). This leg **creates** the card, keyed `stuck-tab:<slug>`, so the
+(`--dedup-key park:<sid8>`). This leg **creates** the card, keyed
+`stuck-tab:<slug>:<restarts>`, so the
 gate reason and the card cannot both accumulate for one session.
