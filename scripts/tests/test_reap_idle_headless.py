@@ -750,6 +750,18 @@ class TestScript(unittest.TestCase):
         self.assertEqual(done.stdout.splitlines()[0], "task-unresolved")
         self.assertIsNone(child.poll(), "a refusal must send no signal")
 
+    def test_an_empty_vault_config_still_refuses(self):
+        """No configured vault contributes a `tasks_dir`, so nothing was searched: an absent
+        search is not an absent anchor. Without this guard an empty config would close the
+        whole fleet in one tick."""
+        with open(self.vault_config, "w", encoding="utf-8") as handle:
+            json.dump([], handle)
+        child = self._spawn()
+        self._registry(child.pid)
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "task-unresolved")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
     # --- the close --------------------------------------------------------------------
 
     def test_dry_run_signals_nothing(self):

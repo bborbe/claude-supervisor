@@ -55,10 +55,13 @@ Eleven refusals, each exit 1 with a stable token as the first line of output:
 One close outcome, exit 0, printed as the first line of output before the `🧹` header:
 
   unanchored-closed     the id appears in no task page among every configured vault's
-                        `tasks_dir`, so nothing owns the session and nothing can resume it
-                        for. The guard chain above has already proven it headless, idle past
-                        `IDLE_FLOOR`, card-free, wrapper-idle and pid-identity-verified; the
-                        process is closed and the transcript kept, same as any other reap.
+                        `tasks_dir`, and at least one such directory was searched, so
+                        nothing owns the session and nothing can resume it for. The guard
+                        chain above has already proven it headless, idle past `IDLE_FLOOR`,
+                        card-free, wrapper-idle and pid-identity-verified; the process is
+                        closed and the transcript kept, same as any other reap. An empty
+                        directory list (no vault declares a `tasks_dir`) keeps refusing —
+                        nothing was searched, which is not the same as nothing being there.
 
 ⚠️ **The watcher read has a stated hole.** It inspects children of the claude pid; a
 watcher detached with `setsid`/`nohup` leaves that tree and escapes it. The read guards the
@@ -583,10 +586,17 @@ def main(argv=None):
                 # session: nothing owns it, so nothing can resume it for, and the guard chain
                 # above has already proven it headless, idle past `IDLE_FLOOR`, card-free and
                 # wrapper-idle.
+                #
+                # ⚠️ An EMPTY dir list is a third cause, and it must keep refusing: no
+                # configured vault contributed a `tasks_dir`, so nothing was searched and
+                # "no page carries it" is an absent search, not an absent anchor. Without
+                # this guard an empty `vault-cli` config would read every session as
+                # unanchored and close the whole fleet in one tick.
                 _refusal, detail = close_worker.resolution_refusal(
                     session_id, rec.get("cwd")
                 )
-                if "not among them" in detail:
+                searched = close_worker.task_dirs_for(rec.get("cwd"))
+                if "not among them" in detail or not searched:
                     verdict = ("task-unresolved", bad[1])
                 else:
                     unanchored = True
