@@ -49,7 +49,16 @@ with open(log, "a", encoding="utf-8") as fh:
 ctl = json.load(open(os.environ["FAKE_CONTROL"], encoding="utf-8"))
 verb = sys.argv[1]
 if verb == "post":
-    print(ctl.get("post_id", "item-1"))
+    rc = ctl.get("post_rc", 0)
+    if rc != 0:
+        print("REFUSED: the store would not take it")
+        sys.exit(rc)
+    item = ctl.get("post_id", "item-1")
+    # The real shapes: `post` prints ITEM_ID then a POLL hint line, and `poll` prints
+    # `ANSWERED: <content>`. A fake that printed a bare id would hide the parser defect
+    # this file exists to catch.
+    print(f"ITEM_ID: {item}")
+    print(f"POLL: python3 attention-ask.py poll {item}")
     sys.exit(0)
 if verb == "poll":
     print(ctl.get("poll", "OPEN"))
@@ -145,12 +154,18 @@ class Base(unittest.TestCase):
         out = buf.getvalue().strip().splitlines()
         return rc, out
 
+    def lifted_calls(self):
+        return [a for a in self.calls("restart") if "--allow-busy-lapse" in a]
+
     def assert_no_unattended_lift(self):
-        """The invariant: no invocation outside the answered path passes the lift."""
-        for argv in self.calls("restart"):
-            if "--allow-busy-lapse" in argv:
-                self.assertNotIn("--dry-run", argv,
-                                 f"the lift and --dry-run are mutually exclusive here: {argv}")
+        """The invariant: NOTHING passes the lift unless the operator said `restart it`.
+
+        The earlier form only rejected an argv carrying both the lift and `--dry-run`, which
+        an unattended call with the lift and no `--dry-run` sails straight through — the
+        exact shape of the bug. This asserts the absence directly.
+        """
+        self.assertEqual([], self.lifted_calls(),
+                         "an unattended path reached --allow-busy-lapse")
 
 
 class Verdicts(Base):
@@ -215,8 +230,41 @@ class Handover(Base):
         self.assertEqual(1, len(self.calls("restart")), "only the dry run may have run")
         self.assert_no_unattended_lift()
 
+    def test_answered_leave_it_does_not_restart(self):
+        """`ANSWERED` alone is not permission to kill. The card offers `restart it` and
+        `leave it`, and acting on the terminal alone would make the card's safest answer the
+        most destructive one."""
+        self.patch_control(poll="ANSWERED: leave it")
+        rc, lines = self.run_leg()
+        self.assertEqual(rc, 0)
+        self.assertEqual(lines[0], "carded")
+        self.assertEqual([], self.lifted_calls())
+
+    def test_answered_leave_it_is_recorded_so_it_is_not_reread(self):
+        self.patch_control(poll="ANSWERED: leave it")
+        self.run_leg()
+        rc, lines = self.run_leg()
+        self.assertEqual(lines[0], "carded")
+        self.assertIn("already consumed", lines[1])
+        self.assertEqual([], self.lifted_calls())
+
+    def test_a_failed_post_is_cannot_tell(self):
+        self.patch_control(post_rc=1)
+        rc, lines = self.run_leg()
+        self.assertEqual(lines[0], "cannot-tell")
+        self.assertEqual([], self.lifted_calls())
+
+    def test_the_item_id_is_read_from_the_item_id_line(self):
+        """`post` prints `ITEM_ID: <id>` then a `POLL:` hint line. Reading the LAST line
+        yields that hint, so `poll` answers `cannot-tell` forever and the leg reports
+        `carded` every round while never restarting anything."""
+        self.patch_control(poll="ANSWERED: restart it")
+        self.run_leg()
+        polls = [a for a in self.calls("ask") if a[0] == "poll"]
+        self.assertEqual(["item-1"], polls[0][1:2])
+
     def test_answered_runs_the_real_restart_with_the_lift(self):
-        self.patch_control(poll="ANSWERED")
+        self.patch_control(poll="ANSWERED: restart it")
         rc, lines = self.run_leg()
         self.assertEqual(rc, 0, lines)
         self.assertEqual(lines[0], "restart")
@@ -230,7 +278,7 @@ class Handover(Base):
     def test_one_answer_never_becomes_a_loop(self):
         """The card is marked consumed BEFORE the call, so a second round that still reads
         `ANSWERED` does not restart again."""
-        self.patch_control(poll="ANSWERED")
+        self.patch_control(poll="ANSWERED: restart it")
         self.run_leg()
         before = len([a for a in self.calls("restart") if "--dry-run" not in a])
         rc, lines = self.run_leg()
@@ -239,13 +287,42 @@ class Handover(Base):
         self.assertEqual(before, after, "a consumed card restarted the session a second time")
 
 
+class FailClosed(Base):
+    def test_a_corrupt_state_file_fails_closed(self):
+        """A present-but-unreadable store could hide a spent cap or a consumed card, and
+        both exist to stop a restart. Reading it as fresh resets the cap — fail-open."""
+        path = st.state_path(self.vault, self.TASK)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        rc, lines = self.run_leg()
+        self.assertEqual(lines[0], "cannot-tell")
+        self.assertEqual([], self.lifted_calls())
+
+    def test_a_state_object_with_a_wrong_typed_counter_fails_closed(self):
+        path = st.state_path(self.vault, self.TASK)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"restarts": "two", "consumed": []}, fh)
+        rc, lines = self.run_leg()
+        self.assertEqual(lines[0], "cannot-tell")
+        self.assertEqual([], self.lifted_calls())
+
+    def test_a_missing_hold_probe_reads_as_held(self):
+        """`session-holds.py` absent means heldness is unknown, and unknown is not clear."""
+        os.remove(st.HOLDS)
+        rc, lines = self.run_leg()
+        self.assertEqual(lines[0], "held")
+        self.assertEqual([], self.calls("restart"))
+
+
 class Cap(Base):
     def test_the_cap_stops_the_third_restart_and_escalates_once(self):
-        self.patch_control(poll="ANSWERED")
+        self.patch_control(poll="ANSWERED: restart it")
         self.run_leg()                      # restart 1
-        self.patch_control(poll="ANSWERED", post_id="item-2")
+        self.patch_control(poll="ANSWERED: restart it", post_id="item-2")
         self.run_leg()                      # restart 2
-        self.patch_control(poll="ANSWERED", post_id="item-3")
+        self.patch_control(poll="ANSWERED: restart it", post_id="item-3")
         rc, lines = self.run_leg()          # capped
         self.assertEqual(rc, 0)
         self.assertEqual(lines[0], "capped")
@@ -255,13 +332,13 @@ class Cap(Base):
         self.assertIn("stuck-tab-capped:" + st.slug_for(self.TASK), keys)
 
     def test_progress_resets_the_cap(self):
-        self.patch_control(poll="ANSWERED")
+        self.patch_control(poll="ANSWERED: restart it")
         self.run_leg()
-        self.patch_control(poll="ANSWERED", post_id="item-2")
+        self.patch_control(poll="ANSWERED: restart it", post_id="item-2")
         self.run_leg()
         # A newer task page is the reset signal, exactly worker-keepalive.py's.
         os.utime(self.task_path, (0, 10 ** 10))
-        self.patch_control(poll="ANSWERED", post_id="item-3")
+        self.patch_control(poll="ANSWERED: restart it", post_id="item-3")
         rc, lines = self.run_leg()
         self.assertEqual(lines[0], "restart", "progress did not reset the cap")
         real = [a for a in self.calls("restart") if "--dry-run" not in a]

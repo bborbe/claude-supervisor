@@ -64,6 +64,11 @@ STATE_DIR = os.path.expanduser(
 #: restart already carries more evidence than a third resume would.
 RESTART_CAP = 2
 
+#: The card's two options, as literals because the answer is compared against them. The
+#: operator's `ANSWERED:` carries the chosen content, and only `restart it` may kill.
+OPTION_RESTART = "restart it"
+OPTION_LEAVE = "leave it"
+
 
 def slug_for(task):
     """A filesystem-safe key for a task name, stable across rounds."""
@@ -76,21 +81,46 @@ def state_path(vault, task):
     return os.path.join(STATE_DIR, key, f"{slug_for(task)}.json")
 
 
+def fresh_state():
+    return {"restarts": 0, "progress_at": None, "consumed": []}
+
+
 def read_state(vault, task):
+    """`(state, None)` when the store is absent or valid, `(None, reason)` when it is not.
+
+    ⚠️ **A present-but-unreadable store is NOT a fresh one.** Treating it as `restarts: 0`
+    would reset the cap on any corrupt write, which is the fail-open direction: the cap
+    exists to stop a restart loop, and a loop is exactly what a silently-reset counter
+    permits. Absence is genuinely fresh — a task this leg has never seen.
+    """
+    path = state_path(vault, task)
     try:
-        with open(state_path(vault, task), encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
-    except (OSError, ValueError):
-        return {"restarts": 0, "progress_at": None, "consumed": []}
+    except FileNotFoundError:
+        return fresh_state(), None
+    except (OSError, ValueError) as error:
+        return None, f"state unreadable: {error}"
     if not isinstance(data, dict):
-        return {"restarts": 0, "progress_at": None, "consumed": []}
-    data.setdefault("restarts", 0)
-    data.setdefault("progress_at", None)
-    data.setdefault("consumed", [])
-    return data
+        return None, "state is not an object"
+    restarts = data.get("restarts", 0)
+    consumed = data.get("consumed", [])
+    if not isinstance(restarts, int) or isinstance(restarts, bool):
+        return None, f"state restarts is {type(restarts).__name__}, not int"
+    if not isinstance(consumed, list) or not all(isinstance(c, str) for c in consumed):
+        return None, "state consumed is not a list of strings"
+    return {"restarts": restarts, "progress_at": data.get("progress_at"),
+            "consumed": consumed}, None
 
 
 def write_state(vault, task, state):
+    """True when the store landed. **A failed write must stop the act, not be swallowed.**
+
+    The consumed marker is written BEFORE the restart precisely so one answer cannot become
+    a loop. If the write fails and the restart runs anyway, the marker is gone, the card
+    still reads `ANSWERED` next round, and the worker is killed again — the loop the marker
+    exists to prevent. The cap has the same shape: a lost count is a bypassed cap.
+    """
     path = state_path(vault, task)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -99,9 +129,8 @@ def write_state(vault, task, state):
             json.dump(state, fh, indent=2, sort_keys=True)
         os.replace(tmp, path)
     except OSError:
-        # A state write that fails must not turn a reported verdict into a traceback: the
-        # cap is a safety net, and the card still tells the operator what happened.
-        pass
+        return False
+    return True
 
 
 def task_progress_stamp(vault, dirname, task):
@@ -117,9 +146,15 @@ def task_progress_stamp(vault, dirname, task):
 
 
 def is_held(session_id):
-    """`(held, reason)`. A probe that cannot decide reads as held — never as clear."""
+    """`(held, reason)`. A probe that cannot decide reads as held — never as clear.
+
+    ⚠️ **A missing `session-holds.py` is unknown, not clear.** The backstop is real —
+    `restart-worker.py` refuses a held target itself — but it only guards the KILL, not the
+    card: posting a restart offer for a session the operator has held is the act the hold
+    exists to prevent, and the card would sit there inviting it.
+    """
     if not os.path.exists(HOLDS):
-        return False, ""
+        return True, "hold probe absent"
     try:
         out = subprocess.run(
             [sys.executable, HOLDS, "is-held", session_id],
@@ -178,41 +213,59 @@ def post_card(task, session_id, token_detail):
         out = subprocess.run(
             [sys.executable, ask, "post",
              "--dedup-key", f"stuck-tab:{slug_for(task)}",
+             # A stable producer id: the asking session reads its own item back, and the
+             # fleet round that posts is not always the session that polls on a later tick.
+             "--producer-id", f"stalled-tab:{slug_for(task)}",
              "--payload", (f"STALLED TAB WORKER: {task} ({session_id[:8]}) has made no "
                            f"progress for 2+ sweeps. {token_detail} "
                            f"Restart it now? This starts a FRESH session bound to this task."),
-             "--option", "restart it", "--option", "leave it",
-             "--recommend", "restart it", "--interrupt-class", "pick"],
+             "--option", OPTION_RESTART, "--option", OPTION_LEAVE,
+             "--recommend", OPTION_RESTART, "--interrupt-class", "pick"],
             capture_output=True, text=True, timeout=60,
         )
     except (OSError, subprocess.SubprocessError):
         return ""
     if out.returncode != 0:
         return ""
-    return (out.stdout or "").strip().splitlines()[-1].strip() if out.stdout else ""
+    # ⚠️ The id is on the `ITEM_ID:` line, and `post` prints a SECOND line
+    # (`POLL: python3 attention-ask.py poll <id>`) after it. Reading the last line yields
+    # that command, `poll` then answers `cannot-tell` forever, and the leg reports `carded`
+    # every round while never restarting anything — a silent no-op that reads as success.
+    for line in (out.stdout or "").splitlines():
+        if line.startswith("ITEM_ID:"):
+            return line[len("ITEM_ID:"):].strip()
+    return ""
 
 
 def poll_card(item_id):
-    """`ANSWERED` / `OPEN` / `DECLINED` / `HIDDEN` / `cannot-tell` for this item.
+    """`(verdict, content)` for this item — `content` is what the operator actually chose.
 
     Only `ANSWERED` releases the gate. A declined or hidden card is NOT an answer, and
     neither is a probe that failed — `attention-ask.py`'s own five terminals own that rule.
+
+    ⚠️ **`ANSWERED` alone is not permission to kill.** The card offers `restart it` and
+    `leave it`, and `attention-ask.py` prints `ANSWERED: <content>`. Acting on the terminal
+    alone means an operator who chose **leave it** gets their worker killed — the card's
+    safest answer becoming the most destructive one. The caller compares `content`.
     """
     ask = ASK
     if not item_id or not os.path.exists(ask):
-        return "cannot-tell"
+        return "cannot-tell", ""
     try:
         out = subprocess.run(
             [sys.executable, ask, "poll", item_id],
             capture_output=True, text=True, timeout=60,
         )
     except (OSError, subprocess.SubprocessError):
-        return "cannot-tell"
-    head = (out.stdout or "").strip().splitlines()[0].strip() if out.stdout else ""
+        return "cannot-tell", ""
+    lines = (out.stdout or "").strip().splitlines()
+    head = lines[0].strip() if lines else ""
     for word in ("ANSWERED", "DECLINED", "HIDDEN", "OPEN"):
         if head.startswith(word):
-            return word
-    return "cannot-tell"
+            if word != "ANSWERED":
+                return word, ""
+            return word, head[len("ANSWERED:"):].strip() if head.startswith("ANSWERED:") else ""
+    return "cannot-tell", ""
 
 
 def escalate(task, session_id, restarts):
@@ -262,13 +315,23 @@ def main(argv=None):
         print(reason)
         return 0
 
-    state = read_state(args.vault, args.task)
+    state, state_error = read_state(args.vault, args.task)
+    if state_error is not None:
+        # Fail closed: a corrupt store could hide a spent cap or a consumed card, and both
+        # of those exist to stop a restart. Refusing to act is the only safe reading.
+        print("cannot-tell")
+        print(state_error)
+        return 0
+
     stamp = task_progress_stamp(args.vault, args.dir, args.task)
     if stamp is not None and state.get("progress_at") is not None and stamp > state["progress_at"]:
         # Progress since the last restart resets the cap — the same reset condition
         # `worker-keepalive.py` uses, and the reason a capped row is not capped forever.
         state["restarts"] = 0
-        write_state(args.vault, args.task, state)
+        if not write_state(args.vault, args.task, state):
+            print("cannot-tell")
+            print("the cap reset could not be recorded")
+            return 0
 
     code, token, detail = refusal(args.session_id)
     if code is None:
@@ -302,7 +365,7 @@ def main(argv=None):
         print("the card could not be posted")
         return 0
 
-    verdict = poll_card(item)
+    verdict, answer = poll_card(item)
     if verdict != "ANSWERED":
         print("carded")
         print(f"card {item} is {verdict}")
@@ -314,10 +377,28 @@ def main(argv=None):
         print(f"card {item} was already consumed")
         return 0
 
+    if answer != OPTION_RESTART:
+        # `ANSWERED` alone is not permission to kill — the operator chose LEAVE. Record it
+        # as consumed so the same answer is not re-read every round, and do nothing else.
+        state["consumed"].append(item)
+        if not write_state(args.vault, args.task, state):
+            print("cannot-tell")
+            print("the answer could not be recorded")
+            return 0
+        print("carded")
+        print(f"card {item} answered {answer!r} — not restarting")
+        return 0
+
     state["consumed"].append(item)
     state["restarts"] += 1
     state["progress_at"] = stamp
-    write_state(args.vault, args.task, state)
+    if not write_state(args.vault, args.task, state):
+        # ⚠️ The marker is written BEFORE the act. If it cannot be written, the act must not
+        # run: the card still reads `ANSWERED`, so a restart here would repeat every round —
+        # the exact loop the marker exists to prevent.
+        print("cannot-tell")
+        print("the restart could not be recorded, so nothing was restarted")
+        return 0
 
     # The real restart: the operator's answer IS the judgement the ruling requires, so this
     # is the only call site that passes `--allow-busy-lapse`.
