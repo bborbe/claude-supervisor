@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.302.10
 
 - fix: **the fleet digest's first line is composed in code, so the `snapshot written:` label can no longer be written twice.** Measured 2026-11-05: a round's first line read `snapshot written: snapshot written: 2026-11-05T17:34:30Z - 43 sessions`. The sweep prompt told its reader to quote `fleet-snapshot.py`'s own already-labelled stdout line into a template slot that carried the label itself — two instructions in one prompt, and the agent followed the wrong one. `fleet-snapshot.py` now composes the whole line (`compose_header`), unwrapping a repeated label from whatever value it is handed, and `agents/fleet-sweep-reader.md` pastes that file's line 1 verbatim and composes only from line 2 onward — the prompt is 11 bytes shorter for it, so `scripts/budget-baseline.json` tightened rather than moved. The `DIGEST … · N sessions · snapshot written:` shape `manager-receipt.py` reads a digest by is unchanged, and the consumer-side unwrap in `fleet-digest.py`'s `parse_snapshot` stays — two independent guards are the point. Change set: `scripts/fleet-snapshot.py`, `scripts/tests/test_fleet_snapshot.py`, `agents/fleet-sweep-reader.md`, `CHANGELOG.md`.
 
