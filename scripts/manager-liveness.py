@@ -45,6 +45,10 @@ name, and a flat slug let one subject's cadence record overwrite the other's:
                                     cadence and cannot be filtered at read time, which is
                                     why the reset is its own file rather than something
                                     inferred from the marker the arm must now preserve.
+                                    ⚠️ `is_subject_stopped()` is the ONE reader of that
+                                    marker, imported by `open-queue.py` and
+                                    `adopt-orphans.py`; the manager tier reads it through
+                                    `--state` / `--check`, which classify STOPPED.
   --sleep --subject T --branch B --until ISO
                                   <slug>.sleeping = the ISO instant. A date-gated
                                     subject whose remaining work is all future
@@ -268,6 +272,78 @@ def resolve(s: str, ext: str):
         if os.path.exists(legacy):
             return legacy, True
     return prefixed, False
+
+
+def stopped_marker(subject: str, branch: str):
+    """The marker file that stands this subject down, or None — THE one marker read.
+
+    `open-queue.py` (the goal and topic tiers) and `adopt-orphans.py` call this rather
+    than re-deriving the path: a second copy would drift from `stop()`'s writer, and the
+    drift is silent in the worst direction — the fleet round would keep reopening a
+    subject the operator had deliberately ended.
+
+    ⚠️ **Existence, not the timestamp.** Later stops rewrite the marker's content, so the
+    file existing is the load-bearing fact; `--arm --resume` is the one verb that clears
+    it. The RESOLVED path is returned, never a re-composed `<branch>--<slug>`: a legacy
+    pre-split record (`<slug>.stopped`, no branch prefix) counts too, through `resolve()`,
+    and a caller that re-derived the name would report a file that does not exist.
+
+    A branch outside `BRANCHES` raises rather than answering None: the caller named a tier
+    that does not exist, and a silent "not stopped" would hide that bug behind a reopened
+    row.
+    """
+    marker, _legacy = resolve(slug(subject, branch), "stopped")
+    return marker if os.path.exists(marker) else None
+
+
+def is_subject_stopped(subject: str, branch: str) -> bool:
+    """Is `stopped_marker()` non-None? The boolean form every consumer reads."""
+    return stopped_marker(subject, branch) is not None
+
+
+def session_marker(subject: str, branch: str) -> str:
+    """Where this subject's OWN session id is recorded, beside its cadence.
+
+    ⚠️ **This is the one POSITIVE statement of manager tier on disk.** Every other
+    candidate signal is an absence — not in the spawn ledger, no `.stopped` marker —
+    and absence is shared with the operator's own tabs and with a worker whose
+    session id never resolved. `--arm` runs inside the manager's own session, so the
+    id it writes is the manager's and never the round's.
+    """
+    return path(slug(subject, branch), "session")
+
+
+def manager_sessions(state_dir: str = None) -> dict:
+    """{session id -> slug} for every manager that has armed at least once.
+
+    The reader for a consumer that holds a SESSION ID and must decide whether it
+    belongs to the manager tier — `scripts/park-nudge.py`, which must never apply a
+    worker-tier park mechanism to a manager whose pane is its only wake path.
+
+    ⚠️ **An empty answer is "tier-unknown", never "no managers".** A manager that
+    armed before the marker existed carries none until its next arm — one interval
+    away — so a caller must treat a miss as a miss and fall through to its other
+    guards, never read it as proof of worker tier. That is why this returns a plain
+    dict with no sentinel: the two answers a caller acts on are "this id is a
+    manager" and "this id is not on record".
+    """
+    directory = os.path.expanduser(state_dir or STATE_DIR)
+    out = {}
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".session"):
+            continue
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as fh:
+                sid = fh.read().strip()
+        except OSError:
+            continue
+        if sid:
+            out[sid] = name[: -len(".session")]
+    return out
 
 
 def write_atomic(p: str, text: str) -> None:
@@ -1009,6 +1085,15 @@ def arm(subject: str, branch: str, interval: int, resume: bool = False,
     """
     s = slug(subject, branch)
     write_atomic(path(s, "cadence"), f"{interval}\n")
+    # The tier marker, beside the cadence it belongs to: THIS process's session id,
+    # which is the manager's because `--arm` runs inside the manager's own session.
+    # `scripts/park-nudge.py` reads it to keep a worker-tier park mechanism off the
+    # manager tier, where the pane — not a `defer_date` — is the only wake path.
+    # ⚠️ Absent outside a Claude session (a drill, a test, a hand-run probe), where
+    # there is no tier to record; the reader treats that as tier-unknown.
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if session_id:
+        write_atomic(session_marker(subject, branch), f"{session_id}\n")
     # ⚠️ **Fire-and-forget, in a daemon thread.** `arm()` is the liveness READING: the
     # epochs it records are what `observed_period` measures, so a network call on this
     # path would lengthen every arm-to-arm gap by its own latency and drift the period

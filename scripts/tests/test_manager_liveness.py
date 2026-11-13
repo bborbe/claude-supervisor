@@ -1648,3 +1648,64 @@ class GateDrivenLiveness(unittest.TestCase):
         os.rmdir(self.gate_dir)
         os.rmdir(self.m.GATE_LOOP_STATE_DIR)
         self.assertEqual("STALE", self.m.classify(self.s, time.time())[0])
+
+
+class SessionMarker(unittest.TestCase):
+    """`--arm` records THIS session's id beside the cadence, and `manager_sessions()`
+    reads it back.
+
+    ⚠️ It is the one POSITIVE statement of manager tier on disk. Every other
+    candidate signal is an ABSENCE — not in the spawn ledger, no `.stopped` marker —
+    and absence is shared with the operator's own tabs and with a worker whose
+    session id never resolved, so a consumer that keyed on absence would classify
+    most of the fleet as managers. `scripts/park-nudge.py` reads this marker to keep
+    a worker-tier park mechanism off the manager tier, where the exit the nudge
+    demands closes the pane that is the manager's only wake path.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+        self.addCleanup(lambda: os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None))
+        self.addCleanup(lambda: os.environ.pop("CLAUDE_CODE_SESSION_ID", None))
+
+    def run_cli(self, *argv):
+        out, old = io.StringIO(), sys.argv
+        sys.argv = ["manager-liveness.py", *argv]
+        try:
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                rc = self.m.main()
+        finally:
+            sys.argv = old
+        return rc, out.getvalue()
+
+    def arm(self, session_id=None):
+        if session_id is None:
+            os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        else:
+            os.environ["CLAUDE_CODE_SESSION_ID"] = session_id
+        return self.run_cli("--arm", "--subject", "Some Subject",
+                            "--branch", "goal", "--interval", "900")
+
+    def test_an_arm_records_the_arming_session_under_its_slug(self):
+        self.assertEqual(0, self.arm("abc-123")[0])
+        self.assertEqual({"abc-123": "goal--some-subject"}, self.m.manager_sessions())
+
+    def test_an_arm_outside_a_claude_session_writes_no_marker(self):
+        """A drill, a test or a hand-run probe has no tier to record — and the arm
+        itself must still land, because it is the liveness reading."""
+        self.assertEqual(0, self.arm()[0])
+        self.assertEqual({}, self.m.manager_sessions())
+        self.assertTrue(os.path.exists(
+            os.path.join(self.m.STATE_DIR, "goal--some-subject.cadence")))
+
+    def test_a_re_arm_keeps_one_marker_and_the_newest_session_wins(self):
+        """A resumed manager arms again under a new id; the reader must not answer
+        with the stale one."""
+        self.arm("first-111")
+        self.arm("second-222")
+        self.assertEqual({"second-222": "goal--some-subject"}, self.m.manager_sessions())
+
+    def test_an_unreadable_state_dir_reads_as_no_managers_not_a_crash(self):
+        self.assertEqual({}, self.m.manager_sessions(os.path.join(self.tmp.name, "absent")))

@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { permissionTier } from './permission-tier.mjs'
+import { permissionTier, permissionTierTimeoutMs } from './permission-tier.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const { cases } = JSON.parse(readFileSync(join(HERE, 'permission-tier.fixtures.json'), 'utf8'))
@@ -52,4 +52,24 @@ test('supervisor.mjs computes the tier at park time and publishes it', () => {
 
 test('no tool name fails closed', () => {
   assert.equal(permissionTier('', {}).tier, 'operator')
+})
+
+// ⚠️ A timeout is the failure this suite used to report as a routing difference. A classifier that
+// runs past its budget must be legible AS a timeout: the reason names it and the form is
+// `unverifiable`, so no reader can take the result for a tier verdict.
+test('a classifier that runs past its budget reports the timeout, not a tier', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ptier-slow-'))
+  const script = join(dir, 'slow.py')
+  writeFileSync(script, 'import time\ntime.sleep(5)\n')
+  const got = permissionTier('Bash', { command: 'git status' }, { script, timeoutMs: 200 })
+  assert.equal(got.tier, 'operator')
+  assert.equal(got.form, 'unverifiable')
+  assert.match(got.reason, /did not run: .*(ETIMEDOUT|timed out)/i)
+})
+
+test('the classifier budget is a measured multiple, not a fixed five seconds', () => {
+  assert.equal(permissionTierTimeoutMs({ measuredMs: 50 }), 10_000)       // below the floor
+  assert.equal(permissionTierTimeoutMs({ measuredMs: 500 }), 10_000)      // 20 × 500 is the floor
+  assert.equal(permissionTierTimeoutMs({ measuredMs: 2_000 }), 40_000)    // 20 × 2 000
+  assert.equal(permissionTierTimeoutMs({ measuredMs: 60_000 }), 120_000)  // above the cap
 })

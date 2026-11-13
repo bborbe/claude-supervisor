@@ -105,9 +105,18 @@ class OpenQueueTest(unittest.TestCase):
         self._att = tempfile.TemporaryDirectory()
         self._saved_att = getattr(oq, "ATTENTION_DIR", None)
         oq.ATTENTION_DIR = self._att.name
+        # ⚠️ **Never the operator's real stand-down store.** The subject-tier guard reads
+        # `<branch>--<slug>.stopped` out of it, so a marker there would suppress a fixture
+        # row for a reason the case never set up — and these rows are named for their role
+        # (`low`, `high`), which a real goal could share.
+        self._states = tempfile.TemporaryDirectory()
+        self._saved_states = oq.manager_liveness.STATE_DIR
+        oq.manager_liveness.STATE_DIR = self._states.name
 
     def tearDown(self):
         oq.ATTENTION_DIR = self._saved_att
+        oq.manager_liveness.STATE_DIR = self._saved_states
+        self._states.cleanup()
         self._att.cleanup()
         self._dir.cleanup()
 
