@@ -24,6 +24,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import shlex
 import shutil
@@ -316,6 +317,51 @@ class RebaseEndToEndTest(unittest.TestCase):
         placement = ra.gate_placement(scratch, bullets)
         self.assertIsNotNone(placement, "a bullet under a released heading must fail")
         self.assertIn("v1.1.0", placement)
+
+
+class RunRecordTest(unittest.TestCase):
+    """The record is the only thing a CronJob pod leaves behind.
+
+    The state directory is an emptyDir in the cluster, so a run whose record exists only
+    there is a run nothing can read afterwards. These cases pin the two halves that make
+    it durable and honest: the trigger travels with the payload, and the printed line is
+    a single parseable line naming every row.
+    """
+
+    def _dir(self):
+        path = tempfile.mkdtemp(prefix="rebase-agent-test-")
+        self.addCleanup(shutil.rmtree, path, True)
+        return path
+
+    def test_the_payload_carries_the_trigger(self):
+        rows = [{"repo": "bborbe/x", "pr": 7, "branch": "feat/a", "verdict": "PUSH",
+                 "reason": None, "behind": 2, "push_line": "git -C /r push"}]
+        path, payload = ra.write_state(rows, [], "schedule", state_dir=self._dir())
+        self.assertEqual(payload["trigger"], "schedule")
+        self.assertTrue(os.path.exists(path))
+        with open(os.path.join(os.path.dirname(path), "latest.json"),
+                  encoding="utf-8") as handle:
+            self.assertEqual(json.load(handle)["trigger"], "schedule")
+
+    def test_the_record_line_is_one_line_json_naming_every_row(self):
+        rows = [{"repo": "bborbe/x", "pr": 7, "branch": "feat/a", "verdict": "PUSH",
+                 "reason": None, "behind": 2, "push_line": "line"}]
+        payload = {"generated_at": "2026-11-13T00:00:00+00:00", "trigger": "schedule",
+                   "errors": [], "rows": rows}
+        line = ra.record_line(payload, "/state/2026.json")
+        self.assertTrue(line.startswith(ra.RECORD_PREFIX))
+        self.assertNotIn("\n", line)
+        parsed = json.loads(line[len(ra.RECORD_PREFIX):])
+        self.assertEqual(parsed["trigger"], "schedule")
+        self.assertEqual(parsed["state"], "/state/2026.json")
+        self.assertEqual(parsed["rows"][0]["pr"], 7)
+        self.assertEqual(parsed["rows"][0]["push_line"], "line")
+
+    def test_a_hand_started_run_records_manual(self):
+        """A hand-started run must never be readable as a scheduled one."""
+        self.assertEqual(ra.build_parser().parse_args([]).trigger, "manual")
+        self.assertEqual(
+            ra.build_parser().parse_args(["--trigger", "schedule"]).trigger, "schedule")
 
 
 class RepoSetTest(unittest.TestCase):
