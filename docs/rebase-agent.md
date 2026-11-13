@@ -72,6 +72,65 @@ The record names the rows it rebased and the push line for each — never a `DIR
 transition, because the agent never pushes. The PR stays `DIRTY` until the operator
 applies that line.
 
+## The board
+
+A record nobody reads is not delivery. Each `PUSH` row is also posted to the fleet
+attention board as one card whose body carries the line **verbatim**, so the operator gets
+it without a `kubectl logs` on a pod that no longer exists.
+
+The write is guarded by two variables and is off when they are absent:
+
+| Variable | Meaning |
+|---|---|
+| `ATTENTION_STORE_URL` | base URL of the store's bearer-gated listener — `http://attention-controller.agent.svc.cluster.local:18081` from the cluster |
+| `ATTENTION_STORE_TOKEN` | bearer token, required for any non-loopback store |
+
+⚠️ **The port is 18081, not 18080.** 18080 serves the unauthenticated board page; 18081
+serves only `/api/1.0/attention…` behind the token. Pointing this at 18080 would publish
+the card-writing path on the surface the board itself lives on.
+
+⚠️ **No default.** The session producers default to `localhost:18080`; this one does not,
+because the same script runs on the Mac and a default would post every sweep to whatever
+happens to listen there. An unset store prints one line on stderr — only when the run has a
+push line to lose — and leaves the push line in the run record.
+
+**Where the variables are set:** nowhere in this repo. The cluster CronJob lives in
+`bborbe/nuke` (`rebase-agent/rebase-agent-cronjob.yaml`), and that unit carries both — the
+URL as a literal and the token from its own Secret. Set them there, not here; this script
+reads the environment and nothing else.
+
+**Store floor:** `attention-controller ≥ v0.42.0`. That is the release carrying `owner:`
+liveness and `expires_at` enforcement; against an older store the card's liveness model is
+unknown and the push is rejected, which surfaces as a `board_error` naming the store's
+message.
+
+### The card's declaration, and why each field is what it is
+
+| Field | Value | Why |
+|---|---|---|
+| `producer_id` | `rebase-agent` | Stable across runs — the dedup key is compared *within a producer*. |
+| `producer_kind` | `cron` | The closed enum's member for a scheduled job. |
+| `provenance_class` | `explicit` | An explicit producer call carrying a stable id. |
+| `answer_mechanism` | `ack` | A condition report: the operator acts on it, nothing routes back to the pod. |
+| `interrupt_class` | `approve` | Self-report, not enumerated by the store; the rung the watcher's own ack cards use. |
+| `dedup_key` | `rebase-agent:<repo>#<n>` | Per PR, so a sweep that keeps finding the same branch refreshes one card. |
+| `liveness_ref` | `owner:operator` | See below. |
+| `expires_at` | now + 1 h | The card's only removal, given `owner:` probes nothing. |
+
+⚠️ **`owner:` is not a convenience — the other two models break the card.** Duplicate
+suppression only collapses a re-push while the store reads the producer as live
+(`updateExistingIfLive` → `isProducerLive`), and it resolves `heartbeat:<path>` against the
+**store host's** filesystem and `session:` against the store host's session registry. A pod
+appears in neither, so both read *gone*, suppression never applies, and every 15-minute
+sweep adds a **new** card — a board that floods instead of one that reports. `owner:`
+probes nothing and returns live unconditionally, which is exactly why it must be paired
+with `expires_at`: an unbounded `owner:` card would never leave.
+
+⚠️ **A board failure is never a rebase failure.** The post runs outside the per-PR `try`,
+so an unreachable store cannot turn a good rebase into an `ERROR` verdict; the failure is
+recorded as `board_error` on the row and printed to stderr, and the record still carries
+the line.
+
 ## The scratch worktree
 
 ```

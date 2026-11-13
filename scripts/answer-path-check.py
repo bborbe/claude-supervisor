@@ -12,6 +12,17 @@ alive?" from evidence the manager leaves on disk at every re-arm. A second lock 
 written by a second writer would be exactly the two-counters defect this repo refuses
 everywhere else: the day one writer changes, the two disagree with no error on either.
 
+⚠️ **That record now carries a WORK SIGNAL beside the round cadence, and this gate reads
+it through the state word.** `--state`'s detail gained `work=<seconds>s`: the age of the
+manager's own transcript, resolved from the session id `--arm` records — the file Claude
+Code appends to on every turn, so it moves on ANY work, not only a round. The state word
+therefore distinguishes the two readings this gate must not conflate: `OK` means a round
+OR work inside the limit (a manager working without a round is alive); `IDLE` means
+armed and gate-watched but no round and no work — the gate tick alone no longer certifies
+a manager. **`IDLE` refuses here**, exactly like every other non-`OK` state: a manager
+that has produced nothing is not a manager whose gates a headless worker's parks can
+reach, and opening a worker on it is the 2026-09-20 stranding this check prevents.
+
 ⚠️ **The subject comes from the session's own registration, not from an argument.**
 `~/.claude/state/worker-manager/<session-id>.json` carries `subject`, `branch` and
 `vault` — written by the tier resolution that already decides which manager a session
@@ -277,6 +288,13 @@ def check(session_id):
     if state is None:
         return False, subject, branch, reason
     if state != "OK":
+        if state == "IDLE":
+            return False, subject, branch, (
+                f"this session's manager loop on {branch} '{subject}' reads IDLE, not OK — "
+                f"the record shows no round and no work (its work signal, the manager "
+                f"transcript's age, has not moved), so nothing here is producing work to "
+                f"answer a headless worker's parked prompt"
+            )
         return False, subject, branch, (
             f"this session's manager loop on {branch} '{subject}' reads {state}, not OK — "
             f"nothing is armed to answer a headless worker's parked prompt"
