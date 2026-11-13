@@ -22,6 +22,7 @@ Verdicts (one line on stdout):
   skip:no-composer         no `❯` prompt on screen, so idleness is unproven
   skip:machine-wait        the last turn declared a machine wait (`🟡 WAITING` / `⏰ Ends:`)
   skip:sleeping            the subject is date-gated asleep (`manager-liveness.py --state`)
+  skip:state-unreadable    a subject resolved but its state could not be read — fail closed
   error:<reason>           the pane could not be read
 
 Exit status: 0 for `wake` / `wake:suggestion`, 1 for any `skip:*`, 2 for `error:*`.
@@ -54,6 +55,9 @@ MODAL_CANCEL = "Esc to cancel"
 OPTION_ROW = re.compile("^" + PROMPT_GLYPH + r"\s*1\.")
 MACHINE_WAIT = ("\U0001f7e1 WAITING", "⏰ Ends:")
 SLEEPING = "SLEEPING"
+# A subject RESOLVED but its state could not be read. Distinct from `None`, which means
+# no subject resolved at all — see `verdict`'s docstring for why only this one fails closed.
+STATE_UNREADABLE = "UNREADABLE"
 OPERATOR_ASK = "\U0001f464 You:"  # 👤 You:
 
 # The escape stripper and the faint parser are REUSED from the reload lever, never
@@ -100,11 +104,22 @@ def verdict(text, allow_machine_wait=False, subject_state=None):
     definition — the sleep exists to produce exactly that state — so it is refused
     before the screen is even considered. A sleeping pane shows an empty composer and
     no `👤 You:` ask, which is why the screen checks cannot tell it from a lapse.
-    `None` means the state read failed or resolved nothing; that is NOT a state, so
-    the screen verdict decides, exactly as before this parameter existed.
+
+    `STATE_UNREADABLE` means a subject RESOLVED but its state could not be read — a
+    non-zero exit, an unparsable line, a timeout. That is refused too, and it is the
+    one place this guard fails closed: a missed wake costs a manager nothing (its gate
+    re-arms it) while a spurious wake types into a pane whose session then closes it
+    for good. Measured 2026-11-13: three `DEFAULT_MESSAGE` wakes landed inside a
+    `SLEEPING` window because the failed read fell through to the screen verdict.
+
+    `None` means NO subject resolved — a hand-opened tab, or a session dispatched
+    before the record existed. That is not a state either way, so the screen verdict
+    decides, exactly as before this parameter existed.
     """
     if subject_state == SLEEPING:
         return "skip:sleeping"
+    if subject_state == STATE_UNREADABLE:
+        return "skip:state-unreadable"
     if text is None:
         return "error:unreadable"
     if not text.strip():
