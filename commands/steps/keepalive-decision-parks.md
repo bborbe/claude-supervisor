@@ -41,10 +41,12 @@ here. Before that file existed the four readings lived only in the hand-back mes
 
 ⚠️ **Exit 3 means the readings were produced but could not be persisted** (a read-only or full
 state dir). The script still prints the summary and names the failure on stderr as
-`decision-persist: FAILED — <path>: <error>`. Report `decision-persist=FAILED` in the hand-back and
-never let the round read as clean: a leg that swallowed this would put the numbers back in a message
-only. Exit 0 is `decision-persist=written`, and a leg the debt gate skipped (never reaching this
-step) reports `decision-persist=not-run` — one of the three, emitted on every run, never omitted.
+`decision-persist: FAILED — <path>: <error>`. ⚠️ **Any non-zero exit that printed that line is
+`FAILED`, exit 3 or not** — a failed READ (exit 1) can carry a failed write too, and the stderr line
+is the fact, not the code. Report `decision-persist=FAILED` and never let the round read as clean: a
+leg that swallowed this would put the numbers back in a message only. Exit 0 is
+`decision-persist=written`, and a leg the debt gate skipped (never reaching this step) reports
+`decision-persist=not-run` — one of the three, emitted on every run, never omitted.
 
 ⚠️ **A failed READ is not a clean round, and the file says so twice.** When the tasks dir cannot be
 read the script exits **1**, prints `unread — <reason>`, and keeps `decision-unread=1` as the

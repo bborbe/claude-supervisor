@@ -469,13 +469,20 @@ def main(argv: list[str]) -> int:
     persisted = None
     try:
         persisted = persist(args.persist_beside, result, now)
-    except OSError as error:
+    except (OSError, ValueError, OverflowError) as error:
+        # ⚠️ **Not `OSError` alone.** `datetime.fromtimestamp` raises `OverflowError` / `ValueError`
+        # for an out-of-range clock, and that escape would surface as a traceback instead of the
+        # named failure — the round would read as crashed rather than as unpersisted.
         print(
             f"decision-persist: FAILED — {decision_path(args.persist_beside)}: {error}",
             file=sys.stderr,
         )
 
     if not result["ok"]:
+        # ⚠️ **A failed read outranks a failed write in the exit code, but neither is swallowed.**
+        # 1 says the tasks dir could not be read (the reading is the `decision-unread=1` sentinel);
+        # when the write ALSO failed the caller still has the `decision-persist: FAILED` line on
+        # stderr, and the step's rule treats any non-zero exit carrying that line as `FAILED`.
         print(f"unread — {result['reason']}")
         print(summary_line(result))
         return 1
