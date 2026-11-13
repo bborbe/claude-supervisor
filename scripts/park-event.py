@@ -392,13 +392,29 @@ def _replace_or_insert(text: str, key: str, line: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def atomic_write(path: Path, text: str) -> None:
+    """Replace `path` with `text`, never leaving a half-written page behind.
+
+    The task page is rewritten while the vault autocommits, so a truncating
+    write is a worse failure than the missing record it was fixing.
+    """
+    handle, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.stem}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(text)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+
+
 def write_park_record(task: str, key: str, recheck: str, action: str, vault: str | None) -> Path:
     """Write the `later (on …)` line the fleet round reads as the park's record.
 
     Frontmatter goes through `vault-cli`; body prose has no CLI writer, so the
-    page is rewritten in place. The rewrite is atomic (`os.replace` of a sibling
-    temp file) because this runs while the vault autocommits: a truncated task
-    page is a worse failure than a missing record.
+    page is rewritten in place.
     """
     path = task_file(task, vault)
     try:
@@ -407,16 +423,7 @@ def write_park_record(task: str, key: str, recheck: str, action: str, vault: str
         raise ParkError(f"could not read the task page {path}: {exc}") from exc
     updated = _replace_or_insert(text, key, record_line(key, action))
     if updated != text:
-        handle, tmp_name = tempfile.mkstemp(
-            dir=str(path.parent), prefix=f".{path.stem}.", suffix=".tmp"
-        )
-        try:
-            with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                stream.write(updated)
-            os.replace(tmp_name, path)
-        except BaseException:
-            Path(tmp_name).unlink(missing_ok=True)
-            raise
+        atomic_write(path, updated)
     return path
 
 
@@ -732,16 +739,7 @@ def cmd_backfill(args: argparse.Namespace) -> int:
         if args.apply:
             updated = _replace_or_insert(text, key, line)
             if updated != text:
-                handle, tmp_name = tempfile.mkstemp(
-                    dir=str(path.parent), prefix=f".{path.stem}.", suffix=".tmp"
-                )
-                try:
-                    with os.fdopen(handle, "w", encoding="utf-8") as stream:
-                        stream.write(updated)
-                    os.replace(tmp_name, path)
-                except BaseException:
-                    Path(tmp_name).unlink(missing_ok=True)
-                    raise
+                atomic_write(path, updated)
                 written += 1
         if not args.json:
             print(f"{'wrote' if args.apply else 'would write'}\t{path.name}\t{line}")
