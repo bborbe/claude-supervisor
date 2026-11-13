@@ -91,7 +91,34 @@ def write_snapshot(sessions, path=None, swept_at=None):
     return data
 
 
-def write_digest_marker(swept_at, digest_path):
+LABEL = "snapshot written:"
+
+
+def compose_header(session_count, swept_at):
+    """Compose a round's `.digest` first line — the one place the label is written.
+
+    Measured 2026-11-05: a round's first line read
+    `snapshot written: snapshot written: 2026-11-05T17:34:30Z - 43 sessions`.
+    The sweep prompt told the reader to quote `fleet-snapshot.py`'s own
+    already-labelled stdout line into a template slot that carried the label
+    itself, so two instructions in one prompt disagreed and the agent followed
+    the wrong one. Composing the line here removes the disagreement: the prompt
+    pastes this line verbatim and composes only from line 2 onward.
+
+    `swept_at` is unwrapped before it is used. A caller that hands back a whole
+    labelled line must still yield one label — the historical doubling is
+    exactly that input, and it is pinned by a test.
+
+    The three ASCII markers `DIGEST `, `sessions` and `snapshot written:` are the
+    shape `scripts/manager-receipt.py` reads a digest by, so none is optional.
+    """
+    value = swept_at.strip()
+    while value.lower().startswith(LABEL):
+        value = value[len(LABEL):].strip()
+    return "DIGEST %s · %d sessions · %s %s" % (value, session_count, LABEL, value)
+
+
+def write_digest_marker(swept_at, digest_path, session_count):
     """Name `swept_at` in the round's `.digest` at the instant the snapshot is taken.
 
     The watcher judges freshness from the newest `.digest` on disk, so a round whose
@@ -107,6 +134,10 @@ def write_digest_marker(swept_at, digest_path):
     the baseline it carries the same instant. The round's full render later replaces
     this path and carries the identical `snapshot written:` value.
 
+    When `session_count` is given the marker is the round's complete first line
+    (`compose_header`), so the file lands with the same shape the render later
+    replaces it with.
+
     Returns the path written, or None when no digest path was given.
     """
     if not digest_path:
@@ -114,10 +145,11 @@ def write_digest_marker(swept_at, digest_path):
     parent = os.path.dirname(digest_path)
     if parent:
         os.makedirs(parent, exist_ok=True)
+    line = compose_header(session_count, swept_at)
     tmp = digest_path + ".tmp"
     try:
         with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write("DIGEST marker · snapshot written: %s\n" % swept_at)
+            fh.write(line + "\n")
         os.replace(tmp, digest_path)
     except BaseException:
         if os.path.exists(tmp):
@@ -147,7 +179,7 @@ def main(stdin=None, path=None, digest_path=None):
         )
         return 1
     data = write_snapshot(sessions, path=path)
-    write_digest_marker(data["swept_at"], digest_path)
+    write_digest_marker(data["swept_at"], digest_path, len(sessions))
     print("snapshot written:", data["swept_at"], "-", len(sessions), "sessions")
     return 0
 
@@ -160,8 +192,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--digest-path",
         default=None,
-        help="this round's .digest; a marker naming the snapshot is written there "
-        "at stamp time (default: FLEET_SNAPSHOT_DIGEST_PATH)",
+        help="this round's .digest; its complete first line is written there at "
+        "stamp time (default: FLEET_SNAPSHOT_DIGEST_PATH)",
     )
     args = parser.parse_args()
     sys.exit(main(path=args.path, digest_path=args.digest_path))

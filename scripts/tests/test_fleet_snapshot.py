@@ -280,6 +280,78 @@ class DigestMarker(Base):
         self.assertFalse(os.path.exists(self.digest))
 
 
+class HeaderComposition(Base):
+    """The `.digest` first line is composed here, once — never by the prompt.
+
+    Measured 2026-11-05: a round's first line read
+    `snapshot written: snapshot written: 2026-11-05T17:34:30Z - 43 sessions`.
+    The sweep prompt told the reader to quote `fleet-snapshot.py`'s own
+    already-labelled stdout line into a template slot that carried the label
+    itself, so two instructions in one prompt disagreed and the agent followed
+    the wrong one. Composing the line in code removes the disagreement.
+    """
+
+    VALUE = "2026-11-05T17:34:30Z"
+
+    def test_the_composer_writes_the_label_once(self):
+        line = fs.compose_header(43, self.VALUE)
+        self.assertEqual(line.count("snapshot written:"), 1, line)
+        self.assertEqual(
+            line,
+            "DIGEST 2026-11-05T17:34:30Z · 43 sessions · snapshot written: 2026-11-05T17:34:30Z",
+        )
+
+    def test_the_2026_11_05_value_yields_one_label(self):
+        # The value the script itself prints, which is what a caller quotes.
+        line = fs.compose_header(
+            43, "snapshot written: 2026-11-05T17:34:30Z - 43 sessions"
+        )
+        self.assertEqual(line.count("snapshot written:"), 1, line)
+        self.assertTrue(
+            line.endswith("snapshot written: 2026-11-05T17:34:30Z - 43 sessions"), line
+        )
+
+    def test_the_doubled_form_normalises_to_one_label(self):
+        line = fs.compose_header(
+            43,
+            "snapshot written: snapshot written: 2026-11-05T17:34:30Z - 43 sessions",
+        )
+        self.assertEqual(line.count("snapshot written:"), 1, line)
+        self.assertTrue(
+            line.endswith("snapshot written: 2026-11-05T17:34:30Z - 43 sessions"), line
+        )
+
+    def test_the_header_carries_the_shape_the_receipt_reads(self):
+        # manager-receipt.py's digest_shape(): these three markers are the shape.
+        line = fs.compose_header(43, self.VALUE)
+        self.assertTrue(line.startswith("DIGEST "), line)
+        self.assertIn("sessions", line)
+        self.assertIn("snapshot written:", line)
+
+    def test_a_naive_concatenation_still_doubles(self):
+        # The control: proves the one-label assertion above can go red. This is
+        # exactly what the prompt's two instructions produced together.
+        naive = "snapshot written: " + "snapshot written: 2026-11-05T17:34:30Z - 43 sessions"
+        self.assertEqual(naive.count("snapshot written:"), 2)
+
+    def test_the_marker_is_the_rounds_full_header(self):
+        digest = os.path.join(self.tmp, "handback", "round.digest")
+        stdin = io.StringIO(json.dumps({"a": {"name": "s1"}}))
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = fs.main(stdin=stdin, path=self.path, digest_path=digest)
+        self.assertEqual(rc, 0)
+        with open(digest, encoding="utf-8") as handle:
+            first = handle.readline().rstrip("\n")
+        self.assertIn("· 1 sessions · snapshot written: ", first)
+        self.assertEqual(first.count("snapshot written:"), 1, first)
+        # The prefix names the same stamp the label carries, so a reader that
+        # shows line 1 cannot report two different times for one round.
+        prefix, _, labelled = first.partition(" · ")
+        self.assertEqual(
+            prefix[len("DIGEST "):], labelled.split("snapshot written:", 1)[1].strip(), first
+        )
+
+
 class RecordedCase(unittest.TestCase):
     """The 2026-10-22 window, replayed against the watcher at a controlled clock."""
 
