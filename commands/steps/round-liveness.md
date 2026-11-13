@@ -24,14 +24,14 @@ When: every round, before the pre-dispatch gate
   PLUGIN=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}
   STATE=$(python3 "$PLUGIN/scripts/manager-liveness.py" --state --subject "<subject>" --branch "<goal|topic>" --vault "<vault-root>" | awk '{print $1}')
   case "$STATE" in
-    OK|STALE|UNARMED|INVALID) python3 "$PLUGIN/scripts/manager-liveness.py" --arm --subject "<subject>" --branch "<goal|topic>" --interval "<clamped-seconds>" ;;
+    OK|IDLE|STALE|UNARMED|INVALID) python3 "$PLUGIN/scripts/manager-liveness.py" --arm --subject "<subject>" --branch "<goal|topic>" --interval "<clamped-seconds>" ;;
     STOPPED) echo "liveness: STOPPED — no arm (deliberately stood down)" ;;
     SLEEPING) echo "liveness: SLEEPING — no arm (date-gated; the wake ends it)" ;;
     *) echo "liveness: ${STATE:-refused (subject unresolvable — see stderr)} — no arm" ;;
   esac
   ```
 
-  ⚠️ **Arm on an allow-list, never on a fallback.** Only `OK` / `STALE` / `UNARMED` / `INVALID` arm; every other answer — `STOPPED`, `SLEEPING`, `WRONG-BRANCH`, and an **empty** `STATE` — does not. `--state` prints its verdict as the first field and **exits 0 for every state**, but it **exits 3 with nothing on stdout** when the subject resolves neither a record under any branch nor a page under `--vault` (an abbreviated or mistyped name), so `STATE` comes back empty. `WRONG-BRANCH` means the record lives on another tier. Both are misreads of the subject, and arming on a misread re-arms the wrong record — a live loop's cadence history reset, or a stand-down reversed. The previous `*) --arm` fallback did exactly that for any word it did not name; `scripts/tests/test_round_liveness_step.py` pins this block.
+  ⚠️ **Arm on an allow-list, never on a fallback.** Only `OK` / `IDLE` / `STALE` / `UNARMED` / `INVALID` arm; every other answer — `STOPPED`, `SLEEPING`, `WRONG-BRANCH`, and an **empty** `STATE` — does not. ⚠️ **`IDLE` arms, and this is load-bearing:** the record carries a **work signal** beside the round cadence (`work=<seconds>s` in `--state`'s detail — the age of the manager's own transcript), and `IDLE` means a round and that work are both old while the gate is still watching. The manager is armed and will be woken; a round that reads `IDLE` and skips the arm would never record the round that ends it, so it would read `IDLE` for ever. `--state` prints its verdict as the first field and **exits 0 for every state**, but it **exits 3 with nothing on stdout** when the subject resolves neither a record under any branch nor a page under `--vault` (an abbreviated or mistyped name), so `STATE` comes back empty. `WRONG-BRANCH` means the record lives on another tier. Both are misreads of the subject, and arming on a misread re-arms the wrong record — a live loop's cadence history reset, or a stand-down reversed. The previous `*) --arm` fallback did exactly that for any word it did not name; `scripts/tests/test_round_liveness_step.py` pins this block.
 
   ⚠️ **`--vault` is the vault ROOT**, the same value the round's other scripts take; it is what lets `--state` resolve a subject that has no record yet.
 

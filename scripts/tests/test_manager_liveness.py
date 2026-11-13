@@ -28,6 +28,11 @@ def load(state_dir):
     # host can never make a synthetic stale subject read OK. Not created here: the
     # unreadable-state-dir test relies on the path staying absent.
     os.environ["MANAGER_GATE_LOOP_STATE_DIR"] = os.path.join(state_dir, "gate-loop")
+    # Same isolation for the WORK SIGNAL: the transcript read resolves a session id
+    # against the project tree, and a suite run inside a Claude session would otherwise
+    # find the runner's own transcript and make every reading fresh. Not created here,
+    # so a test that wants work must write a transcript under it explicitly.
+    os.environ["MANAGER_TRANSCRIPT_PROJECTS_DIR"] = os.path.join(state_dir, "projects")
     spec = importlib.util.spec_from_file_location(
         "manager_liveness", os.path.join(os.path.dirname(_HERE), "manager-liveness.py")
     )
@@ -1554,14 +1559,21 @@ class GateDrivenLiveness(unittest.TestCase):
         t = time.time() - age
         os.utime(p, (t, t))
 
-    def test_a_watched_goal_with_a_stale_cadence_reads_ok(self):
+    def test_a_watched_goal_with_a_stale_cadence_reads_idle_not_ok(self):
+        # ⚠️ THE FALSE `OK` THIS CHANGE REMOVES. A gate tick proves the TIMER works, not
+        # that the manager produced anything: the gate can poll every 15 minutes for 20
+        # hours while no round runs. `OK` here certified a slot that produces nothing.
+        # IDLE says what is true — armed and watched, no round, no work — and is still
+        # not a lapse, so nothing restarts it.
         self.stale_arm()
         now = time.time()
         self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 5)
         self.heartbeat("some-other-subject.heartbeat", 5)
         state, detail = self.m.classify(self.s, now)
-        self.assertEqual("OK", state)
+        self.assertEqual("IDLE", state)
         self.assertIn("gate-driven", detail)
+        self.assertIn("work=none", detail)
+        self.assertIn("no round, no work", detail)
 
     def test_a_stale_cadence_without_any_heartbeat_stays_stale(self):
         self.stale_arm()
@@ -1629,7 +1641,7 @@ class GateDrivenLiveness(unittest.TestCase):
             fh.write("0 x rc=0\n")
         os.utime(p, (now, now))
         self.heartbeat("some-other-subject.heartbeat", 5)
-        self.assertEqual("OK", self.m.classify(self.s, now)[0])
+        self.assertEqual("IDLE", self.m.classify(self.s, now)[0])
 
     def test_an_unparseable_sleep_marker_with_a_fresh_gate_stays_stale(self):
         """A corrupt `.sleeping` file still records a sleep; the gate cannot wake it, so
@@ -1648,6 +1660,128 @@ class GateDrivenLiveness(unittest.TestCase):
         os.rmdir(self.gate_dir)
         os.rmdir(self.m.GATE_LOOP_STATE_DIR)
         self.assertEqual("STALE", self.m.classify(self.s, time.time())[0])
+
+
+class WorkSignal(unittest.TestCase):
+    """The record's SECOND reading: `age` is round cadence, `work` is the manager working.
+
+    These are the two directions the defect produced, one case each so neither can
+    regress silently:
+      * a round-free but working manager must read `OK` (the false STALE), and
+      * an armed but unworking manager must NOT read `OK` (the false OK) — it reads `IDLE`
+        when the gate is watching, `STALE` otherwise.
+    The two pairs are told apart by the `work=` field, which exists in neither the
+    pre-fix output nor a documentation-only change.
+    """
+
+    SUBJECT = "Work Signal Subject"
+    SID = "11111111-2222-3333-4444-555555555555"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.m = load(self.tmp.name)
+        self.addCleanup(lambda: os.environ.pop("MANAGER_LIVENESS_STATE_DIR", None))
+        self.addCleanup(lambda: os.environ.pop("MANAGER_GATE_LOOP_STATE_DIR", None))
+        self.addCleanup(lambda: os.environ.pop("MANAGER_TRANSCRIPT_PROJECTS_DIR", None))
+        self.s = self.m.slug(self.SUBJECT, "goal")
+        self.gate_dir = os.path.join(self.m.GATE_LOOP_STATE_DIR, "vault")
+        os.makedirs(self.gate_dir, exist_ok=True)
+
+    def arm_old(self, branch="goal", age=5000, session=None):
+        """Arm, then move the cadence back so it is past any limit."""
+        with redirect_stdout(io.StringIO()):
+            self.m.arm(self.SUBJECT, branch, 900)
+        s = self.m.slug(self.SUBJECT, branch)
+        p = self.m.path(s, "cadence")
+        t = time.time() - age
+        os.utime(p, (t, t))
+        if session is not None:
+            with open(self.m.path(s, "session"), "w", encoding="utf-8") as fh:
+                fh.write(session + "\n")
+        return s
+
+    def transcript(self, session, age):
+        d = os.path.join(self.m.PROJECTS_DIR, "proj")
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, f"{session}.jsonl")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        t = time.time() - age
+        os.utime(p, (t, t))
+
+    def heartbeat(self, name, age):
+        p = os.path.join(self.gate_dir, name)
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("0 x rc=0\n")
+        t = time.time() - age
+        os.utime(p, (t, t))
+
+    def watched(self):
+        """Make the gate look alive and watching this subject."""
+        self.heartbeat(f"{self.m.base_slug(self.SUBJECT)}.heartbeat", 5)
+        self.heartbeat("some-other-subject.heartbeat", 5)
+
+    def test_a_round_free_but_working_goal_reads_ok(self):
+        """FALSE STALE — the direction the record used to miss entirely.
+
+        Cadence far past the limit, no round, gate down (no heartbeat written): pre-fix
+        this read STALE and `topic-keepalive.py` would restart a working manager. The
+        transcript moved, so it is working, and it reads OK.
+        """
+        s = self.arm_old(age=5000, session=self.SID)
+        self.transcript(self.SID, 30)
+        state, detail = self.m.classify(s, time.time())
+        self.assertEqual("OK", state)
+        self.assertRegex(detail, r"work=\d+s")
+        self.assertIn("working (no round", detail)
+
+    def test_an_armed_but_unworking_goal_reads_idle_not_ok(self):
+        """FALSE OK — the gate tick alone must never certify a manager.
+
+        Old cadence, a recorded session whose transcript has not moved, and a live gate
+        watching: pre-fix this read `OK ... gate-driven`. It now reads IDLE.
+        """
+        s = self.arm_old(age=5000, session=self.SID)
+        self.transcript(self.SID, 4000)  # a transcript that exists but has not moved
+        self.watched()
+        state, detail = self.m.classify(s, time.time())
+        self.assertEqual("IDLE", state)
+        self.assertRegex(detail, r"work=\d+s")
+        self.assertIn("no round, no work", detail)
+
+    def test_no_transcript_reads_work_none(self):
+        """`work=none` is "cannot tell", never an idle reading dressed as a number."""
+        s = self.arm_old(age=5000, session=self.SID)  # session recorded, no transcript
+        self.watched()
+        state, detail = self.m.classify(s, time.time())
+        self.assertEqual("IDLE", state)
+        self.assertIn("work=none", detail)
+
+    def test_a_working_manager_stays_ok_even_without_a_session_marker(self):
+        """No `.session` → `work=none`; the round cadence alone still decides."""
+        s = self.arm_old(age=100)
+        state, detail = self.m.classify(s, time.time())
+        self.assertEqual("OK", state)
+        self.assertIn("work=none", detail)
+
+    def test_a_topic_subject_with_no_work_is_stale_not_idle(self):
+        """IDLE is goal-tier only — the other tiers arm their own cadence."""
+        s = self.arm_old(branch="topic", age=5000, session=self.SID)
+        self.watched()
+        state, _ = self.m.classify(s, time.time())
+        self.assertEqual("STALE", state)
+
+    def test_the_work_field_distinguishes_the_two_directions(self):
+        """The load-bearing assertion: same `age`/`limit` shape, different `work`."""
+        working = self.arm_old(age=5000, session=self.SID)
+        self.transcript(self.SID, 30)
+        _, working_detail = self.m.classify(working, time.time())
+        armed_only = self.arm_old(age=5000, session="99999999-8888-7777-6666-555555555555")
+        _, armed_detail = self.m.classify(armed_only, time.time())
+        self.assertRegex(working_detail, r"work=\d+s")
+        self.assertIn("work=none", armed_detail)
+        self.assertNotEqual(working_detail, armed_detail)
 
 
 class SessionMarker(unittest.TestCase):
