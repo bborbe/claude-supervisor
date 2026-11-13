@@ -42,7 +42,7 @@ def row(box, door="two-way", reason="vault edit, revert undoes it", kind="sc", o
 ONE_WAY = {"blast_radius": "nuke prod cluster", "rollback": "revert the PR and re-apply"}
 
 
-def base(rows=(), pending=(), live=3, soft=50, card_open=False, skipped=(),
+def base(rows=(), pending=(), live=3, soft=50, card_open=False,
          goal_phase="execution", coverage_ran=True):
     return {
         "coverage_ran": coverage_ran,
@@ -50,7 +50,7 @@ def base(rows=(), pending=(), live=3, soft=50, card_open=False, skipped=(),
         "rows": list(rows),
         "pending": list(pending),
         "cap": {"mode": "headless", "live": live, "soft": soft},
-        "card": {"open": card_open, "skipped_boxes": list(skipped)},
+        "card": {"open": card_open},
     }
 
 
@@ -171,15 +171,17 @@ class CardDiscipline(unittest.TestCase):
         self.assertEqual(by_box(r)["SC1: deploy"]["action"], "card-pending")
         self.assertEqual([p["task"] for p in r["open"]], ["Easy Task"])
 
-    def test_skipped_box_is_not_reasked(self):
+    def test_turned_down_box_is_closed_by_dup_of(self):
+        """A box the operator already declined carries `dup_of` to the task that quotes it,
+        so the next tick reports `dedup-linked` instead of re-asking."""
         r = plan(base(
-            rows=[row("SC1: deploy", door="one-way-self-contained", **ONE_WAY)],
-            skipped=["SC1: deploy"],
+            rows=[row("SC1: deploy", door="one-way-self-contained", **ONE_WAY,
+                      dup_of="Deploy Task")],
         ))
         self.assertIsNone(r["card"])
         self.assertEqual(r["file"], [])
         d = by_box(r)["SC1: deploy"]
-        self.assertEqual((d["action"], d["reason"]), ("skip", "operator-skipped"))
+        self.assertEqual((d["action"], d["reason"]), ("dedup-linked", "Deploy Task"))
 
 
 class WideReach(unittest.TestCase):

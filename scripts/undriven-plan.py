@@ -48,7 +48,10 @@ stdin (JSON):
                      proposal, door, door_reason, optional dup_of, blast_radius, rollback.
     pending[]      — todo rows already on disk: task, planned_by, door, phase.
     cap            — {mode, live, soft} for the spawn mode a manager-opened row uses.
-    card           — {open: bool, skipped_boxes: [box, …]} — the round's approve-card state.
+    card           — {open: bool} — whether the round's waiting-approval card is still open.
+                     A box the operator turned down needs no skip list: it is closed by
+                     `dup_of`, because the filed task quotes the box and the next tick's
+                     search finds it.
 
 stdout (JSON): decisions[], file[], open[], approve_by_manager[], held_on_cap[], card.
 Exit 2 on malformed input — a planner that guesses on a bad payload files the wrong task.
@@ -93,7 +96,6 @@ def decide(p):
     out = {"decisions": [], "file": [], "open": [], "approve_by_manager": [],
            "held_on_cap": [], "card": None}
     card_open = bool(p["card"].get("open"))
-    skipped = set(p["card"].get("skipped_boxes") or [])
 
     # Pending rows: only this step's own two-way rows may be approved by a manager.
     for t in p["pending"]:
@@ -124,10 +126,6 @@ def decide(p):
         if proposal not in FILE_PROPOSALS:
             out["decisions"].append({"box": box, "action": "skip",
                                      "reason": "proposal-unknown"})
-            continue
-        if box in skipped:
-            out["decisions"].append({"box": box, "action": "skip",
-                                     "reason": "operator-skipped"})
             continue
         if r.get("dup_of"):
             out["decisions"].append({"box": box, "action": "dedup-linked",
