@@ -51,6 +51,12 @@ check-spawn-target:
 check-open-manager-resolution:
 	@python3 scripts/check-open-manager-resolution.py
 
+# The GOAL and TOPIC branches type their manager's start commands into the pane they just
+# spawned. Three regressions are silent: the operator-paste instruction returns, the wait
+# falls through instead of exiting, or a literal pane id replaces the just-spawned variable.
+check-open-manager-start:
+	@python3 scripts/check-open-manager-start.py
+
 check-worker-target:
 	@python3 scripts/check-worker-target.py
 
@@ -211,6 +217,6 @@ test: check check-server-deps
 # a reader following the wrong directory gets no feedback that they did. `server/package.json`'s
 # own `start` script is `bun install --no-summary && node supervisor.mjs`, so `bun install`
 # inside `server/` works too.
-precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-keys check-spawn-target check-open-manager-resolution check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-open-role-defaults check-open-resume-mode check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-ledger-writes check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-own-parks-routing test check-wrote-nothing
+precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-keys check-spawn-target check-open-manager-resolution check-open-manager-start check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-open-role-defaults check-open-resume-mode check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-ledger-writes check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-own-parks-routing test check-wrote-nothing
 
-.PHONY: default hooks check-versions check-changelog check-changelog-size check-changelog-unreleased-fold changelog-archive check-spawn-mode check-spawn-keys check-spawn-target check-open-manager-resolution check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-open-role-defaults check-open-resume-mode check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-own-parks-routing check-manager-allowlist check check-server-deps test precommit check-wrote-nothing
+.PHONY: default hooks check-versions check-changelog check-changelog-size check-changelog-unreleased-fold changelog-archive check-spawn-mode check-spawn-keys check-spawn-target check-open-manager-resolution check-open-manager-start check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-open-role-defaults check-open-resume-mode check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-own-parks-routing check-manager-allowlist check check-server-deps test precommit check-wrote-nothing
