@@ -38,8 +38,16 @@ tasks = f.split("|")[2]
 # every artifact this repo makes, which is how the first version of this step was a no-op.
 snap = os.environ.get("FLEET_SNAPSHOT_PATH") or os.path.expanduser(
     "~/.claude/state/fleet-snapshot.json")
-with open(snap, encoding="utf-8") as fh:
-    sessions = (json.load(fh) or {}).get("sessions") or {}
+# ⚠️ Guarded: the snapshot is absent on a fresh state dir, after `fleet-reset.py`, and on
+# a first round. An unguarded open aborts the whole procedure with a traceback before a
+# single row is reported. `fleet-snapshot.py` writes atomically, so a torn read is not the
+# risk — absence and a non-dict document are.
+try:
+    with open(snap, encoding="utf-8") as fh:
+        sessions = (json.load(fh) or {}).get("sessions") or {}
+except (OSError, ValueError) as error:
+    print("stalled-tabs: cannot-tell — snapshot unreadable: " + str(error))
+    sys.exit(0)
 for sid, row in sorted(sessions.items()):
     if not isinstance(row, dict):
         continue
@@ -53,10 +61,16 @@ for sid, row in sorted(sessions.items()):
     if not task_file:
         continue
     task = os.path.splitext(os.path.basename(task_file))[0]
+    # ⚠️ The PAGE'S OWN directory, never the vault's tasks dir. The sweep resolves a
+    # session's task file across the tasks THEN goals tier, so a goal-page row passed the
+    # tasks dir finds nothing: the progress reset and the decline clear never fire, and one
+    # `leave it` silences that row forever. `task_progress_stamp` joins `vault` + this, and
+    # an absolute path wins the join, so both tiers work.
+    page_dir = os.path.dirname(task_file)
     try:
         out = subprocess.run(
             [sys.executable or "python3", script, "--vault", vault, "--task", task,
-             "--dir", tasks, "--session-id", sid, "--stall-count", str(count)],
+             "--dir", page_dir, "--session-id", sid, "--stall-count", str(count)],
             # Above the script's own ceiling (hold 30 + dry-run 120 + post 60 + poll 60 +
             # restart 120 ≈ 390 s). A wrapper timeout BELOW it would kill the child after
             # the consumed marker is written and before the restart runs — spending the
@@ -65,8 +79,10 @@ for sid, row in sorted(sessions.items()):
     except Exception as error:      # one bad row must never abort the rest of the round
         print(sid[:8] + "\tcannot-tell\t" + type(error).__name__, end="\n")
         continue
-    lines = out.split("\n")
-    print(sid[:8] + "\t" + "\n".join(lines[:2]).replace("\n", "\t"), end="\n")
+    # Every line, not the first two: the third is the only signal that a failed state write
+    # bypassed the restart cap, and truncating it makes that bypass invisible.
+    lines = [ln for ln in out.split("\n") if ln.strip()]
+    print(sid[:8] + "\t" + "\n".join(lines).replace("\n", "\t"), end="\n")
 ' "<vault>" "$F" "$P/stalled-tab-restart.py"
 ```
 
