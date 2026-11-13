@@ -350,7 +350,7 @@ output — the fleet table.
   goal-round row 4d (`commands/steps/goal-plan-undriven.md`, decision in
   `scripts/undriven-plan.py`). At most one file per goal per tick. A two-way row it filed
   is approved `--by manager` and opens through the ordinary `To open` path; a one-way row
-  waits on the round's approve card; a wide-reach row gets a `# Decision` record and a
+  waits on the round's approve card; a wide-reach row gets a `### Decision:` block and a
   talk-through. Every other `phase: todo` row stays the operator's —
   `docs/fleet-surface.md` § Approval provenance owns the boundary.
 - **A topic manager starts a goal manager with `/supervisor:open --goal "<goal>"`**, and only

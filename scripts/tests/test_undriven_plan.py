@@ -125,6 +125,18 @@ class TwoWay(unittest.TestCase):
         r = plan(base(rows=[row("SC1: easy", **ONE_WAY)], goal_phase="planning"))
         self.assertEqual(r["file"][0]["route"], "card")
 
+    def test_two_way_on_goal_not_in_execution_without_fields_is_refused(self):
+        """A two-way row on a non-execution goal routes to `card`, so it needs the card
+        fields even though its door is two-way. Without them it is refused rather than
+        carded blind — and never silently re-skipped as a filed row."""
+        r = plan(base(rows=[row("SC1: easy")], goal_phase="planning"))
+        self.assertEqual(r["file"], [])
+        self.assertEqual(by_box(r)["SC1: easy"]["reason"], "card-fields-missing")
+
+    def test_two_way_on_execution_goal_needs_no_card_fields(self):
+        r = plan(base(rows=[row("SC1: easy")], goal_phase="execution"))
+        self.assertEqual(r["file"][0]["route"], "open")
+
 
 class OneWaySelfContained(unittest.TestCase):
     """SC4a: one card, naming task, blast radius and rollback."""

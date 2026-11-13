@@ -12,20 +12,24 @@ Rationale and incident history: the Manager Session runbook § Command rationale
 
 This step **files** the task each undriven SC/DoD box from row 4b needs and **routes** it by its door. ⚠️ **Row 4b stays read-only** — this step consumes its rows; it never re-runs or widens the coverage dispatch.
 
-**The decision has ONE home — `scripts/undriven-plan.py decide`.** This file gathers its input and executes its output; it never re-derives a route, a cap or a ranking. Run it once per tick, the payload piped on stdin — never written to a file, which would park on a write prompt:
+**The decision has ONE home — `scripts/undriven-plan.py decide`.** This file gathers its input and executes its output; it never re-derives a route, a cap or a ranking. Run it once per tick:
 
+```bash
+python3 ${CLAUDE_PLUGIN_ROOT}/scripts/undriven-plan.py decide <<'PAYLOAD'
+<payload JSON>
+PAYLOAD
 ```
-printf '%s' '<payload JSON>' | python3 ${CLAUDE_PLUGIN_ROOT}/scripts/undriven-plan.py decide
-```
+
+⚠️ **The heredoc delimiter is QUOTED, and that is load-bearing.** `rows[].box` is verbatim vault prose, so it can carry an apostrophe or `$(…)`; a single-quoted argument or an unquoted heredoc would end the literal at the first quote and hand the rest to the shell. The quoted form is also why the payload is never written to a file — a temp-file write parks on a permission prompt.
 
 ## 1. Build the payload
 
-- **`coverage_ran`** — `true` only when row 4b's gate exited **10** this tick. On exit 0 (no change) pass `false`: the script then files nothing, and only the `pending` half below runs. ⚠️ Never pass `true` on a tick 4b did not dispatch — a stale row set would re-file what last tick already filed.
+- **`coverage_ran`** — `true` when row 4b's gate exited **10** (one owner path per line) **or 2** (fail-open: the tracked set was unreadable and every owner was dispatched, so rows exist). Pass `false` only on **exit 0** (no change): the script then files nothing and only the `pending` half runs. ⚠️ Never pass `true` on a tick 4b did not run at all — a stale row set would re-file what last tick already filed.
 - **`goal_phase`** — the subject goal's `phase`, read this tick. A two-way row opens only on a goal at `execution`.
 - **`rows[]`** — one per 4b row whose driving cell is `none`, carrying the row's own `box` text (verbatim), `kind` (`sc` from `# Success Criteria`, `dod` from `# Definition of Done`), `order` (its position on the page), `driving`, and `proposal`. Then add the three fields only the manager can supply:
   - **`door`** — `two-way`, `one-way-self-contained`, `one-way-wide`, or `unsure`, classified with the vault's own checklist (`One-Way and Two-Way Door Decisions` § How to classify). ⚠️ **Classify; never ask the operator to classify** — that page rules it out as an added ask. **Unsure is a valid answer** and routes as one-way.
   - **`door_reason`** — one line naming the checklist item that decided it (*"production-touching: restarts the attention-controller"*, *"vault edit, autocommitted"*). An empty reason is refused by the script.
-  - **`blast_radius`** and **`rollback`** — required for any row that is not two-way; the script refuses a one-way row without them rather than carding an ask the operator cannot judge.
+  - **`blast_radius`** and **`rollback`** — required for every row that can reach the card or the talk-through, which is **every row except a two-way row on a goal at `execution`**. A two-way row on any other goal phase routes to `card`, so it needs them too; without them the script refuses the row (`card-fields-missing`) rather than carding an ask the operator cannot judge.
   - **`dup_of`** — the name of an existing task, **in any status** (aborted included), that already quotes this box. Search before you file: `check_duplicates` with the box text, plus `grep -lF "<box text>"` over the vault's tasks dir. A box the operator already turned down stays turned down — that is how a skip is never re-asked across rounds.
 - **`pending[]`** — every tracked task at `phase: todo` with its `task`, `planned_by`, `door` and `phase` frontmatter.
 - **`cap`** — `{"mode": "<the mode a manager-opened row spawns in>", "live": <worker-sessions.py --count>, "soft": <worker-target.py>}` — the same pair row 9 compares. ⚠️ **The per-mode axes (headless, interactive) are enforced by the wrapper at spawn**, not here: a row approved below this target can still be refused at the spawn, and row 6 reports that refusal as held. The limits hold either way.
