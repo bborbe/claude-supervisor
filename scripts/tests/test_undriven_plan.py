@@ -126,9 +126,8 @@ class TwoWay(unittest.TestCase):
         self.assertEqual(r["file"][0]["route"], "card")
 
     def test_two_way_on_goal_not_in_execution_without_fields_is_refused(self):
-        """A two-way row on a non-execution goal routes to `card`, so it needs the card
-        fields even though its door is two-way. Without them it is refused rather than
-        carded blind — and never silently re-skipped as a filed row."""
+        """A two-way row on a non-execution goal routes to `card`, which needs the card
+        fields whatever the door. Without them the row is refused, not carded blind."""
         r = plan(base(rows=[row("SC1: easy")], goal_phase="planning"))
         self.assertEqual(r["file"], [])
         self.assertEqual(by_box(r)["SC1: easy"]["reason"], "card-fields-missing")
