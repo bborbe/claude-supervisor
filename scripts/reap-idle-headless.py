@@ -266,6 +266,18 @@ def is_helper(args):
         cwd = parts[index + 1] if index + 1 < len(parts) else ""
         trimmed = cwd.rstrip("/")
         return trimmed.endswith(SUPERVISOR_MCP_DIR_SUFFIX) and "claude-supervisor" in trimmed
+    # Claude Code's own LSP server. `gopls` is a direct child of the session process, held
+    # for the session's lifetime and never closed on idle — a parked language server, not
+    # work. ⚠️ The bias toward "not a helper" does not apply to this population: a session
+    # that IS working is refused `busy-target` before this filter is reached, so
+    # `watcher-alive` only ever sees sessions the registry already calls idle. Measured
+    # 2026-11-13: six `gopls`-bearing sessions, four `idle` and one `busy` (the busy one
+    # refused earlier in the chain). Reaping does not orphan the server — it exits on stdin
+    # EOF in ~0.5 s, and parent death closes that pipe.
+    # ⚠️ Anchored on the executable like every other arm: a backgrounded `bash -c 'gopls …'`
+    # is a watcher, and a substring match would have called it a helper.
+    if exe == "gopls":
+        return True
     if exe not in {"uv", "uvx", "npm", "npx", "bun", "node"}:
         return False
     # A known MCP server PACKAGE, not the bare `mcp-` substring: `node scripts/mcp-watch.js`

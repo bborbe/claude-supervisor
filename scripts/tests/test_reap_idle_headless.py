@@ -123,6 +123,20 @@ class TestHelperFilter(unittest.TestCase):
         for args in ("uvx mcp-obsidian", "npm exec @modelcontextprotocol/server-x"):
             self.assertTrue(reap.is_helper(args), args)
 
+    def test_the_language_server_is_a_helper(self):
+        """`gopls` is Claude Code's own LSP child, held for the session's lifetime and
+        never closed on idle. It is not work: a session that IS working is refused
+        `busy-target` before this filter is reached, so `watcher-alive` only ever sees
+        registry-idle sessions. Reaping does not orphan it — it exits on stdin EOF."""
+        for args in ("gopls", "/Users/x/Documents/workspaces/go/bin/gopls"):
+            self.assertTrue(reap.is_helper(args), args)
+
+    def test_a_backgrounded_gopls_is_not_a_helper(self):
+        """Anchored on the executable like every other arm: a `bash -c 'gopls …'` child is
+        a watcher, and a substring match would have called it a helper."""
+        for args in ("/bin/bash -c 'gopls -remote=auto'", "sh -c 'gopls serve'"):
+            self.assertFalse(reap.is_helper(args), args)
+
 
 class TestTranscriptPath(unittest.TestCase):
     def test_both_slash_and_dot_munge_to_dash(self):
