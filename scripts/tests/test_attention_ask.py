@@ -1541,20 +1541,6 @@ class ManagerCallSitesPassTheKindTest(unittest.TestCase):
         cmd = self._captured_argv(module, lambda: module.post(card))
         self.assert_manager_kind(cmd, "scripts/propose-managers.py post")
 
-    def test_incident_ledger_posts_its_escalation_as_manager(self):
-        module = _load_script("incident_ledger_under_test", "incident-ledger.py")
-        incident = {
-            "dedup_key": "incident:abc",
-            "session_id": "sid-1",
-            "kind": "stall",
-            "owner": "worker",
-            "opened_at": "2026-10-28T10:00:00Z",
-            "deadline": "2026-10-28T12:00:00Z",
-            "detected_by": "sweep",
-        }
-        cmd = self._captured_argv(module, lambda: module.post_card(incident))
-        self.assert_manager_kind(cmd, "scripts/incident-ledger.py post_card")
-
     def test_every_manager_command_posting_site_carries_the_flag(self):
         # The markdown call sites are prose, so they cannot be argv-captured.
         #

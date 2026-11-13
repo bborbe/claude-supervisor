@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: the incident ledger's deadline escalation no longer posts a board card. `escalate` stamps `escalated_by` and prints the escalation line into the round's output (`scripts/incident-ledger.py`; `commands/steps/drive.md`). The card carried `--option ack` as its only control — an acknowledgement rendered as a question — and measured 2026-11-13 it was the board's largest misroute class: 401 manager-kind `ack`-only items on the Fleet Manager producer, 16 flagged `only ack is not actionable` in 2026W44. `card_id` now belongs to the blocker card alone; escalation no longer writes it.
+
 ## v0.308.0
 
 - feat: a goal round now files the task an undriven SC/DoD box needs and routes it by its door — new row 4d (`commands/steps/goal-plan-undriven.md`), decision in `scripts/undriven-plan.py`. Two-way rows the step filed are approved `--by manager` and open through the ordinary `To open` path below the worker target; one-way rows ride the round's one approve card with blast radius and rollback; wide-reach rows get a `### Decision:` block and a talk-through card that asks for no decision; `re-scope` proposals are never filed. At most one file per goal per tick. Every other `phase: todo` row stays the operator's.
