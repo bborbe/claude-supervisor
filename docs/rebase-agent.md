@@ -91,8 +91,18 @@ the card-writing path on the surface the board itself lives on.
 
 ⚠️ **No default.** The session producers default to `localhost:18080`; this one does not,
 because the same script runs on the Mac and a default would post every sweep to whatever
-happens to listen there. An unset store prints one line on stderr and leaves the push line
-in the run record.
+happens to listen there. An unset store prints one line on stderr — only when the run has a
+push line to lose — and leaves the push line in the run record.
+
+**Where the variables are set:** nowhere in this repo. The cluster CronJob lives in
+`bborbe/nuke` (`rebase-agent/rebase-agent-cronjob.yaml`), and that unit carries both — the
+URL as a literal and the token from its own Secret. Set them there, not here; this script
+reads the environment and nothing else.
+
+**Store floor:** `attention-controller ≥ v0.42.0`. That is the release carrying `owner:`
+liveness and `expires_at` enforcement; against an older store the card's liveness model is
+unknown and the push is rejected, which surfaces as a `board_error` naming the store's
+message.
 
 ### The card's declaration, and why each field is what it is
 

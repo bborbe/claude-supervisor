@@ -500,6 +500,38 @@ class BoardTest(unittest.TestCase):
         self.assertIsNone(item_id)
         self.assertIn("unreachable", error)
 
+    # ---- the wiring: the post must never reach process_pr's verdict ----------------
+
+    def test_a_successful_post_records_the_item_id_on_the_row(self):
+        row = dict(self.ROW, board_item_id=None, board_error=None)
+        with mock.patch.object(ra, "post_push_line", return_value=("abc123", None)):
+            ra.board_post_row(row)
+        self.assertEqual(row["board_item_id"], "abc123")
+        self.assertIsNone(row["board_error"])
+
+    def test_a_raising_post_leaves_the_verdict_alone(self):
+        """The load-bearing claim: the post sits outside process_pr's try."""
+        row = dict(self.ROW, board_item_id=None, board_error=None)
+        with mock.patch.object(ra, "post_push_line", side_effect=RuntimeError("boom")):
+            ra.board_post_row(row)
+        self.assertEqual(row["verdict"], "PUSH")
+        self.assertIsNone(row["board_item_id"])
+        self.assertIn("boom", row["board_error"])
+
+    def test_render_prints_the_board_item_id_and_any_board_error(self):
+        row = dict(self.ROW, reason=None, behind=2, board_item_id="abc123")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ra.render([row])
+        self.assertIn("board: abc123", buf.getvalue())
+
+        failed = dict(self.ROW, reason=None, behind=2, board_item_id=None,
+                      board_error="board unreachable at http://x")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ra.render([failed])
+        self.assertIn("board: board unreachable at http://x", buf.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
