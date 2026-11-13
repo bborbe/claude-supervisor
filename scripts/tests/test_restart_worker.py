@@ -197,6 +197,71 @@ class ResumeCommand(unittest.TestCase):
     def test_fresh_prompt_is_allowlisted(self):
         self.assertEqual(("/supervisor:fleet-loop",), rw.FRESH_PROMPTS)
 
+    def test_the_task_fresh_prompt_command_is_a_literal_constant(self):
+        """Pins the COMMAND CHOICE, not just a value: `--fresh-prompt-task` must not turn
+        the allowlist into free text, and swapping in a different command (say
+        `/supervisor:worker-drive`, which cannot anchor a fresh session) must fail here."""
+        self.assertEqual("/vault-cli:work-on-task", rw.TASK_FRESH_PROMPT_COMMAND)
+
+    def test_a_quote_in_the_task_name_cannot_close_the_bash_string(self):
+        """The prompt is embedded as `"{prompt}"` inside `bash -lc '…'`, so an unescaped `"`
+        would end the quote and let the rest of a task name reach the shell as syntax."""
+        raw = '/vault-cli:work-on-task we"ird $(x) `y`'
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc", raw)[-1]
+        self.assertNotIn('we"ird', inner)
+        self.assertIn('we\\"ird', inner)
+        self.assertIn('\\$(x)', inner)
+        self.assertIn('\\`y\\`', inner)
+
+    def test_escaping_round_trips_through_a_real_shell(self):
+        """The behavioural control, and the one that would catch a dropped `\\` in the
+        class: every value must come back byte-identical from bash — including a trailing
+        backslash, the one character that breaks a double-quoted string at its tail."""
+        corpus = ['plain name', 'a"b', "back\\slash", "trailing\\", "$HOME", "`id`",
+                  '$(rm -rf /)', 'a\\"b', "semi;colon", "pipe|char"]
+        for raw in corpus:
+            with self.subTest(raw=raw):
+                out = subprocess.run(
+                    ["bash", "-c", 'printf %s "' + rw.bash_dq_escape(raw) + '"'],
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(raw, out.stdout, out.stderr)
+
+    def test_bash_dq_escape_leaves_an_ordinary_task_name_alone(self):
+        """The negative control: escaping must not rewrite names that carry no specials."""
+        self.assertEqual(
+            "/vault-cli:work-on-task A Stuck Tab Worker",
+            rw.bash_dq_escape("/vault-cli:work-on-task A Stuck Tab Worker"),
+        )
+
+    def test_allow_busy_lapse_still_needs_a_fresh_prompt(self):
+        """The flag's whole safety is its narrowness — it must never widen a plain resume."""
+        out = subprocess.run(
+            [sys.executable, SCRIPT, "sid", "--reason", "lapse", "--allow-busy-lapse"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_the_two_fresh_prompt_flags_are_exclusive(self):
+        """Exit 2 alone is satisfied by ANY usage error, so the message is asserted too."""
+        out = subprocess.run(
+            [sys.executable, SCRIPT, "sid", "--fresh-prompt", "/supervisor:fleet-loop",
+             "--fresh-prompt-task"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertIn("exclusive", out.stderr)
+
+    def test_the_task_fresh_prompt_is_exclusive_with_absent(self):
+        """`--absent` resumes a session with no process and spawns nothing, so a fresh
+        prompt alongside it is a contradiction rather than a preference."""
+        out = subprocess.run(
+            [sys.executable, SCRIPT, "sid", "--fresh-prompt-task", "--absent"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(out.returncode, 2, out.stderr)
+        self.assertIn("exclusive", out.stderr)
+
     def test_resume_command_uses_the_resolved_wezterm_not_a_bare_name(self):
         """Regression 2026-11-11: a bare `"wezterm"` is not on launchd's PATH, so the keeper's
         `restart fresh` killed the Fleet Manager and could not spawn the replacement."""
@@ -1616,6 +1681,25 @@ class TaskTerminalRefusal(unittest.TestCase):
         self._write_task(task_path, ["status: completed", f"claude_session_id: {self.SID}"])
         self.assertEqual(rw.task_terminal_refusal(self.SID, cwd)[0], "task-terminal")
 
+    def test_fresh_prompt_task_binds_the_fresh_session_to_its_own_task(self):
+        """A fresh session carries no conversation, so its first turn is the ONLY thing that
+        can re-anchor it. The prompt must name THIS task — not a generic loop, and not
+        whichever in-progress task a fallback happened to find."""
+        cwd, _ = self._vault(["status: in_progress", f"claude_session_id: {self.SID}"])
+        prompt, refusal = rw.fresh_prompt_for_task(self.SID, cwd)
+        self.assertIsNone(refusal)
+        self.assertEqual("/vault-cli:work-on-task A Task", prompt)
+
+    def test_fresh_prompt_task_refuses_when_no_anchor_resolves(self):
+        """An unanchored restart spends a spawn slot to produce a session that drives
+        nothing, which is the failure the flag exists to prevent."""
+        cwd, _ = self._vault(
+            ["status: in_progress", "claude_session_id: some-other-session"]
+        )
+        prompt, refusal = rw.fresh_prompt_for_task(self.SID, cwd)
+        self.assertIsNone(prompt)
+        self.assertEqual(refusal[0], "no-task-anchor")
+        self.assertIn(self.SID, refusal[1])
 
     def test_the_cli_task_guard_exits_one_on_a_finished_task(self):
         """`--task-guard` is the route a leg that spawns on its own uses, so the CLI's own
@@ -1635,6 +1719,113 @@ class TaskTerminalRefusal(unittest.TestCase):
             capture_output=True, text=True,
         )
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+
+class FreshPromptTaskRefusal(unittest.TestCase):
+    """`--fresh-prompt-task` must refuse BEFORE anything is signalled.
+
+    The helper below is unit-tested for its token; this class pins the property the whole
+    module is built on — exit 1, the token as the FIRST line, and no `killing-pid` line.
+    A refusal that arrives after the signal is a killed worker with a reassuring message,
+    and the `killing-pid` assertion is what makes that failure visible.
+    """
+
+    SID = "9c1f2d3e-4a5b-6c7d-8e9f-0a1b2c3d4e5f"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = self.tmp.name
+        self.reg = os.path.join(self.root, "sessions")
+        os.makedirs(self.reg)
+        self.load = os.path.join(self.root, "loadpath")
+        os.makedirs(os.path.join(self.load, "9.9.9"))
+        self.vault = os.path.join(self.root, "vault")
+        os.makedirs(os.path.join(self.vault, "25 Tasks"))
+        self.task_path = os.path.join(self.vault, "25 Tasks", "A Task.md")
+
+        config = os.path.join(self.root, "vaults.json")
+        with open(config, "w", encoding="utf-8") as fh:
+            json.dump([{"name": "v", "path": self.vault, "tasks_dir": "25 Tasks"}], fh)
+        previous_config = os.environ.get("SUPERVISOR_VAULT_CONFIG")
+        previous_roles = os.environ.get("SUPERVISOR_ROLE_MAP")
+        os.environ["SUPERVISOR_VAULT_CONFIG"] = config
+        os.environ["SUPERVISOR_ROLE_MAP"] = os.path.join(self.root, "no-role-map.json")
+
+        def restore():
+            for key, value in (("SUPERVISOR_VAULT_CONFIG", previous_config),
+                               ("SUPERVISOR_ROLE_MAP", previous_roles)):
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+        self.addCleanup(restore)
+
+        with open(os.path.join(self.reg, "4242.json"), "w", encoding="utf-8") as fh:
+            json.dump(entry(self.SID, cwd=self.vault), fh)
+
+    def _task(self, *lines):
+        with open(self.task_path, "w", encoding="utf-8") as fh:
+            fh.write("---\n" + "\n".join(lines) + "\n---\n\n# Summary\n")
+
+    def _run(self, *extra):
+        """No `--dry-run` by default: the point is that the refusal lands before a signal."""
+        env = dict(os.environ)
+        env["SUPERVISOR_LOAD_PATH"] = self.load
+        env["SUPERVISOR_LAUNCHER"] = self.load
+        env.setdefault("SUPERVISOR_WEZTERM", sys.executable)
+        return subprocess.run(
+            [sys.executable, SCRIPT, self.SID, "--sessions-dir", self.reg,
+             "--reason", "lapse", "--allow-busy-lapse", "--fresh-prompt-task", *extra],
+            capture_output=True, text=True, env=env,
+        )
+
+    def test_no_anchor_refuses_before_the_signal(self):
+        self._task("status: in_progress", "claude_session_id: some-other-session")
+        out = self._run()
+        lines = out.stdout.strip().splitlines()
+        self.assertEqual(out.returncode, 1, lines)
+        self.assertEqual(lines[0], "no-task-anchor", lines)
+        self.assertNotIn("killing-pid", out.stdout)
+
+    def test_handed_off_refuses_before_the_signal(self):
+        """`metrics_sessions` carries the id while `claude_session_id` names the successor,
+        which is exactly the shape `close-worker.py::find_task` reports as handed off."""
+        self._task(
+            "status: in_progress",
+            "claude_session_id: some-successor",
+            "metrics_sessions:",
+            f"    - session_id: {self.SID}",
+            '      started_at: "2026-11-12T00:00:00+01:00"',
+        )
+        out = self._run()
+        lines = out.stdout.strip().splitlines()
+        self.assertEqual(out.returncode, 1, lines)
+        self.assertEqual(lines[0], "task-handed-off", lines)
+        self.assertNotIn("killing-pid", out.stdout)
+
+    def test_the_dry_run_names_the_task_it_would_bind_to(self):
+        """The positive control: with an anchor present the same invocation must reach the
+        prompt, and name THIS task. Without it, a helper that refused everything would pass
+        every test above."""
+        self._task("status: in_progress", f"claude_session_id: {self.SID}")
+        out = self._run("--dry-run")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("/vault-cli:work-on-task A Task", out.stdout)
+
+    def test_the_busy_lift_reaches_the_task_prompt(self):
+        """The property `--allow-busy-lapse` exists for, on a hermetic fixture: a `stalled`
+        session is `busy`, so without the lift this path could never restart one at all.
+        The default `entry()` is `idle`, which would pass the test above without ever
+        exercising the lift — hence the explicit `status="busy"` here."""
+        self._task("status: in_progress", f"claude_session_id: {self.SID}")
+        with open(os.path.join(self.reg, "4242.json"), "w", encoding="utf-8") as fh:
+            json.dump(entry(self.SID, cwd=self.vault, status="busy"), fh)
+        out = self._run("--dry-run")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("busy-target lifted by --allow-busy-lapse", out.stdout)
+        self.assertIn("/vault-cli:work-on-task A Task", out.stdout)
 
 
 if __name__ == "__main__":
