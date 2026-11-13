@@ -58,6 +58,14 @@ Exit codes
 0  every candidate produced a push line, or there was no candidate
 1  at least one candidate refused or failed a gate
 2  the queue could not be read — `unknown`, never rendered as "nothing to do"
+
+The run record
+--------------
+Every run writes `<stamp>.json` and `latest.json` under `--state-dir` and prints one
+`record: {json}` line to stdout. The line exists because the state directory does not
+survive a container: in the cluster it is an emptyDir, so the pod's log is the only
+record that outlives the run. `--trigger` (default `manual`) is written into both, so a
+hand-started run cannot be read as a scheduled one.
 """
 import argparse
 import json
@@ -72,6 +80,10 @@ from datetime import datetime, timezone
 
 STATE_DIR = os.path.expanduser("~/.local/state/claude-supervisor/rebase-agent")
 STATE_KEEP = 50
+# The one-line record printed to stdout. A fixed prefix keeps it greppable out of a Job
+# log that also carries the human render.
+RECORD_PREFIX = "record: "
+TRIGGERS = ("manual", "schedule")
 # A hung `git rebase` or a stalled `gh` would otherwise hold the launchd job open
 # forever; the interval is 900 s, so nothing legitimate takes this long.
 TIMEOUT_SECONDS = 300
@@ -570,26 +582,55 @@ def render(rows):
     )
 
 
-def write_state(rows, errors):
-    os.makedirs(STATE_DIR, exist_ok=True)
+def write_state(rows, errors, trigger, state_dir=None):
+    """Write the per-run state and return `(path, payload)`.
+
+    `trigger` is part of the payload rather than only of the printed line: the state
+    file is what a later run reads to tell a scheduled sweep from a hand-started one.
+    """
+    directory = state_dir or STATE_DIR
+    os.makedirs(directory, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "trigger": trigger,
         "errors": errors,
         "rows": rows,
     }
     for name in (f"{stamp}.json", "latest.json"):
-        with open(os.path.join(STATE_DIR, name), "w", encoding="utf-8") as handle:
+        with open(os.path.join(directory, name), "w", encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)
-    prune_state()
-    return os.path.join(STATE_DIR, f"{stamp}.json")
+    prune_state(directory)
+    return os.path.join(directory, f"{stamp}.json"), payload
 
 
-def prune_state():
+def record_line(payload, path):
+    """One machine-readable line naming the run, its trigger and every row.
+
+    Single-line and fixed-prefix on purpose: the readers are `kubectl logs` and `grep`
+    against a pod that no longer exists, and a pretty-printed blob is unusable through
+    either.
+    """
+    return RECORD_PREFIX + json.dumps(
+        {
+            "agent": "rebase-agent",
+            "generated_at": payload["generated_at"],
+            "trigger": payload["trigger"],
+            "state": path,
+            "errors": payload["errors"],
+            "rows": payload["rows"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def prune_state(directory=None):
     """Keep the newest STATE_KEEP runs — the loop writes one file per 900 s."""
+    directory = directory or STATE_DIR
     try:
         runs = sorted(
-            (os.path.join(STATE_DIR, name) for name in os.listdir(STATE_DIR)
+            (os.path.join(directory, name) for name in os.listdir(directory)
              if name.endswith(".json") and name != "latest.json"),
             key=os.path.getmtime,
             reverse=True,
@@ -603,7 +644,7 @@ def prune_state():
             pass
 
 
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", action="append", default=None,
                         help="restrict to one owner/repo (repeatable)")
@@ -612,7 +653,14 @@ def main(argv=None):
     parser.add_argument("--keep-scratch", action="store_true",
                         help="leave the scratch worktree in place for inspection")
     parser.add_argument("--state-dir", default=None)
-    args = parser.parse_args(argv)
+    parser.add_argument("--trigger", choices=TRIGGERS, default="manual",
+                        help="what started this run, written into the record "
+                             "(default: manual)")
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
 
     global STATE_DIR
     if args.state_dir:
@@ -646,16 +694,18 @@ def main(argv=None):
                 continue
             rows.append(process_pr(cfg, pr, keep_scratch=args.keep_scratch))
 
-    path = write_state(rows, errors)
+    path, payload = write_state(rows, errors, args.trigger)
     if args.json:
         print(json.dumps({
             "state": path,
+            "trigger": args.trigger,
             "errors": errors,
             "repos_examined": [cfg["repo"] for cfg in cfgs],
             "repos_not_in_set": unknown_repos,
             "rows": rows,
         }, indent=2))
     else:
+        print(record_line(payload, path))
         if unknown_repos:
             print(
                 "repo not in the rebase set: " + ", ".join(unknown_repos)

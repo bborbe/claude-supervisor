@@ -51,6 +51,27 @@ launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.bborbe.rebase-agent.plis
 Output goes to `~/.local/state/claude-supervisor/rebase-agent/latest.json` (plus one
 timestamped copy per run) and to `~/Library/Logs/rebase-agent.log`.
 
+### The run record
+
+Every run prints one `record: {json}` line to stdout beside the human render, and writes
+the same payload to the state directory. The line is the record that survives a
+container: when the agent runs as a cluster CronJob the state directory is an `emptyDir`,
+so the pod's log is all a later reader has — `kubectl logs job/<name> | grep '^record: '`.
+
+```json
+{"agent":"rebase-agent","generated_at":"2026-11-13T14:00:12+00:00","trigger":"schedule",
+ "state":"/state/2026-11-13T14-00-12Z.json","errors":[],
+ "rows":[{"repo":"bborbe/claude-supervisor","pr":123,"verdict":"PUSH","push_line":"git -C …"}]}
+```
+
+`--trigger` (default `manual`) is written into the payload, so a run started by hand is
+never readable as a scheduled one. A cluster CronJob passes `--trigger schedule`; every
+other caller gets `manual` without saying anything.
+
+The record names the rows it rebased and the push line for each — never a `DIRTY → CLEAN`
+transition, because the agent never pushes. The PR stays `DIRTY` until the operator
+applies that line.
+
 ## The scratch worktree
 
 ```
