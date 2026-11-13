@@ -3,10 +3,11 @@
 
     park-event.py threshold [--seconds | --human]
     park-event.py register --task <name> --event <key> --recheck <ISO8601>
-                           [--session <id>] [--vault <name>]
+                           [--session <id>] [--vault <name>] [--action <words>]
     park-event.py list  [--json]
     park-event.py due   [--json]
     park-event.py release --event <key> --session <id>
+    park-event.py backfill --vault <name> [--tasks-dir <dir>] [--apply] [--json]
 
 WHY THIS IS A SCRIPT AND NOT PROSE. Three facts decide whether a worker parks
 instead of holding a fleet slot for hours, and each of them was, until now,
@@ -28,6 +29,13 @@ either duplicated across files or held only in the round's memory:
   * THE MEMBERSHIP. A watch is not a process here: the fleet round asks this
     store what is due. So "one watch" means one entry carrying every session
     parked on that key — not one process, and never a second entry.
+
+  * THE RECORD. A park is only closable when the task page carries a
+    `later (on …)` line; the fleet round reads a deferred row without one as
+    `unverifiable` and never frees its slot. That line used to be the parking
+    session's own job, so every park made by a script or by a session that
+    skipped the step held its slot for ever. `register` writes it now, and
+    `backfill` repairs the rows parked before it did.
 
 THE THRESHOLD IS A DURATION, NOT A DATE. A wait whose expected end is within
 `threshold` seconds stays resident under its watcher; anything longer parks. The
@@ -254,11 +262,15 @@ def resolve_event_key(key: str) -> str:
 
 # --- task write --------------------------------------------------------------
 
+def _vault_cli(args: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(["vault-cli", *args], capture_output=True, text=True, check=False)
+
+
 def _set_field(task: str, field: str, value: str, vault: str | None) -> None:
-    cmd = ["vault-cli", "task", "set", task, field, value]
+    cmd = ["task", "set", task, field, value]
     if vault:
         cmd += ["--vault", vault]
-    done = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    done = _vault_cli(cmd)
     if done.returncode != 0:
         raise ParkError(
             f"could not write {field} on {task!r}: "
@@ -266,8 +278,159 @@ def _set_field(task: str, field: str, value: str, vault: str | None) -> None:
         )
 
 
-def write_task_key(task: str, key: str, recheck: str, vault: str | None) -> None:
-    """Record the event key and the re-check instant on the task.
+def task_file(task: str, vault: str | None) -> Path:
+    """The task's own page, as the CLI that owns the vault resolves it.
+
+    `vault-cli task show --output json` reports `file_path` for exactly the
+    vault the frontmatter write targets, so the record lands in the same page
+    as the `defer_date`. Resolving it independently — walking a configured
+    `tasks_dir` by hand — is how a record ends up in one vault while the defer
+    it describes lands in another, which reads as a task with no record at all.
+    """
+    cmd = ["task", "show", task, "--output", "json"]
+    if vault:
+        cmd += ["--vault", vault]
+    done = _vault_cli(cmd)
+    if done.returncode != 0:
+        raise ParkError(
+            f"could not resolve the file for task {task!r}: "
+            f"{(done.stderr or done.stdout).strip() or 'vault-cli failed'}"
+        )
+    try:
+        payload = json.loads(done.stdout)
+    except json.JSONDecodeError as exc:
+        raise ParkError(f"vault-cli returned no readable task for {task!r}: {exc}") from exc
+    path = str(payload.get("file_path") or "").strip()
+    if not path:
+        raise ParkError(
+            f"vault-cli resolved no file for task {task!r} — the park record has "
+            "nowhere to go, and a park with no record reads unverifiable for ever"
+        )
+    return Path(path)
+
+
+# --- the park record ---------------------------------------------------------
+#
+# THE RECORD THE ROUND READS. `agents/fleet-drive.md` classifies a clock-bound
+# park on three facts: `status: in_progress`, a `defer_date` after today, AND a
+# `later (on ` line in the task file. The first two are frontmatter; the third
+# is body prose, which `vault-cli task set` cannot write. Until this existed the
+# line was the parking session's own job (`commands/worker-drive.md` step 2), so
+# a park made by a script, a resumed session, or a worker that skipped the step
+# left a correct defer and no record — measured 2026-11-13 at **29 of 37**
+# future-dated `in_progress` rows. A row read `unverifiable` is never closed, so
+# a live parked session's process holds its slot until it dies on its own.
+
+PROGRESS_HEADING = "# Progress"
+PROGRESS_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+Progress[ \t]*$")
+
+
+def _heading_level(row: str) -> int:
+    """The ATX heading level of `row`, or 0 when it is not a heading."""
+    match = re.match(r"^(#{1,6})[ \t]+\S", row)
+    return len(match.group(1)) if match else 0
+
+
+def record_line(key: str, action: str) -> str:
+    return f"- later (on {key}): {action}"
+
+
+def default_action(recheck: str) -> str:
+    return f"the defer_date re-check at {recheck} — the fleet round re-opens this row"
+
+
+def is_future(recheck: str) -> bool:
+    """Whether this re-check actually defers the row.
+
+    A past instant is not a park — the row is due, and a `later (on …)` line
+    naming it would tell the round the wait is still running when it is not.
+    """
+    try:
+        return parse_instant(recheck, "recheck") > now()
+    except ParkError:
+        return False
+
+
+def _replace_or_insert(text: str, key: str, line: str) -> str:
+    """Put `line` where the round's reader finds it, without stacking copies.
+
+    One park per task is the normal case, so an existing line for this key is
+    REPLACED: a re-park moves the instant, and stacking a second line leaves the
+    page naming a re-check that has already passed.
+
+    The section heading is matched at ANY level, because the vault is not
+    uniform: `# Progress` is the template's, and a large minority of pages carry
+    `## Progress` instead. Appending a new `# Progress` to one of those would
+    leave the page with two Progress sections — the record still found by the
+    reader's grep, and the page wrong to a human.
+    """
+    pattern = re.compile(r"^[ \t]*(?:[-*][ \t]+)?later \(on " + re.escape(key) + r"\):.*$", re.M)
+    if pattern.search(text):
+        return pattern.sub(lambda _match: line, text, count=1)
+
+    lines = text.splitlines()
+    start = level = None
+    for index, row in enumerate(lines):
+        match = PROGRESS_HEADING_RE.match(row.strip())
+        if match:
+            start, level = index, len(match.group(1))
+            break
+    if start is None:
+        # No section yet: create one, rather than appending a bare line to
+        # whatever the page happens to end with.
+        return f"{text.rstrip()}\n\n{PROGRESS_HEADING}\n\n{line}\n"
+    end = next(
+        (i for i in range(start + 1, len(lines)) if 1 <= _heading_level(lines[i]) <= level),
+        len(lines),
+    )
+    at = end
+    # Stay inside the section: a blank separator before the next heading is the
+    # page's own layout, not a slot for a new entry.
+    while at > start + 1 and not lines[at - 1].strip():
+        at -= 1
+    lines.insert(at, line)
+    return "\n".join(lines) + "\n"
+
+
+def atomic_write(path: Path, text: str) -> None:
+    """Replace `path` with `text`, never leaving a half-written page behind.
+
+    The task page is rewritten while the vault autocommits, so a truncating
+    write is a worse failure than the missing record it was fixing.
+    """
+    handle, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=f".{path.stem}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(text)
+        os.replace(tmp_name, path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+
+
+def write_park_record(task: str, key: str, recheck: str, action: str, vault: str | None) -> Path:
+    """Write the `later (on …)` line the fleet round reads as the park's record.
+
+    Frontmatter goes through `vault-cli`; body prose has no CLI writer, so the
+    page is rewritten in place.
+    """
+    path = task_file(task, vault)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ParkError(f"could not read the task page {path}: {exc}") from exc
+    updated = _replace_or_insert(text, key, record_line(key, action))
+    if updated != text:
+        atomic_write(path, updated)
+    return path
+
+
+def write_task_key(
+    task: str, key: str, recheck: str, vault: str | None, action: str | None = None
+) -> None:
+    """Record the event key, the re-check instant and the park's own record.
 
     `defer_date` carries the full instant, not a bare date: the readers honour
     the time of day (`scripts/defer-date.py`), so this is the field that
@@ -275,15 +438,26 @@ def write_task_key(task: str, key: str, recheck: str, vault: str | None) -> None
     alongside so a restarted round re-derives the watch from disk instead of
     arming a second one.
 
-    Written through `vault-cli task set`, never by editing the file: the vault
-    owns its own frontmatter and an unattended writer that bypasses the CLI is
-    how a page ends up with a key no reader expects.
+    Frontmatter is written through `vault-cli task set`, never by editing the
+    file: the vault owns its own frontmatter and an unattended writer that
+    bypasses the CLI is how a page ends up with a key no reader expects. The
+    `later (on …)` line is body prose with no CLI writer, so it is written
+    directly (above) — and it is written HERE, not left to the caller, because
+    a defer without it reads `unverifiable` and the slot is never freed.
     """
     _set_field(task, "park_event", key, vault)
     _set_field(task, "defer_date", recheck, vault)
+    if is_future(recheck):
+        write_park_record(task, key, recheck, action or default_action(recheck), vault)
 
 
-def advance_members(record: dict, recheck: str, vault: str | None, skip: str | None) -> list[str]:
+def advance_members(
+    record: dict,
+    recheck: str,
+    vault: str | None,
+    skip: str | None,
+    action: str | None = None,
+) -> list[str]:
     """Move EVERY member's `defer_date` forward on a re-park.
 
     A watch with several members is the case this store exists for. Advancing
@@ -291,12 +465,18 @@ def advance_members(record: dict, recheck: str, vault: str | None, skip: str | N
     `defer_date`, and a past defer is not "deferred" to `worker-keepalive.py` —
     it falls through to `resume`, so those peers are resumed into a wait that
     has not fired. The watch is counted once; the clock moves for all of it.
+
+    A peer's record moves with its clock: leaving the old line behind would name
+    a re-check that has already passed on a row now deferred to a later one.
     """
     moved = []
+    key = record.get("event") or ""
     for task in sorted({t for t in (record.get("tasks") or {}).values() if t}):
         if task == skip:
             continue
         _set_field(task, "defer_date", recheck, vault)
+        if key and is_future(recheck):
+            write_park_record(task, key, recheck, action or default_action(recheck), vault)
         moved.append(task)
     return moved
 
@@ -390,9 +570,11 @@ def _register_locked(args: argparse.Namespace, key: str, recheck, session: str) 
     write_watch(key, record)
 
     if args.task:
-        write_task_key(args.task, key, record["recheck_at"], args.vault)
+        write_task_key(args.task, key, record["recheck_at"], args.vault, args.action)
     if args.repark:
-        record["_moved"] = advance_members(record, record["recheck_at"], args.vault, args.task)
+        record["_moved"] = advance_members(
+            record, record["recheck_at"], args.vault, args.task, args.action
+        )
 
     record["_created"] = created
     return record
@@ -479,6 +661,103 @@ def cmd_release(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def read_defer(raw: str) -> datetime | None:
+    """A stored `defer_date`, read leniently — `None` when it cannot be read.
+
+    Unlike `--recheck`, a task's own `defer_date` may legitimately be date-only:
+    the vault writes those, and `scripts/defer-date.py` resolves one to the start
+    of its local day. The backfill must read the field as the readers do, not as
+    the writer validates it.
+    """
+    text = raw.strip().strip('"').strip("'")
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            return datetime.strptime(text, "%Y-%m-%d").replace(
+                tzinfo=datetime.now().astimezone().tzinfo
+            )
+        return parse_instant(text, "defer_date")
+    except (ParkError, ValueError):
+        return None
+
+
+def vault_config(vault: str) -> dict:
+    done = _vault_cli(["config", "list", "--output", "json"])
+    if done.returncode != 0:
+        raise ParkError(
+            f"could not read the vault config: "
+            f"{(done.stderr or done.stdout).strip() or 'vault-cli failed'}"
+        )
+    try:
+        entries = json.loads(done.stdout)
+    except json.JSONDecodeError as exc:
+        raise ParkError(f"vault config is not readable JSON: {exc}") from exc
+    for entry in entries:
+        if entry.get("name") == vault:
+            return entry
+    raise ParkError(f"no configured vault named {vault!r}")
+
+
+def cmd_backfill(args: argparse.Namespace) -> int:
+    """Give every already-deferred row the record the fleet round reads.
+
+    The forward fix is `register` writing the line itself; this is the one-off
+    sweep over the rows parked before that existed. It re-derives the population
+    with the SAME filter the measurement uses — `status: in_progress` plus a
+    `defer_date` strictly after now — so the before/after counts describe one
+    population rather than two.
+    """
+    entry = vault_config(args.vault)
+    root = Path(os.path.expanduser(str(entry.get("path") or "")))
+    tasks_dir = args.tasks_dir or entry.get("tasks_dir") or "25 Tasks"
+    directory = root / tasks_dir
+    if not directory.is_dir():
+        raise ParkError(f"no tasks directory at {directory}")
+
+    clock = now()
+    rows = missing = written = 0
+    for path in sorted(directory.glob("*.md")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ParkError(f"could not read {path}: {exc}") from exc
+        status = re.search(r"^status:\s*(\S+)", text, re.M)
+        if not status or status.group(1).strip() != "in_progress":
+            continue
+        defer = re.search(r"^defer_date:\s*(\S+)", text, re.M)
+        if not defer:
+            continue
+        when = read_defer(defer.group(1))
+        if when is None or when <= clock:
+            continue
+        rows += 1
+        if re.search(r"later \(on ", text):
+            continue
+        missing += 1
+        event = re.search(r"^park_event:\s*(.+)$", text, re.M)
+        key = (event.group(1).strip().strip("\"'") if event else "") or iso(when)
+        line = record_line(key, default_action(iso(when)))
+        if args.apply:
+            updated = _replace_or_insert(text, key, line)
+            if updated != text:
+                atomic_write(path, updated)
+                written += 1
+        if not args.json:
+            print(f"{'wrote' if args.apply else 'would write'}\t{path.name}\t{line}")
+
+    summary = (
+        f"{rows} future-dated in_progress | {missing} missing later(on) | "
+        f"{written} written"
+    )
+    if args.json:
+        print(json.dumps(
+            {"rows": rows, "missing": missing, "written": written, "applied": bool(args.apply)},
+            indent=2, sort_keys=True,
+        ))
+    else:
+        print(summary)
+    return EXIT_OK
+
+
 # --- wiring ------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -495,6 +774,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--recheck", required=True, help="ISO-8601 instant with offset")
     p.add_argument("--session", help="session id (default: $CLAUDE_CODE_SESSION_ID)")
     p.add_argument("--vault", help="vault name for the task write")
+    p.add_argument(
+        "--action",
+        help="what replaces the session's live watcher, for the `later (on …)` "
+        "record (default: the defer_date re-check + the fleet round)",
+    )
     p.add_argument("--repark", action="store_true",
                    help="count this as a re-park of the same event (escalate at 3)")
     p.set_defaults(func=cmd_register)
@@ -511,6 +795,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--event", required=True)
     p.add_argument("--session", required=True)
     p.set_defaults(func=cmd_release)
+
+    p = sub.add_parser(
+        "backfill", help="write the park record onto rows deferred before register wrote it"
+    )
+    p.add_argument("--vault", required=True, help="vault whose tasks are swept")
+    p.add_argument("--tasks-dir", help="override the vault's configured tasks dir")
+    p.add_argument("--apply", action="store_true", help="write; default is a dry run")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_backfill)
 
     return parser
 
