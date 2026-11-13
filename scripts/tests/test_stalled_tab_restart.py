@@ -409,6 +409,16 @@ class Cap(Base):
         rc, lines = self.run_leg()
         self.assertEqual(lines[0], "restart", "a stale decline silenced the new episode")
 
+    def test_a_decline_survives_an_unreadable_task_page(self):
+        """`stamp is None` at answer time must not lose the decline — the mtime alone cannot
+        carry it, and the operator would be re-asked every round."""
+        os.remove(self.task_path)
+        self.patch_control(poll="ANSWERED: option: leave it")
+        self.run_leg()
+        rc, lines = self.run_leg()
+        self.assertEqual(lines[0], "carded")
+        self.assertIn("declined", lines[1])
+
     def test_the_escalation_is_posted_once(self):
         """The store's suppression is open-scoped, so a fixed key re-alerts every tick for a
         condition the operator has already acknowledged."""

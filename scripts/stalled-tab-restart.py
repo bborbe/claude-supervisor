@@ -99,8 +99,7 @@ def state_path(vault, task):
 
 
 def fresh_state():
-    return {"restarts": 0, "progress_at": None, "consumed": [], "declined_at": None,
-            "escalated": None}
+    return {"restarts": 0, "progress_at": None, "consumed": [], "declined": False, "declined_at": None, "escalated": None}
 
 
 def read_state(vault, task):
@@ -136,7 +135,8 @@ def read_state(vault, task):
     ):
         return None, f"state progress_at is {type(progress_at).__name__}, not a number"
     return {"restarts": restarts, "progress_at": progress_at,
-            "consumed": consumed, "declined_at": data.get("declined_at"),
+            "consumed": consumed, "declined": bool(data.get("declined")),
+            "declined_at": data.get("declined_at"),
             "escalated": data.get("escalated")}, None
 
 
@@ -424,6 +424,7 @@ def act(args):
         # `leave it` recorded at generation N silences every later episode that reaches N
         # again — the leg goes permanently quiet on the one row it exists for, which is the
         # failure this whole file is written to prevent.
+        state["declined"] = False
         state["declined_at"] = None
         state["escalated"] = None
         if not write_state(args.vault, args.task, state):
@@ -484,11 +485,16 @@ def act(args):
     # leaves `declined == restarts == 0` and the cap reset never runs, because it needs a
     # `progress_at` only a restart sets — so the leg goes permanently quiet on that row.
     # The page moving is the real "this is a new episode" signal, and it exists from round 1.
-    declined_at = state.get("declined_at")
-    if declined_at is not None and (stamp is None or stamp <= declined_at):
-        print("carded")
-        print("the operator declined this episode and the task has not moved since")
-        return 0
+    # ⚠️ The flag and the mtime are BOTH needed. `declined_at` alone loses the decline when
+    # the task page cannot be resolved at answer time (`stamp is None`), and the operator is
+    # then re-asked every round — the failure this branch exists to prevent, reachable
+    # through an unreadable page rather than through a stale generation.
+    if state.get("declined"):
+        declined_at = state.get("declined_at")
+        if declined_at is None or stamp is None or stamp <= declined_at:
+            print("carded")
+            print("the operator declined this episode and the task has not moved since")
+            return 0
 
     item = post_card(args.task, args.session_id, detail, state)
     if not item:
@@ -514,6 +520,7 @@ def act(args):
         state["consumed"].append(item)
         # Remembered in OUR store: the attention store drops the suppression once the card
         # is answered, so without this the next round posts a fresh card and asks again.
+        state["declined"] = True
         state["declined_at"] = stamp
         if not write_state(args.vault, args.task, state):
             print("cannot-tell")
@@ -546,6 +553,7 @@ def act(args):
     state["restarts"] += 1
     state["progress_at"] = stamp
     # The generation advanced, so the previous episode's decline and escalation are spent.
+    state["declined"] = False
     state["declined_at"] = None
     state["escalated"] = None
     if not write_state(args.vault, args.task, state):
