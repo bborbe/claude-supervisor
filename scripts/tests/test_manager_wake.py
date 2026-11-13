@@ -250,6 +250,13 @@ class ReadState(unittest.TestCase):
         self._run_returning("")
         self.assertEqual(self.mod.read_state("X", "goal"), self.mod._guard_mod().STATE_UNREADABLE)
 
+    def test_leading_tab_is_stripped_before_the_first_field(self):
+        # `.strip()` removes the leading tab, so an empty first field cannot arise from
+        # a tab-led line — the `or` fallback is defensive, not reachable here. Pinned so
+        # a future reader does not "fix" it into the sentinel by mistake.
+        self._run_returning("\tgoal--x\tdetail\n")
+        self.assertEqual(self.mod.read_state("X", "goal"), "goal--x")
+
 
 class ResolvePane(unittest.TestCase):
     def setUp(self):

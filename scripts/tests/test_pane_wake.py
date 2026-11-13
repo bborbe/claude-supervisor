@@ -78,11 +78,17 @@ class PlanTest(unittest.TestCase):
         [row] = self._plan(["a"], [rec("a", 100)], states={"a": "SLEEPING"})
         self.assertEqual((row["verdict"], row["subject_state"]), ("skip:sleeping", "SLEEPING"))
 
-    def test_unknown_state_falls_through_to_the_screen_verdict(self):
-        # Negative direction: a failed/absent state read must NOT suppress the wake —
-        # otherwise a broken manager-liveness would silently stop every fleet wake.
+    def test_no_subject_falls_through_to_the_screen_verdict(self):
+        # `None` means NO subject resolved — a hand-opened tab — not "the read failed".
+        # A failed read is the sentinel and is refused; this case must still wake.
         [row] = self._plan(["a"], [rec("a", 100)], states={})
         self.assertEqual((row["verdict"], row["subject_state"]), ("wake", None))
+
+    def test_unreadable_state_is_never_a_target(self):
+        sentinel = wake.guard.STATE_UNREADABLE
+        [row] = self._plan(["a"], [rec("a", 100)], states={"a": sentinel})
+        self.assertEqual((row["verdict"], row["subject_state"]),
+                         ("skip:state-unreadable", sentinel))
 
 
 class SubjectStateTest(unittest.TestCase):

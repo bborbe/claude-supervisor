@@ -192,7 +192,7 @@ def read_state(subject, branch):
     lines = (r.stdout or "").strip().splitlines()
     if r.returncode != 0 or not lines:
         return _guard_mod().STATE_UNREADABLE
-    return lines[0].split("\t", 1)[0] or STATE_UNREADABLE
+    return lines[0].split("\t", 1)[0] or _guard_mod().STATE_UNREADABLE
 
 
 def guard(pane_id, subject_state=None):

@@ -189,7 +189,8 @@ def plan(session_ids, *, records, panes, pid_ttys, read, card, state,
 
     `records`: the `session-liveness.py --list --json` rows. `panes`: `{pane_id: {"tty"}}`.
     `pid_ttys`: `{pid: tty}`. `read(pane_id)` → screen text. `card(session_id)` → card or None.
-    `state(session_id)` → the subject's liveness state, or None when it could not be read.
+    `state(session_id)` → a state string; `guard.STATE_UNREADABLE` when a subject resolved
+    but the read failed (refused); or None when NO subject resolved (screen decides).
     """
     by_sid = {r.get("sessionId"): r for r in records}
     by_tty = {}
