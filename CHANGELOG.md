@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.307.0
 
 - feat: **the rebase agent's run record survives the pod, and carries what started the run.** The agent is moving off the operator's Mac into a nuke prod CronJob, where the state directory is an `emptyDir` — so `latest.json`, the only record the launchd job needed, would die with the pod and a scheduled run would leave nothing to read. Every run now prints one `record: {json}` line to stdout beside the human render, naming `generated_at`, the trigger, the state path and every row with its push line, and `--trigger` (default `manual`) is written into the payload as well. The flag is the point of the change rather than decoration: a CronJob passes `--trigger schedule`, and a hand-started run keeps the default, so "was this sweep unattended" stops being a guess. `write_state()` returns the payload it wrote and takes an optional state directory, so the record half is testable without touching `~/.local/state`. Change set: `scripts/rebase-agent.py`, `scripts/tests/test_rebase_agent.py`, `docs/rebase-agent.md`, `CHANGELOG.md`.
 
