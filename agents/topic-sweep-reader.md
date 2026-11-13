@@ -51,8 +51,15 @@ file reaches you, it is a caller bug — say so and render no row for it.
       **You must not read the clock yourself.**
    5. **The manager verdicts**, as `<goal> → LIVE | ABSENT | UNKNOWN`, from the caller's
       `session-liveness.py --check` over each goal page's `claude_session_id`, for every goal the topic declares.
-   6. **The cadence verdicts**, as `<goal> → OK | STALE | STOPPED | SLEEPING | UNARMED | INVALID | WRONG-BRANCH`, from the
+   6. **The cadence verdicts**, as `<goal> → OK | IDLE | STALE | STOPPED | SLEEPING | UNARMED | INVALID | WRONG-BRANCH`, from the
       caller's `manager-liveness.py --state --subject <goal> --branch goal --vault <vault-root>`.
+      ⚠️ **The record carries a WORK SIGNAL alongside round cadence, and `IDLE` is its verdict.**
+      `--state`'s detail carries `work=<seconds>s` — the age of the manager's own transcript,
+      resolved from the session id `--arm` records — so `OK` means a round OR work inside the
+      limit, while `IDLE` means a live gate is watching a manager with neither: armed and woken,
+      producing nothing. An `IDLE` slot is **not** `progressing` (nothing was produced) and
+      **not** a lapse (nothing needs restarting) — render the row with its `IDLE` word so the
+      operator can see a slot that is filled but idle.
    7. **`today`** — ISO `YYYY-MM-DD`, for the deferred overlay on goal rows.
    8. **The payload path** — where to write the rendered table. Your one write goes there and
       nowhere else. ⚠️ **A caller that passes none has left your only granted write without a
@@ -101,7 +108,9 @@ file reaches you, it is a caller bug — say so and render no row for it.
 
    **Manager cell** — the delimiter is the liveness verdict: `[<sid8>]` live, `(<sid8>)` not
    live, `—` no id recorded, `UNVERIFIED` when the probe could not decide. The word after it
-   is the cadence (`OK` / `STALE` / `STOPPED` / `SLEEPING` / `INVALID`).
+   is the cadence (`OK` / `IDLE` / `STALE` / `STOPPED` / `SLEEPING` / `INVALID`). `IDLE` is
+   the work-signal verdict — armed and gate-watched, no round and no work — and it is
+   rendered as its own word, never folded into `OK`.
 
 6. **Return one compact report** — the bucket counts, the goals with no manager (named, with
    their rank position), any `UNVERIFIED` row with the missing input named, and the payload

@@ -43,7 +43,10 @@ class VerdictTableTest(unittest.TestCase):
         self.o = load()
 
     def test_live_with_an_armed_loop_is_an_owner(self):
-        for loop in ("OK", "STALE"):
+        # `IDLE` is the work-signal verdict — a round and the manager transcript's age both
+        # old while a live gate watches — so the manager still HOLDS the subject (a second
+        # writer must not be created for it); it is merely producing nothing.
+        for loop in ("OK", "IDLE", "STALE"):
             self.assertEqual(("owner", "live-armed"),
                              self.o.verdict_of("LIVE", loop), loop)
 
@@ -89,12 +92,15 @@ class VerdictTableTest(unittest.TestCase):
 
     def test_no_state_other_than_live_and_armed_earns_owner(self):
         # The exhaustive statement of the definition: over every (session, loop) pair the two
-        # probes can produce, `owner` appears exactly for LIVE x {OK, STALE} and nowhere else.
+        # probes can produce, `owner` appears exactly for LIVE x {OK, IDLE, STALE} and nowhere
+        # else. `IDLE` is in that set because the record's work signal makes "armed and
+        # gate-watched but producing nothing" a manager that still holds its subject.
         sessions = ("LIVE", "ABSENT", "UNKNOWN", "AMBIGUOUS", "MALFORMED", "NONE")
-        loops = ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID", "UNREADABLE", "NONE")
+        loops = ("OK", "IDLE", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID",
+                 "UNREADABLE", "NONE")
         owners = {(s, l) for s in sessions for l in loops
                   if self.o.verdict_of(s, l)[0] == "owner"}
-        self.assertEqual({("LIVE", "OK"), ("LIVE", "STALE")}, owners)
+        self.assertEqual({("LIVE", "OK"), ("LIVE", "IDLE"), ("LIVE", "STALE")}, owners)
 
 
 class PageAndSessionTest(unittest.TestCase):

@@ -120,7 +120,13 @@ POST_TIMEOUT = 60
 # `WRONG-BRANCH` (the record lives on another tier) is named rather than folded into the probe
 # failure; neither is `STALE`, so neither cards. An unresolvable subject is not a word: `--state`
 # refuses it with exit 3, which reads as PROBE_FAILED below.
-CADENCE_STATES = ("OK", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID", "WRONG-BRANCH")
+# ⚠️ `IDLE` must be here or the record's newest state reads as a probe FAILURE. It is not a
+# lapse: the record carries a WORK SIGNAL beside the round cadence — the age of the manager's
+# own transcript, resolved from the session id `--arm` records (`work=<seconds>s` in the
+# detail) — and `IDLE` means a round and that work signal are both old while the gate is still
+# watching, i.e. armed and woken but producing nothing. Nothing here cards it; the topic tier
+# is what acts on a slot that produces nothing.
+CADENCE_STATES = ("OK", "IDLE", "STALE", "STOPPED", "SLEEPING", "UNARMED", "INVALID", "WRONG-BRANCH")
 PROBE_FAILED = "UNREADABLE"
 
 # `session-liveness.py --check`'s documented exit codes. The instrument's contract, not a
@@ -419,6 +425,13 @@ def cadence_state(name: str, branch: str) -> str:
     and folding it into `INVALID` made "the instrument did not run" indistinguishable from
     "this record is corrupt". Neither is `STALE`, so neither cards; the difference is what the
     `--json` diagnosis says, which is the only place a human reads it.
+
+    ⚠️ **The record carries a WORK SIGNAL alongside round cadence, and this probe reads it in
+    the state word.** The detail carries `work=<seconds>s` — the age of the manager's own
+    transcript, resolved from the session id `--arm` records — so `OK` means a round OR work
+    inside the limit, and `IDLE` means a live gate is watching a manager with neither. `IDLE`
+    is in `CADENCE_STATES` (a state, not a probe failure) and is NOT a lapse, so it does not
+    card; `STALE` — no round, no work, no gate — is the only lapsed reading.
     """
 
     def probe() -> str:

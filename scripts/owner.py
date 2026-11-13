@@ -237,7 +237,13 @@ def verdict_of(session: str, loop: str) -> tuple:
     if loop == "WRONG-BRANCH":
         return CANNOT_TELL, "loop-wrong-branch"
     # 9. THE DEFINITION.
-    if session == "LIVE" and loop in ("OK", "STALE"):
+    # ⚠️ `IDLE` is an OWNER. The record carries a WORK SIGNAL beside the round cadence
+    # (`work=<seconds>s` in `--state`'s detail: the age of the manager's own transcript),
+    # and `IDLE` means a round and that work are both old while a live gate still watches
+    # the subject — armed and woken, producing nothing. It holds the subject exactly as an
+    # `OK` manager does, so a caller must not open a second writer for it; the action it
+    # needs is the operator's attention (the topic tier renders it), never a fresh spawn.
+    if session == "LIVE" and loop in ("OK", "IDLE", "STALE"):
         return OWNER, "live-armed"
     # 10. A caller that named a session but no subject has no loop to read. That is not an owner
     #     on the evidence, and it is not "no owner" either.

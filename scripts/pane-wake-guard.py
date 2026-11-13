@@ -105,6 +105,14 @@ def verdict(text, allow_machine_wait=False, subject_state=None):
     before the screen is even considered. A sleeping pane shows an empty composer and
     no `👤 You:` ask, which is why the screen checks cannot tell it from a lapse.
 
+    ⚠️ **The record now carries a WORK SIGNAL beside the round cadence, and `IDLE` is the
+    state it produces.** `--state`'s detail carries `work=<seconds>s` (the age of the
+    manager's own transcript, resolved from the session id `--arm` records), so `OK` means a
+    round OR work inside the limit. `IDLE` means armed and gate-watched but no round and no
+    work — the manager has produced nothing, but it is NOT asleep and it is NOT stopped, so
+    a wake is exactly what it is waiting for. `IDLE` therefore falls through to the screen
+    verdict, like `OK`: only `SLEEPING` and an unreadable state suppress the wake.
+
     `STATE_UNREADABLE` means a subject RESOLVED but its state could not be read — a
     non-zero exit, an unparsable line, a timeout. That is refused too, and it is the
     one place this guard fails closed: a missed wake costs a manager nothing (its gate
