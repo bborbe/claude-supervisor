@@ -397,6 +397,84 @@ def open_cards(session_id, attention_url=None):
     return cards, True
 
 
+def busy_parked_session_ids(
+    sessions_dir=None, wrapper_url=None, ledger_url=None, attention_url=None, now=None
+):
+    """The parked-question sessions nothing closes and no card names, with their park age.
+
+    ⚠️ **This is a read for visibility, never for action.** A wrapper session parked on a
+    question while the registry reports a non-`idle` status is refused `busy-target` by the
+    guard — `_stale_busy()` requires no parked question, so the stale-status reap shipped in
+    v0.303.2 deliberately does **not** reach this shape — and it is never closed at any age.
+    The operator's 2026-11-13 ruling ends that by surfacing the population rather than
+    widening the guard: *"keep `busy-target` absolute — fix the missing card instead, not
+    the reaper"* (card `039df378a626f84a8e61fa11863517ec`). Nothing here reaps, signals, or
+    relaxes that guard.
+
+    ⚠️ **The refusal is machine-visible but not operator-visible.** Since v0.303.2 a
+    non-`idle` record past `IDLE_FLOOR` *is* a candidate, so a tick does emit an
+    `outcome=busy-target` line for this shape — an earlier revision of this docstring said
+    no line existed, and that was true only before that change. What is still missing is the
+    card: a refusal line in a launchd log is not something a person is asked about, and the
+    summary counts it as one more refusal among many. This read names the specific shape so
+    the tick can post one.
+
+    Returns `[(session_id, park_age_seconds, requested_at)]` — `requested_at` is the dedup
+    clock, so one card is posted per session **per park** and a re-park is a new card.
+
+    ⚠️ **Fail-closed on every unreadable read**, matching the guard it reports on: an
+    unreadable wrapper record, an unageable `requested_at`, an unreadable attention store,
+    and a registry record carrying no id all drop the session rather than guess. `None`
+    from `open_cards()` is "could not read", never "no cards" — posting blind could
+    duplicate a card a person is already looking at.
+
+    ⚠️ **`open_cards()` sees the session's OWN card, not this tick's.** It filters
+    `producer_id == session_id`, and the cards posted from `idle-reaper-tick.py` carry
+    `producer_id: idle-reaper-tick`. So this check skips a session already surfaced by its
+    own producer (the Stop hook mirrors every closer into one) and does **not** dedup the
+    tick's own posts — that is the tick's marker file's job.
+    """
+    found = []
+    seen = set()
+    for path in sorted(glob.glob(os.path.join(sessions_dir or SESSIONS_DIR, "*.json"))):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                rec = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        session_id = rec.get("sessionId")
+        if not session_id or session_id in seen:
+            continue
+        # ⚠️ Independent of `candidate_session_ids()`, which since v0.303.2 also returns a
+        # non-`idle` record once it is past `IDLE_FLOOR`. This read selects the parked-
+        # question shape specifically, so it must not be written as that function's
+        # complement — the two sets now overlap by construction. A record with **no**
+        # `status` is included on purpose: the guard renders it `'(none)'` and refuses it
+        # `busy-target` all the same, so excluding it here would hide a session for a
+        # reason the guard does not share.
+        if rec.get("entrypoint") != "sdk-cli":
+            continue
+        if rec.get("status") == "idle":
+            continue
+        wrapper = wrapper_record(session_id, wrapper_url, ledger_url)
+        if not isinstance(wrapper, dict):
+            continue
+        if wrapper.get("state") != "idle":
+            continue
+        if wrapper.get("pending_turns") != 0:
+            continue
+        question = wrapper.get("question")
+        park_age = question_age_seconds(question, now)
+        if park_age is None or park_age < IDLE_FLOOR:
+            continue
+        cards, cards_readable = open_cards(session_id, attention_url)
+        if not cards_readable or cards:
+            continue
+        seen.add(session_id)
+        found.append((session_id, park_age, question.get("requested_at")))
+    return found
+
+
 def transcript_path(cwd, session_id, projects_dir=None):
     """`~/.claude/projects/<escaped-cwd>/<sid>.jsonl` — the artifact a resume reads.
 
