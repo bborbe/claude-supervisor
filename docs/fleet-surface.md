@@ -1143,6 +1143,19 @@ no approval record, and a resumed row was already approved and already running; 
 tasks, **0** were `human_review` or `hold` and **632** were `completed` — the flag never
 expressed the parked class; the two fields beside it do.
 
+**`approved_by: manager` — the one approval a manager writes, and its boundary.** A
+`phase: todo` row is the operator's inbox, and a manager never flips it — with exactly one
+exception, ruled 2026-11-13 (the vault's Decision Table row *"Start a session (worker) on a
+task"*): a row that goal-round row 4d **itself filed** for an undriven SC/DoD box
+(`planned_by: goal-plan-undriven`) **and** classified as a two-way door, on a goal at
+`execution`, below the worker target, is approved with `vault-cli task approve --by manager`.
+It then opens through the ordinary `To open` path — this table's rows are unchanged, because
+that path reads `phase`, never `approved_by`, and the row carries no flag. A one-way row stays
+at `todo` and rides the round's approve card; a wide-reach one gets a `### Decision:` block and
+a talk-through, never a card asking for the decision. The decision has one home,
+`scripts/undriven-plan.py`, and `scripts/tests/test_undriven_plan.py` § ApprovalBoundary pins
+that an operator-filed or one-way row is never approved by a manager.
+
 ⚠️ **Guarded by `scripts/check-resume-flag-clause.py`**, which parses the gate's `not parked`
 bullet into a predicate and evaluates fixture rows through it and through Step 0.5's own
 selector lines. A token grep would not hold this: deleting the token and adding a new
