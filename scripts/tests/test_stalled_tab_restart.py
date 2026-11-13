@@ -223,6 +223,20 @@ class Handover(Base):
         key = post[post.index("--dedup-key") + 1]
         self.assertTrue(key.startswith("stuck-tab:"), key)
 
+    def test_a_repeat_stall_after_a_restart_is_asked_again(self):
+        """A bare `stuck-tab:<slug>` would resolve to the answered item forever, so the
+        operator would never be re-asked on the one row this leg exists for."""
+        self.patch_control(poll="ANSWERED: restart it")
+        self.run_leg()
+        first = [a for a in self.calls("ask") if a[0] == "post"][0]
+        first_key = first[first.index("--dedup-key") + 1]
+        self.patch_control(poll="OPEN", post_id="item-2")
+        self.run_leg()
+        posts = [a for a in self.calls("ask") if a[0] == "post"]
+        second_key = posts[-1][posts[-1].index("--dedup-key") + 1]
+        self.assertNotEqual(first_key, second_key,
+                            "the same dedup key after a restart means the operator is never re-asked")
+
     def test_declined_is_not_an_answer(self):
         self.patch_control(poll="DECLINED")
         rc, lines = self.run_leg()

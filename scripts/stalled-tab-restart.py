@@ -199,7 +199,20 @@ def refusal(session_id, dry_run=True, lift=False):
     return out.returncode, head, (lines[1].strip() if len(lines) > 1 else "")
 
 
-def post_card(task, session_id, token_detail):
+def card_key(task, state):
+    """The dedup key, carrying a generation so a repeat stall is re-asked.
+
+    ⚠️ **A bare `stuck-tab:<slug>` would ask the operator once, ever.** The store dedups on
+    producer + key, so after the first card is answered and consumed, a later stall of the
+    same task would resolve to that same item, hit the "already consumed" branch, and the
+    operator would never be asked again — the leg would go quiet on exactly the row it
+    exists for. Folding the restart count and the consumed count in gives each episode its
+    own card while still refusing to stack two within one episode.
+    """
+    return f"stuck-tab:{slug_for(task)}:{state['restarts']}:{len(state['consumed'])}"
+
+
+def post_card(task, session_id, token_detail, state):
     """Post ONE card for this session. Returns its item id, or `""`.
 
     `attention-ask.py post` is idempotent on the dedup key, so a second round reaches the
@@ -212,7 +225,7 @@ def post_card(task, session_id, token_detail):
     try:
         out = subprocess.run(
             [sys.executable, ask, "post",
-             "--dedup-key", f"stuck-tab:{slug_for(task)}",
+             "--dedup-key", card_key(task, state),
              # A stable producer id: the asking session reads its own item back, and the
              # fleet round that posts is not always the session that polls on a later tick.
              "--producer-id", f"stalled-tab:{slug_for(task)}",
@@ -359,7 +372,7 @@ def main(argv=None):
         print(f"{state['restarts']} restarts with no progress")
         return 0
 
-    item = post_card(args.task, args.session_id, detail)
+    item = post_card(args.task, args.session_id, detail, state)
     if not item:
         print("cannot-tell")
         print("the card could not be posted")
