@@ -25,16 +25,15 @@ Three things are load-bearing, and each is a way the suite could be plausibly wr
   an incident with no evidence must NOT close, a corrupt ledger must NOT read as
   empty, and `--dry-run` must NOT write.
 
-- **The card id.** `test_escalate_persists_the_id_the_poster_printed` runs the real
-  `post_card` against a stubbed subprocess and reads the record back from DISK. The
-  field was empty on every escalated incident for as long as the ledger existed, and
-  the failure mode of the fix is a value captured and dropped one line later -- which
-  an in-memory assertion cannot see.
+- **The escalation posts no card.** `test_escalate_writes_no_card_id` and
+  `test_escalate_keeps_the_blocker_card_handle` are a pair: the first proves the
+  escalation leg touches nothing on the board, the second proves the field still
+  belongs to the blocker card `open --card-id` supplies. Both read the record back
+  from DISK — an in-memory assertion cannot see a value written and then dropped.
 
-`post_card` is stubbed in the escalate cases, and only its subprocess in the capture
-cases (`TestCardIdCapture`). The real one shells out to `attention-ask.py` and
-would reach the operator's attention service from a unit test -- a test that posts a
-board card is a test that needs the operator, which is the opposite of what this is.
+There is no poster to stub any more: `escalate` runs no subprocess, so nothing here
+can reach the operator's attention service from a unit test. The remaining subprocess
+stub is the liveness probe, which is a local script.
 
 Run: python3 -m unittest discover -s scripts/tests -v
 """
@@ -59,20 +58,6 @@ SESSION = "11111111-2222-3333-4444-555555555555"
 OTHER_SESSION = "66666666-7777-8888-9999-aaaaaaaaaaaa"
 OWNER = "manager-session-1"
 
-#: What the store mints for an item id: 32 lowercase hex characters. Used as the
-#: stubbed poster's answer so a test can assert the id the escalation RECORDS.
-CARD_ID = "0123456789abcdef0123456789abcdef"
-
-
-class _Run:
-    """A `subprocess.run` result stand-in: only the three fields `post_card` reads."""
-
-    def __init__(self, returncode=0, stdout="", stderr=""):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-
 def iso(delta=None):
     when = datetime.datetime.now(datetime.timezone.utc)
     if delta is not None:
@@ -96,20 +81,16 @@ class Base(unittest.TestCase):
         # on the operator's shell -- green on a host with a large budget, red on a host
         # with none. A class that wants a specific budget sets it in its own `setUp`.
         os.environ.pop("SUPERVISOR_INCIDENT_STALL_BUDGET", None)
-        # The real post_card would post a board card from a unit test.
-        self._post_card = il.post_card
-        self.posted = []
-        il.post_card = self._stub_post
-
-    def _stub_post(self, incident):
-        self.posted.append(incident["dedup_key"])
-        return CARD_ID
 
     def tearDown(self):
         il.LEDGER, il.LOCK = self._ledger, self._lock
-        il.post_card = self._post_card
         os.environ.clear()
         os.environ.update(self._env)
+
+    def escalated_keys(self, out):
+        return [
+            row.split()[1] for row in out.splitlines() if row.startswith("escalated ")
+        ]
 
     def run_cli(self, *argv):
         """Run a subcommand in-process, returning (rc, stdout)."""
@@ -410,14 +391,8 @@ class TestEscalate(Base):
         il.live_states = lambda: (
             None if self.live is None else {sid: ("idle", "idle") for sid in self.live}
         )
-        # `test_escalate_persists_the_id_the_poster_printed` stubs the poster's
-        # subprocess instead of `post_card`; restored here so no later case in this
-        # class can shell out to the real attention store.
-        self._run = il.subprocess.run
-
     def tearDown(self):
         il.live_states = self._live_states
-        il.subprocess.run = self._run
         super().tearDown()
 
     def make_overdue(self, session=SESSION, kind="permission"):
@@ -431,11 +406,15 @@ class TestEscalate(Base):
 
     def test_escalate_stamps_the_round(self):
         self.make_overdue()
-        self.run_cli("escalate", "--round-id", "2026-10-22T14:00:00Z")
+        rc, out = self.run_cli("escalate", "--round-id", "2026-10-22T14:00:00Z")
         record = self.records()[0]
         self.assertEqual(record["outcome"], il.TIMED_OUT)
         self.assertEqual(record["escalated_by"], "round:2026-10-22T14:00:00Z")
-        self.assertEqual(self.posted, [record["dedup_key"]])
+        # The escalation's surface is the round's output, so the line is part of the
+        # contract -- a stamp written and never printed would be invisible to the
+        # round that has to report it.
+        self.assertIn("escalated %s" % record["dedup_key"], out)
+        self.assertIn("passed its deadline with no verified resume", out)
 
     def test_escalate_without_a_round_stamps_manual(self):
         """The discriminator, other direction.
@@ -453,7 +432,6 @@ class TestEscalate(Base):
         self.open_incident()
         self.run_cli("escalate", "--round-id", "r1")
         self.assertEqual(self.records()[0]["outcome"], il.PENDING)
-        self.assertEqual(self.posted, [])
 
     def test_dry_run_writes_nothing(self):
         self.make_overdue()
@@ -461,94 +439,43 @@ class TestEscalate(Base):
         self.assertEqual(rc, 0)
         self.assertIn("would escalate", out)
         self.assertEqual(self.records()[0]["outcome"], il.PENDING)
-        self.assertEqual(self.posted, [])
 
-    def test_a_failed_post_leaves_the_incident_pending(self):
-        # Stamping after a failed post would record an escalation that never
-        # reached the board -- the same class of false green the ledger exists for.
-        #
-        # ⚠️ `None` is `post_card`'s "nothing was posted". The empty string is a
-        # DIFFERENT answer -- posted, id unread -- and it must still stamp (see the
-        # next case), so this stub cannot use a falsy value interchangeably.
-        self.make_overdue()
-        il.post_card = lambda incident: None
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.run_cli("escalate", "--round-id", "r1")
-        self.assertEqual(self.records()[0]["outcome"], il.PENDING)
-        self.assertEqual(self.records()[0]["card_id"], "")
+    def test_escalate_writes_no_card_id(self):
+        """The escalation leg touches nothing on the board.
 
-    def test_a_post_that_prints_no_id_still_escalates_with_an_empty_card_id(self):
-        """The honest degradation: a posted card is never left `pending`.
-
-        A poster that exits 0 but prints nothing parseable has still posted the
-        card, so the row is stamped with `card_id` empty -- the pre-fix state, which
-        `post_card` names on stderr. Leaving it pending instead would re-post it
-        next round and duplicate the escalation.
+        `card_id` belongs to the blocker card a producer posted. The escalation used
+        to post its own card and move the field onto it; that card was an
+        acknowledgement with no control but `ack`, so the operator could only dismiss
+        it. The record is the stamp plus the printed line now, and the field stays
+        untouched -- asserted from DISK, because a value written and then dropped one
+        line later is invisible to an in-memory check.
         """
         self.make_overdue()
-        il.post_card = lambda incident: ""
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.run_cli("escalate", "--round-id", "r1")
+        self.run_cli("escalate", "--round-id", "r1")
         record = self.records()[0]
         self.assertEqual(record["outcome"], il.TIMED_OUT)
-        self.assertEqual(record["card_id"], "")
+        self.assertEqual(record["card_id"], "", "escalation writes no card id")
 
-    def test_an_existing_handle_is_replaced_and_the_replacement_is_named(self):
-        """A `timed-out` row must join on the ESCALATION's card, and the move is loud.
+    def test_escalate_keeps_the_blocker_card_handle(self):
+        """The negative control for the case above: a real handle is left alone.
 
-        `open --card-id` supplies a handle for the blocker card; the escalation posts
-        a different one, whose `dedup_key` is the incident's own. Moving the field to
-        it is what makes the join checkable, and the warning is what keeps the
-        replacement from being silent.
+        `open --card-id` supplies a handle for the blocker card. Clearing it would
+        destroy a real join to record an escalation that owns no card of its own.
         """
         self.open_incident(card_id="blk-1")
         self.make_overdue()
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            self.run_cli("escalate", "--round-id", "r1")
-        self.assertEqual(self.records()[0]["card_id"], CARD_ID)
-        self.assertIn("blk-1", err.getvalue())
-        self.assertIn(CARD_ID, err.getvalue())
-
-    def test_an_unread_id_does_not_blank_an_existing_handle(self):
-        """The negative control for the case above: an empty capture erases nothing.
-
-        Blanking the field would destroy a real join to record nothing at all, so a
-        poster that printed no id leaves the row's own handle in place.
-        """
-        self.open_incident(card_id="blk-1")
-        self.make_overdue()
-        il.post_card = lambda incident: ""
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.run_cli("escalate", "--round-id", "r1")
+        self.run_cli("escalate", "--round-id", "r1")
         record = self.records()[0]
         self.assertEqual(record["outcome"], il.TIMED_OUT)
         self.assertEqual(record["card_id"], "blk-1", "a real handle is not erased")
 
-    def test_escalate_persists_the_id_the_poster_printed(self):
-        """SC1 + SC2 end to end inside the unit: the poster's line reaches the FILE.
-
-        `post_card` is the REAL one and only the subprocess is stubbed, so this
-        covers the capture and the write together -- a stub returning an id would
-        prove neither, and reading the record back from disk is the point: the
-        defect is a value captured and then dropped one line later.
-        """
-        self.make_overdue()
-        il.post_card = self._post_card
-        il.subprocess.run = lambda command, **kwargs: _Run(
-            stdout="ITEM_ID: %s\nPOLL: python3 attention-ask.py poll %s\n"
-            % (CARD_ID, CARD_ID)
-        )
-        self.run_cli("escalate", "--round-id", "r1")
-        record = self.records()[0]
-        self.assertEqual(record["card_id"], CARD_ID, "the id never reached the record")
-        self.assertEqual(record["outcome"], il.TIMED_OUT)
-
     def test_escalate_is_idempotent(self):
         self.make_overdue()
         self.run_cli("escalate", "--round-id", "r1")
-        self.run_cli("escalate", "--round-id", "r1")
-        self.assertEqual(len(self.posted), 1)
+        rc, out = self.run_cli("escalate", "--round-id", "r1")
+        # A stamped row is no longer `pending`, so the second round has nothing due.
+        self.assertNotIn("escalated", out)
+        self.assertEqual(len(self.records()), 1)
 
     # --- the gone-session leg -------------------------------------------------
     def make_overdue_stall(self, session=SESSION):
@@ -574,7 +501,7 @@ class TestEscalate(Base):
             rc, out = self.run_cli("escalate", "--round-id", "r1")
         self.assertEqual(rc, 0)
         self.assertIn("warning: session liveness unavailable", err.getvalue())
-        self.assertEqual(len(self.posted), 1, "an outage must not suppress the card")
+        self.assertEqual(len(self.escalated_keys(out)), 1, "an outage must not suppress the escalation")
         self.assertEqual(self.records()[0]["outcome"], il.TIMED_OUT)
 
     def test_a_gone_stall_incident_is_retired_not_left_pending(self):
@@ -587,7 +514,7 @@ class TestEscalate(Base):
         record = self.records()[0]
         self.assertEqual(record["outcome"], il.SKIPPED_GONE)
         self.assertNotEqual(record["outcome"], il.TIMED_OUT, "a skip is not an escalation")
-        self.assertEqual(self.posted, [])
+        self.assertEqual(self.escalated_keys(out), [])
 
     def test_a_retired_incident_is_not_re_listed_next_round(self):
         """SC2, second half: the next round must print no skip line for it."""
@@ -664,7 +591,7 @@ class TestEscalate(Base):
             rc, out = self.run_cli("escalate", "--round-id", "r1")
         self.assertEqual(rc, 0)
         self.assertIn("malformed session_id", err.getvalue())
-        self.assertEqual(len(self.posted), 1, "an unjudgeable id escalates, not retires")
+        self.assertEqual(len(self.escalated_keys(out)), 1, "an unjudgeable id escalates, not retires")
 
     def test_the_probe_is_not_paid_when_nothing_is_due(self):
         """SC6: a probe with nothing to judge is a subprocess plus an HTTP call for nothing."""
@@ -705,11 +632,6 @@ class TestEscalate(Base):
             json.dump(data, handle)
         return sessions
 
-    def escalated_keys(self, out):
-        return [
-            row.split()[1] for row in out.splitlines() if row.startswith("escalated ")
-        ]
-
     def test_the_round_escalates_at_most_the_budget(self):
         """10 due, budget 3 — three cards, seven still pending."""
         sessions = self.make_due_stalls(10)
@@ -719,7 +641,7 @@ class TestEscalate(Base):
         pending = [r for r in self.records() if r["outcome"] == il.PENDING]
         self.assertEqual(len(pending), 7)
         self.assertEqual(
-            self.posted,
+            self.escalated_keys(out),
             [il.dedup_key(sid, "stall") for sid in sessions[:3]],
             "in selection order, not merely the same three",
         )
@@ -763,7 +685,7 @@ class TestEscalate(Base):
         self.assertEqual(len(would), 3)
         self.assertIn("would hold back 7", dry)
         self.assertIn("(+2 more)", dry)
-        self.assertEqual(self.posted, [], "a dry run posts nothing")
+        self.assertEqual(self.escalated_keys(dry), [], "a dry run escalates nothing")
         # Same selection, not merely the same count.
         rc, real = self.run_cli("escalate", "--round-id", "r1")
         self.assertEqual(rc, 0)
@@ -873,74 +795,6 @@ class TestEscalate(Base):
         finally:
             il.incident_budget = real_budget
             il.live_sessions = real_sessions
-
-
-class TestCardIdCapture(Base):
-    """`post_card` reads the id the poster prints, and refuses anything else.
-
-    The poster is stubbed at `subprocess.run`, never invoked: the real one reaches
-    the operator's attention store, which is the opposite of what a unit test may do.
-    `Base` has already replaced `post_card` itself, so the ORIGINAL is held in
-    `self._post_card` and that is what these cases call.
-    """
-
-    def setUp(self):
-        super().setUp()
-        self._run = il.subprocess.run
-        self.incident = {
-            "dedup_key": "incident:%s:stall" % SESSION,
-            "session_id": SESSION,
-            "kind": "stall",
-            "owner": OWNER,
-            "opened_at": "2026-10-29T10:00:00Z",
-            "deadline": "2026-10-29T10:15:00Z",
-            "detected_by": "drive:unverifiable@r1",
-        }
-
-    def tearDown(self):
-        il.subprocess.run = self._run
-        super().tearDown()
-
-    def post(self, **result):
-        il.subprocess.run = lambda command, **kwargs: _Run(**result)
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            card_id = self._post_card(self.incident)
-        return card_id, err.getvalue()
-
-    def test_the_item_id_line_is_what_is_captured(self):
-        card_id, err = self.post(
-            stdout="ITEM_ID: %s\nPOLL: python3 attention-ask.py poll %s\n"
-            % (CARD_ID, CARD_ID)
-        )
-        self.assertEqual(card_id, CARD_ID)
-        self.assertEqual(err, "", "a clean post says nothing")
-
-    def test_a_candidate_that_is_not_a_store_id_is_refused(self):
-        """Shape, not existence: the store mints 32 hex characters.
-
-        A truncated id or another script's display id would 404 at poll time and
-        read as "the card is gone", so it is refused here rather than recorded.
-        """
-        candidates = (
-            "0123456789abcdef",  # truncated by hand
-            "0123456789abcdef0123456789abcdeZ",  # 32 characters, not hex
-            "",  # the poster printed the label and no value
-        )
-        for candidate in candidates:
-            with self.subTest(candidate=candidate):
-                card_id, err = self.post(stdout="ITEM_ID: %s\n" % candidate)
-                self.assertEqual(card_id, "")
-                self.assertIn("printed no ITEM_ID", err)
-
-    def test_a_failed_post_returns_none_and_says_why(self):
-        card_id, err = self.post(returncode=1, stderr="store unreachable")
-        self.assertIsNone(card_id, "a failed post is not an empty id")
-        self.assertIn("could not post escalation", err)
-
-    def test_stdout_that_is_empty_is_not_an_id(self):
-        card_id, _ = self.post(stdout="")
-        self.assertEqual(card_id, "")
 
 
 class TestRefusal(Base):
@@ -1467,7 +1321,7 @@ class TestEscalateSkipsGoneStallIncidents(Base):
         rc, out = self.run_cli("escalate", "--round-id", "r1")
         self.assertEqual(rc, 0)
         self.assertIn("gone sessions", out)
-        self.assertEqual(self.posted, [])
+        self.assertEqual(self.escalated_keys(out), [])
         self.assertEqual(
             self.records()[0]["outcome"], il.SKIPPED_GONE, "a skip is not an escalation"
         )
@@ -1482,7 +1336,7 @@ class TestEscalateSkipsGoneStallIncidents(Base):
         rc, out = self.run_cli("escalate", "--round-id", "r1")
         self.assertEqual(rc, 0)
         self.assertIn("escalated", out)
-        self.assertEqual(len(self.posted), 1)
+        self.assertEqual(len(self.escalated_keys(out)), 1)
         self.assertEqual(self.records()[0]["outcome"], il.TIMED_OUT)
 
 
@@ -1531,7 +1385,11 @@ class TestEscalateMidCommandPredicate(Base):
 
     def escalated(self):
         """The round's escalated set, as session ids — the criterion's observable."""
-        return sorted(key.split(":")[1] for key in self.posted)
+        return sorted(
+            record["dedup_key"].split(":")[1]
+            for record in self.records()
+            if record.get("outcome") == il.TIMED_OUT
+        )
 
     def run_round(self):
         rc, out = self.run_cli("escalate", "--round-id", "r1")
@@ -1561,7 +1419,6 @@ class TestEscalateMidCommandPredicate(Base):
         self.run_round()
         self.assertEqual(self.escalated(), [], "mid-command must not escalate")
 
-        self.posted.clear()
         self.states = {self.A: ("shell", "waiting-on-operator")}
         self.run_round()
         self.assertEqual(self.escalated(), [self.A], "the same row, now parked")
