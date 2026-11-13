@@ -99,7 +99,7 @@ def state_path(vault, task):
 
 
 def fresh_state():
-    return {"restarts": 0, "progress_at": None, "consumed": []}
+    return {"restarts": 0, "progress_at": None, "consumed": [], "declined": None}
 
 
 def read_state(vault, task):
@@ -127,7 +127,7 @@ def read_state(vault, task):
     if not isinstance(consumed, list) or not all(isinstance(c, str) for c in consumed):
         return None, "state consumed is not a list of strings"
     return {"restarts": restarts, "progress_at": data.get("progress_at"),
-            "consumed": consumed}, None
+            "consumed": consumed, "declined": data.get("declined")}, None
 
 
 def write_state(vault, task, state):
@@ -442,6 +442,16 @@ def act(args):
         print(f"{state['restarts']} restarts with no progress")
         return 0
 
+    # ⚠️ **The store's suppression is OPEN-scoped, so a `leave it` is not remembered for us.**
+    # Once the card is answered the same dedup key posts a NEW item, and without this the
+    # operator is asked again every round — the exact failure the key generation was supposed
+    # to prevent and does not. The decline has to live in our own store, scoped to the
+    # episode: a restart starts a new generation, which is when asking again is correct.
+    if state.get("declined") == state["restarts"]:
+        print("carded")
+        print(f"the operator declined this episode (generation {state['restarts']})")
+        return 0
+
     item = post_card(args.task, args.session_id, detail, state)
     if not item:
         print("cannot-tell")
@@ -464,6 +474,9 @@ def act(args):
         # `ANSWERED` alone is not permission to kill — the operator chose LEAVE. Record it
         # as consumed so the same answer is not re-read every round, and do nothing else.
         state["consumed"].append(item)
+        # Remembered in OUR store: the attention store drops the suppression once the card
+        # is answered, so without this the next round posts a fresh card and asks again.
+        state["declined"] = state["restarts"]
         if not write_state(args.vault, args.task, state):
             print("cannot-tell")
             print("the answer could not be recorded")

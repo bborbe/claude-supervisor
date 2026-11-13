@@ -82,6 +82,13 @@ a different population with a different mechanism. `restart-worker.py` refuses
 `headless-target` itself, so a headless row is reported rather than acted on, but do not add
 a filter for it: there is no field to filter on.
 
+⚠️ **`stall_count >= 2` is the sweep's COUNTER, not its whole `stalled` verdict** — the reader
+also requires `--ages` to read `quiet`, and the snapshot carries no field for that. So this
+population is a **superset** of `stalled`: a busy session whose task page merely stopped
+moving can be carded. That is the safe direction here and it is why the act is a card and not
+a restart — the operator sees the refusal and decides, and `restart-worker.py --dry-run` names
+the token either way.
+
 ## Act on the verdict — the script's first line
 
 | Verdict | What it means | What you do |

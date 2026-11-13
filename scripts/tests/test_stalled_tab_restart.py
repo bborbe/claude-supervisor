@@ -53,7 +53,20 @@ if verb == "post":
     if rc != 0:
         print("REFUSED: the store would not take it")
         sys.exit(rc)
-    item = ctl.get("post_id", "item-1")
+    # The real store mints a NEW item per post once the previous one is answered — its
+    # suppression is open-scoped. A fake returning a constant id would let a test assert a
+    # same-round restart the real store cannot produce.
+    counter = os.environ["FAKE_LOG"] + ".n"
+    n = 0
+    if os.path.exists(counter):
+        try:
+            n = int(open(counter, encoding="utf-8").read().strip() or 0)
+        except (OSError, ValueError):
+            n = 0
+    n += 1
+    with open(counter, "w", encoding="utf-8") as fh:
+        fh.write(str(n))
+    item = ctl.get("post_id") or f"item-{n}"
     # The real shapes: `post` prints ITEM_ID then a POLL hint line, and `poll` prints
     # `ANSWERED: <content>`. A fake that printed a bare id would hide the parser defect
     # this file exists to catch.
@@ -259,8 +272,13 @@ class Handover(Base):
         self.run_leg()
         rc, lines = self.run_leg()
         self.assertEqual(lines[0], "carded")
-        self.assertIn("already consumed", lines[1])
+        # The decline is remembered in our own store, because the attention store drops its
+        # suppression once a card is answered — a same-key post would mint a fresh item and
+        # ask again every round.
+        self.assertIn("declined this episode", lines[1])
         self.assertEqual([], self.lifted_calls())
+        self.assertEqual(1, len([a for a in self.calls("ask") if a[0] == "post"]),
+                         "a declined episode posted a second card")
 
     def test_a_failed_post_is_cannot_tell(self):
         self.patch_control(post_rc=1)
