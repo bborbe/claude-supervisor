@@ -778,11 +778,51 @@ class TestScript(unittest.TestCase):
         self.assertEqual(done.stdout.splitlines()[0], "task-terminal")
         self.assertIsNone(child.poll(), "a refusal must send no signal")
 
-    def test_unresolved_task_is_refused(self):
+    def test_an_unanchored_session_is_closed(self):
+        """An id in no page among every configured vault owns nothing: the guard chain has
+        already proven it headless, idle past the floor, card-free and wrapper-idle, so it is
+        closed and the token names why. Pre-change this refused `task-unresolved`."""
+        child = self._spawn()
+        entry = self._registry(child.pid)
+        transcript = self._transcript()
+        done = self._run()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(done.stdout.splitlines()[0], "unanchored-closed")
+        self.assertEqual(child.wait(timeout=10), -signal.SIGTERM)
+        self.assertFalse(os.path.exists(entry), "the registry entry must be gone")
+        self.assertTrue(os.path.exists(transcript), "the transcript must survive")
+
+    def test_vault_not_searched_still_refuses(self):
+        """A vault with no `tasks_dir` is a config defect, not an unanchored session: its
+        anchor may live where this process cannot read, so it keeps refusing and signals
+        nothing."""
+        other = os.path.join(self.vaults, "no-tasks-vault")
+        os.makedirs(other)
+        with open(self.vault_config, "w", encoding="utf-8") as handle:
+            json.dump(
+                [
+                    {"path": os.path.join(self.vaults, VAULT), "tasks_dir": "25 Tasks"},
+                    {"path": other},
+                ],
+                handle,
+            )
+        child = self._spawn()
+        self._registry(child.pid, cwd=other)
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "task-unresolved")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_an_empty_vault_config_still_refuses(self):
+        """No configured vault contributes a `tasks_dir`, so nothing was searched: an absent
+        search is not an absent anchor. Without this guard an empty config would close the
+        whole fleet in one tick."""
+        with open(self.vault_config, "w", encoding="utf-8") as handle:
+            json.dump([], handle)
         child = self._spawn()
         self._registry(child.pid)
         done = self._run()
         self.assertEqual(done.stdout.splitlines()[0], "task-unresolved")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
 
     # --- the close --------------------------------------------------------------------
 
