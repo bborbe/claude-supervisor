@@ -31,7 +31,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.join(os.path.dirname(_HERE), "rebase-agent.py")
@@ -392,6 +395,142 @@ class RepoSetTest(unittest.TestCase):
         with contextlib.redirect_stdout(buf):
             ra.render([])
         self.assertIn("no open PR is behind master", buf.getvalue())
+
+
+class BoardTest(unittest.TestCase):
+    """A push line is the operator's to run, so a record nobody reads is not delivery.
+
+    The declarations are the load-bearing half, not the transport: `owner:` liveness is
+    what lets the store's duplicate suppression collapse a re-sweep onto one card (a pod
+    is never resolvable as live under `session:` or `heartbeat:`), and `expires_at` is the
+    only thing that ever removes that card again. Getting either wrong produces a board
+    that floods every 15 minutes or one that never clears.
+    """
+
+    ROW = {
+        "repo": "bborbe/claude-supervisor",
+        "pr": 7,
+        "branch": "feat/x",
+        "verdict": "PUSH",
+        "push_line": "git -C /r push --force-with-lease=refs/heads/feat/x:a origin b:refs/heads/feat/x",
+    }
+    AT = "2026-11-13T20:00:00+00:00"
+
+    def test_dedup_key_is_per_pr_so_a_resweep_refreshes_one_card(self):
+        body = ra.board_body(self.ROW, self.AT)
+        self.assertEqual(body["dedup_key"], "rebase-agent:bborbe/claude-supervisor#7")
+
+    def test_the_payload_carries_the_push_line_verbatim(self):
+        """The task's criterion reads the card for this exact line, so it must be in it."""
+        body = ra.board_body(self.ROW, self.AT)
+        self.assertIn(self.ROW["push_line"], body["payload"])
+        self.assertIn("bborbe/claude-supervisor#7", body["payload"])
+
+    def test_the_card_declares_owner_liveness_and_carries_its_only_bound(self):
+        body = ra.board_body(self.ROW, self.AT)
+        self.assertEqual(body["liveness_ref"], "owner:operator")
+        self.assertEqual(body["expires_at"], self.AT)
+
+    def test_the_card_is_an_ack_so_nothing_routes_back_to_the_pod(self):
+        body = ra.board_body(self.ROW, self.AT)
+        self.assertEqual(body["answer_mechanism"], "ack")
+        self.assertEqual(body["producer_kind"], "cron")
+        self.assertEqual(body["provenance_class"], "explicit")
+
+    def test_a_remote_store_without_a_token_is_refused(self):
+        reason = ra.board_refusal(
+            "http://attention-controller.agent.svc.cluster.local:18081", "")
+        self.assertIsNotNone(reason)
+        self.assertIn("REFUSED", reason)
+
+    def test_a_loopback_store_needs_no_token(self):
+        self.assertIsNone(ra.board_refusal("http://127.0.0.1:18081", ""))
+
+    def test_an_unset_store_means_no_post_at_all(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(ra.board_store(), "")
+            item_id, error = ra.post_push_line(self.ROW)
+        self.assertIsNone(item_id)
+        self.assertIn("unset", error)
+
+    def test_post_sends_the_body_and_returns_the_item_id(self):
+        seen = {}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802 — the stdlib's spelling
+                length = int(self.headers.get("Content-Length") or 0)
+                seen["path"] = self.path
+                seen["body"] = json.loads(self.rfile.read(length) or b"{}")
+                seen["auth"] = self.headers.get("Authorization")
+                payload = json.dumps({"item_id": "abc123"}).encode()
+                self.send_response(201)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):  # silence the per-request stderr line
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_address[1]}"
+        with mock.patch.dict(
+            os.environ,
+            {ra.BOARD_STORE_ENV: url, ra.BOARD_TOKEN_ENV: "secret"},
+            clear=False,
+        ):
+            item_id, error = ra.post_push_line(self.ROW)
+        self.assertIsNone(error)
+        self.assertEqual(item_id, "abc123")
+        self.assertEqual(seen["path"], "/api/1.0/attention")
+        self.assertEqual(seen["auth"], "Bearer secret")
+        self.assertIn(self.ROW["push_line"], seen["body"]["payload"])
+        self.assertEqual(seen["body"]["dedup_key"],
+                         "rebase-agent:bborbe/claude-supervisor#7")
+
+    def test_a_failing_store_returns_an_error_and_never_raises(self):
+        """A board that is down must not turn a rebase verdict into an ERROR."""
+        with mock.patch.dict(os.environ, {ra.BOARD_STORE_ENV: "http://127.0.0.1:1"},
+                             clear=False):
+            item_id, error = ra.post_push_line(self.ROW)
+        self.assertIsNone(item_id)
+        self.assertIn("unreachable", error)
+
+    # ---- the wiring: the post must never reach process_pr's verdict ----------------
+
+    def test_a_successful_post_records_the_item_id_on_the_row(self):
+        row = dict(self.ROW, board_item_id=None, board_error=None)
+        with mock.patch.object(ra, "post_push_line", return_value=("abc123", None)):
+            ra.board_post_row(row)
+        self.assertEqual(row["board_item_id"], "abc123")
+        self.assertIsNone(row["board_error"])
+
+    def test_a_raising_post_leaves_the_verdict_alone(self):
+        """The load-bearing claim: the post sits outside process_pr's try."""
+        row = dict(self.ROW, board_item_id=None, board_error=None)
+        with mock.patch.object(ra, "post_push_line", side_effect=RuntimeError("boom")):
+            ra.board_post_row(row)
+        self.assertEqual(row["verdict"], "PUSH")
+        self.assertIsNone(row["board_item_id"])
+        self.assertIn("boom", row["board_error"])
+
+    def test_render_prints_the_board_item_id_and_any_board_error(self):
+        row = dict(self.ROW, reason=None, behind=2, board_item_id="abc123")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ra.render([row])
+        self.assertIn("board: abc123", buf.getvalue())
+
+        failed = dict(self.ROW, reason=None, behind=2, board_item_id=None,
+                      board_error="board unreachable at http://x")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ra.render([failed])
+        self.assertIn("board: board unreachable at http://x", buf.getvalue())
 
 
 if __name__ == "__main__":

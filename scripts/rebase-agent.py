@@ -66,6 +66,19 @@ Every run writes `<stamp>.json` and `latest.json` under `--state-dir` and prints
 survive a container: in the cluster it is an emptyDir, so the pod's log is the only
 record that outlives the run. `--trigger` (default `manual`) is written into both, so a
 hand-started run cannot be read as a scheduled one.
+
+The board
+---------
+A push line is the operator's to run, so a record nobody reads is not delivery. Each
+`PUSH` row is also posted to the fleet attention board as one card carrying the line
+verbatim — when `ATTENTION_STORE_URL` names a store, and `ATTENTION_STORE_TOKEN` a bearer
+token for any non-loopback one (an unauthenticated remote store is readable by anything
+that can reach it). Unset means no board write plus one line on stderr: this script also
+runs on the Mac, and defaulting to `localhost:18080` the way the session producers do
+would post every sweep to whatever happens to listen there.
+
+⚠️ A board failure is never a rebase failure. It is logged, written onto the row as
+`board_error`, and leaves the verdict alone — the record still carries the line.
 """
 import argparse
 import json
@@ -76,7 +89,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta, timezone
 
 STATE_DIR = os.path.expanduser("~/.local/state/claude-supervisor/rebase-agent")
 STATE_KEEP = 50
@@ -88,6 +104,39 @@ TRIGGERS = ("manual", "schedule")
 # forever; the interval is 900 s, so nothing legitimate takes this long.
 TIMEOUT_SECONDS = 300
 SCRATCH_REF = "refs/rebase-agent"
+
+# The fleet attention board, reached over its bearer-gated listener (`/api/1.0/attention`).
+# The port is 18081 in the cluster, NOT 18080: 18080 is the unauthenticated board page and
+# is deliberately not the cluster path.
+BOARD_STORE_ENV = "ATTENTION_STORE_URL"
+BOARD_TOKEN_ENV = "ATTENTION_STORE_TOKEN"
+BOARD_PATH = "/api/1.0/attention"
+# A board that is down must cost a clear failure, never a stalled sweep. 10 s matches the
+# sibling attention arms, measured against the store's create path peaking at 2.26 s under
+# 20 concurrent readers — a timeout here loses the card while the rebase itself succeeded.
+BOARD_TIMEOUT_SECONDS = 10
+# Every sweep re-pushes while the PR is still behind, and duplicate suppression refreshes
+# the card's payload and created_at rather than adding a row, so this only has to outlive
+# the 900 s gap between two runs. Once the PR is rebased or merged the re-push stops and
+# the card clears itself.
+BOARD_CARD_TTL_SECONDS = 3600
+BOARD_PRODUCER_ID = "rebase-agent"
+BOARD_PRODUCER_KIND = "cron"
+# A card is "live" only when the store can resolve its liveness model. It resolves
+# `heartbeat:<path>` against the STORE host's filesystem and `session:`/`owner:` against
+# the store host's session registry — a pod appears in neither. So `owner:` is the model a
+# pod must declare: it probes nothing and returns live unconditionally, which is what lets
+# duplicate suppression collapse a re-push onto the existing card instead of adding a new
+# one every 15 minutes. The price is that it never expires by liveness, so the card MUST
+# carry `expires_at` — that deadline is its only removal.
+BOARD_LIVENESS_REF = "owner:operator"
+# A push line is a condition the operator acts on; nothing routes back to the pod, so the
+# item is an `ack`. `interrupt_class` is a self-report and is not enumerated by the store;
+# `approve` is the rung the watcher's own ack cards use.
+BOARD_ANSWER_MECHANISM = "ack"
+BOARD_INTERRUPT_CLASS = "approve"
+BOARD_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+
 
 # The repo set is explicit, never "every repo". The conflict class exists only where a
 # release cut renames `## Unreleased` in a CHANGELOG that open branches also edit — a
@@ -455,6 +504,153 @@ def push_line(repo_path, branch, head_sha, number):
     )
 
 
+# ---------------------------------------------------------------------------- the board
+
+
+def board_store():
+    """The store base URL, or "" when no board is configured."""
+    return (os.environ.get(BOARD_STORE_ENV) or "").strip().rstrip("/")
+
+
+def board_token():
+    return (os.environ.get(BOARD_TOKEN_ENV) or "").strip()
+
+
+def board_host(store):
+    try:
+        return (urllib.parse.urlsplit(store).hostname or "").strip("[]")
+    except ValueError:
+        return ""
+
+
+def board_refusal(store, token):
+    """Why this store must not be posted to, or None when it may.
+
+    The guard exists so that *absent* and *safe* coincide: an unauthenticated
+    non-loopback store lets anything that can reach the port read every card and release
+    every gate, which is strictly worse than the gap this closes. Loopback with no token
+    is the legitimate local case.
+    """
+    if not store:
+        return f"{BOARD_STORE_ENV} is unset — no board write"
+    if token or board_host(store) in BOARD_LOCAL_HOSTS:
+        return None
+    return (
+        f"REFUSED: {store} is not loopback and {BOARD_TOKEN_ENV} is unset — "
+        "an unauthenticated remote store is readable by anything that can reach it"
+    )
+
+
+def board_payload(row):
+    """The card's own text: what is behind, and the exact line to run.
+
+    The line is carried verbatim because it is the operator's next action, and the task
+    that added this path requires the card to contain it exactly. The schema's "no commit
+    SHAs in the sentence" rule governs the prose — the SHA here is the lease pin inside a
+    command, and removing it would make the command unsafe to paste.
+    """
+    return (
+        f"{row['repo']}#{row['pr']} ({row['branch']}) is behind master and rebases "
+        f"cleanly. Run this line to update the branch:\n\n{row['push_line']}"
+    )
+
+
+def board_context():
+    return (
+        "The agent rebases every behind-master open PR in a scratch worktree, verifies "
+        "the result, and never pushes. The line is this run's own output, reproduced "
+        "verbatim; it names the clone path the run used, so compare it with your own "
+        "checkout before running it."
+    )
+
+
+def board_body(row, expires_at):
+    """The push body for one row. Pure — the caller supplies the deadline."""
+    return {
+        "producer_id": BOARD_PRODUCER_ID,
+        "producer_kind": BOARD_PRODUCER_KIND,
+        "provenance_class": "explicit",
+        "liveness_ref": BOARD_LIVENESS_REF,
+        # Per PR, so a sweep that keeps finding the same branch refreshes ONE card. The
+        # store compares this within a live producer, which is why the liveness model
+        # above has to read live for a pod.
+        "dedup_key": f"{BOARD_PRODUCER_ID}:{row['repo']}#{row['pr']}",
+        "answer_mechanism": BOARD_ANSWER_MECHANISM,
+        "interrupt_class": BOARD_INTERRUPT_CLASS,
+        "payload": board_payload(row),
+        "context": board_context(),
+        "expires_at": expires_at,
+    }
+
+
+def post_push_line(row, now=None):
+    """Post one row's push line; return `(item_id, error)`.
+
+    Never raises. A board that is down must not turn a rebase verdict into an ERROR, and
+    the run record still carries the line — the error is returned so the record can name
+    it and the operator can tell "no card" from "no push line".
+    """
+    store = board_store()
+    refusal = board_refusal(store, board_token())
+    if refusal:
+        return None, refusal
+    deadline = (now or datetime.now(timezone.utc)) + timedelta(
+        seconds=BOARD_CARD_TTL_SECONDS
+    )
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    token = board_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(
+        store + BOARD_PATH,
+        data=json.dumps(board_body(row, deadline.isoformat())).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=BOARD_TIMEOUT_SECONDS) as response:
+            body = json.loads(response.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as error:
+        # The store's own explanation is carried through: a bare "returned 400" names no
+        # field, and a rejected declaration is rejected identically forever.
+        detail = error.read().decode("utf-8", "replace")
+        return None, f"board returned {error.code} for {row['repo']}#{row['pr']}: {detail}"
+    # ⚠️ Three clauses, not one: a timeout and a malformed body are NOT "unreachable", and
+    # reporting them that way sends a reader to the network for a store that answered.
+    except TimeoutError:
+        return None, f"board did not answer within {BOARD_TIMEOUT_SECONDS}s at {store}"
+    except urllib.error.URLError as error:
+        return None, f"board unreachable at {store}: {error}"
+    except ValueError as error:
+        return None, f"board returned a malformed body for {row['repo']}#{row['pr']}: {error}"
+    except Exception as error:  # noqa: BLE001 — a board must never fail the sweep
+        # `http.client.IncompleteRead` and friends are not OSError/ValueError, and a
+        # truncated response that escaped would abort the sweep before `write_state` —
+        # losing the very record this placement exists to protect.
+        return None, f"board post failed for {row['repo']}#{row['pr']}: {error!r}"
+    return body.get("item_id"), None
+
+
+def board_post_row(row):
+    """Post one row's push line and record the outcome on the row.
+
+    Owns its own catch so that nothing the board can do reaches `process_pr`'s verdict.
+    `post_push_line` already promises not to raise; this keeps that promise true even if
+    it is ever broken, because the cost of the alternative is a sweep that lost its record
+    to one truncated HTTP response.
+    """
+    try:
+        item_id, board_error = post_push_line(row)
+    except Exception as error:  # noqa: BLE001 — see the docstring
+        item_id = None
+        board_error = f"board post failed for {row['repo']}#{row['pr']}: {error!r}"
+    row["board_item_id"] = item_id
+    if board_error:
+        row["board_error"] = board_error
+        print(f"board: {board_error}", file=sys.stderr)
+    return row
+
+
 def process_pr(cfg, pr, keep_scratch=False):
     repo_path = cfg["path"]
     number = pr["number"]
@@ -473,6 +669,8 @@ def process_pr(cfg, pr, keep_scratch=False):
         "head_sha": None,
         "new_sha": None,
         "scratch": None,
+        "board_item_id": None,
+        "board_error": None,
     }
 
     if not os.path.isdir(repo_path):
@@ -552,6 +750,11 @@ def process_pr(cfg, pr, keep_scratch=False):
             git(repo_path, "worktree", "prune")
         if keep_scratch:
             row["scratch"] = scratch
+
+    # The board write is deliberately OUTSIDE the try above: a store that is down must not
+    # reach the `except Exception` arm and turn a good rebase into an ERROR verdict.
+    if row["verdict"] == "PUSH" and board_store():
+        board_post_row(row)
     return row
 
 
@@ -573,6 +776,10 @@ def render(rows):
             print(f"{'':32} {'':>5} {'':>6}  {'':8} └─ {row['reason']}")
         if row["push_line"]:
             print(f"{'':32} {'':>5} {'':>6}  {'':8} └─ {row['push_line']}")
+        if row.get("board_item_id"):
+            print(f"{'':32} {'':>5} {'':>6}  {'':8} └─ board: {row['board_item_id']}")
+        if row.get("board_error"):
+            print(f"{'':32} {'':>5} {'':>6}  {'':8} └─ board: {row['board_error']}")
     pushes = sum(1 for row in rows if row["verdict"] == "PUSH")
     refused = sum(1 for row in rows if row["verdict"] != "PUSH")
     print()
@@ -684,7 +891,7 @@ def main(argv=None):
             rows.append({
                 "repo": cfg["repo"], "pr": "-", "branch": "-", "verdict": "UNKNOWN",
                 "reason": f"queue could not be read: {error}", "behind": None,
-                "push_line": None,
+                "push_line": None, "board_item_id": None, "board_error": None,
             })
             continue
         for pr in prs:
@@ -693,6 +900,15 @@ def main(argv=None):
             if not needs_rebase(pr):
                 continue
             rows.append(process_pr(cfg, pr, keep_scratch=args.keep_scratch))
+
+    # Once per run, and only when there is a push line to lose: a clean queue has nothing
+    # to deliver, so warning on it would put a line in the log every 15 minutes for a
+    # state that is already correct.
+    if not board_store() and any(row["verdict"] == "PUSH" for row in rows):
+        print(
+            f"board: {BOARD_STORE_ENV} is unset — push lines stay in the run record only",
+            file=sys.stderr,
+        )
 
     path, payload = write_state(rows, errors, args.trigger)
     if args.json:
