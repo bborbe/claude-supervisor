@@ -8,6 +8,10 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
+## Unreleased
+
+- fix: the incident ledger's deadline escalation no longer posts a board card. `escalate` stamps `escalated_by` and prints the escalation line into the round's output (`scripts/incident-ledger.py`; `commands/steps/drive.md`). The card carried `--option ack` as its only control — an acknowledgement rendered as a question — and measured 2026-11-13 it was the board's largest misroute class: 401 manager-kind `ack`-only items on the Fleet Manager producer, 16 flagged `only ack is not actionable` in 2026W44. `card_id` now belongs to the blocker card alone; escalation no longer writes it.
+
 ## v0.309.0
 
 - feat: add a `check-task-link` gate that fails a PR whose body carries no `Task: <task_identifier>` line

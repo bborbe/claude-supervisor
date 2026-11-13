@@ -36,12 +36,25 @@ asker, and neither it nor `drive-ledger.py` carries an outcome or a deadline -- 
 neither can say whether the worker ever resumed. That gap, not a missing field, is why
 this is a third store.
 
-⚠️ A STALL IS A DURATION, NOT AN EVENT, AND IT ISSUES NO ATTENTION CARD. Its
-`detected_by` is the drive verdict that named it (`drive:<verdict>@<round>`), and
-`card_id` is empty at DETECTION. Its deadline escalation does post one, and that
-card's store item id is what `escalate` records on the row -- see `post_card`. Do not
-fabricate a card id to fill the field: a fabricated id is a join that never resolves
-and it reads as provenance.
+⚠️ A STALL IS A DURATION, NOT AN EVENT, AND IT ISSUES NO ATTENTION CARD -- neither at
+detection nor at escalation. Its `detected_by` is the drive verdict that named it
+(`drive:<verdict>@<round>`), and `card_id` is empty. The deadline escalation is a
+ledger stamp (`escalated_by`) plus a line in the round's output; it posts nothing to
+the board.
+
+⚠️ **THE ESCALATION USED TO POST A CARD, AND THAT CARD WAS A DEFECT.** It carried
+`--option ack` as its only control, so the operator could dismiss it and nothing else
+-- an acknowledgement rendered as a question. Measured 2026-11-13: 401 of the Fleet
+Manager producer's items were manager-kind cards whose sole option was `ack`, and 16
+of them were flagged `only ack is not actionable` in 2026W44 alone -- the single
+largest misroute class on the board. An acknowledgement belongs in a turn's output or
+a ledger write, not on the board: the row below is the record, and the round's own
+output is the surface. Do not reintroduce a card here without giving it a decision the
+operator owns.
+
+⚠️ **`card_id` IS STILL A REAL FIELD** -- `open --card-id` supplies a handle for the
+blocker card a producer posted. Escalation no longer writes it. Do not fabricate an id
+to fill it: a fabricated id is a join that never resolves and it reads as provenance.
 
 ⚠️ A CORRUPT LEDGER IS REFUSED, NOT READ AS EMPTY -- the rule `drive-ledger.py` states
 and for the same reason: a false "empty" is how 37 entries were lost on 2026-09-23.
@@ -68,7 +81,6 @@ LEDGER = os.environ.get("SUPERVISOR_INCIDENTS_LEDGER") or os.path.expanduser(
 LOCK = LEDGER + ".lock"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ATTENTION_ASK = os.path.join(HERE, "attention-ask.py")
 
 #: Exit code for a ledger this script will not touch: unparseable on disk. Distinct
 #: from 1 so a caller can tell "refused" from "crashed" -- a refused run wrote nothing.
@@ -665,56 +677,11 @@ def past_deadline(incident, at):
     return deadline is not None and at >= deadline
 
 
-#: A store item id is 32 lowercase hex characters, minted over 16 random bytes
-#: (`attention-controller` pkg/item-id-generator.go), and `attention-ask.py post`
-#: prints it on its `ITEM_ID:` line -- the only place a pollable id comes from.
-#:
-#: Repeated from `attention-ask.py`'s own `is_store_item_id` rather than imported:
-#: these scripts are run by path and are deliberately not a package, so an import
-#: would couple two entry points at load time for a three-line shape check.
-STORE_ITEM_ID_LEN = 32
-_HEX_DIGITS = frozenset("0123456789abcdef")
-
-
-def store_item_id(stdout):
-    """The store item id from `attention-ask.py post`'s own `ITEM_ID:` line, or "".
-
-    ⚠️ **This is the capture that did not exist.** `post_card` ran the poster with
-    `capture_output=True` and read NOTHING out of stdout -- the only consultation was
-    on the failure path, inside the warning -- so every escalated incident was written
-    with `card_id: ""` and no record could be joined to its card. Measured 2026-10-29:
-    `card_id` empty on 1 044 of 1 044 incidents in the live ledger, 1 028 of them
-    `timed-out`, and the join was recovered only by hand -- the store's `closed_at`
-    burst matched against the ledger's counts.
-
-    Shape-checked, for the reason `attention-ask.py` gives one store over: the store
-    mints 32 hex characters, and anything else on that line -- a truncated id, an
-    `open-items` display id -- resolves to a 404 that reads as "the card is gone".
-    A line that does not parse yields "", which the caller records honestly rather
-    than filling the field with something that only looks like a join.
-    """
-    for line in (stdout or "").splitlines():
-        line = line.strip()
-        if not line.startswith("ITEM_ID:"):
-            continue
-        candidate = line[len("ITEM_ID:"):].strip()
-        if len(candidate) == STORE_ITEM_ID_LEN and all(
-            char in _HEX_DIGITS for char in candidate
-        ):
-            return candidate
-    return ""
-
-
-def post_card(incident):
-    """Post the escalation card, keyed on the incident so a re-run cannot duplicate it.
-
-    Returns the store's item id, `""` when the card posted but no id could be read
-    from the poster, and `None` when nothing was posted at all. The three cases are
-    kept apart on purpose: `escalate` must stamp a posted card and must not stamp an
-    unposted one, and collapsing "posted, id unread" into either would lose a real
-    escalation or record one that never reached the board.
-    """
-    payload = (
+#: The escalation's own line, built from the incident row. It used to be the payload of
+#: a board card; it is now the round's output line, and the row is the durable record.
+#: Kept as one function so the shape stays in one place if it is ever surfaced again.
+def escalation_line(incident):
+    return (
         "Blocker on session %s (%s) passed its deadline with no verified resume. "
         "Owner: %s. Opened %s, deadline %s, detected by %s."
         % (
@@ -726,42 +693,6 @@ def post_card(incident):
             incident.get("detected_by") or "unknown",
         )
     )
-    command = [
-        sys.executable,
-        ATTENTION_ASK,
-        "post",
-        # Raised by the periodic manager loop (see the module docstring: the ledger
-        # records worker blockers and the manager sweep is what escalates them), so
-        # the card is a manager's escalation even though its subject is a worker.
-        "--producer-kind", "manager",
-        "--dedup-key",
-        incident["dedup_key"],
-        "--payload",
-        payload,
-        "--context",
-        "An answered-but-never-resumed blocker counts in the total and not as "
-        "resolved. This card is the escalation, not a resolution.",
-        "--option",
-        "ack",
-    ]
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode != 0:
-        sys.stderr.write(
-            "warning: could not post escalation for %s: %s\n"
-            % (incident["dedup_key"], (result.stderr or result.stdout).strip())
-        )
-        return None
-    card_id = store_item_id(result.stdout)
-    if not card_id:
-        # Posted, but the poster printed nothing this can trust as an id. The
-        # escalation happened, so the caller still stamps it; the empty `card_id` is
-        # recorded and named here rather than filled with something that only looks
-        # like a join.
-        sys.stderr.write(
-            "warning: escalation for %s posted but printed no ITEM_ID, so the "
-            "record cannot be joined to its card\n" % incident["dedup_key"]
-        )
-    return card_id
 
 
 def cmd_escalate(args):
@@ -777,12 +708,19 @@ def cmd_escalate(args):
     without inventing a round id, which is the class of dishonesty this ledger exists
     to prevent.
 
-    ⚠️ The cap bounds *posts*, not *rows examined*: a gone or mid-command session is
-    suppressed BEFORE the budget is consulted, so a round that retires a graveyard
+    ⚠️ **AN ESCALATION IS A LEDGER STAMP AND A LINE IN THE ROUND'S OUTPUT -- IT IS NOT A
+    BOARD CARD.** The card this used to post carried `--option ack` as its only
+    control: an acknowledgement rendered as a question the operator could only dismiss.
+    Measured 2026-11-13, it was the single largest misroute class on the board (401
+    manager-kind `ack`-only items on one producer; 16 flagged `only ack is not
+    actionable` in 2026W44). The row is the durable record and the printed line is the
+    surface; see the module docstring.
+
+    ⚠️ The cap bounds *escalations*, not *rows examined*: a gone or mid-command session
+    is suppressed BEFORE the budget is consulted, so a round that retires a graveyard
     still spends its whole allowance on real blockers. Measured 2026-10-29: one round
-    posted 165 cards in a single pass. The store's dedup did not help -- it is a
-    *content* key, so it collapses repeats of ONE session and says nothing about 162
-    different sessions going due together.
+    escalated 165 blockers in a single pass -- under the old posting behaviour that was
+    165 board cards, which is why the cap exists.
     """
     at = parse_ts(now())
     # ⚠️ The probe runs BEFORE the lock, and only when it can change the outcome:
@@ -888,43 +826,25 @@ def cmd_escalate(args):
             if slots_spent >= budget:
                 held.append(incident["dedup_key"])
                 continue
-            # Spent BEFORE the post, not after: on a broken store every `post_card`
-            # pays a subprocess, so counting only successes would let one round pay
-            # 165 of them -- the same flood arriving on stderr instead of the board.
-            # A slot is spent whether the post lands or not, and under `--dry-run`
-            # too.
+            # Spent BEFORE the escalation, not after: the budget bounds how much the
+            # round reports, and a slot that only counted successes would let one
+            # round print an unbounded list of blockers -- the same flood, on the
+            # round's output instead of the board. A slot is spent under `--dry-run`
+            # too, so a dry run reports the same shape a real one would.
             slots_spent += 1
             if args.dry_run:
                 print("would escalate %s (stamp %s)" % (incident["dedup_key"], stamp))
                 continue
-            card_id = post_card(incident)
-            if card_id is None:
-                # Leave the incident pending: it is still un-escalated, and stamping
-                # it would record an escalation that never reached the board.
-                continue
-            # ⚠️ Recorded BEFORE the outcome stamp, and taken from the poster's own
-            # line: `card_id` is the join this row never carried, and a value captured
-            # here and not written would be the same defect one layer up.
-            #
-            # Only when an id was actually read. An empty capture leaves whatever the
-            # row already had -- `open --card-id` supplies a handle for the BLOCKER
-            # card, and blanking it would destroy a real join to record nothing.
-            if card_id:
-                if incident.get("card_id") and incident["card_id"] != card_id:
-                    # The row already carried a different handle, and the two cards
-                    # are not the same one. A `timed-out` row must join on the
-                    # ESCALATION's id -- its `dedup_key` is the incident's own, which
-                    # is what makes the join checkable -- so the field moves to it,
-                    # and the replacement is named rather than silent.
-                    sys.stderr.write(
-                        "warning: %s carried card id %s, replaced by the "
-                        "escalation's %s\n"
-                        % (incident["dedup_key"], incident["card_id"], card_id)
-                    )
-                incident["card_id"] = card_id
+            # ⚠️ NO CARD, NO POSTER, NO SUBPROCESS. The escalation is the stamp below
+            # plus the line printed after it; both are what the round's output carries
+            # and what the ledger keeps. `card_id` is deliberately NOT touched: it
+            # belongs to the blocker card a producer posted (`open --card-id`), and
+            # writing an escalation id into it is what made the field's meaning depend
+            # on which leg last ran.
             incident["outcome"] = TIMED_OUT
             incident["escalated_by"] = stamp
             print("escalated %s (stamp %s)" % (incident["dedup_key"], stamp))
+            print("  %s" % escalation_line(incident))
         if malformed:
             sys.stderr.write(
                 "warning: %d stall incident(s) carry a malformed session_id, so the "
