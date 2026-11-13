@@ -27,13 +27,26 @@ its `crash-loop` branch sits after all of them. So this script keeps its own cou
 `--record` is what writes it, through the same `topic-keepalive.py` store helpers every other leg
 uses. A counter nothing writes is not a bound; that was round seven.
 
+Where the four readings live
+----------------------------
+The four readings are printed, and — with `--persist-beside` — written to
+`~/.claude/state/fleet-handback/<round>.decision`, beside the round's `.digest`. Until 2026-11-13
+they existed only in the keep-alive leg's ≤ 1 KB hand-back, so a round's decision numbers died
+with the message and nothing could audit them afterwards (measured: `grep -rl decision-candidates
+~/.claude/state/fleet-handback/` → 0 files). The file carries the SAME string the script prints —
+one renderer, `summary_line()` — so the artifact and the hand-back cannot disagree. They are still
+**not** `fleet-legs.py` digest keys: that would change the digest contract, a separate decision.
+
 Usage
 -----
     decision-park-resume.py --vault <path> --tasks-dir <path> [--now <epoch>] [--json]
+        [--persist-beside <this round's .digest path>]
     decision-park-resume.py --vault <path> --record <task> --sid <session-id>
 
 Exit codes: 0 = a verdict was produced (including "nothing to do") or a resume was recorded;
-1 = a read failed and the round must report it; 2 = usage error.
+1 = a read failed and the round must report it; 2 = usage error; 3 = the readings were produced
+but `--persist-beside` could not write them — the round reports that failure and never renders a
+clean round over it.
 """
 from __future__ import annotations
 
@@ -231,6 +244,77 @@ def record(vault: str, task: str, sid: str, now: float) -> None:
     k.record(path, k.load_resumes(path), now, sid)
 
 
+# --------------------------------------------------------------------------- the readings
+
+#: The sibling artifact this script writes beside the round's `.digest`. Not a digest key: the
+#: digest's `LEGS` section is `fleet-legs.py`'s and adding a fifth key there is a separate change.
+DECISION_SUFFIX = ".decision"
+
+
+def summary_line(result: dict) -> str:
+    """The four readings as ONE line — printed AND persisted, so the two cannot disagree.
+
+    ⚠️ **One renderer, never two.** The hand-back's values and the `.decision` file's must be
+    byte-identical, and a second f-string is exactly the drift this function removes: the file
+    would be written from one expression and the message from another, and the first divergence
+    would be invisible (both look like readings). Per wait kind, never one total — SC5 grades each
+    kind on its own, and a single number cannot say which wait cleared.
+    """
+    resumed = [r for r in result["rows"] if r["verdict"] == "resume"]
+    by_kind = {k: sum(1 for r in resumed if r["kind"] == k) for k in ("a", "d")}
+    return (
+        f"decision-candidates={result['candidates']} · "
+        f"decision-resumed-a={by_kind['a']} · decision-resumed-d={by_kind['d']} · "
+        f"decision-unread={len(result['unread'])}"
+    )
+
+
+def decision_path(digest: str) -> str:
+    """`<dir>/<round>.digest` → `<dir>/<round>.decision` — the round's own filename, reused.
+
+    ⚠️ **The digest's stem, never a re-derived round timestamp.** The sanitization rule has one
+    home (`agents/fleet-sweep-reader.md` § `<output_format>`); a second derivation is how the two
+    filenames drift apart. A path that is not a round digest is refused rather than turned into a
+    sibling of something else — a caller that passes the wrong path must hear it.
+    """
+    root, ext = os.path.splitext(digest)
+    if ext != ".digest" or not os.path.basename(root):
+        raise ValueError(f"not a round digest path: {digest!r}")
+    return root + DECISION_SUFFIX
+
+
+def persist(digest: str, result: dict, now: float) -> str:
+    """Write the round's four readings beside its digest, atomically. Returns the path.
+
+    ⚠️ **The atomic write is not decoration** — a `.decision` half-written by a crash is read as a
+    reading by the next round's auditor, and a truncated line is indistinguishable from a smaller
+    fleet. Same rule as the `.digest` / `.keepalive` payloads: `<path>.tmp` then `os.replace`.
+    """
+    from datetime import datetime, timezone
+
+    path = decision_path(digest)
+    round_tag = os.path.basename(path)[: -len(DECISION_SUFFIX)]
+    written = datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds")
+    body = "\n".join(
+        [f"round={round_tag}", f"written_at={written}", summary_line(result)]
+    ) + "\n"
+
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        os.replace(tmp, path)
+    except BaseException:
+        # A failed write must not leave a stray `.tmp` behind for the prune to count as a round.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return path
+
+
 # --------------------------------------------------------------------------- decide
 
 
@@ -304,6 +388,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--sid")
     parser.add_argument("--now", type=float, default=None)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--persist-beside",
+        dest="persist_beside",
+        metavar="DIGEST",
+        help="this round's .digest path — the four readings are written to its .decision sibling",
+    )
     args = parser.parse_args(argv)
     now = args.now if args.now is not None else now_epoch()
 
@@ -319,16 +409,39 @@ def main(argv: list[str]) -> int:
         print("usage: --tasks-dir is required unless --record is given", file=sys.stderr)
         return 2
 
+    # Refuse a path that is not a round digest BEFORE the read: the derivation is this script's,
+    # and a caller that passed the wrong path must hear it rather than get a sibling of something
+    # else (a `.decision` named after a directory or an unrelated file is unreadable as a round).
+    if args.persist_beside is not None:
+        try:
+            decision_path(args.persist_beside)
+        except ValueError as error:
+            print(f"usage: {error}", file=sys.stderr)
+            return 2
+
     result = decide(args.vault, args.tasks_dir, now)
+
+    # ⚠️ Persist BEFORE the output branch, and report a failure on stderr while still printing the
+    # readings. A round that dropped them from the message because the file failed would reproduce
+    # the original defect one layer down: the numbers would again live only in a message.
+    persisted = None
+    if args.persist_beside is not None:
+        try:
+            persisted = persist(args.persist_beside, result, now)
+        except OSError as error:
+            print(
+                f"decision-persist: FAILED — {decision_path(args.persist_beside)}: {error}",
+                file=sys.stderr,
+            )
+
     if not result["ok"]:
         print(f"unread — {result['reason']}")
-        print("decision-candidates=0 · decision-resumed-a=0 · decision-resumed-d=0 · decision-unread=1")
+        print(summary_line(result))
         return 1
     if args.json:
         print(json.dumps(result))
-        return 0
+        return 0 if persisted or args.persist_beside is None else 3
 
-    resumed = [r for r in result["rows"] if r["verdict"] == "resume"]
     for row in result["rows"]:
         if row["verdict"] == "crash-loop":
             print(f"⚠️ WORKER CRASH-LOOP: {row['task']} — {row['detail']}")
@@ -336,13 +449,8 @@ def main(argv: list[str]) -> int:
             print(f"resume kind={row['kind']} {row['task']} {row['sid']} — {row['detail']}")
     for row in result["unread"]:
         print(f"unread {row['task']} — {row['reason']}")
-    # Per wait kind, never one total: SC5 grades each kind on its own, and a single number
-    # cannot say which wait cleared — nor reconcile against the `--record` store by kind.
-    by_kind = {k: sum(1 for r in resumed if r["kind"] == k) for k in ("a", "d")}
-    print(f"decision-candidates={result['candidates']} · "
-          f"decision-resumed-a={by_kind['a']} · decision-resumed-d={by_kind['d']} · "
-          f"decision-unread={len(result['unread'])}")
-    return 0
+    print(summary_line(result))
+    return 0 if persisted or args.persist_beside is None else 3
 
 
 if __name__ == "__main__":

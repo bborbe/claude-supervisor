@@ -20,14 +20,31 @@ today. A second implementation would be a second owner of one wait, which is how
 
 ```bash
 P=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts
-python3 "$P/decision-park-resume.py" --vault "<vault>" --tasks-dir "<vault>/<tasks-dir>"
+python3 "$P/decision-park-resume.py" --vault "<vault>" --tasks-dir "<vault>/<tasks-dir>" \
+  --persist-beside "<this round's digest path>"
 ```
 
 `--tasks-dir` is the vault's own, resolved from `vault-cli config` — never a hardcoded directory
 name, which would glob nothing and report a clean round. The script prints one line per row and a
 summary carrying `decision-candidates=`, `decision-resumed-a=`, `decision-resumed-d=` and
-`decision-unread=`. Print the
-summary; it is the hand-back's three counts and none of them is a digest key.
+`decision-unread=`. Print the summary; it is the hand-back's four counts and none of them is a
+digest key.
+
+⚠️ **`--persist-beside` is what makes those four readings auditable, and passing it is not
+optional.** It writes them to `<the digest's directory>/<the digest's round>.decision` — the same
+round, the same sanitized filename — carrying the **same line** the script printed, so the artifact
+and the hand-back cannot disagree. Before 2026-11-13 they existed only in the hand-back message:
+`grep -rl decision-candidates ~/.claude/state/fleet-handback/` returned **0 files**, so a round's
+decision numbers died with the message and nobody — including the next round's manager — could
+re-read them. Pass the round's digest path exactly as the caller gave it; the script derives the
+sibling itself and **refuses** a path that is not a `.digest` rather than writing beside something
+else.
+
+⚠️ **Exit 3 means the readings were produced but could not be persisted** (a read-only or full
+state dir). The script still prints the summary and names the failure on stderr as
+`decision-persist: FAILED — <path>: <error>`. Report `decision-persist=FAILED` in the hand-back and
+never let the round read as clean: a leg that swallowed this would put the numbers back in a message
+only, which is the defect this file exists to close. Exit 0 is `decision-persist=written`.
 
 ⚠️ **This was prose for six review rounds, and every round found a different real defect** — an
 `approved_at` read the population already guarantees, an empty `blocked_by` that is vacuously "all

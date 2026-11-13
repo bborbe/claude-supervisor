@@ -28,7 +28,9 @@ The shape a sweep's **read half** and **act half** return to their caller. Ten a
     applies), one count per act (`restarted`, `resumed`, `parked-due`,
     `nudged`, `undelivered`), one count per row list (`crash-loop`, `cannot-tell`), and one
     dropped count per row list (`crash-loop-truncated`, `cannot-tell-truncated`) — including
-    the zeros.
+    the zeros — plus the decision-park readings and their write verdict (`decision-candidates`,
+    `decision-resumed-a`, `decision-resumed-d`, `decision-unread`, `decision-persist`), whose
+    persisted home is the round's `.decision` (§ Which readings survive the round).
   - the **flagged-open leg** returns the **open tally and every refusal** — `legs` with
     `legs-reason`, the `operator-flagged` digest reading, `opened`, `refused`, and one `refused:`
     line per refusal **verbatim**, because the caller prints them and the operator reads them. Its
@@ -43,6 +45,20 @@ The shape a sweep's **read half** and **act half** return to their caller. Ten a
     is the block payload, which `commands/steps/output-shape.md` item 3 renders.
 - **The full payload never rides the hand-back.** A leg that rendered a table, classified a set or drafted a batch writes it to disk and hands back the verdict about it. Inlining the payload is the failure this half of the contract removes: it is the same information at many times the size, and it arrives in prose where nothing downstream can check it.
 - **The truncation exception — the size cap's only sanctioned exception, homed here rather than in a leg's own file.** A leg whose required set cannot fit, because it is one line per handed-over row, emits its counts plus as many rows as fit and a dropped count **per truncatable list**, and the **payload carries the rest**; the caller reads those rows from the payload and nothing else. That is the only case in which the cap and the per-row required set can both hold, and a batch small enough to fit is never truncated. ⚠️ **One dropped count per list, never one shared `truncated=`** — the keep-alive leg's two row lists carry `crash-loop-truncated=` and `cannot-tell-truncated=`, because a single count cannot say which list lost rows and the reconciliation below would then be unsatisfiable; a leg with one truncatable list (the flagged-open leg's `refused:`) keeps `truncated=`. **The caller reconciles per list** — the rows it printed for that list plus that list's dropped count equal the leg's count for it (`refused=`, `crash-loop=` / `cannot-tell=`), and a mismatch is a row lost in transit, reported as such and never rounded away. Both halves of that rule live here: the leg truncates and names where the rest went, the caller prints the remainder and checks the arithmetic, and neither restates the other's half.
+
+## Which readings survive the round
+
+A hand-back is a message: it dies with the session that read it. So every reading that must be auditable later has a file, and the hand-back carries a **verdict about that write** — never the reading's only copy. This is the distinction that was incidental until 2026-11-13, when the fleet keep-alive leg's four `decision-*` readings existed only in the hand-back (`grep -rl decision-candidates ~/.claude/state/fleet-handback/` returned **0 files**) and a round's decision numbers could be recovered from a session transcript and nowhere else.
+
+| Reading (fleet keep-alive leg) | Persisted in | Written by |
+|---|---|---|
+| `lapsed-managers`, `topicless-goal-managers`, `dead-workers` | the round's `.digest`, `LEGS` section | `fleet-legs.py --leg <key> --count` |
+| `decision-candidates`, `decision-resumed-a`, `decision-resumed-d`, `decision-unread` | the round's `.decision` | `decision-park-resume.py --persist-beside <digest>` |
+| the full `crash-loop:` / `cannot-tell:` lists, when truncated | the round's `.keepalive` | the leg's own atomic write |
+
+**Message-only, and deliberately so:** the act counts (`restarted`, `resumed`, `parked-due`, `nudged`, `undelivered`), the per-list counts (`crash-loop`, `cannot-tell`), `dead-scan`, `park-nudge:`, and the verdicts that describe the writes themselves (`legs`, `legs-reason`, `decision-persist`). They report what the leg **did this round**, which the next round does not need to re-read; a criterion resting on one of them is resting on a transcript, and should be moved onto a file before it is relied on.
+
+⚠️ **A failed write is a verdict, not silence.** `legs=UNKNOWN` (the digest) and `decision-persist=FAILED` (the `.decision`) are the two shapes this leg reports instead of quietly leaving a reading message-only — the caller renders them as an unpersisted reading, never as a measured one.
 
 ## Where the full payload goes
 

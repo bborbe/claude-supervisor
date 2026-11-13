@@ -15,7 +15,7 @@ import os
 import shutil
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.dirname(HERE)
@@ -293,6 +293,97 @@ class TestUnread(Base):
         rc, out = self.decide()
         self.assertEqual(0, rc, "a non-dict line must not take the round down")
         self.assertEqual("a", self.resumed(out)[0]["kind"])
+
+
+class TestThePersistedReading(Base):
+    """The four readings reach disk, beside the round's digest — not only the hand-back.
+
+    The defect: `grep -rl decision-candidates ~/.claude/state/fleet-handback/` returned 0 files
+    while the keep-alive payloads existed, so a round's decision numbers were recoverable only
+    from a session transcript. These tests drive the real writer, not a fixture of it.
+    """
+
+    def digest(self, name="2026-11-13T00-15Z.digest"):
+        path = os.path.join(self.root, "handback", name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        return path
+
+    def run_with(self, digest, tasks_dir=None):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = dpr.main(["--vault", self.vault, "--tasks-dir", tasks_dir or self.tasks,
+                           "--now", str(NOW), "--persist-beside", digest])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_the_file_carries_all_four_readings_and_matches_the_printed_line(self):
+        """SC1: the artifact and the hand-back are the same string, from one renderer.
+
+        Equality is asserted against the script's OWN printed line, so a second f-string would
+        fail here rather than drift silently.
+        """
+        self.parked(name="Approved Row", sid="sid-a", approved_at=APPROVED_AFTER)
+        self.task("Dep Done", status="completed", claude_session_id="",
+                  completed_date=COMPLETED_AFTER)
+        self.parked(name="Blocked Row", sid="sid-d", blocked_by="'[[Dep Done]]'")
+        digest = self.digest()
+        rc, out, _ = self.run_with(digest)
+        self.assertEqual(0, rc)
+
+        path = os.path.join(os.path.dirname(digest), "2026-11-13T00-15Z.decision")
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+        self.assertEqual("round=2026-11-13T00-15Z", lines[0])
+        self.assertTrue(lines[1].startswith("written_at="), lines[1])
+        printed = [l for l in out.splitlines() if l.startswith("decision-candidates=")][-1]
+        self.assertEqual(printed, lines[-1], "the file's readings must equal the hand-back verbatim")
+        for key in ("decision-candidates=", "decision-resumed-a=",
+                    "decision-resumed-d=", "decision-unread="):
+            self.assertIn(key, lines[-1])
+        self.assertIn("decision-candidates=2", lines[-1])
+        self.assertIn("decision-resumed-a=1", lines[-1])
+        self.assertIn("decision-resumed-d=1", lines[-1])
+
+    def test_no_flag_writes_no_sibling_file(self):
+        """The control for SC2's falsifier: a round that did not pass the flag leaves nothing,
+        which is why a pre-fix round's directory holds no `.decision` to read."""
+        self.parked(approved_at=APPROVED_AFTER)
+        digest = self.digest()
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = dpr.main(["--vault", self.vault, "--tasks-dir", self.tasks, "--now", str(NOW)])
+        self.assertEqual(0, rc)
+        self.assertFalse(os.path.exists(os.path.join(os.path.dirname(digest),
+                                                     "2026-11-13T00-15Z.decision")))
+
+    def test_a_path_that_is_not_a_round_digest_is_refused(self):
+        self.parked(approved_at=APPROVED_AFTER)
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            rc = dpr.main(["--vault", self.vault, "--tasks-dir", self.tasks, "--now", str(NOW),
+                           "--persist-beside", os.path.join(self.root, "round.drive")])
+        self.assertEqual(2, rc)
+        self.assertIn("not a round digest path", err.getvalue())
+
+    def test_a_failed_write_is_reported_and_never_reads_as_a_clean_round(self):
+        """SC3's probe: a read-only target directory. The leg must name the failure and exit
+        non-zero, and must STILL print the readings — a round that dropped them because the file
+        failed reproduces the original defect one layer down."""
+        self.parked(approved_at=APPROVED_AFTER)
+        digest = self.digest()
+        os.chmod(os.path.dirname(digest), 0o500)
+        try:
+            rc, out, err = self.run_with(digest)
+        finally:
+            os.chmod(os.path.dirname(digest), 0o700)
+        self.assertEqual(3, rc, "a failed persist must not exit 0")
+        self.assertIn("decision-persist: FAILED", err)
+        self.assertIn("2026-11-13T00-15Z.decision", err)
+        self.assertIn("decision-candidates=1", out, "the readings must still reach the hand-back")
+        self.assertFalse(os.path.exists(os.path.join(os.path.dirname(digest),
+                                                     "2026-11-13T00-15Z.decision")))
+        self.assertFalse(os.path.exists(os.path.join(os.path.dirname(digest),
+                                                     "2026-11-13T00-15Z.decision.tmp")),
+                         "a failed write must not leave a stray .tmp for the prune to count")
 
 
 if __name__ == "__main__":
