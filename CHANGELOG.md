@@ -8,9 +8,12 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## v0.307.0
+## Unreleased
 
 - feat: a goal round now files the task an undriven SC/DoD box needs and routes it by its door — new row 4d (`commands/steps/goal-plan-undriven.md`), decision in `scripts/undriven-plan.py`. Two-way rows the step filed are approved `--by manager` and open through the ordinary `To open` path below the worker target; one-way rows ride the round's one approve card with blast radius and rollback; wide-reach rows get a `### Decision:` block and a talk-through card that asks for no decision; `re-scope` proposals are never filed. At most one file per goal per tick. Every other `phase: todo` row stays the operator's.
+
+## v0.307.0
+
 - feat: **the rebase agent's run record survives the pod, and carries what started the run.** The agent is moving off the operator's Mac into a nuke prod CronJob, where the state directory is an `emptyDir` — so `latest.json`, the only record the launchd job needed, would die with the pod and a scheduled run would leave nothing to read. Every run now prints one `record: {json}` line to stdout beside the human render, naming `generated_at`, the trigger, the state path and every row with its push line, and `--trigger` (default `manual`) is written into the payload as well. The flag is the point of the change rather than decoration: a CronJob passes `--trigger schedule`, and a hand-started run keeps the default, so "was this sweep unattended" stops being a guess. `write_state()` returns the payload it wrote and takes an optional state directory, so the record half is testable without touching `~/.local/state`. Change set: `scripts/rebase-agent.py`, `scripts/tests/test_rebase_agent.py`, `docs/rebase-agent.md`, `CHANGELOG.md`.
 
 ## v0.306.0
@@ -146,7 +149,6 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## v0.296.2
 
 
-
 - fix: **a present-but-blank `role:` or `mode:` is defaulted, not used verbatim.** `commands/open.md` § Step 0.6 resolved `role:` by key *presence* — branch 1 read "`role:` present → use it" — so a row carrying `role: ""` opened with no role at all, and `vault-cli task set "<task>" role ""` writes exactly that. `docs/fleet-surface.md` § Spawn a worker item 6 had the same shape for `mode:`, passing the argument "whenever the field is present". Both now treat a blank value as absent: branch 2 re-classifies from the body per matrix Rule 1, the `mode` paragraph resolves per Rule 2, and item 6 passes the argument only for a non-blank value. `scripts/check-open-role-defaults.py` gains three clauses pinning the blank-value arm, with `scripts/tests/test_check_open_role_defaults.py` carrying the pre-change negative controls. Change set: `commands/open.md`, `docs/fleet-surface.md`, `scripts/check-open-role-defaults.py`, `scripts/tests/test_check_open_role_defaults.py`, `scripts/budget-baseline.json`, `CHANGELOG.md`.
 
 ## v0.296.1
@@ -160,7 +162,6 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 - feat: **`blocked-row-routing.py` decides whether a `🔴 BLOCKED` row needs a manager at all, and emits the routing record when it does.** `agents/fleet-drive.md` renders an `ESCALATION` row for every blocked session and `scripts/escalation-manager.py` resolves which manager owns it — but *whether to route* was still prose. Measured 2026-11-10: 4 of 8 blocked sessions named no recipient, so those rows were escalated to nobody, while 4 that already named an owner would have been double-routed. ⚠️ **It composes two shipped scripts and re-derives neither:** `closer-gate-lint.py`'s `owner_named()` owns "does this closer name an owner" — including the two-haystack split where `⏰ Ends:` sits on its own line — and `escalation-manager.py`'s `resolve()` owns "which manager", including the four-tier chain. A second copy of either is the drift `docs/fleet-surface.md` forbids. ⚠️ **`waiting on someone` is not an owner** — it names a wait, not a recipient — so it routes. ⚠️ **An unresolvable manager exits 2 rather than printing nothing**: silence would read as "an owner was found", the exact failure this ends. Change set: `scripts/blocked-row-routing.py`, `scripts/tests/test_blocked_row_routing.py`, `CHANGELOG.md`.
 
 ## v0.295.3
-
 
 
 - fix: **the keeper's `restart-worker` budget is raised from 120 s to 400 s, because role resolution alone costs 170.6 s.** `restart-worker.py` resolves the session's role through `fleet-board.vault_index()`, which walks every vault's topic/goal/task pages and reads each task's frontmatter — measured 2026-11-12 at 170.6 s, on its own, before the kill or the spawn. At the old 120 s budget every restart reported `outcome UNKNOWN` and recovered nothing, and because the hang sits BEFORE the kill it aborted harmlessly, so no failure was visible. The new `RESTART_WORKER_TIMEOUT` constant is shared by both call sites — the answer-gated fresh restart and the `--absent` resume — since both pay the same index cost and a literal left behind on either is a live defect. Operator ruling 2026-11-12: raise the budget above the index cost rather than optimise the index here. Tests: `test_the_restart_budget_exceeds_the_measured_index_cost`. Change set: `scripts/fleet-keeper.py`, `scripts/tests/test_fleet_keeper.py`, `CHANGELOG.md`.
