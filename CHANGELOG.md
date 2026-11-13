@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.305.1
 
 - fix: **`rebase-agent.py` names a `--repo` outside the rebase set instead of reporting a clean queue.** `main()` filtered `DEFAULT_REPOS` by `--repo`, so an out-of-set repo emptied the list and `render()` printed `no open PR is behind master — nothing to rebase` — a clean verdict for a repo it never looked at. Measured 2026-11-13 on `bborbe/git-rest#81` and `bborbe/agent-task-executor#161`, both `CONFLICTING` and both reported clean. The out-of-set name is now printed together with the set it was measured against, `--json` carries `repos_examined` and `repos_not_in_set`, and an out-of-set-only run exits 2 — "not examined" is never "clean". Change set: `scripts/rebase-agent.py`, `scripts/tests/test_rebase_agent.py`, `CHANGELOG.md`.
 
