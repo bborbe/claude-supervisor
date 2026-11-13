@@ -331,9 +331,9 @@ def main(argv=None):
             f"{stamp} idle-reaper-tick session={session_id} verb={verb} "
             f"outcome={outcome} trigger={trigger}"
         )
-    # The parked-`busy` cards. ⚠️ Deliberately NOT folded into `rows`: `summary_line()`
-    # derives `candidates=` and `refused=` from those, and a card is neither a candidate
-    # nor a refusal — it is a session the candidate filter can never return.
+    # The parked-question cards. ⚠️ Deliberately NOT folded into `rows`: `summary_line()`
+    # derives `candidates=` and `refused=` from those, and a card is neither a close nor a
+    # refusal — it is the one shape the guard refuses at every age and nothing ever closes.
     cards, cards_ok = card_parked_sessions(reaper, args.sessions_dir, args.dry_run)
     for session_id, outcome in cards:
         print(

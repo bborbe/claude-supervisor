@@ -103,6 +103,9 @@ SESSIONS_DIR = close_worker.SESSIONS_DIR
 #: on the recorded event. A scheduling policy, not an inference about abandonment.
 IDLE_FLOOR = 15 * 60
 
+#: "Not supplied" for an injected reading whose real value may legitimately be `None`.
+_UNSET = object()
+
 #: How long to wait for the pid and its registry entry to disappear after SIGTERM.
 EXIT_DEADLINE = 8.0
 
@@ -160,13 +163,18 @@ def registry_entries(session_id, sessions_dir=None):
 
 
 def candidate_session_ids(sessions_dir=None):
-    """Every registry `sessionId` this verb can ever act on: headless, and currently idle.
+    """Every registry `sessionId` this verb can ever act on: headless, and not provably
+    mid-turn.
 
-    Filtered here rather than left to the guards. `not-headless` and `busy-target` would
-    refuse every other record, so a sweep over the whole registry would emit one refusal
-    per tab worker and per mid-turn worker on every tick — noise that buries the refusals
-    that carry information. The other nine guards still run per candidate; this filter
-    removes only the two that can never pass for the excluded records.
+    Filtered here rather than left to the guards. `not-headless` would refuse every tab
+    worker, so a sweep over the whole registry would emit one refusal per tab worker on
+    every tick — noise that buries the refusals that carry information.
+
+    ⚠️ **A non-`idle` record past `IDLE_FLOOR` IS a candidate.** Excluding every non-idle
+    record here would make `guard()`'s stale-status reading unreachable: a session stuck
+    at `busy` would never be handed to the guard chain at all. The age test keeps a
+    genuinely mid-turn worker out (so it still costs no refusal), and the guard re-reads
+    the wrapper and the tool marker before signalling.
 
     A record with no `sessionId` is skipped: nothing downstream could join it back.
     """
@@ -182,8 +190,16 @@ def candidate_session_ids(sessions_dir=None):
             continue
         if rec.get("entrypoint") != "sdk-cli":
             continue
+        # ⚠️ Not `status == "idle"` alone. A record whose status stopped moving is the
+        # population this verb exists for, and filtering it out here means `guard()`'s
+        # stale-status reading can never be reached — the fix would be dead code. The
+        # cheap age test keeps a genuinely mid-turn worker out of the candidate set (so
+        # it costs no refusal per tick); `guard()` then re-reads the wrapper record and
+        # the tool marker before anything is signalled.
         if rec.get("status") != "idle":
-            continue
+            age = idle_seconds(rec)
+            if age is None or age < IDLE_FLOOR:
+                continue
         if session_id not in ids:
             ids.append(session_id)
     return ids
@@ -384,18 +400,24 @@ def open_cards(session_id, attention_url=None):
 def busy_parked_session_ids(
     sessions_dir=None, wrapper_url=None, ledger_url=None, attention_url=None, now=None
 ):
-    """The parked sessions `candidate_session_ids()` can never return, with their park age.
+    """The parked-question sessions nothing closes and no card names, with their park age.
 
-    ⚠️ **This is a read for visibility, never for action.** `candidate_session_ids()` drops
-    every record whose registry `status` is not `idle` at its own filter, so a wrapper
-    session parked on a question while the registry still reports a non-idle status is
-    skipped *before* the `busy-target` guard can refuse it — no refusal token, no tick
-    line, and no age at which anything closes it. That silence reads identically to
-    "nothing to reap", which is the invisibility the operator's 2026-11-13 ruling ends by
-    surfacing the population rather than widening the guard: *"keep `busy-target`
-    absolute — fix the missing card instead, not the reaper"* (card
-    `039df378a626f84a8e61fa11863517ec`). Nothing here reaps, signals, or relaxes that
-    guard; it only names what the guard will never see.
+    ⚠️ **This is a read for visibility, never for action.** A wrapper session parked on a
+    question while the registry reports a non-`idle` status is refused `busy-target` by the
+    guard — `_stale_busy()` requires no parked question, so the stale-status reap shipped in
+    v0.303.2 deliberately does **not** reach this shape — and it is never closed at any age.
+    The operator's 2026-11-13 ruling ends that by surfacing the population rather than
+    widening the guard: *"keep `busy-target` absolute — fix the missing card instead, not
+    the reaper"* (card `039df378a626f84a8e61fa11863517ec`). Nothing here reaps, signals, or
+    relaxes that guard.
+
+    ⚠️ **The refusal is machine-visible but not operator-visible.** Since v0.303.2 a
+    non-`idle` record past `IDLE_FLOOR` *is* a candidate, so a tick does emit an
+    `outcome=busy-target` line for this shape — an earlier revision of this docstring said
+    no line existed, and that was true only before that change. What is still missing is the
+    card: a refusal line in a launchd log is not something a person is asked about, and the
+    summary counts it as one more refusal among many. This read names the specific shape so
+    the tick can post one.
 
     Returns `[(session_id, park_age_seconds, requested_at)]` — `requested_at` is the dedup
     clock, so one card is posted per session **per park** and a re-park is a new card.
@@ -423,8 +445,10 @@ def busy_parked_session_ids(
         session_id = rec.get("sessionId")
         if not session_id or session_id in seen:
             continue
-        # The exact complement of `candidate_session_ids()`'s own filter, so the two
-        # populations partition the registry and can never overlap. A record with **no**
+        # ⚠️ Independent of `candidate_session_ids()`, which since v0.303.2 also returns a
+        # non-`idle` record once it is past `IDLE_FLOOR`. This read selects the parked-
+        # question shape specifically, so it must not be written as that function's
+        # complement — the two sets now overlap by construction. A record with **no**
         # `status` is included on purpose: the guard renders it `'(none)'` and refuses it
         # `busy-target` all the same, so excluding it here would hide a session for a
         # reason the guard does not share.
@@ -479,7 +503,34 @@ def resolve_transcript(cwd, session_id, projects_dir=None):
     return hits[0] if hits else None
 
 
-def guard(rec, now=None, wrapper=None, cards=None, cards_readable=True, children=None):
+def _stale_busy(rec, wrapper, in_flight):
+    """True when a non-`idle` registry `status` is a stale claim, not a live turn.
+
+    ⚠️ `status` is written by the harness and survives a turn that ended without an update,
+    so a session can sit at `busy` with nothing in flight. The registry field alone is not a
+    mid-turn signal in either direction — `close-worker.py` records the mirror case, where a
+    pane-less worker parked on the permission channel "does not move its `status`".
+
+    Quiescence needs both readings to say "nothing pending": an idle wrapper record with no
+    pending turn and no parked question — the authoritative reading this guard already
+    trusts further down — and no open tool marker inside `TOOL_MARKER_WINDOW`, the only
+    record a pane-less session leaves mid-call and one this script does not otherwise read.
+    A missing or unreadable wrapper fails closed to the old refusal.
+    """
+    if not isinstance(wrapper, dict):
+        return False
+    if wrapper.get("state") != "idle":
+        return False
+    if wrapper.get("pending_turns") != 0:
+        return False
+    if wrapper.get("question"):
+        return False
+    if in_flight is _UNSET:
+        in_flight = close_worker.in_flight_tool(rec.get("sessionId") or "")
+    return in_flight is None
+
+
+def guard(rec, now=None, wrapper=None, cards=None, cards_readable=True, children=None, in_flight=_UNSET):
     """`(token, detail)` for the first failing guard, or None when the close may proceed.
 
     Pure apart from the injected readings, so the whole predicate is testable without a
@@ -501,7 +552,7 @@ def guard(rec, now=None, wrapper=None, cards=None, cards_readable=True, children
             f"entrypoint is {entrypoint or '(none)'!r}, not 'sdk-cli'; use close-worker.py",
         )
     status = (rec.get("status") or "").strip()
-    if status != "idle":
+    if status != "idle" and not _stale_busy(rec, wrapper, in_flight):
         return ("busy-target", f"registry status is {status or '(none)'!r}, not 'idle'")
     # ⚠️ A parked wrapper session is aged by its PARK clock, not the registry's idle clock.
     # `statusUpdatedAt` says when the session last went idle, which can be hours before the
@@ -710,16 +761,6 @@ def main(argv=None):
                 f"{fresh.get('pid')}); nothing was signalled",
             )
             continue
-        # A turn accepted during the guards flips the entry out of `idle` and re-stamps
-        # `statusUpdatedAt`, so the guard chain's reading is stale exactly when it matters.
-        fresh_status = (fresh.get("status") or "").strip()
-        if fresh_status != "idle":
-            exit_code = refuse(
-                "busy-target",
-                f"registry status became {fresh_status or '(none)'!r} during the guards; "
-                "nothing was signalled",
-            )
-            continue
         # The wrapper record is the authoritative "nothing pending" reading, and for a
         # wrapper-backed worker it is the only one: a continuation that arrived during the
         # guards would otherwise be killed with the process.
@@ -730,6 +771,19 @@ def main(argv=None):
         # can be minutes into a park whose question was asked hours ago, and the question
         # refusal would fire at every age.
         fresh_wrapper = wrapper_record(session_id)
+        # A turn accepted during the guards flips the entry out of `idle` and re-stamps
+        # `statusUpdatedAt`, so the guard chain's reading is stale exactly when it matters.
+        # ⚠️ A `busy` that was already stale before the guards is still stale now: the same
+        # `_stale_busy` reading decides it, against the re-read wrapper and a re-read tool
+        # marker, so this second gate cannot silently undo the first one's decision.
+        fresh_status = (fresh.get("status") or "").strip()
+        if fresh_status != "idle" and not _stale_busy(fresh, fresh_wrapper, _UNSET):
+            exit_code = refuse(
+                "busy-target",
+                f"registry status became {fresh_status or '(none)'!r} during the guards; "
+                "nothing was signalled",
+            )
+            continue
         if fresh_wrapper is None or fresh_wrapper.get("state") != "idle":
             exit_code = refuse(
                 "wrapper-busy",
