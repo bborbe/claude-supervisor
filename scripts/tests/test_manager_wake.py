@@ -241,13 +241,21 @@ class ReadState(unittest.TestCase):
         self._run_returning("SLEEPING\tgoal--x\tuntil 2026-11-12T01:22:59+01:00\n")
         self.assertEqual("SLEEPING", self.mod.read_state("X", "goal"))
 
-    def test_non_zero_exit_is_none_not_a_state(self):
+    def test_non_zero_exit_is_the_unreadable_sentinel_not_a_state(self):
+        # This caller always knows its subject, so a failed read fails CLOSED.
         self._run_returning("SLEEPING\tgoal--x\tdetail\n", returncode=3)
-        self.assertIsNone(self.mod.read_state("X", "goal"))
+        self.assertEqual(self.mod.read_state("X", "goal"), self.mod._guard_mod().STATE_UNREADABLE)
 
-    def test_empty_stdout_is_none(self):
+    def test_empty_stdout_is_the_unreadable_sentinel(self):
         self._run_returning("")
-        self.assertIsNone(self.mod.read_state("X", "goal"))
+        self.assertEqual(self.mod.read_state("X", "goal"), self.mod._guard_mod().STATE_UNREADABLE)
+
+    def test_leading_tab_is_stripped_before_the_first_field(self):
+        # `.strip()` removes the leading tab, so an empty first field cannot arise from
+        # a tab-led line — the `or` fallback is defensive, not reachable here. Pinned so
+        # a future reader does not "fix" it into the sentinel by mistake.
+        self._run_returning("\tgoal--x\tdetail\n")
+        self.assertEqual(self.mod.read_state("X", "goal"), "goal--x")
 
 
 class ResolvePane(unittest.TestCase):

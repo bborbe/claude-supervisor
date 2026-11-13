@@ -175,23 +175,24 @@ def resolve_pane(session_id):
 
 
 def read_state(subject, branch):
-    """`manager-liveness.py --state`'s first field for this subject, or None.
+    """`manager-liveness.py --state`'s first field, or the fail-closed sentinel.
 
-    Fail-open by construction: `None` means "unknown" and the guard is called without
-    `--subject-state`, so it decides on the screen exactly as it did before this check
-    existed. Never a fabricated state — a broken liveness read must not silence the
-    wake, and a fabricated `SLEEPING` must not suppress it.
+    This caller always knows its subject, so a failed read is `STATE_UNREADABLE`, never
+    `None` — the guard refuses the wake on it. A missed wake re-arms the manager through
+    its gate; a spurious wake types into a pane whose session then closes it for good.
+    Never a fabricated state: a broken liveness read must not read as "awake", and a
+    fabricated `SLEEPING` must not suppress every wake.
     """
     try:
         r = subprocess.run([sys.executable, LIVENESS, "--state",
                             "--subject", subject, "--branch", branch],
                            capture_output=True, text=True, timeout=20)
-    except Exception:  # noqa: BLE001 — any failure is unknown, never a state
-        return None
+    except Exception:  # noqa: BLE001 — any failure is unreadable, never a state
+        return _guard_mod().STATE_UNREADABLE
     lines = (r.stdout or "").strip().splitlines()
     if r.returncode != 0 or not lines:
-        return None
-    return lines[0].split("\t", 1)[0] or None
+        return _guard_mod().STATE_UNREADABLE
+    return lines[0].split("\t", 1)[0] or _guard_mod().STATE_UNREADABLE
 
 
 def guard(pane_id, subject_state=None):
