@@ -1747,5 +1747,82 @@ class TestResume(Base):
         self.assertIn("no verified resumes", out)
 
 
+class TestEscalationCardCarriesADecision(Base):
+    """The escalation card asks a question; `ack` alone is not one.
+
+    The card used to carry `--option ack` and nothing else, so its only control
+    acknowledged the escalation and decided nothing. Measured 2026-11-13 over
+    2026W44: 488 cards from this producer carried the option set `('ack',)`, and
+    15 of the 17 the operator flagged that week were flagged `only ack is not
+    actionable` — the largest single misroute class in the first weekly reading.
+
+    These cases read the poster's ARGV rather than the posted card, because the
+    real poster reaches the operator's attention store from a unit test.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._run = il.subprocess.run
+        self.commands = []
+        self.incident = {
+            "dedup_key": "incident:%s:stall" % SESSION,
+            "session_id": SESSION,
+            "kind": "stall",
+            "owner": OWNER,
+            "opened_at": "2026-10-29T10:00:00Z",
+            "deadline": "2026-10-29T10:15:00Z",
+            "detected_by": "drive:unverifiable@r1",
+        }
+
+    def tearDown(self):
+        il.subprocess.run = self._run
+        super().tearDown()
+
+    def post(self):
+        def capture(command, **kwargs):
+            self.commands.append(command)
+            return _Run(returncode=0, stdout="ITEM_ID: %s\n" % CARD_ID)
+
+        il.subprocess.run = capture
+        return self._post_card(self.incident)
+
+    def argv(self):
+        self.post()
+        self.assertEqual(len(self.commands), 1, "one post, one command")
+        return self.commands[0]
+
+    def test_the_card_offers_two_options_and_a_recommendation(self):
+        argv = self.argv()
+        options = [argv[i + 1] for i, a in enumerate(argv) if a == "--option"]
+        self.assertEqual(
+            options,
+            list(il.CARD_OPTIONS),
+            "the card asks a question with a real choice, not an acknowledgement",
+        )
+        self.assertIn("--recommend", argv)
+        recommend = argv[argv.index("--recommend") + 1]
+        self.assertIn(
+            recommend, options, "a recommendation must name one of the options"
+        )
+
+    def test_ack_is_not_the_only_control(self):
+        """The regression itself: a card whose option set is `('ack',)`."""
+        argv = self.argv()
+        options = [argv[i + 1] for i, a in enumerate(argv) if a == "--option"]
+        self.assertNotIn("ack", [o.lower() for o in options])
+        self.assertGreaterEqual(len(options), 2, "a single option is not a choice")
+
+    def test_both_options_name_an_action(self):
+        for option in il.CARD_OPTIONS:
+            self.assertTrue(
+                option.strip(), "an empty label is not an action"
+            )
+            self.assertNotIn(
+                option.lower(),
+                ("ok", "ack", "acknowledge", "seen", "noted"),
+                "an acknowledgement is not a decision",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -705,6 +705,22 @@ def store_item_id(stdout):
     return ""
 
 
+#: The two answers the escalation card offers. **`ack` alone is not a question.**
+#: The card carried `--option ack` and nothing else, so its only control
+#: acknowledged the escalation and decided nothing. Measured 2026-11-13 over
+#: 2026W44: 488 of this producer's cards carried the option set `('ack',)`, and
+#: 15 of the 17 the operator flagged that week were flagged `only ack is not
+#: actionable` — the largest single misroute class in the first real weekly
+#: reading. Both options here are actions: `restart it` reopens the session,
+#: `not now` leaves the blocker open and counted, which is a decision about it
+#: rather than an acknowledgement of it. The same pair and the same
+#: recommendation as the sibling crashed-manager card
+#: (`scripts/crashed-managers.py` `CARD_OPTIONS`), so two escalation cards for
+#: one class of subject read alike.
+CARD_OPTIONS = ("restart it", "not now")
+CARD_RECOMMEND = "restart it"
+
+
 def post_card(incident):
     """Post the escalation card, keyed on the incident so a re-run cannot duplicate it.
 
@@ -741,9 +757,13 @@ def post_card(incident):
         "--context",
         "An answered-but-never-resumed blocker counts in the total and not as "
         "resolved. This card is the escalation, not a resolution.",
-        "--option",
-        "ack",
     ]
+    # ⚠️ Two options and a recommendation, never a bare `ack` — see CARD_OPTIONS.
+    # A card whose only control acknowledges it decides nothing, and the operator
+    # flagged 15 of them in 2026W44.
+    for option in CARD_OPTIONS:
+        command += ["--option", option]
+    command += ["--recommend", CARD_RECOMMEND]
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
         sys.stderr.write(
