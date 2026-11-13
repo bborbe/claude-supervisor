@@ -10,7 +10,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
-- Add a `check-task-link` CI gate that fails a PR whose body carries no `Task: <task_identifier>` line
+- ci: add a `check-task-link` gate that fails a PR whose body carries no `Task: <task_identifier>` line
 
 ## v0.308.1
 
