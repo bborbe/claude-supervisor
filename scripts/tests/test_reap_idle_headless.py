@@ -123,6 +123,24 @@ class TestHelperFilter(unittest.TestCase):
         for args in ("uvx mcp-obsidian", "npm exec @modelcontextprotocol/server-x"):
             self.assertTrue(reap.is_helper(args), args)
 
+    def test_the_language_server_is_a_helper(self):
+        """A bare `gopls` is Claude Code's LSP child, held for the session's lifetime."""
+        for args in ("gopls", "/Users/x/Documents/workspaces/go/bin/gopls"):
+            self.assertTrue(reap.is_helper(args), args)
+
+    def test_a_gopls_running_work_is_not_a_helper(self):
+        """The length test keeps agent-launched `gopls` a watcher: a worker that
+        backgrounds `gopls check ./...` and returns to idle is still working, and reaping
+        it would kill that work. The executable anchor keeps a `bash -c` wrapper a watcher
+        too, like every other arm."""
+        for args in (
+            "/bin/bash -c 'gopls -remote=auto'",
+            "sh -c 'gopls serve'",
+            "gopls check ./...",
+            "/Users/x/go/bin/gopls ** telemetry **",
+        ):
+            self.assertFalse(reap.is_helper(args), args)
+
 
 class TestTranscriptPath(unittest.TestCase):
     def test_both_slash_and_dot_munge_to_dash(self):
@@ -801,6 +819,40 @@ class TestScript(unittest.TestCase):
         done = self._run()
         self.assertEqual(done.stdout.splitlines()[0], "watcher-alive")
         self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_a_bare_gopls_child_does_not_refuse(self):
+        """A bare `gopls` is Claude Code's LSP child, held for the session's lifetime — not
+        work. A symlink named `gopls` reproduces the spawned shape exactly: no arguments,
+        executable basename `gopls`. Pre-change this read as a watcher and refused."""
+        bindir = tempfile.mkdtemp(prefix="reap-gopls-")
+        self.addCleanup(shutil.rmtree, bindir, True)
+        link = os.path.join(bindir, "gopls")
+        os.symlink("/usr/bin/yes", link)
+        # The session process is the `sh`; the `gopls` is its CHILD, which is the shape
+        # `watchers()` scans. `yes` spins forever writing to /dev/null, so the child stays
+        # alive exactly like the LSP child does, and its command line is the bare link path.
+        child = self._spawn(["/bin/sh", "-c", f"{link} > /dev/null"])
+        time.sleep(0.3)
+        pids = subprocess.run(
+            ["pgrep", "-P", str(child.pid)], capture_output=True, text=True
+        ).stdout.split()
+        # ⚠️ Without this the test passes on the UNFIXED build whenever the child is absent
+        # or late: `watchers()` would read `[]` and the session would close for the wrong
+        # reason. The fixture must prove it produced the shape under test.
+        self.assertTrue(pids, "no `gopls` child: the fixture did not build the shape")
+        for pid in pids:
+            self.addCleanup(
+                lambda p=pid: subprocess.run(["kill", "-9", p], capture_output=True)
+            )
+        entry = self._registry(child.pid)
+        self._transcript()
+        for pid in pids:
+            os.kill(int(pid), 0)  # raises if it died — the child must still be there
+        done = self._run()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn("watcher-alive", done.stdout.splitlines()[0])
+        self.assertEqual(child.wait(timeout=10), -signal.SIGTERM)
+        self.assertFalse(os.path.exists(entry), "the registry entry must be gone")
 
     def test_terminal_task_is_refused(self):
         """A finished task belongs to close-worker.py, not here."""
