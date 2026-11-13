@@ -1,0 +1,124 @@
+---
+# Read by the router, never invoked — without this key Claude Code
+# registers this file as /<plugin>:steps:<name>.
+user-invocable: false
+---
+
+# Fleet round tail
+
+When: every tick
+
+## The round's receipt — the mechanical check that the steps ran
+
+`commands/fleet-drive.md` is a router map: it names the steps and the condition under which each is read, and nothing verifies that any of them ran. A round can therefore arm its wakeup, take the readings and render exactly like a full one, while the digest was never written and nothing on the round's own tail said so.
+
+Measured 2026-10-30: the fleet round ran `manager-liveness.py --arm` twelve times across a window in which **no digest was written for 6h38m**, and no line of that round's output distinguished it from a complete one.
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --check --subject "Fleet Manager" --branch fleet
+```
+
+It prints `INCOMPLETE ROUND — skipped: <step> — <why>` for every field that does not resolve to an artifact produced **this round**, and exits **11**; a full round prints nothing and exits **0**.
+
+⚠️ **The line is positive on purpose.** The rounds measured on 2026-10-31 that skipped their digest had *already* dropped `Snapshot written` from their render, so an absence-based signal would have passed on exactly the rounds this exists to catch. Only a string that cannot exist at the pre-change revision discriminates — which is why the sentinel comes from the script rather than from a sentence a model is asked to remember.
+
+## The acting legs' verdict — the check item 14 names and nothing called
+
+`commands/steps/output-shape.md` item 14 names `scripts/fleet-legs.py --check` as *"the mechanical guard"* for the acting legs. Nothing invoked it — no router row, no leg, no tail — so the guard was correct and its verdict never reached a render, and a round whose legs never spoke still printed the sweep's seed `not run — no reading recorded this round` as if it were a reading.
+
+Measured 2026-11-07 on `~/.claude/state/fleet-handback/2026-11-06T23-46Z.digest`: its `LEGS` section still held the sweep's seed, carried no `unactioned:` line, and `--check` exited **1** naming all three keys. A correct verdict nobody read.
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --status --digest "<this round's digest>"
+```
+
+⚠️ **`--status` is the verdict the round copies; `--check` is the guard behind it.** Run `--status` here, capture its one line and its exit code, and carry both to the `Legs` render at row 20 — the render prints that line **verbatim**, because a verdict a model paraphrases is a verdict it can soften, and a softened verdict is how a failed round reads as a clean one. `--check` remains the mechanical guard and is what the shape item's exit-code branch describes; `--status` is the same computation in one copyable string.
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/fleet-legs.py" --check --digest "<this round's digest>" 2>&1
+```
+
+⚠️ **A round whose verdict is `legs: INCOMPLETE` is a FAILED round, not a quiet one.** The operator's ruling is that the flagged check runs every round and that a skipped check is a defect. So an `INCOMPLETE` verdict must reach the round's own closer — the line that names the next tick — not only the `Legs` block. A round that prints `legs: INCOMPLETE` and then closes as if it had done its work has replaced one silence with another, which is the failure this whole section exists to end.
+
+⚠️ **Still never a brake on the arm.** Failing the round in its render and re-arming are not in tension: `fleet-keeper.py` resumes a lapsed round, so a refused arm becomes a crash loop rather than a recovery. The verdict is loud, the arm proceeds, and the next round is the one that can fix it.
+
+⚠️ **Run it here and carry the exit code to the `Legs` render at row 20.** This section owns the call and the branch; `commands/steps/output-shape.md` item 14 owns what each exit code renders and every format string — read it there and never restate it here.
+
+⚠️ **Branch on the exit code, never on the output — and capture stderr.** Every `--check` message is written to stderr while only `legs ok: …` goes to stdout, so a read that captures stdout alone hands item 14 an empty `<reason>`.
+
+⚠️ **Run it before the output-shape row**, for the same reason the receipt check runs here: a verdict discovered after the render cannot reach the block the operator reads. Like that check it is a report, not a brake — it never blocks the arm.
+
+⚠️ **What it does not catch.** A hand-typed count passes, and so does a leg-authored `not run — <reason>` written without the leg running; of the lines that are present, only the sweep's seed reads as unspoken. Nor can it tell this round's digest from a stale one — a round that passes a previous round's path, whose keys are all recorded, reads green while its own legs never spoke. The check proves a digest *carries a reading*, never that the reading is this round's or true.
+
+## The debt — what makes the verdict outlive its round
+
+The sentinel reports on the round that printed it, and it dies with that round: `--start` clears `fields`, so one round later nothing records that a step was skipped. Measured 2026-10-31: **five of twelve** post-deploy rounds armed and never wrote a digest. One printed the line (11:50); four never ran this check at all (10:42, 11:00, 13:11, 13:27); and the 13:27 round rendered a whole-round closer ending `⏰ Next: the 13:43 fleet round` with no digest behind it. The evidence was gone by the next round in every case.
+
+So `--check` also writes the skipped steps to `<slug>.debt` beside the receipt, and **`--start` deliberately does not touch that file**:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-receipt.py" --debt --subject "Fleet Manager" --branch fleet
+```
+
+It prints `debt: <step>` per open step and exits **12** while any step is owed, **0** when clear. ⚠️ **It also exits 2, and that is a third state — not a clear one.** `--debt` returns 2 when it cannot read the debt file or cannot write the verdict (`debt()`, `scripts/manager-receipt.py`), and it prints **nothing to stdout** in that case, only a reason to stderr. The `--debt && <leg>` chain fail-closes either way, but the render must not: see `commands/steps/output-shape.md` item 13, which branches on the exit code rather than on empty output for exactly this reason. The three non-sweep legs chain it — `--debt && <leg>` in `commands/steps/drive.md` and `commands/steps/flagged-open.md`, and `--debt --only re-arm && <leg>` in `commands/steps/keepalive.md` — so a round that owes a sweep cannot spend itself on the drive or flagged-open legs instead. ⚠️ **The keepalive leg is scoped to `re-arm` on purpose:** its procedures never read the digest, and gated on the whole round it was skipped whenever the sweep reader was still in flight (2 of 25 gate calls, measured 2026-11-05; rationale in `keepalive.md`). `--only` scopes the exit code, never the record, so this check still sees the full debt. The debt is rewritten on every evaluation, so a round that does its work pays it simply by passing.
+
+⚠️ **`--debt` RE-EVALUATES the round in progress; it is not a read of the file alone.** This is load-bearing and it was a defect in the first cut. The gate sits at router rows 5 / 5b / 5c and the tail's `--check` at row 19, so a file-only read judges every round on the *previous* round's verdict: a round that had already swept would still be blocked by a debt it had paid, and the round that actually skipped would never be blocked at all — the exact inversion of what the gate is for. `--debt` therefore recomputes the skip set from the current receipt and the `.arms` ring (the same `_skips()` `--check` uses), rewrites the file with it, and only falls back to reading the file when the round cannot be judged at all — no receipt, or its window lapsed. Two consequences worth naming: a round that skips is blocked **on its own receipt**, which is the prevention; and a round that runs its legs but never its tail still records its own skip, because the gate is a writer too.
+
+⚠️ **Exit 12 means "skip this leg", never "end the round".** A round that stopped at a gate would not wedge anything — `--debt` and this check both rewrite the debt, so the next round that does its work pays it by passing. What it loses is the **verdict**: the gate prints `debt: <step>` and `output-shape.md` item 13 renders those lines, so the step names do reach the operator — but only this check names *why* each step was skipped, and only the full output shape puts that beside the round's own report. Ending the round early leaves the reason unrecorded.
+
+`--abandon --step <step>` is the single recovery verb: it removes one step from the debt, records it timestamped in `<slug>.abandoned`, and prints `abandoned <slug> <step>`. `check()` honours a payment only inside the round's own window, bounded at both ends, so neither an old abandonment nor a clock-jumped one can excuse the step. Use it when the round genuinely will not do that step.
+
+⚠️ **Never block the arm instead.** `fleet-keeper.py` (launchd, `StartInterval` 60 s) reads the digest ledger and resumes a round it sees as lapsed, so a refused arm becomes a crash loop rather than a recovery. The guard sits where the round *reads*, not where it arms.
+
+⚠️ **`--branch fleet` is load-bearing, not decoration.** The fleet round writes its liveness under `fleet--fleet-manager` (the slug `manager-liveness.py` builds from `--branch fleet`); a receipt keyed on the bare `fleet-manager` reads a file the arm step never wrote, so every round would report `skipped: re-arm` whether or not it armed. The same flag is what makes `--start` / `--record` write the receipt this check reads — a round that records under one slug and checks under another reports `skipped: receipt`.
+
+⚠️ **The fleet tier owes two steps, not the goal tier's four:** `re-arm` (an arm epoch **inside** the round window, read from the `.arms` ring — the file's existence proves nothing, since a ring survives from earlier rounds and `manager-liveness.py:345` empties it at the first arm after a stand-down) and `digest` (the sweep reader's rendered payload, identified by its own `DIGEST … sessions … snapshot written:` opening line). A missing digest is reported as `skipped: digest`, never folded into `skipped: sweep`.
+
+⚠️ **Surface every `skipped:` line in this tick's render, and re-arm regardless of the verdict.** An exit code nobody reads is the failure this check exists to end: a round that printed `skipped: digest` into a Bash result and then rendered a complete-looking table has replaced one silence with another. The tail runs **before** the output-shape row for exactly that reason — a skip discovered after the render cannot reach the block the operator reads.
+
+⚠️ **Re-arm regardless.** The verdict is a report, not a brake: a round that skips a step still arms the next one, so the fleet is not left unwatched by the very check that found the gap.
+
+⚠️ **Run it at the tail, against the round that just ran.** The check reads the receipt `--start` opened this round, so running it before the round's own steps have run reports the round as empty — correctly, and unhelpfully.
+
+⚠️ **What this check catches, stated exactly — because a check that over-claims is worse than one that says where it stops.**
+
+- **Catches: a round that opened its receipt and skipped a step.** The arm missing → `skipped: re-arm`; the digest missing → `skipped: digest`. That is the measured 2026-10-30 shape and the reason this row exists.
+- **Catches: a round whose receipt is older than its own window** — reported as `skipped: receipt`, because `--check` refuses a round that started more than `observed_period() + SLACK` ago (`period + 180`, or the declared interval plus the same `SLACK` before four arms exist).
+- **Catches, one round late: a skipped step that nothing read.** `<slug>.debt` is a file, not a render, so `--debt` fires on a round that never ran this check — the 13:11 and 13:27 shape — and on every round after it until the step is done or abandoned. It does not require this tail to have run, which is the property a printed line cannot have.
+- **Does NOT catch: a round that skips a step and reaches neither this check nor a gated leg.** The debt is written by `check()` **and by `--debt`**, so a round that runs any of the three gated legs records its own skip even when it never reaches the tail. The call sites that write it are **six**: this check (row 19), the three gated legs (rows 5 / 5b / 5c), the `--debt` call inside `output-shape.md` item 13 (row 20), and `--abandon`. Item 13 runs on every tick, so a round that skips its sweep but still renders its output records its own skip there. A round that makes *none* of those six calls — no gated leg, no render, no tail, no abandon — records nothing of its own, and `--debt` fires on the round after it only when an *earlier* evaluation left the debt open. Read the two halves separately: the **read** never depended on the tail having run, and the **write** now needs only one of six calls rather than the one at the end. That residual is why the arm is never blocked and why `fleet-digest.py --check` still exists — the debt carries a skip that was seen, it does not manufacture one that nothing looked at.
+- **Does NOT catch: a round that skipped `--start` itself.** The previous round's `round_started_at` and `fields` survive, the new arm and digest are recorded into that stale receipt, and both predicates resolve against the *previous* window — so one such round can read green. It is bounded: the stale window lapses within `period + 180` (≈18 min at a 15-minute cadence), so at most one round is masked before `skipped: receipt` starts firing. Closing it needs a witness outside the receipt — a per-round id compared against the `.arms` ring — and a wrong guess there produces a false red on a healthy round, which is the failure this whole check exists to prevent. Named here rather than fixed blind.
+- **Does NOT catch: a round that never ran at all** — a hand-assembled substitute never reads this router table, so no tail row fires. That shape is `scripts/fleet-digest.py --check`'s job: it ages the newest digest independently of any round, and re-fires while the age keeps rising (`scripts/fleet-digest.py` § `--check`). Neither check substitutes for the other.
+
+## The closing liveness beat — so a round that outruns its limit never ends reading `STALE`
+
+The head arm in `commands/steps/re-arm.md` is the round's only liveness write, so a round long enough that its tail sits past `period + SLACK` reaches its own end with the record already aged past the limit — a live, working manager reading `STALE` to every session that checks `--state` mid-round. This section writes the round's second beat.
+
+⚠️ **After the receipt `--check` above, never before it.** That check is what proves the round ran its legs; a beat written ahead of it would make a skipped leg invisible. Like every check on this page it is a report, not a brake: the arm runs on `--debt` exit `0`, `12` and `2` alike.
+
+⚠️ **`--beat tail` is load-bearing, not cosmetic.** `observed_period()` is a p90 capped at 2.5× the median, so two *unmarked* beats in one round make the gap population `[D, I−D]`, the median collapses to the smaller gap, and the cap lands below the round-to-round gap — a false `STALE` on every quiet round. `observed_period()` therefore counts **head beats only**, and the marker is the only honest discriminator: a tail sits wherever the round happened to end, so gap size cannot tell the two apart. **Do not drop the marker.**
+
+⚠️ **This beat does not pay the `re-arm` step.** `manager-receipt.py`'s `rearm_shape` counts **head beats only**, so a round that skipped its head arm still reports `skipped: re-arm` after this tail runs — the closing beat cannot clear that debt. That is deliberate: the debt exists to catch a round that never armed, and a closing beat is not an opening one.
+
+⚠️ **This is the fleet round's only CONDITIONAL arm, and it is why there is no allow-list to copy.** The head arm arms unconditionally and reads no state at all, so the tail reads `--state` itself. Only `OK`, `STALE`, `UNARMED` and `INVALID` arm. `STOPPED`, `SLEEPING`, `WRONG-BRANCH` and an empty reading do not — `arm()` removes `<slug>.sleeping` unconditionally (`scripts/manager-liveness.py` § `arm`, `:1076`), so an unguarded tail arm would wake a date-gated subject mid-round. A `.stopped` subject needs no guard here: `arm()` never touches that marker (`:1002`) and only `--resume` clears it (`:1067`).
+
+⚠️ **Never `--resume`.** That verb is the explicit "this subject is being restarted" signal; a liveness record is not a restart, and passing it would clear a stand-down marker a deliberate stop wrote.
+
+⚠️ **`--interval` is required, and it is the head's clamped value.** `--arm` errors with `--arm needs --interval > 0` (`scripts/manager-liveness.py:1463`), so the tail passes the same clamped seconds `re-arm.md` passed at the head. Omit it and the step fails on every round.
+
+```bash
+STATE="$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-liveness.py" --state --subject "Fleet Manager" --branch fleet 2>/dev/null | cut -f1)"
+case "$STATE" in
+OK|STALE|UNARMED|INVALID)
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-liveness.py" --arm --subject "Fleet Manager" --branch fleet --interval "<clamped-seconds>" --beat tail
+;;
+*)
+echo "tail beat skipped: state=${STATE:-none}"
+;;
+esac
+```
+
+⚠️ **Keep the arm on one line, starting at column 0 with `python3`.** The block above is written that way deliberately: the invocation stays greppable as a single match, and a backslash continuation puts the beat flag on the next line, where a reader looking for the arm will not see it.
+
+⚠️ **Two arms per round halve the ring's round history.** `ARMS_KEEP = 12` (`:200`) covers six rounds instead of twelve, so `observed_period()`'s p90 runs over five head gaps rather than eleven. That still clears the ≥4-head / ≥3-span floor (`:498–503`), so the period keeps resolving — a consequence to know, not a defect to fix.
+
+⚠️ **This beat does not shorten a round.** A round longer than the limit still reads `STALE` for its duration; what the tail fixes is the reading **after** it, and the wait that follows, because the clock restarts at the round's end. A mid-round beat would shorten the gap instead — that is a different change and is not made here.

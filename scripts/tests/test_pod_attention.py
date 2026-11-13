@@ -208,10 +208,64 @@ class RenderPollTest(unittest.TestCase):
         pod.render_poll(item(state="answered", decision="allow"), out)
         self.assertTrue(out.getvalue().startswith("NOT_OPERATOR_ANSWERED:"))
 
-    def test_a_message_item_with_no_answer_reads_as_open(self):
+    def test_a_live_message_item_with_no_answer_reads_as_open(self):
+        # The positive control for the `state == "open"` guard: a non-permission
+        # card that is still waiting must keep printing OPEN. ⚠️ A `permission`
+        # gate is NOT a control for this branch — it is answered by the branch
+        # above, so it prints OPEN on a broken arm too.
         out = io.StringIO()
-        pod.render_poll(item(answer_mechanism="message"), out)
+        pod.render_poll(item(answer_mechanism="message", state="open"), out)
         self.assertEqual(out.getvalue().strip(), "OPEN")
+
+    def test_a_reaped_message_close_does_not_read_as_open(self):
+        # ⚠️ The dominant closed shape in the live store: `closed` with no
+        # `answered_at` and no `answered_by`. It classifies as NOTHING and renders
+        # no content, so the un-keyed branch printed OPEN for it — making a reaped
+        # message card read exactly like a live gate. Measured 2026-11-02 on the
+        # deployed 0.227.3 arm. NOT_OPERATOR_ANSWERED is the terminal it reaches
+        # now. ⚠️ It is NOT distinguished from an acknowledgement here — see
+        # test_an_acknowledgement_close_is_indistinguishable_from_a_reap.
+        out = io.StringIO()
+        pod.render_poll(item(answer_mechanism="message", state="closed"), out)
+        self.assertEqual(
+            out.getvalue().strip(),
+            "NOT_OPERATOR_ANSWERED: (no answer content recorded; item is closed)",
+        )
+
+    def test_an_acknowledgement_close_is_indistinguishable_from_a_reap(self):
+        # ⚠️ Pins a LIMITATION, so the comment above cannot drift back into
+        # claiming a distinction this arm does not provide. An acknowledgement is
+        # `closed` + `answered_by` with no `answered_at`; `answered-attribution`
+        # classifies it UNATTRIBUTED (a close is a clear, not an answer), and
+        # `render_poll` prints no `ANSWERED_BY:` line, so it renders byte-identical
+        # to an actor-less reap. `attention-ask.py`'s `cmd_poll` keeps the two
+        # apart with `ANSWERED_BY:`; this arm does not. Asserting equality is the
+        # point — if someone later adds that line, this test is what tells them
+        # the comment needs updating too.
+        reap, ack = io.StringIO(), io.StringIO()
+        pod.render_poll(item(answer_mechanism="message", state="closed"), reap)
+        pod.render_poll(
+            item(answer_mechanism="message", state="closed", answered_by="someone"), ack
+        )
+        self.assertEqual(reap.getvalue(), ack.getvalue())
+        self.assertTrue(ack.getvalue().startswith("NOT_OPERATOR_ANSWERED:"))
+        self.assertNotIn("ANSWERED_BY:", ack.getvalue())
+
+    def test_a_reaped_ack_close_does_not_read_as_open(self):
+        # The second non-permission class that reaches the branch — `ack` cards
+        # reap the same way, so the guard has to cover it too.
+        out = io.StringIO()
+        pod.render_poll(item(answer_mechanism="ack", state="closed"), out)
+        self.assertTrue(out.getvalue().startswith("NOT_OPERATOR_ANSWERED:"))
+        self.assertNotIn("OPEN", out.getvalue())
+
+    def test_a_message_item_with_no_readable_state_does_not_read_as_open(self):
+        # Failing closed: a record whose `state` is unreadable is not claimed as
+        # open either, because OPEN asserts the gate is still waiting.
+        out = io.StringIO()
+        pod.render_poll(item(answer_mechanism="message", state=None), out)
+        self.assertTrue(out.getvalue().startswith("NOT_OPERATOR_ANSWERED:"))
+        self.assertNotIn("OPEN", out.getvalue())
 
 
 class AskTest(unittest.TestCase):
@@ -429,7 +483,7 @@ class WireContractTest(unittest.TestCase):
     # is quotable. Verified against the source on 2026-10-06:
     # `OwnerLivenessModel LivenessModel = "owner"` (`pkg/liveness-ref.go:39`),
     # carried by `AvailableLivenessModels` (`:46-49`).
-    STORE_PRODUCER_KINDS = ("session", "agent", "cron", "dark-factory")
+    STORE_PRODUCER_KINDS = ("session", "manager", "agent", "cron", "dark-factory")
     STORE_LIVENESS_MODELS = ("session", "heartbeat", "owner")
 
     def _posted(self, command="ask"):

@@ -84,25 +84,21 @@ def strip_glyphs(text):
     return " ".join(_GLYPHS.sub(" ", text or "").split()).strip().lower()
 
 
-def wezterm_panes():
-    """`pane id -> wezterm record`, or `None` when the query failed.
+# The pane read is the sibling's, imported rather than copied — the same argument the
+# `guard` import above makes. `who-needs-me.py` owns the budget (120 s, one 30 s retry,
+# derived from the measured 0.05–88.78 s distribution) and the slow-vs-dead failure kind;
+# a second copy is exactly what drifts, and the previous copy's comment claimed this file
+# "imports no sibling" while `guard` sat thirty lines above it. Only the sentence's
+# subject differs between callers, and that is a parameter.
+wnm = _load("who_needs_me", "who-needs-me.py")
 
-    `None` is a distinct answer from `{}`: a failed `wezterm cli list` cannot prove a pane
-    is gone, so no caller may read it as "no panes exist". Same convention as the
-    sibling's own `wezterm_panes()`, and the reason this file returns `None` rather than
-    an empty map on every transport failure.
-    """
-    try:
-        result = subprocess.run(["wezterm", "cli", "list", "--format", "json"],
-                                capture_output=True, text=True, timeout=5)
-    except Exception:
-        return None
-    if result.returncode != 0:
-        return None
-    try:
-        return {str(p["pane_id"]): p for p in json.loads(result.stdout)}
-    except (ValueError, KeyError, TypeError):
-        return None
+
+def pane_read_refusal():
+    """This sweep's wording of the shared refusal; the failure kind comes from the sibling."""
+    return wnm.pane_read_refusal(
+        subject="manager pane can be proven footer-free",
+        consequence="print a sweep that would read as a clean fleet",
+    )
 
 
 def pane_lines(pane_id):
@@ -153,7 +149,7 @@ def manager_panes():
     than sweep an empty set, because an empty sweep and a broken mux socket are the same
     render and only one of them is a clean bill.
     """
-    panes = wezterm_panes()
+    panes = wnm.wezterm_panes()
     if panes is None:
         return None
     topics, goals = guard.vault_page_names()
@@ -258,9 +254,7 @@ def main(argv=None):
 
     rows, unreadable = sweep()
     if rows is None:
-        print("WezTerm pane list unreadable — the mux socket is not answering, so no "
-              "manager pane can be proven footer-free. Refusing to print a sweep that "
-              "would read as a clean fleet.", file=sys.stderr)
+        print(pane_read_refusal(), file=sys.stderr)
         return 1
 
     with_footer = [r for r in rows if r["footer"] is True]

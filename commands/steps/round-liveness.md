@@ -1,0 +1,70 @@
+---
+# Read by the router, never invoked — without this key Claude Code
+# registers this file as /<plugin>:steps:<name>.
+user-invocable: false
+---
+
+# Liveness record
+
+When: every round, before the pre-dispatch gate
+
+- **Write the liveness record every round, and before anything can stop the round.** `manager-liveness.py --arm` writes the `<slug>.arms` cadence that `--state` classifies and that `answer-path-check.py` gates a headless spawn on. A round that skips it leaves a live manager reading `STALE` one period later, and the fleet sweep then reports a healthy manager as lapsed. This step is that write.
+
+  ⚠️ **It runs BEFORE the pre-dispatch gate.** A no-change by-hand round stops at that gate (`commands/goal-drive.md` § Pre-dispatch gate, exit 0) and never reaches the router's later steps — so a record placed after the gate is absent on exactly the rounds that most often go stale. That is the gap this step closes; do not move it below the gate.
+
+  ⚠️ **The record is the ROUND's; the goal loop's wakeup arm is gone.** `commands/goal-loop.md` § step 3 no longer arms a `ScheduleWakeup` — the detached sweep gate is the goal tier's sole wake source — and `commands/goal-drive.md` opens with *"This is the round, not the arm."* This step writes the liveness **record** every round: a different file from the wakeup the **topic** and **fleet** tiers still arm, and never a wakeup itself — two files, two jobs. Reading the one-shot rule as covering the record is what left the record unwritten.
+
+  ⚠️ **Skip a stood-down or sleeping manager.** `--arm` **clears** the `<slug>.sleeping` marker (`scripts/manager-liveness.py`), so arming a sleeping subject silently un-sleeps it — handing `topic-keepalive.py` a live cadence to keep. Read `--state` first and arm only when it is neither `STOPPED` nor `SLEEPING`. ⚠️ **A stand-down is no longer cleared by an arm, and this step is why:** an arm runs at every round, so it is the liveness *reading*; a reading that cleared the marker destroyed the evidence that would have prevented the wrong action (measured 2026-11-07 — stood down 12:13, read 12:51, marker gone, Fleet Manager read `STALE` and restarted at 13:14). Only `--arm --resume` resumes, and only the loop-start arms (`goal-loop` / `topic-loop` / `fleet-loop`) pass it. ⚠️ **Never pass `--resume` from this step** — it is the round's reading, not a restart. ⚠️ **The sleep is the case that bites without a warning:** a date-gated subject is SUPPOSED to have an ageing cadence, so the arm looks like the ordinary every-round write and quietly cancels the sleep the same round just armed.
+
+  ⚠️ **`--interval` is required and must be > 0** — `manager-liveness.py` hard-errors otherwise (`--arm needs --interval > 0`), and neither round command otherwise reads it. Take the seconds the wakeup prompt carried, clamped exactly as the arm clamps it (default **15 min**, floor **5 min**), and pass **bare seconds** (`900`), never `15m` or `900s`. A by-hand round whose prompt carries no interval uses the default.
+
+  ⚠️ **`--branch` is explicit, never auto-detected here.** `goal` from `commands/goal-drive.md`, `topic` from `commands/topic-drive.md`. Omitting it falls back to auto-detection, which keeps a subject in whichever namespace its existing record or page happens to match — the one place an explicit tier is cheaper than a correct guess.
+
+  ```bash
+  PLUGIN=${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}
+  STATE=$(python3 "$PLUGIN/scripts/manager-liveness.py" --state --subject "<subject>" --branch "<goal|topic>" --vault "<vault-root>" | awk '{print $1}')
+  case "$STATE" in
+    OK|STALE|UNARMED|INVALID) python3 "$PLUGIN/scripts/manager-liveness.py" --arm --subject "<subject>" --branch "<goal|topic>" --interval "<clamped-seconds>" ;;
+    STOPPED) echo "liveness: STOPPED — no arm (deliberately stood down)" ;;
+    SLEEPING) echo "liveness: SLEEPING — no arm (date-gated; the wake ends it)" ;;
+    *) echo "liveness: ${STATE:-refused (subject unresolvable — see stderr)} — no arm" ;;
+  esac
+  ```
+
+  ⚠️ **Arm on an allow-list, never on a fallback.** Only `OK` / `STALE` / `UNARMED` / `INVALID` arm; every other answer — `STOPPED`, `SLEEPING`, `WRONG-BRANCH`, and an **empty** `STATE` — does not. `--state` prints its verdict as the first field and **exits 0 for every state**, but it **exits 3 with nothing on stdout** when the subject resolves neither a record under any branch nor a page under `--vault` (an abbreviated or mistyped name), so `STATE` comes back empty. `WRONG-BRANCH` means the record lives on another tier. Both are misreads of the subject, and arming on a misread re-arms the wrong record — a live loop's cadence history reset, or a stand-down reversed. The previous `*) --arm` fallback did exactly that for any word it did not name; `scripts/tests/test_round_liveness_step.py` pins this block.
+
+  ⚠️ **`--vault` is the vault ROOT**, the same value the round's other scripts take; it is what lets `--state` resolve a subject that has no record yet.
+
+- **Emit the two answer reaches, every round, beside the liveness write.** The `mcp` and `wrapper` reaches are what `scripts/answer-path-check.py` reads instead of trusting an armed loop (measured 2026-11-09: spawner `0110c4a3` read exit 0 while its 27 workers' parks were released 56 times by the store and never by it). They **age out**, so they belong in the ROUND, not the one-shot arm: a manager that writes them once at loop start has a `wrapper` leg that expires one period later.
+
+  ⚠️ **This is the goal and topic tiers' half of a contract the fleet round writes in `commands/steps/re-arm.md`.** All three tiers can open headless workers and all three answer parks, so all three must refresh. The fleet round does it per tick in its own step; this one covers `commands/goal-drive.md` and `commands/topic-drive.md`, which run this step every round. A tier that emitted neither would have its headless spawns refused once the probe's verdict flips onto the reaches.
+
+  **Leg `mcp` is ONE tool call, and it must actually be made.** `answer_permission` with a sentinel `agent_id` and `request_id`, neither of which names a worker. The server finds no such agent, consults the wrapper, and replies `unknown session` (a sentinel request id against a real agent would reply with the foreign-park message instead — either reply is fine). The handler records the reach **on entry**, so any `answer_permission` call writes this leg — but a manager that answers no parks writes nothing, which is why this call is still required.
+
+  ```
+  mcp__supervisor__answer_permission(agent_id="answer-path-reach-sentinel", request_id="answer-path-reach-sentinel", behavior="deny")
+  ```
+
+  ⚠️ **On the current server, any `answer_permission` call writes this leg — but a manager that answers no parks writes nothing, so the call is still required.** The Go handler records the reach **on entry**, before decoding arguments or looking the request id up (`claude-wrapper/pkg/roster_mcp.go` `answerPermission`). ⚠️ **An earlier version of this paragraph said the opposite** — that real parks settle on another arm and never write the leg. That was true of the retired JS `server/supervisor.mjs` and is false here; it was carried over by mistake.
+
+  **Leg `wrapper` is automatic — do nothing.** `manager-liveness.py --arm` emits it: the arm POSTs to the wrapper's answer route with a sentinel request id and records the reach only when the reply is `404` or `409`. ⚠️ **There is no separate curl or recorder call to run**, and adding one back is how this leg went unemitted for days (4 fresh `mcp` reaches against 1 fresh `wrapper` reach, measured 2026-11-13).
+
+  ⚠️ **`SUPERVISOR_WRAPPER_URL` must be an ORIGIN, with no path.** `server/config.mjs` resolves it to `url.origin`, so a value carrying a path would have the server call `/api/1.0/...` while this curl posts to `<path>/api/1.0/...` — a route-level `404`, which the recorder accepts as a valid reach and which would therefore certify a route that was never reached.
+
+  ⚠️ **`409` or `404` are the only statuses the recorder accepts**, and the only ones that mean the request arrived and was refused harmlessly. Any other status writes nothing and says why: a `5xx`, an unreachable wrapper, or a command the classifier denied all leave this session with **no** wrapper reach. **Do not retry a refused curl into a passing status** — the refusal is the finding.
+
+## A second beat at the tail
+
+**Run the `case "$STATE"` allow-list block above a second time — that block, not the curl block below it — as the tick's last write**, from `commands/steps/round-tail.md` step 9. The head arm is what keeps a by-hand round that stops at the pre-dispatch gate from going unrecorded; this second run is what stops a round that outruns `period + SLACK` from reaching its own end already reading `STALE` — the reading that made a live, working manager look lapsed to every session checking `--state` mid-round.
+
+⚠️ **After `commands/steps/round-tail.md` step 8's receipt check, never before it.** That check is what proves the round ran its legs; a beat written ahead of it would make a skipped leg invisible.
+
+⚠️ **Same allow-list, same arguments, `--beat tail`, never `--resume`.** Only `OK` / `STALE` / `UNARMED` / `INVALID` arm; `STOPPED`, `SLEEPING`, `WRONG-BRANCH` and an empty `STATE` do not. A `SLEEPING` subject is the one that bites: a date-gated manager is *supposed* to have an ageing cadence, so an unconditional arm looks like the ordinary write and silently cancels the sleep the round just armed.
+
+⚠️ **It is a liveness RECORD, not the `ScheduleWakeup` arm.** `commands/steps/round-tail.md` step 7 says *"do not re-arm here"*, and that is the **wakeup**, one-shot per call. The paragraph above already separates the two (*"two files, two jobs"*).
+
+⚠️ **It is a ninth item in `commands/steps/round-tail.md`, not a line in this file.** That placement is deliberate: a mandatory tail action stated only here, at the head, has to survive a whole round in the reader's memory while the file it is actually following at the tail says nothing — which is the "a round that skips a step reads as complete" failure this beat exists to prevent. The cost is that `round-tail.md` now carries 31626 bytes against its 30720 body budget, and `scripts/budget-baseline.json` records that size. ⚠️ **That entry is a ratchet, not an allowance:** `scripts/check-budget.py` fails when the file grows past it, so any further addition to `round-tail.md` needs its own justification, not this one.
+
+⚠️ **`--beat tail` is load-bearing, and the reason is a defect this change had to fix.** `observed_period()` is a **p90 capped at 2.5× the median**. With a second beat the gap population becomes `[D, I−D]`, so the **median collapses to the smaller gap** and the cap lands *below* the round-to-round gap it has to cover. Measured on a 900 s interval with 120 s rounds: median 120, cap 300, p90 780 → period 300, limit 480, against a 900 s gap — a false `STALE` on every quiet round, which is the exact failure the tail beat exists to remove. `observed_period()` therefore counts **head beats only**; a tail beat's gap is intra-round and never enters the population. **Do not drop the marker**, and do not re-derive the period from all arms.
+
+⚠️ **A round longer than the limit still reads `STALE` during it** — only the post-round reading is fixed. A mid-round beat would shorten the gap instead; that is a different change and is not made here.

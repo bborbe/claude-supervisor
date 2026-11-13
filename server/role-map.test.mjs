@@ -15,8 +15,9 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
-import { resolveRole, ROLES, DEFAULT_ROLE } from './role-map.mjs'
+import { resolveRole, ROLES, DEFAULT_ROLE, vaultFamily, familyChip, chipForRole } from './role-map.mjs'
 
 // The live map's exact shape, read off ~/.cache/wezterm-role-map.json — including the
 // fact that the ids are numbers and that `Hold` carries a null chip.
@@ -124,4 +125,78 @@ test('a null chip does not by itself invalidate a resolution', () => {
   assert.equal(r.resolved, true)
   assert.equal(r.windowId, 0)
   assert.equal(r.chip, null)
+})
+
+// A HUMAN session's chip follows the vault family, and nothing else does. The operator's
+// convention is green = Seibert, cyan = private; colour is the only at-a-glance cue for which
+// employer a tab belongs to, so a Seibert tab coming up cyan reads as a private one.
+
+test('the vault family is the prefix before the first hyphen', () => {
+  assert.equal(vaultFamily('seibert-brogrammers'), 'seibert')
+  assert.equal(vaultFamily('private-personal'), 'private')
+  assert.equal(vaultFamily('assistant-data'), 'assistant')
+  assert.equal(vaultFamily('solo'), 'solo')
+  for (const absent of [undefined, null, '', '   ', 42]) {
+    assert.equal(vaultFamily(absent), null)
+  }
+})
+
+test('a seibert vault is green and a private vault is cyan', () => {
+  assert.equal(familyChip({ vault: 'seibert-brogrammers', fallback: 'cyan' }), 'green')
+  assert.equal(familyChip({ vault: 'private-personal', fallback: 'cyan' }), 'cyan')
+})
+
+test('an unlisted family keeps the fallback rather than picking a colour', () => {
+  // `assistant-*` vaults exist; the operator's convention covers only seibert and private.
+  assert.equal(familyChip({ vault: 'assistant-brogrammers', fallback: 'cyan' }), 'cyan')
+  assert.equal(familyChip({ vault: 'assistant-personal', fallback: 'orange' }), 'orange')
+  assert.equal(familyChip({ vault: undefined, fallback: 'cyan' }), 'cyan')
+  assert.equal(familyChip({}), null)
+})
+
+test('the spawn path feeds chipForRole the RESOLVED vault', () => {
+  // The failure this guards: passing the raw `vault` argument instead of `workerTarget.vault`
+  // restores the defect on every cwd-only spawn — where `vault` is undefined — while every
+  // pure-helper test above still passes. Same source-shape assertion `manager-cap.test.mjs` uses.
+  const source = readFileSync(new URL('./supervisor.mjs', import.meta.url), 'utf8')
+  assert.match(source, /chipForRole\(\{ resolution: roleResolution, vault: workerTarget\.vault \}\)/)
+})
+
+test('a family named after an Object.prototype member still falls back', () => {
+  // A bare `FAMILY_CHIPS[family]` lookup walks the prototype chain, so `constructor` would
+  // return a function — which then reaches the pane as a `/color …` argument.
+  for (const inherited of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__']) {
+    assert.equal(familyChip({ vault: `${inherited}-brogrammers`, fallback: 'cyan' }), 'cyan', inherited)
+  }
+})
+
+test('all six role × family combinations resolve as specified', () => {
+  // `chipForRole` is the function the spawn path calls, so this asserts the same composition a
+  // real spawn runs rather than a re-derivation that could drift from it.
+  const cases = [
+    ['manager', 'seibert-brogrammers', 'orange'],
+    ['manager', 'private-personal', 'orange'],
+    ['agent', 'seibert-brogrammers', 'pink'],
+    ['agent', 'private-personal', 'pink'],
+    ['human', 'seibert-brogrammers', 'green'],
+    ['human', 'private-personal', 'cyan'],
+  ]
+  for (const [role, vault, expected] of cases) {
+    const resolution = resolveRole({ role, map: MAP })
+    assert.equal(chipForRole({ resolution, vault }), expected, `${role} in ${vault}`)
+  }
+})
+
+test('a human chip falls back to the map when the vault family is unknown', () => {
+  const resolution = resolveRole({ role: 'human', map: MAP })
+  assert.equal(chipForRole({ resolution, vault: 'assistant-personal' }), 'cyan')
+  assert.equal(chipForRole({ resolution, vault: undefined }), 'cyan')
+})
+
+test('a degraded resolution is passed through, never given a family chip', () => {
+  // A headless spawn has no window and no usable map: the family must not invent a colour.
+  const resolution = resolveRole({ role: 'human', map: null })
+  assert.equal(resolution.resolved, false)
+  assert.equal(chipForRole({ resolution, vault: 'seibert-brogrammers' }), null)
+  assert.equal(chipForRole({}), null)
 })

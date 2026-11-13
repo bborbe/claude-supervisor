@@ -2,9 +2,10 @@
 """The topic tier's spawn gate: may THIS topic start a goal manager right now?
 
 `topic-spawn` is the one verb a topic manager owns that starts a session, and it starts
-**exactly one level below itself** — a goal manager, never a worker. Every refusal is a
-named token on the **first line of stdout**, so a probe can assert on it without parsing
-prose, and the exit code is non-zero for every one of them.
+**exactly one level below itself** — a goal manager. A worker is the tier's to open too, but
+not this verb's: it goes through `/supervisor:open --task`, the same path a goal manager
+uses. Every refusal is a named token on the **first line of stdout**, so a probe can assert
+on it without parsing prose, and the exit code is non-zero for every one of them.
 
   goal-not-in-scope      the goal is not in the topic page's declared `## Goals`
   goal-not-startable     the goal's `phase` is a value that is not `planning` or
@@ -13,16 +14,33 @@ prose, and the exit code is non-zero for every one of them.
                            Start` § Out of Scope keeps the unphased goals on
                            today's behavior, and the topic tier is the only
                            start path they have.
+  goal-terminal          the goal's `status` is `completed` or `aborted`. Closure leaves
+                           `phase` untouched, so a phase-only gate keeps offering a goal
+                           the same tick has just closed.
+                           ⚠️ **`hold` is NOT in `TERMINAL_STATUSES`.** A held goal in a
+                           startable phase therefore still passes this gate — a pause is
+                           not a closure, and whether a held goal should be openable is an
+                           open question this gate does not decide. Stated here because a
+                           docstring that claimed `hold` was terminal would describe
+                           behaviour the code does not implement.
+  goal-unflagged         the goal does not carry a `flag: true` the operator set. An
+                           agent-set or absent `flag_set_by` is refused (the 2026-09-28
+                           provenance rule, generalised to every tier 2026-11-10) — an
+                           unadmitted goal is reported with its rank and never started;
+                           its WORKERS are still opened by the fleet round's open leg.
+  topic-unflagged        `--topic-open` only: the TOPIC page does not carry `flag: true`.
+                           Same rule one tier up — a flagged topic is opened when the fleet
+                           manager ceiling admits another manager.
   manager-cap            a bound is reached; the SECOND line names which:
                            goal-cap      — this topic already runs N goal managers
                            manager-cap   — the fleet-wide manager ceiling is reached
-  workers are not this tier's to start
+  workers are not this verb's to start
 
 Exit 0 = allowed (prints `spawn-ok: <goal>` and, with `--print`, the `/supervisor:open`
 line to run). Exit 2 = usage error, which is never a verdict.
 
 ⚠️ **The fleet ceiling always wins over N.** N = 3 is a per-topic share; the fleet-wide
-`spawn.maxManagers` is the outer bound, and six topics at N = 3 would want eighteen
+`spawn.maxManagersSoft` is the outer bound, and six topics at N = 3 would want eighteen
 managers against a ceiling of ten. The cap is never raised to make room.
 
 ⚠️ **Startability is the operator's approval, read from disk, never inferred.** A goal at
@@ -35,6 +53,7 @@ not recognise and never refuses the empty one.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -48,10 +67,54 @@ DEFAULT_N = 3
 STARTABLE_PHASES = ("planning", "execution")
 TERMINAL_STATUSES = ("completed", "aborted")
 
-REFUSE_WORKER = "workers are not this tier's to start"
+REFUSE_WORKER = "workers are not this verb's to start"
 REFUSE_SCOPE = "goal-not-in-scope"
 REFUSE_STARTABLE = "goal-not-startable"
+# ⚠️ A separate token from `goal-not-startable`, because the causes are not the same and
+# the levers differ: `phase` is the operator's approval to *begin*, `status` is the record
+# that the goal *finished*. Collapsing them tells an operator to flip a phase on a goal
+# that is already done.
+REFUSE_TERMINAL = "goal-terminal"
+# ⚠️ A fourth token, and it exists because opening a manager and approving a phase are
+# different operator acts. `phase` says *begin this work*; the flag says *open a manager
+# for it*. Operator ruling 2026-10-30: "we dont want to auto open topic-manager,
+# goal-manager ... but flag are fine".
+REFUSE_UNFLAGGED = "goal-unflagged"
+# The topic tier's own refusal — a topic manager is opened for a TOPIC, so it needs a token
+# of its own rather than reusing the goal one.
+REFUSE_TOPIC_UNFLAGGED = "topic-unflagged"
 REFUSE_CAP = "manager-cap"
+
+# YAML spells a boolean three ways. `operator_pin` below already accepts `yes`, so taking
+# only the literal `true` would report a page that IS flagged as "held for the flag".
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+#: The one flag predicate — see `scripts/flag_provenance.py`. Loaded by path because this
+#: script runs standalone out of the plugin cache, where `scripts/` is not on `sys.path`.
+_FLAG_SPEC = importlib.util.spec_from_file_location(
+    "flag_provenance", os.path.join(_HERE, "flag_provenance.py"))
+flag_provenance = importlib.util.module_from_spec(_FLAG_SPEC)
+_FLAG_SPEC.loader.exec_module(flag_provenance)
+
+FLAG_TRUTHY = flag_provenance.FLAG_TRUTHY
+
+
+def flagged(fm: str, kind: str = "goal") -> bool:
+    """Does this page's flag admit it? Delegates to `flag_provenance.flag_admits()`.
+
+    ⚠️ **Provenance IS read, for goals and topics alike.** Until the operator's
+    2026-11-10 ruling (attention card `f8cd8b41…`) this function deliberately ignored
+    `flag_set_by`, so an agent could flag its own goal and get a manager opened for it.
+    That ruling unifies the three tiers on *refuse*: a `flag_set_by` outside
+    `OPENING_ACTORS`, absent included, does not open a manager here any more than it
+    opens a task. The 2026-10-30 ruling governs WHICH flagged row may be opened; it never
+    made an agent-set flag an approval.
+
+    ⚠️ `scripts/topic-keepalive.py` delegates to the same predicate;
+    `test_topic_keepalive.py` asserts the two agree on the same page, because a split
+    verdict between them would open exactly the goal the other refuses.
+    """
+    return flag_provenance.flag_admits(fm, kind)
 
 
 def refuse(token: str, detail: str, bound: str | None = None) -> int:
@@ -70,8 +133,32 @@ def frontmatter(text: str) -> str:
 
 
 def scalar(fm: str, key: str) -> str:
-    m = re.search(rf"^{re.escape(key)}:\s*(.*)$", fm, re.MULTILINE)
+    # ⚠️ `[ \t]*`, never `\s*`: `\s` matches the newline, so an EMPTY value makes the regex
+    # swallow the line break and return the NEXT key's line as this key's value — an
+    # unflagged page whose `flag:` is blank would then read as `flag: <the next key>`.
+    m = re.search(rf"^{re.escape(key)}:[ \t]*(.*)$", fm, re.MULTILINE)
     return (m.group(1).strip().strip("\"'") if m else "")
+
+
+#: Every spelling of "no id recorded", compared case-insensitively — the same set
+#: `scripts/goals-declaration.py` uses for "declares nothing", and the same fold
+#: `scripts/owner.py`'s `page_session_id` owns. Duplicated deliberately: this script loads
+#: no `owner.py`, and both run standalone out of the plugin cache, so there is no shared
+#: module to import — `test_topic_keepalive.py` asserts the two agree.
+_EMPTY_IDS = frozenset({"", "[]", "null", "~"})
+
+
+def session_id(fm: str) -> str:
+    """The page's recorded session id, or "" for every spelling of "none recorded".
+
+    ⚠️ **`scalar()` alone returns the literal text after the colon**, so
+    `claude_session_id: null` arrives as the four characters `null` — non-empty, and a legal
+    `session-liveness.py` argument, so it probes as a session that was never named. This
+    script only counts a LIVE probe (`probe.returncode == 0`), so a `null` id never inflated
+    the manager count; the fold is here to keep the two copies in step.
+    """
+    value = scalar(fm, "claude_session_id").strip()
+    return "" if value.lower() in _EMPTY_IDS else value
 
 
 def section(text: str, heading: str) -> str:
@@ -134,7 +221,7 @@ def fleet_goal_managers(goals: list[str]) -> set:
     """Session ids of live goal managers on `goals`, from the fleet registry.
 
     ⚠️ **The page id alone undercounts, and the shortfall is not rare.** The
-    resolve step is the only writer of `manager_session_id`, so a goal manager
+    resolve step is the only writer of the page's session id (`claude_session_id`), so a goal manager
     started by any other path (a hand-opened `/supervisor:open`, a manager
     re-adopted after a reconnect) runs with no page record at all — measured
     2026-10-20: the live goal manager for one topic read as unmanaged, and the
@@ -170,7 +257,7 @@ def live_goal_managers(vault: str, topics_dir: str, goals: list[str]) -> int:
 
     Two independent sources, and neither is complete on its own:
 
-    * each goal page's `manager_session_id`, probed through
+    * each goal page's `claude_session_id`, probed through
       `session-liveness.py --check`, which answers LIVE / ABSENT / UNKNOWN. Only
       LIVE counts — an UNKNOWN is not a dead manager, but it is also not a running
       one, and counting it would refuse a start on evidence nothing produced.
@@ -186,7 +273,9 @@ def live_goal_managers(vault: str, topics_dir: str, goals: list[str]) -> int:
             continue
         try:
             with open(page, encoding="utf-8") as fh:
-                sid = scalar(frontmatter(fh.read()), "manager_session_id")
+                # `claude_session_id` is the only field a goal page records its manager in.
+                _fm = frontmatter(fh.read())
+                sid = session_id(_fm)
         except OSError:
             continue
         if not sid:
@@ -202,14 +291,21 @@ def live_goal_managers(vault: str, topics_dir: str, goals: list[str]) -> int:
 
 
 def fleet_manager_ceiling() -> int | None:
-    """`spawn.maxManagers` as the server resolves it, or None when it cannot be read."""
+    """`spawn.maxManagersSoft` as the server resolves it, or None when it cannot be read.
+
+    Both spellings, current first — the same fold `resolveMaxManagers` applies. Reading only
+    the current name would return None for an operator's existing config, both `ceiling is
+    not None` guards would be skipped, and the fleet ceiling would silently stop binding.
+    """
     cfg = os.path.expanduser("~/.config/claude-supervisor/config.json")
     try:
         with open(cfg, encoding="utf-8") as fh:
             spawn = (json.load(fh) or {}).get("spawn") or {}
     except (OSError, ValueError):
         return None
-    value = spawn.get("maxManagers")
+    value = spawn.get("maxManagersSoft")
+    if value is None:
+        value = spawn.get("maxManagers")
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
     return value
@@ -274,36 +370,33 @@ def ready_work(vault: str, goal: str) -> int:
     return count
 
 
+_GOALS_DECLARATION = None
+
+
+def _goals_declaration():
+    """Import goals-declaration.py — the shared `goals:` reader.
+
+    ⚠️ **Shared, and it was not before.** This module carried the third private copy of
+    the same extractor (`manager-predispatch.py` and `reset.py` held the other two), and
+    the three disagreed on which shapes they read. One implementation is what stops the
+    drift recurring; `test_topic_spawn.py`'s shape assertions are unchanged by the
+    move and now pin the shared reader too.
+    """
+    global _GOALS_DECLARATION
+    if _GOALS_DECLARATION is None:
+        here = os.path.dirname(os.path.abspath(__file__))
+        spec = importlib.util.spec_from_file_location(
+            "goals_declaration", os.path.join(here, "goals-declaration.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _GOALS_DECLARATION = mod
+    return _GOALS_DECLARATION
+
+
 def goals_of(fm: str) -> list[str]:
-    """The goal names a task's `goals:` frontmatter names, across all three shapes."""
-    m = re.search(r"^goals:(.*)$", fm, re.MULTILINE)
-    if not m:
-        return []
-    inline = m.group(1).strip()
-    if inline and inline not in ("[]", "null", "~"):
-        names = re.findall(r"\[\[([^\]|#]+)", inline)
-        return names or [inline.strip("\"' ")] if inline.strip("\"' ") else []
-    # Block form: every following indented `- …` entry, with any `- - ` nesting.
-    # ⚠️ Blank lines are SKIPPED, not treated as the end of the block: `m.end()` lands
-    # before the newline that follows the `goals:` key, so the first item of
-    # `splitlines()` is always empty and a `break` there returns `[]` for every block-form
-    # task — the shape most of the vault uses.
-    names = []
-    for line in fm[m.end():].splitlines():
-        if not line.strip():
-            continue
-        if not line.startswith((" ", "\t")):
-            break
-        s = line.strip()
-        if not s.startswith("-"):
-            continue
-        s = re.sub(r"^-\s*", "", s)
-        s = re.sub(r"^-\s*", "", s)
-        w = re.search(r"\[\[([^\]|#]+)", s)
-        name = (w.group(1) if w else s).strip().strip("\"' ")
-        if name:
-            names.append(name)
-    return names
+    """The goal names a task's `goals:` frontmatter names, across every shape."""
+    return _goals_declaration().goal_names(fm)
 
 
 def operator_pin(topic_text: str, goal_fm: str, goal: str) -> bool:
@@ -325,6 +418,22 @@ def rank(vault: str, topic_text: str, goals: list[str], n: int) -> list[dict]:
                 fm = frontmatter(fh.read())
         except OSError:
             continue
+        # ⚠️ A terminal goal is never a candidate, whatever its phase says. Closure
+        # (router row 4c) sets `status: completed` and leaves `phase: execution` in
+        # place, so a phase-only ranking keeps offering a goal the same tick has just
+        # closed — the "finished goal silently restarts" failure.
+        if scalar(fm, "status").lower() in TERMINAL_STATUSES:
+            continue
+        # ⚠️ Opening a goal manager is the operator's act, so only a FLAGGED goal may take a
+        # slot. Operator ruling 2026-10-30: "we dont want to auto open topic-manager,
+        # goal-manager ... but flag are fine". Restart is not open — a restart resumes a
+        # session that already has a subject and a recorded id, so the keep-alive
+        # `restart`/`resume` arms are untouched by this gate; only a fresh open is.
+        # ⚠️ An unflagged goal is still RANKED, never dropped. `commands/topic-drive.md`
+        # § Start promises the operator the row *with its rank*, and a row that vanishes
+        # from a sweep is indistinguishable from a row that got fixed. It carries the
+        # `unflagged` slot below, so it is reported and can never be started.
+        is_flagged = flagged(fm)
         phase = scalar(fm, "phase").lower()
         # An absent phase is exempt (see the module docstring): the goal is
         # startable, so it must be ranked, not silently dropped from the list.
@@ -340,11 +449,19 @@ def rank(vault: str, topic_text: str, goals: list[str], n: int) -> list[dict]:
             "ready": ready_work(vault, goal),
             "priority": priority,
             "order": goals.index(goal),
+            "flagged": is_flagged,
         })
     # pin desc, ready desc, priority asc, then declaration order (oldest first).
     rows.sort(key=lambda r: (not r["pin"], -r["ready"], r["priority"], r["order"]))
-    for i, r in enumerate(rows):
-        r["slot"] = "start" if i < n else "held"
+    # Only a flagged row competes for a slot, so N is spent on rows the operator admitted —
+    # an unflagged row keeps its position in the report and can never take a slot from one.
+    taken = 0
+    for r in rows:
+        if not r["flagged"]:
+            r["slot"] = "unflagged"
+            continue
+        r["slot"] = "start" if taken < n else "held"
+        taken += 1
     return rows
 
 
@@ -353,20 +470,24 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--vault", required=True, help="the vault ROOT path")
     ap.add_argument("--topic", help="the topic manager's subject")
     ap.add_argument("--goal", help="the goal to start a manager for")
-    ap.add_argument("--worker", help="refused outright — this tier never starts a worker")
+    ap.add_argument("--worker", help="refused outright — a worker is opened with /supervisor:open --task")
     ap.add_argument("--topics-dir", default=DEFAULT_TOPICS_DIR)
     ap.add_argument("--max-goal-managers", type=int, default=DEFAULT_N)
     ap.add_argument("--print", dest="emit", action="store_true",
                     help="print the /supervisor:open line on success")
     ap.add_argument("--rank", action="store_true",
                     help="print the § 1 ranking for the topic and which goals take the N slots")
+    ap.add_argument("--topic-open", dest="topic_open", action="store_true",
+                    help="may a manager be opened for this TOPIC page itself? (the topic "
+                         "tier's flag gate)")
     a = ap.parse_args(argv)
 
-    # (1) The tier boundary, checked first: it is the refusal a caller most often gets
+    # (1) The verb boundary, checked first: it is the refusal a caller most often gets
     # wrong, and it must not depend on any page resolving.
     if a.worker:
         return refuse(REFUSE_WORKER, f"<{a.worker}> is a task, and a task is a worker's "
-                                     f"anchor. A topic manager starts goal managers only.")
+                                     f"anchor. This verb starts goal managers; open a worker "
+                                     f"with /supervisor:open --task.")
 
     if not a.topic:
         ap.error("--topic is required (with --goal, --rank, or --worker)")
@@ -388,10 +509,40 @@ def main(argv: list[str]) -> int:
     if a.rank:
         goals = declared_goals(topic_text, os.path.join(vault, GOALS_DIR))
         rows = rank(vault, topic_text, goals, a.max_goal_managers)
-        print(f"rank: {len(rows)} startable of {len(goals)} declared · N = {a.max_goal_managers}")
+        # `startable` counts the rows that may actually take a slot. The unflagged rows are
+        # printed below with their rank but are never counted here — counting them would
+        # report a topic as having work it cannot start.
+        startable = sum(1 for r in rows if r["flagged"])
+        print(f"rank: {startable} startable of {len(goals)} declared · N = {a.max_goal_managers}")
         for i, r in enumerate(rows, 1):
-            print(f"{i} {r['slot']:<5} {r['goal']} "
+            print(f"{i} {r['slot']:<9} {r['goal']} "
                   f"pin={'yes' if r['pin'] else 'no'} ready={r['ready']} priority={r['priority']}")
+        return 0
+
+    # (2c) `--topic-open` answers the TOPIC tier's own question: may a manager be opened for
+    # this topic page? The flag must be operator-set (2026-11-10, attention card f8cd8b41)
+    # and the ceiling must admit another manager. ⚠️ Without this, a flag on a topic page is
+    # read by nothing: `open.md`'s
+    # topic branch gates on `phase: todo` alone, so the ruling had no executable leg one tier
+    # up from where it was already enforced.
+    if a.topic_open:
+        if not flagged(frontmatter(topic_text), kind="topic"):
+            return refuse(
+                REFUSE_TOPIC_UNFLAGGED,
+                f"<{a.topic}> is not flagged. Opening a topic manager is an open, and this "
+                f"tier only opens what carries the flag — set `flag: true` on the topic page. "
+                f"Worker sessions are opened by the fleet round's open leg regardless.",
+            )
+        ceiling = fleet_manager_ceiling()
+        count = fleet_manager_count() if ceiling is not None else None
+        if ceiling is not None and count is not None and count >= ceiling:
+            return refuse(
+                REFUSE_CAP,
+                f"the fleet manager ceiling is reached ({count} of {ceiling}); start nothing "
+                f"this tick and report the bound.",
+                "manager-cap",
+            )
+        print(f"open-ok: {a.topic}")
         return 0
 
     if not a.goal:
@@ -412,6 +563,29 @@ def main(argv: list[str]) -> int:
             REFUSE_SCOPE,
             f"<{a.goal}> is not in {a.topic}'s `## Goals` list "
             f"({len(goals)} declared). The topic's declared membership is the boundary.",
+        )
+
+    # (5a) A terminal goal is not startable, and this is checked before the phase gate
+    # so the refusal names the real cause: closure leaves `phase: execution` in place,
+    # so a phase-first read would report the goal as perfectly startable.
+    status = scalar(goal_fm, "status")
+    if status.lower() in TERMINAL_STATUSES:
+        return refuse(
+            REFUSE_TERMINAL,
+            f"<{a.goal}> reads status `{status}` — it is finished, not unstarted. "
+            f"Closure leaves `phase` untouched, so this is the record that decides it.",
+        )
+
+    # (5b) Opening a goal manager is the operator's act — only a FLAGGED goal is startable.
+    # ⚠️ This is the executable half of rule 4: without it the gate lives only in
+    # `commands/topic-drive.md`, and a documented mandate is not an executed one.
+    if not flagged(goal_fm):
+        return refuse(
+            REFUSE_UNFLAGGED,
+            f"<{a.goal}> is not flagged. Opening a goal manager is an open, and this tier "
+            f"only opens what carries the flag — set `flag: true` on the goal page. Only an "
+            f"operator-set flag opens; an agent-set or absent `flag_set_by` is refused. Its "
+            f"workers are opened by the fleet round's open leg regardless.",
         )
 
     # (5) Startability — the operator's approval, read from disk.
@@ -443,7 +617,7 @@ def main(argv: list[str]) -> int:
     if ceiling is not None and live is not None and live >= ceiling:
         return refuse(
             REFUSE_CAP,
-            f"{live} managers live fleet-wide, ceiling spawn.maxManagers = {ceiling}. "
+            f"{live} managers live fleet-wide, ceiling spawn.maxManagersSoft = {ceiling}. "
             f"N is a per-topic share; the ceiling is the outer bound and is never raised "
             f"to make room.",
             bound="manager-cap",

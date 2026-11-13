@@ -12,6 +12,15 @@ Order matters in `answer`: the store's open -> answered compare-and-set runs
 first, and a caller that loses it (409) must NOT route its answer -- another arm
 already did. Only the winner prints a TARGET.
 
+⚠️ **A Stop-hook MIRROR card is the one exception, and it has NO compare-and-set.**
+Such a card lives in the event log and never in the store (`who-needs-me.py`'s
+`board_missing_gates()`), so there is nothing to POST: the branch resolves the
+card through the folded log, prints a TARGET, and the caller delivers. Because
+no CAS exists there, two arms answering one mirror id will BOTH deliver — the
+operator should answer a mirror card once. A mirror whose card has closed, or
+whose kind is `permission`, is refused rather than routed: a relay cannot release
+another session's parked gate.
+
 The answer carries two identities: `answered_by` names the arm, and `resolved_by`
 names the session that ran it. The session id is read from the environment, so a
 resolution is attributable without the caller passing a flag -- and the invoking
@@ -35,8 +44,14 @@ Two classes route an answer, and they route it differently:
               it by SendMessage, to the name on the TARGET line printed here.
   permission  the answer is a verdict, given with --decision allow|deny. The
               spawning supervisor server delivers it by polling the store, so
-              this script prints a DELIVERY line and never a TARGET: there is
-              no session to send to, and printing one would invite a relay.
+              this script never prints a TARGET: there is no session to send
+              to, and printing one would invite a relay. It waits (bounded,
+              ATTENTION_DELIVERY_WAIT, default 35 s) for the store's delivery
+              report and prints one of:
+                ANSWERED + DELIVERY: delivered by <carrier>      exit 0
+                RECORDED + NOT_DELIVERED: failed|held by <c>     exit 3
+                RECORDED + UNCONFIRMED: <why>                    exit 3
+              Exit 3 means the verdict is stored but the asker is still parked.
 
 `ack` items are listed but refused -- they ask nothing, so there is nothing to
 route.
@@ -55,14 +70,131 @@ import argparse
 import glob
 import http.client
 import json
+import math
 import os
+import re
 import sys
+import time
 import urllib.error
 import urllib.request
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
 # Local store; a hung one must cost a clear failure, never a stalled session.
 STORE_TIMEOUT = float(os.environ.get("ATTENTION_STORE_TIMEOUT", "3"))
+
+# Where the worker's own attention hook looks for the record of WHO answered it.
+#
+# ⚠️ This is the WRITER half of a two-repo change: `~/.claude/hooks/attention-log.py` reads
+# `<session>.answer.json` from this directory and stamps `answerer_session` / `answerer_kind`
+# onto the close line. Written alone it is a file nobody reads; the hook alone is a reader
+# whose file never exists. They ship as a pair.
+#
+# The resolution mirrors the hook exactly (`ATTENTION_STATE_DIR`, then the default) — a
+# writer pointed at a different directory than the reader is a silent no-op on both sides.
+ATTENTION_STATE_DIR = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser(
+    "~/.claude/state/attention")
+
+# The kinds the hook accepts. Anything else is ignored there, so an unknown value here would
+# be a write that can never be read.
+ANSWERER_KINDS = ("manager", "operator", "other")
+
+# A Claude session id, which is the only thing the hook keys a marker on. Validated before the
+# value reaches a filesystem path — see `write_answer_marker`.
+_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def write_answer_marker(producer_id, answerer_session, answerer_kind):
+    """Record who answered `producer_id`'s item, for its own hook to stamp on close.
+
+    Best-effort by design and never raises: this is a measurement side-channel, and failing
+    to record WHO answered must never stop the answer being delivered. The caller has already
+    written the answer to the store; trading a missing attribution for a failed command would
+    be the wrong way round.
+
+    Returns True when the marker landed. A false return is not an error — the answer stands.
+    """
+    if answerer_kind not in ANSWERER_KINDS:
+        return False
+    # ⚠️ Validated as a UUID, not merely non-empty. `producer_id` is external store data —
+    # the store is an unauthenticated localhost endpoint — and it is interpolated into a
+    # filesystem path. An absolute value makes `os.path.join` discard ATTENTION_STATE_DIR
+    # outright, and `..` segments walk out of it; both would write a marker outside the
+    # directory the hook reads, or over a file that has nothing to do with attention.
+    if not isinstance(producer_id, str) or not _UUID.match(producer_id):
+        return False
+    path = os.path.join(ATTENTION_STATE_DIR, f"{producer_id}.answer.json")
+    # pid-suffixed temp + replace, the same reason `<sid>.posted.json` does it: a fixed `.tmp`
+    # lets two concurrent writers interleave, and a crash between write and replace orphans it.
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        os.makedirs(ATTENTION_STATE_DIR, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({
+                "answerer_session": answerer_session or "",
+                "answerer_kind": answerer_kind,
+                # EPOCH SECONDS, not milliseconds: the hook parses with `float()` and
+                # compares against `time.time()`. Milliseconds read as ~50 000 years ahead,
+                # which the hook rejects as future-dated — silently.
+                "ts": time.time(),
+            }, f)
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+# How long a permission answer waits for the store's delivery report before it
+# calls the delivery unconfirmed. ⚠️ It must outlast the poller's IDLE interval,
+# not its busy one: `server/attention-poll.mjs` reads every `intervalMs = 2000`
+# while an item is open but every `idleIntervalMs = 30000` when nothing is, so an
+# answer can be picked up up to 30 s after it lands. A shorter bound would report
+# a slow-but-working delivery as unconfirmed.
+DEFAULT_DELIVERY_WAIT_SECONDS = 35.0
+DELIVERY_POLL_SECONDS = 1.0
+
+
+# A ceiling on the override. An unbounded wait is the pre-fix bug on a slower
+# clock: the caller still cannot tell a delivered answer from an undelivered one,
+# it just stops returning. Ten minutes outlasts every poller cadence with margin
+# and still guarantees the command comes back.
+MAX_DELIVERY_WAIT_SECONDS = 600.0
+
+
+def delivery_wait_seconds(environ=None):
+    """The bounded wait, from `ATTENTION_DELIVERY_WAIT` or the default.
+
+    ⚠️ A bare `float()` is not enough. `float("nan")` and `float("inf")` both
+    parse, and `wait_for_delivery` bounds itself with `_clock() >= deadline` —
+    a `nan` deadline makes that comparison permanently False, so the loop never
+    exits and the command hangs instead of reporting. Non-finite, non-positive
+    and oversized values all fall back to a bound rather than becoming one.
+    """
+    raw = (os.environ if environ is None else environ).get("ATTENTION_DELIVERY_WAIT", "")
+    try:
+        value = float(raw) if raw else DEFAULT_DELIVERY_WAIT_SECONDS
+    except ValueError:
+        return DEFAULT_DELIVERY_WAIT_SECONDS
+    if not math.isfinite(value) or value <= 0:
+        return DEFAULT_DELIVERY_WAIT_SECONDS
+    return min(value, MAX_DELIVERY_WAIT_SECONDS)
+
+
+DELIVERY_WAIT_SECONDS = delivery_wait_seconds()
+# A delivery report status that settles the question. `never_attempted` and
+# `pre_trail_unknown` do not: they mean no carrier has written yet.
+DELIVERY_TERMINAL = ("delivered", "failed", "held")
+# Exit code for "the verdict is in the store but was not observed delivered" --
+# distinct from 1 (store write failed) and 2 (refused before write), because the
+# caller's next move differs: the worker is still parked, and nothing here can
+# release it.
+EXIT_NOT_DELIVERED = 3
+# Indirection so tests can drive the bounded wait without sleeping.
+_sleep = time.sleep
+_clock = time.monotonic
 SESSIONS_DIR = os.environ.get("CLAUDE_SESSIONS_DIR") or os.path.expanduser("~/.claude/sessions")
 DEFAULT_ARM = "supervisor:attention-next"
 PAYLOAD_WIDTH = 160
@@ -115,6 +247,116 @@ def fetch_item(item_id):
         return json.load(resp)
 
 
+def mirror_gate(item_id, state_dir=None):
+    """`(session_id, kind)` for an EVENT-LOG-only card that is still OPEN, else None.
+
+    ⚠️ **A Stop-hook mirror card is not in the store.** The hook mints a card for a
+    closer and writes it to the event log; the store never carries it. So `fetch_item()`
+    404s on a mirror's id, and before this fallback that 404 escaped `cmd_answer` before
+    any `TARGET:` line was printed — the operator's approve reached nobody and the
+    session kept waiting (measured 2026-11-11: `urllib.error.HTTPError: HTTP Error 404`,
+    fixture `MirrorCardLookup`).
+
+    ⚠️ **This is a SUPERSET of what `board_missing_gates()` offers, deliberately.** That
+    function applies further gates (`STORE_OK`, `is_superseded`, and `is_open_gate()`'s
+    `is_parked_verb` / `is_reapable` / `names_peer_gate` / `is_rendered_panel`), and those
+    exclude exactly the record this branch exists for: a `Stop`-sourced closer panel is
+    `event: "Stop"`, `kind: "question"`, and a **rendered panel** — which `is_open_gate()`
+    filters out as a card that raises no ask. A mirror card IS that panel, so narrowing
+    this to `board_missing_gates()`' class would make the branch answer nothing at all.
+    The gates that DO matter here are enforced: the card must be open (the fold) and its
+    kind must be `question` (a `permission` card is refused as laundering).
+
+    ⚠️ **The log is FOLDED, not scanned for a first match.** A record is a live card only
+    when an `open` line names it (`type: "open"`) and no `close` line does anywhere
+    (`closed_by`, which the close line carries instead of a `type`). The test is
+    order-independent — any close wins, in any file. ⚠️ **That matches
+    `who-needs-me.load_events()`, and it inherits its limitation:** `item_id` is
+    `sha256(sid:kind:detail)`, so a byte-identical ask re-parked AFTER its card closed
+    appends a second `open` for the same id, and any-close-wins then refuses a live card.
+    The two surfaces agree, so this is consistent rather than novel — but it is a real
+    edge, not a soundness guarantee. A first-match scan would be worse: it would route an
+    answer for a card that closed, and the store path has a compare-and-set for exactly
+    that, while the mirror path has none.
+
+    `kind` is returned because the caller MUST NOT treat a `permission` card as a
+    message: a session cannot release another session's parked gate, and relaying a
+    verdict to it is permission laundering.
+    """
+    base = state_dir or ATTENTION_STATE_DIR
+    opened = None
+    closed = False
+    for path in glob.glob(os.path.join(base, "*.events.jsonl")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue  # a torn final line is expected, not fatal
+                    if not isinstance(rec, dict) or rec.get("item_id") != item_id:
+                        continue
+                    if rec.get("closed_by") is not None:
+                        closed = True
+                    elif rec.get("type") == "open":
+                        opened = rec
+        except OSError:
+            continue
+    if opened is None or closed:
+        return None
+    return (opened.get("session_id") or "", opened.get("kind") or "")
+
+
+def fetch_delivery(item_id, timeout=None):
+    """Return the store's delivery report for `item_id` (`GET …/attempt`)."""
+    with urllib.request.urlopen(
+        f"{STORE}/api/1.0/attention/{item_id}/attempt",
+        timeout=STORE_TIMEOUT if timeout is None else timeout,
+    ) as resp:
+        return json.load(resp)
+
+
+def wait_for_delivery(item_id):
+    """Poll the delivery report until it settles or the bound runs out.
+
+    Returns (status, carrier, reason). `status` is a terminal report status
+    when one was observed; otherwise it is the last non-terminal status read, or
+    None when no well-formed report was ever read -- and `reason` says why.
+
+    ⚠️ An unreadable report is never read as delivered, nor as failed: like
+    `restart-precheck.py`, only a report carrying `status` decides anything.
+
+    ⚠️ Every read is clamped to the budget that is left, so the bound this
+    returns within is the one the caller is told about. A read allowed its full
+    `STORE_TIMEOUT` could push the real elapsed time past `DELIVERY_WAIT_SECONDS`
+    while the UNCONFIRMED line still printed the nominal figure.
+    """
+    deadline = _clock() + DELIVERY_WAIT_SECONDS
+    status, carrier, reason = None, "", "no report read"
+    while True:
+        remaining = deadline - _clock()
+        if remaining <= 0:
+            return status, carrier, reason
+        try:
+            report = fetch_delivery(item_id, timeout=min(STORE_TIMEOUT, remaining))
+        except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as err:
+            status, reason = None, f"delivery report unreadable ({err})"
+        else:
+            if isinstance(report, dict) and "status" in report:
+                status, carrier, reason = report.get("status"), report.get("carrier") or "", ""
+                if status in DELIVERY_TERMINAL:
+                    return status, carrier, reason
+            else:
+                status, reason = None, "delivery report unreadable (no status field)"
+        remaining = deadline - _clock()
+        if remaining <= 0:
+            return status, carrier, reason
+        _sleep(min(DELIVERY_POLL_SECONDS, remaining))
+
+
 def resolved_session_id(environ=None):
     """The session id of whoever is running this arm, or "".
 
@@ -151,8 +393,11 @@ def post_answer(item_id, answered_by, resolved_by="", decision=""):
 # The answer endpoint returns HTTP 409 for more than one failure, and the status
 # alone cannot tell them apart -- only the `error.code` in the body can. The two
 # this arm can meet are different facts about the gate, so each gets its own
-# line: ITEM_CLOSED means the card left the queue before the answer arrived (the
-# board cleared it, or its producer exited) and no arm can answer it now;
+# line: ITEM_CLOSED means the card left the queue before the answer arrived and
+# no arm can answer it now -- ⚠️ **and it does not say why, because the record
+# does not.** A cleared card, a withdrawn one and one whose producer exited
+# leave the same `closed` row with no actor, so naming any of them would be a
+# claim the store cannot support; the line says so instead.
 # ALREADY_ANSWERED means another arm's verdict landed first. Neither is a retry.
 STORE_CODE_ITEM_CLOSED = "ITEM_CLOSED"
 STORE_CODE_ALREADY_ANSWERED = "ALREADY_ANSWERED"
@@ -186,22 +431,43 @@ def answer_conflict_line(item_id, err, verb):
     item, "deliver" for a permission one -- so each branch keeps its own word for
     what it is refusing. An unreadable or unknown code falls back to the generic
     line rather than to either named one: a code this arm cannot read is not
-    evidence of which failure happened, and the two named lines claim a specific
-    cause.
+    evidence of which failure happened.
+
+    ⚠️ **`ITEM_CLOSED` does NOT name a cause, and that is deliberate.** It used
+    to read "the card was cleared, or its producer exited" -- two causes offered
+    as if the record settled which. It cannot. A `permission` gate that leaves
+    the queue with no verdict carries no `answered_by` (the store refuses an
+    arm-caused close of an open gate, so there is no actor to read) and that
+    same no-actor close is produced by a producer exit, by a compact-crossing
+    clear and by a forwarded `SessionEnd` -- so the record establishes that the
+    gate was never answered, and establishes nothing about why. Saying so is the
+    honest line; picking one cause would invent a fact.
+
+    ⚠️ The `LOST:` fallback must not merge its two causes either. It fires on a
+    code this arm could not read at all, which is strictly LESS evidence than
+    `ITEM_CLOSED` carries -- so a line asserting "already answered or no longer
+    open" claims two specific causes from zero information.
     """
     code = store_error_code(err)
     if code == STORE_CODE_ITEM_CLOSED:
         return (
-            f"ITEM_CLOSED: {item_id} left the queue before this answer arrived -- the card "
-            f"was cleared, or its producer exited; no arm can answer it now and no verdict "
-            f"was recorded; do not {verb}"
+            f"ITEM_CLOSED: {item_id} left the queue before this answer arrived and no "
+            f"verdict was recorded; the store does not record why -- the dead-session "
+            f"sweep, the compact-crossing clear, a forwarded SessionEnd and the "
+            f"compact-approval clear all leave the same closed row with no actor, and "
+            f"one of them is not a producer exit at all, so no arm can establish the "
+            f"cause and none can answer it now; do not {verb}"
         )
     if code == STORE_CODE_ALREADY_ANSWERED:
         return (
             f"ALREADY_ANSWERED: {item_id} already has a verdict from another arm; "
             f"do not {verb}"
         )
-    return f"LOST: {item_id} already answered or no longer open -- do not {verb}"
+    return (
+        f"LOST: {item_id} was not answered by this arm -- the store refused it with a code "
+        f"this arm cannot read, so it cannot say whether the card already had a verdict or "
+        f"had left the queue; do not {verb}"
+    )
 
 
 def cmd_next(registry, out=sys.stdout):
@@ -226,7 +492,53 @@ def cmd_next(registry, out=sys.stdout):
 
 
 def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None, decision=""):
-    item = fetch_item(item_id)
+    try:
+        item = fetch_item(item_id)
+    except urllib.error.HTTPError as err:
+        if err.code != 404:
+            print(f"FAILED: store returned {err.code} for {item_id}", file=out)
+            return 1
+        # A Stop-hook MIRROR card: the event log holds it and the store never did. There
+        # is no store record to answer, so nothing is POSTed — the caller delivers the
+        # answer straight to the producing session, which is what the TARGET line is for.
+        gate = mirror_gate(item_id)
+        if gate is None:
+            print(f"FAILED: {item_id} is neither a store item nor an open event-log card", file=out)
+            return 1
+        producer, kind = gate
+        if not producer:
+            print(f"FAILED: {item_id} carries no producing session", file=out)
+            return 1
+        if kind == "permission":
+            # ⚠️ Never relay a verdict for another session's parked gate. The store path
+            # routes these through `answer_permission`, which the spawning server polls;
+            # a SendMessage carrying `--decision allow` is permission laundering even when
+            # the action looks small, and this arm cannot record a verdict anywhere.
+            print(f"REFUSED: {item_id} is a permission card; a relay cannot release "
+                  "another session's parked gate", file=out)
+            return 2
+        if kind != "question":
+            # Only `question` is a card here, which is also what `board_missing_gates()`
+            # offers (`is_open_gate()`). Every other kind is a turn record — an `idle`
+            # line names no ask — so there is nothing to answer.
+            print(f"FAILED: {item_id} is a {kind or 'typeless'} record, not a card", file=out)
+            return 1
+        # ⚠️ The marker goes down only for a card that can actually be DELIVERED to. The
+        # store path writes it after the store accepted the answer, for the same reason it
+        # states: "a marker for an answer that failed to land would attribute a question
+        # nobody answered". A mirror has no store write to wait on, so deliverability —
+        # `resolve_target` returning a name — is the equivalent gate.
+        name, reason = resolve_target(producer, registry)
+        if not name:
+            # Nothing was recorded and nothing will be delivered, so `ANSWERED:` would be a
+            # state claim this branch has not established — the store path earns that line
+            # from a successful POST.
+            print(f"UNDELIVERABLE: {reason}", file=out)
+            return 0
+        write_answer_marker(producer, "", "operator")
+        print(f"ANSWERED: {item_id} (no store record)", file=out)
+        print(f"TARGET: {name}", file=out)
+        return 0
     mech = item.get("answer_mechanism")
     if mech == "permission":
         return cmd_answer_permission(item, answered_by, resolved_by, decision, out)
@@ -248,18 +560,45 @@ def cmd_answer(item_id, answered_by, registry, out=sys.stdout, resolved_by=None,
     print(f"ANSWERED: {item_id} at {answered.get('answered_at')} by {answered.get('answered_by')}", file=out)
     print(f"RESOLVED_BY: {resolved_by}" if resolved_by else
           "RESOLVED_BY: unknown -- CLAUDE_CODE_SESSION_ID unset, so this item will read as unresolved", file=out)
+    # Tell the asking session's own hook WHO answered, so its close line carries the party
+    # rather than only the event that cleared the gate. Written AFTER the store accepted the
+    # answer, never before: a marker for an answer that failed to land would attribute a
+    # question nobody answered.
+    #
+    # ⚠️ `operator`, not `manager`. This arm is `/supervisor:attention-next`, which
+    # `commands/attention-next.md` defines as relaying the operator's own words — *"This
+    # command relays an operator answer; it is not a channel for a manager's own decisions."*
+    # Hardcoding `manager` here would inflate the count this marker exists to produce, in the
+    # exact direction that makes SC8 look better than it is. A manager answering a park goes
+    # through `answer_permission`, which is a different writer.
+    #
+    # The session is `resolved_by` — the session that RAN the relay — but the party is the
+    # operator, so `answerer_session` stays empty: the board and the operator are arms, not
+    # sessions, and naming the relaying session as the answerer would be the same
+    # misattribution one field over.
+    write_answer_marker(item.get("producer_id", ""), "", "operator")
     print(target_line(item.get("producer_id", ""), registry), file=out)
     return 0
 
 
 def cmd_answer_permission(item, answered_by, resolved_by, decision, out=sys.stdout):
-    """Answer a permission-class item with a verdict, and name how it is delivered.
+    """Answer a permission-class item with a verdict, and report whether it landed.
 
     The delivery is the spawning supervisor server polling the store, so this
-    prints DELIVERY and never TARGET. A TARGET line here would be actively
-    harmful rather than merely useless: the wrapping command branches on it, and
-    a session cannot release another session's parked gate -- a relay is
-    permission laundering even when the action looks small.
+    never prints TARGET. A TARGET line here would be actively harmful rather
+    than merely useless: the wrapping command branches on it, and a session
+    cannot release another session's parked gate -- a relay is permission
+    laundering even when the action looks small.
+
+    ⚠️ The POST is not the delivery, so it is not reported as one. After the
+    write this reads the store's delivery report (written by the poller after
+    it settles, or fails to settle, the park) for a bounded wait, and claims
+    `ANSWERED` only on an observed `delivered`. Anything else -- `failed`,
+    `held`, or no report within the bound -- prints `RECORDED` plus a
+    `NOT_DELIVERED` / `UNCONFIRMED` line and exits EXIT_NOT_DELIVERED: the
+    verdict is in the store, and the worker is still parked. Measured
+    2026-11-05: the pre-fix arm printed `ANSWERED` and exit 0 while the poller
+    refused with `wrapper holds no question for session bdc2f1ed`.
     """
     item_id = item.get("item_id")
     if decision not in DECISIONS:
@@ -281,12 +620,25 @@ def cmd_answer_permission(item, answered_by, resolved_by, decision, out=sys.stdo
         else:
             print(f"FAILED: store returned {err.code} for {item_id}", file=out)
         return 1
-    print(f"ANSWERED: {item_id} at {answered.get('answered_at')} by {answered.get('answered_by')}", file=out)
+    status, carrier, reason = wait_for_delivery(item_id)
+    stamp = f"{item_id} at {answered.get('answered_at')} by {answered.get('answered_by')}"
+    print(f"ANSWERED: {stamp}" if status == "delivered" else
+          f"RECORDED: {stamp} -- verdict stored, NOT observed delivered", file=out)
     print(f"RESOLVED_BY: {resolved_by}" if resolved_by else
           "RESOLVED_BY: unknown -- CLAUDE_CODE_SESSION_ID unset, so this item will read as unresolved", file=out)
     print(f"DECISION: {decision}", file=out)
-    print("DELIVERY: supervisor poll -- no session to send to, so do NOT SendMessage", file=out)
-    return 0
+    by = carrier or "unknown carrier"
+    if status == "delivered":
+        print(f"DELIVERY: delivered by {by} -- do NOT SendMessage", file=out)
+        return 0
+    if status in ("failed", "held"):
+        print(f"NOT_DELIVERED: {status} by {by} -- the asking session is still parked; "
+              f"do NOT SendMessage, and do not report this gate as answered", file=out)
+        return EXIT_NOT_DELIVERED
+    print(f"UNCONFIRMED: {reason or status} after {DELIVERY_WAIT_SECONDS:g}s -- no carrier reported "
+          f"delivery, so the asking session may still be parked; do NOT SendMessage, "
+          f"and do not report this gate as answered", file=out)
+    return EXIT_NOT_DELIVERED
 
 
 def post_attempt(item_id, carrier, outcome):
@@ -309,6 +661,36 @@ def post_attempt(item_id, carrier, outcome):
         return json.load(resp)
 
 
+def mirror_known(item_id, state_dir=None):
+    """True when the EVENT LOG has ever named this id — open OR closed.
+
+    ⚠️ **The attempt leg must not ask `mirror_gate()`.** By the time a delivery is
+    reported the card has usually ALREADY CLOSED — the session's next turn clears it —
+    so requiring a still-open gate there would re-raise `FAILED` for a delivery that
+    succeeded, which is the opposite of what the branch exists for. "The log knows this
+    id" is the discriminator that does not depend on card state, and it still separates a
+    mirror from a store id: the two id spaces are disjoint, so a store id is never in the
+    log and an older store's missing `/attempt` endpoint keeps its `FAILED:` signal.
+    """
+    base = state_dir or ATTENTION_STATE_DIR
+    for path in glob.glob(os.path.join(base, "*.events.jsonl")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(rec, dict) and rec.get("item_id") == item_id:
+                        return True
+        except OSError:
+            continue
+    return False
+
+
 def cmd_attempt(item_id, carrier, outcome, out=sys.stdout):
     """Record the outcome of a delivery this arm attempted.
 
@@ -324,7 +706,29 @@ def cmd_attempt(item_id, carrier, outcome, out=sys.stdout):
             file=out,
         )
         return 1
-    post_attempt(item_id, carrier, outcome)
+    try:
+        post_attempt(item_id, carrier, outcome)
+    except urllib.error.HTTPError as err:
+        # ⚠️ A 404 alone does NOT mean "mirror". `commands/attention-next.md` documents the
+        # other cause: against a store older than attention-controller v0.30.0 the `/attempt`
+        # endpoint does not exist, and that is "a missing endpoint, not a failed delivery".
+        # Swallowing every 404 would delete that documented `FAILED:` signal and mislabel it
+        # as a mirror card.
+        #
+        # ⚠️ And the test is `mirror_known`, NOT `mirror_gate`: by the time this leg runs the
+        # card has usually already closed, so asking for a still-open gate would re-raise
+        # FAILED for a delivery that succeeded.
+        if err.code != 404 or not mirror_known(item_id):
+            raise
+        # A mirror card has no store record, so there is no attempt trail to append to.
+        # Reporting that as a failure would turn a delivery that DID happen into a failed
+        # attempt — the command runs this step unconditionally after every delivery.
+        print(
+            f"ATTEMPT: {item_id} {outcome} by {carrier} (mirror card — no store record, "
+            "nothing recorded)",
+            file=out,
+        )
+        return 0
     print(f"ATTEMPT: {item_id} {outcome} by {carrier}", file=out)
     return 0
 

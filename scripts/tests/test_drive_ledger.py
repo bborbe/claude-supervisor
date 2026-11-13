@@ -32,6 +32,7 @@ The fixture models the live file as measured 2026-10-12 14:13, with invented nam
 internally uniform), 5 `entries`-list rows, 3 sids in both, 18 distinct sessions.
 """
 import glob
+import importlib.util
 import json
 import os
 import pathlib
@@ -43,14 +44,17 @@ import unittest
 
 SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "drive-ledger.py"
 
-#: The canonical entry's twelve fields, as `agents/fleet-drive.md` step 7 names them.
+#: The canonical entry's thirteen fields, as `agents/fleet-drive.md` step 7 names them.
 #: `task_file` is what step 0 re-probes from; without it a retained row cannot be
 #: resolved back to a task at all. `reprobe_verdict`/`reprobe_probe` hold step 0's own
 #: observation, kept apart from `verdict`/`probe` (the agent's conclusion) because the
 #: two vocabularies never coincide -- `needs-step-4` is emitted by the re-probe and
 #: deliberately absent from VERDICTS. `unverifiable_streak`/`unverifiable_round` carry
 #: how many CONSECUTIVE rounds a session has been classified unverifiable and the round
-#: tag that count was last advanced at -- `drive-unverifiable.py` acts on it at exactly 2.
+#: tag that count was last advanced at; `unverifiable_action` records what the 2-round
+#: rule did about it, and is what makes the action fire once rather than every round.
+#: `unverifiable_observation` is the third outcome -- a row whose pane did not resolve,
+#: recorded apart from `unverifiable_action` so it never counts as an action taken.
 FIELDS = {
     "session_id",
     "name",
@@ -64,6 +68,10 @@ FIELDS = {
     "reprobe_probe",
     "unverifiable_streak",
     "unverifiable_round",
+    "unverifiable_action",
+    "unverifiable_observation",
+    # The stuck probe's reading, compared by the NEXT round's --previous-mtime.
+    "transcript_mtime",
 }
 
 FLAT_ONLY = tuple("flat%05d" % i for i in range(13))
@@ -252,7 +260,7 @@ class TestRead(Base):
             "exactly one entry per session id",
         )
         for row in out["entries"]:
-            self.assertEqual(set(row), FIELDS, "canonical shape, all twelve fields")
+            self.assertEqual(set(row), FIELDS, "canonical shape, all thirteen fields")
 
     def test_absent_ledger_reads_empty(self):
         proc = self.run_script(["read"])
@@ -336,6 +344,23 @@ class TestMerge(Base):
 
 
 class TestMergeRefusals(Base):
+    def test_every_verdict_step_7_names_is_in_the_closed_set(self):
+        """A verdict the drive leg emits but `VERDICTS` omits refuses the WHOLE round.
+
+        `agents/fleet-drive.md` step 5's table and step 7's entry list name the verdicts the
+        agent may write; `VERDICTS` is the validator's closed set. When `wrote-nothing` was
+        added to the prose and not to this tuple, the first such row made `merge` exit 2 and
+        write nothing — so that round's suppression state for every OTHER row was lost too.
+        Pin the prose's vocabulary against the validator so the two cannot drift again.
+        """
+        spec = importlib.util.spec_from_file_location("drive_ledger_under_test", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        rule = (SCRIPT.parent.parent / "agents" / "fleet-drive.md").read_text(encoding="utf-8")
+        for verdict in module.VERDICTS:
+            with self.subTest(verdict=verdict):
+                self.assertIn(verdict, rule, f"{verdict!r} is validated but never emitted")
+
     def assert_refused(self, proc, needle):
         self.assertEqual(proc.returncode, 2, proc.stdout)
         self.assertIn(needle, proc.stderr)

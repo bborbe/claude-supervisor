@@ -17,6 +17,8 @@ A worker session is in exactly one of four states when it ends a turn. The state
 
 A wait on a bot, CI, deploy or clock is `external`, not `decision`. The run arms the watcher itself (`/github-pr-watch`, `ScheduleWakeup`, `Monitor`, `CronCreate`, a `defer_date`) and names it in `⏰ Ends:`. It never asks the operator to "reply watch": an external wait dressed as a decision blocks the operator on a machine event.
 
+⚠️ **`external` is a state for a wait, not a licence to hold a slot for hours.** A wait expected to run longer than the event-wait park threshold — `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/park-event.py threshold`, which is the only place the number is written — is not lived through resident. It **parks**: `defer_date` at the re-check instant (the readers honour the time of day), the event key registered through `park-event.py register` (which joins a watch a peer already holds for the same event rather than arming a second, and writes the trigger as a `later (on <trigger>)` line in `# Progress` — the record the fleet round needs before it will close a deferred row), and the slot released. The rule's home is `commands/worker-drive.md` § *Park a clock-bound session*; this paragraph names only what it means for the state vocabulary, so a session that reports `🟡 WAITING` with an unbounded watcher is reporting the wrong state rather than a legal one.
+
 ## Decision — exactly one card
 
 Every `decision` run produces exactly one board card for its ask:
@@ -29,6 +31,8 @@ Never add a second card for the same ask: no `📣 Board: yes` line and no manua
 ## Closed — session-close only on a terminal anchor
 
 `closed` covers `completed`, `aborted` and `hold`, but only `completed` and `aborted` are terminal: run `/vault-cli:sync-progress`, then `/vault-cli:session-close`, and stop. `hold` is parked, not finished — sync and report it, never end the session on it. This is the existing Never-end-the-session rule, not a new one.
+
+⚠️ **A `hold` is only ever a block of unknown length.** A task waiting on an operator decision or answer is `decision` — its card is the wait — or `in_progress` + `defer_date` once a pickup date exists; it is never `hold`. A session found at that combination is a mis-set status, not a `closed` one: report it as `decision`, and the fix is `vault-cli task set "<task>" status in_progress`, not a close.
 
 ## Provenance
 

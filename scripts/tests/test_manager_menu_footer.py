@@ -23,7 +23,9 @@ Run: python3 -m unittest discover -s scripts/tests
 """
 import importlib.util
 import os
+import subprocess
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(_HERE))
@@ -115,6 +117,43 @@ class TestTransportContract(unittest.TestCase):
                         "the positive control must be asserted")
         self.assertTrue(any("must be False" in line for line in lines),
                         "the negative control must be asserted")
+
+
+class TestSlowMuxIsNotADeadSocket(unittest.TestCase):
+    """A timed-out pane read is a SLOW mux, not a dead one — this sweep says so too.
+
+    The budget, the retry and the failure kind are `who-needs-me.py`'s, imported rather
+    than copied (this file already imports `manager-menu-guard.py` the same way), so the
+    implementation is pinned once in `test_who_needs_me.py::PaneReadFailureKind`. What is
+    local — and what these tests pin — is this sweep's own wording: the shared sentence
+    is parameterised, and a caller that passes the wrong subject would tell the operator
+    a feed was refused when it was a sweep.
+    """
+
+    def _patch(self, *results):
+        return mock.patch.object(footer.wnm.subprocess, "run", side_effect=list(results))
+
+    def test_the_refusal_is_the_shared_sentence_with_this_sweeps_subject(self):
+        with self._patch(subprocess.TimeoutExpired(["wezterm"], footer.wnm.PANE_LIST_TIMEOUT),
+                         subprocess.TimeoutExpired(["wezterm"],
+                                                   footer.wnm.PANE_LIST_RETRY_TIMEOUT)):
+            self.assertIsNone(footer.wnm.wezterm_panes())
+        self.assertEqual(footer.wnm.PANE_FAIL_TIMEOUT, footer.wnm.pane_read_failure())
+        text = footer.pane_read_refusal()
+        self.assertIn("slow", text)
+        self.assertNotIn("not answering", text)
+        self.assertIn("manager pane can be proven footer-free", text)
+        self.assertIn("clean fleet", text)
+
+    def test_a_dead_socket_keeps_the_not_answering_text_and_the_local_subject(self):
+        dead = mock.Mock(returncode=1, stdout="", stderr="")
+        with self._patch(dead):
+            self.assertIsNone(footer.wnm.wezterm_panes())
+        self.assertEqual(footer.wnm.PANE_FAIL_UNREADABLE, footer.wnm.pane_read_failure())
+        text = footer.pane_read_refusal()
+        self.assertIn("not answering", text)
+        self.assertNotIn("slow", text)
+        self.assertIn("manager pane can be proven footer-free", text)
 
 
 if __name__ == "__main__":

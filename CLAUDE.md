@@ -6,7 +6,7 @@ Audience split follows `coding/docs/readme-guide.md`: README answers *"can a new
 
 ## Session tiers
 
-Every command's prefix names the tier of the session that runs it: `fleet-*` for the fleet manager, `topic-*` for a topic manager, `goal-*` for a goal manager, `worker-*` for a worker; `jump`, `who-needs-me`, `read-guides`, `attention-next`, `close` and `ready` are cross-tier. The tiers form a **strict tree** — each level manages only the level directly below it, and `<tier>-spawn` starts that level: `topic-spawn` starts a goal manager, `goal-spawn` a worker. A worker never opens or spawns sessions (`/supervisor:open` is manager-only) and routes anything out of scope to its manager. The full command → tier table, with "never run from" guidance, is [`docs/session-tiers.md`](docs/session-tiers.md) — the single source; run `/supervisor:read-guides` to load it.
+Every command's prefix names the tier of the session that runs it: `fleet-*` for the fleet manager, `topic-*` for a topic manager, `goal-*` for a goal manager, `worker-*` for a worker; `jump`, `who-needs-me`, `read-guides`, `attention-next`, `close` and `ready` are cross-tier. The tiers form a **tree**, and the operator's hierarchy (2026-10-23) names what each level may open: the fleet manager is top of everything — it opens topic managers, goal managers and workers, each when no lower-tier manager owns the subject; a topic manager opens goal managers and workers; a goal manager opens workers; a worker opens nothing. The `<tier>-spawn` verbs are narrower than their tier: `topic-spawn` starts a goal manager, `goal-spawn` a worker, and a worker opened from the topic tier goes through `/supervisor:open --task`. A worker never opens or spawns sessions (`/supervisor:open` is manager-only) and routes anything out of scope to its manager. The full command → tier table, with "never run from" guidance, is [`docs/session-tiers.md`](docs/session-tiers.md) — the single source; run `/supervisor:read-guides` to load it.
 
 ## How it works
 
@@ -26,6 +26,8 @@ manager session ──MCP──► supervisor server ──query()×N──► w
 
 ## Where a worker runs
 
+⚠️ **`server/supervisor.mjs` is NOT the supervisor tool a session binds — do not fix spawn behaviour there.** The live tool is the Go **`claude-wrapper`** daemon at `http://127.0.0.1:18090/supervisor/mcp`: every `cc-*` launcher loads `~/.claude/mcp-private-personal.json` with `--strict-mcp-config`, and this plugin ships no `.mcp.json`. Nothing on the operator's machine starts the JS server: it is reachable only from the drill scripts and from `scripts/mcp-start.py`, the plugin's own launcher for a deployment that wires an `.mcp.json`. A spawn, model or permission fix belongs in `bborbe/claude-wrapper` — `pkg/roster_mcp.go` (spawn handler, `headlessModel`) and `pkg/spawn_cwd.go` (launcher + model resolution). Measured 2026-11-09: a headless-spawn model fix was written and tested in `server/supervisor.mjs`, then discarded — the live path was the Go daemon. A `PreToolUse` hook on the operator's machine now refuses edits to that file, so the redirect lands before the write.
+
 `spawn_agent` requires `vault` or `cwd` and **refuses when neither is given**. `server/spawn-cwd.mjs` owns that resolution, and it is a pure function — no filesystem, no environment, no clock — so it is unit-testable without a server.
 
 Both halves used to be silent, and the failure is worth keeping in view when editing it. An absent `cwd` became this server's own working directory; an unresolvable launcher became the vault named `personal` and then the bare `claude` binary. Measured 2026-10-03: **27 workers** spawned that way in one batch, every one in the supervisor repo and on Opus instead of the vault's `cc-private-deepseek` — and the response named neither the launcher, nor the vault, nor the model, so a wrong spawn was indistinguishable from a correct one.
@@ -36,14 +38,16 @@ The spawn response carries `vault`, `launcher` and `model`. The model is read fr
 
 ## Reaching a running tab worker
 
-`send_agent_message(agent_id, message)` sends a follow-up to a running worker, over one of two transports picked from the worker's own record (`server/message-channel.mjs`). For a **tab** worker it types into the pane and submits — focus is stolen, and a failure is reported rather than passed off as a success. For a **cluster** worker there is no pane: it posts one more turn on that worker's **existing session id** through the claude-interactive service, blocks until the pod answers, and returns the answer. This is the `send_to_agent` the server never had: a worker that has gone wrong can be corrected, and one that has stalled can be nudged, without a human at the tab.
+`send_agent_message(agent_id, message)` sends a follow-up to a running worker, over one of four transports picked from the worker's own record (`server/message-channel.mjs`). For a **tab** worker it types into the pane and submits — focus is stolen, and a failure is reported rather than passed off as a success. For a **cluster** worker there is no pane: it posts one more turn on that worker's **existing session id** through the claude-interactive service, blocks until the pod answers, and returns the answer. For an **A2A** worker (`docker` / `k8s`) it opens one more turn on the worker's own endpoint. For a **headless** worker it does not deliver at all — it resolves the worker's **session-registry name** and returns it with `sent: false`, and the CALLER sends it with `SendMessage(to: <name>)`, because the server is not a Claude session and cannot call that tool. This is the `send_to_agent` the server never had: a worker that has gone wrong can be corrected, and one that has stalled can be nudged, without a human at the tab.
+
+⚠️ **The headless hand-back is a send the caller must finish, and `sent: false` says so rather than reporting a failure.** Measured 2026-11-08: session `6d16758d` was live and registered as `claude-1f`, while the old refusal told the caller to *"reach it mid-task with SendMessage"* — which, given only the id the caller held, answers `No agent named '6d16758d…' is reachable`. The join is `namesForSessionId` (`liveness.mjs`, the inverse of `sessionIdsNamed`) over the session registry Claude Code writes per session; a name another live session also answers to is refused rather than guessed (so is a second name for one id), and a worker with no entry at all (the session exited, or it runs in-process under the SDK, which registers no name) is refused too — the fix widens the success path, never the failure one.
 
 ⚠️ **A 2xx from a cluster follow-up is not evidence the SAME conversation ran.** The service takes the session id from the caller and echoes none back, so a turn against an id the pod no longer holds is indistinguishable, from this side, from a real continuation — and it would look like a successful send. The proof is the pod's own log (`turn start id=<id>` / `turn end id=<id>`, from `interactive/session-cache.go`), which is the caller's to read. The same discipline `cluster-spawn.mjs` states for a spawn applies to every later turn.
 
 Three things about the **pane** transport are measured rather than assumed, and each one is a trap:
 
-- **It reaches a tab worker only.** A headless worker has no pane, so the call is refused rather than attempted — typing into a pane that does not exist is how a channel reports success while delivering nothing. A cluster worker has no pane either, and is reached over HTTP instead (above) — so read this bullet as scoped to the pane transport, never as "the tool is tab-only".
-- **It activates the worker's tab, which steals focus.** Not silent by design; there is no way to type into a wezterm pane without making its tab active.
+- **It reaches a tab worker only.** The PANE transport is scoped to a tab worker: a headless worker has no pane, so the pane branch is never taken for one — typing into a pane that does not exist is how a channel reports success while delivering nothing. A cluster or A2A worker has no pane either, and a headless worker is handed back to the caller's `SendMessage` (above) — so read this bullet as scoped to the pane transport, never as "the tool is tab-only".
+- **It does not activate the worker's tab.** `send-text --pane-id` reaches a pane in a background tab, so a send never takes the operator's focus. This bullet previously claimed the opposite — that activation was unavoidable and stole focus — and that claim did not reproduce (measured 2026-11-09: 6/6 bytes delivered with `focused_pane_id` unchanged). The earlier 0-byte readings were a canonical-mode artefact, not a delivery failure.
 - **It waits for the input prompt, it does not sleep.** A fixed delay is a race that fails on a loaded machine. Readiness is the `❯` glyph in the pane, which appears about a second after spawn.
 
 **The colour is set the same way, and that is a bug fix.** `SUPERVISOR_WORKER_COLOR` (default `/color pink`) used to be seeded as the first line of the worker's prompt, and it never worked: Claude Code parses one submitted message as one command, and `/color` takes the *entire* trimmed argument, so the colour swallowed the blank line and the whole task — `Invalid color "pink\n\n<task>"`. It is now sent as its own message once the pane is up, and the spawn response reports `color: {applied: true}` only when it actually landed.
@@ -100,7 +104,7 @@ Measured 2026-09-14: the live registry held 13 entries against 13 live processes
 }
 ```
 
-`role` is the role the spawn declared, as resolved by `spawn_agent` from the role map (`manager` / `agent` / `human`; `agent` is the default). It is recorded because **the spawn edge alone cannot tell a manager from a worker**: `/supervisor:open` starts a topic manager in a plain wezterm tab, which writes no record at all, while `spawn_agent(role="manager")` writes one — and `gate-owner-filter.py`'s `is_manager()` reads a record as proof of "worker". Without this field a manager opened through the worker path was invisible to every peer manager, which then re-escalated gates it had already handled (measured 2026-10-06). `null` means the record was written before the field existed, and it reads as a worker — not because no pre-field manager has a record (the manager this fixes had one), but because the field is absent on pre-field workers and managers alike, so defaulting the other way would flip every worker spawned before the change into a manager and drop the fleet's gates. The residue is a known gap: a pre-change `spawn_agent(role="manager")` manager still reads as a worker until it is re-spawned or its record gains the field.
+`role` is the role the spawn declared, as resolved by `spawn_agent` from the role map (`manager` / `agent` / `human`; `agent` is the default). It is recorded because **the spawn edge alone cannot tell a manager from a worker**: `/supervisor:open` starts a topic manager in a plain wezterm tab, which writes no record at all, while `spawn_agent(role="manager")` writes one — and `gate-owner-filter.py`'s `is_manager()` reads a record as proof of "worker". Without this field a manager opened through the worker path was invisible to every peer manager, which then re-escalated gates it had already handled (measured 2026-10-06). `null` means the record was written before the field existed, and it reads as a worker — not because no pre-field manager has a record (the manager this fixes had one), but because the field is absent on pre-field workers and managers alike, so defaulting the other way would flip every worker spawned before the change into a manager and drop the fleet's gates. The residue is a known gap: a pre-change `spawn_agent(role="manager")` manager still reads as a worker until it is re-spawned or its record gains the field. `human` is the operator's own workspace, opened into the Direct window rather than as a worker (`commands/open.md` § Step 0.6), so `gate-owner-filter.py`'s `is_human()` excludes such a row as `role-human` instead of emitting it — measured 2026-10-27, a human row the Fleet Manager itself had spawned fired its feed three times in one hour. `is_human()` matches only an explicit `human`, the opposite default from `is_manager()`: a pre-field record and a `null` role are never human, because excluding on an absence is the fleet-wide silence every hop there fails open to avoid.
 
 `parent_session` is the **spawn edge** — the manager session that called `spawn_agent`, resolved once by walking up from this server's own pid to the **nearest ancestor the live registry knows**. It is *not* the direct parent pid: `.mcp.json` starts this server through a `bun run` wrapper, so the direct parent is that wrapper and a bare `process.ppid` lookup named nothing — which is why this field was `null` in every record written before the walk existed. When no ancestor is registered — an exited manager, or a chain that never passed through a session — the field stays `null` rather than carrying a guess. Nothing else records it. A worker whose session id never resolved gets no record rather than one filed under a key nothing would look up, and the server logs that rather than staying quiet.
 
@@ -139,7 +143,7 @@ Every worker blocker — a permission prompt, a question, a stall — is a recor
 ```
 .claude-plugin/marketplace.json          marketplace manifest
 .claude-plugin/plugin.json               plugin manifest
-.mcp.json                                starts the server (${CLAUDE_PLUGIN_ROOT}/server)
+(no .mcp.json)                           deliberately absent — the plugin declares no MCP server; sessions reach `supervisor` over the daemon's HTTP endpoint (`make check` fails if the file reappears)
 skills/supervising-workers/SKILL.md
 skills/open-items/SKILL.md               the operator-asks ledger — rules + /supervisor:open-items (script stays at scripts/open-items.py)
 commands/{goal-spawn,fleet-workers,goal-answer,goal-drain}.md
@@ -147,8 +151,9 @@ commands/{jump,who-needs-me}.md                  find and reach a session
 commands/attention-next.md + scripts/attention-answer.py  answer an attention item, route it to the asker
 commands/{fleet-loop,fleet-status}.md            fleet surface — many sessions; the loop's arm and its read-only snapshot
 commands/fleet-drive.md                          fleet surface — the loop's round, dispatched on every wakeup and runnable by hand
+commands/fleet-triage.md + commands/steps/fleet-triage-*.md  one pass over every live session — classify, close, drive, card; the deliverable is all five green conditions: zero stuck, zero uncarded, zero finished-but-open, zero no-loop, and every live session accounted for
 commands/{topic-loop,topic-status}.md    one TOPIC — the loop's arm and its read-only goal snapshot
-commands/topic-drive.md                  one TOPIC — the loop's round: keep goal managers alive, start what the ranking admits
+commands/topic-drive.md                  one TOPIC — the loop's round: keep goal managers alive, start only goals the operator flagged
 commands/topic-spawn.md                  one TOPIC — start ONE goal manager; holds no spawn tool, delegates to /supervisor:open --goal
 commands/topic-verify.md                 topic manager — verify one topic, suggest fixes
 commands/{goal-loop,goal-status}.md      one GOAL — the loop's arm and its read-only task snapshot
@@ -160,20 +165,25 @@ commands/worker-drive.md                         one worker session — drive it
 scripts/progress-window.py                       its measured window — verdict, A/B/C observations and the claim result, from disk only (spec: docs/session-progress.md)
 commands/restart.md                              restart ONE named session, worker or manager — kill, resume, re-orient
 commands/worker-restart.md                       DEPRECATED alias for commands/restart.md
-commands/close.md                                close ONE finished session's pane — seven guards, never a resume
+commands/close.md                                close ONE finished session — eight guards, never a resume
 scripts/restart-precheck.py                      its read-only pre-kill probe: worktree, transcript, cause of death
-scripts/restart-worker.py                        the kill+resume leg — seven refusals, never a broad `kill`
+scripts/restart-worker.py                        the kill+resume leg — eight refusals, never a broad `kill`
+scripts/resolve-launcher.py                      the resume's launcher + chip, resolved by code — a thin CLI over `restart-worker.py`'s `resolve_launcher`, called by `commands/open.md` § 3.1
 scripts/close-worker.py                          the close leg — reuses restart-worker/restart-precheck/jump, adds the task gate
 commands/open.md                                 resolve a name → jump / resume / spawn (manager-only)
 commands/ready.md                                ready ONE named task to the bar, then open it (cross-tier)
 commands/stop.md                                 stand that loop down
 commands/reset.md + scripts/reset.py             re-discover its state; never deletes the ledger
 docs/fleet-surface.md                            spawn shape + fleet table render spec (canonical)
+docs/closer-classes.md                           the CLOSERS class vocabulary, the routine-continue table and the digest join rule (canonical)
 docs/sweep-output.md                             the manager sweep's output frame — columns, widths, icons (canonical)
+docs/fleet-drive-rationale.md                    the evidence behind the drive leg's rules — the agent body states them and points here
 docs/session-tiers.md                            session tiers + command → tier table (canonical)
 docs/subject-resolution.md                      the four-source subject chain the eight manager commands share
 scripts/topic-spawn.py                           the topic tier's spawn gate — goal-not-in-scope / goal-not-startable / manager-cap, the § 1 ranking, and the worker refusal
 scripts/topic-keepalive.py                       the topic tier's keep-alive — resume-not-respawn, 3 resumes per goal per 30 min, crash-loop line
+scripts/topicless-goal-keepalive.py              the fleet tier's keep-alive for goal managers no topic declares — selects in_progress+execution goals, asks topic-keepalive.py per goal, never acts
+scripts/owner.py                                 THE ownership definition (`docs/session-tiers.md` § Keep-alive) as code — owner / not-owner / cannot-tell from session liveness + loop state; every keeper and filter resolves through it
 docs/voice-asks.md                               a voiced question is also a board card — rule + detector (canonical)
 docs/orphan-recovery.md                          stop + recreate a remote worker whose container or pod is gone (canonical)
 scripts/voice-ask-pairing.py                     flags question `say`s with no `attention-ask.py post` within 60 s
@@ -181,9 +191,16 @@ scripts/manager-predispatch.py                   the pre-dispatch gate both mana
 scripts/plugin-version-census.py                 the fleet reading of the plugin-install probe — who is stale, and `--reload` the lever that moves them
 scripts/approved-not-started.py                  the approved-but-unstarted reading both loops print (tick = 30 min constant; `unknown`, never `0`, on an unreadable registry)
 scripts/adopt-orphans.py                         adopts an exited manager's live workers into the ownership-claim store (/fleet-loop Step 3a) — successor-by-subject, else the tick session
-scripts/gate-owner-filter.py                     the ownership-scoped attention arm — drops gates a live peer manager owns (state: ~/.claude/state/gate-feed/<self-session-id>.json)
+scripts/gate-owner-filter.py                     the ownership-scoped attention arm — drops gates a live peer manager owns, excludes gates the vault says belong to another goal, and excludes a `role: human` row (the operator's own workspace, never a manager's to route) (state: ~/.claude/state/gate-feed/<self-session-id>.json)
+scripts/session-scope.py                         that arm's durable ownership input — which goal a session belongs to, from the vault's page stamps (not a live store)
 commands/read-guides.md                          load every guide in docs/
 scripts/{jump,who-needs-me}.py                   their helpers
+scripts/service-guard.py                         the fleet round's standing resource guard (fifth reading, router row 15) — `phys_footprint` + CPU per launchd service against `~/.claude/state/service-guard.json`; `--apply` reopens the owning row on a breach, never restarts
+scripts/keeper-census.py                         the sixth reading (router row 15) — every live session's keeper tier and every page's, against `docs/session-tiers.md` § Keep-alive; names each unkept / double-kept row and exits 1, posts one card per red episode, never acts
+scripts/declared-wait.py                         the shared `⏰ Ends:` reader — one home for the slot `fleet-board.py`, `manager-predispatch.py` and the fleet sweep all key on (the "fourth definition of idle" guard)
+scripts/observable-reprobe.py                    the `⏰ Ends:` observable probe — parses every PR a declaration names, asks `gh` whether each cleared, and prints `resumed` / `still-blocked` / `unprobeable`; clears only when EVERY named PR has, and never on an unreadable input
+scripts/wait-reprobe.py                          the round's join of declared waits to that probe — one row per declaring session, rendered as a `REPROBED` block; renders only, never resumes
+scripts/round-detectors.py                       the round's SC1/SC2 detectors in ONE call — `NO-CARD` (a parked ask with no live store card) and `ROUTING` (an ownerless `🔴 BLOCKED` closer → the subject's manager); builds the manager chain once, and only when a row needs routing
 agents/goal-wrangler.md                routine approval loop over headless workers
 agents/topic-sweep-reader.md            the TOPIC sweep's read half — goal rows and their managers (called by topic-loop/topic-status)
 agents/topic-drive.md                   the TOPIC sweep's act leg — keep-alive and the ranked start hand-over
@@ -195,13 +212,24 @@ agents/goal-verify.md                  the goal tier's checks + report shape (di
 agents/fleet-drive.md                    the fleet drive leg — revive/blocked split, re-nudge ledger (called by /fleet-drive and by /fleet-loop every round)
 agents/gate-relay-read.md                the manager's gate relay, read leg — pane id in, ≤15-line per-pane summary out; declares no write tool at all
 agents/gate-relay-send.md                the manager's gate relay, send leg — the operator's answer into a tab worker's pane; never drives a selection modal
-server/supervisor.mjs                    the MCP server
+server/supervisor.mjs                    the DEPRECATED MCP server — drill scripts only; the live tool is the Go claude-wrapper daemon
 server/policy.json                       bundled approval rules (see README § The approval policy)
+launchd/com.bborbe.fleet-keeper.plist    the fleet keeper — one tick a minute, no Claude session as its parent
+launchd/com.bborbe.idle-reaper.plist     the idle reaper
+launchd/com.bborbe.rebase-agent.plist    the rebase agent
+launchd/com.bborbe.session-exit-daily.plist  the daily session exit
+launchd/com.bborbe.fleet-pusher.plist    the CHEAP wake cadence — StartInterval 900, no model turn (docs/fleet-pusher.md)
+launchd/com.bborbe.fleet-pusher-watch.plist  its watchdog — StartInterval 300, reports a dead cadence
+scripts/fleet-pusher-tick.sh             one pusher pass, exits; resolves the NEWEST installed supervisor, never a pinned version
+scripts/fleet-pusher-watch.sh            reads the pusher's heartbeat, posts one `ack` card once it ages past 1800 s
+docs/fleet-pusher.md                     the pusher's two layers, its install, and the five things that look healthy and are not
 ```
 
 ## Changelog fold guard
 
-`.github/workflows/changelog-fold.yml` runs `bborbe/coding`'s reusable guard on every push to master. It fails when a bullet sits under a released section whose tag does not contain its merge.
+The fold is guarded twice. `.github/workflows/changelog-unreleased-fold.yml` runs on every pull request and **predicts** it: it computes the merge with `git merge-tree --write-tree` and fails when a pending `## Unreleased` bullet would land under an already-released heading. `.github/workflows/changelog-fold.yml` runs on every push to master and **detects** it in the real merged tree: it fails when a bullet sits under a released section whose tag does not contain its merge.
+
+The precheck is the one that saves the mail. Between 2026-10-30 and 10-31 the post-merge guard was red for 91 consecutive master runs — 91 detections, not 91 prevented, one failure mail each. Run the precheck locally before pushing: `CHANGELOG_ROOT=$PWD CHANGELOG_BASE_REF=origin/master bash <path-to-bborbe-coding>/scripts/check-changelog-unreleased-fold.sh`.
 
 **A red run on master blocks the next merge.** Owner: the maintainer. Trigger: a `changelog-fold` workflow run concluding `failure` on master. Repair it in the next PR, or in a PR of its own, before merging anything else — an always-red guard cannot distinguish a new fold from a standing backlog, which is how three folds in a row (#398, #405, #406) were each found by hand while the guard sat red and unread.
 

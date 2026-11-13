@@ -60,6 +60,44 @@ def without_pointer(text):
     return "\n".join(lines) + "\n"
 
 
+def archive_body(text):
+    """The released sections of an existing archive, from its first `## v` heading.
+
+    The header is re-emitted from `ARCHIVE_HEADER`, so the prior body is taken from the first
+    release heading rather than from a header shape that may have drifted.
+    """
+    m = re.search(r"^## v\d+\.\d+\.\d+$", text, re.MULTILINE)
+    return text[m.start():] if m else ""
+
+
+def merge_archive(existing, archived):
+    """Newly archived sections first, then the prior archive's — newest first, no duplicates.
+
+    ⚠️ **The prior archive is not optional.** This rotation appends to frozen history; writing
+    only the freshly cut suffix silently deletes every section archived by an earlier run, and
+    nothing else in the tree holds them. Observed 2026-10-29: a second rotation overwrote
+    `CHANGELOG-archive.md` and dropped 316 released sections (v0.102.3 … v0.1.0) out of the
+    repository entirely. A heading already present in `archived` is skipped so a repeated run
+    cannot duplicate it.
+    """
+    seen = {line for line in archived.split("\n") if RELEASED.match(line)}
+    kept = []
+    for block in re.split(r"(?m)^(?=## v\d+\.\d+\.\d+$)", archive_body(existing)):
+        head = block.split("\n", 1)[0]
+        if RELEASED.match(head) and head not in seen:
+            kept.append(block)
+            seen.add(head)
+    if not kept:
+        return archived
+    # A bare concatenation puts the next heading straight after the last bullet of the previous
+    # section. ATX headings interrupt paragraphs, so it still renders — but it is the one junction
+    # this function CREATES, and it should not be the one that differs. ⚠️ **This does not
+    # normalise carried-forward blocks:** the real archive has 17+ junctions with no blank line
+    # from earlier hand-edits, and they are left verbatim because released sections are frozen.
+    # Measured 2026-10-29 by review on CHANGELOG-archive.md:521.
+    return archived.rstrip("\n") + "\n\n" + "".join(kept).lstrip("\n")
+
+
 def main(argv):
     root = pathlib.Path(__file__).resolve().parent.parent
     path = root / CHANGELOG
@@ -111,8 +149,16 @@ def main(argv):
         f"\n_Releases older than {archived_heads[0]} ({archived_heads[-1]} … "
         f"{archived_heads[0]}) are archived in [CHANGELOG-archive.md]({ARCHIVE})._\n"
     )
+    # ⚠️ The archive is written FIRST. Truncating CHANGELOG.md before the archive exists means a
+    # failed archive write leaves the freshly cut sections in neither file — recoverable only
+    # from git. This order fails the other way: a crash can duplicate a section, but the freshly
+    # cut ones are never absent from both. ⚠️ **Scoped to the cut sections, not to all of them:**
+    # the retained half is still truncated by its own write below, so a mid-write failure there
+    # is recoverable only from git. The order is an improvement, not a guarantee.
+    archive_path = root / ARCHIVE
+    prior = archive_path.read_text(encoding="utf-8") if archive_path.exists() else ""
+    archive_path.write_text(ARCHIVE_HEADER + merge_archive(prior, archived), encoding="utf-8")
     path.write_text(f"{kept}\n{pointer}", encoding="utf-8")
-    (root / ARCHIVE).write_text(ARCHIVE_HEADER + archived, encoding="utf-8")
 
     new_size = len(path.read_text(encoding="utf-8").encode("utf-8"))
     print(

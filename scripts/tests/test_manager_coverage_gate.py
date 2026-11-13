@@ -177,6 +177,68 @@ class CoverageGateTest(unittest.TestCase):
         self.assertEqual(rows, [owner], "a multi-word name is one name, not many")
         self.assertEqual(rc, 10)
 
+    def test_a_comma_bearing_name_resolves_as_one_name(self):
+        """SC3: a comma INSIDE a task name is not a separator.
+
+        Regression: `split_names` split on every comma, so this name became two fragments,
+        neither matched an owner, `resolve` returned None and the gate failed open to the
+        whole set. Measured 2026-11-02 on the live 61-owner set: a one-owner change
+        dispatched all 61 at full cost, with every fail-open assertion still passing.
+
+        ⚠️ The fixture holds FOUR owners and asserts ONE row, so the assertion cannot be
+        satisfied by a build that emits nothing — the collapse is the claim.
+        """
+        name = (
+            "Digest Watcher Judges File Arrival, So a Late-Landing Digest Trips a "
+            "False Report on a Timely Round"
+        )
+        owner = f"/vault/25 Tasks/{name}.md"
+        tracked = os.path.join(self._tmp.name, "comma.txt")
+        with open(tracked, "w", encoding="utf-8") as handle:
+            handle.write(owner + "\n")
+            for other in TASKS:
+                handle.write(other + "\n")
+            handle.write(SUBJECT + "\n")
+        rc, rows, _ = run("--tracked", tracked, "--delta", "change", "--changed", name)
+        self.assertEqual(rows, [owner], "a comma inside a name is not a separator")
+        self.assertEqual(rc, 10)
+
+    def test_a_comma_bearing_name_leaves_no_fragment_on_stdout(self):
+        """The negative evidence: the dispatch list names the owner, never its halves."""
+        name = (
+            "Digest Watcher Judges File Arrival, So a Late-Landing Digest Trips a "
+            "False Report on a Timely Round"
+        )
+        owner = f"/vault/25 Tasks/{name}.md"
+        tracked = os.path.join(self._tmp.name, "comma-neg.txt")
+        with open(tracked, "w", encoding="utf-8") as handle:
+            handle.write(owner + "\n")
+            handle.write(SUBJECT + "\n")
+        rc, rows, _ = run("--tracked", tracked, "--delta", "change", "--changed", name)
+        self.assertEqual(rows, [owner])
+        # ⚠️ Assert on the JOINED stdout, not on list membership: `rows` holds whole
+        # owner paths, so `assertNotIn("<fragment>", rows)` is element equality and
+        # cannot fail even when a fragment is emitted.
+        stdout = "\n".join(rows)
+        self.assertNotIn("Digest Watcher Judges File Arrival\n", stdout + "\n")
+        self.assertNotIn(
+            "\nSo a Late-Landing Digest Trips a False Report on a Timely Round",
+            "\n" + stdout,
+        )
+
+    def test_a_space_separated_value_fails_open_rather_than_splitting(self):
+        """`--changed` is comma- or newline-separated, never whitespace-separated.
+
+        A single unknown name that happens to decompose into two known owners must not
+        narrow the dispatch to those two — the value is one name the set cannot place, and
+        the documented contract for that is fail-open whole-set.
+        """
+        rc, rows, _ = run(
+            "--tracked", self.tracked, "--delta", "change", "--changed", "Alpha Row Beta Row"
+        )
+        self.assertEqual(rows, TASKS + [SUBJECT])
+        self.assertEqual(rc, 10)
+
     def test_changed_names_match_a_full_path_too(self):
         rc, rows, _ = run(
             "--tracked", self.tracked, "--delta", "change", "--changed", TASKS[0],

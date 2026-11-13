@@ -891,6 +891,55 @@ class TestLiveness(Base):
         self.m.enrich_liveness(tracked, self.m.read_registry(), self.m.read_feed())
         self.assertEqual(tracked[0]["liveness"], self.m.LIVENESS_PARKED)
 
+    def test_a_declared_wait_is_parked_not_live(self):
+        """`⏰ Ends:` names a machine the worker waits on — a dependency, so parked.
+
+        The sibling below is the control: the same registry state with no declaration
+        stays `live`, so a build that parked every session fails here rather than
+        passing by accident. The declaration is read from the file's own `FEED_DIR`,
+        which is what keeps this test off the live store.
+        """
+        self.registry("s-decl")
+        self.events("s-decl", "⏰ Ends: watch.sh (background Bash, x)")
+        tracked = [{"name": "T", "session": "s-decl"}]
+        self.m.enrich_liveness(tracked, self.m.read_registry(), self.m.read_feed())
+        self.assertEqual(tracked[0]["liveness"], self.m.LIVENESS_PARKED)
+
+    def test_a_session_without_a_declaration_stays_live(self):
+        self.registry("s-nodecl")
+        self.events("s-nodecl", "👤 You: nothing")
+        tracked = [{"name": "T", "session": "s-nodecl"}]
+        self.m.enrich_liveness(tracked, self.m.read_registry(), self.m.read_feed())
+        self.assertEqual(tracked[0]["liveness"], self.m.LIVENESS_LIVE)
+
+    def test_a_declared_wait_parks_the_roster_name_fallback_too(self):
+        """The name-fallback path must carry BOTH park carriers, not just the gate.
+
+        ⚠️ `roster_owner` is the sibling of `liveness_of_sid`'s park test and its own
+        comment reads *"Same rule as `liveness_of`"*. A build that patched only the id
+        path leaves a declared-waiting worker reading LIVE whenever its task resolves by
+        roster name — and the LIVE half is what feeds `idle_stuck`'s
+        `!= LIVENESS_PARKED` branch, so the task is still offered for re-dispatch.
+        """
+        self.registry_named("s-roster", "Declared One")
+        self.events("s-roster", "⏰ Ends: watch.sh (background Bash, x)")
+        tracked = [{"name": "Declared One", "session": "", "sessions": []}]
+        self.m.enrich_liveness(tracked, self.m.read_registry(), self.m.read_feed())
+        self.assertEqual(tracked[0]["liveness"], self.m.LIVENESS_PARKED)
+
+    def test_the_roster_name_fallback_stays_live_without_a_declaration(self):
+        self.registry_named("s-roster2", "Undeclared One")
+        tracked = [{"name": "Undeclared One", "session": "", "sessions": []}]
+        self.m.enrich_liveness(tracked, self.m.read_registry(), self.m.read_feed())
+        self.assertEqual(tracked[0]["liveness"], self.m.LIVENESS_LIVE)
+
+    def events(self, sid, detail):
+        """Append one `Stop` record to a session's log inside the file's own FEED_DIR."""
+        path = os.path.join(self.m.FEED_DIR, f"{sid}.events.jsonl")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "open", "event": "Stop", "item_id": "i",
+                                 "detail": detail}) + "\n")
+
     # -- the id set, and the roster-name fallback ---------------------------- #
 
     def registry_named(self, sid, name, status="idle"):
@@ -1569,13 +1618,25 @@ class TestTrackedArtifacts(Base):
         """Work Approval tick #90: 11 names a side, sharing none. Two independently-derived
         memberships cannot each hold every name the other lacks, so the shape is itself the
         tell — a caller-side format error (here a `sed` that never fired and kept each
-        bullet's `— description` tail), not a disagreement of any size."""
+        bullet's `— description` tail), not a disagreement of any size.
+
+        ⚠️ This is the ONE divergence that blocks rather than reports, so it carries its
+        own exit code. Measured 2026-11-08 (Development Pipeline Throughput): 38
+        vault-relative page paths against 543 real task rows classified `caller-format`,
+        the round continued on the shared exit 10, and the readings document rendered
+        `clear=38 · none=38` for a fleet it never read. A caller branching on 10 for
+        "stop and look" cannot also treat it as "refuse the round", so the two verdicts
+        are two codes.
+        """
         self.tracked("ATopic", ["ATask", "AGoal"])
         self.snapshot("ATopic", ["Other1", "Other2"])
         rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked")
-        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertEqual(rc, self.m.EXIT_CALLER_FORMAT, out)
+        self.assertNotEqual(self.m.EXIT_CALLER_FORMAT, self.m.EXIT_DIVERGENT,
+                            "a blocking verdict must not share the report-only code")
         self.assertIn("caller-format", out)
         self.assertIn("format error", out)
+        self.assertIn("⛔", out, "the refusal must be legible on the first line")
 
     def test_compare_names_the_caller_side_when_the_scan_overshot(self):
         """The other direction of the same cause: gate-only is empty and the caller carries
@@ -1634,6 +1695,96 @@ class TestTrackedArtifacts(Base):
         self.assertIn("unclassified", out)
         self.assertIn("could not be read", out)
 
+    # -- `--heal` ------------------------------------------------------------------
+    #
+    # The refresh-on-divergence. Measured 2026-11-12: a goal manager's tracked file was
+    # last written at 14:09:48 while its gate snapshot refreshed at 16:29:12, so 130 names
+    # stood against 136 and six declaring rows were invisible to every sweep for three
+    # hours. The comparison caught it on every firing and reported it; nothing wrote.
+
+    def read_tracked(self, subject):
+        with open(self.m.tracked_path(subject), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_heal_refreshes_a_strict_subset_and_names_the_added_rows(self):
+        """The defect's own shape: the caller's set is a strict subset of the gate's and
+        carries nothing the page never declared. The refresh writes the union — no row is
+        removed — and the round's own output names each row it added."""
+        self.tracked("ATopic", ["ATask", "AGoal"])
+        self.snapshot("ATopic", ["ATask", "AGoal", "Dropped"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked", "--heal")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+        self.assertIn("caller-scan-suspect", out)
+        self.assertIn("TRACKED missing 1 · extra 0", out)
+        self.assertIn("REFRESHED tracked set 2 → 3 (+1): Dropped", out)
+        self.assertIn("✅ TRACKED complete — 3 names, missing 0, extra 0", out)
+        self.assertEqual(self.read_tracked("ATopic"), "AGoal\nATask\nDropped\n")
+
+    def test_the_healed_set_compares_identical_on_the_next_firing(self):
+        """The probe SC3/SC4 grade: after the refresh, the very next round reports
+        `missing 0 · extra 0` and writes nothing — so the receipt can never carry a stale
+        "healed" claim into a second round."""
+        self.tracked("ATopic", ["ATask", "AGoal"])
+        self.snapshot("ATopic", ["ATask", "AGoal", "Dropped"])
+        self.run_gate("--subject", "ATopic", "--compare-tracked", "--heal")
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked", "--heal")
+        self.assertEqual(rc, self.m.EXIT_NOCHANGE, out)
+        self.assertIn("memberships identical", out)
+        self.assertIn("✅ TRACKED complete — 3 names, missing 0, extra 0", out)
+        self.assertNotIn("REFRESHED", out)
+
+    def test_heal_never_writes_on_caller_overshoot(self):
+        """The other direction, and the reason the write is gated on one label: here the
+        caller carries a name the page never declared while gate-only is empty, so the
+        caller may be right and the snapshot a refresh behind. Overwriting would delete a
+        row that exists."""
+        self.tracked("ATopic", ["ATask", "Stray"])
+        self.snapshot("ATopic", ["ATask"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked", "--heal")
+        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertIn("caller-overshoot", out)
+        self.assertNotIn("REFRESHED", out)
+        self.assertEqual(self.read_tracked("ATopic"), "ATask\nStray\n")
+
+    def test_heal_never_writes_when_neither_side_is_exonerated(self):
+        self.tracked("ATopic", ["ATask", "Stray"])
+        self.snapshot("ATopic", ["ATask", "Extra"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked", "--heal")
+        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertIn("both-sides-moved", out)
+        self.assertIn("TRACKED missing 1 · extra 1", out)
+        self.assertNotIn("REFRESHED", out)
+        self.assertEqual(self.read_tracked("ATopic"), "ATask\nStray\n")
+
+    def test_heal_refuses_a_caller_format_pair_and_writes_nothing(self):
+        """`caller-format` is the one divergence that refuses the round. Healing it would
+        write a set built from a wrong-form scan, so it stays a refusal under `--heal`
+        too."""
+        self.tracked("ATopic", ["ATask", "AGoal"])
+        self.snapshot("ATopic", ["Other1", "Other2"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked", "--heal")
+        self.assertEqual(rc, self.m.EXIT_CALLER_FORMAT, out)
+        self.assertIn("caller-format", out)
+        self.assertNotIn("REFRESHED", out)
+        self.assertEqual(self.read_tracked("ATopic"), "ATask\nAGoal\n")
+
+    def test_heal_never_writes_when_the_snapshot_is_unreadable(self):
+        """"I could not check" is not "there is nothing to add": an unreadable snapshot
+        leaves the previous set untouched and reports, exactly as the comparison does."""
+        self.tracked("ATopic", ["ATask"])
+        rc, out = self.run_gate("--subject", "ATopic", "--compare-tracked", "--heal")
+        self.assertEqual(rc, self.m.EXIT_DIVERGENT, out)
+        self.assertIn("unavailable", out)
+        self.assertNotIn("REFRESHED", out)
+        self.assertEqual(self.read_tracked("ATopic"), "ATask\n")
+
+    def test_heal_without_the_comparison_is_a_usage_error(self):
+        """A modifier that silently did nothing would let a round believe it refreshed a
+        set it never read. `--print` supplies the required mode so this reaches the
+        explicit check rather than argparse's "one of the arguments is required" exit."""
+        rc, out = self.run_gate("--subject", "ATopic", "--print", "--heal")
+        self.assertEqual(rc, self.m.EXIT_USAGE, out)
+
 
 HELD = "aaaaaaaa-1111-2222-3333-444444444444"
 OTHER = "bbbbbbbb-1111-2222-3333-444444444444"
@@ -1657,6 +1808,10 @@ class HoldDigest(Base):
         super().setUp()
         self.holds = os.path.join(self.tmp, "holds.json")
         self.m.HOLDS_PATH = self.holds
+        # No role map: the Hold-window source is off for these store tests, so they
+        # never shell out to a real WezTerm and stay host-independent. The window is
+        # exercised on its own in HoldWindowDigest below.
+        self.m.ROLE_MAP = os.path.join(self.tmp, "no-role-map.json")
         self.write_holds()
 
     def write_holds(self, *session_ids):
@@ -1703,6 +1858,77 @@ class HoldDigest(Base):
         with open(self.holds, "w", encoding="utf-8") as handle:
             handle.write("{not json")
         self.assertEqual(before, self.m.digest_of(tracked))
+
+
+class HoldWindowDigest(Base):
+    """The Hold WINDOW as a digest input -- the second source of heldness.
+
+    A pane parked in the role map's Hold window is held with no store entry at all.
+    Like the store hold, that is a DIGEST INPUT here, never a suppression: this gate
+    only decides whether the sweep runs, so adding or releasing a Hold-window hold
+    must move the digest and wake the loop to re-render the row.
+
+    A failed pane read answers *not held*, and that is the chosen direction for THIS
+    caller rather than a collapse: the gate is fail-open (CHANGE authorises a sweep,
+    it never suppresses one), so a missed Hold-window hold costs one un-moved digest
+    while the held row still renders on the next tick -- whereas inventing a hold
+    would answer CHANGE on every tick for as long as the transport stayed down,
+    defeating the saving the gate exists for. Same direction the store read
+    documents, and the two must agree.
+
+    Both directions are asserted by name, and the pane read is stubbed so the suite
+    never depends on the host having WezTerm.
+    """
+
+    NAME = "⚙ held"
+    PANE = 874
+    HOLD_WINDOW = 11
+    AGENT_WINDOW = 9
+
+    def setUp(self):
+        super().setUp()
+        # An absent store: the window must hold on its own, with no entry.
+        self.m.HOLDS_PATH = os.path.join(self.tmp, "holds.json")
+        self.m.ROLE_MAP = os.path.join(self.tmp, "role-map.json")
+        with open(self.m.ROLE_MAP, "w", encoding="utf-8") as handle:
+            json.dump({"Hold": {"window_id": self.HOLD_WINDOW}}, handle)
+        self.m.registry_names = lambda: {self.NAME: HELD}
+
+    def pane_in(self, window):
+        self.m.panes = lambda: [
+            {"pane_id": self.PANE, "window_id": window, "title": "✳ " + self.NAME}
+        ]
+
+    def row(self, name, session):
+        return {
+            "name": name,
+            "status": "in_progress",
+            "phase": "execution",
+            "session": session,
+        }
+
+    def test_a_pane_in_the_hold_window_is_held(self):
+        """Too-tight: position alone is a hold, with no store entry."""
+        self.pane_in(self.HOLD_WINDOW)
+        self.assertTrue(self.m.is_held(HELD))
+
+    def test_a_pane_outside_the_hold_window_is_not_held(self):
+        """Too-loose: a pane in another window is an ordinary session."""
+        self.pane_in(self.AGENT_WINDOW)
+        self.assertFalse(self.m.is_held(HELD))
+
+    def test_the_hold_window_moves_the_digest(self):
+        """The digest input the gate is graded on: moving the pane moves it."""
+        tracked = [self.row("a", HELD)]
+        self.pane_in(self.HOLD_WINDOW)
+        held = self.m.digest_of(tracked)
+        self.pane_in(self.AGENT_WINDOW)
+        self.assertNotEqual(held, self.m.digest_of(tracked))
+
+    def test_a_failed_pane_read_reads_not_held(self):
+        """The chosen response: no spurious CHANGE while the transport is down."""
+        self.m.panes = lambda: None
+        self.assertFalse(self.m.is_held(HELD))
 
 
 class TestStuck(Base):
@@ -2908,6 +3134,210 @@ class TestBlockedVerdictsMode(Base):
         self.assertEqual(out.strip(), "")
 
 
+class GoalsDeclarationShapes(Base):
+    """The `goals:` read, against every shape the vault writes.
+
+    The defect (measured 2026-11-02 on the live `private-personal` vault): a `goals:`
+    block item written as a bare list entry carries no `[[...]]`, so the wikilink-only
+    extractor returned `[]` for it. `resolve_tracked` admits a task only when its goals
+    intersect the member set, so that task left the tracked set entirely — no row, no
+    warning, no failed assertion. The caller's scan read 61 names against the gate's 60,
+    differing by exactly the one task in this shape.
+
+    ⚠️ The four shapes are asserted through `read_task`, the path `resolve_tracked`
+    actually walks — not through the normaliser alone. A test of the helper would pass
+    against a `read_task` still wired to the old extractor, which is the wiring this
+    defect lived in.
+    """
+
+    SHAPES = {
+        "wikilink list": "goals:\n    - '[[AGoal]]'\n",
+        "plain scalar": "goals: AGoal\n",
+        "nested list-of-list": "goals:\n    - - AGoal\n",
+        "plain-list item": "goals:\n    - AGoal\n",
+    }
+
+    def page(self, name, goals_fm):
+        """Write a task page declaring `goals_fm`, and return its parsed frontmatter dict."""
+        self.write(
+            "25 Tasks/%s.md" % name,
+            "---\nstatus: in_progress\nphase: execution\n%s---\nTags: [[Task]]\n"
+            % goals_fm,
+        )
+        return self.m.read_task(os.path.join(self.vault, "25 Tasks", "%s.md" % name))
+
+    def test_every_shape_reads_as_the_same_one_name(self):
+        for label, goals_fm in self.SHAPES.items():
+            with self.subTest(shape=label):
+                self.assertEqual(
+                    self.page("Shape Task", goals_fm)["goals"],
+                    ["AGoal"],
+                    "%s did not read as one goal name" % label,
+                )
+
+    def test_a_plain_list_item_puts_the_task_in_the_tracked_set(self):
+        """SC1: the row this defect dropped, restored to the tracked set."""
+        self.page("Bare Item", self.SHAPES["plain-list item"])
+        names = [t["name"] for t in self.m.resolve_tracked(self.vault, ["AGoal"])]
+        self.assertIn(
+            "Bare Item", names, "a bare `- Name` goals item left the task untracked"
+        )
+
+    def test_the_reader_and_reset_py_agree_on_every_shape(self):
+        """SC2: the gate's extractor and the caller's scan are ONE implementation.
+
+        `reset.py` re-discovers the tracked set from disk — the caller's side of the
+        `--compare-tracked` comparison. Before this fix it handled all four shapes while
+        the gate handled two, and each looked self-consistent on its own.
+        """
+        spec = importlib.util.spec_from_file_location(
+            "reset_under_test", os.path.join(os.path.dirname(_HERE), "reset.py")
+        )
+        reset = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reset)
+        for label, goals_fm in self.SHAPES.items():
+            with self.subTest(shape=label):
+                page = "---\n%s---\nTags: [[Task]]\n" % goals_fm
+                self.assertEqual(
+                    set(self.page("Shape Task", goals_fm)["goals"]),
+                    reset.goals_of(page),
+                    "%s disagrees between read_task and reset.goals_of" % label,
+                )
+
+    def test_a_comma_inside_a_quoted_flow_item_is_not_a_separator(self):
+        """The mirror of the coverage gate's comma fix, in the declaration read.
+
+        A quoted flow-list item may carry a comma of its own. Splitting the list before
+        locating its item boundaries shatters the name into fragments that match no
+        member — the same silent drop the bare-list fix removed, one shape over.
+        """
+        name = "Digest Watcher Judges File Arrival, So a Late-Landing Digest Trips a False Report on a Timely Round"
+        goals_fm = "goals: ['[[%s]]']\n" % name
+        self.assertEqual(self.page("Comma Goal", goals_fm)["goals"], [name])
+
+    def test_an_inline_value_that_is_itself_a_wikilink_is_not_a_flow_list(self):
+        """`goals: [[X]]` is YAML's inline nested list; read as a flow list it yields `[X]`.
+
+        Both spellings are shapes the three readers this module replaces resolved, so
+        mishandling them is a silent-drop regression rather than a new gap.
+        """
+        for goals_fm, want in (
+            ("goals: [[AGoal]]\n", ["AGoal"]),
+            ("goals: [[AGoal]] [[BGoal]]\n", ["AGoal", "BGoal"]),
+        ):
+            with self.subTest(declaration=goals_fm.strip()):
+                self.assertEqual(self.page("Inline Link", goals_fm)["goals"], want)
+
+    def test_a_full_line_comment_inside_the_block_does_not_end_it(self):
+        """A comment line is not a terminator — items after it are still declarations."""
+        self.assertEqual(
+            self.page(
+                "Comment Between", "goals:\n    - AGoal\n    # note\n    - BGoal\n"
+            )["goals"],
+            ["AGoal", "BGoal"],
+        )
+
+    def test_a_doubled_quote_is_an_escaped_apostrophe_not_a_close(self):
+        """`''` must not close the quoted item, or the comma after it splits the name."""
+        self.assertEqual(
+            self.page("Escaped Comma", "goals: ['[[Bob''s Goal, Part 2]]']\n")["goals"],
+            ["Bob's Goal, Part 2"],
+        )
+
+    def test_indentation_and_line_endings_do_not_change_the_read(self):
+        """Tab indentation and CRLF are both valid YAML for the same block."""
+        for goals_fm, want in (
+            ("goals:\n\t- AGoal\n", ["AGoal"]),
+            ("goals:\r\n    - AGoal\r\n", ["AGoal"]),
+        ):
+            with self.subTest(declaration=repr(goals_fm)):
+                self.assertEqual(self.page("Indent", goals_fm)["goals"], want)
+
+    def test_an_apostrophe_inside_an_unquoted_item_is_not_a_quote(self):
+        """A quote opens an item; an apostrophe is punctuation inside one.
+
+        Toggling quote state on every `'` reads the apostrophe in `Loop's` as an opening
+        quote, swallows the comma that follows, and merges two names into one that matches
+        no page — the same silent drop, reached through the fix for it.
+        """
+        self.assertEqual(
+            self.page(
+                "Apostrophe",
+                "goals: [The Manager Loop's Coverage Step, Other Goal]\n",
+            )["goals"],
+            ["The Manager Loop's Coverage Step", "Other Goal"],
+        )
+
+    def test_a_yaml_inline_comment_is_stripped(self):
+        """A comment-bearing declaration used to work; the unification must not break it."""
+        for goals_fm, want in (
+            ("goals:\n    - '[[AGoal]]' # note\n", ["AGoal"]),
+            ("goals: AGoal # note\n", ["AGoal"]),
+        ):
+            with self.subTest(declaration=goals_fm.strip()):
+                self.assertEqual(self.page("Commented", goals_fm)["goals"], want)
+
+    def test_a_hash_inside_a_quoted_wikilink_is_not_read_as_a_comment(self):
+        """The comment scan must open the quote past the list marker and the flow bracket.
+
+        A prefix test demanding literal blankness refuses to open the quote after `    - `
+        or `[`, so the space-preceded `#` inside the name reads as a comment and the line
+        truncates before the link closes — `'[[Name`, a fragment matching no page. The
+        expected value is `Name` rather than `Name # Heading` because the wikilink's
+        heading is split off deliberately, as Obsidian reads `[[Page#Heading]]`.
+        """
+        for goals_fm, want in (
+            ("goals:\n    - '[[Name # With Hash]]'\n", ["Name"]),
+            ("goals: ['[[Name # Hash]]', 'Other']\n", ["Name", "Other"]),
+            # ⚠️ A LATER item is the case that failed when the comment scan ran on the
+            # whole value: the first item's text sat in front of the second item's opening
+            # quote, so the quote was never recognised and the list truncated at the `#`.
+            ("goals: ['[[AGoal]]', 'Bob # 2']\n", ["AGoal", "Bob # 2"]),
+            ("goals: ['[[AGoal]]', '[[B # C]]']\n", ["AGoal", "B"]),
+        ):
+            with self.subTest(declaration=goals_fm.strip()):
+                self.assertEqual(self.page("Hash Link", goals_fm)["goals"], want)
+
+    def test_a_column_zero_comment_inside_the_block_is_dropped(self):
+        """An unindented comment line is a comment, not a goal the file carries."""
+        self.assertEqual(
+            self.page("Column Zero Comment", "goals:\n# note\n- AGoal\n")["goals"],
+            ["AGoal"],
+        )
+
+    def test_a_comment_on_an_empty_declaration_is_still_empty(self):
+        """`goals: [] # note` names no goal, not a goal called `[] # note`."""
+        self.assertEqual(
+            self.page("Commented Empty", "goals: [] # note\n")["goals"], []
+        )
+
+    def test_a_flow_list_still_splits_on_the_commas_between_its_items(self):
+        """The positive control: quote-awareness must not stop a real two-item list."""
+        self.assertEqual(
+            self.page("Two Goals", "goals: ['[[AGoal]]', '[[BGoal]]']\n")["goals"],
+            ["AGoal", "BGoal"],
+        )
+
+    def test_an_empty_declaration_is_still_empty(self):
+        """The control: every empty spelling names no goal, so the fix cannot over-read.
+
+        `goals: ~` is included because YAML's null is case-insensitive — a reader that
+        matches `null` only in lower case would read `goals: NULL` as a goal named `NULL`.
+        """
+        for goals_fm in (
+            "goals: []\n",
+            "goals:\n",
+            "goals: null\n",
+            "goals: ~\n",
+            "goals: NULL\n",
+            # A live marker in the vault: emptiness spelled as a list ITEM rather than as
+            # the value. Returning `[]` as a name would be a phantom matching no page.
+            "goals:\n    - '[]'\n",
+        ):
+            with self.subTest(declaration=goals_fm.strip()):
+                self.assertEqual(self.page("Empty Task", goals_fm)["goals"], [])
+
+
 class DeclaredMembersBoundary(unittest.TestCase):
     """`## Goals` membership must not be truncated by a `###`.
 
@@ -3021,20 +3451,32 @@ class TestRosterOwnerTruncation(Base):
                        alive=False),
             self.m.LIVENESS_NONE)
 
-    def test_the_truncation_floor_agrees_across_the_three_readers(self):
+    def test_the_truncation_floor_agrees_across_the_four_readers(self):
         """⚠️ `_TRUNCATION_MIN_PREFIX` is duplicated in `fleet-board.py` and
-        `resolve-task-file.py` on purpose — none of the three imports another — so the
-        values are pinned together here. Drift would make the board, this gate and the
-        sweep reader disagree about whether a name resolves, which is the one thing all
-        three exist to answer the same way."""
+        `resolve-task-file.py` on purpose — none of the four imports another — so the
+        values are pinned together here. Drift would make the board, this gate, the
+        sweep reader and the pane join disagree about whether a name resolves, which is
+        the one thing all four exist to answer the same way.
+
+        ⚠️ **The fourth reader is `exit-record-coverage.py`, and it is a late addition.**
+        It carries the same floor as `PREFIX_FLOOR` while joining PANE TITLES rather than
+        task names, so only the constant is shared: it has no `_norm_session_name`, and
+        its `normalize()` is a different transform (leading-glyph strip, not the task-name
+        normalizer). It is therefore pinned on the floor alone — a name-only loop over the
+        original two would leave this copy unpinned and let the pane join drift away from
+        the task-name join without a single failing test."""
         base = os.path.dirname(_SCRIPT)
-        for filename, alias in (("fleet-board.py", "fleet_board_floor_probe"),
-                                ("resolve-task-file.py", "resolve_task_file_floor_probe")):
+        for filename, alias, floor_attr, norm_attr in (
+                ("fleet-board.py", "fleet_board_floor_probe", "_TRUNCATION_MIN_PREFIX", "_norm_session_name"),
+                ("resolve-task-file.py", "resolve_task_file_floor_probe", "_TRUNCATION_MIN_PREFIX", "_norm_session_name"),
+                ("exit-record-coverage.py", "exit_record_coverage_floor_probe", "PREFIX_FLOOR", None)):
             with self.subTest(sibling=filename):
                 spec = importlib.util.spec_from_file_location(alias, os.path.join(base, filename))
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
-                self.assertEqual(self.m._TRUNCATION_MIN_PREFIX, mod._TRUNCATION_MIN_PREFIX)
+                self.assertEqual(self.m._TRUNCATION_MIN_PREFIX, getattr(mod, floor_attr))
+                if norm_attr is None:
+                    continue
                 # ⚠️ **The constant is not the only shared surface — pin the normalizer
                 # too.** A drift in `_norm_session_name` alone (dropping the whitespace
                 # collapse, say) makes the three readers disagree about what a name *is*,
@@ -3121,6 +3563,110 @@ class TestCheckboxCountStruckRows(unittest.TestCase):
         # the choice cannot drift silently.
         text = "# Tasks\n\n- [x] kept\n- [/] ~~[[InFlight]]~~ — being reworked\n"
         self.assertEqual(self.m.checkbox_count(text), "1/2")
+
+
+class LedgerPathDefault(unittest.TestCase):
+    """The ledger path is NOT derived from this script's own state dir.
+
+    The defect this pins: `os.path.join(STATE_DIR, "open-items")` resolves under
+    `~/.claude/state/manager-predispatch`, a directory that never exists — so
+    `open_asked_of_you()` returned `[]` on every call and the frozen-tree predicate
+    silently collapsed to mtime-only, the exact failure the gate exists to prevent.
+
+    It reads the DEFAULT, in its own class, because `TestFrozenTree.setUp` overrides
+    `OPEN_ITEMS_DIR` with a tempdir — which is why every other test passed while the
+    production path was wrong.
+    """
+
+    def test_the_default_ledger_path_is_the_real_ledger(self):
+        m = load(tempfile.mkdtemp())
+        self.assertNotIn(
+            os.path.realpath(m.STATE_DIR), os.path.realpath(m.OPEN_ITEMS_DIR)
+        )
+        self.assertTrue(
+            m.OPEN_ITEMS_DIR.endswith(os.path.join("state", "open-items")),
+            m.OPEN_ITEMS_DIR,
+        )
+
+
+class TestFrozenTree(Base):
+    """The frozen-tree predicate — both conjuncts, and neither may stand in for the other.
+
+    `Manager Session.md:488` defines it as *"no tracked file's mtime has moved for >= 2
+    cadence intervals (30 min at the 15-min default), AND the tick's content has already
+    left the machine."* The second conjunct has no instrument in the runbook, so it is
+    read here as: this session's ledger carries no OPEN `asked-of-you`. Each test pins one
+    conjunct in isolation — a predicate that answers on mtime alone passes the quiet-tree
+    case and hides an unpublished operator question, which is the failure the runbook
+    names in as many words.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.m.OPEN_ITEMS_DIR = os.path.join(self.tmp, "open-items")
+        os.makedirs(self.m.OPEN_ITEMS_DIR)
+        self.sid = "sid-under-test"
+        self._saved = os.environ.get("CLAUDE_CODE_SESSION_ID")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = self.sid
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        else:
+            os.environ["CLAUDE_CODE_SESSION_ID"] = self._saved
+
+    def age(self, seconds):
+        """Push every tracked task's mtime `seconds` into the past."""
+        tasks = os.path.join(self.vault, "25 Tasks")
+        for name in os.listdir(tasks):
+            os.utime(os.path.join(tasks, name), (time.time() - seconds,) * 2)
+
+    def ledger(self, items):
+        path = os.path.join(self.m.OPEN_ITEMS_DIR, self.sid + ".json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"session_id": self.sid, "items": items}, fh)
+
+    def test_quiet_tree_with_no_open_asks_is_frozen(self):
+        self.age(4 * 3600)
+        v = self.m.frozen_tree(self.vault, "ATopic")
+        self.assertTrue(v["frozen"], v)
+
+    def test_a_recently_moved_tracked_file_is_not_frozen(self):
+        self.age(4 * 3600)
+        self.write("25 Tasks/ATask.md", TASK.format(sid="", progress=""))
+        v = self.m.frozen_tree(self.vault, "ATopic")
+        self.assertFalse(v["frozen"], v)
+        self.assertLess(v["quiet_seconds"], v["window_seconds"])
+
+    def test_an_open_asked_of_you_blocks_the_gate_even_on_a_quiet_tree(self):
+        # The conjunct that mtime alone cannot see: the tree is frozen, but a question
+        # the operator has not answered is still the manager's live context.
+        self.age(4 * 3600)
+        self.ledger([{"kind": "asked-of-you", "state": "open", "text": "ship it?"}])
+        v = self.m.frozen_tree(self.vault, "ATopic")
+        self.assertFalse(v["frozen"], v)
+        self.assertEqual(v["open_asks"], ["ship it?"])
+
+    def test_a_closed_asked_of_you_does_not_block(self):
+        self.age(4 * 3600)
+        self.ledger([{"kind": "asked-of-you", "state": "closed", "text": "answered"}])
+        self.assertTrue(self.m.frozen_tree(self.vault, "ATopic")["frozen"])
+
+    def test_other_ledger_kinds_do_not_block(self):
+        # Only `asked-of-you` is a question awaiting an answer; `pushed` and `asked-of-me`
+        # close on their task file and carry nothing the operator still owes.
+        self.age(4 * 3600)
+        self.ledger([
+            {"kind": "pushed", "state": "open", "text": "filed a task"},
+            {"kind": "asked-of-me", "state": "open", "text": "do the thing"},
+        ])
+        self.assertTrue(self.m.frozen_tree(self.vault, "ATopic")["frozen"])
+
+    def test_a_missing_ledger_does_not_block(self):
+        # Unreadable is `[]`, never fail-closed: a session that never used the ledger
+        # asked the operator nothing, and blocking there would freeze the gate forever.
+        self.age(4 * 3600)
+        self.assertTrue(self.m.frozen_tree(self.vault, "ATopic")["frozen"])
 
 
 if __name__ == "__main__":

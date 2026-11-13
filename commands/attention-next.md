@@ -25,10 +25,12 @@ Print the output verbatim, then stop. Each item shows its `item_id`, its questio
    A `permission`-class item **needs** the flag and is refused without it. A `message`-class item ignores it, so passing it for a message whose answer happens to be the word "allow" changes nothing.
 2. Branch on the output — never on anything else:
    - `ANSWERED:` then `TARGET: <name>` → call `SendMessage` with `to` = `<name>` exactly, and `message` = `Operator answer, via attention stack (item <ITEM_ID>): <ANSWER>`. Report the item id and the recipient.
-   - `ANSWERED:` then `DELIVERY: supervisor poll` → do **not** send anything. Report: the verdict is recorded and the spawning supervisor server will settle the parked prompt. **There is no session to message here**, and messaging one would be a relay — a session cannot release another session's parked gate.
+   - `ANSWERED:` then `DELIVERY: delivered by <carrier>` → do **not** send anything. Report: the verdict was delivered and the store recorded the carrier's attempt. **There is no session to message here**, and messaging one would be a relay — a session cannot release another session's parked gate.
+   - `RECORDED:` then `NOT_DELIVERED: <failed|held> by <carrier>` → do **not** send. Report: the verdict is stored but the carrier could not settle the park (`failed`) or left it for the operator (`held`) — **the asking session is still parked**, and the gate must not be reported as answered.
+   - `RECORDED:` then `UNCONFIRMED: <why>` → do **not** send. Report: the verdict is stored but no carrier reported delivery within the wait — **the asking session may still be parked**; do not report the gate as answered.
    - `ANSWERED:` then `UNDELIVERABLE: <reason>` → do **not** send. Report: the item is answered in the store, but the answer was not delivered — `<reason>`.
    - `ALREADY_ANSWERED:` → do **not** send; another arm's verdict landed first. Report it.
-   - `ITEM_CLOSED:` → do **not** send. The card left the queue before this answer arrived (the board cleared it, or its producer exited), so **no arm can answer it now and no verdict was recorded** — the gate was **not** released. Report it.
+   - `ITEM_CLOSED:` → do **not** send. The card left the queue before this answer arrived and **no verdict was recorded** — the gate was **not** released. ⚠️ **Do not name a cause.** The store does not record why it left: a cleared card, a withdrawn one and one whose producer exited all leave the same no-actor record, so the line says the cause is not recorded and a report must repeat that rather than pick one. Report it.
    - `LOST:` → do **not** send; the store refused the write with a 409 whose body carried no code this arm could read, **or none it knows**, so which of the two above happened is **unknown**. Report it.
    - `REFUSED:` / `FAILED:` → report the line verbatim; do not send.
 
@@ -45,7 +47,7 @@ Print the output verbatim, then stop. Each item shows its `item_id`, its questio
    | `TARGET:` and `SendMessage` returned without error | `delivered` | The answer reached the session. |
    | `TARGET:` and `SendMessage` **errored** | `failed` | A carrier looked and could not deliver. |
    | `UNDELIVERABLE: <reason>` | `failed` | The attempt failed at target resolution; nothing was sent. |
-   | `DELIVERY: supervisor poll` | **nothing** | The supervisor server delivers the verdict and records its own attempt. Posting here would record an attempt by an arm that delivered nothing. |
+   | `DELIVERY: delivered by …` / `NOT_DELIVERED:` / `UNCONFIRMED:` | **nothing** | The supervisor server delivers the verdict and records its own attempt — these lines are that record, read back. Posting here would record an attempt by an arm that delivered nothing. |
    | `ALREADY_ANSWERED:` / `ITEM_CLOSED:` / `LOST:` / `REFUSED:` / `FAILED:` | **nothing** | No attempt happened — another arm won the compare-and-set, the card had already left the queue, or the answer was refused before any delivery was tried. ⚠️ Recording `failed` here would claim a carrier tried and could not deliver, which is a different and false statement. |
 
    ⚠️ **Never record at answer time.** An attempt is a fact about the carrier, so writing it where the *answer* is recorded would make every answer read as attempted — the exact defect this trail exists to close. The store stamps the attempt's time from its own clock, so this command cannot date its own attempt.

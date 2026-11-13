@@ -10,11 +10,14 @@ Covers the two decisions that make an answer safe to route:
     print a TARGET. A 409 must never be followed by a route, and an `ack` item
     must be refused before the store is written at all.
   * the 409 itself -- the status covers more than one failure, so the body's
-    `error.code` names which: ITEM_CLOSED (the card was cleared and left the
-    queue, so no arm can answer it) must read differently from ALREADY_ANSWERED
-    (another arm's verdict landed first). A code the arm cannot read falls back
-    to the generic line, because a body it cannot parse is not evidence of
-    either, and both named lines claim a specific cause.
+    `error.code` names which: ITEM_CLOSED (the card left the queue, so no arm
+    can answer it) must read differently from ALREADY_ANSWERED (another arm's
+    verdict landed first). A code the arm cannot read falls back to the generic
+    line, because a body it cannot parse is not evidence of either.
+    ⚠️ **ITEM_CLOSED names no cause** — the store does not record why a card
+    left, so the line states that rather than picking one; only
+    ALREADY_ANSWERED claims a specific fact, and that fact is the verdict's
+    existence, which the code does establish.
   * the permission branch -- a permission-class item needs an explicit
     --decision. Without one it is refused rather than defaulted, because
     neither an implicit allow nor an implicit deny is safe; with one it prints
@@ -101,10 +104,23 @@ class LoadRegistryTest(unittest.TestCase):
 class AnswerGateTest(unittest.TestCase):
     REG = [_session("p1", "Asker")]
 
-    def _run(self, item, post=None, decision=""):
+    def _run(self, item, post=None, decision="", delivery=None):
+        # A permission answer now reads the store's delivery report before it
+        # claims anything; the default here is the delivered case, so the gate
+        # tests below keep asserting the gate rather than the wait.
+        if delivery is None:
+            delivery = {"item_id": "i1", "status": "delivered", "carrier": "supervisor:attention-poll"}
         out = io.StringIO()
+        # ⚠️ `ATTENTION_STATE_DIR` is redirected into a throwaway dir. `cmd_answer` writes an
+        # answer marker beside the worker's event log, so without this every message-class
+        # test would write into the real `~/.claude/state/attention` — polluting the operator's
+        # live state from the test suite, and making the assertions depend on a file that
+        # outlives the run.
         with mock.patch.object(aa, "fetch_item", return_value=item), \
-             mock.patch.object(aa, "post_answer", side_effect=post) as posted:
+             mock.patch.object(aa, "post_answer", side_effect=post) as posted, \
+             mock.patch.object(aa, "fetch_delivery", return_value=delivery), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", tempfile.mkdtemp()), \
+             mock.patch.object(aa, "_sleep", lambda _s: None):
             rc = aa.cmd_answer("i1", "arm", self.REG, out=out, decision=decision)
         return rc, out.getvalue(), posted
 
@@ -171,17 +187,23 @@ class AnswerGateTest(unittest.TestCase):
         self.assertIn("LOST:", out)
         self.assertNotIn("DELIVERY", out)
 
-    def test_item_closed_names_the_cleared_card(self):
+    def test_item_closed_does_not_pick_a_cause(self):
         item = {"item_id": "i1", "answer_mechanism": "message", "producer_id": "p1"}
         rc, out, _ = self._run(item, post=_conflict("ITEM_CLOSED"))
         self.assertEqual(rc, 1)
         self.assertIn("ITEM_CLOSED:", out)
         self.assertNotIn("LOST:", out)
-        # The whole point of the split: a reader who sees only this line must
-        # learn the card was cleared and no verdict was recorded, which is a
-        # different fact about the gate from a lost race.
-        self.assertIn("cleared", out)
+        # ⚠️ The whole point of the split is that a reader who sees only this
+        # line learns no verdict was recorded — NOT which cause produced it. The
+        # line used to offer "the card was cleared, or its producer exited" as
+        # if the record had settled which; it cannot. An empty-body close comes
+        # from the dead-session sweep, the compact-crossing clear, a forwarded
+        # SessionEnd and `close_session_approval`, and the last is not a
+        # producer exit at all. Naming one member of that set would be a claim
+        # the record does not support, so the line must name the ambiguity.
         self.assertIn("no verdict was recorded", out)
+        self.assertIn("the store does not record why", out)
+        self.assertNotIn("producer exited;", out)
         self.assertNotIn("TARGET", out)
 
     def test_already_answered_names_the_lost_race(self):
@@ -199,6 +221,13 @@ class AnswerGateTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("LOST:", out)
         self.assertNotIn("ITEM_CLOSED:", out)
+        # ⚠️ This branch fires on a code the arm could not read at all, so it
+        # carries strictly LESS evidence than ITEM_CLOSED carries — and it used
+        # to assert "already answered or no longer open", two specific causes
+        # drawn from zero information. It must now say it cannot tell which.
+        self.assertIn("cannot read", out)
+        self.assertIn("cannot say whether", out)
+        self.assertNotIn("already answered or no longer open", out)
         self.assertNotIn("ALREADY_ANSWERED:", out)
 
     def test_unknown_code_falls_back_to_the_generic_line(self):
@@ -404,6 +433,380 @@ class AttemptOutcomeGateTest(unittest.TestCase):
         self.assertEqual(code, 0)
         posted.assert_called_once_with("i1", "arm", "delivered")
         self.assertIn("ATTEMPT: i1 delivered by arm", out.getvalue())
+
+
+class PermissionDeliveryTruthTest(unittest.TestCase):
+    """A permission answer claims only the delivery the store observed.
+
+    The CLI only POSTs the verdict; the spawning server's poller settles the
+    park and records the attempt. The pre-fix arm printed `ANSWERED` and an
+    unconditional `DELIVERY: supervisor poll` line and exited 0 whatever
+    happened next — measured 2026-11-05, a manager read that as answered while
+    the worker stayed parked (`wrapper holds no question for session …`).
+    """
+
+    ITEM = {"item_id": "i1", "answer_mechanism": "permission", "producer_id": "p1"}
+    POSTED = {"answered_at": "t", "answered_by": "arm"}
+
+    def _run(self, reports, wait=35.0, poll=1.0):
+        """Answer `allow` while the store's delivery report walks `reports`.
+
+        Each entry is a report dict, or an exception the read raises. The last
+        entry repeats, and a fake clock advances one `poll` per read, so the
+        bounded wait is exercised without sleeping.
+        """
+        seq = list(reports)
+        reads = []
+        timeouts = []
+        clock = [0.0]
+
+        def fetch(item_id, timeout=None):
+            reads.append(item_id)
+            timeouts.append(timeout)
+            entry = seq.pop(0) if len(seq) > 1 else seq[0]
+            if isinstance(entry, Exception):
+                raise entry
+            return entry
+
+        def sleep(seconds):
+            clock[0] += seconds
+
+        out = io.StringIO()
+        with mock.patch.object(aa, "fetch_item", return_value=self.ITEM), \
+             mock.patch.object(aa, "post_answer", return_value=self.POSTED), \
+             mock.patch.object(aa, "fetch_delivery", side_effect=fetch), \
+             mock.patch.object(aa, "_sleep", sleep), \
+             mock.patch.object(aa, "_clock", lambda: clock[0]), \
+             mock.patch.object(aa, "DELIVERY_WAIT_SECONDS", wait), \
+             mock.patch.object(aa, "DELIVERY_POLL_SECONDS", poll):
+            rc = aa.cmd_answer("i1", "arm", [], out=out, decision="allow")
+        self.timeouts = timeouts
+        return rc, out.getvalue(), reads
+
+    def test_delivered_reports_the_observed_delivery(self):
+        rc, out, _ = self._run([{"status": "delivered", "carrier": "supervisor:attention-poll"}])
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED: i1", out)
+        self.assertIn("DELIVERY: delivered by supervisor:attention-poll", out)
+        self.assertNotIn("NOT_DELIVERED", out)
+        # The pre-fix line stated a route and checked nothing; it must be gone.
+        self.assertNotIn("no session to send to", out)
+
+    def test_delivery_landing_after_a_few_polls_is_waited_for(self):
+        rc, out, reads = self._run([
+            {"status": "never_attempted"},
+            {"status": "never_attempted"},
+            {"status": "delivered", "carrier": "supervisor:attention-poll"},
+        ])
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED: i1", out)
+        self.assertEqual(len(reads), 3)
+
+    def test_failed_attempt_is_not_answered(self):
+        # The bdc2f1ed shape: a poller owned the item and the wrapper held no
+        # question, so it recorded `failed`.
+        rc, out, _ = self._run([{"status": "failed", "carrier": "supervisor:attention-poll"}])
+        self.assertEqual(rc, aa.EXIT_NOT_DELIVERED)
+        self.assertNotIn("ANSWERED:", out)
+        self.assertIn("RECORDED: i1", out)
+        self.assertIn("NOT_DELIVERED: failed by supervisor:attention-poll", out)
+
+    def test_held_attempt_is_not_answered(self):
+        rc, out, _ = self._run([{"status": "held", "carrier": "supervisor:attention-poll"}])
+        self.assertEqual(rc, aa.EXIT_NOT_DELIVERED)
+        self.assertNotIn("ANSWERED:", out)
+        self.assertIn("NOT_DELIVERED: held by supervisor:attention-poll", out)
+
+    def test_no_attempt_within_the_bound_is_a_failure_not_a_success(self):
+        # ⚠️ The third state must never read as success: a wait that times out
+        # and exits 0 is the pre-fix bug on a different clock.
+        rc, out, reads = self._run([{"status": "never_attempted"}], wait=35.0, poll=1.0)
+        self.assertEqual(rc, aa.EXIT_NOT_DELIVERED)
+        self.assertNotIn("ANSWERED:", out)
+        self.assertIn("RECORDED: i1", out)
+        self.assertIn("UNCONFIRMED: never_attempted", out)
+        self.assertGreaterEqual(len(reads), 35)
+
+    def test_unreadable_report_is_unconfirmed(self):
+        # Same guard as restart-precheck.py: a report without `status` decides nothing.
+        rc, out, _ = self._run([{"item_id": "i1"}], wait=3.0)
+        self.assertEqual(rc, aa.EXIT_NOT_DELIVERED)
+        self.assertNotIn("ANSWERED:", out)
+        self.assertIn("UNCONFIRMED: delivery report unreadable", out)
+
+    def test_an_unreadable_read_then_a_delivered_one_still_succeeds(self):
+        # The recovery path the wait most depends on: a failed read resets
+        # status/reason but must keep polling rather than give up.
+        rc, out, reads = self._run([
+            urllib.error.URLError("refused"),
+            {"status": "delivered", "carrier": "supervisor:attention-poll"},
+        ])
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED: i1", out)
+        self.assertIn("DELIVERY: delivered by supervisor:attention-poll", out)
+        self.assertEqual(len(reads), 2)
+
+    def test_every_read_is_clamped_to_the_budget_that_is_left(self):
+        # The printed bound must be the enforced one: a read allowed its full
+        # STORE_TIMEOUT could overshoot DELIVERY_WAIT_SECONDS.
+        self._run([{"status": "never_attempted"}], wait=5.0, poll=1.0)
+        self.assertTrue(self.timeouts)
+        self.assertLessEqual(max(self.timeouts), 5.0)
+        self.assertLess(self.timeouts[-1], 2.0)
+
+    def test_unreachable_report_is_unconfirmed(self):
+        rc, out, _ = self._run([urllib.error.URLError("refused")], wait=3.0)
+        self.assertEqual(rc, aa.EXIT_NOT_DELIVERED)
+        self.assertNotIn("ANSWERED:", out)
+        self.assertIn("UNCONFIRMED: delivery report unreadable", out)
+        self.assertIn("refused", out)
+
+    def test_delivered_and_undelivered_outputs_are_distinguishable(self):
+        _, delivered, _ = self._run([{"status": "delivered", "carrier": "c"}])
+        _, failed, _ = self._run([{"status": "failed", "carrier": "c"}])
+        delivered_lines = {line.split(":", 1)[0] for line in delivered.splitlines()}
+        failed_lines = {line.split(":", 1)[0] for line in failed.splitlines()}
+        self.assertIn("ANSWERED", delivered_lines - failed_lines)
+        self.assertIn("NOT_DELIVERED", failed_lines - delivered_lines)
+
+    def test_default_wait_outlasts_the_idle_poll_interval(self):
+        # server/attention-poll.mjs reads at idleIntervalMs = 30000 when nothing
+        # is open; an answer landing then is picked up up to 30 s later, so a
+        # shorter bound would call a slow-but-working delivery unconfirmed.
+        self.assertGreater(aa.DELIVERY_WAIT_SECONDS, 30.0)
+
+    def test_wait_is_overridable_from_the_environment(self):
+        self.assertEqual(aa.delivery_wait_seconds({"ATTENTION_DELIVERY_WAIT": "5"}), 5.0)
+        self.assertEqual(aa.delivery_wait_seconds({}), aa.DEFAULT_DELIVERY_WAIT_SECONDS)
+
+    def test_non_finite_wait_falls_back_instead_of_hanging(self):
+        # ⚠️ A `nan` deadline makes `_clock() >= deadline` permanently False, so
+        # the loop would never exit; `inf` blocks for ever. Neither may parse.
+        for raw in ("nan", "inf", "-inf", "Infinity"):
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    aa.delivery_wait_seconds({"ATTENTION_DELIVERY_WAIT": raw}),
+                    aa.DEFAULT_DELIVERY_WAIT_SECONDS,
+                )
+
+    def test_non_positive_wait_falls_back(self):
+        for raw in ("0", "-5"):
+            with self.subTest(raw=raw):
+                self.assertEqual(
+                    aa.delivery_wait_seconds({"ATTENTION_DELIVERY_WAIT": raw}),
+                    aa.DEFAULT_DELIVERY_WAIT_SECONDS,
+                )
+
+    def test_oversized_wait_is_clamped(self):
+        self.assertEqual(
+            aa.delivery_wait_seconds({"ATTENTION_DELIVERY_WAIT": "999999"}),
+            aa.MAX_DELIVERY_WAIT_SECONDS,
+        )
+
+    def test_a_nan_wait_cannot_make_the_command_hang(self):
+        # The end-to-end shape of the MAJOR: with a nan bound the pre-fix loop
+        # never returned. The clamp is what makes this terminate.
+        seq = [{"status": "never_attempted"}]
+        reads, clock = [], [0.0]
+        out = io.StringIO()
+
+        def fetch(item_id, timeout=None):
+            reads.append(item_id)
+            return seq[0]
+
+        with mock.patch.object(aa, "fetch_item", return_value={"item_id": "i1", "answer_mechanism": "permission"}), \
+             mock.patch.object(aa, "post_answer", return_value={"answered_at": "t", "answered_by": "a"}), \
+             mock.patch.object(aa, "fetch_delivery", side_effect=fetch), \
+             mock.patch.object(aa, "_sleep", lambda s: clock.__setitem__(0, clock[0] + s)), \
+             mock.patch.object(aa, "_clock", lambda: clock[0]), \
+             mock.patch.object(aa, "DELIVERY_WAIT_SECONDS",
+                               aa.delivery_wait_seconds({"ATTENTION_DELIVERY_WAIT": "nan"})), \
+             mock.patch.object(aa, "DELIVERY_POLL_SECONDS", 1.0):
+            rc = aa.cmd_answer("i1", "arm", [], out=out, decision="allow")
+        self.assertEqual(rc, aa.EXIT_NOT_DELIVERED)
+        self.assertIn("UNCONFIRMED:", out.getvalue())
+
+
+class FetchDeliveryTest(unittest.TestCase):
+    def test_reads_the_attempt_endpoint(self):
+        captured = {}
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def _urlopen(url, timeout=None):
+            captured["url"] = url
+            return _Resp(json.dumps({"item_id": "i1", "status": "delivered"}).encode())
+
+        with mock.patch.object(aa.urllib.request, "urlopen", _urlopen):
+            report = aa.fetch_delivery("i1")
+        self.assertTrue(captured["url"].endswith("/api/1.0/attention/i1/attempt"))
+        self.assertEqual(report["status"], "delivered")
+
+
+class MirrorCardLookup(unittest.TestCase):
+    """An answer given on a Stop-hook MIRROR card must reach the waiting session.
+
+    A mirror is a gate the EVENT LOG holds and the STORE never carried — the class
+    `who-needs-me.py`'s `board_missing_gates()` returns. So `fetch_item()` 404s on the
+    mirror's id, and on unfixed code that exception escapes `cmd_answer` before any
+    TARGET is printed: the operator's approve lands nowhere and the session keeps
+    waiting.
+
+    ⚠️ The fixtures use the shapes the hook ACTUALLY writes — an open line carrying
+    `type: "open"` + `kind`, and a close line carrying `closed_by` and no `type`
+    (`~/.claude/hooks/attention-log.py`). A one-line `{item_id, session_id, kind}` record
+    is a shape production never emits, so it cannot express a closed card and would pin
+    the bug rather than catch it.
+    """
+
+    SID = "3f9c1a2b-4d5e-4f60-8a7b-1c2d3e4f5a6b"
+
+    def setUp(self):
+        self.state = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.state, True)
+        self.registry = [{"sessionId": self.SID, "name": "claude-1f"}]
+
+    def _write(self, *records):
+        # Filename matches the record's session_id, as every real log does.
+        path = os.path.join(self.state, f"{self.SID}.events.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec) + "\n")
+
+    def _open(self, item_id="mirror-1", kind="question"):
+        return {"type": "open", "item_id": item_id, "session_id": self.SID,
+                "kind": kind, "event": "Stop", "ts": 1}
+
+    def _close(self, item_id="mirror-1"):
+        return {"item_id": item_id, "session_id": self.SID,
+                "closed_by": "UserPromptSubmit", "ts": 2}
+
+    def _answer(self, item_id, err=None):
+        out = io.StringIO()
+        err = err or urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        with mock.patch.object(aa, "fetch_item", side_effect=err), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", self.state), \
+             mock.patch.object(aa, "write_answer_marker") as marked:
+            rc = aa.cmd_answer(item_id, "operator", self.registry, out)
+        return rc, out.getvalue(), marked
+
+    def test_answering_a_mirror_id_routes_to_the_producing_session(self):
+        self._write(self._open())
+        rc, text, marked = self._answer("mirror-1")
+        self.assertEqual(rc, 0, text)
+        self.assertIn("TARGET: claude-1f", text)
+        # The marker the store path writes, so the close line carries who answered.
+        self.assertEqual(marked.call_args[0][0], self.SID)
+
+    def test_a_closed_mirror_is_refused_not_routed(self):
+        # The store path has a compare-and-set for this; the mirror path has none, so
+        # the fold is the only guard.
+        self._write(self._open(), self._close())
+        rc, text, _ = self._answer("mirror-1")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("FAILED:", text)
+        self.assertNotIn("TARGET:", text)
+
+    def test_a_permission_mirror_is_refused(self):
+        # A relay cannot release another session's parked gate — that is permission
+        # laundering, and this arm cannot record a verdict anywhere.
+        self._write(self._open(kind="permission"))
+        rc, text, _ = self._answer("mirror-1")
+        self.assertEqual(rc, 2, text)
+        self.assertIn("REFUSED:", text)
+        self.assertNotIn("TARGET:", text)
+
+    def test_an_idle_record_is_not_a_gate(self):
+        self._write(self._open(kind="idle"))
+        rc, text, _ = self._answer("mirror-1")
+        self.assertEqual(rc, 1, text)
+        self.assertNotIn("TARGET:", text)
+
+    def test_a_close_in_another_log_file_still_closes_the_card(self):
+        # The fold is global, not per-file — `who-needs-me.load_events()` folds per file,
+        # so a "harmonize with load_events" refactor would restore the routed-closed-card
+        # bug with every other test still green. This pins the cross-file case.
+        other = "8d2e4c3a-5f61-4a72-9b83-2d3e4f5a6b7c"
+        self._write(self._open())
+        with open(os.path.join(self.state, f"{other}.events.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"item_id": "mirror-1", "session_id": other,
+                                "closed_by": "UserPromptSubmit", "ts": 3}) + "\n")
+        rc, text, _ = self._answer("mirror-1")
+        self.assertEqual(rc, 1, text)
+        self.assertNotIn("TARGET:", text)
+
+    def test_an_undeliverable_producer_writes_no_marker(self):
+        # The marker asserts an answer landed. A session that has exited cannot receive
+        # one, so writing it would attribute a question nobody answered.
+        self._write(self._open())
+        out = io.StringIO()
+        not_found = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        with mock.patch.object(aa, "fetch_item", side_effect=not_found), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", self.state), \
+             mock.patch.object(aa, "write_answer_marker") as marked:
+            rc = aa.cmd_answer("mirror-1", "operator", [], out)
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertIn("UNDELIVERABLE:", out.getvalue())
+        # Nothing was recorded and nothing will be delivered, so the branch must not
+        # claim the card was answered.
+        self.assertNotIn("ANSWERED:", out.getvalue())
+        marked.assert_not_called()
+
+    def test_a_mirror_attempt_404_reports_the_delivery_not_a_failure(self):
+        # The command runs this step unconditionally after a delivery, so a 404 here
+        # would report a delivery that happened as a failed attempt.
+        #
+        # ⚠️ The record is CLOSED, which is the normal case: the session's next turn
+        # clears the card before this leg runs. A gate-only check would re-raise FAILED
+        # for a delivery that succeeded.
+        self._write(self._open(), self._close())
+        out = io.StringIO()
+        not_found = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        with mock.patch.object(aa, "post_attempt", side_effect=not_found), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", self.state):
+            rc = aa.cmd_attempt("mirror-1", "operator", "delivered", out)
+        self.assertEqual(rc, 0, out.getvalue())
+        # The suffix, not the prefix: "ATTEMPT: mirror-1 delivered" is a prefix of BOTH
+        # messages, so it would pass on a handler that swallowed the 404 and fell through.
+        self.assertIn("mirror card — no store record", out.getvalue())
+
+    def test_a_404_for_an_id_that_is_not_a_mirror_still_raises(self):
+        # An older store has no /attempt endpoint; `commands/attention-next.md` documents
+        # that as "a missing endpoint, not a failed delivery" and expects FAILED. Only a
+        # real mirror card may be swallowed.
+        out = io.StringIO()
+        not_found = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+        with mock.patch.object(aa, "post_attempt", side_effect=not_found), \
+             mock.patch.object(aa, "ATTENTION_STATE_DIR", self.state):
+            with self.assertRaises(urllib.error.HTTPError):
+                aa.cmd_attempt("not-a-mirror", "operator", "delivered", out)
+
+    def test_a_non_404_attempt_error_still_raises(self):
+        out = io.StringIO()
+        boom = urllib.error.HTTPError("u", 500, "Server Error", {}, None)
+        with mock.patch.object(aa, "post_attempt", side_effect=boom):
+            with self.assertRaises(urllib.error.HTTPError):
+                aa.cmd_attempt("x", "operator", "delivered", out)
+
+    def test_an_id_in_neither_store_nor_log_fails_loudly(self):
+        self._write(self._open(item_id="other"))
+        rc, text, _ = self._answer("nowhere")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("FAILED:", text)
+
+    def test_a_non_404_store_error_does_not_fall_back_to_the_log(self):
+        self._write(self._open())
+        rc, text, _ = self._answer(
+            "mirror-1", err=urllib.error.HTTPError("u", 500, "Server Error", {}, None)
+        )
+        self.assertEqual(rc, 1, text)
+        self.assertIn("FAILED: store returned 500", text)
+        self.assertNotIn("TARGET:", text)
 
 
 if __name__ == "__main__":

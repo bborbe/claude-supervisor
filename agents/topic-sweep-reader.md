@@ -50,10 +50,14 @@ file reaches you, it is a caller bug — say so and render no row for it.
    4. **`timestamp`** — the wall-clock string for a tick marker, supplied by the caller.
       **You must not read the clock yourself.**
    5. **The manager verdicts**, as `<goal> → LIVE | ABSENT | UNKNOWN`, from the caller's
-      `session-liveness.py --check` over each goal page's `manager_session_id`.
-   6. **The cadence verdicts**, as `<goal> → OK | STALE | STOPPED | INVALID`, from the
-      caller's `manager-liveness.py --state --subject <goal> --branch goal`.
+      `session-liveness.py --check` over each goal page's `claude_session_id`, for every goal the topic declares.
+   6. **The cadence verdicts**, as `<goal> → OK | STALE | STOPPED | SLEEPING | UNARMED | INVALID | WRONG-BRANCH`, from the
+      caller's `manager-liveness.py --state --subject <goal> --branch goal --vault <vault-root>`.
    7. **`today`** — ISO `YYYY-MM-DD`, for the deferred overlay on goal rows.
+   8. **The payload path** — where to write the rendered table. Your one write goes there and
+      nowhere else. ⚠️ **A caller that passes none has left your only granted write without a
+      destination** — name that as the missing input in your report rather than choosing a
+      path of your own, because a path you invented is one no gate reads.
 
    ⚠️ **A missing input is named, never defaulted.** An absent verdict renders the cell
    `UNVERIFIED` and says which input was missing; a defaulted one reads exactly like a taken
@@ -64,7 +68,7 @@ file reaches you, it is a caller bug — say so and render no row for it.
    are usually named after it, so a wildcard matches the wrong page.
 
    Per page, read in one pass: frontmatter `status` and `phase`, the `# Success Criteria`
-   tally (`[x]` of total), `manager_session_id`, and `defer_date`.
+   tally (`[x]` of total), `claude_session_id`, and `defer_date`.
 
    ⚠️ **A name matching no file under `24 Goals/` is reported by name and never guessed at.**
    A wrong-file read would state another goal's numbers in this cell.
@@ -81,7 +85,7 @@ file reaches you, it is a caller bug — say so and render no row for it.
    - **`🔄 progressing`** — a manager is live (`LIVE`).
    - **`🚀 ready-to-start`** — startable (`phase` `planning`/`execution`), no live manager,
      and not already filling one of the N slots.
-   - **`⚠️ problem`** — startable, no live manager, and no `manager_session_id` ever
+   - **`⚠️ problem`** — startable, no live manager, and no `claude_session_id` ever
      recorded while the goal reads `in_progress` **at `phase: execution`** — the goal-tier
      orphan shape, one level up.
    - **`UNVERIFIED`** — the liveness or cadence verdict was missing or `UNKNOWN`. ⚠️ **Never
@@ -97,7 +101,7 @@ file reaches you, it is a caller bug — say so and render no row for it.
 
    **Manager cell** — the delimiter is the liveness verdict: `[<sid8>]` live, `(<sid8>)` not
    live, `—` no id recorded, `UNVERIFIED` when the probe could not decide. The word after it
-   is the cadence (`OK` / `STALE` / `STOPPED` / `INVALID`).
+   is the cadence (`OK` / `STALE` / `STOPPED` / `SLEEPING` / `INVALID`).
 
 6. **Return one compact report** — the bucket counts, the goals with no manager (named, with
    their rank position), any `UNVERIFIED` row with the missing input named, and the payload

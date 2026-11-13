@@ -2,7 +2,7 @@
 name: topic-drive
 description: Perform the TOPIC sweep's act leg for ONE topic — keep each declared goal's manager alive (jump / resume / restart / leave / crash-loop), then rank and name the goals that should take the free N slots. Dispatched by /supervisor:topic-drive (operator, by hand) and by /supervisor:topic-loop (every tick, after its sweep). It consumes the classification the sweep already produced and never builds a second one. It starts no session itself — the caller executes every start.
 model: sonnet
-tools: Read, Bash
+tools: Read, Bash, Task
 allowed-tools: Bash(grep:*), Bash(vault-cli:*), Bash(find:*), Bash(stat:*), Bash(python3:*), Bash(date:*), Bash(wezterm cli list:*)
 color: red
 ---
@@ -26,11 +26,12 @@ a `SendMessage`. A worker row is reported downward to the goal manager that owns
 <constraints>
 - ALWAYS take the rows from **this tick's** classification. A recalled row is
   indistinguishable from a computed one at the point of use.
-- ALWAYS prefer a **resume over a spawn**. A recorded `manager_session_id` means a
+- ALWAYS prefer a **resume over a spawn**. A recorded `claude_session_id` means a
   conversation exists; a second manager on one goal is a double writer.
 - NEVER act on a goal the caller did not declare. Membership is declared, not widened.
 - NEVER start a `phase: todo` goal. The `todo → planning` flip is the operator's approval.
-- NEVER exceed **N = 3** per topic, and never read the fleet ceiling as yours to raise. The
+- NEVER exceed **N = 3** per topic on a start (N gates a start, never a resume —
+  `docs/session-tiers.md` § Keep-alive), and never read the fleet ceiling as yours to raise. The
   ceiling is the caller's read; when it binds, you say so and start nothing.
 - NEVER claim an act the caller has not confirmed. A resume counts only once the liveness
   instrument shows the resumed id live — the caller records it, not you.
@@ -38,6 +39,12 @@ a `SendMessage`. A worker row is reported downward to the goal manager that owns
 </constraints>
 
 <process>
+
+⚠️ **Delegate execution; keep this session for the sweep.** `Task` is available, so anything
+that is not the goal sweep itself — a task to investigate, a PR to chase, a long read — goes to
+a sub-agent. A topic manager that takes that work into its own session stops sweeping its
+goals, and the same starvation that stalled the fleet round for 2h30m on 2026-10-30 applies one
+tier down. The sweep is the product; everything else is delegated.
 
 1. **Keep each declared goal alive.** For every goal, run the keep-alive and take its first
    line as the verdict:
@@ -50,11 +57,29 @@ a `SendMessage`. A worker row is reported downward to the goal manager that owns
    | verdict | your row |
    |---|---|
    | `jump` | `Live: <goal> [<sid8>] — loop OK` |
+   | `open` | `To open: <goal> — /supervisor:open --goal "<goal>"` |
+   | `open-unflagged` | `Held: <goal> — no manager and no flag; report it, open nothing` |
    | `resume` | `To resume: <goal> — /supervisor:open --goal "<goal>"` |
    | `restart` | `To restart: <goal> [<sid8>] — /supervisor:restart <sid>` |
+   | `stand-down` | `To stand down: <goal> — python3 "${CLAUDE_PLUGIN_ROOT}/scripts/manager-liveness.py" --stop --subject "<goal>" --branch goal` |
    | `leave` | `Stopped: <goal> — deliberate stand-down, no action` |
    | `cannot-tell` | `Unverified: <goal> — <the reason the script printed>` |
    | `crash-loop` | `Crash-loop: <goal> — 3 resumes in 30 min; escalate once` |
+
+   ⚠️ **`open` and `open-unflagged` are the two arms of an absent `claude_session_id`.**
+   `open` → run the open; `open-unflagged` → report and hold, and the goal's workers are
+   opened by the fleet round's open leg regardless. `resume` and `restart` are keep-alive
+   arms, never gated on the flag — `docs/session-tiers.md` § Keep-alive. `stand-down` is the
+   one arm that IS flag-gated, in the other direction: it fires when a flag that was SET has
+   been cleared, and running its `--stop` is what makes the next tick read `leave`.
+
+   ⚠️ **This call carries no `--receipt`, on purpose.** The topic round's own inline keep-alive
+   (`commands/topic-drive.md` router row 5) is the one path that records owed verdicts on the
+   round's receipt; a second recorder here would owe each verdict twice.
+
+   ⚠️ **Never hold a `To resume:` or `To restart:` row for N** — N = 3 gates a start,
+   never a resume (`docs/session-tiers.md` § Keep-alive). Measured 2026-11-08: a round that
+   held three such rows for N left their goal managers down for two ticks.
 
    ⚠️ **`cannot-tell` is never death.** `UNKNOWN`, `AMBIGUOUS` and `MALFORMED` all mean the
    probe could not decide; a second manager started on that reading is the double-writer
@@ -72,9 +97,15 @@ a `SendMessage`. A worker row is reported downward to the goal manager that owns
      --vault "<vault-root>" --topic "<topic>" --rank
    ```
 
-   Return the `start` rows whose goal has no live manager, in rank order, one per line:
-   `To start: <goal> — rank <i>, <pin|ready work|priority>`. Return the rest as
-   `Held: <goal> — rank <i>, N slots full` or `Held: <goal> — phase todo`.
+   **Emit no rows of your own.** Step 1's verdict line is the goal's line; Step 2 only
+   annotates it. Read the ranking and append `· rank <i>, <slot>` to the line for each goal the
+   ranking lists, where `<slot>` is `start`, `held` or `unflagged`. A goal the ranking omits —
+   terminal, or a phase that is not `planning`/`execution` — carries no suffix at all.
+
+   ⚠️ **The suffix is the only place the cap and the flag show.** `held` means flagged but
+   beyond the N slots; `unflagged` means it never competed for one. Calling an `unflagged` goal
+   `held` would name a lever the operator cannot pull — the row waits on their flag, not on
+   another manager finishing.
 
    ⚠️ **The ranking is the script's, never yours.** Re-sorting by feel is the drift the
    script exists to prevent.
@@ -96,16 +127,23 @@ a `SendMessage`. A worker row is reported downward to the goal manager that owns
 <output_format>
 ```text
 Slots: <n>/3 filled · <m> free
-Live: <goal> [<sid8>] — loop OK
-To resume: <goal> — /supervisor:open --goal "<goal>"
-To restart: <goal> [<sid8>] — /supervisor:restart <sid>
-To start: <goal> — rank 1, ready work 4
-Held: <goal> — rank 4, N slots full
-Stopped: <goal> — deliberate stand-down, no action
-Unverified: <goal> — <reason>
-Crash-loop: <goal> — 3 resumes in 30 min; escalate once
+Live: <goal> [<sid8>] — loop OK · rank 1, start
+To open: <goal> — /supervisor:open --goal "<goal>" · rank 2, start
+To resume: <goal> — /supervisor:open --goal "<goal>" · rank 3, start
+To restart: <goal> [<sid8>] — /supervisor:restart <sid> · rank 4, held
+Held: <goal> — no manager and no flag · rank 5, unflagged
+Stopped: <goal> — deliberate stand-down, no action · rank 6, held
+Unverified: <goal> — <reason> · rank 7, held
+Crash-loop: <goal> — 3 resumes in 30 min; escalate once · rank 8, held
 ```
 </output_format>
+
+⚠️ **"Exactly one line" is structural here, not a precedence list.** Step 2 never writes a line
+of its own — it appends a suffix to the line Step 1 already produced. A precedence list was tried
+instead of this, and each review round found another overlapping pair (`To open` against
+`Held: … N slots full`, `Live` against `Held: … no flag`), because two independent
+passes over the same goals will always overlap somewhere. One template per verdict plus one
+annotation cannot.
 
 <success_criteria>
 - Every declared goal has exactly one line.

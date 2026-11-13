@@ -11,8 +11,9 @@ many live sessions are behind, which ones, and how to reach each.
               when any live session has no marker), then one line per stale session:
               `<sid8>  loaded <ver>  <name>` plus its jump target
   --json      the same rows as JSON, for a caller that renders its own table
-  --reload    THE LEVER — for every stale session whose pane resolves, activate the pane
-              and type `/reload-plugins`, then re-read the markers and print the delta
+  --reload    THE LEVER — for every stale session whose pane resolves, type
+              `/reload-plugins` into it without activating, then re-read the markers and
+              print the delta
 
 ⚠️ **The marker count is not the session count, and reading it as one is the trap this
 script exists to avoid.** The harness writes `.../<version>/.in_use/<pid>` at session
@@ -38,7 +39,7 @@ installed version**: with no baseline to compare against, every session would re
 `current` and the header would print `stale: 0` — a clean fleet derived from a probe that
 could not read its own reference.
 
-⚠️ **`--reload` types into panes, so it steals focus and only reaches a TAB session.** It
+⚠️ **`--reload` types into panes without taking focus, and only reaches a TAB session.** It
 is the one mutating mode; the census itself is read-only. A session with no resolvable pane
 is skipped and named, never guessed at. ⚠️ **Success is the newest marker for that pid
 moving** — never the pre-reload version directory's mtime, which a reload never touches.
@@ -375,9 +376,9 @@ def pane_is_ready(text):
 def reload_pane(pane_id, pid, cache_dir, marketplace, plugin):
     """Type `/reload-plugins` into an idle pane and confirm the reload landed.
 
-    Activate first: `send-text` reaches a pane only once its tab is active (measured
-    2026-09-20 in `server/tab.mjs`, and again here). Readiness is an empty composer, not a
-    sleep.
+    Nothing is activated: `send-text --pane-id` reaches a pane in an inactive tab (measured
+    2026-11-09 — 6/6 bytes with `focused_pane_id` unchanged; the earlier "activate first"
+    reading was a canonical-mode artefact). Readiness is an empty composer, not a sleep.
 
     ⚠️ **Success is the newest marker for this pid changing — never the pre-reload version
     directory's mtime.** A reload writes a NEW `.in_use/<pid>` entry under the *installed*
@@ -390,15 +391,6 @@ def reload_pane(pane_id, pid, cache_dir, marketplace, plugin):
     if before is None:
         # No marker to compare against: the send could land, but nothing could confirm it.
         return {"pane": pane_id, "ok": False, "why": "no marker before the send — unverified"}
-
-    try:
-        activated = subprocess.run(["wezterm", "cli", "activate-pane", "--pane-id", str(pane_id)],
-                                   capture_output=True, text=True, timeout=20)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {"pane": pane_id, "ok": False, "why": f"activate-pane failed: {exc}"}
-    if activated.returncode != 0:
-        return {"pane": pane_id, "ok": False,
-                "why": f"activate-pane exited {activated.returncode}: {activated.stderr.strip()}"}
 
     deadline = time.time() + RELOAD_READY_TIMEOUT
     while time.time() < deadline:

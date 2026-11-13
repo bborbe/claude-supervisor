@@ -44,8 +44,8 @@ Usage
 Exit codes: 0 emitted · 2 refused (bad input, unreadable vault).
 """
 import argparse
-import datetime as dt
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -54,10 +54,28 @@ import subprocess
 import sys
 from pathlib import Path
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load(name, filename):
+    """Import a sibling script by path — the filenames carry hyphens."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: `defer_date` is an instant, not a date — see `defer-date.py`.
+defer_date = _load("defer_date", "defer-date.py")
+
 PLAN_DIR = "60 Periodic Notes"
 CAP = 5
 PROPOSAL_CAP = 3
 TERMINAL = {"completed", "aborted"}
+# Where `next-focus-answer.py` records a `leave it out` answer. Reading this directory is
+# a READ, so it costs nothing of this script's read-only contract — the consumer is its
+# only writer. One file per card key, because the store's suppression is per key.
+DISMISSED_DIR = os.path.expanduser("~/.claude/state/next-focus-dismissed")
 
 FM_LINE = re.compile(r"^([a-z_]+):\s*(.*)$")
 # A block-style list entry under a key: `  - [[Some Task]]`. Column-0 keys never match
@@ -181,6 +199,43 @@ def parse_weekly(text):
     return [r for r in rows if r["names"]]
 
 
+DEFERRED_HEADING = re.compile(r"^#{1,2}\s+Explicitly Deferred\b", re.I)
+
+
+def parse_deferred(text):
+    """The names listed under `# Explicitly Deferred`, their lines, and the heading line.
+
+    The section is authored as plain bullets — some carrying no wikilink, some nesting
+    one or two — not as `### N.` blocks, so `parse_weekly` cannot see it and every row
+    listed there stayed eligible for a proposal card. A card is an ask, and an ask to
+    re-decide a question the operator already answered is the cost this reading removes.
+
+    The section ends at the next heading or at the `---` rule that closes it. A reader
+    that runs to end-of-file swallows every later section into the deferred set, which
+    suppresses real proposals while looking correct.
+
+    Returns `([(name, line)], heading_line, present)`. `present` is a fact about the
+    section rather than about its contents, so a section that excludes nothing can be
+    reported as such instead of reading like one that was never found.
+    """
+    rows, inside, heading = [], False, 0
+    for i, line in enumerate(text.splitlines(), 1):
+        if DEFERRED_HEADING.match(line):
+            inside, heading = True, i
+            continue
+        if not inside:
+            continue
+        if re.match(r"^#{1,6}\s", line) or line.strip() == "---":
+            break
+        if not re.match(r"^\s*[-*+]\s", line):
+            continue
+        # An embed is not a page: `wikilinks` would read `![[chart.png]]` as a name and
+        # report it as a deferred page with no task/goal/topic behind it.
+        for name in wikilinks(re.sub(r"!\[\[[^\]]*\]\]", "", line)):
+            rows.append((name, i))
+    return rows, heading, inside
+
+
 def parse_monthly(text):
     """`## Must / Should / Could` numbered items, `**Must**` before `**Should**` before `**Could**`."""
     rows, bucket = [], None
@@ -275,6 +330,27 @@ class Board:
             path = d / f"{name}.md"
             if path.exists():
                 return kind, path
+        return None, None
+
+    def resolve_page(self, name):
+        """The page a link names, carrying the filename's real casing.
+
+        `find()` builds the path from the LINK's own text, which is the wrong name to
+        key an exclusion on: on a case-insensitive filesystem `[[deferred one]]`
+        resolves to a stem spelled the link's way while `proposed()` keys on the
+        directory entry's `Deferred One`, and on a case-sensitive one the same link
+        resolves to nothing at all. Both would leave the row proposed. Matching the
+        entry by its casefolded stem returns the name `proposed()` will use, on either
+        filesystem.
+        """
+        # Same containment rule as `find`: a plan page is content and may link anywhere.
+        if not name or name.startswith(("/", "~")) or ".." in Path(name).parts:
+            return None, None
+        target = name.casefold()
+        for kind, d in self.dirs.items():
+            for entry in sorted(d.glob("*.md")):
+                if entry.stem.casefold() == target:
+                    return kind, entry
         return None, None
 
     def read(self, name):
@@ -394,7 +470,7 @@ def candidate(name, kind, fm, source, why):
 
 
 def plan_candidates(vault, board, day, notes):
-    """Walk the four tiers in rank order, returning (rows, unread list)."""
+    """Walk the four tiers in rank order, returning (rows, deferred keys)."""
     keys = period_keys(day)
     tiers = [
         ("weekly", parse_weekly),
@@ -403,12 +479,15 @@ def plan_candidates(vault, board, day, notes):
         ("yearly", parse_yearly),
     ]
     out = []
+    weekly_text = None
     for period, parser in tiers:
         path = plan_path(vault, period, keys[period])
         text, err = read_text(path)
         if err:
             notes.append(f"{period} {keys[period]}: {err}")
             continue
+        if period == "weekly":
+            weekly_text = text
         items = parser(text)
         # A tier with no parseable item is a fact about that tier, not a pass.
         if not items:
@@ -424,12 +503,34 @@ def plan_candidates(vault, board, day, notes):
                     {"period": period, "file": str(path), "line": item["line"]},
                     item.get("title", ""),
                 ))
-    return out
+    # `# Explicitly Deferred` is a settled answer, not a gap in the plan: a row parked
+    # there must never be offered back as a proposal. Read from the same weekly note the
+    # picked sections resolve, and REPORTED — a section that excluded nothing and a
+    # section that was never read must not look the same.
+    deferred = set()
+    if weekly_text is not None:
+        names, heading_line, present = parse_deferred(weekly_text)
+        if present:
+            for name, _line in names:
+                # Resolved to the entry's own name, not the link text: `proposed()` keys
+                # on the directory entry's stem, so a link spelled differently would be
+                # reported as excluded while the row was still proposed.
+                kind, path = board.resolve_page(name)
+                if path is None:
+                    notes.append(f"deferred {name}: no page in tasks/goals/topics")
+                    continue
+                deferred.add((kind, path.stem))
+            notes.append(f"weekly {keys['weekly']}: # Explicitly Deferred "
+                         f"(line {heading_line}) — {len(deferred)} name(s) excluded")
+    return out, deferred
 
 
-def due_today(board, tasks_dir, day):
+def due_today(board, tasks_dir, day, now=None):
     """Tasks deferred or flagged for `day` — the highest rank there is."""
     iso = day.isoformat()
+    # `now` is the instant the read is taken at; absent, it is the CURRENT instant, never
+    # `day`'s start — local midnight would park a defer that already came due today.
+    moment = defer_date.as_now(now)
     out = []
     d = Path(tasks_dir)
     if not d.is_dir():
@@ -446,11 +547,15 @@ def due_today(board, tasks_dir, day):
         # dates answer different questions, so they are read apart rather than min()-ed —
         # collapsing them labelled a parked task "overdue since <due>" and an active task
         # "overdue since <defer>".
-        defer = str(fm.get("defer_date", ""))[:10]
+        defer_state, defer_reason = defer_date.defer_state(fm.get("defer_date"), moment)
+        if defer_state == "invalid":
+            # Unreadable is not "due now": the row is withheld, and the reason is said.
+            print(f"next-focus: {defer_reason} — treating as deferred", file=sys.stderr)
+        defer = defer_date.display(fm.get("defer_date"))
         due_d = str(fm.get("due_date", ""))[:10]
-        parked = bool(defer) and defer > iso
+        parked = defer_state in ("deferred", "invalid")
         overdue = bool(due_d) and due_d <= iso
-        active = bool(defer) and defer <= iso
+        active = defer_state == "due"
         due = not parked and (overdue or active)
         flagged = fm.get("flag") == "true" and fm.get("flag_set_by") == "operator"
         if not (due or flagged):
@@ -471,7 +576,32 @@ def due_today(board, tasks_dir, day):
     return out
 
 
-def proposed(vault, board, tasks_dir, planned_keys, alerts_state, alerts_lines):
+def load_dismissals(state_dir=None):
+    """`(records, notes)` — the durable `leave it out` answers.
+
+    A missing directory is a FACT (`[]`, no note): nothing has been declined yet. An
+    unreadable record is neither a dismissal nor an empty set — it is reported, so a
+    corrupt state file cannot silently re-propose a row the operator already refused.
+    """
+    d = Path(state_dir or DISMISSED_DIR)
+    if not d.is_dir():
+        return [], []
+    records, notes = [], []
+    for path in sorted(d.glob("*.json")):
+        try:
+            rec = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            notes.append(f"dismissal {path.name}: unreadable ({exc.__class__.__name__})")
+            continue
+        if not isinstance(rec, dict) or not rec.get("card_key"):
+            notes.append(f"dismissal {path.name}: no card_key")
+            continue
+        records.append(rec)
+    return records, notes
+
+
+def proposed(vault, board, tasks_dir, planned_keys, alerts_state, alerts_lines,
+             dismissed_keys=frozenset()):
     """Important items in NO current plan — at most PROPOSAL_CAP, one card each.
 
     `planned_keys` is a set of `(kind, name)`, not bare names: a planned GOAL called X
@@ -526,8 +656,17 @@ def proposed(vault, board, tasks_dir, planned_keys, alerts_state, alerts_lines):
                 {"period": "unplanned", "file": str(path), "line": 1},
                 f"blocked on {fm['blocked_by']}, in no current plan",
             ))
+    # `rows` is built above; this pass keys and filters it into a NEW list. Mutating in
+    # place and `continue`-ing would skip the payload but leave the row in the result —
+    # which is what a dismissed row did before this was a filtered copy.
+    kept = []
     for row in rows:
         row["card_key"] = card_key(vault, row["kind"], row["name"])
+        # A `leave it out` answer is durable. Dropping the row HERE — before the payload
+        # is built and before the cap is applied — is what stops the same card returning
+        # every round, and it keeps a dismissed row out of the three proposal slots.
+        if row["card_key"] in dismissed_keys:
+            continue
         # Shell-quoted HERE, because the round pastes this into a `bash` command line.
         # `name` is a raw line of prometheus-alerts.sh stdout for an alert row, and a
         # task file's stem for a task/goal row — the latter is chosen by any worker that
@@ -537,25 +676,31 @@ def proposed(vault, board, tasks_dir, planned_keys, alerts_state, alerts_lines):
             f'{row["name"]} — {row["why"]} — '
             f'{row["source"]["file"]}:{row["source"]["line"]}'
         )
-    return rows
+        kept.append(row)
+    return kept
 
 
 # ---------------------------------------------------------------------- main
 
 
-def build(vault, tasks_dir, day, live=None, target=None, plugin=None, alerts_script=None):
+def build(vault, tasks_dir, day, live=None, target=None, plugin=None, alerts_script=None,
+          now=None, dismissed_state_dir=None):
     board = Board(vault, tasks_dir)
     notes = []
 
     live, target, capacity_source = read_capacity(live, target, plugin)
     alerts_state, alerts_lines = read_alerts(vault, alerts_script)
 
-    today = due_today(board, Path(vault) / tasks_dir, day)
+    dismissals, dismiss_notes = load_dismissals(dismissed_state_dir)
+    notes.extend(dismiss_notes)
+    dismissed_keys = {rec["card_key"] for rec in dismissals}
+
+    today = due_today(board, Path(vault) / tasks_dir, day, now=now)
     if today is None:
         notes.append(f"tasks dir {tasks_dir}: missing")
         today = []
 
-    planned = plan_candidates(vault, board, day, notes)
+    planned, deferred_keys = plan_candidates(vault, board, day, notes)
     ranked = today + planned
 
     seen, ordered = set(), []
@@ -573,9 +718,14 @@ def build(vault, tasks_dir, day, live=None, target=None, plugin=None, alerts_scr
     for i, row in enumerate(emitted, 1):
         row["rank"] = i
 
+    # `deferred_keys` joins the planned set here rather than in `ordered`: a deferred row
+    # is not a candidate, so it must not occupy a rank slot, but it is planned in the
+    # only sense this script asks about — it must never be proposed back.
     proposed_rows = proposed(
         vault, board, Path(vault) / tasks_dir,
-        {(row["kind"], row["name"]) for row in ordered}, alerts_state, alerts_lines,
+        {(row["kind"], row["name"]) for row in ordered} | deferred_keys,
+        alerts_state, alerts_lines,
+        dismissed_keys=dismissed_keys,
     )
     proposed_overflow = proposed_rows[PROPOSAL_CAP:]
 
@@ -592,6 +742,10 @@ def build(vault, tasks_dir, day, live=None, target=None, plugin=None, alerts_scr
         "overflow": [r["name"] for r in overflow],
         "proposed": proposed_rows[:PROPOSAL_CAP],
         "proposed_overflow": [r["name"] for r in proposed_overflow],
+        # The dismissals themselves, not only their effect: the positive marker is what
+        # a caller reads, because absence from `proposed` is also what a rank demotion or
+        # the 3-per-round cap produces.
+        "dismissed": dismissals,
         "notes": list(dict.fromkeys(notes)),
     }
     # The block rides in the JSON too: a round that must post proposal cards needs the
@@ -650,12 +804,15 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Rank the next focus from the periodic plans.")
     ap.add_argument("--vault", required=True)
     ap.add_argument("--tasks-dir", default="25 Tasks")
-    ap.add_argument("--now", default=None, help="ISO date or datetime; default today")
+    ap.add_argument("--now", default=None,
+                    help="ISO date or datetime; default now (a date means its local start)")
     ap.add_argument("--live", type=int, default=None)
     ap.add_argument("--target", type=int, default=None)
     ap.add_argument("--plugin", default=os.environ.get("CLAUDE_PLUGIN_ROOT") or str(Path(__file__).resolve().parent.parent))
     ap.add_argument("--alerts-script", default=None,
                     help="alert script to run; default is <vault>/.claude/scripts/prometheus-alerts.sh")
+    ap.add_argument("--state-dir", default=None,
+                    help=f"dismissal state dir; default {DISMISSED_DIR}")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
 
@@ -663,14 +820,16 @@ def main(argv=None):
         print(f"next-focus: REFUSED — vault not found: {args.vault}", file=sys.stderr)
         return 2
     try:
-        day = dt.date.fromisoformat(args.now[:10]) if args.now else dt.date.today()
+        moment = defer_date.as_now(args.now)
     except ValueError:
         print(f"next-focus: REFUSED — bad --now: {args.now}", file=sys.stderr)
         return 2
+    day = moment.date()
 
     try:
         result = build(args.vault, args.tasks_dir, day, args.live, args.target,
-                       args.plugin, args.alerts_script)
+                       args.plugin, args.alerts_script, now=moment,
+                       dismissed_state_dir=args.state_dir)
     except Exception as exc:  # noqa: BLE001 — deliberate: the tick must always render
         # Any non-zero exit is a REFUSAL the round must render, so an unexpected bug
         # has to reach that contract. Unguarded, it exited 1 with a bare traceback —

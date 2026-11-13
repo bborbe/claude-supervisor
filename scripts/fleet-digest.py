@@ -36,9 +36,13 @@ Verbs, one file each, all under STATE_DIR:
               RECOVERED  digest=<ts> age=<s> limit=<s>
               UNOBSERVED gap=<s> — this watcher did not run across the gap; baseline reset
 
-            Exit 10 on the STALE **transition** only. The notified marker holds the
-            baseline it reported, so one lapse notifies once and the following healthy
-            round clears it (exit 0, RECOVERED). A second lapse reports again.
+            Exit 10 on each STALE report — once per lapse interval, not once per
+            transition. The notified marker holds the
+            baseline it reported and the lapse interval reached, so a FLAT age notifies
+            once and the following healthy round clears it (exit 0, RECOVERED). A
+            RISING age re-fires once per further LIMIT — a lapse that never recovers is
+            still a lapse, and silencing it after one report is how a 6h24m gap went
+            unreported. A second lapse after a recovery reports again.
             Exit 2 on any failure to read the digest directory — never 0, so a broken
             read can never read as "healthy".
 
@@ -67,10 +71,18 @@ filenames do not carry the snapshot time reliably — `2026-10-20T08-43-00-02-00
 holds `snapshot written: 2026-10-20T06:43:35Z` and `round14-2026-10-20T13-10Z.digest`
 holds `11:39:16Z` — so ordering by name would judge a stale round by a fresh filename.
 
-⚠️ **Nine of the 85 retained digests carry a `snapshot written:` value that is not a
-timestamp, and four of those name no baseline at all.** A parser that treats them as
+⚠️ **Most `skipped` digests carry a `snapshot written:` value that is not a timestamp**
+(43 of the 100 retained at 2026-11-01; the rest are ISO). A parser that treats them as
 fresh misses a real lapse; one that treats them as a parse failure reports a false one.
 They are enumerated in `parse_snapshot` with the rule for each.
+
+⚠️ **One of those forms is a round that RAN, and it must not be carried forward.** A
+round whose roster join collapsed writes `skipped (roster join incomplete: 5/52
+resolved)` — the round armed, swept and wrote its digest, so its own mtime is the honest
+age. Carrying an older baseline forward instead is what made a working manager read as a
+lapsed one on 2026-11-01 (`ledger.txt` `STALE … age=51862s` against a 15-hour-old
+baseline, while the round had just run). It classifies as `join-degraded`, and a
+genuinely old degraded round still ages out and still reports.
 """
 import argparse
 import calendar
@@ -86,7 +98,11 @@ DIGEST_DIR = os.path.expanduser(
 STATE_DIR = os.path.expanduser(
     os.environ.get("FLEET_DIGEST_STATE_DIR", "~/.claude/state/fleet-digest")
 )
-LIMIT = int(os.environ.get("FLEET_DIGEST_LIMIT", "1080"))
+# Floored at 1: the re-fire step below divides by it, so a misconfigured 0 would raise
+# `ZeroDivisionError` (exit 1, traceback) where the previous code merely reported stale —
+# turning a tuning knob into a crash. A negative value would otherwise pin every lapse at
+# step 1 and suppress the re-fire entirely.
+LIMIT = max(1, int(os.environ.get("FLEET_DIGEST_LIMIT", "1080")))
 TICK = int(os.environ.get("FLEET_DIGEST_TICK", "60"))
 
 HEARTBEAT = "heartbeat"
@@ -106,6 +122,17 @@ ISO_FULL = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z")
 ISO_MIN = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})\b")
 ISO_DAY = re.compile(r"^(\d{4})-(\d{2})-(\d{2})\b")
 BASELINE_KEPT = re.compile(r"baseline kept at (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)")
+# A round that RAN but could not join the roster to the registry, so it wrote no
+# snapshot time. Matched on the parenthesised prefix, never on a bare `roster join`
+# substring: `skipped (roster not supplied; round failed)` is a different failure — that
+# round did not run — and must keep carrying forward.
+ROSTER_JOIN = re.compile(r"^skipped \(roster join (?:incomplete|failed)\b")
+
+# The quality for a round that ran on a degraded roster join. Named, never folded into
+# `carried-forward`: the two say different things. `carried-forward` means "this round
+# proved nothing, age it by an older round's baseline"; `join-degraded` means "this round
+# ran, age it by itself".
+JOIN_DEGRADED = "join-degraded"
 
 
 def _epoch(y, mo, d, h=0, mi=0, s=0):
@@ -128,7 +155,9 @@ def parse_snapshot(value):
                                                         baseline
       `skipped (… baseline read ok)`                 -> unknown: no baseline named; the
                                                         caller carries the previous round's
-      `skipped (roster join failed; …)`              -> unknown, carried forward
+      `skipped (roster join incomplete: 5/52 …)`     -> join-degraded: the round RAN and
+      `skipped (roster join failed; …)`                 could not join, so its own file
+                                                        mtime is the honest age
       `skipped (roster not supplied; round failed)`  -> unknown, carried forward
       `skipped (pass not run: …)`                    -> unknown, carried forward
       `skipped (not persisted by this agent run; …)` -> unknown, carried forward
@@ -137,10 +166,33 @@ def parse_snapshot(value):
     "Carried forward" is deliberately not "fresh": a round that persisted nothing has
     not proved the loop is alive, and treating it as fresh is exactly the silent miss
     this watcher exists to prevent.
+
+    `join-degraded` is the one form that is NOT carried forward, and it earns the
+    exception by a different route: the round ran (its digest file exists and was just
+    written), so its own mtime proves the loop is alive without pretending the round
+    produced a snapshot. Measured 2026-11-01: a round that armed six times and ran still
+    rendered `skipped (roster join incomplete: 5/52 resolved)`, was aged against a
+    15-hour-old baseline, and read as a lapse — the false report this quality removes.
     """
     text = value.strip()
-    # The baseline-kept lookup runs FIRST, because that form's baseline lives inside the
-    # parentheses and any generic trailing-annotation handling would throw it away.
+    # A render that copies a whole `snapshot written: …` tail into the value emits
+    # `snapshot written: snapshot written: <iso>`. Measured 2026-11-03: one such file
+    # (`2026-11-03T07-44Z.digest`) parsed as `no-baseline`, `newest_round()` carried the
+    # PREVIOUS round's baseline forward, and the watcher reported `STALE … age=1129s` at
+    # `08:00:48Z` on a round that had run on time — the same false report this watcher
+    # exists to remove, reached through a malformed header rather than a late file. The
+    # watcher is the last line of defence and cannot assume the renderer wrote the label
+    # exactly once, so it unwraps rather than carrying a stale baseline forward.
+    while text.lower().startswith("snapshot written:"):
+        text = text[len("snapshot written:"):].strip()
+    if ROSTER_JOIN.match(text):
+        return None, JOIN_DEGRADED
+    # ROSTER_JOIN precedes the ISO lookups and is mutually exclusive with BASELINE_KEPT:
+    # a roster-join render never names a baseline, and a baseline-kept render never names
+    # a failed join. Both are checked before the generic forms for the same reason.
+    # The baseline-kept lookup runs before the rest, because that form's baseline lives
+    # inside the parentheses and any generic trailing-annotation handling would throw it
+    # away.
     m = BASELINE_KEPT.search(text)
     if m:
         mm = ISO_FULL.match(m.group(1))
@@ -180,6 +232,14 @@ def newest_round():
     otherwise — never the filename, which routinely disagrees with its own contents.
     A newest file that names no baseline carries the newest PARSEABLE baseline forward,
     which is what keeps a run of `skipped` rounds from reading as either fresh or broken.
+
+    ⚠️ **Except `join-degraded`, which is aged by its own mtime.** A round that ran on a
+    degraded roster join did run — it armed, swept and wrote its digest — so carrying an
+    older round's baseline forward makes a working manager read as a lapsed one. That is
+    the false report measured 2026-11-01: the degraded round's digest sat beside a
+    15-hour-old baseline and the keepalive declared `STALE … sent` while the round had
+    just run. Its own mtime is the honest age; a genuinely old degraded round still ages
+    out and still reports.
     """
     try:
         names = [n for n in os.listdir(DIGEST_DIR) if n.endswith(".digest")]
@@ -196,14 +256,18 @@ def newest_round():
             mtime = os.path.getmtime(path)
         except OSError:
             mtime = 0.0
-        rows.append((epoch if epoch is not None else mtime, name, path, epoch, quality, raw))
+        rows.append(
+            (epoch if epoch is not None else mtime, name, path, epoch, quality, raw, mtime)
+        )
 
     rows.sort(key=lambda r: (r[0], r[1]))
-    _, name, path, epoch, quality, raw = rows[-1]
+    _, name, path, epoch, quality, raw, mtime = rows[-1]
     if epoch is not None:
         return epoch, quality, path, raw
+    if quality == JOIN_DEGRADED:
+        return mtime, quality, path, raw
 
-    for _, name2, path2, epoch2, quality2, raw2 in reversed(rows):
+    for _, name2, path2, epoch2, quality2, raw2, _mtime2 in reversed(rows):
         if epoch2 is not None:
             return epoch2, "carried-forward", path2, raw
     raise RuntimeError("no digest under %s names a usable baseline" % DIGEST_DIR)
@@ -306,13 +370,22 @@ def cmd_check():
         # Dedup on the baseline EPOCH, not on a substring of the rendered detail. The
         # rendered line is for the ledger and may change shape; keying the "already
         # reported" decision on it would make a cosmetic edit silently re-notify.
-        if was and was.get("epoch") == epoch:
+        # ⚠️ The epoch alone is not enough, and deduping on it alone was the defect
+        # measured 2026-10-30: a lapse that never recovers keeps the SAME newest digest,
+        # so the epoch never moves and every later tick printed `SUPPRESSED` while the
+        # age climbed 1,374 s -> 23,064 s over 6h24m. The discriminator is therefore a
+        # RISING age, recorded as the lapse interval it has reached: a flat age stays
+        # quiet — the dedup's original job — and each further LIMIT of age re-fires once.
+        age = int(time.time() - epoch)
+        step = max(1, age // LIMIT)
+        if was and was.get("epoch") == epoch and was.get("step", 1) >= step:
             write_heartbeat(0)
             print("SUPPRESSED %s reason=already-reported" % detail)
             return 0
         write_notified({"epoch": epoch,
                         "digest": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch)),
-                        "reported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+                        "reported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "step": step})
         write_heartbeat(EXIT_STALE)
         print("STALE %s" % detail)
         return EXIT_STALE

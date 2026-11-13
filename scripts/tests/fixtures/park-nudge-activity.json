@@ -1,0 +1,36 @@
+{
+ "_note": "SYNTHETIC. The session-activity.py --json shape that scripts/park-nudge.py consumes, and the row shapes it must tell apart. bborbe/claude-supervisor is a PUBLIC repo, so the real rows that motivated this (a 31-minute and a 12-minute `watching` session, measured 2026-11-03, and a session parked 3 h 34 m across 20+ watcher re-arms, measured 2026-11-06) stay in the private task file; every id and name below is invented. `threshold` holds the two `watching` rows either side of the 15-minute line; `buckets` holds one row per non-`watching` bucket, every one ABOVE the threshold, so only bucket exclusion (not a duration filter) can keep them silent. `divergent` is the re-arm case: `quiet_min` 12 (the transcript was touched 12 minutes ago by a re-arm) against `watching_min` 214 (the wait itself began 3 h 34 m ago) — the selection must follow the second, or the session is never nudged. `stale_transcript` is the mirror case SC2 needs: an over-threshold row beside a `watching` session whose transcript is 99 minutes old but whose wait began only 12 minutes ago — it must stay silent, so a stale transcript alone never nudges.",
+ "threshold": {
+  "window_min": 15,
+  "live": 2,
+  "sessions": [
+   {"sid": "aaaaaaaa-0000-4000-8000-000000000031", "name": "Synthetic Over-Threshold Watcher", "status": "shell", "bucket": "watching", "calls": 0, "out_tok": 0, "quiet_min": 31, "watching_min": 31, "waits_on": "CI run 1111 completes (watch-ci.sh, bg id x1)"},
+   {"sid": "bbbbbbbb-0000-4000-8000-000000000012", "name": "Synthetic Within-Allowance Watcher", "status": "shell", "bucket": "watching", "calls": 0, "out_tok": 0, "quiet_min": 12, "watching_min": 12, "waits_on": "bot review on PR 2222 (pr-watch, bg id x2)"}
+  ]
+ },
+ "divergent": {
+  "window_min": 15,
+  "live": 1,
+  "sessions": [
+   {"sid": "ffffffff-0000-4000-8000-000000000214", "name": "Synthetic Re-Arming Watcher", "status": "shell", "bucket": "watching", "calls": 0, "out_tok": 0, "quiet_min": 12, "watching_min": 214, "waits_on": "the peer's push SHA range (watch, bg id x3)"}
+  ]
+ },
+ "stale_transcript": {
+  "window_min": 15,
+  "live": 2,
+  "sessions": [
+   {"sid": "ffffffff-0000-4000-8000-000000000214", "name": "Synthetic Re-Arming Watcher", "status": "shell", "bucket": "watching", "calls": 0, "out_tok": 0, "quiet_min": 12, "watching_min": 214, "waits_on": "the peer's push SHA range (watch, bg id x3)"},
+   {"sid": "bbbbbbbb-0000-4000-8000-000000000013", "name": "Synthetic Stale-Transcript Young-Watcher", "status": "shell", "bucket": "watching", "calls": 0, "out_tok": 0, "quiet_min": 99, "watching_min": 12, "waits_on": "bot review on PR 3333 (pr-watch, bg id x4)"}
+  ]
+ },
+ "buckets": {
+  "window_min": 15,
+  "live": 4,
+  "sessions": [
+   {"sid": "cccccccc-0000-4000-8000-000000000040", "name": "Synthetic Working Row", "status": "busy", "bucket": "working", "calls": 9, "out_tok": 5000, "quiet_min": 40, "watching_min": 40, "waits_on": null},
+   {"sid": "dddddddd-0000-4000-8000-000000000022", "name": "Synthetic Gated Row", "status": "waiting", "bucket": "gated", "calls": 0, "out_tok": 0, "quiet_min": 22, "watching_min": 22, "waits_on": null},
+   {"sid": "eeeeeeee-0000-4000-8000-000000000060", "name": "Synthetic Idle Row", "status": "idle", "bucket": "idle", "calls": 0, "out_tok": 0, "quiet_min": 60, "watching_min": 60, "waits_on": null},
+   {"sid": "aaaaaaaa-0000-4000-8000-000000000031", "name": "Synthetic Over-Threshold Watcher", "status": "shell", "bucket": "watching", "calls": 0, "out_tok": 0, "quiet_min": 31, "watching_min": 31, "waits_on": "CI run 1111 completes (watch-ci.sh, bg id x1)"}
+  ]
+ }
+}

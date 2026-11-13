@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""A subject's manager is resolved from the page field BEFORE the registry result, never
+after it — because an empty registry match cannot tell "no manager ever existed" from
+"the manager exited".
+
+`session-liveness.py --list --json` lists live sessions only, so the same empty output means
+both things. The page's recorded session id is what distinguishes them, and a read gated on
+the registry result never runs for the case it exists to catch. Measured 2026-10-27: a Fleet
+Manager reached Step 2B item 4 (spawn) on a goal whose page carried a recorded session id
+(the field has since been unified onto `claude_session_id`), and `--check`
+resolved that id `ABSENT` — a verdict item 3 maps to RESUME.
+
+This check asserts the four things that keep that from recurring in `commands/open.md`:
+
+  (a) both branches read the page field **unconditionally**, before the registry result
+  (b) the empty-match **ambiguity is stated** where a caller reads it
+  (c) the spawn arm stays reachable for a subject that **never had a manager** — `None`
+      means registry empty AND no page id, never registry empty alone
+  (d) the spawn passes the vault's `manager_launcher` to `manager-launcher.py` explicitly —
+      without `--default-source manager-default` the script takes its `-claude` sibling rung
+      whenever that sibling exists, and reports the launcher as `vault` rather than
+      `manager-default`
+
+⚠️ **What this check does not prove.** It is a prose-shape check over a markdown command
+file, because a command file *is* prose — there is no function to call and no return value to
+thread. So it cannot prove the resolution is *performed*; it proves the text cannot silently
+lose the unconditional read or re-widen the spawn arm. The behavioural half is one real
+`/supervisor:open --goal` run against an `ABSENT` page id, which no grep can fake.
+
+⚠️ **The superseded wording is pinned as a literal denial.** The old text is what regresses
+when a rewrite copies the branch back from an older revision, so its presence is a failure
+rather than an absence.
+"""
+import pathlib
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+COMMAND = "commands/open.md"
+
+#: Section boundaries. A renamed heading fails loudly instead of scanning an empty string and
+#: reporting a clean branch — the failure mode that makes a prose check worthless.
+SECTIONS = (
+    ("Step 2B", "## Step 2B — Goal branch", "## Step 2C — Topic branch"),
+    ("Step 2C", "## Step 2C — Topic branch", "## Step 3 — Spawn the tab"),
+)
+
+#: The read must be unconditional **and ordered before the registry result**. The phrase is
+#: pinned whole, not the word alone: `UNCONDITIONALLY` as a bare substring is satisfied by a
+#: negated sentence ("do not read the page UNCONDITIONALLY") and by a mention in any item, so
+#: it cannot distinguish the ordering this check exists to protect.
+UNCONDITIONAL_MARKER = "UNCONDITIONALLY, before the registry result"
+
+#: The ambiguity, stated per branch. 2B was the gap; 2C is asserted too so a future rewrite
+#: cannot silently drop it from the branch that already had it.
+AMBIGUITY_MARKERS = {
+    "Step 2B": "An empty match never *proves*",
+    "Step 2C": "an empty match is **ambiguous**",
+}
+
+#: (c) — the replacement branch. Without it, a subject that never had a manager has no spawn
+#: route at all, which is a worse regression than the duplicate spawn this change fixes.
+SPAWN_SCOPE_MARKER = "registry empty AND the page carried no session id"
+
+#: The launcher must come from the resolver with the vault's `manager_launcher` supplied.
+#: `manager-launcher.py` takes its `-claude` sibling rung when `--default-source` is omitted
+#: or set to `vault` and that sibling exists — so a rewrite that drops the flag silently puts
+#: the manager on the Claude launcher, and reports `vault` rather than `manager-default` even
+#: when the sibling is absent. Pinned per branch as the whole
+#: invocation, not the bare flag: Step 2C also *mentions* the flag in prose ("tells it the
+#: value came from config"), so a substring marker is satisfied by the sentence that survives
+#: the command losing it — the exact defect this pin exists to catch.
+LAUNCHER_MARKERS = {
+    "Step 2B": 'manager-launcher.py" "<manager_launcher>" "<goal page>" --default-source manager-default',
+    "Step 2C": 'manager-launcher.py" "<manager_launcher>" "<topic page>" --default-source manager-default',
+}
+
+#: Literal denial pins — the superseded wording. Any of these present means the fix was
+#: reverted, half-applied, or copied back from an older revision.
+DENIED = (
+    "None, `UNKNOWN` or `AMBIGUOUS`",
+    "When the registry matches nothing, read it",
+    "When it matches nothing, read the topic page",
+)
+
+
+def section(text, start, end):
+    """The slice between two headings, or None when either heading is missing."""
+    i = text.find(start)
+    if i < 0:
+        return None
+    j = text.find(end, i + len(start))
+    if j < 0:
+        return None
+    return text[i:j]
+
+
+def check(root):
+    """Return the list of failures for the tree at `root`. Empty means pass."""
+    path = root / COMMAND
+    if not path.exists():
+        return [f"{COMMAND}: missing — the command this check guards is gone"]
+
+    text = path.read_text(encoding="utf-8")
+    failures = []
+
+    for name, start, end in SECTIONS:
+        body = section(text, start, end)
+        if body is None:
+            failures.append(
+                f"{COMMAND}: no {name} section between {start!r} and {end!r} — the branch was "
+                f"renamed, retitled or removed, so every assertion below would scan nothing"
+            )
+            continue
+
+        if UNCONDITIONAL_MARKER not in body:
+            failures.append(
+                f"{COMMAND} {name}: the page read is not marked {UNCONDITIONAL_MARKER} — a read "
+                f"gated on the registry result never runs for an exited manager, which is the "
+                f"case it exists to catch"
+            )
+
+        ambiguity = AMBIGUITY_MARKERS[name]
+        if ambiguity not in body:
+            failures.append(
+                f"{COMMAND} {name}: never states the empty-match ambiguity (`{ambiguity}`) — "
+                f"without it an empty result reads as 'no manager ever existed'"
+            )
+
+        if SPAWN_SCOPE_MARKER not in body:
+            failures.append(
+                f"{COMMAND} {name}: the spawn arm does not scope `None` to "
+                f"`{SPAWN_SCOPE_MARKER}` — a subject that never had a manager would have no "
+                f"spawn route left"
+            )
+
+        launcher_marker = LAUNCHER_MARKERS[name]
+        if launcher_marker not in body:
+            failures.append(
+                f"{COMMAND} {name}: the manager spawn does not invoke "
+                f"`manager-launcher.py {launcher_marker}` — it would fall to the `-claude` "
+                f"sibling rung instead of the vault's configured manager_launcher"
+            )
+
+        for denied in DENIED:
+            if denied in body:
+                failures.append(
+                    f"{COMMAND} {name}: carries the superseded wording `{denied}` — the "
+                    f"conditional read or the bare spawn enumeration is back"
+                )
+
+    return failures
+
+
+def main():
+    failures = check(ROOT)
+
+    if failures:
+        for f in failures:
+            print(f"  open-manager-resolution FAIL: {f}", file=sys.stderr)
+        sys.exit(1)
+
+    print(
+        f"  open-manager-resolution ok: {len(SECTIONS)} branch(es) read the page field "
+        f"{UNCONDITIONAL_MARKER.lower()}, state the empty-match ambiguity, keep the "
+        f"no-page-id spawn arm, and pass `--default-source manager-default`"
+    )
+
+
+if __name__ == "__main__":
+    main()

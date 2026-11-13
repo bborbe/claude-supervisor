@@ -52,6 +52,8 @@ If no name survives parsing **and `--flagged` was not given**, print `❌ Pass a
 
 Everything above is `/supervisor:open`'s, run by reference. This is the half that is not.
 
+⚠️ **A `goal_loop: true` row is refused HERE, before any backend branch.** This path reads the task's frontmatter but never runs the goal emitter, so the goal would be silently absent — a downgrade with no error. Print `⛔ goal_loop not supported on open-a2a — use /supervisor:open` and spawn nothing. It sits at the top of Step 2 rather than in § 2.3 because a target-less row dispatches through § 2.2 and would otherwise never reach the check. Rule: `docs/fleet-surface.md` § Spawn a worker item 10.
+
 ### 2.1 Read `target:` — it picks the backend, and nothing else does
 
 ```bash
@@ -103,7 +105,7 @@ Pass the frontmatter value **verbatim** — never lower-cased, never mapped, nev
 
 ⚠️ **On this branch the argument contract is different, and `role` is dropped with it.** `role`, `interactive`, `resume`, `env`, `policy`, `window_id` and `shipping` are each refused, and `task` is required — the list and its reasons have their single home in `docs/fleet-surface.md` § Spawn a worker item 7; read it there and never hand-build this branch from the line above.
 
-**The `mode:` carve-out is inherited here and consumed WITHOUT an argument — do not invent one.** The row's `mode:` was already written by `/supervisor:open` § Step 0.6, and the classifier that produced it has its single home in `docs/fleet-surface.md` § Spawn a worker item 6: it runs in both directions — `interactive=false` for a row whose `mode:` reads `headless`, `interactive=true` for one that reads `interactive`, and the argument omitted only when the field is absent. ⚠️ **Neither branch of this command can carry that argument** — a `docker` / `k8s` row refuses `interactive` whenever it is present (item 7), and the local-backend create carries no mode field — so the field is read and reported, never passed. Say so in the report rather than implying it was consumed.
+**The `mode:` carve-out is inherited here and consumed WITHOUT an argument — do not invent one.** The row's `mode:` was already written by `/supervisor:open` § Step 0.6, and the `role`-forced mapping that produced it has its single home in `docs/fleet-surface.md` § Spawn a worker item 6: it runs in both directions — `interactive=false` for a row whose `mode:` reads `headless`, `interactive=true` for one that reads `interactive`, and the argument omitted only when the field is absent. ⚠️ **Neither branch of this command can carry that argument** — a `docker` / `k8s` row refuses `interactive` whenever it is present (item 7), and the local-backend create carries no mode field — so the field is read and reported, never passed. Say so in the report rather than implying it was consumed.
 
 ⚠️ **Requires `mcp__supervisor__*` in this session.** There is no wezterm fallback on this command: a tab is not a controller worker, and opening one would answer a call that asked for somewhere else.
 

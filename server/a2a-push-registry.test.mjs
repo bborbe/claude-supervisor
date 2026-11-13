@@ -50,6 +50,84 @@ test('beginCreate mints a token and the callback URL together', async () => {
   assert.deepEqual(begun.push, { url: 'http://host.docker.internal:41234/a2a/push', token: 'tok-alpha' })
 })
 
+test('beginCreate honours a caller-supplied callback URL, and still defaults without one', async () => {
+  let minted = 0
+  const { registry } = harness({ tokenFactory: () => `tok-${++minted}` })
+  const relay = 'http://a2a-push-relay.agent.svc.cluster.local:18082/a2a/push'
+  const withRelay = await registry.beginCreate({ callbackUrl: relay })
+  assert.deepEqual(withRelay.push, { url: relay, token: 'tok-1' })
+  // The positive control in the same process: an override-less call still yields the Docker
+  // gateway, so the assertion above shows the override is USED rather than that the default moved.
+  const plain = await registry.beginCreate()
+  assert.deepEqual(plain.push, { url: 'http://host.docker.internal:41234/a2a/push', token: 'tok-2' })
+})
+
+test('a router registration failure releases the token rather than minting an undeliverable one', async () => {
+  const make = (registerWithRouter) =>
+    createA2APushRegistry({
+      receiverFactory: () => ({ listen: async () => 41234, close: async () => {}, messagesFor: () => [] }),
+      tokenFactory: () => 'tok-reg',
+      routerUrl: 'http://127.0.0.1:1',
+      registerWithRouter,
+    })
+
+  // The positive control in the same process: a successful registration mints the token.
+  const ok = await make(async () => null).beginCreate()
+  assert.equal(ok.token, 'tok-reg')
+
+  // ⚠️ The negative this pins: a token whose router refused it is a credential nothing can
+  // deliver, and keeping it would make `pushFor` hand a follow-up a channel that reads as
+  // configured-but-quiet — the exact failure shape this module exists to remove.
+  const failed = await make(async () => ({ error: 'router unreachable' })).beginCreate()
+  assert.equal(failed.error, 'router unreachable')
+  assert.equal(failed.token, undefined, 'no token may survive a failed registration')
+  assert.equal(failed.push, undefined)
+})
+
+test('a follow-up re-registers against the URL its own worker was created with', async () => {
+  let minted = 0
+  const { registry } = harness({ tokenFactory: () => `tok-${++minted}` })
+  const relay = 'http://a2a-push-relay.agent.svc.cluster.local:18082/a2a/push'
+  const cluster = await registry.beginCreate({ callbackUrl: relay })
+  registry.bind({ token: cluster.token, workerId: 'w-k8s' })
+  const docker = await registry.beginCreate()
+  registry.bind({ token: docker.token, workerId: 'w-docker' })
+  // ⚠️ THE NEGATIVE THIS PINS: `pushFor` must not fall back to this process's default for a
+  // worker created against the relay. A follow-up that re-registered a cluster worker against
+  // the Docker gateway would silently restore the very defect the per-target URL removes — and
+  // it would look like a healthy registration, because the worker accepts it.
+  assert.equal((await registry.pushFor('w-k8s')).url, relay)
+  assert.equal((await registry.pushFor('w-docker')).url, 'http://host.docker.internal:41234/a2a/push')
+})
+
+test('the receiver is built with the configured port and host, so a deployed relay can reach it', async () => {
+  let opts = null
+  const registry = createA2APushRegistry({
+    receiverFactory: (o) => {
+      opts = o
+      return { listen: async () => 18082, close: async () => {}, messagesFor: () => [] }
+    },
+    receiverPort: 18082,
+    receiverHost: '192.0.2.10',
+  })
+  await registry.ensureListening()
+  assert.equal(opts.port, 18082, 'an ephemeral port cannot be a relay upstream; the configured one must reach the socket')
+  assert.equal(opts.host, '192.0.2.10', 'a relay on another host cannot dial loopback, so the configured bind address must reach the socket')
+
+  // The positive control beside it: an unconfigured registry still binds loopback, so the
+  // assertions above show the options are USED rather than that the default was widened.
+  let defaults = null
+  const plain = createA2APushRegistry({
+    receiverFactory: (o) => {
+      defaults = o
+      return { listen: async () => 41234, close: async () => {}, messagesFor: () => [] }
+    },
+  })
+  await plain.ensureListening()
+  assert.equal(defaults.host, '127.0.0.1', 'the docker path must not be widened by this change')
+  assert.equal(defaults.port, 0, 'the docker path keeps its ephemeral port')
+})
+
 test('pushFor hands a follow-up the token its first turn already bound', async () => {
   const { registry } = harness({ tokenFactory: () => 'tok-alpha' })
   const begun = await registry.beginCreate()

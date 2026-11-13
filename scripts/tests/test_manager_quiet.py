@@ -41,7 +41,7 @@ GOAL = "---\npage_type: goal\nstatus: in_progress\n---\n\nA goal.\n"
 
 TASK = """---
 status: {status}
-phase: execution
+phase: {phase}
 {extra}goals:
     - '[[AGoal]]'
 ---
@@ -87,8 +87,11 @@ class Base(unittest.TestCase):
         with open(os.path.join(self.vault, rel), "w", encoding="utf-8") as fh:
             fh.write(text)
 
-    def task(self, name, status="in_progress", extra=""):
-        self.write("25 Tasks/%s.md" % name, TASK.format(status=status, extra=extra))
+    def task(self, name, status="in_progress", phase="execution", extra=""):
+        self.write(
+            "25 Tasks/%s.md" % name,
+            TASK.format(status=status, phase=phase, extra=extra),
+        )
 
     def arm(self, subject="AGoal"):
         """Simulate the manager's head-of-round arm — which is what marks a NEW tick.
@@ -135,6 +138,45 @@ class TestBoundary(Base):
         self.assertEqual(self.verdicts(3), ["armed", "stood-down", "stood-down"])
 
 
+class TestSleepUntil(Base):
+    """A date-gated subject sleeps to its earliest `defer_date` — SC1's fixture.
+
+    Two future-dated rows and zero runnable ones: the subject is not finished and not
+    blocked, it is waiting on a date it already knows, so standing it down is the defect
+    (a human re-arms it every morning). The verdict word AND the named instant are both
+    asserted — a build that returned the right word with a wrong or absent instant would
+    arm the wakeup for the wrong moment, which is worse than not sleeping at all.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.task("Later", extra='defer_date: "2026-10-20T11:00:00+02:00"\n')
+        self.task("Sooner", extra='defer_date: "2026-10-18T08:00:00+02:00"\n')
+
+    def test_two_future_dated_rows_sleep_until_the_earliest(self):
+        self.assertEqual(self.tick()["verdict"], "armed")
+        r = self.tick()
+        self.assertEqual(r["verdict"], "sleep-until")
+        self.assertEqual(r["trigger"], "2026-10-18T08:00:00+02:00")
+
+    def test_a_sleeping_subject_never_reads_stood_down(self):
+        self.assertNotIn("stood-down", self.verdicts(4))
+
+    def test_the_boundary_is_the_same_as_the_stand_down(self):
+        """One quiet tick is still ordinary — sleeping does not start a tick early."""
+        self.assertEqual(self.verdicts(1), ["armed"])
+
+    def test_a_runnable_row_defeats_the_sleep(self):
+        """The negative control: live work must never be put to sleep."""
+        self.task("Live")
+        self.assertEqual(self.verdicts(3), ["armed", "armed", "armed"])
+
+    def test_a_blocked_row_defeats_the_sleep(self):
+        """A blocker reopens on a human's action, not on a clock — still stands down."""
+        self.task("Blocked", extra="blocked_by:\n    - '[[Missing]]'\n")
+        self.assertEqual(self.verdicts(2), ["armed", "stood-down"])
+
+
 class TestNegativeControl(Base):
     """Property 2 — one runnable task never stands the subject down."""
 
@@ -178,11 +220,46 @@ class TestQuietShapes(Base):
     """Each quiet shape is read from a field — none is inferred."""
 
     def test_unsurfaced_statuses_are_quiet(self):
-        for i, status in enumerate(("next", "backlog", "hold")):
+        for i, status in enumerate(("backlog", "hold")):
             self.task("Row%d" % i, status=status)
         r = self.tick()
         self.assertEqual(r["runnable"], [])
-        self.assertEqual(sorted(r["quiet"]), ["Row0", "Row1", "Row2"])
+        self.assertEqual(sorted(r["quiet"]), ["Row0", "Row1"])
+
+    def test_an_approved_next_row_is_runnable(self):
+        """`vault-cli task approve` leaves `status: next`; the row is approved, not queued.
+
+        Counting it quiet here made a subject full of approved rows read as empty, so
+        the stand-down counter retired the manager that had just approved them.
+        """
+        self.task("Approved", status="next", phase="planning")
+        r = self.tick()
+        self.assertEqual(r["runnable"], ["Approved"])
+        self.assertEqual(r["quiet"], [])
+
+    def test_a_next_row_with_no_phase_key_is_runnable(self):
+        """`sweep-gate.py` keeps the `status == "next"` arm for exactly this shape.
+
+        Rows filed before the phase field existed carry no `phase` key at all; a
+        `phase`-only predicate would drop every one of them out of the offer silently.
+        """
+        self.write(
+            "25 Tasks/Unphased.md",
+            "---\nstatus: next\ngoals:\n    - '[[AGoal]]'\n---\n\n# Tasks\n\n- [ ] x\n",
+        )
+        r = self.tick()
+        self.assertEqual(r["runnable"], ["Unphased"])
+
+    def test_a_todo_phase_is_quiet_even_at_status_next(self):
+        """The approval boundary is `phase: todo`, the field `task approve` moves.
+
+        Without this guard, admitting `status: next` would surface the operator's whole
+        unapproved inbox as runnable work.
+        """
+        self.task("Unapproved", status="next", phase="todo")
+        r = self.tick()
+        self.assertEqual(r["runnable"], [])
+        self.assertEqual(r["quiet"], ["Unapproved"])
 
     def test_terminal_tasks_are_excluded_not_quiet(self):
         self.task("Done", status="completed")

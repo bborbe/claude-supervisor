@@ -71,7 +71,10 @@ Load it the way the tree loads its siblings (`fleet-board.py:77`):
 # The store's own state vocabulary. `closed` is **not** an act — see
 # `was_acted_on`: a close records that a card was cleared, not that anything was
 # answered. The state stays in the vocabulary because a sweep must still be able
-# to name what it saw.
+# to name what it saw. ⚠️ `OPEN` is the only state no branch in this module
+# compares against, and that is deliberate: it is the one live value, and
+# `classify` must never *default* to it — an absent state is `unreadable`, not
+# open, so a caller gating on `state == "open"` and this reason line agree.
 OPEN = "open"
 ANSWERED = "answered"
 CLOSED = "closed"
@@ -118,10 +121,15 @@ def was_acted_on(item):
 
     What changed is downstream, in `classify`: a close is an act but **not a
     release**, because the asking session is still frozen — treating the clear as
-    an answer opens a gate nobody opened. Splitting the two is what keeps a reap
-    distinguishable from an acknowledgement in the poll's terminal: a reap
-    carries no actor at all and reads as OPEN, while an acknowledgement carries
-    one and reads as NOT_OPERATOR_ANSWERED.
+    an answer opens a gate nobody opened. Splitting the two keeps a reap
+    distinguishable from an acknowledgement, but **not by the poll's terminal
+    word** — since 2026-10-28 both reach `NOT_OPERATOR_ANSWERED:`, and they are
+    separated by the `ANSWERED_BY:` line, which an acknowledgement carries and a
+    reap cannot. ⚠️ **This docstring said the opposite until then** — that a reap
+    "reads as OPEN" — and `attention-ask.py`'s `cmd_poll` keyed its OPEN branch
+    on it, so a reaped close printed the same word as a live gate. That is why
+    the branch is now keyed on `state == "open"`: OPEN is the one terminal that
+    means "still unanswered", and no close of any kind can support it.
 
     ⚠️ The reap reading this function was written for is unchanged. The dominant
     closed shape in the live store is a reap — `closed` with no `answered_at`,
@@ -167,7 +175,13 @@ def classify(item):
     """
     item = item or {}
     if not was_acted_on(item):
-        state = item.get("state") or OPEN
+        # ⚠️ **Never default this to `OPEN`.** `attention-ask.py`'s poll gates its
+        # `OPEN` terminal on `state == "open"`, so a record with no readable
+        # state is deliberately NOT claimed as open there. A fallback of `OPEN`
+        # here made the reason line contradict that gate on the same record —
+        # `NOT_OPERATOR_ANSWERED: … (state None) -- no answer recorded (state
+        # open)` — naming the one state the caller had just rejected.
+        state = item.get("state") or "unreadable"
         return NOTHING, f"no answer recorded (state {state})"
 
     # ⚠️ **A close is a clear, not an answer — 2026-09-27.** `was_acted_on` still

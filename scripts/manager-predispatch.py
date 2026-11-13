@@ -208,6 +208,7 @@ import json
 import os
 import re
 import select
+import subprocess
 import sys
 import time
 import unicodedata
@@ -217,7 +218,9 @@ STATE_DIR = os.path.expanduser(
     os.environ.get("MANAGER_PREDISPATCH_STATE_DIR", "~/.claude/state/manager-predispatch")
 )
 REGISTRY_DIR = os.path.expanduser("~/.claude/sessions")
-FEED_DIR = os.path.expanduser("~/.claude/state/attention")
+FEED_DIR = os.environ.get("ATTENTION_STATE_DIR") or os.path.expanduser(
+    "~/.claude/state/attention"
+)
 
 # The headless-worker heartbeat store, written by this plugin's `server/heartbeat.mjs`.
 HEARTBEAT_DIR = os.environ.get("SUPERVISOR_HEARTBEAT_DIR") or os.path.join(
@@ -252,6 +255,15 @@ EXIT_WRITE_OK = 0
 # response is the same shape — stop and look rather than proceed — while staying a
 # separate name so a reader cannot mistake it for the digest verdict.
 EXIT_DIVERGENT = 10
+# The `caller-format` verdict is the one divergence that is a hard stop rather than a
+# report: the two memberships share NO name at all, so every downstream read would be
+# attributed to a row that does not exist and would render from empty lists. Measured
+# 2026-11-08 (Development Pipeline Throughput): a tracked set of 38 vault-relative page
+# paths against 543 real task rows classified `caller-format`, the round continued, and
+# the readings document rendered `clear=38 · none=38` for a fleet it never read. Distinct
+# from EXIT_DIVERGENT because the caller's response is different — refuse the round, not
+# "stop and look" — and distinct from EXIT_USAGE because the arguments were well formed.
+EXIT_CALLER_FORMAT = 11
 
 STUCK_SECONDS = 30 * 60
 
@@ -655,7 +667,10 @@ def read_task(path: str) -> dict | None:
         "phase": fm_scalar(fm, "phase"),
         "session": fm_scalar(fm, "claude_session_id").strip("'\""),
         "sessions": session_id_set(fm),
-        "goals": fm_wikilinks(fm, "goals"),
+        # ⚠️ The shared normaliser, never `fm_wikilinks`: that one returns only `[[...]]`
+        # matches, so a bare `- Name` block item reads as "declares no goal" and the task
+        # silently leaves the tracked set. See `_goals_declaration` for the measurement.
+        "goals": _goals_declaration().goal_names(fm),
         "progress_hash": progress_hash(text),
         "met": checkbox_count(text),
         "mtime": mtime,
@@ -695,8 +710,18 @@ def declared_members(topic_path: str) -> list[str]:
     return members
 
 
-def resolve_tracked(vault: str, members: list[str]) -> list[dict]:
-    """A member may be a goal (admits tasks whose `goals:` name it) or a task.
+def resolve_tracked_by_member(vault: str, members: list[str]) -> tuple[list[dict], list[str]]:
+    """`(tracked tasks, the members that admitted at least one of them)`.
+
+    `resolve_tracked`'s flat list erases *which* member produced a task, and a caller that
+    renders one row per member cannot recover it: a member is a goal name or a task name,
+    and only a task name ever equals a row's `name`. Measured 2026-11-08: a caller deriving
+    its unresolved set from the row names alone would read a goal that admitted 30 tasks as
+    unresolved and carry a spurious `unread` row beside them — the same false negative the
+    member-level report exists to remove, one level down.
+
+    The admission rule lives here and only here; `resolve_tracked` is this function's first
+    half.
 
     Vault-only and pure: it never touches the registry, so a fixture can run it against a
     throwaway vault and get the same values the live run gets.
@@ -704,17 +729,127 @@ def resolve_tracked(vault: str, members: list[str]) -> list[dict]:
     tasks_dir = os.path.join(vault, TASKS_DIRNAME)
     member_set = set(members)
     tracked: list[dict] = []
+    matched: set[str] = set()
     for entry in sorted(os.listdir(tasks_dir)):
         if not entry.endswith(".md"):
             continue
         task = read_task(os.path.join(tasks_dir, entry))
         if task is None:
             continue
+        # Every member that admitted this task, not just the first: one task may name two
+        # tracked goals, and both are resolved.
+        admitted = member_set.intersection(task["goals"])
         if task["name"] in member_set:  # declared directly as a task entry
-            tracked.append(task)
-        elif member_set.intersection(task["goals"]):
-            tracked.append(task)
-    return sorted(tracked, key=lambda t: t["name"])
+            admitted.add(task["name"])
+        if not admitted:
+            continue
+        tracked.append(task)
+        matched |= admitted
+    return sorted(tracked, key=lambda t: t["name"]), sorted(matched)
+
+
+def resolve_tracked(vault: str, members: list[str]) -> list[dict]:
+    """A member may be a goal (admits tasks whose `goals:` name it) or a task.
+
+    Vault-only and pure: it never touches the registry, so a fixture can run it against a
+    throwaway vault and get the same values the live run gets.
+    """
+    return resolve_tracked_by_member(vault, members)[0]
+
+
+# --- the frozen-tree predicate ------------------------------------------------
+#
+# [[Manager Session]] § Cadence mechanics defines it verbatim: "no tracked file's
+# mtime has moved for >= 2 cadence intervals (30 min at the 15-min default), and the
+# tick's content has already left the machine."
+#
+# Both conjuncts are required and they are DIFFERENT claims. The first reads the
+# tracked set's mtimes. The second has no instrument in the runbook, so it is read
+# here: the round's own session ledger must carry no OPEN `asked-of-you`. An open one
+# is a question the operator has not answered — its content has NOT left the machine —
+# and gating over it would hide the one place they read it.
+#
+# ⚠️ This is NOT the digest `--check` computes. That one hashes content and liveness
+# and deliberately excludes raw mtime; `round-quiet.md` states the two are "a
+# different predicate, not a second spelling of this one", and neither may be read as
+# evidence for the other.
+# ⚠️ NOT under `STATE_DIR`. That is `~/.claude/state/manager-predispatch`, this script's
+# own store — deriving the ledger from it reads a directory that never exists, so
+# `open_asked_of_you()` returns `[]` on every call and the predicate silently collapses
+# to mtime-only. That is precisely the failure the gate exists to prevent, and it fails
+# silently: a missing ledger is a legitimate empty answer, so nothing distinguishes it.
+# The ledger's home is `open-items.py`'s: `~/.claude/state/open-items`.
+OPEN_ITEMS_DIR = os.path.expanduser(
+    os.environ.get("SUPERVISOR_OPEN_ITEMS_DIR", "~/.claude/state/open-items")
+)
+CADENCE_INTERVAL_SECONDS = 15 * 60
+FROZEN_INTERVALS = 2
+
+
+def open_asked_of_you(session_id: str = "") -> list[dict]:
+    """OPEN `asked-of-you` entries in one session's ledger; `[]` when unreadable.
+
+    Unreadable is `[]` on purpose: a session with no ledger asked the operator
+    nothing, and failing closed here would freeze the gate forever on every session
+    that never used the ledger.
+    """
+    sid = session_id or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if not sid:
+        return []
+    try:
+        with open(os.path.join(OPEN_ITEMS_DIR, f"{sid}.json"), encoding="utf-8") as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    items = d.get("items") if isinstance(d, dict) else None
+    return [
+        i for i in (items or [])
+        if isinstance(i, dict)
+        and i.get("kind") == "asked-of-you"
+        and i.get("state") == "open"
+    ]
+
+
+def frozen_tree(vault: str, subject: str, now: float | None = None,
+                interval_seconds: int = CADENCE_INTERVAL_SECONDS,
+                intervals: int = FROZEN_INTERVALS) -> dict:
+    """The frozen-tree predicate's verdict, both conjuncts evaluated."""
+    now = time.time() if now is None else now
+    _, members = resolve_subject(vault, subject)
+    tracked = resolve_tracked(vault, members)
+    mtimes = [t["mtime"] for t in tracked if t.get("mtime")]
+    newest = max(mtimes) if mtimes else None
+    window = intervals * interval_seconds
+    quiet = newest is None or (now - newest) >= window
+    asks = open_asked_of_you()
+    return {
+        "frozen": bool(quiet and not asks),
+        "tracked": len(tracked),
+        "newest_mtime": newest,
+        "quiet_seconds": None if newest is None else int(now - newest),
+        "window_seconds": window,
+        "open_asks": [i.get("text", "") for i in asks],
+    }
+
+
+def predicate(vault: str, subject: str) -> int:
+    """Print the verdict and its two reads; exit 0 only when frozen."""
+    v = frozen_tree(vault, subject)
+    if v["frozen"]:
+        print(
+            f"FROZEN — newest tracked mtime {v['quiet_seconds']}s ago "
+            f"(window {v['window_seconds']}s), 0 open asked-of-you, {v['tracked']} tracked"
+        )
+        return 0
+    why = []
+    if v["quiet_seconds"] is not None and v["quiet_seconds"] < v["window_seconds"]:
+        why.append(
+            f"a tracked file moved {v['quiet_seconds']}s ago (window {v['window_seconds']}s)"
+        )
+    if v["open_asks"]:
+        why.append(f"{len(v['open_asks'])} open asked-of-you")
+    print(f"NOT-FROZEN — {'; '.join(why) or 'no tracked files'}")
+    return 1
 
 
 def page_type_of(path: str) -> str:
@@ -837,6 +972,81 @@ def _session_identity():
     return _IDENTITY
 
 
+_DECLARED_WAIT = None
+
+
+def _declared_wait():
+    """Import declared-wait.py — the shared `⏰ Ends:` reader.
+
+    ⚠️ **Shared, not re-derived.** `agents/manager-drive.md:134` forbids *"a fourth
+    definition of 'idle'"*, and `scripts/fleet-board.py` reads the same slot through this
+    same module. A private copy here would be exactly the drift that rule names.
+    """
+    global _DECLARED_WAIT
+    if _DECLARED_WAIT is None:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "declared-wait.py")
+        spec = importlib.util.spec_from_file_location("declared_wait", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _DECLARED_WAIT = mod
+    return _DECLARED_WAIT
+
+
+_GOALS_DECLARATION = None
+
+
+def _goals_declaration():
+    """Import goals-declaration.py — the shared `goals:` reader.
+
+    ⚠️ **Shared, not re-derived, and the reason is a measured silent drop.** `read_task`
+    used to read `goals:` through `fm_wikilinks`, which returns only `[[...]]` matches — so
+    a task declaring its goal as a bare list item (`goals:` then `    - Name`, no brackets)
+    contributed nothing to `resolve_tracked`, vanished from the tracked set, and never
+    received a liveness probe. `reset.py` read the same declaration with a normaliser that
+    DID handle that shape, so the two disagreed while both looked self-consistent. Measured
+    2026-11-02 on the live `private-personal` vault: caller scan 61 names, gate snapshot 60,
+    differing by exactly the one task in the bare-list shape.
+
+    ⚠️ `blocked_by` deliberately stays on `fm_wikilinks`. Its contract is different —
+    `blocked_by_verdict` has to tell "declares no blocker" from "declares a blocker that
+    did not parse as a name", and widening the accepted shapes there changes which rows
+    read as blocked. That is not this fix.
+    """
+    global _GOALS_DECLARATION
+    if _GOALS_DECLARATION is None:
+        path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "goals-declaration.py"
+        )
+        spec = importlib.util.spec_from_file_location("goals_declaration", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _GOALS_DECLARATION = mod
+    return _GOALS_DECLARATION
+
+
+_DECLARED_WAIT_IDS = None
+
+
+def declared_wait_ids():
+    """The whole-store `⏰ Ends:` set, read once per process.
+
+    ⚠️ **Memoised, and that is not a micro-optimisation.** Three call sites ask this per
+    row — `liveness_of_sid`, `roster_owner` and `idle_stuck`'s feed — so a per-sid read
+    would open and parse every session's log once per tracked session. `scripts/fleet-board.py`
+    reads the same set through the same shared reader, whole store and once, and this
+    matches that shape rather than inventing a second one.
+
+    ⚠️ **`state_dir=FEED_DIR`, explicitly.** `declared-wait.py`'s module-level `STATE`
+    honours `ATTENTION_STATE_DIR`, but this file's store is `FEED_DIR`; passing it keeps
+    the two readers over one store pointed at the same place, which is what makes an
+    isolated render actually isolated.
+    """
+    global _DECLARED_WAIT_IDS
+    if _DECLARED_WAIT_IDS is None:
+        _DECLARED_WAIT_IDS = _declared_wait().declared_wait_ids(state_dir=FEED_DIR)
+    return _DECLARED_WAIT_IDS
+
+
 def read_registry() -> dict[str, dict]:
     """`~/.claude/sessions/<pid>.json` -> {sessionId: {pid, status, name, alive}}.
 
@@ -908,8 +1118,21 @@ def liveness_of_sid(
         beat = heartbeat_live(sid) if heartbeat is _HEARTBEAT_UNREAD else heartbeat
         if beat is not True:
             return LIVENESS_NONE
-        return LIVENESS_PARKED if is_open_gate(feed.get(sid)) else LIVENESS_LIVE
-    if is_open_gate(feed.get(sid)) or rec["status"] == "waiting":
+        return (LIVENESS_PARKED
+                if (is_open_gate(feed.get(sid)) or sid in declared_wait_ids())
+                else LIVENESS_LIVE)
+    # ⚠️ **A declared wait parks a LIVE row, and only a live one.** `⏰ Ends:` names a
+    # machine the worker is waiting on — a dependency, which is what this file's park
+    # rule exists to cover — read through the shared reader so this file cannot drift
+    # from `scripts/fleet-board.py`'s own reading.
+    # ⚠️ **The read is taken HERE, below the death gate, never above it.** A session that
+    # is dead and once declared a wait is still dead, and parking it would resurrect it;
+    # hoisting the read to the top would leave that invariant resting on the position of
+    # two `or` clauses rather than on the order of the code — the kind a later edit near
+    # the top silently breaks.
+    if (is_open_gate(feed.get(sid))
+            or sid in declared_wait_ids()
+            or rec["status"] == "waiting"):
         return LIVENESS_PARKED
     return LIVENESS_LIVE
 
@@ -1004,7 +1227,15 @@ def roster_owner(name: str, registry: dict, feed: dict) -> str:
             continue
         if not _names_the_same_session(wanted, rec.get("name", "")):
             continue
-        return LIVENESS_PARKED if is_open_gate(feed.get(sid)) else LIVENESS_LIVE
+        # ⚠️ **The park test is `liveness_of`'s, and it carries BOTH carriers.** A
+        # roster-name match names the same session an id match does, so a reader that
+        # parked only on the gate would leave a declared-waiting worker reading LIVE
+        # here — and the LIVE half is what feeds `idle_stuck`'s `!= LIVENESS_PARKED`
+        # branch, so the task would still be offered for re-dispatch. That is the same
+        # false positive this change removes, reached by the name-fallback path.
+        return (LIVENESS_PARKED
+                if (is_open_gate(feed.get(sid)) or sid in declared_wait_ids())
+                else LIVENESS_LIVE)
     return LIVENESS_NONE
 
 
@@ -1077,6 +1308,11 @@ def idle_stuck(t: dict, now_ts: float) -> bool:
     file-unchanged proxy cannot tell the two apart. The parked carrier is already
     computed in this file (`liveness_of` -> `LIVENESS_PARKED`), so a branch (b) that
     ignored it would flag exactly the workers the rule exists to leave alone.
+    ⚠️ **`LIVENESS_PARKED` carries two shapes now, not one:** an open gate, and a
+    session whose newest `Stop` record declares `⏰ Ends:` (read through the shared
+    `scripts/declared-wait.py`). The second is the one that regressed in practice — a
+    worker whose turn ended inside a `run_in_background` watcher is inactive *by
+    design*, and the file-unchanged proxy read that as stuck.
     """
     if t.get("liveness") == LIVENESS_PARKED:
         return False
@@ -1156,11 +1392,170 @@ def read_holds() -> dict:
     return holds if isinstance(holds, dict) else {}
 
 
+# --------------------------------------------------------------------------- #
+# the Hold window -- the second source of heldness
+# --------------------------------------------------------------------------- #
+#
+# A pane parked in the WezTerm role map's Hold window is held with no store entry
+# at all: the operator's statement is the pane's POSITION, not a `hold` call. It is
+# resolved at read time from the map's `Hold.window_id` plus `wezterm cli list`, and
+# never persisted -- a stored entry would outlive the pane leaving the window, so
+# the hold would then be unreleasable by the gesture that set it. Inlined, like
+# `read_holds` above: the plugin's scripts do not import each other.
+
+# The WezTerm role map. Same variable the server reads (`server/config.mjs`) and
+# `session-holds.py` reads, so a test can point at a tmp map exactly as it already
+# points `SUPERVISOR_SESSION_HOLDS` at a tmp store.
+ROLE_MAP = os.environ.get("SUPERVISOR_ROLE_MAP") or os.path.expanduser(
+    "~/.cache/wezterm-role-map.json"
+)
+
+
+def panes():
+    """Every WezTerm pane, or `None` when the query FAILED.
+
+    ⚠️ `None`, never `[]`: a failed `wezterm cli list` cannot prove a pane is gone
+    any more than it can prove one is live, so no caller may read it as "no panes
+    exist". `[]` is reserved for a transport that answered with zero panes.
+
+    ⚠️ A machine with no `wezterm` BINARY is a fourth state and answers `[]`: an
+    absent transport has no panes, and the Hold window is a WezTerm concept, so
+    where WezTerm is not installed there is nothing for it to apply to. Only
+    `FileNotFoundError` reads that way; any other `OSError` (a mux socket that is
+    gone) is a genuine failure and stays `None`. See `docs/pane-reads.md`.
+    """
+    try:
+        result = subprocess.run(
+            ["wezterm", "cli", "list", "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        return []
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        listing = json.loads(result.stdout)
+    except ValueError:
+        return None
+    return listing if isinstance(listing, list) else None
+
+
+# The activity glyph WezTerm puts in front of a pane title (`✳` active, `◑`/`◐`
+# otherwise). Decoration on the title, never part of the name.
+_GLYPH = re.compile(r"^[^\w\s]{1,2}\s+")
+
+
+def registry_names():
+    """name -> session id, for the pane join. Later entries win on a clash."""
+    names = {}
+    for path in glob.glob(os.path.join(REGISTRY_DIR, "*.json")):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        sid = data.get("sessionId") or data.get("session_id")
+        name = data.get("name")
+        if sid and name:
+            names[name] = sid
+    return names
+
+
+def session_pane(session_id, listing):
+    """The pane currently showing this session, or None when the listing has none.
+
+    The registry carries no pane id, so a session id joins to its pane through the
+    registry `name`, which is what the tab TITLE carries -- the same join the
+    server's `findRegisteredByName` uses.
+    """
+    names = registry_names()
+    for pane in listing:
+        title = pane.get("title") or ""
+        name = title if title in names else _GLYPH.sub("", title)
+        if names.get(name) == session_id:
+            return pane.get("pane_id")
+    return None
+
+
+def pane_window(pane_id, listing):
+    """The WezTerm window id owning this pane, or None when the listing has none.
+
+    Read straight off the pane record, with no name join, so it answers for a
+    Hold-window pane whose title the registry does not know.
+    """
+    for pane in listing:
+        if str(pane.get("pane_id")) == str(pane_id):
+            window = pane.get("window_id")
+            if isinstance(window, bool) or not isinstance(window, int):
+                return None
+            return window
+    return None
+
+
+def hold_window_id():
+    """The role map's Hold window id, or None when it cannot be read.
+
+    Read directly from the map's `Hold.window_id`, never through the server's role
+    map: its `ROLES` deliberately excludes Hold, because the Hold window is a
+    parking lot rather than a role and is never spawned into.
+    """
+    try:
+        with open(ROLE_MAP, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    entry = data.get("Hold") if isinstance(data, dict) else None
+    window = entry.get("window_id") if isinstance(entry, dict) else None
+    if isinstance(window, bool) or not isinstance(window, int):
+        return None
+    return window
+
+
+def in_hold_window(target):
+    """Whether session `target` sits in the role map's Hold window.
+
+    Three states, per `docs/pane-reads.md`: `True` in the window, `False` not in
+    it, `None` when the pane listing could NOT be read, so the question is
+    unanswered. A missing role map, an unreadable one, or one carrying no `Hold`
+    key is NOT that third state -- it is the documented fallback to explicit holds
+    only, and it answers `False`.
+    """
+    window = hold_window_id()
+    if window is None:
+        return False
+    listing = panes()
+    if listing is None:
+        return None
+    pane = target if str(target).isdigit() else session_pane(target, listing)
+    if pane is None:
+        return False
+    return pane_window(pane, listing) == window
+
+
 def is_held(session_id: str) -> bool:
-    """True when this session carries a hold. Never raises."""
+    """True when this session carries a hold -- store or Hold window. Never raises.
+
+    The second source is the WezTerm Hold window: a pane parked there is held with
+    no store entry, resolved at read time.
+
+    ⚠️ A failed pane read answers *not held* here, and that is the safe direction
+    for THIS caller rather than a collapse. The value is only ever a DIGEST INPUT
+    (`digest_of`), and this gate is fail-open -- CHANGE authorises a sweep, it never
+    suppresses one. So a missed Hold-window hold costs one un-moved digest while the
+    held row still renders on the next tick, whereas inventing a hold would make the
+    gate answer CHANGE on every tick for as long as the transport stayed down,
+    defeating the saving the gate exists for. That is the same direction the store
+    read above documents, and the two must agree.
+    """
     if not session_id:
         return False
-    return isinstance(read_holds().get(session_id), dict)
+    if isinstance(read_holds().get(session_id), dict):
+        return True
+    return in_hold_window(session_id) is True
 
 
 def liveness_change_term(t: dict) -> int:
@@ -1204,7 +1599,15 @@ def liveness_change_term(t: dict) -> int:
 
 
 def parked_names(tracked: list[dict]) -> list[str]:
-    """The rows whose rendered Status cell reads `⌛ waiting-on-human`, sorted.
+    """The rows whose rendered Status cell reads `⌛ waiting-on-human` or `⌛ waiting-external`, sorted.
+
+    ⚠️ **TWO carriers, two cell names, since the declared-wait change.** This function
+    keys on `LIVENESS_PARKED`, and that verdict now covers both an open gate *and* a
+    session whose newest `Stop` record declares `⏰ Ends:` — which
+    `agents/manager-sweep-reader.md:138` renders as the **`waiting-external`** cell, not
+    `waiting-on-human`. Both are parked, both move the Status cell, and both belong in
+    this set; naming only the first would state a contract that is half false, which is
+    the drift the `roster_owner` comment above warns against.
 
     ⚠️ **This is the Status cell, not the Session cell, and the difference is the whole
     reason this function exists.** `agents/goal-sweep-reader.md:136` makes a *parked*
@@ -1323,6 +1726,15 @@ def digest_of(tracked: list[dict]) -> str:
     string and `digest_moved` fires with nothing about the tree moved. Bounded and
     fail-open -- a CHANGE authorises a sweep, it never suppresses one -- and self-healing:
     the loop's own `--save` rewrites the digest in the new format on its first tick.
+
+    ⚠️ **A SECOND one-shot refusal comes from the same change, and it is a different
+    input.** `parked_replay_reason` compares `parked_names`' set against the stored
+    `"parked"` field, and that set now also carries declared-wait rows — so a record
+    written before the change refuses its replay **once per subject holding such a row**,
+    and the refusal reads as a CHANGE. Same bounds, same direction and the same
+    self-healing as the shape change above: it authorises a sweep rather than suppressing
+    one, and the first `--save` clears it. Named here rather than left to be discovered,
+    which is the discipline the rest of this file applies.
 
     ⚠️ **The hold is a digest input, and deliberately NOT a suppression here.** This gate
     decides whether the sweep runs at all, so suppressing it for a held session would
@@ -2382,6 +2794,16 @@ def main(argv: list[str]) -> int:
         ),
     )
     mode.add_argument(
+        "--predicate",
+        action="store_true",
+        help=(
+            "evaluate the frozen-tree predicate — BOTH conjuncts: no tracked file's "
+            "mtime moved for >= 2 cadence intervals, AND no open `asked-of-you` in this "
+            "session's ledger — printing FROZEN or NOT-FROZEN with its reads; exit 0 "
+            "only when frozen. This is not the digest `--check` computes"
+        ),
+    )
+    mode.add_argument(
         "--write-payload",
         action="store_true",
         help="write the rendered table (on stdin) to <slug>.table, for --save to read",
@@ -2398,6 +2820,16 @@ def main(argv: list[str]) -> int:
             "one `<name>\\t<blocked|ready|unreadable>\\t<unmet…>\\t<entry count>` line per "
             "staged tracked row, for the sweep reader's ready-to-start / blocked-upstream "
             "decision"
+        ),
+    )
+    ap.add_argument(
+        "--heal",
+        action="store_true",
+        help=(
+            "with --compare-tracked: refresh the staged tracked set from the gate's "
+            "membership when the caller's set is a strict subset of it (the "
+            "`caller-scan-suspect` shape) and only then; every other shape is reported, "
+            "never written"
         ),
     )
     ap.add_argument(
@@ -2422,6 +2854,16 @@ def main(argv: list[str]) -> int:
         # is told the argument was wrong instead of being handed a fail-open sweep.
         print(vault_error, file=sys.stderr)
         return EXIT_USAGE
+
+    if args.heal and not args.compare_tracked:
+        # `--heal` is a modifier on the comparison, never a mode of its own: it can only
+        # act on a divergence, and there is no divergence without the comparison. Silently
+        # ignoring it would render a round that believes it refreshed a set it never read.
+        print("--heal requires --compare-tracked", file=sys.stderr)
+        return EXIT_USAGE
+
+    if args.predicate:
+        return predicate(args.vault, args.subject)
 
     if args.content_keys:
         # The single home of the derivation clause (1) used to carry as prose. The leg is an
@@ -2659,11 +3101,13 @@ def main(argv: list[str]) -> int:
 
     if args.compare_tracked:
         # A dispatch whose tracked set disagrees with the gate's own membership is
-        # reported, not accepted. The two memberships are produced by different code from
-        # the same declarations, so each is self-consistent while they disagree — measured
-        # 2026-09-27: 154 declared against 153 in the snapshot, differing by one name whose
-        # only fault was a capital `The` against a case-sensitive membership compare.
-        # Nothing else could see it: APFS is case-insensitive, so `os.path.exists`,
+        # reported, not accepted — with one exception, `--heal`, which refreshes the
+        # caller's set on the single shape where it is provably a strict subset of the
+        # gate's (see the heal branch below). The two memberships are produced by different
+        # code from the same declarations, so each is self-consistent while they disagree
+        # — measured 2026-09-27: 154 declared against 153 in the snapshot, differing by one
+        # name whose only fault was a capital `The` against a case-sensitive membership
+        # compare. Nothing else could see it: APFS is case-insensitive, so `os.path.exists`,
         # `open()`, Obsidian's link resolver and `ls` all succeed on the capitalised path,
         # and no sweep notices because neither source is internally inconsistent.
         # ⚠️ What that framing got wrong is that the *caller's* half is not a derivation at
@@ -2701,6 +3145,8 @@ def main(argv: list[str]) -> int:
         print(f"COMPARE caller {len(mine)} names · gate {len(gate)} names")
         if not only_mine and not only_gate:
             print("  memberships identical")
+            if args.heal:
+                print(f"✅ TRACKED complete — {len(gate)} names, missing 0, extra 0")
             return EXIT_NOCHANGE
 
         # Which of the three causes this is. The declaration is read through the same
@@ -2737,9 +3183,83 @@ def main(argv: list[str]) -> int:
             f"caller scan written {scanned_at}"
         )
 
+        # The round's own receipt line, printed on every `--heal` run: `missing` is every
+        # name the gate holds and the caller lacks, `extra` every caller name the page
+        # never declared. Without it a healing round reports only that it healed and a
+        # round that healed nothing reports nothing — two states the receipt exists to
+        # keep apart. ⚠️ `missing` is measured against the gate's snapshot, never against
+        # the live declaration, and the line says so: a page filed after the snapshot is
+        # missing from both sides and only the next gate tick carries it, so an unqualified
+        # `missing 0` would read as "nothing is missing anywhere". ⚠️ `extra` is measured
+        # against the page's declaration, never the gate: a caller name inside the declared
+        # membership that the snapshot does not hold is the known healthy asymmetry, not an
+        # extra row.
+        if args.heal:
+            extra = (
+                len([n for n in only_mine if n not in set(members)])
+                if members is not None
+                else len(only_mine)
+            )
+            print(
+                f"  TRACKED missing {len(only_gate)} · extra {extra} "
+                f"— missing is against the gate's {len(gate)}-name membership"
+            )
+
         if kind == DIVERGENCE_HEALTHY:
             print(f"✅ COMPARE healthy — {sentence}")
             return EXIT_NOCHANGE
+        if kind == DIVERGENCE_CALLER_SCAN_SUSPECT and args.heal:
+            # Refresh-on-divergence, and only on this one shape. `caller-scan-suspect`
+            # means the caller's set is a strict subset of the gate's *and* carries
+            # nothing the page never declared, so the union is the gate's membership and
+            # no row is removed. Every other shape is left untouched: `caller-overshoot`
+            # and `both-sides-moved` can each mean the caller is right and the snapshot is
+            # a refresh behind, so writing there could delete a row that exists.
+            #
+            # ⚠️ Written only when the membership actually changes, never per firing.
+            # Measured 2026-11-12: a subject whose tracked file was last written at
+            # 14:09:48 and whose gate snapshot refreshed at 16:29:12 carried 130 names
+            # against 136 — six rows invisible to every sweep for three hours, because
+            # `goal-resolve.md` requires the declaration read to refresh on every firing
+            # and a prose step is not a producer. A refresh-on-divergence makes the write
+            # a code path that fires exactly when there is something to write.
+            #
+            # The label is printed before the write so the round's own output names the
+            # cause it acted on, not only the result: a healed tick and a tick that
+            # happened to find nothing to heal must not render the same first line.
+            print(f"⚠️ DIVERGENCE ({kind}): {sentence}")
+            healed = sorted(mine | gate)
+            path = tracked_path(args.subject)
+            tmp = path + ".tmp"
+            os.makedirs(STATE_DIR, exist_ok=True)
+            try:
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    fh.write("\n".join(healed) + "\n")
+                # Atomic for the reason `--write-tracked` gives: a reader sees either the
+                # old set or the new one, never a half-written file.
+                os.replace(tmp, path)
+            except BaseException:
+                if os.path.exists(tmp):
+                    os.unlink(tmp)
+                raise
+            print(
+                f"REFRESHED tracked set {len(mine)} → {len(healed)} "
+                f"(+{len(only_gate)}): " + " · ".join(only_gate)
+            )
+            print(f"✅ TRACKED complete — {len(healed)} names, missing 0, extra 0")
+            return EXIT_NOCHANGE
+        if kind == DIVERGENCE_CALLER_FORMAT:
+            # Refuse, do not report: nothing downstream can attribute a verdict to a row
+            # when the two sets share no name, so continuing writes a document that reads
+            # as a quiet fleet while it is really a wrong-form scan. Printed BEFORE the
+            # names so the caller's first line is the verdict, not a list to interpret.
+            print(f"⛔ COMPARE caller-format — {sentence}")
+            for label, names in (("caller-only", only_mine), ("gate-only", only_gate)):
+                for n in names[:10]:
+                    print(f"  {label}: {n}")
+                if len(names) > 10:
+                    print(f"  … and {len(names) - 10} more {label}")
+            return EXIT_CALLER_FORMAT
         print(f"⚠️ DIVERGENCE ({kind}): {sentence}")
         for label, names in (("caller-only", only_mine), ("gate-only", only_gate)):
             for n in names[:10]:

@@ -15,6 +15,7 @@ Run: python3 -m unittest discover -s scripts/tests -v
 """
 
 import importlib.util
+import json
 import os
 import tempfile
 import time
@@ -73,8 +74,30 @@ class ParkFilter(unittest.TestCase):
         block = 'defer_date: "2026-09-19"\nstatus: in_progress'
         self.assertEqual(oc.is_parked(block, self.TODAY), "defer_date")
 
-    def test_same_day_defer_date_is_parked(self):
+    def test_same_day_defer_date_is_not_parked(self):
+        """A defer_date naming TODAY is due, not parked -- it surfaces on that date.
+
+        The vault's rule is that a `defer_date` keeps a task `in_progress` and
+        makes it available ON that date, so only a date still in the future
+        parks it. Reading today as parked cost a deferred row a further full
+        day, every time.
+        """
         block = 'defer_date: "2026-09-18"'
+        self.assertIsNone(oc.is_parked(block, self.TODAY))
+
+    def test_same_day_rfc3339_defer_date_is_not_parked(self):
+        """The unquoted shape vault-cli writes must not read as future by length.
+
+        `2026-09-18T00:00:00Z` compares GREATER than `2026-09-18` as a raw string,
+        so a comparison that skips the date normalization still parks a same-day
+        row of this shape -- the fix would hold for one stored shape and not the
+        other, which is the failure the two-shape clause exists to prevent.
+        """
+        block = "defer_date: 2026-09-18T00:00:00Z"
+        self.assertIsNone(oc.is_parked(block, self.TODAY))
+
+    def test_future_rfc3339_defer_date_is_parked(self):
+        block = "defer_date: 2026-09-19T00:00:00Z"
         self.assertEqual(oc.is_parked(block, self.TODAY), "defer_date")
 
     def test_past_defer_date_is_not_parked(self):
@@ -129,8 +152,19 @@ class Candidates(unittest.TestCase):
 
     def test_parked_routines_are_skipped(self):
         task_file(self.dir, "Routine.md", "status: in_progress\nclaude_session_id: eeee5555\ncreated_by: recurring-task-creator")
-        task_file(self.dir, "Scheduled.md", f'status: in_progress\nclaude_session_id: ffff6666\ndefer_date: "{self.today}"')
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        task_file(self.dir, "Scheduled.md", f'status: in_progress\nclaude_session_id: ffff6666\ndefer_date: "{tomorrow}"')
         self.assertEqual(self.names(), [])
+
+    def test_due_today_is_a_candidate(self):
+        """A defer_date naming TODAY is due, not parked -- the row must be listed.
+
+        Paired with test_parked_routines_are_skipped: the same fixture one day
+        apart must flip the verdict. Without both halves a comparison that is
+        never read passes either one alone.
+        """
+        task_file(self.dir, "Due.md", f'status: in_progress\nclaude_session_id: 7777aaaa\ndefer_date: "{self.today}"')
+        self.assertEqual(self.names(), ["Due"])
 
     def test_missing_session_id_is_skipped(self):
         task_file(self.dir, "Unstamped.md", "status: in_progress")
@@ -176,9 +210,14 @@ class HoldTest(unittest.TestCase):
         self.holds = os.path.join(self.dir, "session-holds.json")
         self._saved = oc.HOLDS_PATH
         oc.HOLDS_PATH = self.holds
+        # No role map: the Hold-window source is off for these store tests, so they
+        # never shell out to a real WezTerm and stay host-independent.
+        self._saved_map = oc.ROLE_MAP
+        oc.ROLE_MAP = os.path.join(self.dir, "no-role-map.json")
 
     def tearDown(self):
         oc.HOLDS_PATH = self._saved
+        oc.ROLE_MAP = self._saved_map
 
     def write_holds(self, *session_ids):
         entries = ", ".join(
@@ -220,6 +259,71 @@ class HoldTest(unittest.TestCase):
         with open(self.holds, "w", encoding="utf-8") as handle:
             handle.write("{not json")
         self.assertEqual(["free", "held"], sorted(self.names()))
+
+
+class HoldWindowTest(unittest.TestCase):
+    """The Hold WINDOW -- a pane parked in the role map's Hold window is held.
+
+    The second source of heldness. A failed pane read answers *not held* here, the
+    same direction the store read above documents: this predicate DROPS a candidate,
+    so inventing a hold would silently drop a real orphan -- the false clean this
+    script exists to prevent -- while reading a broken transport as "nothing held"
+    merely leaves the row in the candidate list for a later sweep.
+
+    Both directions are asserted by name, and the pane read is stubbed so the suite
+    never depends on the host having WezTerm.
+    """
+
+    NAME = "⚙ held"
+    PANE = 874
+    HOLD_WINDOW = 11
+    AGENT_WINDOW = 9
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self._holds, self._map = oc.HOLDS_PATH, oc.ROLE_MAP
+        self._panes, self._names = oc.panes, oc.registry_names
+        # An absent store: the window must hold on its own, with no entry.
+        oc.HOLDS_PATH = os.path.join(self.dir, "session-holds.json")
+        oc.ROLE_MAP = os.path.join(self.dir, "role-map.json")
+        with open(oc.ROLE_MAP, "w", encoding="utf-8") as handle:
+            json.dump({"Hold": {"window_id": self.HOLD_WINDOW}}, handle)
+        oc.registry_names = lambda: {self.NAME: HELD}
+
+    def tearDown(self):
+        oc.HOLDS_PATH, oc.ROLE_MAP = self._holds, self._map
+        oc.panes, oc.registry_names = self._panes, self._names
+
+    def pane_in(self, window):
+        oc.panes = lambda: [
+            {"pane_id": self.PANE, "window_id": window, "title": "✳ " + self.NAME}
+        ]
+
+    def seed(self):
+        task_file(self.dir, "held.md", "status: in_progress\nclaude_session_id: " + HELD)
+        task_file(self.dir, "free.md", "status: in_progress\nclaude_session_id: " + FREE)
+
+    def names(self):
+        return [n for n, _, _ in oc.candidates(self.dir, date.today(), 30, set())]
+
+    def test_a_pane_in_the_hold_window_drops_the_candidate(self):
+        """Too-tight: a Hold-window pane excludes the row with no store entry."""
+        self.pane_in(self.HOLD_WINDOW)
+        self.seed()
+        self.assertNotIn("held", self.names())
+        self.assertIn("free", self.names())
+
+    def test_a_pane_outside_the_hold_window_keeps_the_candidate(self):
+        """Too-loose: a pane in another window is an ordinary session."""
+        self.pane_in(self.AGENT_WINDOW)
+        self.seed()
+        self.assertIn("held", self.names())
+
+    def test_a_failed_pane_read_keeps_the_candidate(self):
+        """The chosen response for THIS caller: a broken read must not drop a row."""
+        oc.panes = lambda: None
+        self.seed()
+        self.assertIn("held", self.names())
 
 
 if __name__ == "__main__":

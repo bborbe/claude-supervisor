@@ -408,7 +408,34 @@ def render_poll(item, out):
     described = describe_answer(item)
     # `classify` returns (verdict, reason) — unpack it, never compare the tuple.
     classified, _reason = attribution.classify(item)
-    if classified == attribution.NOTHING and described is None:
+    # ⚠️ **Keyed on `state`, the same guard `attention-ask.py`'s `cmd_poll` took on
+    # 2026-10-28.** `OPEN` is the one terminal that means "still unanswered", and
+    # this is the only branch where the pod arm can print it for a non-permission
+    # card — so printing it for a record that has left `open` makes a reap read
+    # exactly like a live gate. A reap is precisely this shape: no answer content
+    # and no act, because `sweep_dead_sessions`, the compact-crossing clear, a
+    # forwarded `SessionEnd` and `close_session_approval` all post an empty body
+    # with no `answered_by`. A reaped `message` or `ack` card therefore reached
+    # here and printed OPEN; measured 2026-11-02, a reaped `message` record
+    # (`state: closed`, no `answered_at`, no `answered_by`) printed OPEN on the
+    # deployed 0.227.3 arm. It now falls through to `NOT_OPERATOR_ANSWERED:`
+    # below.
+    #
+    # ⚠️ **That does NOT restore a reap/acknowledgement distinction in this arm,
+    # and this comment must not claim one.** `attention-ask.py` separates the two
+    # with its `ANSWERED_BY:` line; `render_poll` prints no such line, so an
+    # acknowledgement (`closed` + `answered_by`, no `answered_at`) classifies
+    # `UNATTRIBUTED` and renders byte-identically to a reap here — measured
+    # 2026-11-02, both print `NOT_OPERATOR_ANSWERED: (no answer content recorded;
+    # item is closed)`. What the guard buys is narrower, and is still the point: a
+    # record that has left `open` stops claiming to be a live gate. A record whose
+    # `state` is unreadable is not claimed as open either; failing closed is the
+    # point.
+    if (
+        classified == attribution.NOTHING
+        and described is None
+        and item.get("state") == "open"
+    ):
         print("OPEN", file=out)
         return 0
     content = described or f"(no answer content recorded; item is {item.get('state')})"

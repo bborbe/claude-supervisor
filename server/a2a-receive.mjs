@@ -88,8 +88,13 @@ function statusText(payload) {
  *   through the Docker gateway (`host.docker.internal`), which was measured to reach a
  *   listener bound to 127.0.0.1 only — so a loopback bind is sufficient and is the
  *   narrowest surface that works.
+ * @param {number} [options.port] `0` by default — an ephemeral port, which is all the docker
+ *   path needs. A **k8s** callback cannot use one: the worker reaches this receiver through
+ *   an in-cluster relay, and a relay is configured with a fixed upstream port, so a port that
+ *   moved on every process start would have to be re-deployed into the cluster each time.
+ *   Pinning it here is what makes the relay's config stable.
  */
-export function createA2AStatusReceiver({ workerTokens, onMessage, host = '127.0.0.1' } = {}) {
+export function createA2AStatusReceiver({ workerTokens, onMessage, host = '127.0.0.1', port = 0 } = {}) {
   if (typeof workerTokens !== 'function') {
     throw new Error('createA2AStatusReceiver: workerTokens must be a function returning worker id -> token')
   }
@@ -193,7 +198,7 @@ export function createA2AStatusReceiver({ workerTokens, onMessage, host = '127.0
     listen: () =>
       new Promise((resolve, reject) => {
         server.once('error', reject)
-        server.listen(0, host, () => resolve(server.address().port))
+        server.listen(port, host, () => resolve(server.address().port))
       }),
     close: () => new Promise((resolve) => server.close(resolve)),
   }

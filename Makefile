@@ -14,6 +14,26 @@ check-changelog:
 check-changelog-size:
 	@python3 scripts/changelog-archive.py --check
 
+# The changelog fold, caught BEFORE the push. The same script runs in CI as a
+# warning (`changelog-unreleased-fold-guard.yml`), but a blocking CI check must
+# fail the run, and a failed run mails the operator — and this repo cuts a release
+# on every merge, so a branch folds within minutes of going stale and the check
+# fires on nearly every push (measured 2026-11-02: 15 folds, 15 mails in 29 h).
+#
+# ⚠️ It hangs off a PRE-PUSH HOOK, not off `precommit`. The guard reads the
+# CHANGELOG from a COMMIT (`git show <ref>:CHANGELOG.md`), so at `precommit` time
+# it evaluates the previous commit — the one thing that cannot fold. Only after
+# the commit does `HEAD` carry the bullet under test. `make hooks` installs it
+# (`core.hooksPath`), once per clone; every worktree of that clone then gets it.
+hooks:
+	@git config core.hooksPath scripts/hooks
+	@echo "core.hooksPath = $$(git config core.hooksPath) — pre-push fold guard installed"
+
+# Manual form, for when the hook is not installed. Runs against the committed HEAD.
+check-changelog-unreleased-fold:
+	@CHANGELOG_ROOT=$(CURDIR) CHANGELOG_BASE_REF=origin/master \
+	  bash "$${FOLD_GUARD:-$$HOME/.claude/plugins/marketplaces/coding/scripts/check-changelog-unreleased-fold.sh}"
+
 # Rotate the oldest released sections into CHANGELOG-archive.md. Idempotent — a second run
 # reports `nothing to archive`. Both byte limits live in scripts/changelog-archive.py.
 changelog-archive:
@@ -22,8 +42,20 @@ changelog-archive:
 check-spawn-mode:
 	@python3 scripts/check-spawn-mode.py
 
+check-spawn-keys:
+	@python3 scripts/check-spawn-keys.py
+
 check-spawn-target:
 	@python3 scripts/check-spawn-target.py
+
+check-open-manager-resolution:
+	@python3 scripts/check-open-manager-resolution.py
+
+# The GOAL and TOPIC branches type their manager's start commands into the pane they just
+# spawned. Three regressions are silent: the operator-paste instruction returns, the wait
+# falls through instead of exiting, or a literal pane id replaces the just-spawned variable.
+check-open-manager-start:
+	@python3 scripts/check-open-manager-start.py
 
 check-worker-target:
 	@python3 scripts/check-worker-target.py
@@ -58,8 +90,23 @@ check-budget:
 check-gate-class-order:
 	@python3 scripts/check-gate-class-order.py
 
+check-open-approve-ordering:
+	@python3 scripts/check-open-approve-ordering.py
+
+check-open-role-defaults:
+	@python3 scripts/check-open-role-defaults.py
+
+check-open-resume-mode:
+	@python3 scripts/check-open-resume-mode.py
+
 check-step-when:
 	@python3 scripts/check-step-when.py
+
+check-manager-proposal-row:
+	@python3 scripts/check-manager-proposal-row.py
+
+check-checkbox-regex-drift:
+	@python3 scripts/check-checkbox-regex-drift.py
 
 check-handback-keys:
 	@python3 scripts/check-handback-keys.py
@@ -67,16 +114,65 @@ check-handback-keys:
 check-round-overlap:
 	@python3 scripts/check-round-overlap.py
 
+check-resume-flag-clause:
+	@python3 scripts/check-resume-flag-clause.py
+
 check-drive-ledger-writes:
 	@python3 scripts/check-drive-ledger-writes.py
 
 check-drive-audit-budget:
 	@python3 scripts/check-drive-audit-budget.py
 
-check:
+check-drive-unverifiable-paste:
+	@python3 scripts/check-drive-unverifiable-paste.py
+
+# A round drafts its nudges into the payload and sends them from its own session, and
+# nothing compared the two. Measured 2026-11-11 (`2026-11-11T08-51-29Z`): 5 drafted
+# recipients, 0 sent, and the round still read as complete -- `Sent: 0` renders exactly
+# like `Sent: 5`. The ledger stamps at draft time, so the miss suppresses the next round
+# and step 5b then closes the row.
+check-drive-nudges-sent:
+	@python3 scripts/check-drive-nudges-sent.py
+
+# A freeable tab row that is reaped is not thereby closed -- the reap is a message and the
+# close is the FREEABLE TABS step. The 2026-11-12 round queued a reap for a row the same
+# payload listed with a resolved pane link and never attempted the close; `pane 46` appears
+# zero times in that transcript, so no refusal token exists either. Static half only here
+# (the round supplies --drive at runtime); it fails when the step stops naming its line or
+# this check, or when output-shape stops mandating the line.
+check-freeable-tabs-acted:
+	@python3 scripts/check-freeable-tabs-acted.py
+
+# A finished headless (`sdk-cli`) worker cannot self-close: vault-cli's session-self-exit.py
+# proves a tty and always answers `SELF-EXIT: stay` for one, so the round must close it
+# through close-worker.py. Measured 2026-11-10: a finished worker sat idle 45 minutes with
+# its PR merged, and the reap leg only drafted a message it could never act on.
+check-headless-reap-close:
+	@python3 scripts/check-headless-reap-close.py
+
+# The round's delegate rule sends everything that is not the sweep to a sub-agent, and rows 5b
+# and 5c are exactly that — yet they are the only two rows that ACT. Without the carve-out the
+# round delegates them read-only and prints a count it was told to print — measured 2026-11-01, a
+# round instructed its sub-agent to print `opened=0` and resumed none of the 8 rows it read `resume`.
+check-acting-legs:
+	@python3 scripts/check-acting-legs.py
+
+check-own-parks-routing:
+	@python3 scripts/check-own-parks-routing.py
+
+check-wrote-nothing:
+	@python3 scripts/check-wrote-nothing.py
+
+check: check-manager-allowlist check-open-manager-resolution
 	@for f in server/*.mjs scripts/*.mjs; do case "$$f" in *.test.mjs) continue ;; esac; node --check "$$f" || exit 1; done; echo "  server + scripts modules parse"
-	@python3 -c "import json;[json.load(open(f)) for f in ['.claude-plugin/plugin.json','.claude-plugin/marketplace.json','server/package.json','server/policy.json']]" && echo "  manifests parse"
-	@test -f .mcp.json && test -f README.md && echo "  plugin files present"
+	@python3 -c "import json;[json.load(open(f)) for f in ['.claude-plugin/plugin.json','.claude-plugin/marketplace.json','server/package.json','server/policy.json','server/manager-allowlist.json']]" && echo "  manifests parse"
+	@test ! -e .mcp.json && test -f README.md && echo "  plugin files present"
+
+# Two artifacts, one policy: `server/manager-allowlist.json` is what the server matches against,
+# `docs/permission-allowlist.md` is what a human reads. Without this check they drift silently and
+# in the worst direction — the doc is the half a reader trusts, the JSON is the half that decides.
+check-manager-allowlist:
+	@node scripts/check-manager-allowlist.mjs
 
 # ⚠️ The guard the suite's own failure cannot give you, and the reason it is a target rather
 # than another paragraph of the note below. With `server/node_modules` absent, `node --test`
@@ -121,6 +217,6 @@ test: check check-server-deps
 # a reader following the wrong directory gets no feedback that they did. `server/package.json`'s
 # own `start` script is `bun install --no-summary && node supervisor.mjs`, so `bun install`
 # inside `server/` works too.
-precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-target check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check-drive-ledger-writes check-drive-audit-budget test
+precommit: check-versions check-changelog check-changelog-size check-spawn-mode check-spawn-keys check-spawn-target check-open-manager-resolution check-open-manager-start check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-open-role-defaults check-open-resume-mode check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-ledger-writes check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-own-parks-routing test check-wrote-nothing
 
-.PHONY: default check-versions check-changelog check-changelog-size changelog-archive check-spawn-mode check-spawn-target check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-step-when check-handback-keys check-round-overlap check-drive-audit-budget check check-server-deps test precommit
+.PHONY: default hooks check-versions check-changelog check-changelog-size check-changelog-unreleased-fold changelog-archive check-spawn-mode check-spawn-keys check-spawn-target check-open-manager-resolution check-open-manager-start check-worker-target check-recording-step check-bucket-clause check-content-key-formula check-subject-write-scope check-provenance-sentence check-necessity-templates check-inflight-limb check-goal-row-clause check-budget check-gate-class-order check-open-approve-ordering check-open-role-defaults check-open-resume-mode check-step-when check-manager-proposal-row check-checkbox-regex-drift check-handback-keys check-round-overlap check-resume-flag-clause check-drive-audit-budget check-drive-unverifiable-paste check-drive-nudges-sent check-freeable-tabs-acted check-headless-reap-close check-acting-legs check-own-parks-routing check-manager-allowlist check check-server-deps test precommit check-wrote-nothing

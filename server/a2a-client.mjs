@@ -669,13 +669,16 @@ export function a2aPushConfigListCallFor({ endpoint, taskId, token, requestId = 
 // `contextId` is sent for the same reason the worker half sends it — a control call is a turn on
 // the controller's conversation, and a follow-up must land on the one it started.
 //
-// ⚠️ NO `A2A-Version` HEADER HERE, AND THAT IS A MEASURED DECISION RATHER THAN AN OVERSIGHT. This
-// reaches the a2a-worker-controller, a DIFFERENT SERVICE from the worker: it pins a2a-go v2.6.0,
-// which has no `checkProtocolVersion` at all, so a version here would assert a contract it never
-// advertised. ⚠️ **Whoever bumps the controller past v2.7.0 must add a card read on this plane** —
-// from that version the handler defaults an absent header to `"0.3"` and refuses it, and this
-// function is where they will be standing. See `a2aVersionHeader`.
-export function a2aSendRequestFor({ endpoint, contextId, request, token, messageId } = {}) {
+// ⚠️ THE `A2A-Version` HEADER IS SENT WHEN — AND ONLY WHEN — THE CONTROLLER'S CARD NAMES ONE, and
+// that is what the note this comment replaces asked for. It used to send nothing, deliberately:
+// the controller pinned a2a-go v2.6.0, which has no `checkProtocolVersion` at all, so a version
+// here would have asserted a contract it never advertised. The controller has since moved to
+// v2.7.0, where the handler defaults an ABSENT header to `"0.3"` and refuses it — measured
+// 2026-10-22 against controller `v0.17.0`, whose every control call, `create` included, was
+// refused `-32009 … requested "0.3", served "1.0"`. So the caller reads the card on this plane
+// and passes what it advertises; `undefined` still sends no header, which is exactly the old
+// behaviour and keeps an older controller working. See `a2aVersionHeader`.
+export function a2aSendRequestFor({ endpoint, contextId, request, token, messageId, protocolVersion } = {}) {
   for (const [name, value] of Object.entries({ endpoint, contextId, token, messageId })) {
     if (value === undefined || value === null || value === '') {
       return { error: `\`${name}\` is required to send a control call over A2A.` }
@@ -689,6 +692,7 @@ export function a2aSendRequestFor({ endpoint, contextId, request, token, message
     headers: {
       'content-type': 'application/json',
       authorization: `Bearer ${token}`,
+      ...a2aVersionHeader(protocolVersion),
     },
     body: {
       jsonrpc: '2.0',

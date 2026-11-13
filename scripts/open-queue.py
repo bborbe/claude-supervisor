@@ -1,0 +1,838 @@
+#!/usr/bin/env python3
+"""Gate on the flag, rank the admitted queue, and select the rows a fleet round may open.
+
+Why this exists
+---------------
+The fleet round has read the approved-but-unstarted queue on every tick since
+2026-10-01 and has never opened a row of it: `commands/steps/readings.md` printed
+`approved, not started: N` and stated the design outright — *"The line reports; it
+never opens."* The opening was delegated to the owning goal manager.
+
+Measured 2026-10-30 09:45 on the live fleet: **133 approved rows waiting, 8 of 8
+delegates reading `STALE` / `UNARMED` / `STOPPED`, 17 free worker slots.** A
+measure-then-delegate design with no live delegate is a measure-then-drop, and the
+operator's ruling of 2026-10-30 is that the missing hop is filled by the round itself:
+
+    "we dont want to auto open topic-manager, goal-manager ... but flag are fine"
+
+So this script answers one question — *which rows may this tick open, in what order* —
+and nothing else. It opens nothing: the round does, through `/supervisor:open`, whose
+own gates (approval, readiness, the cap) stay exactly where they are.
+
+The population is not re-derived here
+--------------------------------------
+A row is in the queue because `scripts/approved-not-started.py` says so. This script
+**calls it** rather than re-reading `approved_at`, `status` and `claude_session_id`
+itself: two readers of one predicate is the defect `session-liveness.py`'s header
+records, and it does not become acceptable by being written twice in one repo. The
+queue is `--tasks-dir` handed to that script, and its rows arrive already filtered by
+the live-session rule `readings.md` documents.
+
+This script adds only what that one does not answer:
+
+  * the **guards** — a row this round may not open even though it is approved and
+    unstarted (see below);
+  * the **gate and the rank** — `flag: true` decides WHETHER a row is admitted; priority
+    then age decide only the order among the admitted;
+  * the **capacity** — how many of the admitted rows the free slots take;
+  * the **skipped list**, with a reason per row, so a round that opens three of 133
+    names the other 130 rather than printing `skipped: capacity`.
+
+The guards, and why each is here
+--------------------------------
+`approved-not-started.py` answers "approved, and no live session owns it". That is
+necessary and not sufficient — further conditions decide whether opening the row is
+the round's act:
+
+  * **`phase: todo`** — the operator's approval inbox. `commands/open.md` Gate 1
+    refuses it, and this leg does not become an approval path by being automated.
+  * **`stopped: true`** — the operator ended the row deliberately
+    (`scripts/task-standdown.py`, written by `/supervisor:stop`). It outranks every
+    **derived** guard — a stopped-and-deferred row reports `stopped` — but not the two
+    above, which describe the row's own state rather than a derivation.
+  * **a stood-down SUBJECT** — the row's goal, or the topic that lists that goal or the
+    row itself, carries `<branch>--<slug>.stopped` in the sweep-gate state dir
+    (`/supervisor:stop` → `manager-liveness.py --stop`). The same operator act one tier
+    up, so it carries the same ordering: ahead of every derived guard. Measured
+    2026-11-12 — a stopped goal's flagged tasks were still selected and opened, because
+    this script read only the task tier.
+    ⚠️ **This leg only.** `/supervisor:open --flagged` (`flagged-rows.eligible()`) is the
+    operator naming rows to open and does not apply this guard — nor the task tier's
+    `stopped:` field, nor `prior_wait()`. Same boundary, same reason.
+  * **a `blocked_by`** — the row names a dependency that is not met.
+  * **a future `defer_date`** — defer-UNTIL, not a due date: the row is deliberately
+    parked, and `next-focus.py` reads the same distinction.
+  * **a declared wait** — `prior_wait()` reads the session's own `Stop` records; see its
+    docstring for why only the unattended path must not spend a slot on a row that parks.
+  * **an unreadable task file** — refused, because an absent guard read is not a clean
+    one. Opening on an unknown guard state is the failure this branch exists to stop.
+
+⚠️ **These guards are absences, and an absence passes on a round that opens nothing.**
+The positive control lives in the test suite (`test_open_queue.py`'s control row) and in
+the round itself, which prints the opened set in order.
+
+The gate: the flag, and only the flag
+-------------------------------------
+`flag: true`, **set by an opening actor**, is the ADMISSION predicate, not a ranking hint. A row
+that is approved, eligible and un-flagged is **never** selected, at any position: it is
+skipped with reason `not flagged`, so the round reports it rather than silently dropping
+it.
+
+Operator requirement 2026-11-10, in their own words: *"we only want auto open for flagged
+items"*. The earlier reading of the 2026-10-30 ruling treated the flag as an ordering
+signal and `approved_at` as the gate, which left the approved queue — **2793 rows**
+measured 2026-11-10 — unbounded the moment `bborbe/vault-cli#367` removed the admission
+cap. The flag is the bound. `docs/session-tiers.md` § rule 2 states the same rule one tier
+up: *"A flagged page is opened automatically by the tier above it … the only bound after
+the flag is capacity."*
+
+⚠️ **Provenance is read here, and at every tier.** The 2026-10-30 ruling (*"in the end it
+should not matter how set the flag"*) governs WHICH flagged row may be opened once it is
+admitted; it never made an agent-set flag an approval. The 2026-09-28 rule — *"an agent-set
+`flag: true` is never an approval and opens nothing"* — was generalised to every tier on
+2026-11-10 (attention card `f8cd8b41`), so a `flag_set_by` outside `OPENING_ACTORS`, absent
+included, is refused here exactly as `commands/open.md` § Step 0.5 refuses it. The one
+decision is `scripts/flag_provenance.py`; `docs/fleet-surface.md` § Approval provenance owns
+the statement.
+
+Rank — among the admitted rows
+------------------------------
+Once the gate admits the flagged rows, their order decides which of them the free slots
+take:
+1. **`priority` ascending** — 1 before 2 before 3; a row carrying no `priority` sorts
+   after every row that does, because an unset field is not a high priority.
+2. **oldest `approved_at` first** — the tiebreak, so the queue drains in the order it
+   was approved rather than the order the directory happens to list.
+
+Ranked, never bulk
+------------------
+The 2026-10-01 ruling — *"approving and starting all of them is not a good idea"* — is
+why the cap is applied **after** the rank and why the skipped rows are printed. A round
+that opens `free` arbitrary rows and prints `skipped: capacity` satisfies a count and
+violates the ruling; the count is not the claim, the order is.
+
+Capacity
+--------
+`live` comes from `worker-sessions.py --count` and `target` from `worker-target.py` —
+the two instruments `docs/fleet-surface.md` § Spawn a worker item 5 names, never a
+number restated here.
+
+⚠️ **A target of `unlimited` (the soft key set to `0`) opens nothing.** The cap is the
+only bound this leg has to rank against; admitting every eligible row because the bound
+was removed is bulk opening by construction, which the operator's 2026-10-01 ruling
+forbids. The leg refuses and names the config state rather than inventing a per-round
+number — the operator sets a target.
+
+⚠️ **`unknown` is a third answer, never `0`.** An unreadable capacity store prints
+`unknown` and exits non-zero: *"no free slots"* and *"I could not count"* must not
+render the same, because only one of them is a fact about the fleet. Same rule, same
+reason as `approved-not-started.py`.
+
+Exit codes: 0 selected (including zero rows) · 2 a read failed, reason on stderr.
+"""
+import argparse
+import importlib.util
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load(name, filename):
+    """Import a sibling script by path — the filenames carry hyphens."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: `defer_date` is an instant, not a date — see `defer-date.py` for the accepted shapes.
+defer_date = _load("defer_date", "defer-date.py")
+
+#: The one flag predicate — see `scripts/flag_provenance.py`. Loaded by path for the
+#: same reason as `defer_date`: this module is itself loaded by path, so `scripts/` is
+#: not guaranteed on `sys.path`.
+flag_provenance = _load("flag_provenance", "flag_provenance.py")
+
+#: The row's session-id set (`claude_session_id` + every `metrics_sessions` id) and the
+#: `⏰ Ends:` pattern both have one home each; reuse them rather than re-deriving.
+_predispatch = _load("manager_predispatch", "manager-predispatch.py")
+#: `⏰ Ends:` liveness (expiry, session-bound vs external) has one owner.
+_declared_wait = _load("declared_wait", "declared-wait.py")
+
+#: The ONE stand-down marker read (`<branch>--<slug>.stopped`), owned by the script that
+#: writes it (`/supervisor:stop` → `manager-liveness.py --stop`). Imported rather than
+#: re-derived: a copy would drift from the writer and silently keep reopening a subject
+#: the operator had deliberately ended.
+manager_liveness = _load("manager_liveness", "manager-liveness.py")
+
+#: The vault's link graph — a task's `goals:` / `managed_by:` and a topic's body
+#: `## Goals` section. The SAME reader `fleet-board.py` and `flagged-rows.py` use, so the
+#: population this guard suppresses is the population the fleet's own tiers resolve. The
+#: `topics:` task frontmatter `inbox.py` reads is deliberately NOT an input.
+fleet_board = _load("fleet_board", "fleet-board.py")
+
+#: Where the Stop hook appends each session's `<sid>.events.jsonl`.
+ATTENTION_DIR = _declared_wait.STATE
+
+APPROVED = os.path.join(HERE, "approved-not-started.py")
+WORKER_SESSIONS = os.path.join(HERE, "worker-sessions.py")
+WORKER_TARGET = os.path.join(HERE, "worker-target.py")
+
+FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
+
+# Sorts every row carrying no priority after every row that has one. A number, not a
+# sentinel string, so the key stays a tuple of comparables.
+NO_PRIORITY = 10**6
+
+#: The task tier's deliberate-stop marker — see `is_stopped()`. `scripts/task-standdown.py`
+#: is the only writer; this module and `scripts/worker-keepalive.py` are the readers.
+#: ⚠️ **The truthy set is declared in the two READERS rather than imported** — the repo's
+#: scripts are loaded by path, so a cross-module import would couple two files that are
+#: otherwise independent. `scripts/task-standdown.py` is the writer and holds no set: it
+#: writes the literal `"true"`. Keep the two readers' literals identical: a drift would
+#: make the open queue and the keepalive disagree about whether one row is stopped.
+STOPPED_KEY = "stopped"
+TRUTHY = {"true", "yes", "on"}
+
+
+def frontmatter(text):
+    """Return the frontmatter block, or '' when the file has none."""
+    match = FRONTMATTER.match(text)
+    return match.group(1) if match else ""
+
+
+def field(block, key):
+    r"""First value of a scalar frontmatter key, or None.
+
+    ⚠️ **`[ \t]*`, never `\s*`.** `\s` matches `\n`, so `^key:\s*(.*)$` lets an EMPTY
+    `key:` swallow the newline and capture the NEXT line as its value — `phase:` followed
+    by `status: in_progress` reads `phase` as `status: in_progress`, and a `defer_date:`
+    with no value reads the following key and compares it as a date. Bounded to the
+    horizontal whitespace a YAML scalar actually uses.
+    """
+    match = re.search(rf"^{re.escape(key)}:[ \t]*(.*)$", block, re.MULTILINE)
+    if not match:
+        return None
+    return match.group(1).strip().strip('"').strip("'")
+
+
+def read_frontmatter(tasks_dir, name):
+    """The frontmatter block of one task file, or None when it cannot be read.
+
+    None is distinct from '': the caller refuses on None, because an unreadable file
+    would otherwise yield no guard fields and make a blocked or deferred row look
+    openable.
+    """
+    path = os.path.join(tasks_dir, name + ".md")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return frontmatter(handle.read())
+    except OSError:
+        return None
+
+
+def is_flagged(block):
+    """Does this row's flag admit it? Delegates to `flag_provenance.flag_admits()`.
+
+    This is the ADMISSION predicate: a row it refuses is never selected, at any position
+    (`select()` skips it as `not flagged`); the flag decides WHETHER a row opens, and
+    `rank_key` decides only the order among the rows this admits.
+
+    ⚠️ **Provenance is read, for every kind.** Until the operator's 2026-11-10 ruling
+    (attention card `f8cd8b41…`) this function answered `flag: true` *whoever set it* —
+    the 2026-10-30 reading, which governs WHICH flagged row may be opened once it is
+    operator-set but never made an agent-set flag an approval. A row whose `flag_set_by`
+    is outside `OPENING_ACTORS`, absent included, is now refused here exactly as
+    `commands/open.md` § Step 0.5 refuses it.
+    """
+    return flag_provenance.flag_admits(block, "task")
+
+
+def priority_of(block):
+    """The row's `priority` as an int, or None when absent/unparseable.
+
+    None sorts last: an unset priority is not a high one.
+    """
+    raw = (field(block, "priority") or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def has_blocked_by(block):
+    """True when the row declares any blocker, in **either** frontmatter shape.
+
+    ⚠️ **`blocked_by` is written as a multi-line YAML block in this vault** — a bare
+    `blocked_by:` followed by indented `- '[[…]]'` items — so a scalar-only read returns
+    None for the shape the vault actually uses and the guard never fires. That is the
+    measured defect `scripts/next-focus.py` records for its own hold-goal class: *"An
+    inline-only read returns '' for it … the value's absence read as 'no blocker'"*.
+    There the cost was a proposal that never fired; here it is a spawn, so the guard
+    reads both forms.
+    """
+    match = re.search(r"^blocked_by:[ \t]*(.*)$", block, re.MULTILINE)
+    if not match:
+        return False
+    inline = match.group(1).strip().strip('"').strip("'")
+    if inline:
+        # An inline value is the WHOLE answer — including `[]`, which is an empty list
+        # and not a blocker. Scanning on from here would read the next key's indented
+        # list (`tags:`, `depends_on:`) as a blocker and refuse an eligible row.
+        return inline not in ("[]", "[ ]")
+    for line in block[match.end():].splitlines():
+        if not line.strip():
+            continue
+        if line.startswith((" ", "\t")):
+            if line.strip().startswith("-"):
+                return True  # a block-list item
+            continue
+        break
+    return False
+
+
+def is_stopped(block):
+    """`stopped: true` — the operator deliberately stood this row down.
+
+    The task tier's stand-down marker, written by `scripts/task-standdown.py` (through
+    `vault-cli task set`) when `/supervisor:stop` runs from a worker session. It is a
+    **page field**, not the manager tier's `<slug>.stopped` file, for the reason that
+    file cannot serve here: the state dir is per-user, so a slug would let two same-titled
+    tasks in different vaults share one marker.
+
+    Truthiness matches `is_flagged()`'s set, so the two boolean readers cannot disagree
+    about what `true` looks like.
+    """
+    return (field(block, STOPPED_KEY) or "").strip().lower() in TRUTHY
+
+
+#: The vault's topic and goal folders, SIBLINGS of the task folder — the same folders the
+#: board reads. `collect()` derives them from `tasks_dir`'s parent unless a caller names one.
+TOPICS_DIRNAME = "23 Topics"
+GOAL_DIRNAMES = ("24 Goals", "23 Goals")
+
+
+def default_topics_dir(tasks_dir):
+    """The vault's `23 Topics/` beside `tasks_dir`, whether or not the folder exists."""
+    return os.path.join(os.path.dirname(os.path.abspath(tasks_dir)), TOPICS_DIRNAME)
+
+
+def default_goals_dir(tasks_dir):
+    """The vault's goal folder beside `tasks_dir` — `24 Goals`, else the older `23 Goals`.
+
+    ⚠️ **The goal pages are read, not inferred.** A topic's `## Goals` entry that names a
+    goal page is a goal; one that names a task file is a task. Without the page set the
+    two are told apart by "not a task title", which inverts the partition on the ~5 titles
+    that are both (`Zero-Touch Container Build and Deploy` lists `builds are not tied to
+    the mac`, a goal AND a task) and leaves `goal_topics` missing the link — so a stopped
+    topic would not suppress that goal's tasks.
+    """
+    root = os.path.dirname(os.path.abspath(tasks_dir))
+    for name in GOAL_DIRNAMES:
+        candidate = os.path.join(root, name)
+        if os.path.isdir(candidate):
+            return candidate
+    return os.path.join(root, GOAL_DIRNAMES[0])
+
+
+def _page_titles(directory):
+    """`{lowercased stem: stem}` for every page in a directory; empty when unreadable."""
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return {}
+    return {name[:-3].lower(): name[:-3] for name in names if name.endswith(".md")}
+
+
+def subject_index(tasks_dir, topics_dir, blocks, goals_dir=None):
+    """The task→goal→topic links the subject-tier stand-down read needs.
+
+    Built from what is on disk rather than from `fleet-board.vault_index()`, which walks
+    every Obsidian vault: this runs on a fleet tick against ONE vault. It is the same
+    read, though — `frontmatter_links()` for `goals:` / `managed_by:` and
+    `_goals_section_links()` for the topic body — so a row resolves to the same subjects
+    the board's own tiers would give it.
+
+    ⚠️ **`blocks` is the payload rows' own frontmatter**, not a re-read of the task
+    directory: `collect()` already has it, and a vault holds tens of thousands of task
+    files this leg has no other reason to open.
+
+    The goal half is the vault's goal PAGES (`goals_dir`), with a topic's `## Goals` entry
+    that resolves to no page kept as a goal — a body entry that is neither a goal page nor
+    a task file cannot be a task, and dropping it would lose the suppression rather than
+    gain a truth.
+    """
+    task_titles = _page_titles(tasks_dir)
+    topics = _page_titles(topics_dir)
+    goal_pages = _page_titles(goals_dir if goals_dir is not None else default_goals_dir(tasks_dir))
+    task_goals, task_managed_by = {}, {}
+    for name, block in blocks.items():
+        if block is None:
+            continue
+        goals = [link.strip() for link in fleet_board.frontmatter_links(block, "goals")]
+        if goals:
+            task_goals[name.lower()] = goals
+        owner = fleet_board.frontmatter_links(block, "managed_by")
+        if owner:
+            task_managed_by[name.lower()] = owner[0].strip()
+
+    goals = dict(goal_pages)
+    goal_topics, task_topics = {}, {}
+    for topic in topics.values():
+        try:
+            with open(
+                os.path.join(topics_dir, topic + ".md"), encoding="utf-8", errors="replace"
+            ) as handle:
+                text = handle.read()
+        except OSError:
+            continue
+        for link in fleet_board._goals_section_links(text):
+            key = link.strip().lower()
+            if not key:
+                continue
+            # ⚠️ **Goal page FIRST, then task file** — `vault_index()`'s own order. The
+            # reverse order sends a title that is both (`builds are not tied to the mac`
+            # exists in `24 Goals/` and `25 Tasks/`) into `task_topics` only, and the
+            # goal→topic link the suppression rides on is lost.
+            if key in goal_pages:
+                goal_topics.setdefault(key, []).append(topic)
+            elif key in task_titles:
+                task_topics.setdefault(key, []).append(topic)
+            else:
+                goals.setdefault(key, link.strip())
+                goal_topics.setdefault(key, []).append(topic)
+    return fleet_board.VaultIndex(
+        topics.values(), goals.values(), task_titles.values(), task_goals, goal_topics,
+        task_managed_by, task_topics,
+    )
+
+
+def stopped_subject_of(task_title, index):
+    """The first stopped subject this task belongs to, as `(branch, title)`, or None.
+
+    The resolution order is the fleet's own (`managed_by` → `goals` → the topics that list
+    the goal), plus a topic that lists the TASK directly. A row is suppressed when ANY
+    container it belongs to was stood down: the marker is the operator's act on that
+    container, so the rest of the container's work is no more openable than this row.
+
+    ⚠️ **`managed_by` is checked against BOTH branches, never resolved through
+    `index.subject()`.** That helper prefers topics, and a hand-authored `managed_by` names
+    one subject whose kind the string alone cannot settle — a goal and a topic may share a
+    name. Checking both is the conservative read: the operator stopped that name's work.
+
+    Every other candidate IS resolved on its own branch — `goals_of` gives goals,
+    `topics_of`/`topics_of_task` give topics — so a stopped topic cannot suppress an
+    unrelated same-named goal's task, the collision `docs/subject-resolution.md` requires
+    exact-basename matching to avoid.
+    """
+    managed = index.managed_by_of(task_title)
+    if managed:
+        for branch in ("goal", "topic"):
+            if manager_liveness.is_subject_stopped(managed, branch):
+                return (branch, managed)
+    for goal in index.goals_of(task_title):
+        if manager_liveness.is_subject_stopped(goal, "goal"):
+            return ("goal", goal)
+        for topic in index.topics_of(goal):
+            if manager_liveness.is_subject_stopped(topic, "topic"):
+                return ("topic", topic)
+    for topic in index.topics_of_task(task_title):
+        if manager_liveness.is_subject_stopped(topic, "topic"):
+            return ("topic", topic)
+    return None
+
+
+def _newest_stop(session_id, attention_dir):
+    """(newest `Stop` record, set of closed item ids) for one session's event log.
+
+    ``(None, set())`` when the log is absent or carries no Stop — an absent log is a row
+    that never ran, and a never-run row is runnable.
+    """
+    path = os.path.join(attention_dir, "%s.events.jsonl" % session_id)
+    newest, closed = None, set()
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                if rec.get("event") is None and rec.get("closed_by") is not None:
+                    closed.add(rec.get("item_id"))
+                    continue
+                if rec.get("event") != "Stop" or not isinstance(rec.get("ts"), (int, float)):
+                    continue
+                if newest is None or rec["ts"] > newest["ts"]:
+                    newest = rec
+    except OSError:
+        pass
+    return newest, closed
+
+
+def prior_wait(block, attention_dir, now_s=None):
+    """`waiting-external` | `waiting-operator` | None — did this row's last session end
+    on a wait a new session cannot clear?
+
+    Opening a row whose previous session parked on a machine or on an unanswered
+    operator question starts a worker that parks on its first turn, holding a slot and
+    no model call. Measured 2026-11-10: of 37 idle headless workers, 17 ended 🟡 WAITING
+    and 15 on an operator ask or block.
+
+    Read from the session with the NEWEST `Stop` across the row's whole session-id set,
+    so an old wait a later turn moved past does not hold the row forever.
+
+    * `waiting-external` — that session's `⏰ Ends:` is live per `declared-wait.py`
+      (verdict `declared`, not `expired`) AND `external`. A `session-bound` wake
+      (Monitor, ScheduleWakeup, a background shell …) died with the session — this leg
+      only sees rows with no live session — so nothing will fire it, and the row opens.
+    * `waiting-operator` — that Stop is a `question` card whose item was never closed.
+
+    ⚠️ **The `--flagged` batch (`flagged-rows.py`) does not apply this guard, on purpose.**
+    That batch is the operator opening named rows by hand; this leg is the fleet round
+    filling free slots unattended, and only the unattended path must not spend a slot on
+    a row that will park. `test_open_queue.py` names it as the fourth divergence.
+    """
+    newest_sid, newest, closed = None, None, set()
+    for sid in _predispatch.session_id_set(block):
+        rec, done = _newest_stop(sid, attention_dir)
+        closed |= done
+        if rec is not None and (newest is None or rec["ts"] > newest["ts"]):
+            newest_sid, newest = sid, rec
+    if newest is None:
+        return None
+    wait = _declared_wait.wait_record(newest_sid, state_dir=attention_dir, now=now_s)
+    if wait and wait["verdict"] == "declared" and wait["mechanism"] == "external":
+        return "waiting-external"
+    if newest.get("kind") == "question" and newest.get("item_id") not in closed:
+        return "waiting-operator"
+    return None
+
+
+def guards(block, today, attention_dir=None, name=None, index=None):
+    """The reason this row may not open, or None when it may.
+
+    The first failing guard is the reason reported, so the operator is told one thing
+    rather than a list.
+
+    `name` + `index` carry the SUBJECT tier: the task's own title and the vault's link
+    graph, from which its goal and topic are resolved. Both are optional so a caller that
+    only wants the row's own guards (a test of `is_stopped`, say) need not build an index.
+    """
+    if block is None:
+        return "unreadable task file"
+    if (field(block, "phase") or "").strip() == "todo":
+        return "waiting approval"
+    # ⚠️ **Ahead of every DERIVED guard — `blocked_by` and `defer_date` — but after the two
+    # that describe the row's own state rather than a derivation.** A stop is the operator's
+    # own act and outranks a computed "not now": a row that is both stopped and deferred
+    # must report `stopped`, or the operator sees it silently reappear the day the defer
+    # expires with nothing recording that they had ended it. It deliberately does NOT
+    # outrank `unreadable task file` or `waiting approval`: an unreadable page is not
+    # evidence of a stop, and a `phase: todo` row is in the operator's approval inbox,
+    # which is the boundary `commands/open.md` Gate 1 owns.
+    if is_stopped(block):
+        return "stopped"
+    # The SUBJECT tier, one line below the task tier and by the same ordering rule: a goal's
+    # or topic's stand-down is the same operator act one tier up, so it outranks every
+    # derived guard too. The reason is distinct from `stopped` so a reader can tell which
+    # tier ended the row — and so the task tier keeps its own clean regression probe.
+    if name is not None and index is not None and stopped_subject_of(name, index):
+        return "subject stood down"
+    if has_blocked_by(block):
+        return "blocked"
+    state, detail = defer_date.defer_state(field(block, "defer_date"), today)
+    if state == "invalid":
+        # A value this script cannot vouch for is NOT "due now": read as deferred, and
+        # say why, so a malformed defer parks the row instead of opening it early.
+        print("open-queue: %s — treating as deferred" % detail, file=sys.stderr)
+    if state in ("deferred", "invalid"):
+        return "deferred"
+    now_s = today.timestamp() if hasattr(today, "timestamp") else None
+    return prior_wait(block, attention_dir or ATTENTION_DIR, now_s)
+
+
+def rank_key(row):
+    """Sort key among the ADMITTED rows: priority asc, then oldest approval.
+
+    The flag is not part of this key. `select()` admits only flagged rows, so a flag
+    component would sort a constant on every row it ever sees; the flag decides WHETHER a
+    row is admitted, and this key decides the order among the rows that were.
+    """
+    # ⚠️ `-age_seconds`, never the raw `approved_at` string. `approved-not-started.py`
+    # re-emits it via `datetime.isoformat()`, which preserves each row's own UTC offset,
+    # so two rows in different offsets compare as strings and sort by the digits rather
+    # than by the instant. `age_seconds` is already normalised and sorts correctly.
+    return (
+        row["priority"] if row["priority"] is not None else NO_PRIORITY,
+        -float(row["age_seconds"]),
+    )
+
+
+def run_json(cmd):
+    """Run a helper that emits JSON; return (value, error).
+
+    A non-zero exit or unparseable stdout is an error, never an empty result — the
+    `unknown`-is-not-`0` rule.
+    """
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError as exc:
+        return None, "cannot run %s: %s" % (os.path.basename(cmd[1]), exc)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return None, detail[-1] if detail else "exit %d" % proc.returncode
+    try:
+        return json.loads(proc.stdout), None
+    except ValueError:
+        return None, "unparseable output from %s" % os.path.basename(cmd[1])
+
+
+def run_scalar(cmd):
+    """Run a helper that emits one token; return (value, error)."""
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError as exc:
+        return None, "cannot run %s: %s" % (os.path.basename(cmd[1]), exc)
+    if proc.returncode != 0:
+        detail = (proc.stderr or "").strip().splitlines()
+        return None, detail[-1] if detail else "exit %d" % proc.returncode
+    return proc.stdout.strip(), None
+
+
+def collect(tasks_dir, today, approved_json=None, attention_dir=None, topics_dir=None,
+            goals_dir=None):
+    """The ranked eligible rows (flagged and unflagged — `select()` applies the gate) plus
+    the skipped ones with their reasons.
+
+    `approved_json` is injectable so the suite can drive this without a live registry;
+    production passes None and the script calls `approved-not-started.py` itself.
+
+    `topics_dir` and `goals_dir` are the vault's topic and goal folders, defaulting to the
+    `23 Topics/` and `24 Goals/` beside `tasks_dir`. They are what makes the SUBJECT tier
+    resolvable: a task's goal comes from its own frontmatter, but the topic that contains
+    that goal is only knowable from the topic pages' body `## Goals` section, and telling a
+    goal entry from a task entry needs the goal pages. The index is built ONCE per call,
+    from the payload rows' own blocks, never per row.
+    """
+    if approved_json is None:
+        payload, err = run_json([sys.executable, APPROVED, "--tasks-dir", tasks_dir, "--json"])
+        if err:
+            return None, None, err
+    else:
+        payload = approved_json
+
+    entries = payload.get("rows", [])
+    blocks = {entry["name"]: read_frontmatter(tasks_dir, entry["name"]) for entry in entries}
+    index = subject_index(
+        tasks_dir,
+        topics_dir if topics_dir is not None else default_topics_dir(tasks_dir),
+        blocks,
+        goals_dir,
+    )
+
+    rows = []
+    skipped = []
+    for entry in entries:
+        name = entry["name"]
+        block = blocks[name]
+        reason = guards(block, today, attention_dir, name=name, index=index)
+        if reason:
+            skipped.append({"name": name, "reason": reason})
+            continue
+        rows.append(
+            {
+                "name": name,
+                "approved_at": entry.get("approved_at", ""),
+                "age_seconds": entry.get("age_seconds", 0),
+                "manager": entry.get("manager"),
+                "flagged": is_flagged(block),
+                "priority": priority_of(block),
+            }
+        )
+    rows.sort(key=rank_key)
+    return rows, skipped, None
+
+
+def capacity():
+    """(live, target) — `target` is None for `unlimited`; (None, None) on a failed read."""
+    live_raw, live_err = run_scalar([sys.executable, WORKER_SESSIONS, "--count"])
+    target_raw, target_err = run_scalar([sys.executable, WORKER_TARGET])
+    if live_err or target_err:
+        return None, None
+    try:
+        live = int(live_raw)
+    except ValueError:
+        return None, None
+    if target_raw == "unlimited":
+        return live, None
+    try:
+        return live, int(target_raw)
+    except ValueError:
+        return None, None
+
+
+def select(rows, live, target):
+    """Split the admitted rows into (opened, skipped).
+
+    The flag is the GATE, applied first: a row whose `flag` is not truthy is never
+    admitted, at any position — it is skipped with reason `not flagged`, so the round
+    reports it instead of dropping it silently. `rows` arrives already ranked, so the
+    flagged rows keep their order and the cap takes the head of that list.
+
+    ⚠️ **`target is None` (the soft key set to `0`, i.e. unlimited) admits NOTHING.**
+    "Unlimited" switches the server's cap off, and a cap is the only thing this leg has
+    to bound a round against: admitting every eligible row because the bound was removed
+    is bulk opening by construction, which the operator's 2026-10-01 ruling forbids
+    ("approving and starting all of them is not a good idea"). So the leg refuses and
+    names the config state instead of guessing a number — the operator can set a target.
+    """
+    flagged = [row for row in rows if row["flagged"]]
+    unflagged = [{"name": row["name"], "reason": "not flagged"}
+                 for row in rows if not row["flagged"]]
+    if target is None:
+        return [], [{"name": row["name"], "reason": "capacity"} for row in flagged] + unflagged
+    free = max(0, target - live)
+    return (flagged[:free],
+            [{"name": row["name"], "reason": "capacity"} for row in flagged[free:]] + unflagged)
+
+
+def render(opened, skipped, live, target):
+    """The round's block.
+
+    Three forms, each of which the round prints verbatim. Zero free slots and an
+    unlimited target each have their own line: a leg that opened nothing because the
+    fleet was full, because the target was removed, and because the queue was empty
+    must not render the same.
+    """
+    if target is None:
+        return "open leg: target unlimited — selected 0 (workers unlimited)"
+
+    if live is not None and max(0, target - live) == 0:
+        return "open leg: no free slots — selected 0 (workers %d/%d)" % (live, target)
+
+    head = "open leg: selected %d (workers %d/%d)" % (len(opened), live, target)
+    lines = [head]
+    for index, row in enumerate(opened, start=1):
+        # Every opened row is flagged (the gate admitted it), so the per-row reason is
+        # the RANK that placed it here, not the flag.
+        if row["priority"] is not None:
+            why = "flagged · priority %d" % row["priority"]
+        else:
+            why = "flagged · no priority"
+        lines.append("  %d. %s — %s" % (index, row["name"], why))
+    if skipped:
+        counts = {}
+        for row in skipped:
+            counts[row["reason"]] = counts.get(row["reason"], 0) + 1
+        detail = " · ".join("%d %s" % (n, reason) for reason, n in sorted(counts.items()))
+        lines.append("  skipped: %d — %s" % (len(skipped), detail))
+    return "\n".join(lines)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Gate on the flag, rank the admitted queue, and select the rows a fleet round may open"
+    )
+    parser.add_argument("--tasks-dir", required=True, help="the vault's task directory")
+    parser.add_argument(
+        "--topics-dir",
+        default=None,
+        help="the vault's topic directory (default: the '23 Topics' beside --tasks-dir)",
+    )
+    parser.add_argument(
+        "--goals-dir",
+        default=None,
+        help="the vault's goal directory (default: '24 Goals', else '23 Goals', beside "
+             "--tasks-dir)",
+    )
+    parser.add_argument("--now", default=None,
+                        help="ISO date or datetime for the defer guard (default: now)")
+    parser.add_argument("--vault", default=None,
+                        help="vault name, used to compose each row's ready-to-run action")
+    parser.add_argument("--json", action="store_true", help="emit the selection as JSON")
+    args = parser.parse_args(argv)
+
+    if not os.path.isdir(args.tasks_dir):
+        # Both streams: the exit code is the signal, but a round that captured only
+        # stdout would otherwise render nothing at all, which reads as a clean round.
+        print("open leg: unknown")
+        print("❌ tasks dir not found: %s" % args.tasks_dir, file=sys.stderr)
+        return 2
+
+    # Not sliced: `defer-date.py` reads a date-only value as the start of that local day
+    # and a full datetime as itself, so truncating here would throw the time away.
+    # Default to the CURRENT INSTANT, not today's date: a date reads as local midnight,
+    # which would park a defer to 02:00 until the next day and reopen the very bug this
+    # guard was fixed for.
+    try:
+        today = defer_date.as_now(args.now)
+    except ValueError:
+        # A bad --now is a refusal, not a traceback: the round reads exit 2 and renders
+        # "open leg: unknown" rather than losing the whole line to a stack dump.
+        print("open leg: unknown")
+        print("❌ bad --now: %s" % args.now, file=sys.stderr)
+        return 2
+    rows, skipped, err = collect(args.tasks_dir, today, topics_dir=args.topics_dir,
+                                 goals_dir=args.goals_dir)
+    if err:
+        print("open leg: unknown")
+        print("⚠️ approved queue unreadable — %s" % err, file=sys.stderr)
+        return 2
+
+    live, target = capacity()
+    if live is None:
+        print("open leg: unknown")
+        print("⚠️ capacity unreadable — cannot tell free slots from a full fleet", file=sys.stderr)
+        return 2
+
+    opened, select_skipped = select(rows, live, target)
+    # `select()` now carries each skipped row's reason (`capacity` or `not flagged`), so
+    # the two populations stay distinguishable in the round's tally.
+    all_skipped = skipped + select_skipped
+
+    if args.json:
+        # ⚠️ `action` is pre-quoted with `shlex.quote`, mirroring `next-focus.py`'s
+        # `action` field. A row name is a task-file stem, and the vault is
+        # worker-writable, so a `"` in it breaks naive quoting and a `$(…)` or backtick
+        # executes in the session's shell. The round takes this string verbatim.
+        vault = ' --vault %s' % shlex.quote(args.vault) if args.vault else ""
+        json.dump(
+            {
+                "selected": [
+                    {
+                        "name": r["name"],
+                        "action": "/supervisor:open %s --task%s"
+                        % (shlex.quote(r["name"]), vault),
+                    }
+                    for r in opened
+                ],
+                "skipped": all_skipped,
+                "live": live,
+                "target": target,
+                # The rendered block rides the JSON, as `next-focus.py` does, so one
+                # invocation yields both the block to print and the quoted actions —
+                # two reads could disagree, and a step that needs both would otherwise
+                # have to run the leg twice.
+                "render": render(opened, all_skipped, live, target),
+            },
+            sys.stdout,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+        return 0
+
+    print(render(opened, all_skipped, live, target))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

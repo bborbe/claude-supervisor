@@ -40,7 +40,7 @@ Not `/supervisor:worker-drive` (session-scoped) and not `/fleet-status` (statele
 
 The hard invariants and gates live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/rules.md` — their single normative home. This file and the round do not restate them.
 
-⚠️ This file's frontmatter grants `mcp__supervisor__spawn_agent`; the mode rule that governs every spawn — the classifier, the `mode:` field and both headless constraints — has its single home in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6. Read it there; never restate it here.
+⚠️ This file's frontmatter grants `mcp__supervisor__spawn_agent`; the mode rule that governs every spawn — the `role`-forced mapping, the `mode:` field and both headless constraints — has its single home in `${CLAUDE_PLUGIN_ROOT}/docs/fleet-surface.md` § Spawn a worker item 6. Read it there; never restate it here.
 
 ## Interval
 
@@ -49,6 +49,8 @@ The hard invariants and gates live in `${CLAUDE_PLUGIN_ROOT}/commands/steps/rule
 ## Arm procedure
 
 1. **Arm `ScheduleWakeup` FIRST — before the read half, not after it.** It is one-shot per call, so a long round (a drive leg, an escalation, a gate relay) that re-arms at its end is exactly the round that never reaches the re-arm and stops silently. Arm at the **clamped** interval with the prompt `/supervisor:fleet-drive --interval <N>m` — **name the ROUND, never the arm** — and `noop: false` (the round has not run yet, so `noop` cannot be honest at the head). A second `ScheduleWakeup` supersedes the first rather than stacking.
+   ⚠️ **The fleet registration and its liveness record are written by the round's re-arm step** — `${CLAUDE_PLUGIN_ROOT}/commands/steps/re-arm.md`, which runs immediately after this arm. This arm does not duplicate them: one home for the pair, and a round that skips its re-arm step also stops refreshing its answer path, which is a defect that should be visible in one place.
+   ⚠️ **This arm is also the fleet tier's loop-start, so it clears a stand-down — the only place that may.** Run `manager-liveness.py --arm --resume --subject "Fleet Manager" --branch fleet --interval "<clamped-seconds>"` here, once: a plain `--arm` never clears `fleet--fleet-manager.stopped`, so without it a `/supervisor:stop`ped fleet manager stays `STOPPED` for ever — `fleet-keeper.py` leaves it alone and `answer-path-check.py` refuses every spawn. The round's re-arm step stays plain.
 2. **Then run the round** — read `${CLAUDE_PLUGIN_ROOT}/commands/fleet-drive.md` and follow its router table. Every step file it names is under `${CLAUDE_PLUGIN_ROOT}/commands/steps/`.
 
 ## Router

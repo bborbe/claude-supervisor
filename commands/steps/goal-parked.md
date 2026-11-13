@@ -19,6 +19,8 @@ definition.
   worker inside a tool call is not parked; a terminal task is not parked; an untracked
   session is not this round's to report.
 
+- **An empty parked set is still reported, in one line: `5b: no parked tracked workers`.** Never omit the section — a silent 5b cannot be told apart from a skipped one, which is exactly how rounds went unread on 2026-11-04/05.
+
 - **The row — four fields, always, in this order:**
   `<jump link> · waits: <what it is parked on> · lever: <the one act that clears it> · owner: <manager|operator|machine: <watcher>>`
   - **Jump link** — `python3 ${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/jump-link.py <pane-id>`. ⚠️ **Two different absences, and they must not collapse:** a **headless** worker has no pane (`--pane -` → `no pane (headless)`), while a **tab** worker always has one — if you have not resolved its id, pass `--pane ?` → `pane unresolved (tab worker)`. The first live sample passed `-` for a tab worker and told the operator there was no window to open.

@@ -43,6 +43,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import unittest
 import urllib.error
@@ -50,7 +51,8 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_SCRIPT = os.path.join(os.path.dirname(_HERE), "attention-ask.py")
+_SCRIPTS_DIR = os.path.dirname(_HERE)
+_SCRIPT = os.path.join(_SCRIPTS_DIR, "attention-ask.py")
 
 _spec = importlib.util.spec_from_file_location("attention_ask", _SCRIPT)
 ask = importlib.util.module_from_spec(_spec)
@@ -162,7 +164,7 @@ class PostBatchTest(unittest.TestCase):
         captured = {}
         calls = []
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             calls.append(req.full_url)
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": "batch1"})
@@ -172,7 +174,11 @@ class PostBatchTest(unittest.TestCase):
             rc = ask.cmd_post_batch(batch_args(task=["Alpha", "Beta", "Gamma"]), out=out)
 
         self.assertEqual(rc, 0)
-        self.assertEqual(len(calls), 1)
+        # Count POSTS, not every request: the producer-kind resolver reads the
+        # session ledger first, and that read is not a card. The contract under
+        # test is "N rows, ONE card", so a GET must not be counted as one.
+        posts = [url for url in calls if url.rstrip("/").endswith("/api/1.0/attention")]
+        self.assertEqual(len(posts), 1, calls)
         body = captured["body"]
         self.assertEqual(body["answer_mechanism"], "message")
         # ⚠️ Both new defaults are pinned HERE as well as on `post`, and the
@@ -191,7 +197,7 @@ class PostBatchTest(unittest.TestCase):
     def test_offers_no_options_so_the_answer_is_the_operators_own_words(self):
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": "batch1"})
 
@@ -212,7 +218,7 @@ class PostBatchTest(unittest.TestCase):
         """
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": "batch1"})
 
@@ -232,7 +238,7 @@ class PostBatchTest(unittest.TestCase):
     def test_refuses_a_blank_row_without_reaching_the_store(self):
         out = io.StringIO()
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             raise AssertionError("a refused batch must not reach the store")
 
         with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
@@ -364,11 +370,11 @@ class ProducerKindTest(unittest.TestCase):
     unknown value with a `400` naming the field, so an invented kind used to cost
     a round trip and read as a store fault rather than a bad argument. `choices=`
     refuses it client-side instead, which is correct only while this tuple still
-    carries the four the store accepts.
+    carries the five the store accepts.
 
     ⚠️ **Nothing here checks that against the store.** The enum's source is
     `attention-controller` `pkg/producer-kind.go`, a sibling repo this suite does
-    not read, so the second case pins the tuple to the four values this repo
+    not read, so the second case pins the tuple to the five values this repo
     *records* — the comment block at `scripts/pod-attention.py:104` and its mirror
     in `test_pod_attention.py`. A local edit that widens or narrows the tuple
     fails there; a change on the store's side passes silently, and the e2e is what
@@ -393,11 +399,12 @@ class ProducerKindTest(unittest.TestCase):
                 self.assertIn("invalid choice", err.getvalue())
                 self.assertIn("worker", err.getvalue())
 
-    def test_the_accepted_kinds_are_pinned_to_the_recorded_four(self):
-        # The recorded four, not a read of the store's Go source — see the class
+    def test_the_accepted_kinds_are_pinned_to_the_recorded_five(self):
+        # The recorded five, not a read of the store's Go source — see the class
         # docstring. A divergence on the store's side is the e2e's to catch.
         self.assertEqual(
-            ask.PRODUCER_KINDS, ("session", "agent", "cron", "dark-factory")
+            ask.PRODUCER_KINDS,
+            ("session", "manager", "agent", "cron", "dark-factory"),
         )
 
 
@@ -413,7 +420,7 @@ class PostTest(unittest.TestCase):
     def test_posts_the_declaration_and_prints_the_item_id(self):
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["url"] = req.full_url
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
@@ -445,7 +452,7 @@ class PostTest(unittest.TestCase):
     def test_posts_the_declared_risk(self):
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
@@ -465,7 +472,7 @@ class PostTest(unittest.TestCase):
         """
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
@@ -492,7 +499,7 @@ class PostTest(unittest.TestCase):
         """
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
@@ -519,7 +526,7 @@ class PostTest(unittest.TestCase):
         """The default must not swallow a caller who knows its own bound."""
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
@@ -541,7 +548,7 @@ class PostTest(unittest.TestCase):
         """
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
@@ -569,7 +576,7 @@ class PostTest(unittest.TestCase):
         """
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
@@ -690,7 +697,7 @@ class PostTest(unittest.TestCase):
     def test_empty_optionals_are_omitted_not_sent_blank(self):
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
@@ -710,7 +717,7 @@ class PostTest(unittest.TestCase):
     def test_present_optionals_are_sent(self):
         captured = {}
 
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             captured["body"] = json.loads(req.data.decode())
             return FakeResponse({"item_id": STORE_ITEM_ID})
 
@@ -732,7 +739,7 @@ class PostTest(unittest.TestCase):
         self.assertEqual(len(body["options"]), 1)
 
     def test_store_rejection_is_reported_with_its_detail(self):
-        def fake_urlopen(req, timeout=None):
+        def fake_urlopen(req, timeout=None, **kwargs):
             raise urllib.error.HTTPError(
                 req.full_url, 400, "Bad Request", None, io.BytesIO(b'{"error":"options not allowed"}')
             )
@@ -764,13 +771,32 @@ def answered_lines(text):
     return [line for line in text.splitlines() if line.startswith("ANSWERED:")]
 
 
+def answered_at_lines(text):
+    """Only the `ANSWERED_AT:` lines — the flag's whole surface."""
+    return [line for line in text.splitlines() if line.startswith("ANSWERED_AT:")]
+
+
+# An answered item as the store returns it, carrying the timestamp the flag
+# renders. One fixture, reused by every `--answered-at` case, so a change to the
+# shape cannot make one test pass while another silently exercises a different
+# payload.
+ANSWERED_ITEM = {
+    "item_id": STORE_ITEM_ID,
+    "state": "answered",
+    "answer": {"kind": "option", "value": "the board"},
+    "answered_by": "attention-board",
+    "answered_client": OPERATOR_CLIENT,
+    "answered_at": "2026-11-11T21:52:03+01:00",
+}
+
+
 class PollTest(unittest.TestCase):
-    def poll(self, item):
+    def poll(self, item, answered_at=False):
         with mock.patch.object(
-            ask.urllib.request, "urlopen", lambda req, timeout=None: FakeResponse(item)
+            ask.urllib.request, "urlopen", lambda req, timeout=None, **kwargs: FakeResponse(item)
         ):
             out = io.StringIO()
-            rc = ask.cmd_poll(STORE_ITEM_ID, out=out)
+            rc = ask.cmd_poll(STORE_ITEM_ID, out=out, answered_at=answered_at)
         return rc, out.getvalue()
 
     def test_open_item_reads_as_open(self):
@@ -799,6 +825,64 @@ class PollTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("ANSWERED: option: the board", text)
         self.assertIn("ANSWERED_BY: attention-board", text)
+        # The client evidence is what separates a board click from a script, so
+        # it must be readable from `poll` without grepping the controller's log.
+        self.assertIn(
+            "ANSWERED_CLIENT: Mozilla/5.0 (Macintosh) Chrome/153.0.0.0 @ 127.0.0.1:63415",
+            text,
+        )
+
+    def test_script_answer_renders_a_distinct_client(self):
+        rc, text = self.poll(
+            {
+                "item_id": STORE_ITEM_ID,
+                "state": "answered",
+                "answer": {"kind": "option", "value": "the board"},
+                "answered_by": "attention-board",
+                "answered_client": {
+                    "user_agent": "curl/8.7.1",
+                    "remote_addr": "127.0.0.1:63416",
+                    "automation": False,
+                },
+            }
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED_CLIENT: curl/8.7.1 @ 127.0.0.1:63416", text)
+        self.assertNotIn("Chrome", text)
+
+    def test_forwarded_for_renders_beside_the_peer_address(self):
+        _, text = self.poll(
+            {
+                "item_id": STORE_ITEM_ID,
+                "state": "answered",
+                "answer": {"kind": "option", "value": "the board"},
+                "answered_by": "attention-board",
+                "answered_client": {
+                    "user_agent": "curl/8.7.1",
+                    "remote_addr": "127.0.0.1:63417",
+                    "forwarded_for": "203.0.113.7",
+                },
+            }
+        )
+        # Beside, never instead of: the header is caller-set, so the peer
+        # address stays the unspoofable half of the line.
+        self.assertIn(
+            "ANSWERED_CLIENT: curl/8.7.1 @ 127.0.0.1:63417 (forwarded_for: 203.0.113.7)",
+            text,
+        )
+
+    def test_item_without_a_recorded_client_prints_no_client_line(self):
+        _, text = self.poll(
+            {
+                "item_id": STORE_ITEM_ID,
+                "state": "closed",
+                "answered_by": "attention-board",
+            }
+        )
+        # The actor line proves the terminal ran and would have carried a client
+        # had the store recorded one — so the absence below is a real absence.
+        self.assertIn("ANSWERED_BY: attention-board", text)
+        self.assertNotIn("ANSWERED_CLIENT:", text)
 
     def test_skip_is_rendered_without_a_trailing_value(self):
         _, text = self.poll(
@@ -929,29 +1013,120 @@ class PollTest(unittest.TestCase):
         self.assertIn("item is answered", text)
         self.assertNotIn("item is closed", text)
 
-    def test_reaped_close_with_no_actor_reads_as_open(self):
-        # The dominant closed shape in the live store is a reap: no
-        # answered_at, no answered_by, no client. It is not an act by anyone,
-        # so it must not be reported as an answer in either direction.
+    def test_reaped_close_with_no_actor_does_not_read_as_open(self):
+        # ⚠️ Reversed 2026-10-27. This shape — `closed`, no `answered_at`, no
+        # `answered_by` — is the no-actor close, and it used to print OPEN so
+        # that a reap stayed distinct from an acknowledgement. It bought that at
+        # the cost of the pair that actually fails: a reaped close and a LIVE
+        # gate both printed OPEN, and on 2026-10-27 `poll` and `answer` disagreed
+        # about one card seconds apart because of it. The store cannot name the
+        # cause either — an empty-body close comes from the dead-session sweep,
+        # the compact-crossing clear, a forwarded SessionEnd and
+        # `close_session_approval`, and the last is not a producer exit at all —
+        # so OPEN is not a claim this record can support. A reap now shares
+        # NOT_OPERATOR_ANSWERED with an acknowledgement — they are separated by
+        # `ANSWERED_BY:`, which an acknowledgement carries and a reap cannot,
+        # not by the terminal word. The word that used to separate them also
+        # meant "a live gate is waiting", and that is the overload given up.
         rc, text = self.poll({"item_id": STORE_ITEM_ID, "state": "closed"})
         self.assertEqual(rc, 0)
-        self.assertIn("OPEN", text)
-        self.assertNotIn("NOT_OPERATOR_ANSWERED", text)
+        self.assertIn("NOT_OPERATOR_ANSWERED", text)
+        self.assertNotIn("OPEN", text)
 
-    def test_answer_absent_reads_as_open_even_when_state_says_answered(self):
-        # A permission-class item is answered with a `decision` and carries no
-        # `answer`, so the poll must not report content that is not there.
+    def test_record_with_no_state_does_not_read_as_open(self):
+        # ⚠️ The fail-closed half of the guard, and the one shape it was added
+        # for that had no fixture. `state` is what the OPEN branch keys on, so a
+        # record carrying none must not be claimed as open. It must also not be
+        # *described* as open: `classify` used to default an absent state to
+        # `open`, so this record printed `NOT_OPERATOR_ANSWERED: (no answer
+        # content recorded; item is None) -- no answer recorded (state open)` —
+        # naming the very state the gate had just rejected.
+        rc, text = self.poll({"item_id": STORE_ITEM_ID})
+        self.assertEqual(rc, 0)
+        self.assertIn("NOT_OPERATOR_ANSWERED", text)
+        self.assertNotIn("OPEN", text)
+        self.assertIn("no answer recorded (state unreadable)", text)
+
+    def test_answer_absent_and_state_not_open_does_not_read_as_open(self):
+        # The same guard, second shape: an `answered` record carrying no
+        # `answered_at` classifies as NOTHING, and OPEN is the one terminal that
+        # must not be printed for a record which has left `open`. The arm cannot
+        # render a `decision` as answer content, so it says it has no answer
+        # recorded rather than claiming the gate is still waiting.
         rc, text = self.poll(
             {"item_id": STORE_ITEM_ID, "state": "answered", "decision": "allow"}
         )
         self.assertEqual(rc, 0)
-        self.assertIn("OPEN", text)
+        self.assertIn("NOT_OPERATOR_ANSWERED", text)
+        self.assertNotIn("OPEN", text)
+
+    # --- `--answered-at` is opt-in and the default output is byte-identical ---
+    #
+    # The flag exists for `fleet-keeper.py`, which bounds how long an answered
+    # resume may wait from when the OPERATOR answered rather than from when the
+    # keeper first noticed. Every existing consumer (`pod-attention.py`,
+    # `answered-attribution.py`, the hooks) reads the default output, so the
+    # contract is that `ANSWERED_AT:` appears only when the flag is passed.
+    #
+    # ⚠️ **The gate is pinned at two layers, and neither layer alone is enough.**
+    # The function-level pair fails if the flag is ignored (zero lines where one
+    # is expected) and if it is made the default inside `cmd_poll` (a line where
+    # none is expected) — but it never touches argparse, so flipping the
+    # `--answered-at` default or breaking the `answered_at=args.answered_at`
+    # wiring would leave it green. `test_cli_wires_the_flag_through` closes that
+    # half.
+
+    def test_default_poll_prints_no_answered_at_line(self):
+        # The contract the opt-in gate exists to keep: an answered item polled
+        # without the flag renders exactly as it did before the flag existed.
+        rc, text = self.poll(ANSWERED_ITEM)
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED: option: the board", text)
+        self.assertEqual(answered_at_lines(text), [])
+
+    def test_answered_at_flag_prints_exactly_one_rfc3339_line(self):
+        # And with the flag, exactly one line -- not zero (flag ignored) and not
+        # two (a duplicated print).
+        rc, text = self.poll(ANSWERED_ITEM, answered_at=True)
+        self.assertEqual(rc, 0)
+        lines = answered_at_lines(text)
+        self.assertEqual(len(lines), 1, text)
+        self.assertEqual(lines[0], "ANSWERED_AT: 2026-11-11T21:52:03+01:00")
+
+    def test_answered_at_flag_prints_nothing_when_the_item_carries_no_timestamp(self):
+        # The flag gates a field, not the terminal: an answered item with no
+        # `answered_at` must not gain an empty `ANSWERED_AT:` line. The ATTRIBUTED
+        # terminal is asserted too, so a classification regression cannot make
+        # this pass by rendering some other terminal.
+        item = dict(ANSWERED_ITEM)
+        item.pop("answered_at")
+        rc, text = self.poll(item, answered_at=True)
+        self.assertEqual(rc, 0)
+        self.assertIn("ANSWERED: option: the board", text)
+        self.assertEqual(answered_at_lines(text), [])
+
+    def test_cli_wires_the_flag_through(self):
+        # The half the function-level tests cannot see: argparse's default and
+        # the `answered_at=args.answered_at` call site. A flip of either leaves
+        # every test above green while every CLI caller gets the wrong output.
+        seen = []
+
+        def record(item_id, out=None, answered_at=False):
+            seen.append((item_id, answered_at))
+            return 0
+
+        with mock.patch.object(ask, "cmd_poll", record):
+            ask.main(["poll", STORE_ITEM_ID])
+            ask.main(["poll", STORE_ITEM_ID, "--answered-at"])
+        self.assertEqual(
+            seen,
+            [(STORE_ITEM_ID, False), (STORE_ITEM_ID, True)],
+        )
 
     def poll_error(self, code, body=b""):
-        # fetch_item passes a URL string to urlopen, not a Request, so the fake
-        # takes a str — reading `.full_url` here would be an AttributeError, not
-        # a raised HTTPError.
-        def fake(url, timeout=None):
+        # fetch_item passes a Request to urlopen (it carries the auth header), so
+        # the fake takes one and hands it straight back as the HTTPError's url.
+        def fake(url, timeout=None, **kwargs):
             raise urllib.error.HTTPError(url, code, "err", None, io.BytesIO(body))
 
         with mock.patch.object(ask.urllib.request, "urlopen", fake):
@@ -986,7 +1161,7 @@ class PollTest(unittest.TestCase):
         # The store is mocked to blow up if it is reached at all: a refusal that
         # still issued the request would be a message change, not a guard.
         # `70eb5521` is the tick-127 id from the incident, verbatim.
-        def explode(url, timeout=None):
+        def explode(url, timeout=None, **kwargs):
             raise AssertionError(f"poll reached the store with {url!r}")
 
         with mock.patch.object(ask.urllib.request, "urlopen", explode):
@@ -1005,7 +1180,7 @@ class PollTest(unittest.TestCase):
         # `cmd_list` renders it. It is NOT a truncation of a store id -- it is
         # an unrelated uuid -- and it is equally unpollable, so the refusal has
         # to cover it without claiming it was truncated.
-        def explode(url, timeout=None):
+        def explode(url, timeout=None, **kwargs):
             raise AssertionError(f"poll reached the store with {url!r}")
 
         with mock.patch.object(ask.urllib.request, "urlopen", explode):
@@ -1039,7 +1214,7 @@ class TransportFailureReportingTest(unittest.TestCase):
     """
 
     def post(self, error):
-        def explode(req, timeout=None):
+        def explode(req, timeout=None, **kwargs):
             raise error
 
         with mock.patch.object(ask.urllib.request, "urlopen", explode):
@@ -1050,7 +1225,7 @@ class TransportFailureReportingTest(unittest.TestCase):
     def poll(self, error):
         # `fetch_item` passes a URL string, not a Request — the same asymmetry
         # `PollTest.poll_error` documents.
-        def explode(url, timeout=None):
+        def explode(url, timeout=None, **kwargs):
             raise error
 
         with mock.patch.object(ask.urllib.request, "urlopen", explode):
@@ -1217,6 +1392,468 @@ class RecordPostedCloserTest(unittest.TestCase):
             with mock.patch.object(ask.os, "replace", side_effect=OSError("boom")):
                 ask.record_posted_closer("session-a", "pick — 1. x · 2. y", "k")
         self.assertEqual([n for n in self._names() if n.endswith(".tmp")], [])
+
+
+class MechanismTest(unittest.TestCase):
+    """`--mechanism` at the script boundary: the body it sends, and what it refuses.
+
+    ⚠️ **`ack` exists so a card can report a condition and ask nothing.** It is
+    the shape the re-registered-park arm posts for a session parked on a prompt
+    in its own pane, where a board answer cannot release anything. The store
+    rejects `options` on an `ack` item, so the refusal has to land HERE — as a
+    bad argument — rather than as a 400 the caller reads as a store fault.
+
+    ⚠️ `permission` is deliberately not offered. A permission gate is released
+    only by an answer carrying `resolved_by`, which only an arm writes and the
+    board never sends, so a card minted by this script could not release one.
+    That refusal is asserted here rather than left to `choices=` alone.
+    """
+
+    def _post(self, **overrides):
+        captured = {}
+
+        def fake_urlopen(req, timeout=None, **kwargs):
+            captured["body"] = json.loads(req.data.decode())
+            return FakeResponse({"item_id": STORE_ITEM_ID})
+
+        out = io.StringIO()
+        with mock.patch.object(ask.urllib.request, "urlopen", fake_urlopen):
+            rc = ask.cmd_post(post_args(**overrides), out=out)
+        return rc, captured.get("body"), out.getvalue()
+
+    def test_an_ack_post_carries_the_mechanism_and_no_options(self):
+        rc, body, _ = self._post(mechanism="ack", payload="answer it in the pane")
+        self.assertEqual(rc, 0)
+        self.assertEqual(body["answer_mechanism"], "ack")
+        self.assertNotIn("options", body,
+                         "the schema gives an ack item no choices; an empty "
+                         "list is a present field the store rejects")
+
+    def test_an_ack_post_refuses_options(self):
+        rc, body, text = self._post(mechanism="ack", option=["allow", "deny"])
+        self.assertEqual(rc, 2)
+        self.assertIsNone(body, "nothing may be posted on a refusal")
+        self.assertIn("REFUSED", text)
+        self.assertIn("asks nothing", text)
+
+    def test_an_ack_post_refuses_a_recommendation(self):
+        rc, body, text = self._post(mechanism="ack", recommend="allow")
+        self.assertEqual(rc, 2)
+        self.assertIsNone(body)
+        self.assertIn("REFUSED", text)
+
+    def test_the_default_is_still_a_message_card(self):
+        rc, body, _ = self._post()
+        self.assertEqual(rc, 0)
+        self.assertEqual(body["answer_mechanism"], "message")
+
+    def test_permission_is_not_a_postable_mechanism(self):
+        self.assertNotIn("permission", ask.POSTABLE_MECHANISMS,
+                         "a card minted here could not release a permission "
+                         "gate — the release path reads resolved_by, which only "
+                         "an arm writes and the board never sends")
+        self.assertIn("ack", ask.POSTABLE_MECHANISMS)
+
+    def test_a_real_string_outside_the_set_is_refused(self):
+        # ⚠️ Not defaulted. argparse already rejects typed values, so reaching
+        # here with one means a programmatic caller — and silently downgrading
+        # `"ack "` to `message` posts exactly the misleading question card this
+        # change exists to remove, with no error anywhere.
+        rc, body, text = self._post(mechanism="ack ")
+        self.assertEqual(rc, 2)
+        self.assertIsNone(body)
+        self.assertIn("REFUSED", text)
+        self.assertIn("not one of", text)
+
+    def test_a_non_string_placeholder_takes_the_default(self):
+        # A mock/namespace caller carries a non-string here; that is a fixture,
+        # not a request, so it must not be refused.
+        rc, body, _ = self._post(mechanism=mock.Mock())
+        self.assertEqual(rc, 0)
+        self.assertEqual(body["answer_mechanism"], "message")
+
+
+_REPO = os.path.dirname(_SCRIPTS_DIR)
+
+
+def _load_script(name, filename):
+    """Import a sibling script by path, the way this file imports `attention-ask.py`."""
+    spec = importlib.util.spec_from_file_location(
+        name, os.path.join(_SCRIPTS_DIR, filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class ManagerCallSitesPassTheKindTest(unittest.TestCase):
+    """Every manager-loop posting site must pass `--producer-kind manager`.
+
+    ⚠️ **`--producer-kind` DEFAULTS to `session`**, so a call site that omits the
+    flag keeps emitting `session` silently — the omission is the failure mode,
+    not a neutral default. That makes a reverted flag invisible to every other
+    test in this suite: the enum still accepts `manager`, the store still
+    accepts the post, and only the board's grouping is wrong. Each site is
+    pinned here for that reason.
+    """
+
+    def _captured_argv(self, module, call):
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = list(cmd)
+            return mock.Mock(
+                returncode=0,
+                stdout="ITEM_ID: %s\n" % STORE_ITEM_ID,
+                stderr="",
+            )
+
+        with mock.patch.object(module.subprocess, "run", fake_run):
+            call()
+        self.assertIn("cmd", captured, "the call site never shelled out")
+        return captured["cmd"]
+
+    def assert_manager_kind(self, cmd, site):
+        self.assertIn("--producer-kind", cmd, f"{site} omits --producer-kind")
+        self.assertEqual(
+            "manager",
+            cmd[cmd.index("--producer-kind") + 1],
+            f"{site} does not pass manager",
+        )
+
+    def test_open_items_posts_its_ledger_cards_as_manager(self):
+        module = _load_script("open_items_under_test", "open-items.py")
+        item = {"id": "abc", "text": "a question", "card_options": ["one", "two"]}
+        cmd = self._captured_argv(
+            module,
+            lambda: module.post_card(item, "sid-1", script_dir=_SCRIPTS_DIR),
+        )
+        self.assert_manager_kind(cmd, "scripts/open-items.py post_card")
+
+    def test_propose_managers_posts_as_manager(self):
+        module = _load_script("propose_managers_under_test", "propose-managers.py")
+        card = {
+            "dedup_key": "key",
+            "payload": "a question",
+            "context": "why",
+            "recommend": "start manager",
+            "options": ["start manager", "not now"],
+        }
+        cmd = self._captured_argv(module, lambda: module.post(card))
+        self.assert_manager_kind(cmd, "scripts/propose-managers.py post")
+
+    def test_incident_ledger_posts_its_escalation_as_manager(self):
+        module = _load_script("incident_ledger_under_test", "incident-ledger.py")
+        incident = {
+            "dedup_key": "incident:abc",
+            "session_id": "sid-1",
+            "kind": "stall",
+            "owner": "worker",
+            "opened_at": "2026-10-28T10:00:00Z",
+            "deadline": "2026-10-28T12:00:00Z",
+            "detected_by": "sweep",
+        }
+        cmd = self._captured_argv(module, lambda: module.post_card(incident))
+        self.assert_manager_kind(cmd, "scripts/incident-ledger.py post_card")
+
+    def test_every_manager_command_posting_site_carries_the_flag(self):
+        # The markdown call sites are prose, so they cannot be argv-captured.
+        #
+        # ⚠️ **Per INVOCATION, not per file.** A file-level `assertIn` passes as
+        # soon as ONE of a file's posting sites carries the flag, which is how
+        # `commands/steps/goal-gates.md` shipped with its second site (the
+        # `waiting-approval` `post-batch`) still defaulting to `session`. Both
+        # `goal-gates.md` and `agents/goal-drive.md` carry more than one.
+        #
+        # A bare `attention-ask.py post` in backticks is a PROSE reference to the
+        # verb, not an invocation, so the closing backtick is excluded — otherwise
+        # "in the order `attention-ask.py post` takes them" reads as a call site.
+        sites = [
+            "agents/goal-drive.md",
+            "commands/open.md",
+            "commands/steps/covered-subject-invariant.md",
+            "commands/steps/drive.md",
+            "commands/steps/goal-gates.md",
+            "commands/steps/goal-under-target.md",
+            "commands/steps/needs-input.md",
+            "commands/steps/readings.md",
+            "commands/steps/round-tail.md",
+        ]
+        invocation = re.compile(r"attention-ask\.py\s+(post-batch|post)(?!`)")
+        seen = 0
+        for site in sites:
+            with self.subTest(site=site):
+                with open(os.path.join(_REPO, site), encoding="utf-8") as handle:
+                    body = handle.read()
+                matches = list(invocation.finditer(body))
+                self.assertTrue(matches, f"{site} has no posting invocation")
+                for match in matches:
+                    seen += 1
+                    window = body[match.start():match.start() + 400]
+                    self.assertIn(
+                        "--producer-kind manager",
+                        window,
+                        f"{site}: the invocation at offset {match.start()} does "
+                        "not pass --producer-kind manager",
+                    )
+        self.assertGreaterEqual(seen, 10, "the site list stopped covering the tree")
+
+
+class StoreTokenTest(unittest.TestCase):
+    """`$ATTENTION_STORE_TOKEN` reaches the request only when it is set.
+
+    Four cases, and the last two are the ones a regression misses: `fetch_item`
+    was converted from a bare URL string to a `Request` solely to carry this
+    header, so the GET is pinned separately from the POST. The unset cases are
+    the backwards-compatibility claim — an unauthenticated store must see exactly
+    the request it saw before this change.
+    """
+
+    def _auth_header(self, token, invoke):
+        seen = {}
+
+        def fake(request, timeout=None, **kwargs):
+            seen["auth"] = request.get_header("Authorization")
+            return FakeResponse({"item_id": STORE_ITEM_ID, "state": "open"})
+
+        with mock.patch.object(ask, "TOKEN", token):
+            with mock.patch.object(ask.urllib.request, "urlopen", fake):
+                invoke()
+        return seen.get("auth")
+
+    def _post(self):
+        ask.post_question(
+            producer_id="p",
+            producer_kind="session",
+            liveness_ref="heartbeat:/tmp/none",
+            dedup_key="k",
+            interrupt_class="pick",
+            risk="",
+            payload="x",
+            context="",
+            options=[],
+            expires_at="",
+        )
+
+    def test_post_carries_the_token_when_set(self):
+        self.assertEqual(
+            self._auth_header("secret-token", self._post), "Bearer secret-token"
+        )
+
+    def test_post_carries_no_header_when_unset(self):
+        self.assertIsNone(self._auth_header("", self._post))
+
+    def test_poll_carries_the_token_when_set(self):
+        self.assertEqual(
+            self._auth_header("secret-token", lambda: ask.fetch_item(STORE_ITEM_ID)),
+            "Bearer secret-token",
+        )
+
+    def test_poll_carries_no_header_when_unset(self):
+        self.assertIsNone(self._auth_header("", lambda: ask.fetch_item(STORE_ITEM_ID)))
+
+
+class SslContextTest(unittest.TestCase):
+    """A python.org build trusts nothing, so HTTPS needs a bundle from somewhere.
+
+    `ssl.get_default_verify_paths()` returns None for both `cafile` and `capath`
+    on that build, and `urlopen` then rejects every certificate with
+    `CERTIFICATE_VERIFY_FAILED` before the request is sent. The store's chain is
+    fine — `curl` and `openssl` both validate it — so the failure reads as a bad
+    server certificate and is a missing trust store.
+
+    The first case is the backwards-compatibility claim: a machine whose
+    interpreter already carries a bundle keeps its own default untouched, and
+    every other case pins one step of the resolution order.
+    """
+
+    def _resolve(
+        self,
+        *,
+        default_roots=("root",),
+        env=None,
+        certifi=None,
+        existing=(),
+        unreadable=(),
+        certless=(),
+    ):
+        """Run `_ssl_context()` against a fake filesystem and a fake ssl.
+
+        `default_roots` is what the interpreter's own default context loads —
+        an empty tuple models the python.org build, whose compiled-in bundle is
+        reported but absent. Returns `(context_or_None, tried)`, where `tried`
+        is every `cafile` handed to `create_default_context`, in order; the
+        sequence is the resolution order the fall-through cases assert on.
+        """
+        tried = []
+
+        def fake_create(cafile=None):
+            if cafile is None:  # the probe of the interpreter's own default
+                return mock.Mock(get_ca_certs=lambda: list(default_roots))
+            tried.append(cafile)
+            if cafile in unreadable:
+                raise OSError("cannot read bundle")
+            loaded = [] if cafile in certless else ["root"]
+            return mock.Mock(get_ca_certs=lambda: loaded)
+
+        env = dict(env or {})
+        env.setdefault("SSL_CERT_FILE", "")
+        modules = {"certifi": None}
+        if certifi is not None:
+            modules["certifi"] = mock.Mock(where=lambda: certifi)
+
+        with mock.patch.dict(os.environ, env, clear=False):
+            with mock.patch.object(ask.ssl, "create_default_context", fake_create):
+                with mock.patch.object(
+                    ask.os.path, "exists", lambda p: p in existing
+                ):
+                    with mock.patch.dict(sys.modules, modules):
+                        result = ask._ssl_context()
+        return result, tried
+
+    def test_a_working_default_is_left_alone(self):
+        result, tried = self._resolve(default_roots=("root",))
+        self.assertIsNone(result)
+        self.assertEqual(tried, [])
+
+    def test_a_reported_but_rootless_default_falls_through(self):
+        """The python.org macOS trap: a default that is *reported*, not working.
+
+        `get_default_verify_paths()` names the compiled-in OpenSSL bundle, which
+        on that build does not exist until `Install Certificates.command` runs.
+        Trusting the report would return the default, `urlopen` would use the
+        same dead path, and the original `CERTIFICATE_VERIFY_FAILED` would
+        persist with no sign the fix did nothing.
+        """
+        result, tried = self._resolve(
+            default_roots=(), existing=("/etc/ssl/cert.pem",)
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/etc/ssl/cert.pem"])
+
+    def test_ssl_cert_file_wins_over_every_other_source(self):
+        result, tried = self._resolve(
+            default_roots=(),
+            env={"SSL_CERT_FILE": "/custom/bundle.pem"},
+            certifi="/certifi/cacert.pem",
+            existing=("/custom/bundle.pem", "/etc/ssl/cert.pem"),
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/custom/bundle.pem"])
+
+    def test_certifi_is_used_when_the_caller_sets_nothing(self):
+        result, tried = self._resolve(
+            default_roots=(),
+            certifi="/certifi/cacert.pem",
+            existing=("/certifi/cacert.pem", "/etc/ssl/cert.pem"),
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/certifi/cacert.pem"])
+
+    def test_the_platform_bundle_is_the_last_resort(self):
+        result, tried = self._resolve(
+            default_roots=(), existing=("/etc/ssl/cert.pem",)
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/etc/ssl/cert.pem"])
+
+    def test_no_bundle_anywhere_keeps_the_loud_failure(self):
+        result, tried = self._resolve(default_roots=())
+        self.assertIsNone(result)
+        self.assertEqual(tried, [])
+
+    def test_a_stale_ssl_cert_file_falls_through_to_the_platform_bundle(self):
+        """An env var naming a path that is not there must not become the answer.
+
+        `create_default_context(cafile=...)` raises on a missing file, and the
+        caller catches `OSError` and reports a transport failure — so a stale
+        variable would turn a working machine into a failing one. Falling
+        through keeps the resolver's promise: the caller named a preference, not
+        a requirement.
+        """
+        result, tried = self._resolve(
+            default_roots=(),
+            env={"SSL_CERT_FILE": "/gone/bundle.pem"},
+            existing=("/etc/ssl/cert.pem",),
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/etc/ssl/cert.pem"])
+
+    def test_a_bundle_that_parses_to_zero_roots_falls_through(self):
+        """An existing bundle with no certificates is a silent no-op, not a fix.
+
+        This is the failure the existence check cannot see: the path is there,
+        `create_default_context` succeeds, and the context carries no trust
+        anchors — so the original `CERTIFICATE_VERIFY_FAILED` persists and looks
+        exactly like the bug this change was written to cure.
+        """
+        result, tried = self._resolve(
+            default_roots=(),
+            env={"SSL_CERT_FILE": "/empty/bundle.pem"},
+            existing=("/empty/bundle.pem", "/etc/ssl/cert.pem"),
+            certless=("/empty/bundle.pem",),
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/empty/bundle.pem", "/etc/ssl/cert.pem"])
+
+    def test_an_unreadable_bundle_falls_through(self):
+        result, tried = self._resolve(
+            default_roots=(),
+            env={"SSL_CERT_FILE": "/locked/bundle.pem"},
+            existing=("/locked/bundle.pem", "/etc/ssl/cert.pem"),
+            unreadable=("/locked/bundle.pem",),
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(tried, ["/locked/bundle.pem", "/etc/ssl/cert.pem"])
+
+
+CONTEXT_SENTINEL = object()
+
+
+class UrlopenContextWiringTest(unittest.TestCase):
+    """`context=` must actually reach `urlopen`, or the fix is dead code.
+
+    Widening every fake to `**kwargs` is what let this argument disappear
+    quietly: the fakes accept `context` and none inspects it, so deleting the
+    kwarg from either call site left the whole suite green — a fix that could
+    not fail. These two assertions are what make that deletion a red run.
+    """
+
+    def _captured_context(self, invoke):
+        seen = {}
+
+        def fake(request, timeout=None, **kwargs):
+            seen["context"] = kwargs.get("context")
+            return FakeResponse({"item_id": STORE_ITEM_ID, "state": "open"})
+
+        with mock.patch.object(ask, "_ssl_context", lambda: CONTEXT_SENTINEL):
+            with mock.patch.object(ask.urllib.request, "urlopen", fake):
+                invoke()
+        return seen.get("context")
+
+    def test_post_passes_the_context_to_urlopen(self):
+        self.assertIs(
+            self._captured_context(
+                lambda: ask.post_question(
+                    producer_id="p",
+                    producer_kind="session",
+                    liveness_ref="heartbeat:/tmp/none",
+                    dedup_key="k",
+                    interrupt_class="pick",
+                    risk="",
+                    payload="x",
+                    context="",
+                    options=[],
+                    expires_at="",
+                )
+            ),
+            CONTEXT_SENTINEL,
+        )
+
+    def test_poll_passes_the_context_to_urlopen(self):
+        self.assertIs(
+            self._captured_context(lambda: ask.fetch_item(STORE_ITEM_ID)),
+            CONTEXT_SENTINEL,
+        )
 
 
 if __name__ == "__main__":

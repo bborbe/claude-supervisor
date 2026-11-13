@@ -116,6 +116,32 @@ class HelpersTest(unittest.TestCase):
             [f"http://store/api/1.0/attention/history?limit={watch.HISTORY_LIMIT}"],
         )
 
+    def test_history_read_is_narrowed_to_the_session(self):
+        seen = []
+
+        class Response:
+            def read(self):
+                return b"[]"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def urlopen(url, timeout=None):
+            seen.append(url)
+            return Response()
+
+        with mock.patch("urllib.request.urlopen", urlopen):
+            watch.fetch_history("http://store", session="a b/c")
+
+        self.assertEqual(
+            seen,
+            [f"http://store/api/1.0/attention/history?limit={watch.HISTORY_LIMIT}"
+             "&producer_id=a%20b%2Fc"],
+        )
+
     def test_history_limit_matches_the_reference_reader(self):
         # ⚠️ Load the sibling module rather than hardcoding its number. A test
         # that only asserts `== 50000` passes unchanged when the *reference*
@@ -201,6 +227,16 @@ class ReconcileTest(unittest.TestCase):
                 self.out,
                 self.err,
             )
+
+    def test_reconcile_reads_with_its_own_session(self):
+        # The wiring that makes the narrowing effective: without `session=`
+        # the read silently widens back to the whole history.
+        with mock.patch.object(watch, "fetch_history", return_value=[]) as fetch:
+            watch.reconcile(
+                "http://store", ME, set(), self.started,
+                FakeAttribution(set()), self.out, self.err,
+            )
+        fetch.assert_called_once_with("http://store", session=ME)
 
     def test_emits_for_own_item_answered_after_start(self):
         seen = self.run_reconcile([item("abc")])

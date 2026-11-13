@@ -3,7 +3,7 @@
 // ⚠️ `config.mjs` reads the file once at module load and freezes the result. That is correct for
 // every key that cannot change under a running server, and wrong for the spawn limits, which the
 // operator edits *precisely because* they want the next spawn to differ from the last. Observed
-// 2026-10-14: `spawn.maxManagers` was raised 5 → 10 in `~/.config/claude-supervisor/config.json`
+// 2026-10-14: `spawn.maxManagersSoft` was raised 5 → 10 in `~/.config/claude-supervisor/config.json`
 // (the file parsed fine) and two `role: manager` spawns were still refused against 5, until the
 // server was reconnected via `/mcp`. The operator had no way to tell that from a bad value.
 //

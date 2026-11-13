@@ -103,6 +103,117 @@ class TestClassify(unittest.TestCase):
         self.assertIn("pick", closer)
 
 
+def fake_store(open_items=(), items=None, attempts=None):
+    """A `get` for `classify`: path → JSON, `None` for 404."""
+    items, attempts = items or {}, attempts or {}
+
+    def get(path):
+        base = path.split("?", 1)[0]
+        if base == "/api/1.0/attention":
+            return list(open_items)
+        tail = base.rsplit("/api/1.0/attention/", 1)[-1]
+        if tail.endswith("/attempt"):
+            return attempts.get(tail[: -len("/attempt")])
+        return items.get(tail)
+    return get
+
+
+class TestHeadlessAnswerability(unittest.TestCase):
+    """A headless gate is held only while some channel can still answer it."""
+
+    CARD = "0123456789abcdef" * 2
+
+    def _classify(self, closer, entrypoint="sdk-cli", get=None):
+        rec = entry(SID, entrypoint=entrypoint)
+        return rp.classify(rec, FakeWhoNeedsMe(closer=closer), get=get or fake_store())[0]
+
+    def test_pane_session_is_unchanged(self):
+        self.assertEqual(self._classify("review: card 7e55adaf", entrypoint="cli"), "gate-held")
+
+    def test_truncated_handle_is_unanswerable(self):
+        self.assertEqual(self._classify("review: dismiss card `7e55adaf`"), "gate-unanswerable")
+
+    def test_closer_with_no_channel_is_unanswerable(self):
+        self.assertEqual(self._classify("you run: gh pr merge 1 --merge"), "gate-unanswerable")
+
+    def test_card_closed_without_answer_is_unanswerable(self):
+        get = fake_store(items={self.CARD: {"state": "closed"}})
+        self.assertEqual(self._classify(f"review: {self.CARD}", get=get), "gate-unanswerable")
+
+    def test_absent_card_is_unanswerable(self):
+        self.assertEqual(self._classify(f"review: {self.CARD}"), "gate-unanswerable")
+
+    def test_open_named_card_is_held(self):
+        get = fake_store(items={self.CARD: {"state": "open"}})
+        self.assertEqual(self._classify(f"approve: {self.CARD}", get=get), "gate-held")
+
+    def test_own_open_mirror_card_is_held(self):
+        """The Stop hook's mirror card never appears in the closer text."""
+        get = fake_store(open_items=[{"producer_id": SID, "state": "open"}])
+        self.assertEqual(self._classify("approve: reply `go`", get=get), "gate-held")
+
+    def test_open_message_class_card_does_not_hold(self):
+        """SendMessage refuses a headless worker, so a message answer can never land."""
+        get = fake_store(open_items=[{"producer_id": SID, "state": "open",
+                                      "answer_mechanism": "message"}],
+                         items={self.CARD: {"state": "open", "answer_mechanism": "message"}})
+        self.assertEqual(self._classify(f"review: {self.CARD}", get=get), "gate-unanswerable")
+
+    def test_another_sessions_open_card_does_not_hold(self):
+        get = fake_store(open_items=[{"producer_id": OTHER, "state": "open"}])
+        self.assertEqual(self._classify("approve: reply `go`", get=get), "gate-unanswerable")
+
+    def test_answered_never_delivered_is_unanswerable(self):
+        get = fake_store(items={self.CARD: {"state": "answered", "answered_at": "t"}},
+                         attempts={self.CARD: {"status": "never_attempted"}})
+        self.assertEqual(self._classify(f"approve: {self.CARD}", get=get), "gate-unanswerable")
+
+    def test_answered_and_delivered_is_held(self):
+        get = fake_store(items={self.CARD: {"state": "answered", "answered_at": "t"}},
+                         attempts={self.CARD: {"status": "delivered"}})
+        self.assertEqual(self._classify(f"approve: {self.CARD}", get=get), "gate-held")
+
+    def test_open_card_without_mechanism_is_held(self):
+        """An absent `answer_mechanism` is kept as a channel — fail closed."""
+        get = fake_store(items={self.CARD: {"state": "open"}})
+        self.assertEqual(self._classify(f"review: {self.CARD}", get=get), "gate-held")
+
+    def test_malformed_store_responses_fail_closed(self):
+        """Every shape the store should never return keeps the gate held."""
+        def make(listing=(), item=None, attempt=None):
+            def get(path):
+                base = path.split("?", 1)[0]
+                if base == "/api/1.0/attention":
+                    return listing
+                return attempt if base.endswith("/attempt") else item
+            return get
+        cases = {
+            "listing 404": make(listing=None),
+            "listing odd shape": make(listing={"data": []}),
+            "listing at limit": make(listing=[{"producer_id": OTHER}] * rp.OPEN_LIST_LIMIT),
+            "listing non-object entry": make(listing=["x"]),
+            "item non-object": make(listing=[], item=["x"]),
+            "answered, attempt 404": make(listing=[], item={"state": "answered", "answered_at": "t"}),
+            "answered, attempt odd": make(listing=[], item={"state": "answered", "answered_at": "t"},
+                                          attempt={"carrier": "x"}),
+        }
+        for name, get in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(self._classify(f"review: {self.CARD}", get=get), "gate-held")
+
+    def test_unexpected_exception_fails_closed(self):
+        import http.client
+
+        def broken(path):
+            raise http.client.IncompleteRead(b"")
+        self.assertEqual(self._classify(f"review: {self.CARD}", get=broken), "gate-held")
+
+    def test_unreadable_store_fails_closed(self):
+        def down(path):
+            raise rp.StoreUnreadable("down")
+        self.assertEqual(self._classify(f"review: {self.CARD}", get=down), "gate-held")
+
+
 class TestOtherOccupants(unittest.TestCase):
     def test_excludes_self(self):
         entries = [("/a", entry(SID, cwd="/repo"))]

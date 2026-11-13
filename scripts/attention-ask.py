@@ -77,15 +77,22 @@ is a real case rather than a bug, and it is refused rather than posted: an item
 with no producer can never be polled back by anyone, so it would be a question
 asked into a void.
 
-`--closer` is the one declaration that is OPTIONAL. It names the `👤 You:` line
-this card answers, and it exists because a session that posts a card and then
-ends its turn with the same ask on that line put ONE ask on the board twice: the
-deliberate card declares a `dedup_key` slug while the hook's echo derives
-sha256(sid:kind:detail), and those two keys can never collide. Passing it writes
-<sid>.posted.json, which the hook's `Stop` branch and the feed's `reclassify_idle`
-both read to decline the echo. Omitted, nothing is recorded and the echo is
-raised exactly as before — the mechanism is opt-in, so the board stays dirty
-until a poster passes it.
+`--closer` is the one declaration that is OPTIONAL at the CLI — but REQUIRED
+whenever the closer repeats a card THIS session posted itself. It names the
+`👤 You:` line this card answers, and it exists because a session that posts a
+card and then ends its turn with the same ask on that line put ONE ask on the
+board twice: the deliberate card declares a `dedup_key` slug while the hook's
+echo derives sha256(sid:kind:detail), and those two keys can never collide.
+Passing it writes <sid>.posted.json, which the hook's `Stop` branch and the
+feed's `reclassify_idle` both read to decline the echo. Omitted, nothing is
+recorded and the echo is raised exactly as before — so omitting it is correct
+only when the closer asks something *else* or mints nothing.
+
+⚠️ It holds ONE record per session, so a round that posts two cards overwrites
+the first closer. And it does not apply to a relayed gate at all: the closer
+there must be verb-free, so there is no ask for the record to match — whether or
+not this session posted the card. See `commands/steps/needs-input.md`, the relay
+bullet.
 
 Run: python3 attention-ask.py post --dedup-key KEY --payload "..." [--option L]... [--closer "..."]
      python3 attention-ask.py post-batch --dedup-key KEY --task "..." [--task "..."]...
@@ -97,6 +104,7 @@ import importlib.util
 import json
 import math
 import os
+import ssl
 import sys
 import time
 import urllib.error
@@ -117,6 +125,110 @@ def _load(name, filename):
 attribution = _load("answered_attribution", "answered-attribution.py")
 
 STORE = os.environ.get("ATTENTION_STORE_URL", "http://localhost:18080").rstrip("/")
+
+# Where a platform keeps its CA bundle when the interpreter knows of none.
+# macOS, Debian/Ubuntu, and RHEL respectively.
+CA_BUNDLE_PATHS = (
+    "/etc/ssl/cert.pem",
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+)
+
+
+def _ssl_context():
+    """An SSL context that can verify a certificate, or None to keep the default.
+
+    A python.org build ships no CA bundle, so `ssl.get_default_verify_paths()`
+    returns None for both `cafile` and `capath` and `urllib` rejects every
+    certificate before the request is sent:
+
+        [SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer certificate
+
+    That reads as a bad server certificate and is not one — the chain validates
+    under `curl` and `openssl s_client`, and the store answers normally once a
+    bundle is supplied. This went unnoticed because every store this script had
+    used was `http://localhost`, where no TLS is involved, so the first HTTPS
+    store was also the first to fail.
+
+    Resolution order, first hit wins: `$SSL_CERT_FILE` (the caller's explicit
+    choice), then `certifi` when installed, then the platform bundle. A fix
+    inside the script rather than a caller-side env var, because the next
+    caller will not know to set one.
+
+    Returns None when the interpreter's own default context actually loads
+    roots, so `urlopen` keeps its default and a machine that was working is
+    unchanged. Also None when no bundle is found anywhere: there is nothing to
+    trust, and failing loudly beats silently trusting nothing.
+
+    ⚠️ **"Loaded roots" is the test, never "a path is configured."** A bundle
+    that exists but parses to zero certificates builds a context with no trust
+    anchors; the original `CERTIFICATE_VERIFY_FAILED` then persists and the fix
+    is a silent no-op, indistinguishable from the bug it was meant to cure. The
+    same trap sits on the interpreter's own default: `get_default_verify_paths()`
+    reports the **compiled-in** OpenSSL paths, not paths that were checked — a
+    python.org macOS build names a `cert.pem` under its framework that does not
+    exist until `Install Certificates.command` has run. So the default is probed
+    by building it and counting its roots, and only a default that really trusts
+    something is accepted. Each fallback candidate is validated the same way and
+    a dud falls through to the next rather than being returned.
+    """
+    if _default_context_loads_roots():
+        return None
+    for cafile in _ca_bundle_candidates():
+        if not os.path.exists(cafile):
+            continue
+        try:
+            context = ssl.create_default_context(cafile=cafile)
+        except OSError:
+            continue
+        if context.get_ca_certs():
+            return context
+    return None
+
+
+def _default_context_loads_roots():
+    """Whether the interpreter's own default context trusts any certificate.
+
+    Probed rather than inferred from `get_default_verify_paths()`: that reports
+    what OpenSSL was *compiled* to use, and a reported path may not exist.
+    """
+    try:
+        context = ssl.create_default_context()
+    except OSError:
+        return False
+    return bool(context.get_ca_certs())
+
+
+def _ca_bundle_candidates():
+    """The bundle paths to try, in the caller's order of intent."""
+    env = os.environ.get("SSL_CERT_FILE") or ""
+    if env:
+        yield env
+    try:
+        import certifi
+
+        yield certifi.where()
+    except ImportError:
+        pass
+    yield from CA_BUNDLE_PATHS
+
+
+# Bearer token for a store that requires authentication.
+#
+# Empty by default, so a local unauthenticated store behaves exactly as before.
+# An in-cluster store answers 401 without it — and 401 reads to this script as
+# "nothing was posted", which is the confusing failure this exists to remove.
+# The token belongs to whoever runs the command: it is read from the
+# environment and never written, logged or echoed.
+TOKEN = os.environ.get("ATTENTION_STORE_TOKEN", "").strip()
+
+
+def _headers(extra=None):
+    """Request headers, carrying the bearer token when one is configured."""
+    headers = dict(extra or {})
+    if TOKEN:
+        headers["Authorization"] = "Bearer " + TOKEN
+    return headers
 
 
 # The largest TTL this script will accept.
@@ -293,12 +405,27 @@ def is_store_item_id(candidate):
     return len(candidate) == STORE_ITEM_ID_LEN and all(c in _HEX_DIGITS for c in candidate)
 
 
-# The answer mechanisms this script posts. It asks questions, so `message` is
-# the only one it offers: a `permission` item is approve-shaped and only the
-# operator may answer it, in the session that raised it, and an `ack` item asks
-# nothing. Offering either here would let a manager post a gate it cannot
-# legally answer.
+# The answer mechanism this script posts by default. It asks questions, so
+# `message` is the default.
 MECHANISM = "message"
+
+# The mechanisms a caller may select with `--mechanism`.
+#
+# ⚠️ **`permission` is deliberately absent, and the omission is the rule rather
+# than an unfinished enum.** A `permission` item is approve-shaped: its verdict
+# is `decision`, it carries no options, and the release path reads `resolved_by`
+# — a field only an ARM writes, never the board (`attention-answer.py` records
+# why, and `attention-store-impl.go` permits the arm's second write for exactly
+# this class). A poster that minted one here would be creating a gate whose
+# Allow/Deny the operator can click and which releases nothing, which is the
+# defect this script must not be able to express.
+#
+# `ack` IS offered because it is the honest shape for a card that reports a
+# condition and asks nothing: it renders no input field and no Allow/Deny, so it
+# cannot offer an action it does not have. The re-registered-park arm uses it for
+# a session parked on a native permission modal — the modal is answerable only in
+# that session's pane, so a card there must say so and offer no field.
+POSTABLE_MECHANISMS = (MECHANISM, "ack")
 
 
 # The producer kinds the store accepts. It validates this field against a closed
@@ -307,7 +434,7 @@ MECHANISM = "message"
 # is — the failure reads as a store fault rather than a bad argument. Pinning the
 # enum here lets argparse reject it before the request is sent, and list the
 # accepted values in `--help`.
-PRODUCER_KINDS = ("session", "agent", "cron", "dark-factory")
+PRODUCER_KINDS = ("session", "manager", "agent", "cron", "dark-factory")
 # The three levels the store's schema declares for `risk`. It is a producer
 # declaration, stored unchanged; the board may render HIGHER than it and never
 # lower, so a poster that under-declares still cannot make a destructive card
@@ -429,6 +556,60 @@ def manager_guard():
         return None
 
 
+_SESSION_ROLE = None
+
+
+def session_role():
+    """The declared-role resolver, loaded ONCE and reused.
+
+    ⚠️ Lazily loaded but memoized, **including a failure** — the `False`
+    sentinel stops a retry storm. Re-execing the module on every post would also
+    rebuild `session-role.py`'s own role cache from empty, turning its
+    one-call-per-session promise into a file read + compile + HTTP call per card.
+
+    A card must still post when the resolver is missing, so a load failure is a
+    warning and the declared `--producer-kind` stands — the pre-change behaviour,
+    which is the safe direction.
+    """
+    global _SESSION_ROLE
+    if _SESSION_ROLE is None:
+        try:
+            mod = _load("session_role", "session-role.py")
+            _SESSION_ROLE = mod if hasattr(mod, "resolve_producer_kind") else False
+        except Exception as err:
+            _warn(f"session-role unavailable ({err}) — producer_kind stays as declared")
+            _SESSION_ROLE = False
+    return _SESSION_ROLE or None
+
+
+def producer_kind_for(producer_id, declared):
+    """The kind to post: the declared value, or the session's ledger role.
+
+    ⚠️ Keyed on `producer_id` — the session the item is ABOUT — never on the
+    invoking process. `manager-attention-watch.py` posts on behalf of a parked
+    worker: the caller is a manager, the `producer_id` is the worker, and the
+    card must read `session`. Reading `$CLAUDE_CODE_SESSION_ID` here instead
+    would relabel exactly the cards this resolver exists to get right.
+
+    The TLS context and auth headers are forwarded so an HTTPS or authenticated
+    store resolves the same way every other call in this file does; without them
+    the resolver would silently answer `session` for every session there.
+    """
+    mod = session_role()
+    if mod is None:
+        return declared
+    try:
+        return mod.resolve_producer_kind(
+            producer_id,
+            declared,
+            ssl_context=_ssl_context(),
+            headers=_headers(),
+        )
+    except Exception as err:
+        _warn(f"producer_kind resolution failed ({err}) — using {declared!r}")
+        return declared
+
+
 def is_manager_session(guard, producer_id):
     """True when `producer_id` is a manager arm, by the guard's own rule.
 
@@ -534,6 +715,7 @@ def post_question(
     context,
     options,
     expires_at,
+    mechanism=MECHANISM,
 ):
     body = {
         "producer_id": producer_id,
@@ -542,7 +724,7 @@ def post_question(
         "dedup_key": dedup_key,
         "interrupt_class": interrupt_class,
         "payload": payload,
-        "answer_mechanism": MECHANISM,
+        "answer_mechanism": mechanism,
     }
     # Omitted rather than sent empty. The schema treats an absent `context` and
     # an absent `expires_at` as pre-change/optional values, while "" would be a
@@ -562,15 +744,22 @@ def post_question(
     req = urllib.request.Request(
         f"{STORE}/api/1.0/attention",
         data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=_headers({"Content-Type": "application/json"}),
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=STORE_TIMEOUT) as resp:
+    with urllib.request.urlopen(
+        req, timeout=STORE_TIMEOUT, context=_ssl_context()
+    ) as resp:
         return json.load(resp)
 
 
 def fetch_item(item_id):
-    with urllib.request.urlopen(f"{STORE}/api/1.0/attention/{item_id}", timeout=STORE_TIMEOUT) as resp:
+    req = urllib.request.Request(
+        f"{STORE}/api/1.0/attention/{item_id}", headers=_headers()
+    )
+    with urllib.request.urlopen(
+        req, timeout=STORE_TIMEOUT, context=_ssl_context()
+    ) as resp:
         return json.load(resp)
 
 
@@ -790,7 +979,8 @@ def _report_transport_failure(reason, item_may_exist, out):
     return 1
 
 
-def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
+def _post_and_report(args, producer_id, liveness_ref, payload, options, out,
+                     mechanism=MECHANISM):
     """POST one item and print its id and poll line. Returns the exit code."""
     # ⚠️ Resolved BEFORE the store call, and reported HERE rather than raised out
     # of the helper, so a bad `$ATTENTION_ASK_TTL_HOURS` follows the file's own
@@ -807,7 +997,9 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
     try:
         item = post_question(
             producer_id=producer_id,
-            producer_kind=args.producer_kind,
+            # Resolved from the card's `producer_id`, not the caller — see
+            # `producer_kind_for`. An explicit non-`session` flag still wins.
+            producer_kind=producer_kind_for(producer_id, args.producer_kind),
             liveness_ref=liveness_ref,
             dedup_key=args.dedup_key,
             interrupt_class=args.interrupt_class,
@@ -816,6 +1008,7 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
             context=args.context,
             options=options,
             expires_at=expires_at,
+            mechanism=mechanism,
         )
     except urllib.error.HTTPError as err:
         detail = err.read().decode(errors="replace")
@@ -842,9 +1035,49 @@ def _post_and_report(args, producer_id, liveness_ref, payload, options, out):
     return 0
 
 
+def _mechanism_or_default(args):
+    """`args.mechanism`, the default when the caller supplied none, else a refusal.
+
+    ⚠️ Not a bare `getattr(args, "mechanism", MECHANISM)`. `getattr` only falls
+    back when the ATTRIBUTE is absent, and callers that build their args from a
+    mock or a hand-made namespace carry one that is not a legal mechanism — which
+    is how a test fixture's placeholder reached the request body and made the
+    store's own field unserialisable. A placeholder is silently defaulted.
+
+    ⚠️ **A real string outside the set is REFUSED, not defaulted.** argparse
+    already rejects every bad typed value, so reaching here with one means a
+    programmatic caller — and silently downgrading `"ack "` or `"ACK"` to
+    `message` would post exactly the misleading question card this change
+    exists to remove, with no error anywhere. A value that is not a string at
+    all is a placeholder and takes the default.
+    """
+    mechanism = getattr(args, "mechanism", MECHANISM)
+    if mechanism in POSTABLE_MECHANISMS:
+        return mechanism, None
+    if isinstance(mechanism, str) and mechanism.strip():
+        return None, (
+            f"--mechanism {mechanism!r} is not one of "
+            f"{', '.join(POSTABLE_MECHANISMS)}")
+    return MECHANISM, None
+
+
 def cmd_post(args, out=sys.stdout):
     producer = _producer_or_refuse(args, out)
     if producer is None:
+        return 2
+    mechanism, refusal = _mechanism_or_default(args)
+    if refusal:
+        print(f"REFUSED: {refusal}", file=out)
+        return 2
+    if mechanism == "ack" and (args.option or args.recommend):
+        # The store rejects `options` on an `ack` item (the schema gives the
+        # mechanism no choices), so the refusal has to land here where it reads
+        # as a bad argument rather than a store fault.
+        print(
+            "REFUSED: --mechanism ack asks nothing, so --option and --recommend "
+            "are not allowed — post the card with no choices, or drop the "
+            "--mechanism flag to ask a message question.",
+            file=out)
         return 2
     try:
         options = build_options(args.option, args.recommend)
@@ -866,7 +1099,8 @@ def cmd_post(args, out=sys.stdout):
             "--force if the card is deliberate.",
             file=out)
         return 2
-    return _post_and_report(args, *producer, args.payload, options, out)
+    return _post_and_report(args, *producer, args.payload, options, out,
+                            mechanism=mechanism)
 
 
 def cmd_post_batch(args, out=sys.stdout):
@@ -889,7 +1123,43 @@ def cmd_post_batch(args, out=sys.stdout):
     return _post_and_report(args, *producer, payload, [], out)
 
 
-def cmd_poll(item_id, out=sys.stdout):
+def describe_client(item):
+    """Render the store-recorded answering client, or "" when it recorded none.
+
+    The controller writes `answered_client` from the request itself — `user_agent`
+    and `remote_addr` are read by the store and never accepted from a body — so
+    this is evidence about the client rather than a declaration like
+    `answered_by`. Rendering it in `poll` is what makes "who answered this" one
+    command away instead of a grep of the controller's stderr log.
+
+    ⚠️ **`forwarded_for` renders in its own parenthetical and never replaces
+    `remote_addr`.** The header is caller-set, so it belongs to the same weaker
+    class as `user_agent`; flattening it into the address would read as though
+    the store had proven it.
+
+    An item answered before the field existed, or by a caller that sent no user
+    agent and no address, returns "" — the caller prints no line, which reads as
+    "the store recorded nothing about the client" rather than as a blank client.
+    """
+    client = item.get("answered_client")
+    if not isinstance(client, dict):
+        return ""
+    parts = []
+    if client.get("user_agent"):
+        parts.append(str(client["user_agent"]))
+    if client.get("remote_addr"):
+        parts.append("@ " + str(client["remote_addr"]))
+    rendered = " ".join(parts)
+    forwarded_for = client.get("forwarded_for")
+    if forwarded_for:
+        if rendered:
+            rendered = f"{rendered} (forwarded_for: {forwarded_for})"
+        else:
+            rendered = f"forwarded_for: {forwarded_for}"
+    return rendered
+
+
+def cmd_poll(item_id, out=sys.stdout, answered_at=False):
     if not is_store_item_id(item_id):
         # ⚠️ Refused here rather than at the store's 404, and that placement is
         # the whole point: a short id and an unknown full id both printed
@@ -934,22 +1204,52 @@ def cmd_poll(item_id, out=sys.stdout):
     verdict, reason = attribution.classify(item)
     described = describe_answer(item)
     # `OPEN` is the one terminal that means "still unanswered", and it is
-    # reached only when the record carries neither an answer nor an act. An
-    # item that moved but whose mover cannot be attributed falls through to
-    # NOT_OPERATOR_ANSWERED rather than being read as open — failing closed in
-    # that direction is what keeps a re-ask from looking like a lost gate.
+    # reached only when the record is still open AND carries neither an answer
+    # nor an act. An item that moved but whose mover cannot be attributed falls
+    # through to NOT_OPERATOR_ANSWERED rather than being read as open — failing
+    # closed in that direction is what keeps a re-ask from looking like a lost
+    # gate.
     #
-    # ⚠️ **This branch is deliberately NOT keyed on `state`, and 2026-09-27 is
-    # why it was checked.** A `closed` item that carries an actor still classifies
-    # as an act and falls through to NOT_OPERATOR_ANSWERED — the item moved, and
-    # saying "open" would invite a manager to keep waiting on a card that is
-    # gone. Only a record with no actor at all — the reaped close — reaches OPEN
-    # here, which is what makes a reap and an acknowledgement distinguishable in
-    # the terminal rather than collapsed into one word.
-    if verdict == attribution.NOTHING and described is None:
+    # ⚠️ **This branch IS keyed on `state`, and the 2026-09-27 note it replaces
+    # is why.** That note argued the opposite: a record with no actor at all —
+    # the reaped close — should reach OPEN, so a reap and an acknowledgement
+    # stay distinguishable in the terminal. The reasoning holds; the terminal it
+    # picked does not. A reap is not the only record with no actor. Every one of
+    # these posts an empty body and lands here with no `answered_by`:
+    # `sweep_dead_sessions` (attention-watcher.py:668), the compact-crossing
+    # clear (:1327), a forwarded `SessionEnd` (:2991), and
+    # `close_session_approval` (:1213) — and the last is not a producer exit at
+    # all. So "no actor" cannot stand in for "open", and printing OPEN for it
+    # made a reaped close read exactly like a live gate: measured 2026-10-27,
+    # `poll` and `answer` disagreed about one card seconds apart because of it.
+    #
+    # The separation the old note protected survives, but on a different field,
+    # and saying so plainly is the point of this paragraph. A reaped close now
+    # falls through to NOT_OPERATOR_ANSWERED — and so does an acknowledgement,
+    # the actor-carrying close (`state: closed` + `answered_by`, no
+    # `answered_at`), which `answered-attribution.py` deliberately does not
+    # treat as a release (pinned by
+    # `test_ack_close_with_no_client_is_not_operator_answered`). The two stay
+    # distinguishable by `ANSWERED_BY:` — an acknowledgement carries an actor
+    # and a reap carries none — not by the terminal word. What the old branch
+    # actually bought was a word that also meant "a live gate is waiting", and
+    # that overload is what this change gives up. `state` is the only field that
+    # can carry the open/not-open distinction: the store refuses an arm-caused
+    # close of an open `permission` gate (attention-store-impl.go:1498-1506),
+    # so the reaped record has no `answered_by` to read. A record whose `state`
+    # is unreadable is not claimed as open either; failing closed is the point.
+    if (
+        verdict == attribution.NOTHING
+        and described is None
+        and item.get("state") == "open"
+    ):
         print("OPEN", file=out)
         return 0
     answered_by = item.get("answered_by") or ""
+    # The client evidence rides with the actor on every terminal that names an
+    # actor: `answered_by` says which surface moved the item, this says which
+    # client did — the distinction that separates a board click from a script.
+    answered_client = describe_client(item)
     # `state`, never the word "closed": an attributed item that renders no
     # content is `answered` with nothing this renderer reads, and naming the
     # other state would misdescribe the transition that happened.
@@ -958,6 +1258,14 @@ def cmd_poll(item_id, out=sys.stdout):
         print(f"ANSWERED: {content}", file=out)
         if answered_by:
             print(f"ANSWERED_BY: {answered_by}", file=out)
+        if answered_client:
+            print(f"ANSWERED_CLIENT: {answered_client}", file=out)
+        # Opt-in, so every existing consumer's output is byte-identical. The fleet keeper
+        # bounds how long an answered resume may wait from when the OPERATOR answered, not
+        # from when the keeper first noticed — a keeper asleep for hours must not hand an
+        # hours-old answer a fresh window.
+        if answered_at and item.get("answered_at"):
+            print(f"ANSWERED_AT: {item.get('answered_at')}", file=out)
         return 0
     # ⚠️ Two terminals of their own, from 2026-10-20. Both are answers the
     # operator GAVE, so neither is `NOT_OPERATOR_ANSWERED`, and neither is
@@ -973,11 +1281,15 @@ def cmd_poll(item_id, out=sys.stdout):
         print(f"DECLINED: {content}", file=out)
         if answered_by:
             print(f"ANSWERED_BY: {answered_by}", file=out)
+        if answered_client:
+            print(f"ANSWERED_CLIENT: {answered_client}", file=out)
         return 0
     if verdict == attribution.HIDDEN:
         print("HIDDEN", file=out)
         if answered_by:
             print(f"ANSWERED_BY: {answered_by}", file=out)
+        if answered_client:
+            print(f"ANSWERED_CLIENT: {answered_client}", file=out)
         return 0
     # ⚠️ Not a failure of the poll — the poll succeeded and the item DID move.
     # It is a refusal to treat that movement as the operator's answer, so a
@@ -987,6 +1299,8 @@ def cmd_poll(item_id, out=sys.stdout):
     print(f"NOT_OPERATOR_ANSWERED: {content} -- {reason}", file=out)
     if answered_by:
         print(f"ANSWERED_BY: {answered_by}", file=out)
+    if answered_client:
+        print(f"ANSWERED_CLIENT: {answered_client}", file=out)
     return 0
 
 
@@ -998,6 +1312,16 @@ def main(argv=None):
     post.add_argument("--dedup-key", required=True)
     post.add_argument("--payload", required=True)
     post.add_argument("--context", default="")
+    post.add_argument(
+        "--mechanism",
+        default=MECHANISM,
+        choices=POSTABLE_MECHANISMS,
+        help="how this item is answered; default message. `ack` reports a "
+             "condition and asks nothing (no input field, no options). "
+             "`permission` is not offered: a permission gate is released only "
+             "by an arm answer carrying resolved_by, which the board never "
+             "sends, so a card minted here could not release one.",
+    )
     post.add_argument("--option", action="append", default=[])
     post.add_argument("--recommend", default="")
     post.add_argument(
@@ -1065,6 +1389,9 @@ def main(argv=None):
 
     poll = sub.add_parser("poll")
     poll.add_argument("item_id")
+    poll.add_argument("--answered-at", action="store_true",
+                      help="also print `ANSWERED_AT: <rfc3339>` for an answered item (opt-in; "
+                           "the default output is unchanged)")
 
     args = parser.parse_args(argv)
     try:
@@ -1072,7 +1399,7 @@ def main(argv=None):
             return cmd_post(args)
         if args.cmd == "post-batch":
             return cmd_post_batch(args)
-        return cmd_poll(args.item_id)
+        return cmd_poll(args.item_id, answered_at=args.answered_at)
     except urllib.error.HTTPError as err:
         # Each command handles its own HTTP errors, so reaching here means the
         # failure predates the item lookup — which is why no item is named: this

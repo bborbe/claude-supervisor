@@ -24,6 +24,7 @@ import {
   collectWorkerTurn,
   configuredA2AClusters,
   createWorkerOnController,
+  fetchControllerProtocolVersion,
   fetchWorkerCard,
   isA2ATarget,
   ledgerModeForStatus,
@@ -1711,4 +1712,56 @@ test('every worker-facing A2A call site in supervisor.mjs passes the negotiated 
     [],
     'a call site that drops the version silently restores the -32009 refusal this change removes',
   )
+})
+
+// The same guard as the worker-facing one above, on the CONTROL plane. The controller moved to
+// a2a-go v2.7.0 at v0.17.0, where an absent header defaults to "0.3" and is refused, so a control
+// call site that drops the version silently restores `-32009 … requested "0.3", served "1.0"` on
+// `create`, `list` and `stop` — the refusal this change exists to remove.
+test('every controller-facing control call site passes the negotiated version', () => {
+  const src = readFileSync(new URL('./a2a-spawn.mjs', import.meta.url), 'utf8')
+
+  const sites = callSites(src, 'a2aSendRequestFor')
+  assert.ok(sites.length > 0, 'the control plane must have call sites to pin')
+
+  const missing = []
+  sites.forEach((site, index) => {
+    if (!/protocolVersion/.test(site)) missing.push(`a2aSendRequestFor call #${index + 1}`)
+  })
+
+  assert.deepEqual(
+    missing,
+    [],
+    'a control call site that drops the version restores the -32009 refusal on create, list and stop',
+  )
+})
+
+// ⚠️ The controller guards its WHOLE surface, the agent card included: an unauthenticated GET
+// answers 401 (measured 2026-10-22). A card read that omitted the bearer therefore returned no
+// version, sent no `A2A-Version`, and the controller defaulted the absent header to "0.3" and
+// refused — the exact `-32009` the negotiation exists to prevent, reproduced THROUGH the fix.
+test('the controller card is read with the bearer, so a version is actually found', async () => {
+  let sawAuth
+  const version = await fetchControllerProtocolVersion({
+    endpoint: 'https://controller.example/a2a',
+    token: 'controller-bearer',
+    fetchImpl: async (url, init) => {
+      sawAuth = init.headers.authorization
+      return {
+        ok: true,
+        json: async () => ({ supportedInterfaces: [{ protocolVersion: '1.0' }] }),
+      }
+    },
+  })
+  assert.equal(version, '1.0')
+  assert.equal(sawAuth, 'Bearer controller-bearer')
+})
+
+test('a 401 card read yields no version, which is the path that reproduces the refusal', async () => {
+  const version = await fetchControllerProtocolVersion({
+    endpoint: 'https://controller.example/a2a',
+    token: 'controller-bearer',
+    fetchImpl: async () => ({ ok: false, status: 401 }),
+  })
+  assert.equal(version, undefined)
 })

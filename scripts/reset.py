@@ -248,26 +248,39 @@ def members_of(topic_page):
     return [h.group(1).strip() for h in map(_LIST_ITEM.match, m.group(1).splitlines()) if h]
 
 
-def clean(value):
-    """Strip `- `, quotes, brackets until the name stops changing — covers
-    `- '[[X]]'`, `goals: X`, `- - X` and `['[[X]]']`."""
-    prev = None
-    while prev != value:
-        prev = value
-        value = value.strip().lstrip("-").strip().strip("'\"").strip("[]").strip()
-    return value.split("|")[0]
+_GOALS_DECLARATION = None
+
+
+def _goals_declaration():
+    """Import goals-declaration.py — the shared `goals:` reader.
+
+    ⚠️ **Shared with `manager-predispatch.py`, and it was not before.** This file's own
+    normaliser handled every declaration shape while the gate's read returned only
+    `[[...]]` matches, so the two disagreed about any task whose `goals:` is a bare list
+    item — and neither looked wrong on its own. Measured 2026-11-02 on the live
+    `private-personal` vault: 61 names against 60, differing by exactly that task. One
+    implementation is what stops the pair drifting again.
+    """
+    global _GOALS_DECLARATION
+    if _GOALS_DECLARATION is None:
+        spec = importlib.util.spec_from_file_location(
+            "goals_declaration", os.path.join(HERE, "goals-declaration.py")
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _GOALS_DECLARATION = mod
+    return _GOALS_DECLARATION
 
 
 def goals_of(text):
+    """The goal names a task page's `goals:` declares, as a set.
+
+    The frontmatter slice stays here because it is this file's own concern: `text` is the
+    WHOLE page, and a `goals:` line quoted inside a `# Progress` entry must never be read
+    as a declaration. The parsing itself is the shared module's.
+    """
     fm = text.split("\n---", 1)[0] if text.startswith("---") else ""
-    m = re.search(r"^goals:(.*)$", fm, re.M)
-    if not m:
-        return set()
-    rest = m.group(1).strip()
-    if rest and rest != "[]":
-        return {clean(v) for v in rest.strip("[]").split(",") if clean(v)}
-    block = re.search(r"^goals:\s*\n((?:[ \t]*-.*\n?)*)", fm, re.M)
-    return {clean(v) for v in (block.group(1).splitlines() if block else []) if clean(v)}
+    return set(_goals_declaration().goal_names(fm))
 
 
 def tracked_set(subject, branch, page, vcfg):

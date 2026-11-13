@@ -66,8 +66,39 @@ FIELDS = (
     "reprobe_probe",
     "unverifiable_streak",
     "unverifiable_round",
+    "unverifiable_action",
+    "unverifiable_observation",
+    # The stuck probe's reading, which the NEXT round's `--previous-mtime` compares
+    # against. It is a field rather than a suffix on `probe` because the 2-round count
+    # reads one integer: an entry written without it reads as a first observation every
+    # round, and the count can never be reached.
+    "transcript_mtime",
 )
-VERDICTS = ("revive", "blocked", "unverifiable", "finished")
+#: `closed` is the drive leg's idle-after-nudge outcome: the row was nudged in an earlier
+#: round, was unchanged this one, and its pane was closed by `close-idle-tab.py`. It is a
+#: verdict rather than a `nudge` value because the row left the candidate set — recording
+#: it keeps the history explicit, and a later round that finds the session gone reads a
+#: closed entry rather than an unexplained absence.
+#: `wrote-nothing` is the never-wrote outcome: the worker exited without modifying its
+#: task page, so the row is reported as a failure rather than nudged. Both it and
+#: `closed` are verdicts rather than `nudge` values because each leaves the candidate set.
+#: `stuck` is the idle-with-no-wait outcome (agents/fleet-drive.md step 5c): a headless
+#: row that ignored its nudge, whose transcript has not moved for two rounds, with no
+#: tool in flight and no declared wait. A verdict rather than a `nudge` value for the
+#: same reason as `closed` — the row leaves the candidate set, and a later round that
+#: finds the session gone should read a recorded outcome rather than an absence.
+VERDICTS = ("revive", "blocked", "unverifiable", "finished", "closed", "wrote-nothing", "stuck")
+#: What the 2-round rule did about a row, or "" when it has not acted. The marker is what
+#: makes the action fire ONCE per silence rather than on every round at or past the
+#: threshold: a row held back by the per-round cap keeps advancing its streak, so a
+#: `streak == 2` test would never match it again and it would be acted on never.
+UNVERIFIABLE_ACTIONS = ("", "nudge", "escalation")
+#: The third outcome, kept in its OWN field on purpose. `drive-share.py` counts any
+#: non-empty `unverifiable_action` as an action taken, so recording a pane-less
+#: observation there would inflate the detected->verified numerator on a row nobody acted
+#: on. Like the action marker it fires once per silence, so a gone session is named in the
+#: `UNVERIFIABLE` block once rather than every round.
+UNVERIFIABLE_OBSERVATIONS = ("", "observation")
 NUDGES = ("drafted", "none")
 
 #: Top-level keys that are not themselves session entries.
@@ -88,7 +119,7 @@ def bak_path():
 
 
 def canonical(sid, raw):
-    """One entry, canonical shape, all twelve fields present.
+    """One entry, canonical shape, all thirteen fields present.
 
     `open_boxes` is deliberately NOT defaulted to 0. A legacy row never carried the
     field, and 0 means "verified finished" while None means "never counted" -- the
@@ -133,6 +164,11 @@ def canonical(sid, raw):
         "reprobe_probe": raw.get("reprobe_probe") or "",
         "unverifiable_streak": streak_of(raw.get("unverifiable_streak")),
         "unverifiable_round": raw.get("unverifiable_round") or "",
+        "unverifiable_action": raw.get("unverifiable_action") or "",
+        "unverifiable_observation": raw.get("unverifiable_observation") or "",
+        # Kept as the caller wrote it — an epoch int, or "" when the probe did not run.
+        # Coercing it here would turn "no reading" into a number the next round compares.
+        "transcript_mtime": raw.get("transcript_mtime", ""),
     }
 
 
@@ -141,10 +177,11 @@ def streak_of(value):
 
     `bool` is an `int` in Python, so a hand-edited `true` would otherwise read as 1 --
     a plausible-looking count nobody computed. Anything unparseable is 0, and the
-    asymmetry is deliberate: the count gates an action at exactly 2, so a corrupt
-    value read as 0 stays silent, while a corrupt value read as 2 sends a nudge on no
-    evidence. A round payload that carries a bad count is REFUSED by `check()` before
-    it ever reaches here, so this default only covers a ledger already on disk.
+    asymmetry is deliberate: the count becomes actionable at `>= 2`, so a corrupt
+    value read as 0 stays silent, while a corrupt value read as 2 makes a row
+    actionable on no evidence. A round payload that carries a bad count is REFUSED by
+    `check()` before it ever reaches here, so this default only covers a ledger already
+    on disk.
     """
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return 0
@@ -274,6 +311,20 @@ def check(row, sid):
         return "session %s carries unverifiable_streak %r, not a non-negative int" % (
             sid,
             streak,
+        )
+    action = row.get("unverifiable_action", "")
+    if action not in UNVERIFIABLE_ACTIONS:
+        return "session %s carries unverifiable_action %r, not one of %r" % (
+            sid,
+            action,
+            UNVERIFIABLE_ACTIONS,
+        )
+    observation = row.get("unverifiable_observation", "")
+    if observation not in UNVERIFIABLE_OBSERVATIONS:
+        return "session %s carries unverifiable_observation %r, not one of %r" % (
+            sid,
+            observation,
+            UNVERIFIABLE_OBSERVATIONS,
         )
     return None
 

@@ -34,6 +34,14 @@ comes from `~/.claude/state/worker-manager/<sid>.json`, written by the recording
     none. Measured against the two managers in the incident above: `b34530bd` has a
     subject file (`BRO-21389 MDM via REST`), `f37d6f6a` has none. Both branches are real.
 
+⚠️ **A stood-down subject is skipped, and the skip is REPORTED.** `/supervisor:stop` writes
+`<branch>--<slug>.stopped` in the sweep-gate state dir and the operator's act says that
+subject's work is not to be picked up. Adoption would hand its stranded workers to a new
+owner and re-open exactly that work by another door, so the row is skipped before the claim
+is attempted and printed as `skipped: manager <sid8> — subject "<subject>" stood down
+(<marker>)`. The marker read is `manager-liveness.is_subject_stopped()` -- the one reader,
+shared with `open-queue.py`, never a second copy of the path.
+
 ⚠️ **Liveness is registry ∪ heartbeat, and the worker must be LIVE.** The registry is
 pid-keyed and cannot see a headless in-process worker; the heartbeat store covers exactly
 those. Reading either alone answers `0` or misses a population -- `worker-sessions.py`
@@ -91,6 +99,13 @@ def _load(module_name, filename):
 # silent -- this script would adopt on a predicate the router does not use.
 gf = _load("gate_owner_filter", "gate-owner-filter.py")
 
+# The ONE stand-down marker read (`<branch>--<slug>.stopped`), owned by the script that
+# writes it (`/supervisor:stop` -> `manager-liveness.py --stop`). Imported for the same
+# reason as `is_manager`: a copy would drift from the writer, and the drift would be
+# silent -- this script would hand a deliberately stood-down subject's workers to a new
+# owner, which is the defect it exists to avoid.
+ml = _load("manager_liveness", "manager-liveness.py")
+
 
 def normalise(text):
     """Fold a subject for comparison.
@@ -117,8 +132,13 @@ def subject_of(session_id, subjects_dir=SUBJECTS):
     return normalise(record.get("subject")) or None
 
 
-def live_session_ids(registry_dir=None, heartbeat_dir=None):
+def live_session_ids(registry_dir=None, heartbeat_dir=None, registry_out=None):
     """Registry ∪ heartbeat as a set of session ids, or None when a store is unreadable.
+
+    `registry_out` is an optional dict this fills with the registry records it read, so a
+    caller that also needs a worker's own `status` does not re-read the same store. It is
+    an out-parameter rather than a second return value so every existing caller and test
+    keeps its signature.
 
     None is not "nothing is live" -- it is unknown, and the caller must refuse rather than
     adopt. A missing registry would otherwise read every manager as exited and hand its
@@ -136,6 +156,25 @@ def live_session_ids(registry_dir=None, heartbeat_dir=None):
     heartbeats = lw.read_live(store, ttl=lw.TTL_SECONDS)
     if heartbeats is None:
         return None
+    if registry_out is not None:
+        # ⚠️ **The RAW records, not `read_registry`'s normalised dict.** That view carries
+        # only `{pid, status, name, alive}` — `entrypoint` is dropped — so a caller keying
+        # its population on `entrypoint` would read `None` on every row and report nothing
+        # while looking correct. `read_registry_entries` is the same file read as the list
+        # shape, and it keeps the field.
+        entries = identity.read_registry_entries(registry_dir) if registry_dir else identity.read_registry_entries()
+        if entries is None:
+            # ⚠️ **Not silent.** An unreadable registry here means the parked population
+            # was never read, so the `parked:` line reports nothing for a reason — and an
+            # empty line and a clean fleet must not render the same.
+            sys.stderr.write(
+                "adopt-orphans: registry re-read failed -- the parked population was not "
+                "measured this round\n"
+            )
+        for _path, rec in entries or []:
+            session_id = rec.get("sessionId") or rec.get("session_id")
+            if session_id:
+                registry_out[session_id] = rec
     live = set(registry)
     for stamp in heartbeats:
         session_id = stamp.get("session_id")
@@ -174,6 +213,42 @@ def stranded_workers(ledger, live):
     return {parent: sorted(workers) for parent, workers in out.items()}
 
 
+def parked_workers(workers, registry):
+    """The adopted workers parked on a prompt whose responder is gone — E13's population.
+
+    ⚠️ **Adoption gives a worker an owner for its NEXT gate; it does not answer the one it
+    is sitting on.** A parked prompt is held by the spawning session's own server process,
+    so when that process exits the request has no responder at all: the worker waits out
+    the 15-minute auto-deny and then continues on a denial nobody was ever asked about.
+    The recovery is therefore a RESUME, not a claim — the fresh process re-raises the
+    request against the live spawner the adoption just named.
+
+    ⚠️ **`waiting` is the registry's own word for parked**, the same field
+    `manager-attention-watch.py` reads for `registry:waiting`. A worker that is `busy` is
+    mid-turn and a worker that is `idle` is between turns; neither is waiting on an answer
+    that will never come, so neither belongs here.
+
+    ⚠️ **HEADLESS ONLY, and this is the difference between a recovery and a duplicate
+    process.** A tab worker parked on its own tab is waiting on a person looking at that
+    tab — its transport is the pane, which outlived the spawner, so nothing about its
+    prompt is orphaned. Resuming it would put a SECOND process on a live conversation.
+    E13 is specifically the headless worker, whose prompt is served by the spawner's own
+    server process and dies with it; `entrypoint: sdk-cli` is the registry's marker for
+    that kind, the same one `reap-idle-headless.py` gates its own population on.
+    """
+    out = []
+    for worker in workers:
+        record = registry.get(worker) or {}
+        if not isinstance(record, dict):
+            continue
+        if record.get("status") != "waiting":
+            continue
+        if record.get("entrypoint") != "sdk-cli":
+            continue
+        out.append(worker)
+    return out
+
+
 def already_owned(worker, claims, live):
     """True when a LIVE manager already holds this worker -- the adoption has happened.
 
@@ -188,6 +263,37 @@ def already_owned(worker, claims, live):
     """
     holder = claims.get(worker)
     return bool(holder) and holder in live
+
+
+def standdown_marker(subject):
+    """The `<branch>--<slug>.stopped` marker standing this subject down, or None.
+
+    ⚠️ **Every tier is checked, because the exited session is a MANAGER and a manager can
+    have been stood down as a goal, a topic or a fleet subject.** The task tier's usual
+    stand-down is a page field (`stopped: true`) on the row itself, which `open-queue.py`
+    owns; a `task--<slug>.stopped` marker is honoured here all the same, because the
+    marker's existence is the operator's act whatever tier wrote it.
+
+    ⚠️ **A same-named subject on ANOTHER tier therefore also skips this one, and that is
+    the deliberate direction.** The subject-resolution record carries its own `branch`, but
+    trusting it would mean a stale tier there misses the operator's real stop and reopens
+    the work — the failure this whole read exists to prevent. Over-skipping costs an
+    adoption, which the next round repeats; under-skipping costs the operator's decision.
+
+    The returned name is the marker FILE as `manager-liveness.stopped_marker()` resolved
+    it — never a re-composed `<branch>--<slug>`, which on the legacy path names a file that
+    does not exist — so the report can say what evidence the skip rests on and which file
+    to delete to undo it.
+    """
+    if not subject:
+        return None
+    for branch in ml.BRANCHES:
+        # `is_subject_stopped()` is the decision (the same predicate `open-queue.py` reads),
+        # and `stopped_marker()` is the same read returning the path it resolved. Two calls
+        # into ONE implementation, never a second derivation of the name.
+        if ml.is_subject_stopped(subject, branch):
+            return os.path.basename(ml.stopped_marker(subject, branch))
+    return None
 
 
 def resolve_adopter(exited, live, self_id, subjects_dir=SUBJECTS):
@@ -290,7 +396,8 @@ def main(argv=None):
         )
         return 1
 
-    live = live_session_ids(args.registry_dir, args.heartbeat_dir)
+    registry = {}
+    live = live_session_ids(args.registry_dir, args.heartbeat_dir, registry)
     if live is None:
         sys.stderr.write(
             "adopt-orphans: registry or heartbeat store unreadable -- liveness is unknown, "
@@ -312,6 +419,31 @@ def main(argv=None):
     for exited in sorted(stranded):
         workers = stranded[exited]
         adopter, how = resolve_adopter(exited, live, self_id, args.subjects_dir)
+        # ⚠️ **Before the claim, not after it.** `/supervisor:stop` says the subject's work
+        # is not to be picked up; adopting its stranded workers hands that work to a new
+        # owner and re-opens it by another door. The skip is REPORTED (`skipped` on the row
+        # and a `skipped:` line in text mode) rather than silent: an adoption leg that
+        # quietly drops a manager's workers is indistinguishable from one that found none.
+        subject = subject_of(exited, args.subjects_dir)
+        standdown = standdown_marker(subject)
+        if standdown:
+            rows.append(
+                {
+                    "exited": exited,
+                    "adopter": adopter,
+                    "how": how,
+                    "workers": workers,
+                    "adopted": [],
+                    "held": [],
+                    "parked": [],
+                    "skipped": {
+                        "subject": subject,
+                        "reason": "stood down",
+                        "marker": standdown,
+                    },
+                }
+            )
+            continue
         adopted, held = [], []
         for worker in workers:
             if args.dry_run:
@@ -339,6 +471,7 @@ def main(argv=None):
                 "workers": workers,
                 "adopted": adopted,
                 "held": held,
+                "parked": parked_workers(workers, registry),
             }
         )
 
@@ -348,6 +481,15 @@ def main(argv=None):
         return 0
 
     for row in rows:
+        if row.get("skipped"):
+            # ⚠️ The marker is named, not just the fact. "skipped" alone reads as a
+            # judgement; `(goal--<slug>.stopped)` says it is the operator's stand-down and
+            # which file to delete to undo it.
+            print(
+                'skipped: manager %s — subject "%s" stood down (%s)'
+                % (sid8(row["exited"]), row["skipped"]["subject"], row["skipped"]["marker"])
+            )
+            continue
         print("manager %s exited" % sid8(row["exited"]))
         print(
             "%d workers adopted from exited manager %s"
@@ -367,16 +509,27 @@ def main(argv=None):
                 "%d workers already held by a live manager (exited manager %s)"
                 % (len(row["held"]), sid8(row["exited"]))
             )
+        # ⚠️ A parked worker is the adoption's LOOSE END, and it is printed as its own
+        # line so the round cannot read "adopted: 1" as "recovered". The claim routes the
+        # worker's next gate; the prompt it is sitting on died with the spawner, so the
+        # recovery is a resume (E13).
+        for worker in row["parked"]:
+            print(
+                "  parked: %s -- its prompt died with the spawner; resume it"
+                % sid8(worker)
+            )
 
     # Loud on the count, so an empty run reads as "nothing stranded" rather than as a
     # script that never matched -- the same reason `gate-owner-filter.py` prints its
     # verdict census.
     sys.stderr.write(
-        "adopt-orphans: exited managers with live workers: %d  adopted: %d  held: %d\n"
+        "adopt-orphans: exited managers with live workers: %d  adopted: %d  held: %d  "
+        "skipped: %d\n"
         % (
             len(rows),
             sum(len(r["adopted"]) for r in rows),
             sum(len(r["held"]) for r in rows),
+            sum(len(r["workers"]) for r in rows if r.get("skipped")),
         )
     )
     return 0

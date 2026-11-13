@@ -90,6 +90,9 @@ def _load(name, filename):
 wnm = _load("who_needs_me", "who-needs-me.py")
 fs = _load("fleet_sessions", "fleet-sessions.py")
 fc = _load("fleet_colours", "fleet-colours.py")
+dw = _load("declared_wait", "declared-wait.py")
+dd = _load("defer_date", "defer-date.py")
+erc = _load("exit_record_coverage", "exit-record-coverage.py")
 
 # --- the tree's inputs -------------------------------------------------------
 
@@ -582,7 +585,7 @@ BUCKET_ORDER = ("problem", "needs-input", "running", "idle")
 # `Unblocks` — what would move this session forward. Display-only, in the
 # operator's vocabulary: it answers "what do I do about this row", and it
 # deliberately does NOT replace `agents/fleet-drive.md`'s
-# revive/blocked/unverifiable/finished verdicts, which drive the fleet round's
+# revive/blocked/unverifiable/finished/wrote-nothing verdicts, which drive the fleet round's
 # act leg over these same sessions. Two taxonomies over one population is a
 # drift risk; this one is a column, that one is a decision.
 UNBLOCKS_OPERATOR = "operator-keystroke"
@@ -599,7 +602,7 @@ UNBLOCKS_VALUES = (UNBLOCKS_OPERATOR, UNBLOCKS_NUDGE, UNBLOCKS_REAP, UNBLOCKS_WO
 NUDGE_SECONDS = 30 * 60
 
 
-def unblocks_for(sid, age, meta, panel_ids):
+def unblocks_for(sid, age, meta, panel_ids, declared_wait=frozenset(), now=None):
     """Which of the four `Unblocks` values this session carries.
 
     Order is the whole rule — first match wins, and the classes are disjoint by
@@ -615,6 +618,22 @@ def unblocks_for(sid, age, meta, panel_ids):
        so the session wants closing.
     3. `nudge` — inactive past the threshold, in `execution`, holding an open
        box: the one shape where "go on" is both allowed and useful.
+       ⚠️ **A session that DECLARED a wait is never `nudge`.** `declared_wait`
+       carries the ids from `scripts/declared-wait.py` — the `⏰ Ends:` slot — and a
+       declared wait is the one case where a session is inactive *by design*: its
+       turn ended and a machine will wake it. Nudging it is the false positive this
+       parameter exists to remove. `reap/close` and `operator-keystroke` still
+       outrank it, because a finished task wants closing whatever the session
+       declared, and a keystroke row is the operator's to press.
+       ⚠️ **Neither is a session whose task carries a FUTURE `defer_date`.** That
+       is the second inactive-by-design shape, and the `⏰ Ends:` reader cannot
+       see it: a defer is a task-file field, not a closer slot, so a row parked
+       on one reached this rule with an empty `details` and read `nudge` — which
+       is how a `/fleet-triage` pass nudged a worker whose only blocker was the
+       clock (2026-10-28, then 20 such rows in one 2026-11-10 pass). The field is
+       parsed by `scripts/defer-date.py`, the tree's single reader, and only
+       `deferred` suppresses the nudge: a `defer_date` that has PASSED leaves the
+       row `nudge` again, so the defer parks work rather than muting it forever.
     4. `working` — everything else, including a session with no stamped task
        (`meta` is None). ⚠️ `working` is the DEFAULT, not a finding: a session
        with no task cannot be shown to be idle, and inventing a nudge for it
@@ -623,17 +642,47 @@ def unblocks_for(sid, age, meta, panel_ids):
     `age` of `inf` (no transcript at all) counts as past the threshold rather
     than as unknown — `session_transcript_age()`'s own reading, "nothing has been
     written", is the maximal inactive case, and the cell renders it `—`.
+
+    `now` pins the clock for the `defer_date` comparison, so a test can construct
+    a deferred and an expired row without waiting for either.
     """
     if sid in panel_ids:
         return UNBLOCKS_OPERATOR
     if meta:
         if meta.get("status") == "completed":
             return UNBLOCKS_REAP
-        if (age is not None and age >= NUDGE_SECONDS
+        if (sid not in declared_wait
+                and age is not None and age >= NUDGE_SECONDS
                 and meta.get("phase") == "execution"
-                and meta.get("open_boxes", 0) >= 1):
+                and meta.get("open_boxes", 0) >= 1
+                and not _is_deferred(meta, now)):
             return UNBLOCKS_NUDGE
     return UNBLOCKS_WORKING
+
+
+def _defer_reading(meta, now=None):
+    """`(state, detail)` for a row's `defer_date`, or `("none", None)` when absent.
+
+    Reads through `scripts/defer-date.py` rather than slicing the scalar: that
+    module is the tree's ONE `defer_date` reader, and its header records what
+    the seven ad-hoc readers it replaced got wrong (an offset shifting the day,
+    a bare date surfacing at midnight instead of start-of-local-day).
+    """
+    value = (meta or {}).get("defer_date") or ""
+    if not value:
+        return "none", None
+    return dd.defer_state(value, now=now)
+
+
+def _is_deferred(meta, now=None):
+    """Is this row's task deferred into the future?
+
+    Only `deferred` answers True. `due` is a wait that has expired, `none` is no
+    defer at all, and `invalid` is a value that could not be parsed — the last
+    deliberately falls through to the ordinary nudge rule rather than silently
+    parking a row forever on a typo. `build_rows` reports that case in `details`.
+    """
+    return _defer_reading(meta, now=now)[0] == "deferred"
 
 
 def registry_records(sessions_dir=None):
@@ -757,16 +806,25 @@ def collect_signals(stuck_min):
     and the stuck predicate are the same ones the operator's `Needs you` section
     is built from — one definition, two renderings.
 
-    The fourth return value is whether the pane read succeeded. A failed read is
-    `None`, which `is_live()` keeps every row on — the board degrades to the
-    registry's own verdict rather than rendering a false empty — but it must say
-    so, or a board whose pane filter never ran looks identical to one that ran.
+    The fourth return value is the pane map itself — `{pane_id: record}`, or `None`
+    when the read failed. A failed read is `None`, which `is_live()` keeps every row
+    on — the board degrades to the registry's own verdict rather than rendering a
+    false empty — but it must say so, or a board whose pane filter never ran looks
+    identical to one that ran. It is the MAP and not a bool so the exit-record check
+    downstream can reuse this one read instead of spawning a second `wezterm cli
+    list` (up to its 5 s timeout) on every render.
 
     The fifth is the Rendered-panels session-id set — the `operator-keystroke`
     input. It is composed here rather than in `build_rows()` because it needs
     the same `needs`/`open_panes` pair the gate predicate above was built from,
     and re-deriving those in the row builder is exactly the second definition
     this function exists to prevent.
+
+    The sixth is the declared-wait session-id set — the ids whose newest `Stop`
+    record carries a non-empty `⏰ Ends:`, read whole-store through the shared
+    `scripts/declared-wait.py`. It is what suppresses the `Unblocks: nudge`
+    value in `unblocks_for`, and it is returned rather than re-read per row for
+    the same reason the fifth is: one read, one definition.
     """
     registry = wnm.read_registry()
     live_ids = None if registry is None else set(registry)
@@ -792,6 +850,18 @@ def collect_signals(stuck_min):
     gate_ids = {r["session_id"] for r in gates}
     cutoff = time.time() - stuck_min * 60
     stuck_ids = {r["session_id"] for r in wnm.load("tool") if live(r) and r["ts"] < cutoff}
+    # ⚠️ **A declared wait is not stuck, and must not be nudged.** Read once, from the
+    # shared reader (`scripts/declared-wait.py`) — the same `⏰ Ends:` slot the manager
+    # tier's input 13 reads and the fleet sweep's `parked-on-watcher` class keys on.
+    # ⚠️ **The `stuck_ids` subtraction below is forward-compat, not the live fix:**
+    # `stuck_ids` is built from `*.tool.json`, and `agents/manager-drive.md:130` records
+    # that marker as *"effectively dead today — nothing writes the marker any more"*, so
+    # that bucket is inert until the writer returns. **The live route is the `nudge`
+    # value**, which reads transcript age — see `unblocks_for`.
+    # ⚠️ **Untested by design:** no test asserts this subtraction, because the writer is
+    # dead and the bucket is inert. Read the absence of a test as that, not as coverage.
+    wait_ids = dw.declared_wait_ids(state_dir=wnm.STATE)
+    stuck_ids = {sid for sid in stuck_ids if sid not in wait_ids}
     # The Rendered-panels set, read from who-needs-me's own composition so the
     # board's `operator-keystroke` rows and the operator's `Needs you` section
     # cannot drift apart. The `busy`/`resumed` sets are left at their empty
@@ -803,8 +873,8 @@ def collect_signals(stuck_min):
         for r in wnm.rendered_panels(needs, open_panes=open_panes,
                                      task_status=wnm.task_status_from_closer)
     }
-    return (gate_ids, stuck_ids, gate_attribution(gates, gate_ids), pmap is not None,
-            panel_ids)
+    return (gate_ids, stuck_ids, gate_attribution(gates, gate_ids), pmap,
+            panel_ids, wait_ids)
 
 
 def transcript_fresh_ids(window=None):
@@ -1027,7 +1097,8 @@ def _task_title_reason(role, titles):
 
 
 def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, grouping=None,
-               gate_attribution=None, task_meta=None, panel_ids=frozenset()):
+               gate_attribution=None, task_meta=None, panel_ids=frozenset(),
+               declared_wait=frozenset()):
     """One row per registry entry, sorted by bucket precedence then name.
 
     Pure: every input is passed in, so the bucket fixtures in
@@ -1050,7 +1121,7 @@ def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, gr
         age = ages.get(sid)
         last = "—" if age is None or not math.isfinite(age) else fs.human_age(age)
         meta = task_meta.get(sid)
-        unblocks = unblocks_for(sid, age, meta, panel_ids)
+        unblocks = unblocks_for(sid, age, meta, panel_ids, declared_wait=declared_wait)
         titles = task_titles.get(sid) or []
         # Glyph-stripped, matching `who-needs-me.py`'s display: the registry's
         # `name` may carry a leading `⚙` the operator did not type, and a name
@@ -1111,6 +1182,16 @@ def build_rows(registry, gate_ids, stuck_ids, task_titles, ages, widths=None, gr
             details[sid] = (
                 f"waiting on your keystroke: {closer}" if closer else
                 f"waiting on your keystroke for {sid[:8]} — closer not readable from the transcript"
+            )
+        # An unparseable `defer_date` is the one case where the defer field says
+        # something and the classification ignores it, so it reports itself
+        # rather than passing as a plain `nudge`. `setdefault`, so a gate's pane
+        # detail and a closer both outrank it — they name something actionable,
+        # this names a vault value to correct.
+        _state, _detail = _defer_reading(meta)
+        if _state == "invalid":
+            details.setdefault(
+                sid, f"defer_date invalid: {_detail} — the row is classified as if it had no defer"
             )
     rows.sort(key=lambda r: (BUCKET_ORDER.index(r["bucket"]), r["label"].lower()))
     return rows, details
@@ -1244,6 +1325,26 @@ def build_tree(rows, grouping):
     return out, ordered, sids
 
 
+def managers_of(registry, grouping):
+    """`{session id: name}` for every registry session the grouping calls a manager.
+
+    The registry only: a heartbeat-only row is headless or a cluster pod, and owns no pane
+    to carry an exit recorder.
+    """
+    return {sid: (rec.get("name") or "") for sid, rec in registry.items()
+            if grouping.role_of(sid) == ROLE_MANAGER}
+
+
+def manager_sessions():
+    """`managers_of()` over the live registry and vault, or `None` if the registry is unreadable."""
+    registry = registry_records()
+    if registry is None:
+        return None
+    task_titles, _ = fs.build_task_index()
+    grouping = build_grouping(registry, vault_index(), colour_census(), loop_slugs(), task_titles)
+    return managers_of(registry, grouping)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--stuck-min", type=int, default=20)
@@ -1257,8 +1358,8 @@ def main():
         print("fleet-board: session registry unreadable — refusing to render a table", file=sys.stderr)
         return 1
 
-    gate_ids, stuck_ids, attribution, panes_read, panel_ids = collect_signals(a.stuck_min)
-    if not panes_read:
+    gate_ids, stuck_ids, attribution, pane_map, panel_ids, wait_ids = collect_signals(a.stuck_min)
+    if pane_map is None:
         print(
             "fleet-board: ⚠️ `wezterm cli list` unreadable — pane data withheld. Every row is kept "
             "on the session registry's verdict alone: a pane that cannot be checked is UNKNOWN, "
@@ -1315,7 +1416,7 @@ def main():
     grouping = build_grouping(merged, vault_index(), colour_census(), loop_slugs(), task_titles)
     rows, details = build_rows(merged, gate_ids, stuck_ids, task_titles, ages, grouping=grouping,
                                gate_attribution=attribution, task_meta=task_meta,
-                               panel_ids=panel_ids)
+                               panel_ids=panel_ids, declared_wait=wait_ids)
     tree, ordered, sids = build_tree(rows, grouping)
 
     fresh = transcript_fresh_ids()
@@ -1325,6 +1426,18 @@ def main():
     # drop one step later, and only this one can see it.
     errors = coverage_errors([r["session_id"] for r in rows], set(registry), fresh, beat_ids)
     errors += tree_errors(ordered, [r["session_id"] for r in rows])
+    # Manager panes running without the exit recorder. Not a column — the box is at its
+    # 119-character budget — so it rides the doc and the below-box action lines (stderr,
+    # beside the coverage and pane-read warnings). The line text is the coverage script's
+    # own; this board only relays it, so it cannot special-case one pane.
+    # A side check must never take the board down with it: on any failure every manager
+    # reads `unknown`, which is honest, rather than the table not rendering at all.
+    managers = managers_of(registry, grouping)
+    try:
+        exit_record = erc.live_coverage(managers, pane_map)
+    except Exception as exc:  # noqa: BLE001 — degrade to unknown, never crash the board
+        print(f"fleet-board: exit-record check failed: {exc}", file=sys.stderr)
+        exit_record = erc.all_unknown(managers)
     counts = {b: sum(1 for r in rows if r["bucket"] == b) for b in BUCKET_ORDER}
     # Every value in the fixed set, always present — a class with no rows reads
     # `0`, never an absent key, so a consumer cannot mistake "none this round"
@@ -1355,8 +1468,14 @@ def main():
         # claim is otherwise only checkable by parsing the glyphs, and a probe
         # that reads the rendered cell is testing the formatter, not the sort.
         "order": ordered,
+        "exit_record": exit_record,
     }
     print(json.dumps(doc if a.json else {k: doc[k] for k in ("header", "rows", "widths")}))
+    for row in exit_record["unrecorded"]:
+        print(row["line"], file=sys.stderr)
+    unknown = erc.unknown_line(exit_record)
+    if unknown:
+        print(unknown, file=sys.stderr)
 
     if errors:
         # Loud, never silent: a table that renders correctly and omits sessions is

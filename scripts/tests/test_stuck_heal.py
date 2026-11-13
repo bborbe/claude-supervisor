@@ -47,6 +47,19 @@ class HealDecideTest(unittest.TestCase):
         for deaths in (0, 1, 2):
             self.assertEqual(heal.decide("parked-gate", deaths), "report-only")
 
+    def test_a_dead_permission_channel_takes_the_same_ladder(self):
+        # The windowed reading of the same death, not a park: a resume is what
+        # restored the channel on b6e447e4, and reporting it instead would leave the
+        # session that owns a live repair unable to run it.
+        self.assertEqual(heal.decide("permission-channel", 0), "resume-headless")
+        self.assertEqual(heal.decide("permission-channel", 1), "reopen-interactive")
+
+    def test_an_idle_worker_with_no_wait_takes_the_same_ladder(self):
+        # The fleet round's cause: no death to observe, so no gate is ever raised —
+        # one fresh process on the same id, then the tab rung.
+        self.assertEqual(heal.decide("idle-no-wait", 0), "resume-headless")
+        self.assertEqual(heal.decide("idle-no-wait", 1), "reopen-interactive")
+
     def test_an_unknown_kind_is_reported_not_guessed(self):
         self.assertEqual(heal.decide("something-new", 0), "report-only")
 
@@ -200,6 +213,16 @@ class MainTest(unittest.TestCase):
         # synthetic id and report the second rung instead.
         self.endpoint = FixtureEndpoint()
         self.addCleanup(self.endpoint.__exit__, None, None, None)
+        # ⚠️ **The card check runs BEFORE the ladder**, so a MainTest left on the real
+        # store would refuse every case with `store-unreachable` — the fail-closed rule
+        # doing its job against a test that never meant to exercise it. An empty item
+        # list is the "no open card" control; the card cases replace it.
+        self.cards = []
+        self._prev_wn = heal._WHO_NEEDS_ME
+        heal._WHO_NEEDS_ME = type(
+            "FakeWhoNeedsMe", (), {"STORE": "", "store_items": lambda _s: self.cards}
+        )()
+        self.addCleanup(setattr, heal, "_WHO_NEEDS_ME", self._prev_wn)
 
     def run_main(self, *argv):
         import contextlib, io
@@ -207,6 +230,36 @@ class MainTest(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             rc = heal.main(list(argv) + ["--endpoint", self.endpoint.url])
         return rc, out.getvalue().strip()
+
+    def test_an_open_card_refuses_the_restart_with_its_token(self):
+        # SC3: the token is the FIRST line, the card id is named on the second, and
+        # nothing is resumed — the session is waiting on a person.
+        # ⚠️ **The WIRE shape, and a FULL producer id against an 8-char --session.** The
+        # first version of this fixture used `session_id` (the normalised spelling) and an
+        # 8-char id, so it passed against a gate that could never match a live item.
+        self.cards = [{"producer_id": SID, "item_id": "a3e612d9908f0dba269a950b18f3e90f"}]
+        rc, out = self.run_main("--session", SID8, "--task", TASK, "--kind", "stream-closed")
+        self.assertEqual(rc, 1)
+        first, second = out.splitlines()
+        self.assertEqual(first, "open-card")
+        self.assertIn("a3e612d9908f0dba269a950b18f3e90f", second)
+
+    def test_an_unreadable_store_refuses_rather_than_clearing(self):
+        # A gate that cannot be read is not a gate that is absent.
+        def boom():
+            raise RuntimeError("store down")
+
+        heal._WHO_NEEDS_ME.store_items = boom
+        rc, out = self.run_main("--session", SID8, "--task", TASK, "--kind", "stream-closed")
+        self.assertEqual(rc, 1)
+        self.assertEqual(out.splitlines()[0], "store-unreachable")
+
+    def test_a_card_free_session_still_restarts(self):
+        # The paired control: an unconditional refusal must fail this one.
+        self.cards = []
+        rc, line = self.run_main("--session", SID8, "--task", TASK, "--kind", "stream-closed")
+        self.assertEqual(rc, 0)
+        self.assertTrue(line.endswith("-> resume-headless"))
 
     def test_line_shape_for_a_first_stream_closed_death(self):
         rc, line = self.run_main("--session", SID8, "--task", TASK, "--kind", "stream-closed")

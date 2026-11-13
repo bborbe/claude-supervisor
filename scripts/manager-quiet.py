@@ -37,10 +37,22 @@ missed stand-down, not a false one.
 **Quiet shapes**, each read from frontmatter or the blocker resolver, never inferred:
 
   * `status` in `completed` / `aborted`  -> TERMINAL, excluded from the set entirely
-  * `status` in `next` / `backlog` / `hold` -> not surfaced; the manager drives none
+  * `status` in `backlog` / `hold`       -> not surfaced; the manager drives none
+  * `phase` is `todo`                    -> waiting-approval; the operator's boundary
   * `defer_date` on a future date        -> deferred
   * `blocked_by` with an unmet entry     -> blocked (`blocked_by_verdict`, reused)
   * anything else                        -> RUNNABLE
+
+⚠️ **`status: next` is RUNNABLE, and that is deliberate.** `vault-cli task approve`
+writes `phase: todo -> planning` and leaves `status` at `next` — "the row stays queued,
+not owned" (commit `1804f59`, 2026-10-09). Counting `next` quiet here made a subject
+full of approved rows read as *empty* to the stand-down counter: two ticks later the
+manager retired itself and drove none of them, which is the loss this script exists to
+prevent. The approval boundary is `phase: todo`, not `status: next`, because `phase` is
+the field `approve` actually moves. This mirrors `sweep-gate.py`'s `_classify`, whose
+ready-to-start arm is `status == "next" or (in_progress and phase == "planning")` — the
+runbook's rule is that the two renderers must agree, and this file was the third copy
+that did not.
 
 The readers are `manager-predispatch.py`'s, loaded by path rather than re-implemented:
 `split_frontmatter`, `fm_scalar`, `blocked_by_verdict`, `resolve_tracked`. A second
@@ -53,11 +65,15 @@ disagree about a row.
     manager-quiet.py --subject "<goal or topic>" --vault <path> --reset
 
 **Output contract** — one line on stdout, `<verdict>` TAB `<n_runnable>` TAB `<n_quiet>`
-TAB `<consecutive_quiet>`, where `<verdict>` is `armed` or `stood-down`. `armed` means
-the caller must leave the loop alone. `stood-down` means `QUIET_TICKS_TO_STAND_DOWN`
-consecutive quiet ticks were reached and the caller may disarm. An unreadable subject
-exits 2 with a reason on stderr and **writes nothing** — a failed read must not advance
-a counter toward a stand-down.
+TAB `<consecutive_quiet>`, where `<verdict>` is `armed`, `sleep-until` or `stood-down`.
+`armed` means the caller must leave the loop alone. `stood-down` means
+`QUIET_TICKS_TO_STAND_DOWN` consecutive quiet ticks were reached and the caller may
+disarm. `sleep-until` means the same threshold was reached but **every** quiet row is
+quiet for a future `defer_date`, so the subject is waiting on a clock rather than
+finished: the caller arms a wakeup at the trigger instead of disarming, and a second line
+on stdout names that instant (`Sleep until <instant>`). An unreadable subject exits 2
+with a reason on stderr and **writes nothing** — a failed read must not advance a counter
+toward a stand-down.
 """
 import argparse
 import importlib.util
@@ -65,7 +81,20 @@ import json
 import os
 import re
 import sys
-import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load(name, filename):
+    """Import a sibling script by path — the filenames carry hyphens."""
+    spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: `defer_date` is an instant, not a date — see `defer-date.py`.
+defer_date = _load("defer_date", "defer-date.py")
 
 QUIET_TICKS_TO_STAND_DOWN = 2
 
@@ -75,15 +104,25 @@ STATE_DIR = os.path.expanduser(
 
 TERMINAL_STATUSES = frozenset({"completed", "aborted"})
 # Not surfaced: the manager drives none of these, so they are quiet rather than runnable.
-# `next` is queued-not-surfaced, `backlog` is someday, `hold` is paused with no resume
-# date — the vault's own Task Status Semantics.
-UNSURFACED_STATUSES = frozenset({"next", "backlog", "hold"})
+# `backlog` is someday and `hold` is paused with no resume date — the vault's own Task
+# Status Semantics.
+#
+# ⚠️ **`next` is NOT in this set.** `vault-cli task approve` writes `phase: todo ->
+# planning` and deliberately leaves `status` at `next` ("the row stays queued, not
+# owned"), so an approved, never-started row carries `status: next`. Counting it quiet
+# here made a subject full of approved rows read as empty, and the stand-down counter
+# then retired the manager that had just approved them. The approval boundary moved to
+# `UNAPPROVED_PHASE` below, which is the field `approve` actually writes.
+UNSURFACED_STATUSES = frozenset({"backlog", "hold"})
+
+# The operator's approval boundary, mirroring `sweep-gate.py`'s `_classify`: a row at
+# `phase: todo` is waiting on a human by construction — agents file there and stop, and
+# the operator's `todo -> planning` flip IS the approval. It must read quiet even though
+# it now carries `status: next`, which the set above no longer covers.
+UNAPPROVED_PHASE = "todo"
 
 EXIT_OK = 0
 EXIT_UNREADABLE = 2
-
-_HERE = os.path.dirname(os.path.abspath(__file__))
-
 
 _PREDISPATCH = None
 
@@ -105,7 +144,7 @@ def load_predispatch():
     global _PREDISPATCH
     if _PREDISPATCH is None:
         spec = importlib.util.spec_from_file_location(
-            "manager_predispatch", os.path.join(_HERE, "manager-predispatch.py")
+            "manager_predispatch", os.path.join(HERE, "manager-predispatch.py")
         )
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -189,37 +228,22 @@ def write_quiet_count(s: str, n: int, state_dir: str | None = None) -> None:
     write_quiet_state(s, n, 0, state_dir)
 
 
-def parse_date(value: str):
-    """`YYYY-MM-DD` from a `defer_date` scalar, or None when it is not a date.
+def _date_key(value):
+    """The instant a `defer_date` names, or None — `defer-date.py` is the one parser.
 
     ⚠️ **Both spellings reach here.** The vault normalizes an *unquoted* date scalar to
-    RFC3339 (`2026-10-22T00:00:00Z`) and keeps the date-only form only when quoted, so
-    a reader that accepts one spelling silently ignores half the vault. The first ten
-    characters are taken when they match the date shape; anything else is not a date and
-    the caller treats it as absent.
+    RFC3339 (`2026-10-22T00:00:00Z`) and keeps the date-only form only when quoted, and
+    a full timestamp carries a time of day — all three are read as the same kind of
+    thing, an aware datetime, so the comparison below is against an instant rather than
+    a date string.
     """
-    text = (value or "").strip().strip("'\"")
-    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", text)
-    if not m:
-        return None
-    try:
-        return time.struct_time(
-            (int(m.group(1)), int(m.group(2)), int(m.group(3)), 0, 0, 0, 0, 0, -1)
-        )
-    except ValueError:
-        return None
+    parsed, _ = defer_date.parse_defer_date(value)
+    return parsed
 
 
-def _date_key(value: str):
-    """A `(y, m, d)` tuple, or None — comparable without a timezone in the picture."""
-    t = parse_date(value)
-    return (t.tm_year, t.tm_mon, t.tm_mday) if t else None
-
-
-def _date_text(value: str) -> str:
-    """The `YYYY-MM-DD` form a reader is shown, or `""` when the scalar is not a date."""
-    t = parse_date(value)
-    return f"{t.tm_year:04d}-{t.tm_mon:02d}-{t.tm_mday:02d}" if t else ""
+def _date_text(value) -> str:
+    """The form a reader is shown: `YYYY-MM-DD`, or ISO 8601 when a time is set."""
+    return defer_date.display(value)
 
 
 def classify(fm: str, tasks_dir: str, index, today_key) -> dict:
@@ -240,9 +264,17 @@ def classify(fm: str, tasks_dir: str, index, today_key) -> dict:
         return {"kind": "terminal", "defer": None, "blocked": []}
     if status in UNSURFACED_STATUSES:
         return {"kind": "quiet", "defer": None, "blocked": []}
+    phase = (pd.fm_scalar(fm, "phase") or "").strip().lower()
+    if phase == UNAPPROVED_PHASE:
+        return {"kind": "quiet", "defer": None, "blocked": []}
     raw_due = pd.fm_scalar(fm, "defer_date")
-    due = _date_key(raw_due)
-    if due is not None and today_key is not None and due > today_key:
+    state, detail = defer_date.defer_state(raw_due, today_key)
+    if state == "invalid":
+        # Fail toward ARMED, as this module has always documented: a defer this check
+        # cannot read is not one it can rule the row out on, so the row stays runnable —
+        # and the reason is said rather than swallowed, so the garbage is still visible.
+        print(f"manager-quiet: {detail} — not counted as a defer", file=sys.stderr)
+    if state == "deferred":
         return {"kind": "quiet", "defer": _date_text(raw_due), "blocked": []}
     verdict = pd.blocked_by_verdict(fm, tasks_dir, index)
     if verdict["blocked"]:
@@ -280,6 +312,14 @@ def survey(vault: str, members: list, today_key) -> dict:
     return out
 
 
+def _defer_instant(text):
+    """Sort key for a rendered `defer_date` — the instant it names, never the string."""
+    parsed, _ = defer_date.parse_defer_date(text)
+    # `parsed` alone: the caller already filters falsy values, and falling back to "now"
+    # here would sort an unreadable defer as the EARLIEST, naming the wrong trigger.
+    return parsed
+
+
 def reopen_trigger(seen: dict) -> str:
     """What would make this subject live again — the line SC3 requires.
 
@@ -290,7 +330,9 @@ def reopen_trigger(seen: dict) -> str:
     naming nothing, and a reader cannot tell "no trigger exists" from "the trigger
     failed to compute".
     """
-    dates = sorted(d for d in seen["defer"].values() if d)
+    # Sorted by the INSTANT, not by the rendered string: two rows in different UTC
+    # offsets sort by their digits otherwise, naming the wrong "earliest".
+    dates = sorted((d for d in seen["defer"].values() if d), key=_defer_instant)
     if dates:
         return dates[0]
     if seen["blocked"]:
@@ -300,6 +342,36 @@ def reopen_trigger(seen: dict) -> str:
         names = sorted({b for blockers in seen["blocked"].values() for b in blockers})
         return "blocked by " + ", ".join(names)
     return "no named trigger"
+
+
+def verdict_for(seen: dict, count: int) -> str:
+    """`armed` | `sleep-until` | `stood-down` for one surveyed subject.
+
+    ⚠️ **A date-gated subject SLEEPS; it does not stand down.** When every quiet row is
+    quiet *because* it carries a future `defer_date`, the subject is not finished and not
+    blocked — it is waiting on a date it already knows, and standing it down puts a human
+    in the loop every morning to re-arm it. `sleep-until` is that third verdict; the
+    caller arms a wakeup at `trigger` instead of disarming.
+
+    The test is set equality, not a count: `seen["quiet"]` is every quiet row and
+    `seen["defer"]` the subset quiet for a future defer, so equality means **every** quiet
+    row carries one. A subject with even one row quiet for another reason — `backlog`,
+    `hold`, `phase: todo`, or an unmet `blocked_by` — fails it and still stands down: a
+    blocker reopens on a human's action, not on a clock, and auto-reopening that is out
+    of scope.
+
+    ⚠️ **The runnable guard is not redundant.** A runnable row resets `count` to 0 before
+    this is called, so the two conditions cannot both hold today — but this module's whole
+    invariant is failing toward ARMED, and a future change to the counter must not be able
+    to turn a subject with live work into a sleeping one.
+    """
+    if count < QUIET_TICKS_TO_STAND_DOWN:
+        return "armed"
+    if seen["runnable"]:
+        return "armed"
+    if seen["quiet"] and set(seen["quiet"]) == set(seen["defer"]):
+        return "sleep-until"
+    return "stood-down"
 
 
 def tick(subject: str, vault: str, today_key, state_dir: str | None = None) -> dict:
@@ -350,7 +422,7 @@ def tick(subject: str, vault: str, today_key, state_dir: str | None = None) -> d
         "quiet": seen["quiet"],
         "terminal": seen["terminal"],
         "consecutive_quiet": count,
-        "verdict": "stood-down" if count >= QUIET_TICKS_TO_STAND_DOWN else "armed",
+        "verdict": verdict_for(seen, count),
         "trigger": reopen_trigger(seen),
     }
 
@@ -359,7 +431,7 @@ def main(argv: list) -> int:
     ap = argparse.ArgumentParser(description="Zero-runnable-tasks check for one subject.")
     ap.add_argument("--subject", required=True)
     ap.add_argument("--vault", required=True)
-    ap.add_argument("--today", help="YYYY-MM-DD; defaults to the local date")
+    ap.add_argument("--today", help="YYYY-MM-DD or a full datetime; defaults to now")
     ap.add_argument("--state-dir", default=None)
     ap.add_argument("--reset", action="store_true", help="clear the counter and exit")
     a = ap.parse_args(argv)
@@ -368,7 +440,15 @@ def main(argv: list) -> int:
         write_quiet_count(slug(a.subject), 0, a.state_dir)
         return EXIT_OK
 
-    today_key = _date_key(a.today) if a.today else time.localtime()[:3]
+    # Default to the CURRENT INSTANT: local midnight would keep a row quiet until the
+    # next day even after its defer time passed.
+    today_key = _date_key(a.today) if a.today else defer_date.as_now()
+    if today_key is None:
+        # A bad --today must REFUSE, never fall through as "now": that would read future
+        # defers as quiet and stand the manager down, the opposite of this module's
+        # fail-toward-armed invariant. `next-focus.py` and `open-queue.py` refuse too.
+        print(f"manager-quiet: REFUSED — bad --today: {a.today}", file=sys.stderr)
+        return EXIT_UNREADABLE
     result = tick(a.subject, a.vault, today_key, a.state_dir)
     if result.get("error"):
         print(result["error"], file=sys.stderr)
@@ -377,6 +457,11 @@ def main(argv: list) -> int:
         f"{result['verdict']}\t{len(result['runnable'])}\t"
         f"{len(result['quiet'])}\t{result['consecutive_quiet']}"
     )
+    if result["verdict"] == "sleep-until":
+        # The wake instant comes from the SAME read that produced the verdict — a caller
+        # that recomputed it could arm the wakeup for a different date than the one the
+        # sleep was decided on.
+        print(f"Sleep until {result['trigger']}")
     if result["verdict"] == "stood-down":
         # SC3's line. Emitted HERE rather than by the caller so the trigger and the
         # verdict come from one read of the tree — a step that recomputed the trigger
