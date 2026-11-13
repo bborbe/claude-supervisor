@@ -529,7 +529,45 @@ The goal branch **resolves the goal's manager and delegates**; it reimplements n
    wezterm cli spawn ${WINDOW_ID:+--window-id "$WINDOW_ID"} -- env SESSION_EXIT_RECORD="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-exit-record.py" CLAUDE_CODE_ENTRYPOINT=cli bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; _sx() { rc=$?; "$SESSION_EXIT_RECORD" append --pid $$ --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn --pid $$ || true; "$SESSION_EXIT_RECORD" observe --pid $$ || true; trap _sx EXIT; "<MGR>" -n "<goal> Manager" "/color orange"'
    ```
 
-   Same `unset` prefix as Step 3.1 — without it the manager comes up named after the session that spawned it. Then tell the operator to run, in that tab, `/vault-cli:work-on-goal "<goal>"` and `/supervisor:goal-loop "<goal>"`. `/supervisor:open` starts the session; the manager arms its own loop.
+   Same `unset` prefix as Step 3.1 — without it the manager comes up named after the session that spawned it. **Then send the two start commands into that pane yourself**, in Step 3.2's shape: bounded prompt-wait, the text, then `\r` as a separate step. `$NEW_PANE` is the spawn's stdout. ⚠️ **Readiness is `scripts/pane-wake-guard.py`'s verdict — never a fixed sleep, never a bare glyph grep**: the guard is the repo's one definition of "this pane can take a keystroke", while a bare `❯` test reads a mid-turn composer as ready (its Enter is discarded) and a dim next-prompt suggestion as typed text. ⚠️ **`work-on-goal` runs a full planning chain, so the wait before the second send is the long one (300 s)**; a timeout is reported and the second command is not sent.
+
+   ```bash
+   NEW_PANE=<the spawn's stdout>
+   P="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}"
+
+   # bounded prompt-wait — FAIL CLOSED: on exhaustion nothing is sent, because the panes
+   # the guard refuses (an operator ask, a modal, a non-empty composer) are exactly the
+   # ones a send must never reach
+   ready() {
+     _i=0
+     while [ "$_i" -lt "$1" ]; do
+       python3 "$P/scripts/pane-wake-guard.py" --pane-id "$NEW_PANE" >/dev/null 2>&1 && return 0
+       _i=$((_i + 1)); sleep 1
+     done
+     return 1
+   }
+   # a submitted command shows a spinner; an idle composer means the Enter was swallowed
+   submitted() {
+     sleep 2
+     _v=$(python3 "$P/scripts/pane-wake-guard.py" --pane-id "$NEW_PANE" 2>/dev/null)
+     [ "$_v" = "skip:spinner" ] || { echo "⚠️ start command did not submit (guard reads: $_v)"; return 1; }
+   }
+
+   ready 60 || { echo "⚠️ <goal> Manager never reached a prompt — nothing sent"; exit 1; }
+   wezterm cli send-text --pane-id "$NEW_PANE" --no-paste $'/vault-cli:work-on-goal "<goal>"'
+   sleep 1
+   wezterm cli send-text --pane-id "$NEW_PANE" --no-paste $'\r'   # submit as a separate step
+   submitted || exit 1
+
+   # work-on-goal runs a planning chain — wait up to 300 s for the pane to be ready again
+   ready 300 || { echo "⚠️ work-on-goal did not finish — goal-loop not sent"; exit 1; }
+   wezterm cli send-text --pane-id "$NEW_PANE" --no-paste $'/supervisor:goal-loop "<goal>"'
+   sleep 1
+   wezterm cli send-text --pane-id "$NEW_PANE" --no-paste $'\r'   # submit as a separate step
+   submitted || exit 1
+   ```
+
+   `/supervisor:open` starts the session **and** its loop; the manager session is what runs the loop, so nothing is left for the operator to paste.
 
    **The colour and the window are role signals, not decoration** — a manager comes up `orange` in `Managers` so it can never be read as a worker, which stays `pink` in `Agents` (§ 3.0).
 
@@ -572,7 +610,35 @@ The goal branch **resolves the goal's manager and delegates**; it reimplements n
    wezterm cli spawn -- env SESSION_EXIT_RECORD="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/session-exit-record.py" CLAUDE_CODE_ENTRYPOINT=cli bash -lc 'unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; _sx() { rc=$?; "$SESSION_EXIT_RECORD" append --pid $$ --rc "$rc" || true; }; "$SESSION_EXIT_RECORD" append --kind spawn --pid $$ || true; "$SESSION_EXIT_RECORD" observe --pid $$ || true; trap _sx EXIT; "<MGR>" -n "<topic> Manager" "/color orange"'
    ```
 
-   Same `unset` prefix as Step 3.1 — without it the manager comes up named after the session that spawned it. The colour rides as the spawn prompt, per the recipe. Then tell the operator to run `/supervisor:goal-loop "<topic>"` in it. The manager loop is stateful and this command is not; `/supervisor:open` starts the session, the manager arms its own loop.
+   Same `unset` prefix as Step 3.1 — without it the manager comes up named after the session that spawned it. The colour rides as the spawn prompt, per the recipe. **Then send its start command into that pane**, in the same shape as § 2B item 4 — bounded prompt-wait, the text, then `\r` as a separate step. `$NEW_PANE` is the spawn's stdout:
+
+   ```bash
+   NEW_PANE=<the spawn's stdout>
+   P="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}"
+
+   # bounded prompt-wait — FAIL CLOSED, same helpers as § 2B item 4
+   ready() {
+     _i=0
+     while [ "$_i" -lt "$1" ]; do
+       python3 "$P/scripts/pane-wake-guard.py" --pane-id "$NEW_PANE" >/dev/null 2>&1 && return 0
+       _i=$((_i + 1)); sleep 1
+     done
+     return 1
+   }
+   submitted() {
+     sleep 2
+     _v=$(python3 "$P/scripts/pane-wake-guard.py" --pane-id "$NEW_PANE" 2>/dev/null)
+     [ "$_v" = "skip:spinner" ] || { echo "⚠️ start command did not submit (guard reads: $_v)"; return 1; }
+   }
+
+   ready 60 || { echo "⚠️ <topic> Manager never reached a prompt — nothing sent"; exit 1; }
+   wezterm cli send-text --pane-id "$NEW_PANE" --no-paste $'/supervisor:goal-loop "<topic>"'
+   sleep 1
+   wezterm cli send-text --pane-id "$NEW_PANE" --no-paste $'\r'   # submit as a separate step
+   submitted || exit 1
+   ```
+
+   `/supervisor:open` starts the topic manager **and** its loop; the manager session is what runs the loop, so nothing is left for the operator to paste.
 
 **The colour is a role signal, not decoration** — a topic manager comes up `orange` so it can never be read as a worker, which stays `pink` (Step 3.1 and the `--color` default). Keep the two distinct.
 
