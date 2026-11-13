@@ -369,12 +369,12 @@ tab**: it reports the refusal and hands the restart over — a stall is `busy`, 
 the operator's alone.
 
 ⚠️ **`agents/goal-drive.md`'s orphan gate covers the same population; `worker-keepalive.py`
-enforces the exclusion itself.** Both legs record only **after** the instrument confirms
-`LIVE`, so a check-then-act race lets two resumes land before either cap arms — the goal
-tier's and this leg's. `scripts/owner.py` answers for each declared goal — the ONE ownership
+enforces the exclusion.** Both legs record only **after** the instrument reads `LIVE`, so a
+check-then-act race lets two resumes land before either cap arms — the goal tier's
+`last_auto_resume` and this leg's `worker--<slug>`. `scripts/owner.py` answers for each declared goal — the ONE ownership
 definition (`docs/session-tiers.md` § Keep-alive) — so only an **owner** (session `LIVE`
-**and** loop `OK`/`STALE`) returns `jump`; a manager stood down with
-`/supervisor:stop` does not hold the row, and a `cannot-tell` is reported, never resumed.
+**and** loop `OK`/`STALE`) returns `jump`; a stood-down manager holds nothing, and a
+`cannot-tell` is reported, never resumed.
 
 **Record the count — in the digest, and labelled as a floor while the scan cannot finish.**
 `python3 "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}/scripts/fleet-legs.py" --digest "<this round's digest>" --leg dead-workers --count <n> --floor`.

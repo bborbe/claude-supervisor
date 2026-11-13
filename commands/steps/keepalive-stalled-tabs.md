@@ -57,7 +57,11 @@ for sid, row in sorted(sessions.items()):
         out = subprocess.run(
             [sys.executable or "python3", script, "--vault", vault, "--task", task,
              "--dir", tasks, "--session-id", sid, "--stall-count", str(count)],
-            stdout=subprocess.PIPE, text=True, timeout=180).stdout
+            # Above the script's own ceiling (hold 30 + dry-run 120 + post 60 + poll 60 +
+            # restart 120 ≈ 390 s). A wrapper timeout BELOW it would kill the child after
+            # the consumed marker is written and before the restart runs — spending the
+            # operator's answer with nothing restarted.
+            stdout=subprocess.PIPE, text=True, timeout=420).stdout
     except Exception as error:      # one bad row must never abort the rest of the round
         print(sid[:8] + "\tcannot-tell\t" + type(error).__name__, end="\n")
         continue
@@ -115,8 +119,12 @@ Print one line per stalled row (session id8, verdict, and the token for `skipped
 summary:
 
 ```
-stalled-tabs: <n> seen · <restart> restarted · <carded> carded · <capped> capped · <skipped> skipped
+stalled-tabs: <n> seen · <restart> restarted · <carded> carded · <capped> capped · <held> held · <skipped> skipped · <cannot-tell> cannot-tell
 ```
+
+⚠️ **All six verdicts carry a column.** `held` and `cannot-tell` are not decoration: a round
+whose only rows are held or undecidable would otherwise print a summary reporting none of
+them, which reads exactly like a round that found nothing.
 
 ⚠️ **`fleet-legs.py`'s `LEGS` section is a separate contract.** Its `KEYS` list, the sweep's
 seed, `check-handback-keys.py` and six `test_fleet_legs.py` fixtures all encode the four-key

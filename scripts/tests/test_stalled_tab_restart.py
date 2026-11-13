@@ -131,8 +131,13 @@ class Base(unittest.TestCase):
 
         self.control_data({
             "restart": {"dry": {"rc": 1, "out": ["busy-target", "status is busy"]},
-                        "real": {"rc": 0, "out": ["   ✅ killed pid 42; started a FRESH "
-                                                  "session (not x) in a new tab (pane 9)"]}},
+                        # Header first, `✅` last — the real script's order. The header names
+                        # the session that just DIED; only the ✅ line carries the new pane
+                        # and the new session id.
+                        "real": {"rc": 0, "out": [
+                            "🔄 restart-worker · session 11111111 · pid 42 · 'A Stalled Task'",
+                            "   ✅ killed pid 42; started a FRESH session (not 11111111) "
+                            "in a new tab (pane 9)"]}},
             "post_id": "item-1",
             "poll": "OPEN",
             "hold_rc": 1,
@@ -300,6 +305,11 @@ class Handover(Base):
         rc, lines = self.run_leg()
         self.assertEqual(rc, 0, lines)
         self.assertEqual(lines[0], "restart")
+        # The reported line must be the ✅ one, never the header — the header names the
+        # session that just died, and reporting it reads as "the old session is still live".
+        self.assertIn("✅ killed pid", lines[1])
+        self.assertNotIn("🔄", lines[1])
+        self.assertIn("pane 9", lines[1])
         real = [a for a in self.calls("restart") if "--dry-run" not in a]
         self.assertEqual(1, len(real))
         self.assertIn("--allow-busy-lapse", real[0])
