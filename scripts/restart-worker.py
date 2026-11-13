@@ -864,7 +864,7 @@ def resume_command(sid, title, chip, cwd, launcher, fresh_prompt=None,
         "unset CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN "
         "CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION; "
         + trap
-        + (f'"{script}" -n "{title}" "{fresh_prompt}"' if fresh_prompt
+        + (f'"{script}" -n "{title}" "{bash_dq_escape(fresh_prompt)}"' if fresh_prompt
            else f'"{script}" --resume {sid} -n "{title}" "/color {chip}"')
     )
     argv = [wezterm, "cli", "spawn"]
@@ -877,6 +877,67 @@ def resume_command(sid, title, chip, cwd, launcher, fresh_prompt=None,
 #: The only prompts `--fresh-prompt` accepts. The value lands inside `bash -lc '…'`, so it is
 #: an allowlist, never free text.
 FRESH_PROMPTS = ("/supervisor:fleet-loop",)
+
+#: The one command `--fresh-prompt-task` composes a prompt from. ⚠️ **The command stays a
+#: literal and only the task name varies**, which is what preserves the allowlist property
+#: stated above: no caller can reach this path with a command of its own choosing, and the
+#: task name is escaped for the double-quoted bash context before it is embedded.
+#:
+#: `/vault-cli:work-on-task` and NOT `/supervisor:worker-drive`, because a fresh session
+#: carries no conversation to anchor from: worker-drive's anchor ladder would fall through to
+#: `vault-cli task list --status in_progress` (`commands/worker-drive.md` § Step 0) and drive
+#: whichever in-progress task it happened to find. A restarted worker must come back on ITS
+#: OWN task, and this is the command that binds it.
+TASK_FRESH_PROMPT_COMMAND = "/vault-cli:work-on-task"
+
+
+def bash_dq_escape(value):
+    """Escape `value` for a double-quoted `bash -lc` string.
+
+    `resume_command` embeds the prompt as `"{prompt}"` inside the script text handed to
+    `bash -lc`, so a `"` closes the quote and a `$` or backtick expands. Those four
+    characters are the whole dangerous set inside double quotes; each becomes a literal.
+
+    This is the validation that lets a task name — a filename, not a constant — travel
+    through the one place the module documents as allowlist-only. Escaping here rather than
+    at composition keeps the printed prompt readable: only the embedded copy is escaped.
+    """
+    return re.sub(r'([\\"$`])', r"\\\1", value)
+
+
+def fresh_prompt_for_task(sid, cwd):
+    """`(prompt, None)` binding a restarted worker to its own task, or `(None, refusal)`.
+
+    A fresh session starts with no conversation, so its first turn is the only thing that
+    can re-anchor it. The task is the one `task_terminal_refusal` already resolves — the
+    same `close-worker.py::find_task` join, never a second lookup that could disagree with
+    the guard that ran moments earlier on the same session.
+
+    Refusals, each a first-line token + exit 1, both fired before anything is signalled:
+      `no-task-anchor`   no task resolves for this session, so a fresh one could not be
+                         bound to any work. Refusing is the safe direction: an unanchored
+                         restart spends a spawn slot to produce a session that drives
+                         nothing, which is the failure this whole path exists to prevent.
+      `task-handed-off`  the task moved to a successor; restarting this session would put a
+                         second worker on a row it no longer owns.
+    """
+    cw = load_sibling("close-worker.py")
+    task = cw.find_task(sid, cwd)
+    if task is None:
+        return None, (
+            "no-task-anchor",
+            f"session {sid} resolves no task anchor, so a fresh session could not be bound "
+            "to its own work; refusing rather than starting an unanchored worker",
+        )
+    path, _fm, handed_off = task
+    if handed_off:
+        return None, (
+            "task-handed-off",
+            f"session {sid}'s task {os.path.basename(path)} has been handed off; a fresh "
+            "session would be a second worker on a row it no longer owns",
+        )
+    name = os.path.splitext(os.path.basename(path))[0]
+    return f"{TASK_FRESH_PROMPT_COMMAND} {name}", None
 
 
 HOLDS_PATH = os.path.expanduser(
@@ -1403,6 +1464,12 @@ def main():
                     help="kill the session and start a NEW one (fresh context) through the same "
                          "launcher and cwd, with this prompt as its first turn, instead of "
                          "resuming the same id. Allowlisted: the value is typed into a shell")
+    ap.add_argument("--fresh-prompt-task", action="store_true",
+                    help="like --fresh-prompt, but the prompt is built from THIS session's own "
+                         "anchored task (`/vault-cli:work-on-task <task>`), so a restarted "
+                         "worker re-anchors instead of coming back unanchored. The command is a "
+                         "literal and the task name is escaped, so the allowlist above still "
+                         "holds. Refuses `no-task-anchor` / `task-handed-off`")
     ap.add_argument("--allow-busy-lapse", action="store_true",
                     help="lift ONLY the busy-target refusal, and only for the lapse "
                          "fresh-restart path: requires --reason lapse AND --fresh-prompt, so "
@@ -1419,13 +1486,18 @@ def main():
     ap.add_argument("--cwd", help="with --task-guard: the directory the task lookup starts "
                                   "from, normally the session's vault")
     args = ap.parse_args()
-    if args.fresh_prompt and args.absent:
-        ap.error("--fresh-prompt and --absent are exclusive")
-    if args.allow_busy_lapse and not (args.reason == "lapse" and args.fresh_prompt):
+    if args.fresh_prompt and args.fresh_prompt_task:
+        ap.error("--fresh-prompt and --fresh-prompt-task are exclusive")
+    if (args.fresh_prompt or args.fresh_prompt_task) and args.absent:
+        ap.error("--fresh-prompt/--fresh-prompt-task and --absent are exclusive")
+    if args.allow_busy_lapse and not (
+        args.reason == "lapse" and (args.fresh_prompt or args.fresh_prompt_task)
+    ):
         # The flag's whole safety is its narrowness: tied to the lapse fresh-restart path it
         # can only lift a refusal the operator has already judged. Anywhere else it would let
         # a mid-turn kill through on a machine token alone.
-        ap.error("--allow-busy-lapse requires --reason lapse AND --fresh-prompt")
+        ap.error("--allow-busy-lapse requires --reason lapse AND a fresh prompt "
+                 "(--fresh-prompt or --fresh-prompt-task)")
 
     sid = args.session_id.strip()
     if not sid:
@@ -1582,6 +1654,17 @@ def main():
     if token is not None:
         return refuse(token, detail)
 
+    # `--fresh-prompt-task` resolves to a concrete prompt HERE — above the header and before
+    # anything is signalled — so its refusal keeps the first-line-token contract every other
+    # refusal in this script holds. `--fresh-prompt` needs no resolution: argparse has
+    # already confined it to the allowlist.
+    if args.fresh_prompt_task:
+        fresh_prompt, refusal = fresh_prompt_for_task(sid, cwd)
+        if refusal is not None:
+            return refuse(*refusal)
+    else:
+        fresh_prompt = args.fresh_prompt
+
     print(
         f"🔄 restart-worker · session {sid} · pid {pid} · {name!r}"
         f"{' · dry-run' if args.dry_run else ''}"
@@ -1618,7 +1701,7 @@ def main():
 
     if args.dry_run:
         print("   ✅ would kill the pid above and "
-              + (f"start a fresh session with {args.fresh_prompt}" if args.fresh_prompt
+              + (f"start a fresh session with {fresh_prompt}" if fresh_prompt
                  else "resume the same session id"))
         if cwd:
             print(f"   ↪ would resume into {cwd}")
@@ -1663,7 +1746,7 @@ def main():
     # the caller branches on this exit code to decide whether the worker is back.
     try:
         spawned = subprocess.run(
-            resume_command(sid, title, chip, cwd, launcher, args.fresh_prompt, wezterm),
+            resume_command(sid, title, chip, cwd, launcher, fresh_prompt, wezterm),
             capture_output=True, text=True, timeout=30,
         )
     except Exception as error:
@@ -1675,10 +1758,10 @@ def main():
         )
 
     pane = (spawned.stdout or "").strip().splitlines()
-    if args.fresh_prompt:
+    if fresh_prompt:
         print(
             f"   ✅ killed pid {pid}; started a FRESH session (not {sid}) in a new tab "
-            f"(pane {pane[-1] if pane else '?'}) with first turn {args.fresh_prompt}"
+            f"(pane {pane[-1] if pane else '?'}) with first turn {fresh_prompt}"
         )
         return 0
     print(

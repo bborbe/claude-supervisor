@@ -18,10 +18,29 @@ selects the **resume colour** and the **re-arm note** rather than a refusal, and
 
 ```
 scripts/restart-worker.py <session-id> [--dry-run] [--sessions-dir DIR]
+                          [--reason code|lapse]
+                          [--fresh-prompt <allowlisted>|--fresh-prompt-task]
+                          [--allow-busy-lapse]
 ```
 
 `--dry-run` runs every check and reports what it *would* do, killing nothing. It is the
 right way to ask "would this restart be allowed?" without acting.
+
+`--fresh-prompt-task` starts a fresh session whose first turn is
+`/vault-cli:work-on-task <this session's anchored task>`, so a restarted worker comes back
+on **its own** task instead of unanchored. It is the worker-shaped sibling of
+`--fresh-prompt`, and it exists because a fresh session carries no conversation: a literal
+`/supervisor:worker-drive` would fall through that command's anchor ladder to
+`vault-cli task list --status in_progress` and drive whichever in-progress task it found
+first. ⚠️ **The allowlist property survives the task name.** The command is a constant
+(`TASK_FRESH_PROMPT_COMMAND`) and only the task name varies; it is escaped for the
+double-quoted `bash -lc` context (`bash_dq_escape`) before it is embedded, so no caller can
+reach the shell with a command of its own choosing.
+
+⚠️ **`--allow-busy-lapse` is confined to this path.** It requires `--reason lapse` **and** one
+of the two fresh-prompt flags, so it can never widen a code-staleness restart or a plain
+resume. A `stalled` tab worker is `busy`/`shell` by definition, so the lift is not optional
+for that case — and the operator's answer on the card is what authorises it.
 
 The registry is read from `SUPERVISOR_SESSIONS_DIR`, else `~/.claude/sessions`. The load
 path is read from `SUPERVISOR_LOAD_PATH`, else
@@ -38,7 +57,7 @@ path is read from `SUPERVISOR_LOAD_PATH`, else
 
 A refusal is a printed reason, never a traceback.
 
-## The eight refusals
+## The ten refusals
 
 Each exits `1` with its token as the first line of stdout. Every one fires **before**
 anything is signalled, so no code path reaches `os.kill` on a target it has not cleared.
@@ -53,6 +72,8 @@ anything is signalled, so no code path reaches `os.kill` on a target it has not 
 | `role-undetermined` | No role signal could be read. | Fail closed. An unreadable index proves nothing about a role; never assume worker. |
 | `stale-load-path` | None of the three inputs — newest load-path copy, the worker's MCP config file(s), the launcher script — is newer than the session's own start, or the session carries no parseable start time. | Nothing would load differently — the restart buys nothing. |
 | `task-terminal` | The session's anchored task reads `completed`, `aborted` or `hold`, or carries a `defer_date` in the future. The message names the session id, the task and its status. | The work is finished, so a resume restarts a session for a closed task and undoes the close. Measured 2026-11-11: session `2e540d65` was reaped at 07:18:34Z with a `completed` task and was live again at 07:33:55Z. The status is read from disk at resume time, never from a census taken earlier in the round — a task that flips between enumeration and the spawn must be refused. |
+| `no-task-anchor` | `--fresh-prompt-task` was asked for, and `close-worker.py::find_task` resolves no task for this session. | A fresh session starts with no conversation, so its first turn is the only thing that can bind it to work. An unanchored restart spends a spawn slot to produce a session that drives nothing — the exact failure the flag exists to prevent. |
+| `task-handed-off` | `--fresh-prompt-task` was asked for, and the task has moved to a successor. | Restarting would put a second worker on a row this session no longer owns. |
 
 ## Operational failures — not refusals
 
@@ -60,8 +81,8 @@ Exit `1` with an `❌ error:` prefix is an **operational failure**, not a refusa
 target. The one case today is `PermissionError` from `os.kill`: the pid resolved and the
 session id is known, but the caller may not signal it. It is deliberately *not* reported
 under a refusal token — reporting it as `unknown-session-id` would send the operator
-hunting for a typo in an id that was in fact found. The eight tokens above stay exactly
-eight; this is a different class of failure, and the prefix is what distinguishes them.
+hunting for a typo in an id that was in fact found. The ten tokens above stay exactly
+ten; this is a different class of failure, and the prefix is what distinguishes them.
 
 ## How "stale" is decided
 

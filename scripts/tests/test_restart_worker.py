@@ -197,6 +197,55 @@ class ResumeCommand(unittest.TestCase):
     def test_fresh_prompt_is_allowlisted(self):
         self.assertEqual(("/supervisor:fleet-loop",), rw.FRESH_PROMPTS)
 
+    def test_the_task_fresh_prompt_command_is_a_literal_constant(self):
+        """`--fresh-prompt-task` must not turn the allowlist into free text: the COMMAND is
+        a constant and only the task name varies."""
+        self.assertEqual("/vault-cli:work-on-task", rw.TASK_FRESH_PROMPT_COMMAND)
+
+    def test_a_quote_in_the_task_name_cannot_close_the_bash_string(self):
+        """The prompt is embedded as `"{prompt}"` inside `bash -lc '…'`, so an unescaped `"`
+        would end the quote and let the rest of a task name reach the shell as syntax."""
+        raw = '/vault-cli:work-on-task we"ird $(x) `y`'
+        inner = rw.resume_command("sid", "title", "pink", "/d", "/l/cc", raw)[-1]
+        self.assertNotIn('we"ird', inner)
+        self.assertIn('we\\"ird', inner)
+        self.assertIn('\\$(x)', inner)
+        self.assertIn('\\`y\\`', inner)
+
+    def test_bash_dq_escape_leaves_an_ordinary_task_name_alone(self):
+        """The negative control: escaping must not rewrite names that carry no specials."""
+        self.assertEqual(
+            "/vault-cli:work-on-task A Stuck Tab Worker",
+            rw.bash_dq_escape("/vault-cli:work-on-task A Stuck Tab Worker"),
+        )
+
+    def test_allow_busy_lapse_accepts_the_task_fresh_prompt(self):
+        """Without this the lapse path cannot restart a stalled tab worker at all: a stalled
+        session is `busy`, and `--allow-busy-lapse` is the only lift. Exit 2 would be an
+        argparse usage error, i.e. the combination refused before any check ran."""
+        out = subprocess.run(
+            [sys.executable, SCRIPT, "sid", "--reason", "lapse", "--allow-busy-lapse",
+             "--fresh-prompt-task", "--dry-run"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(out.returncode, 2, out.stderr)
+
+    def test_allow_busy_lapse_still_needs_a_fresh_prompt(self):
+        """The flag's whole safety is its narrowness — it must never widen a plain resume."""
+        out = subprocess.run(
+            [sys.executable, SCRIPT, "sid", "--reason", "lapse", "--allow-busy-lapse"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_the_two_fresh_prompt_flags_are_exclusive(self):
+        out = subprocess.run(
+            [sys.executable, SCRIPT, "sid", "--fresh-prompt", "/supervisor:fleet-loop",
+             "--fresh-prompt-task"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(out.returncode, 2, out.stderr)
+
     def test_resume_command_uses_the_resolved_wezterm_not_a_bare_name(self):
         """Regression 2026-11-11: a bare `"wezterm"` is not on launchd's PATH, so the keeper's
         `restart fresh` killed the Fleet Manager and could not spawn the replacement."""
@@ -1615,6 +1664,26 @@ class TaskTerminalRefusal(unittest.TestCase):
         self.assertIsNone(rw.task_terminal_refusal(self.SID, cwd)[0])
         self._write_task(task_path, ["status: completed", f"claude_session_id: {self.SID}"])
         self.assertEqual(rw.task_terminal_refusal(self.SID, cwd)[0], "task-terminal")
+
+    def test_fresh_prompt_task_binds_the_fresh_session_to_its_own_task(self):
+        """A fresh session carries no conversation, so its first turn is the ONLY thing that
+        can re-anchor it. The prompt must name THIS task — not a generic loop, and not
+        whichever in-progress task a fallback happened to find."""
+        cwd, _ = self._vault(["status: in_progress", f"claude_session_id: {self.SID}"])
+        prompt, refusal = rw.fresh_prompt_for_task(self.SID, cwd)
+        self.assertIsNone(refusal)
+        self.assertEqual("/vault-cli:work-on-task A Task", prompt)
+
+    def test_fresh_prompt_task_refuses_when_no_anchor_resolves(self):
+        """An unanchored restart spends a spawn slot to produce a session that drives
+        nothing, which is the failure the flag exists to prevent."""
+        cwd, _ = self._vault(
+            ["status: in_progress", "claude_session_id: some-other-session"]
+        )
+        prompt, refusal = rw.fresh_prompt_for_task(self.SID, cwd)
+        self.assertIsNone(prompt)
+        self.assertEqual(refusal[0], "no-task-anchor")
+        self.assertIn(self.SID, refusal[1])
 
 
     def test_the_cli_task_guard_exits_one_on_a_finished_task(self):
