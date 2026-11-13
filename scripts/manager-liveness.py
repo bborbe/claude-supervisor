@@ -301,6 +301,51 @@ def is_subject_stopped(subject: str, branch: str) -> bool:
     return stopped_marker(subject, branch) is not None
 
 
+def session_marker(subject: str, branch: str) -> str:
+    """Where this subject's OWN session id is recorded, beside its cadence.
+
+    ⚠️ **This is the one POSITIVE statement of manager tier on disk.** Every other
+    candidate signal is an absence — not in the spawn ledger, no `.stopped` marker —
+    and absence is shared with the operator's own tabs and with a worker whose
+    session id never resolved. `--arm` runs inside the manager's own session, so the
+    id it writes is the manager's and never the round's.
+    """
+    return path(slug(subject, branch), "session")
+
+
+def manager_sessions(state_dir: str = None) -> dict:
+    """{session id -> slug} for every manager that has armed at least once.
+
+    The reader for a consumer that holds a SESSION ID and must decide whether it
+    belongs to the manager tier — `scripts/park-nudge.py`, which must never apply a
+    worker-tier park mechanism to a manager whose pane is its only wake path.
+
+    ⚠️ **An empty answer is "tier-unknown", never "no managers".** A manager that
+    armed before the marker existed carries none until its next arm — one interval
+    away — so a caller must treat a miss as a miss and fall through to its other
+    guards, never read it as proof of worker tier. That is why this returns a plain
+    dict with no sentinel: the two answers a caller acts on are "this id is a
+    manager" and "this id is not on record".
+    """
+    directory = os.path.expanduser(state_dir or STATE_DIR)
+    out = {}
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".session"):
+            continue
+        try:
+            with open(os.path.join(directory, name), encoding="utf-8") as fh:
+                sid = fh.read().strip()
+        except OSError:
+            continue
+        if sid:
+            out[sid] = name[: -len(".session")]
+    return out
+
+
 def write_atomic(p: str, text: str) -> None:
     os.makedirs(STATE_DIR, exist_ok=True)
     tmp = p + ".tmp"
@@ -1040,6 +1085,15 @@ def arm(subject: str, branch: str, interval: int, resume: bool = False,
     """
     s = slug(subject, branch)
     write_atomic(path(s, "cadence"), f"{interval}\n")
+    # The tier marker, beside the cadence it belongs to: THIS process's session id,
+    # which is the manager's because `--arm` runs inside the manager's own session.
+    # `scripts/park-nudge.py` reads it to keep a worker-tier park mechanism off the
+    # manager tier, where the pane — not a `defer_date` — is the only wake path.
+    # ⚠️ Absent outside a Claude session (a drill, a test, a hand-run probe), where
+    # there is no tier to record; the reader treats that as tier-unknown.
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    if session_id:
+        write_atomic(session_marker(subject, branch), f"{session_id}\n")
     # ⚠️ **Fire-and-forget, in a daemon thread.** `arm()` is the liveness READING: the
     # epochs it records are what `observed_period` measures, so a network call on this
     # path would lengthen every arm-to-arm gap by its own latency and drift the period
