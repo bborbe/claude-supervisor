@@ -22,20 +22,18 @@ manager wrote (with its reason) and turns it into a route:
     unsure                  -> treated as one-way-self-contained
     proposal re-scope       -> operator-decision (never filed: it changes an SC)
 
-Operator rulings this encodes
------------------------------
-- 2026-11-13, the three tiers: *"there is a card that says, 'Hey, I want to restructure
-  everything.' And I maybe don't read that well and click 'Yes.' And this should be
-  prevented by the decision records that need more attention from me."* Hence the
-  talk-through card carries no approve option.
-- 2026-11-13, caps: *"the softcap is for unflagged tasks and the hardcap is for flagged
-  tasks. So I guess we only start workers for tasks automatically through softcap."* A
-  manager-filed row is unflagged, so `open` needs `live < soft` on its mode's axis.
-- 2026-10-01, ranked never bulk: at most ONE file per goal per round, SC boxes before DoD
-  boxes, page order within each.
-- 2026-09-30, the approval boundary: `phase: todo` is the operator's inbox. Only a row this
-  step itself filed (`planned_by: goal-plan-undriven`) AND labelled two-way may be approved
-  by a manager; every other todo row is left exactly as it is.
+Three invariants the routes encode
+----------------------------------
+- **A wide-reach row's card carries no approve option.** The decision belongs in a written
+  record and a talk-through; a one-click yes on a restructuring is the failure this route
+  exists to prevent.
+- **`open` requires `live < soft` on the row's mode axis.** A manager-filed row is
+  unflagged, and unflagged rows spend only the soft headroom.
+- **At most ONE file per goal per round**, SC boxes before DoD boxes, page order within
+  each. Ranked, never bulk.
+- **`phase: todo` is the operator's inbox.** Only a row this step itself filed
+  (`planned_by: goal-plan-undriven`) AND labelled two-way may be approved by a manager;
+  every other todo row is left exactly as it is.
 
 Usage
 -----
@@ -182,7 +180,14 @@ def main(argv):
         fail(f"stdin is not JSON: {e}")
     if not isinstance(payload, dict):
         fail("stdin must be a JSON object")
-    json.dump(decide(payload), sys.stdout, indent=1)
+    # A malformed nested entry (a row with no `box`, a non-dict `card`) is refused the same
+    # way as a malformed payload: exit 2 with a named reason, never a traceback that reads
+    # as a crash and never a partial answer the caller could act on.
+    try:
+        result = decide(payload)
+    except (KeyError, TypeError, AttributeError) as e:
+        fail(f"malformed payload entry: {type(e).__name__}: {e}")
+    json.dump(result, sys.stdout, indent=1)
     print()
 
 

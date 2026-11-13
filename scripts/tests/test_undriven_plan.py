@@ -1,11 +1,10 @@
-"""The undriven-box planner routes every row by its door, and refuses what would over-ask.
+"""The undriven-box planner routes each row by its door and refuses what would over-ask.
 
-Operator, 2026-11-13: a manager must plan and open the tasks its SC/DoD boxes need on its
-own, and reach out only when the door requires it — two-way work opens with no card, a
-one-way self-contained task goes on the round's one card, and a wide-reach decision gets a
-written record and a talk-through, never a card asking for the decision itself
-("there is a card that says, 'Hey, I want to restructure everything.' And I maybe don't
-read that well and click 'Yes.'").
+Pinned behaviour: a two-way row opens below the soft cap and is held at it; a one-way
+self-contained row goes on the round's one card with blast radius and rollback; a
+wide-reach row gets a talk-through card carrying no approve option; a re-scope proposal is
+never filed; at most one row is filed per round, SC before DoD; and only a row this step
+filed and labelled two-way is approved by a manager.
 
 Every class below carries a POSITIVE assertion — the route it must take — so a planner
 that never routes anything cannot pass by producing nothing.
@@ -255,6 +254,15 @@ class InputRefusals(unittest.TestCase):
         out = subprocess.run([sys.executable, SCRIPT, "decide"], input=json.dumps(p),
                              capture_output=True, text=True)
         self.assertEqual(out.returncode, 2)
+
+    def test_malformed_nested_entry_exits_two_not_a_traceback(self):
+        p = base()
+        p["card"] = []
+        out = subprocess.run([sys.executable, SCRIPT, "decide"], input=json.dumps(p),
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 2)
+        self.assertIn("malformed payload entry", out.stderr)
+        self.assertNotIn("Traceback", out.stderr)
 
 
 if __name__ == "__main__":
