@@ -346,6 +346,13 @@ output — the fleet table.
   dispatch. ⚠️ And it is a **policy, not a gate** — the same caveat `docs/fleet-surface.md`
   § Session roles attaches to the worker-side prohibition, so do not go hunting for an
   enforcement that does not exist.
+- **A goal manager files the task an undriven SC/DoD box needs, and routes it by its door** —
+  goal-round row 4d (`commands/steps/goal-plan-undriven.md`, decision in
+  `scripts/undriven-plan.py`). At most one file per goal per tick. A two-way row it filed
+  is approved `--by manager` and opens through the ordinary `To open` path; a one-way row
+  waits on the round's approve card; a wide-reach row gets a `### Decision:` block and a
+  talk-through. Every other `phase: todo` row stays the operator's —
+  `docs/fleet-surface.md` § Approval provenance owns the boundary.
 - **A topic manager starts a goal manager with `/supervisor:open --goal "<goal>"`**, and only
   for a goal its own `## Goals` list declares **and that carries an operator-set flag**. `commands/topic-spawn.md`
   owns the five refusals (`goal-not-in-scope`, `goal-not-startable`, `goal-terminal`,
