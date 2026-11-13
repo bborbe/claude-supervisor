@@ -43,7 +43,14 @@ here. Before that file existed the four readings lived only in the hand-back mes
 state dir). The script still prints the summary and names the failure on stderr as
 `decision-persist: FAILED — <path>: <error>`. Report `decision-persist=FAILED` in the hand-back and
 never let the round read as clean: a leg that swallowed this would put the numbers back in a message
-only. Exit 0 is `decision-persist=written`.
+only. Exit 0 is `decision-persist=written`, and a leg the debt gate skipped (never reaching this
+step) reports `decision-persist=not-run` — one of the three, emitted on every run, never omitted.
+
+⚠️ **A failed READ is not a clean round, and the file says so twice.** When the tasks dir cannot be
+read the script exits **1**, prints `unread — <reason>`, and keeps `decision-unread=1` as the
+sentinel — the same number a clean empty round would print is **0**, so the sentinel is what
+separates them. The `.decision` it writes carries `status=unread` beside the counts (`status=ok`
+otherwise), which is what a later auditor reads instead of inferring from the numbers.
 
 ⚠️ **This was prose for six review rounds, and every round found a different real defect** — an
 `approved_at` read the population already guarantees, an empty `blocked_by` that is vacuously "all

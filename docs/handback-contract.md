@@ -56,6 +56,8 @@ A hand-back is a message: it dies with the session that read it. So every readin
 | `decision-candidates`, `decision-resumed-a`, `decision-resumed-d`, `decision-unread` | the round's `.decision` | `decision-park-resume.py --persist-beside <digest>` |
 | the full `crash-loop:` / `cannot-tell:` lists, when truncated | the round's `.keepalive` | the leg's own atomic write |
 
+The `.decision` file carries `round=`, `written_at=`, `status=` (`ok` / `unread`) and the four readings on one line. ⚠️ **`status=` is not decoration:** a round whose tasks dir could not be read writes zeros, and a healthy round with nothing parked writes zeros too — the status is what tells a later reader which one it is holding, and `decision-unread=1` is the sentinel a failed read carries.
+
 **Message-only, and deliberately so:** the act counts (`restarted`, `resumed`, `parked-due`, `nudged`, `undelivered`), the per-list counts (`crash-loop`, `cannot-tell`), `dead-scan`, `park-nudge:`, and the verdicts that describe the writes themselves (`legs`, `legs-reason`, `decision-persist`). They report what the leg **did this round**, which the next round does not need to re-read; a criterion resting on one of them is resting on a transcript, and should be moved onto a file before it is relied on.
 
 ⚠️ **A failed write is a verdict, not silence.** `legs=UNKNOWN` (the digest) and `decision-persist=FAILED` (the `.decision`) are the two shapes this leg reports instead of quietly leaving a reading message-only — the caller renders them as an unpersisted reading, never as a measured one.

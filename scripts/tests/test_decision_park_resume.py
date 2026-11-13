@@ -55,6 +55,15 @@ class Base(unittest.TestCase):
         self.store = os.path.join(self.root, "store")
         os.makedirs(self.store, exist_ok=True)
         dpr.store_path = lambda vault, task: os.path.join(self.store, task.replace(" ", "-") + ".json")
+        # `--persist-beside` is REQUIRED on the decide path, so every case carries this round's
+        # digest path. A per-test directory keeps the sibling `.decision` out of any real store.
+        self.handback = os.path.join(self.root, "handback")
+        self.round_digest = os.path.join(self.handback, "2026-11-13T00-15Z.digest")
+        self.round_decision = os.path.join(self.handback, "2026-11-13T00-15Z.decision")
+
+    def argv(self, *extra, tasks_dir=None, digest=None):
+        return ["--vault", self.vault, "--tasks-dir", tasks_dir or self.tasks,
+                "--now", str(NOW), "--persist-beside", digest or self.round_digest, *extra]
 
     def tearDown(self):
         dpr.PROJECTS_DIR = self._orig_projects
@@ -86,8 +95,7 @@ class Base(unittest.TestCase):
     def decide(self):
         out = io.StringIO()
         with redirect_stdout(out):
-            rc = dpr.main(["--vault", self.vault, "--tasks-dir", self.tasks,
-                           "--now", str(NOW), "--json"])
+            rc = dpr.main(self.argv("--json"))
         return rc, json.loads(out.getvalue())
 
     def resumed(self, result):
@@ -195,7 +203,7 @@ class TestTheSummaryLine(Base):
     def text(self):
         out = io.StringIO()
         with redirect_stdout(out):
-            rc = dpr.main(["--vault", self.vault, "--tasks-dir", self.tasks, "--now", str(NOW)])
+            rc = dpr.main(self.argv())
         return rc, out.getvalue().strip().splitlines()[-1]
 
     def test_resumes_are_counted_per_wait_kind(self):
@@ -259,12 +267,21 @@ class TestUnread(Base):
         self.assertEqual(0, out["candidates"])
 
     def test_an_unreadable_tasks_dir_still_carries_the_counts(self):
+        """A failed read keeps its `decision-unread=1` sentinel AND says `status=unread` on disk.
+
+        Without the sentinel the line is `…decision-unread=0`, which is byte-identical to a healthy
+        round with nothing parked — the one distinction this leg exists to preserve.
+        """
         out = io.StringIO()
         with redirect_stdout(out):
-            rc = dpr.main(["--vault", self.vault, "--tasks-dir", os.path.join(self.root, "nope"),
-                           "--now", str(NOW)])
+            rc = dpr.main(self.argv(tasks_dir=os.path.join(self.root, "nope")))
         self.assertEqual(1, rc)
         self.assertIn("decision-candidates=0", out.getvalue())
+        self.assertIn("decision-unread=1", out.getvalue())
+        with open(self.round_decision, encoding="utf-8") as handle:
+            written = handle.read()
+        self.assertIn("status=unread", written)
+        self.assertIn("decision-unread=1", written)
 
     def test_a_null_session_id_is_not_a_candidate(self):
         """The measured false-resume: `claude_session_id: null` must read as no id."""
@@ -343,17 +360,20 @@ class TestThePersistedReading(Base):
         self.assertIn("decision-resumed-a=1", lines[-1])
         self.assertIn("decision-resumed-d=1", lines[-1])
 
-    def test_no_flag_writes_no_sibling_file(self):
-        """The control for SC2's falsifier: a round that did not pass the flag leaves nothing,
-        which is why a pre-fix round's directory holds no `.decision` to read."""
+    def test_a_decide_run_without_the_flag_is_refused(self):
+        """The control for SC2's falsifier, and the parser's half of the step doc's rule.
+
+        A round that omitted the flag would print the four readings into the hand-back and persist
+        nothing — the original defect restored silently — so the decide path refuses instead, and
+        no `.decision` is written.
+        """
         self.parked(approved_at=APPROVED_AFTER)
-        digest = self.digest()
-        out = io.StringIO()
-        with redirect_stdout(out):
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
             rc = dpr.main(["--vault", self.vault, "--tasks-dir", self.tasks, "--now", str(NOW)])
-        self.assertEqual(0, rc)
-        self.assertFalse(os.path.exists(os.path.join(os.path.dirname(digest),
-                                                     "2026-11-13T00-15Z.decision")))
+        self.assertEqual(2, rc, "the decide path must refuse a run with no --persist-beside")
+        self.assertIn("--persist-beside", err.getvalue())
+        self.assertFalse(os.path.exists(self.round_decision))
 
     def test_a_path_that_is_not_a_round_digest_is_refused(self):
         self.parked(approved_at=APPROVED_AFTER)
@@ -364,26 +384,49 @@ class TestThePersistedReading(Base):
         self.assertEqual(2, rc)
         self.assertIn("not a round digest path", err.getvalue())
 
-    def test_a_failed_write_is_reported_and_never_reads_as_a_clean_round(self):
-        """SC3's probe: a read-only target directory. The leg must name the failure and exit
-        non-zero, and must STILL print the readings — a round that dropped them because the file
-        failed reproduces the original defect one layer down."""
-        self.parked(approved_at=APPROVED_AFTER)
-        digest = self.digest()
-        os.chmod(os.path.dirname(digest), 0o500)
-        try:
-            rc, out, err = self.run_with(digest)
-        finally:
-            os.chmod(os.path.dirname(digest), 0o700)
+    def assert_reported_failure(self, digest):
+        """The one assertion both forced-failure probes share."""
+        rc, out, err = self.run_with(digest)
         self.assertEqual(3, rc, "a failed persist must not exit 0")
         self.assertIn("decision-persist: FAILED", err)
         self.assertIn("2026-11-13T00-15Z.decision", err)
         self.assertIn("decision-candidates=1", out, "the readings must still reach the hand-back")
-        self.assertFalse(os.path.exists(os.path.join(os.path.dirname(digest),
-                                                     "2026-11-13T00-15Z.decision")))
-        self.assertFalse(os.path.exists(os.path.join(os.path.dirname(digest),
-                                                     "2026-11-13T00-15Z.decision.tmp")),
+        self.assertFalse(os.path.exists(self.round_decision))
+        self.assertFalse(os.path.exists(self.round_decision + ".tmp"),
                          "a failed write must not leave a stray .tmp for the prune to count")
+
+    def test_a_failed_write_is_reported_and_never_reads_as_a_clean_round(self):
+        """SC3's probe: a read-only target directory. The leg must name the failure and exit
+        non-zero, and must STILL print the readings — a round that dropped them because the file
+        failed reproduces the original defect one layer down.
+
+        ⚠️ **SKIPPED as root, and the root-proof sibling below is why that is not a hole.**
+        `DAC_OVERRIDE` lets uid 0 write into a 0500 directory, so under root this probe SUCCEEDS
+        and tests nothing — a vacuous assertion, not a flaky one, so it never signals. The repo's
+        review containers run as root, which is exactly where a vacuous pass would hide.
+        """
+        if os.geteuid() == 0:
+            self.skipTest("root bypasses directory permissions, so the 0500 probe is unreachable")
+        self.parked(approved_at=APPROVED_AFTER)
+        digest = self.digest()
+        os.chmod(os.path.dirname(digest), 0o500)
+        try:
+            self.assert_reported_failure(digest)
+        finally:
+            os.chmod(os.path.dirname(digest), 0o700)
+
+    def test_a_failed_write_is_reported_when_root_cannot_be_blocked_by_mode(self):
+        """The same failure path, forced by a shape no uid can bypass: the target's parent is a
+        regular file, so `mkdir` raises for root and non-root alike.
+
+        Kept beside the 0500 probe rather than replacing it: that one is SC3's own wording, this
+        one is the half that still runs in the root container CI and the review pods use.
+        """
+        self.parked(approved_at=APPROVED_AFTER)
+        blocker = os.path.join(self.root, "not-a-directory")
+        with open(blocker, "w", encoding="utf-8") as handle:
+            handle.write("")
+        self.assert_reported_failure(os.path.join(blocker, "2026-11-13T00-15Z.digest"))
 
 
 if __name__ == "__main__":

@@ -39,9 +39,13 @@ one renderer, `summary_line()` — so the artifact and the hand-back cannot disa
 
 Usage
 -----
-    decision-park-resume.py --vault <path> --tasks-dir <path> [--now <epoch>] [--json]
-        [--persist-beside <this round's .digest path>]
+    decision-park-resume.py --vault <path> --tasks-dir <path> --persist-beside <digest>
+        [--now <epoch>] [--json]
     decision-park-resume.py --vault <path> --record <task> --sid <session-id>
+
+`--persist-beside` is **required** on the decide path: the four readings must reach disk, not only
+the hand-back, so a round that forgot the flag is refused rather than silently reverting the defect.
+`--record` is exempt — it writes the resume store, not a round's readings.
 
 Exit codes: 0 = a verdict was produced (including "nothing to do") or a resume was recorded;
 1 = a read failed and the round must report it; 2 = usage error; 3 = the readings were produced
@@ -259,7 +263,18 @@ def summary_line(result: dict) -> str:
     would be written from one expression and the message from another, and the first divergence
     would be invisible (both look like readings). Per wait kind, never one total — SC5 grades each
     kind on its own, and a single number cannot say which wait cleared.
+
+    ⚠️ **A failed read keeps its `decision-unread=1` sentinel.** `decide()` returns
+    `unread: []` on that path, so a naive `len(result["unread"])` renders **0** — the reading a
+    clean empty round produces. That would make "the tasks dir could not be read" indistinguishable
+    from "nothing was parked", which is the one distinction this leg exists to preserve; the
+    pre-refactor line hardcoded `1` for exactly this reason and the refactor must not lose it.
     """
+    if not result["ok"]:
+        return (
+            "decision-candidates=0 · decision-resumed-a=0 · decision-resumed-d=0 · "
+            "decision-unread=1"
+        )
     resumed = [r for r in result["rows"] if r["verdict"] == "resume"]
     by_kind = {k: sum(1 for r in resumed if r["kind"] == k) for k in ("a", "d")}
     return (
@@ -267,6 +282,16 @@ def summary_line(result: dict) -> str:
         f"decision-resumed-a={by_kind['a']} · decision-resumed-d={by_kind['d']} · "
         f"decision-unread={len(result['unread'])}"
     )
+
+
+def status_line(result: dict) -> str:
+    """`ok` / `unread` — the field that says whether the counts beside it describe a read at all.
+
+    ⚠️ **Without it an all-zero line is ambiguous**, and ambiguity is the whole failure mode: a
+    round that could not read its tasks dir writes zeros, and so does a healthy round with nothing
+    parked. The status is what a later auditor reads instead of inferring from the numbers.
+    """
+    return "ok" if result["ok"] else "unread"
 
 
 def decision_path(digest: str) -> str:
@@ -296,7 +321,12 @@ def persist(digest: str, result: dict, now: float) -> str:
     round_tag = os.path.basename(path)[: -len(DECISION_SUFFIX)]
     written = datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds")
     body = "\n".join(
-        [f"round={round_tag}", f"written_at={written}", summary_line(result)]
+        [
+            f"round={round_tag}",
+            f"written_at={written}",
+            f"status={status_line(result)}",
+            summary_line(result),
+        ]
     ) + "\n"
 
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -409,15 +439,27 @@ def main(argv: list[str]) -> int:
         print("usage: --tasks-dir is required unless --record is given", file=sys.stderr)
         return 2
 
+    # ⚠️ **Required, not optional.** The step file tells the leg that passing it is not optional,
+    # and a prose-only rule is exactly what this script exists to replace: a round that forgot the
+    # flag would print the four readings into the hand-back and persist nothing — the original
+    # defect, restored silently. `--record` is exempt because it writes the resume store, not a
+    # round's readings.
+    if args.persist_beside is None:
+        print(
+            "usage: --persist-beside <this round's .digest> is required unless --record is given "
+            "— the four readings must reach disk, not only the hand-back",
+            file=sys.stderr,
+        )
+        return 2
+
     # Refuse a path that is not a round digest BEFORE the read: the derivation is this script's,
     # and a caller that passed the wrong path must hear it rather than get a sibling of something
     # else (a `.decision` named after a directory or an unrelated file is unreadable as a round).
-    if args.persist_beside is not None:
-        try:
-            decision_path(args.persist_beside)
-        except ValueError as error:
-            print(f"usage: {error}", file=sys.stderr)
-            return 2
+    try:
+        decision_path(args.persist_beside)
+    except ValueError as error:
+        print(f"usage: {error}", file=sys.stderr)
+        return 2
 
     result = decide(args.vault, args.tasks_dir, now)
 
@@ -425,14 +467,13 @@ def main(argv: list[str]) -> int:
     # readings. A round that dropped them from the message because the file failed would reproduce
     # the original defect one layer down: the numbers would again live only in a message.
     persisted = None
-    if args.persist_beside is not None:
-        try:
-            persisted = persist(args.persist_beside, result, now)
-        except OSError as error:
-            print(
-                f"decision-persist: FAILED — {decision_path(args.persist_beside)}: {error}",
-                file=sys.stderr,
-            )
+    try:
+        persisted = persist(args.persist_beside, result, now)
+    except OSError as error:
+        print(
+            f"decision-persist: FAILED — {decision_path(args.persist_beside)}: {error}",
+            file=sys.stderr,
+        )
 
     if not result["ok"]:
         print(f"unread — {result['reason']}")
@@ -440,7 +481,7 @@ def main(argv: list[str]) -> int:
         return 1
     if args.json:
         print(json.dumps(result))
-        return 0 if persisted or args.persist_beside is None else 3
+        return 0 if persisted else 3
 
     for row in result["rows"]:
         if row["verdict"] == "crash-loop":
@@ -450,7 +491,7 @@ def main(argv: list[str]) -> int:
     for row in result["unread"]:
         print(f"unread {row['task']} — {row['reason']}")
     print(summary_line(result))
-    return 0 if persisted or args.persist_beside is None else 3
+    return 0 if persisted else 3
 
 
 if __name__ == "__main__":

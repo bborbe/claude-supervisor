@@ -428,23 +428,22 @@ through `fleet-legs.py` (steps 1, 1b, 4). The **hand-back** is the ≤ 1 KB summ
 ```text
 legs=written|UNKNOWN · legs-reason=<text>|— · lapsed-managers=<n>|not-run · topicless-goal-managers=<n>|not-run · dead-workers=<n>|not-run · dead-scan=complete|incomplete|—
 restarted=<n> · resumed=<n> · parked-due=<n> · nudged=<n> · undelivered=<n>
-decision-candidates=<n> · decision-resumed-a=<n> · decision-resumed-d=<n> · decision-unread=<n> · decision-persist=written|FAILED
+decision-candidates=<n> · decision-resumed-a=<n> · decision-resumed-d=<n> · decision-unread=<n> · decision-persist=written|FAILED|not-run
 crash-loop=<n> · cannot-tell=<n> · crash-loop-truncated=<n> · cannot-tell-truncated=<n> · payload=<path>|—
 crash-loop: <subject> · <MANAGER|WORKER>
 cannot-tell: <name> · <what could not be decided>
 park-nudge: <the summary line, verbatim>
 ```
 
-⚠️ **`legs=written` asserts every reading this leg owes landed** — each of its three digest keys present as a count **or** its own `--not-run` reason; a `not-run`
-that landed is a reading that landed. `legs=UNKNOWN` means a `fleet-legs.py` call exited 2 and at
+⚠️ **`legs=written` asserts every reading this leg owes landed** — each of its three digest keys present as a count **or** its own `--not-run` reason; a landed `not-run` is a reading. `legs=UNKNOWN` means a `fleet-legs.py` call exited 2 and at
 least one reading did not land — never emitted with numbers, which invites rendering
-counts the digest does not have. ⚠️ **`legs-reason` is the channel the caller's failed-write
-render reads** — the exit and its message when `legs=UNKNOWN`, `—` when `legs=written`; it
-survives nowhere else. ⚠️ **`dead-scan` is the label the digest write used** — `complete` =
-`--exact`, `incomplete` = `--floor`, `—` when `dead-workers=not-run` (no count, so no label).
-Emitted on every run, never inferred. ⚠️ **Its three digest keys are
-emitted on every run** — `not-run` when its step could not execute, never omitted, never a
-bare `0`. ⚠️ **`decision-persist`** = § 2b's write verdict.
+counts the digest lacks. ⚠️ **`legs-reason` is the channel the caller's failed-write
+render reads** — the exit and message when `legs=UNKNOWN`, `—` when `legs=written`; it
+survives nowhere else. ⚠️ **`dead-scan` is the label the write used** — `complete` =
+`--exact`, `incomplete` = `--floor`, `—` when `dead-workers=not-run` (no count, no label).
+Emitted every run, never inferred. ⚠️ **Its three digest keys are
+emitted on every run** — `not-run` when the step could not execute, never omitted, never a
+bare `0`. ⚠️ **`decision-persist`** = § 2b's write verdict; `FAILED` is never softened to `written`.
 ⚠️ **The row lists (`crash-loop:`, `cannot-tell:`) carry no `=` and are not counts** —
 the caller prints them; their per-list counts are `crash-loop=` and `cannot-tell=` on the counts
 line. ⚠️ **One dropped count per list, never one shared `truncated=`** — `crash-loop-truncated=`
