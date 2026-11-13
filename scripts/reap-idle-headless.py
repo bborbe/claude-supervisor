@@ -613,17 +613,15 @@ def main(argv=None):
                 "nothing was signalled",
             )
             continue
-        fresh_idle = idle_seconds(fresh)
-        if fresh_idle is None or fresh_idle < IDLE_FLOOR:
-            exit_code = refuse(
-                "not-idle-long-enough",
-                f"idle dropped to {int(fresh_idle or 0)}s during the guards; "
-                "nothing was signalled",
-            )
-            continue
         # The wrapper record is the authoritative "nothing pending" reading, and for a
         # wrapper-backed worker it is the only one: a continuation that arrived during the
         # guards would otherwise be killed with the process.
+        #
+        # ⚠️ Read BEFORE the registry idle clock, and aged by the PARK clock when a question
+        # is parked — the same rule `guard()` applies. Without this the re-read silently
+        # undoes the decision: `idle_seconds` says when the session last went idle, which
+        # can be minutes into a park whose question was asked hours ago, and the question
+        # refusal would fire at every age.
         fresh_wrapper = wrapper_record(session_id)
         if fresh_wrapper is None or fresh_wrapper.get("state") != "idle":
             exit_code = refuse(
@@ -632,10 +630,35 @@ def main(argv=None):
                 "nothing was signalled",
             )
             continue
-        if fresh_wrapper.get("pending_turns") != 0 or fresh_wrapper.get("question"):
+        fresh_question = fresh_wrapper.get("question")
+        if fresh_question:
+            fresh_park = question_age_seconds(fresh_question)
+            if fresh_park is None:
+                exit_code = refuse(
+                    "wrapper-busy",
+                    "the question parked during the guards cannot be aged; nothing was signalled",
+                )
+                continue
+            if fresh_park < IDLE_FLOOR:
+                exit_code = refuse(
+                    "wrapper-busy",
+                    f"the question has been parked {int(fresh_park)}s < {IDLE_FLOOR}s floor; "
+                    "nothing was signalled",
+                )
+                continue
+        else:
+            fresh_idle = idle_seconds(fresh)
+            if fresh_idle is None or fresh_idle < IDLE_FLOOR:
+                exit_code = refuse(
+                    "not-idle-long-enough",
+                    f"idle dropped to {int(fresh_idle or 0)}s during the guards; "
+                    "nothing was signalled",
+                )
+                continue
+        if fresh_wrapper.get("pending_turns") != 0:
             exit_code = refuse(
                 "wrapper-busy",
-                "a turn or a question arrived during the guards; nothing was signalled",
+                "a turn arrived during the guards; nothing was signalled",
             )
             continue
         # The same recycle, seen from the process side rather than the registry side.

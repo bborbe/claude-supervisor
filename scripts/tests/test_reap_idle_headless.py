@@ -617,6 +617,43 @@ class TestScript(unittest.TestCase):
         self.assertEqual(done.stdout.splitlines()[0], "wrapper-busy")
         self.assertIsNone(child.poll(), "a refusal must send no signal")
 
+    def _parked_question(self, age_seconds):
+        stamp = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+            seconds=age_seconds
+        )
+        return {
+            "id": SID,
+            "state": "idle",
+            "pending_turns": 0,
+            "question": {"requested_at": stamp.isoformat().replace("+00:00", "Z")},
+        }
+
+    def test_a_parked_question_past_the_bound_is_reaped(self):
+        """End to end: `guard()` AND main()'s pre-signal re-read must both let it go.
+
+        The unit tests drive `guard()` alone, so a re-read that still refuses a parked
+        question would leave them green while the real path closes nothing.
+        """
+        child = self._spawn()
+        self._registry(child.pid)
+        self._task()
+        self._transcript()
+        _Store.wrapper = self._parked_question(20 * 60)
+        done = self._run()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertIn("reaped pid", done.stdout)
+        self.assertIsNotNone(child.poll(), "a past-bound park must be signalled")
+
+    def test_a_parked_question_within_the_bound_refuses(self):
+        child = self._spawn()
+        self._registry(child.pid)
+        self._task()
+        self._transcript()
+        _Store.wrapper = self._parked_question(5 * 60)
+        done = self._run()
+        self.assertEqual(done.stdout.splitlines()[0], "wrapper-busy")
+        self.assertIsNone(child.poll(), "a refusal must send no signal")
+
     def test_an_unreadable_start_time_fails_closed(self):
         """An identity never established is never signalled — there is no fallback path."""
         child = self._spawn()
