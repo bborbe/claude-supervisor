@@ -227,6 +227,17 @@ class VerdictTest(unittest.TestCase):
         # must not turn a correct sleep into a wakeable target.
         self.assertEqual(guard.verdict(None, subject_state="SLEEPING"), "skip:sleeping")
 
+    def test_unreadable_state_fails_closed(self):
+        # A subject RESOLVED but its state could not be read. 2026-11-13: three wakes
+        # landed inside a SLEEPING window because this case fell through to `wake`.
+        self.assertEqual(guard.verdict(IDLE, subject_state=guard.STATE_UNREADABLE),
+                         "skip:state-unreadable")
+
+    def test_unreadable_state_is_distinct_from_no_subject(self):
+        # No subject resolved at all is NOT the same claim, and must still wake — a
+        # hand-opened tab has no state to read and is a legitimate target.
+        self.assertEqual(guard.verdict(IDLE, subject_state=None), "wake")
+
     def test_awake_subject_still_wakes_the_same_pane(self):
         # The negative direction, named for itself: the SAME screen with any non-sleeping
         # state must still wake, or the new arm would have swallowed every wake while

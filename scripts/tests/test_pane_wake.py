@@ -8,6 +8,7 @@ after activation, so a modal that opened since the plan read is not typed into.
 """
 import importlib.util
 import pathlib
+import subprocess
 import types
 import unittest
 
@@ -77,18 +78,42 @@ class PlanTest(unittest.TestCase):
         [row] = self._plan(["a"], [rec("a", 100)], states={"a": "SLEEPING"})
         self.assertEqual((row["verdict"], row["subject_state"]), ("skip:sleeping", "SLEEPING"))
 
-    def test_unknown_state_falls_through_to_the_screen_verdict(self):
-        # Negative direction: a failed/absent state read must NOT suppress the wake —
-        # otherwise a broken manager-liveness would silently stop every fleet wake.
+    def test_no_subject_falls_through_to_the_screen_verdict(self):
+        # `None` means NO subject resolved — a hand-opened tab — not "the read failed".
+        # A failed read is the sentinel and is refused; this case must still wake.
         [row] = self._plan(["a"], [rec("a", 100)], states={})
         self.assertEqual((row["verdict"], row["subject_state"]), ("wake", None))
 
+    def test_unreadable_state_is_never_a_target(self):
+        sentinel = wake.guard.STATE_UNREADABLE
+        [row] = self._plan(["a"], [rec("a", 100)], states={"a": sentinel})
+        self.assertEqual((row["verdict"], row["subject_state"]),
+                         ("skip:state-unreadable", sentinel))
+
 
 class SubjectStateTest(unittest.TestCase):
-    def test_failed_read_is_none_not_a_state(self):
+    def test_failed_read_is_the_unreadable_sentinel_not_a_state(self):
+        # A subject RESOLVED, so the read failing must fail CLOSED — 2026-11-13: three
+        # wakes landed in a SLEEPING window because this returned None and fell through.
         def run(cmd, **kw):
             return types.SimpleNamespace(returncode=1, stdout="", stderr="boom")
-        self.assertIsNone(wake.read_subject_state("a", subject_of=lambda s: ("T", "goal"), run=run))
+        self.assertEqual(
+            wake.read_subject_state("a", subject_of=lambda s: ("T", "goal"), run=run),
+            wake.guard.STATE_UNREADABLE)
+
+    def test_empty_output_is_the_unreadable_sentinel(self):
+        def run(cmd, **kw):
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        self.assertEqual(
+            wake.read_subject_state("a", subject_of=lambda s: ("T", "goal"), run=run),
+            wake.guard.STATE_UNREADABLE)
+
+    def test_timeout_is_the_unreadable_sentinel(self):
+        def run(cmd, **kw):
+            raise subprocess.SubprocessError("timed out")
+        self.assertEqual(
+            wake.read_subject_state("a", subject_of=lambda s: ("T", "goal"), run=run),
+            wake.guard.STATE_UNREADABLE)
 
     def test_unresolvable_subject_is_none(self):
         self.assertIsNone(wake.read_subject_state("a", subject_of=lambda s: None))
