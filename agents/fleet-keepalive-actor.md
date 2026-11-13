@@ -279,19 +279,22 @@ that watcher is what the nudge targets. A failed send, or a session with no rost
 (headless, pane-less), is reported `undelivered: <id8>`; the ledger counts it as nudged, so it is
 not retried every tick. Never park, kill or exit it yourself: the nudge asks; the session acts.
 
-Selection is `bucket == watching` AND `watching_min` strictly above `park-event.py threshold`
-— the span from the first `🟡 WAITING` closer of the **current watching episode**, published by
-`session-activity.py`. ⚠️ **Never substitute `quiet_min`:** a watcher re-arm writes to the
-transcript, so a session parked 3 h 34 m read `quiet 12m` and was never nudged. Suppression is
+Selection is `watching_min` strictly above `park-event.py`'s threshold — the span from the first
+`🟡 WAITING` closer of the **current watching episode**, from `session-activity.py`. ⚠️ **Never
+substitute `quiet_min`:** a re-arm writes the transcript, so a session parked 3 h 34 m read
+`quiet 12m`. Suppression is
 one nudge per episode, keyed on the session id **and `watching_since`** — never on the duration,
 and never on the duration merely dropping. Leaving the bucket, leaving the fleet, or a different
 `watching_since` re-arms it.
 
+⚠️ **A manager-tier session is never a candidate** — the script reports `<k> manager-skipped`.
+Do not filter `NUDGE` by tier.
+
 **Report the line.** Print the `park-nudge:` summary verbatim
-(`<n> nudged · <s> suppressed · <w> within 15m · <m> watching · <l> live`) beside the three
-counts that `commands/steps/output-shape.md` item 14 renders. ⚠️ **It is not one of them** — item
-14's block is the digest's `LEGS` section, which admits exactly three `unactioned:` lines, so a
-`park-nudge:` line inside it fails item 14's `--check`.
+(`<n> nudged · <s> suppressed · <w> within 15m · <m> watching · <l> live · <k> manager-skipped`)
+beside the three counts that `commands/steps/output-shape.md` item 14 renders. ⚠️ **It is not one
+of them** — item 14's block is the digest's `LEGS` section, which admits exactly three
+`unactioned:` lines, so a `park-nudge:` line inside it fails item 14's `--check`.
 
 ## 4. Resume a worker whose session died
 
