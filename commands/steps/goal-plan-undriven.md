@@ -10,12 +10,12 @@ When: every tick, after row 4b
 
 Rationale and incident history: the Manager Session runbook § Command rationale — maintained.
 
-**Why this step exists.** Row 4b reports every SC/DoD box whose driving cell is `none` and is read-only by design — *"surface it, never decide it"*. Nothing decided it, so the operator had to visit every manager and ask *"what is the next task we should create/approve/open to complete the next SC/DoD?"* (2026-11-13). This step decides it: it **files** the task a box needs and **routes** it by its door, so the manager plans and opens on its own and reaches the operator only when the door requires it. ⚠️ **Row 4b stays read-only** — this step consumes its rows; it never re-runs or widens the coverage dispatch.
+This step **files** the task each undriven SC/DoD box from row 4b needs and **routes** it by its door. ⚠️ **Row 4b stays read-only** — this step consumes its rows; it never re-runs or widens the coverage dispatch.
 
-**The decision has ONE home — `scripts/undriven-plan.py decide`.** This file gathers its input and executes its output; it never re-derives a route, a cap or a ranking. Run it once per tick:
+**The decision has ONE home — `scripts/undriven-plan.py decide`.** This file gathers its input and executes its output; it never re-derives a route, a cap or a ranking. Run it once per tick, the payload piped on stdin — never written to a file, which would park on a write prompt:
 
 ```
-python3 ${CLAUDE_PLUGIN_ROOT}/scripts/undriven-plan.py decide < <payload.json>
+printf '%s' '<payload JSON>' | python3 ${CLAUDE_PLUGIN_ROOT}/scripts/undriven-plan.py decide
 ```
 
 ## 1. Build the payload
@@ -42,7 +42,7 @@ python3 ${CLAUDE_PLUGIN_ROOT}/scripts/undriven-plan.py decide < <payload.json>
   ```
 
   For a one-way row, put `Blast radius:` and `Rollback:` lines in its `# Impact` — the waiting-approval card renders them (agents/goal-drive.md clause (7)).
-  - `route: talk-through` → **also** write a `### Decision: <title> — one-way` block with `Status: proposed` on the subject goal page (plan, blast radius, rollback, alternatives, cost of waiting), and post ONE card whose options are the script's `card.options` — `--risk risk`, dedup key `talk-through:<subject>:<task>`. ⚠️ **The card says a talk-through is waiting; it never asks for the decision** — no approve option, ever (operator 2026-11-13: a one-click "yes" on "restructure everything" is the failure this prevents). Only the operator moves `Status: proposed` → `accepted`.
+  - `route: talk-through` → **also** write a `### Decision: <title> — one-way` block with `Status: proposed` on the subject goal page (plan, blast radius, rollback, alternatives, cost of waiting), and post ONE card whose options are the script's `card.options` — `--risk risk`, dedup key `talk-through:<subject>:<task>`. ⚠️ **The card says a talk-through is waiting; it never asks for the decision** — no approve option, ever. Only the operator moves `Status: proposed` → `accepted`.
   - `route: card` → **post nothing here.** The filed row sits at `phase: todo`, so next tick's sweep buckets it `⌛ waiting-approval` and it rides the round's ONE existing approve card — the dedup, open-card and skip discipline that card already has applies unchanged.
   - `route: open` / `held-on-cap` → nothing more this tick; the `pending` half picks it up next tick.
 - **`approve_by_manager[]`** — run `vault-cli task approve "<task>" --by manager` per name. ⚠️ **This is the only row a manager may approve**: one this step itself filed (`planned_by: goal-plan-undriven`) **and** labelled two-way, on a goal at `execution`, below the target. Every other `phase: todo` row stays the operator's inbox — never flipped, never opened (`docs/fleet-surface.md` § Approval provenance). Do not spawn here: the approved row reaches the drive leg's readiness audit on the next sweep and opens through row 6 like any approved row.
