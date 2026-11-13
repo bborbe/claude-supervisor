@@ -51,6 +51,57 @@ class ParkEventTest(unittest.TestCase):
             capture_output=True, text=True, env=env, check=False,
         )
 
+    def stub_vault_cli(self, vault_dir, tasks_dir=None):
+        """A `vault-cli` that answers `task show` / `config list` and logs calls.
+
+        The real CLI is the only thing that can name a task's file, so a stub
+        that prints nothing makes `register` refuse — which is the behaviour
+        under test in `test_a_refused_task_write_is_reported_not_swallowed`,
+        and noise everywhere else.
+
+        `vault_dir` is what `config list` reports as the vault path;
+        `tasks_dir` is where `task show` resolves pages, defaulting to the same
+        directory so a register fixture can keep its pages flat.
+        """
+        bin_dir = pathlib.Path(self._tmp.name) / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        calls = pathlib.Path(self._tmp.name) / "calls.txt"
+        stub = bin_dir / "vault-cli"
+        stub.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, os, sys\n"
+            "args = sys.argv[1:]\n"
+            'with open(os.environ["STUB_CALLS"], "a") as fh:\n'
+            '    fh.write(" ".join(args) + "\\n")\n'
+            'if args[:2] == ["task", "show"]:\n'
+            '    print(json.dumps({"file_path": os.path.join(\n'
+            '        os.environ["STUB_TASKS"], args[2] + ".md")}))\n'
+            "    sys.exit(0)\n"
+            'if args[:2] == ["config", "list"]:\n'
+            "    print(json.dumps([{\"name\": \"stubvault\",\n"
+            '        "path": os.environ["STUB_VAULT"], "tasks_dir": "25 Tasks"}]))\n'
+            "    sys.exit(0)\n"
+            "sys.exit(0)\n"
+        )
+        stub.chmod(0o755)
+        return {
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "STUB_CALLS": str(calls),
+            "STUB_TASKS": str(tasks_dir or vault_dir),
+            "STUB_VAULT": str(vault_dir),
+            "PARK_EVENT_NOW": "2026-11-01T00:00:00+01:00",
+        }
+
+    def task_page(self, name, body="# Progress\n\n- 2026-11-01 — filed\n"):
+        tasks = pathlib.Path(self._tmp.name) / "tasks"
+        tasks.mkdir(exist_ok=True)
+        page = tasks / f"{name}.md"
+        page.write_text(
+            "---\nstatus: in_progress\ndefer_date: 2026-11-02\n---\n\n"
+            f"# Impact\n\nsomething\n\n{body}"
+        )
+        return tasks, page
+
     # --- the threshold ------------------------------------------------------
 
     def test_threshold_has_one_home_and_prints_15m(self):
@@ -385,6 +436,135 @@ class ParkEventTest(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 2, proc.stdout)
         self.assertIn("unknown key", proc.stderr)
+
+
+    # --- the park record the round reads ------------------------------------
+
+    def test_register_writes_the_later_on_record_into_progress(self):
+        tasks, page = self.task_page("Some Task")
+        proc = self.run_script(
+            "register", "--task", "Some Task", "--event", "a metric",
+            "--recheck", "2026-11-02T02:00:00+01:00", "--session", "aaaaaaaa",
+            extra_env=self.stub_vault_cli(tasks),
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        text = page.read_text()
+        # The round greps for `later (on `; without it a correctly deferred row
+        # reads `unverifiable` and its slot is never freed.
+        self.assertIn("later (on a metric):", text)
+        self.assertIn("2026-11-02T02:00:00+01:00", text)
+        # Inside `# Progress`, after the entry already there — not appended to
+        # whatever section the page happens to end with.
+        self.assertGreater(text.index("later (on a metric):"), text.index("— filed"))
+
+    def test_register_creates_a_progress_section_when_the_page_has_none(self):
+        tasks, page = self.task_page("Bare Task", body="")
+        proc = self.run_script(
+            "register", "--task", "Bare Task", "--event", "a metric",
+            "--recheck", "2026-11-02T02:00:00+01:00", "--session", "aaaaaaaa",
+            extra_env=self.stub_vault_cli(tasks),
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        text = page.read_text()
+        self.assertIn("# Progress", text)
+        self.assertIn("later (on a metric):", text)
+
+    def test_a_repark_rewrites_the_record_instead_of_stacking_lines(self):
+        tasks, page = self.task_page("Some Task")
+        env = self.stub_vault_cli(tasks)
+        for recheck, extra in (
+            ("2026-11-02T02:00:00+01:00", ()),
+            ("2026-11-05T05:00:00+01:00", ("--repark",)),
+        ):
+            proc = self.run_script(
+                "register", "--task", "Some Task", "--event", "a metric",
+                "--recheck", recheck, "--session", "aaaaaaaa", *extra,
+                extra_env=env,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+        text = page.read_text()
+        self.assertEqual(text.count("later (on a metric):"), 1, text)
+        # The line names the CURRENT re-check: a stale instant would tell the
+        # round the wait is still running against a date that has passed.
+        self.assertIn("2026-11-05T05:00:00+01:00", text)
+        self.assertNotIn("2026-11-02T02:00:00+01:00", text)
+
+    def test_a_repark_rewrites_the_peers_record_too(self):
+        tasks, _page_a = self.task_page("Task A")
+        _tasks, page_b = self.task_page("Task B")
+        env = self.stub_vault_cli(tasks)
+        for session, task in (("aaaaaaaa", "Task A"), ("bbbbbbbb", "Task B")):
+            self.run_script(
+                "register", "--task", task, "--event", "a metric",
+                "--recheck", "2026-11-02T02:00:00+01:00", "--session", session,
+                extra_env=env,
+            )
+        proc = self.run_script(
+            "register", "--task", "Task A", "--event", "a metric",
+            "--recheck", "2026-11-05T05:00:00+01:00", "--session", "aaaaaaaa",
+            "--repark", extra_env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # The peer's clock moves, so its record must move with it.
+        self.assertIn("2026-11-05T05:00:00+01:00", page_b.read_text())
+        self.assertNotIn("2026-11-02T02:00:00+01:00", page_b.read_text())
+
+    def test_a_level_two_progress_section_is_used_rather_than_duplicated(self):
+        tasks, page = self.task_page("Level Two", body="## Progress\n\n- 2026-11-01 — filed\n")
+        proc = self.run_script(
+            "register", "--task", "Level Two", "--event", "a metric",
+            "--recheck", "2026-11-02T02:00:00+01:00", "--session", "aaaaaaaa",
+            extra_env=self.stub_vault_cli(tasks),
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        text = page.read_text()
+        # The vault is not uniform — 53 task pages carry `## Progress`. Writing a
+        # second `# Progress` beside it is the page being made wrong, not fixed.
+        self.assertEqual(text.count("Progress"), 1, text)
+        self.assertGreater(text.index("later (on a metric):"), text.index("## Progress"))
+
+    def test_no_record_is_written_for_a_past_recheck(self):
+        tasks, page = self.task_page("Some Task")
+        proc = self.run_script(
+            "register", "--task", "Some Task", "--event", "a metric",
+            "--recheck", "2026-10-01T02:00:00+01:00", "--session", "aaaaaaaa",
+            extra_env=self.stub_vault_cli(tasks),
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        # A past instant is not a park: the row is due, so a `later (on …)` line
+        # would describe a wait that is not running.
+        self.assertNotIn("later (on ", page.read_text())
+
+    def test_backfill_writes_the_record_only_where_it_is_missing(self):
+        vault = pathlib.Path(self._tmp.name) / "vault"
+        tasks = vault / "25 Tasks"
+        tasks.mkdir(parents=True)
+
+        def page(name, status="in_progress", defer="2026-11-20", body=""):
+            (tasks / f"{name}.md").write_text(
+                f"---\nstatus: {status}\ndefer_date: {defer}\n---\n\n"
+                f"# Progress\n\n{body}"
+            )
+
+        page("Deferred No Record")
+        page("Another Deferred")
+        page("Deferred With Record", body="- later (on something): the round re-opens it\n")
+        page("Deferred Past", defer="2026-10-01")
+        page("Done", status="completed")
+
+        env = self.stub_vault_cli(vault)
+        dry = self.run_script("backfill", "--vault", "stubvault", extra_env=env)
+        self.assertEqual(dry.returncode, 0, dry.stderr)
+        self.assertIn("3 future-dated in_progress | 2 missing later(on) | 0 written", dry.stdout)
+        self.assertNotIn("later (on ", (tasks / "Deferred No Record.md").read_text())
+
+        applied = self.run_script("backfill", "--vault", "stubvault", "--apply", extra_env=env)
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        self.assertIn("3 future-dated in_progress | 2 missing later(on) | 2 written", applied.stdout)
+        self.assertIn("later (on ", (tasks / "Deferred No Record.md").read_text())
+
+        again = self.run_script("backfill", "--vault", "stubvault", "--apply", extra_env=env)
+        self.assertIn("0 missing later(on) | 0 written", again.stdout)
 
 
 if __name__ == "__main__":
