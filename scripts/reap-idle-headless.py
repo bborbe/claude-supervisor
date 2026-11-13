@@ -381,6 +381,76 @@ def open_cards(session_id, attention_url=None):
     return cards, True
 
 
+def busy_parked_session_ids(
+    sessions_dir=None, wrapper_url=None, ledger_url=None, attention_url=None, now=None
+):
+    """The parked sessions `candidate_session_ids()` can never return, with their park age.
+
+    ⚠️ **This is a read for visibility, never for action.** `candidate_session_ids()` drops
+    every record whose registry `status` is not `idle` at its own filter, so a wrapper
+    session parked on a question while the registry still reports a non-idle status is
+    skipped *before* the `busy-target` guard can refuse it — no refusal token, no tick
+    line, and no age at which anything closes it. That silence reads identically to
+    "nothing to reap", which is the invisibility the operator's 2026-11-13 ruling ends by
+    surfacing the population rather than widening the guard: *"keep `busy-target`
+    absolute — fix the missing card instead, not the reaper"* (card
+    `039df378a626f84a8e61fa11863517ec`). Nothing here reaps, signals, or relaxes that
+    guard; it only names what the guard will never see.
+
+    Returns `[(session_id, park_age_seconds, requested_at)]` — `requested_at` is the dedup
+    clock, so one card is posted per session **per park** and a re-park is a new card.
+
+    ⚠️ **Fail-closed on every unreadable read**, matching the guard it reports on: an
+    unreadable wrapper record, an unageable `requested_at`, an unreadable attention store,
+    and a registry record carrying no id all drop the session rather than guess. `None`
+    from `open_cards()` is "could not read", never "no cards" — posting blind could
+    duplicate a card a person is already looking at.
+
+    ⚠️ **`open_cards()` sees the session's OWN card, not this tick's.** It filters
+    `producer_id == session_id`, and the cards posted from `idle-reaper-tick.py` carry
+    `producer_id: idle-reaper-tick`. So this check skips a session already surfaced by its
+    own producer (the Stop hook mirrors every closer into one) and does **not** dedup the
+    tick's own posts — that is the tick's marker file's job.
+    """
+    found = []
+    seen = set()
+    for path in sorted(glob.glob(os.path.join(sessions_dir or SESSIONS_DIR, "*.json"))):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                rec = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        session_id = rec.get("sessionId")
+        if not session_id or session_id in seen:
+            continue
+        # The exact complement of `candidate_session_ids()`'s own filter, so the two
+        # populations partition the registry and can never overlap. A record with **no**
+        # `status` is included on purpose: the guard renders it `'(none)'` and refuses it
+        # `busy-target` all the same, so excluding it here would hide a session for a
+        # reason the guard does not share.
+        if rec.get("entrypoint") != "sdk-cli":
+            continue
+        if rec.get("status") == "idle":
+            continue
+        wrapper = wrapper_record(session_id, wrapper_url, ledger_url)
+        if not isinstance(wrapper, dict):
+            continue
+        if wrapper.get("state") != "idle":
+            continue
+        if wrapper.get("pending_turns") != 0:
+            continue
+        question = wrapper.get("question")
+        park_age = question_age_seconds(question, now)
+        if park_age is None or park_age < IDLE_FLOOR:
+            continue
+        cards, cards_readable = open_cards(session_id, attention_url)
+        if not cards_readable or cards:
+            continue
+        seen.add(session_id)
+        found.append((session_id, park_age, question.get("requested_at")))
+    return found
+
+
 def transcript_path(cwd, session_id, projects_dir=None):
     """`~/.claude/projects/<escaped-cwd>/<sid>.jsonl` — the artifact a resume reads.
 
