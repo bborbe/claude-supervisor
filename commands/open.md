@@ -535,17 +535,36 @@ The goal branch **resolves the goal's manager and delegates**; it reimplements n
    NEW_PANE=<the spawn's stdout>
    P="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}"
 
-   # bounded prompt-wait — the guard's verdict, never a sleep
-   for _ in $(seq 1 60); do python3 "$P/scripts/pane-wake-guard.py" --pane-id "$NEW_PANE" >/dev/null 2>&1 && break; sleep 1; done
+   # bounded prompt-wait — FAIL CLOSED: on exhaustion nothing is sent, because the panes
+   # the guard refuses (an operator ask, a modal, a non-empty composer) are exactly the
+   # ones a send must never reach
+   ready() {
+     _i=0
+     while [ "$_i" -lt "$1" ]; do
+       python3 "$P/scripts/pane-wake-guard.py" --pane-id "$NEW_PANE" >/dev/null 2>&1 && return 0
+       _i=$((_i + 1)); sleep 1
+     done
+     return 1
+   }
+   # a submitted command shows a spinner; an idle composer means the Enter was swallowed
+   submitted() {
+     sleep 2
+     _v=$(python3 "$P/scripts/pane-wake-guard.py" --pane-id "$NEW_PANE" 2>/dev/null)
+     [ "$_v" = "skip:spinner" ] || { echo "⚠️ start command did not submit (guard reads: $_v)"; return 1; }
+   }
+
+   ready 60 || { echo "⚠️ <goal> Manager never reached a prompt — nothing sent"; exit 1; }
    wezterm cli send-text --pane-id "$NEW_PANE" --no-paste $'/vault-cli:work-on-goal "<goal>"'
    sleep 1
    wezterm cli send-text --pane-id "$NEW_PANE" --no-paste $'\r'   # submit as a separate step
+   submitted || exit 1
 
    # work-on-goal runs a planning chain — wait up to 300 s for the pane to be ready again
-   for _ in $(seq 1 300); do python3 "$P/scripts/pane-wake-guard.py" --pane-id "$NEW_PANE" >/dev/null 2>&1 && break; sleep 1; done
+   ready 300 || { echo "⚠️ work-on-goal did not finish — goal-loop not sent"; exit 1; }
    wezterm cli send-text --pane-id "$NEW_PANE" --no-paste $'/supervisor:goal-loop "<goal>"'
    sleep 1
    wezterm cli send-text --pane-id "$NEW_PANE" --no-paste $'\r'   # submit as a separate step
+   submitted || exit 1
    ```
 
    `/supervisor:open` starts the session **and** its loop; the manager session is what runs the loop, so nothing is left for the operator to paste.
@@ -597,11 +616,26 @@ The goal branch **resolves the goal's manager and delegates**; it reimplements n
    NEW_PANE=<the spawn's stdout>
    P="${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/plugins/marketplaces/claude-supervisor}"
 
-   # bounded prompt-wait — the guard's verdict, never a sleep
-   for _ in $(seq 1 60); do python3 "$P/scripts/pane-wake-guard.py" --pane-id "$NEW_PANE" >/dev/null 2>&1 && break; sleep 1; done
+   # bounded prompt-wait — FAIL CLOSED, same helpers as § 2B item 4
+   ready() {
+     _i=0
+     while [ "$_i" -lt "$1" ]; do
+       python3 "$P/scripts/pane-wake-guard.py" --pane-id "$NEW_PANE" >/dev/null 2>&1 && return 0
+       _i=$((_i + 1)); sleep 1
+     done
+     return 1
+   }
+   submitted() {
+     sleep 2
+     _v=$(python3 "$P/scripts/pane-wake-guard.py" --pane-id "$NEW_PANE" 2>/dev/null)
+     [ "$_v" = "skip:spinner" ] || { echo "⚠️ start command did not submit (guard reads: $_v)"; return 1; }
+   }
+
+   ready 60 || { echo "⚠️ <topic> Manager never reached a prompt — nothing sent"; exit 1; }
    wezterm cli send-text --pane-id "$NEW_PANE" --no-paste $'/supervisor:goal-loop "<topic>"'
    sleep 1
    wezterm cli send-text --pane-id "$NEW_PANE" --no-paste $'\r'   # submit as a separate step
+   submitted || exit 1
    ```
 
    `/supervisor:open` starts the topic manager **and** its loop; the manager session is what runs the loop, so nothing is left for the operator to paste.
