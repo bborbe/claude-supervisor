@@ -226,7 +226,7 @@ class Handover(Base):
     def test_a_repeat_stall_after_a_restart_is_asked_again(self):
         """A bare `stuck-tab:<slug>` would resolve to the answered item forever, so the
         operator would never be re-asked on the one row this leg exists for."""
-        self.patch_control(poll="ANSWERED: restart it")
+        self.patch_control(poll="ANSWERED: option: restart it")
         self.run_leg()
         first = [a for a in self.calls("ask") if a[0] == "post"][0]
         first_key = first[first.index("--dedup-key") + 1]
@@ -248,14 +248,14 @@ class Handover(Base):
         """`ANSWERED` alone is not permission to kill. The card offers `restart it` and
         `leave it`, and acting on the terminal alone would make the card's safest answer the
         most destructive one."""
-        self.patch_control(poll="ANSWERED: leave it")
+        self.patch_control(poll="ANSWERED: option: leave it")
         rc, lines = self.run_leg()
         self.assertEqual(rc, 0)
         self.assertEqual(lines[0], "carded")
         self.assertEqual([], self.lifted_calls())
 
     def test_answered_leave_it_is_recorded_so_it_is_not_reread(self):
-        self.patch_control(poll="ANSWERED: leave it")
+        self.patch_control(poll="ANSWERED: option: leave it")
         self.run_leg()
         rc, lines = self.run_leg()
         self.assertEqual(lines[0], "carded")
@@ -272,13 +272,13 @@ class Handover(Base):
         """`post` prints `ITEM_ID: <id>` then a `POLL:` hint line. Reading the LAST line
         yields that hint, so `poll` answers `cannot-tell` forever and the leg reports
         `carded` every round while never restarting anything."""
-        self.patch_control(poll="ANSWERED: restart it")
+        self.patch_control(poll="ANSWERED: option: restart it")
         self.run_leg()
         polls = [a for a in self.calls("ask") if a[0] == "poll"]
         self.assertEqual(["item-1"], polls[0][1:2])
 
     def test_answered_runs_the_real_restart_with_the_lift(self):
-        self.patch_control(poll="ANSWERED: restart it")
+        self.patch_control(poll="ANSWERED: option: restart it")
         rc, lines = self.run_leg()
         self.assertEqual(rc, 0, lines)
         self.assertEqual(lines[0], "restart")
@@ -292,13 +292,34 @@ class Handover(Base):
     def test_one_answer_never_becomes_a_loop(self):
         """The card is marked consumed BEFORE the call, so a second round that still reads
         `ANSWERED` does not restart again."""
-        self.patch_control(poll="ANSWERED: restart it")
+        self.patch_control(poll="ANSWERED: option: restart it")
         self.run_leg()
         before = len([a for a in self.calls("restart") if "--dry-run" not in a])
         rc, lines = self.run_leg()
         self.assertEqual(lines[0], "carded")
         after = len([a for a in self.calls("restart") if "--dry-run" not in a])
         self.assertEqual(before, after, "a consumed card restarted the session a second time")
+
+
+class AnswerShape(unittest.TestCase):
+    """The store prefixes an answer with its KIND — `option: restart it` — because
+    `attention-ask.py` renders through `describe_one`, whose shape is `{kind}: {value}`.
+    Comparing the raw content against the bare label never matches, and the mismatch falls
+    into the leave-it branch, so every approval is recorded as a decline and no restart ever
+    runs. The whole feature is inert that way, which is why this is pinned directly."""
+
+    def test_the_option_kind_is_stripped(self):
+        self.assertEqual("restart it", st.answer_value("option: restart it"))
+
+    def test_the_leave_label_is_stripped_too(self):
+        self.assertEqual("leave it", st.answer_value("option: leave it"))
+
+    def test_a_bare_label_still_works(self):
+        self.assertEqual("restart it", st.answer_value("restart it"))
+
+    def test_an_empty_answer_is_empty(self):
+        self.assertEqual("", st.answer_value(""))
+        self.assertEqual("", st.answer_value(None))
 
 
 class FailClosed(Base):
@@ -332,11 +353,11 @@ class FailClosed(Base):
 
 class Cap(Base):
     def test_the_cap_stops_the_third_restart_and_escalates_once(self):
-        self.patch_control(poll="ANSWERED: restart it")
+        self.patch_control(poll="ANSWERED: option: restart it")
         self.run_leg()                      # restart 1
-        self.patch_control(poll="ANSWERED: restart it", post_id="item-2")
+        self.patch_control(poll="ANSWERED: option: restart it", post_id="item-2")
         self.run_leg()                      # restart 2
-        self.patch_control(poll="ANSWERED: restart it", post_id="item-3")
+        self.patch_control(poll="ANSWERED: option: restart it", post_id="item-3")
         rc, lines = self.run_leg()          # capped
         self.assertEqual(rc, 0)
         self.assertEqual(lines[0], "capped")
@@ -346,13 +367,13 @@ class Cap(Base):
         self.assertIn("stuck-tab-capped:" + st.slug_for(self.TASK), keys)
 
     def test_progress_resets_the_cap(self):
-        self.patch_control(poll="ANSWERED: restart it")
+        self.patch_control(poll="ANSWERED: option: restart it")
         self.run_leg()
-        self.patch_control(poll="ANSWERED: restart it", post_id="item-2")
+        self.patch_control(poll="ANSWERED: option: restart it", post_id="item-2")
         self.run_leg()
         # A newer task page is the reset signal, exactly worker-keepalive.py's.
         os.utime(self.task_path, (0, 10 ** 10))
-        self.patch_control(poll="ANSWERED: restart it", post_id="item-3")
+        self.patch_control(poll="ANSWERED: option: restart it", post_id="item-3")
         rc, lines = self.run_leg()
         self.assertEqual(lines[0], "restart", "progress did not reset the cap")
         real = [a for a in self.calls("restart") if "--dry-run" not in a]

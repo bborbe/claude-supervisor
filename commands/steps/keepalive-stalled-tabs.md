@@ -6,7 +6,10 @@ user-invocable: false
 
 # Keep alive — stalled tab workers
 
-When: every tick, as § 4c of `agents/fleet-keepalive-actor.md`
+When: every tick — the eighth procedure in `commands/steps/keepalive.md`, reached from
+`agents/fleet-keepalive-actor.md` § 4's *four worker mechanisms* note. ⚠️ **It is dispatched
+from there and nowhere else**; a steps file no dispatch names is a procedure that never runs,
+and the whole feature stays inert while reading as built.
 
 The sweep already classifies a tab worker `stalled` (`agents/fleet-sweep-reader.md:115`:
 `busy`/`shell`, unchanged task mtime across ≥2 sweeps, `--ages` reading `quiet`). Nothing acted
@@ -26,7 +29,9 @@ python3 -c '
 import json, subprocess, sys
 vault, f, script = sys.argv[1:4]
 if f.startswith("UNKNOWN"): sys.exit("folders: " + f)
-tasks = f.split("|")[0]
+# ⚠️ Field 2, not 0. `resolve-folders.py` prints `topics|goals|tasks|vault-name`, so
+# `[0]` is the TOPICS directory and the leg would look for task pages among topic pages.
+tasks = f.split("|")[2]
 rows = json.load(sys.stdin)          # this round'"'"'s sweep rows
 for row in rows:
     if row.get("class") != "stalled" or row.get("mode") != "interactive":

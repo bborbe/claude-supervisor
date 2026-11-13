@@ -43,6 +43,7 @@ Verdicts (first line of stdout), one token:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -68,6 +69,22 @@ RESTART_CAP = 2
 #: operator's `ANSWERED:` carries the chosen content, and only `restart it` may kill.
 OPTION_RESTART = "restart it"
 OPTION_LEAVE = "leave it"
+
+
+def answer_value(content):
+    """`option: restart it` -> `restart it`.
+
+    ⚠️ **The store does not print the bare label.** `attention-ask.py` renders an answer
+    through `describe_one`, whose shape is `{kind}: {value}` — so an option click arrives as
+    `option: restart it`. Comparing the raw content against `restart it` never matches, and
+    because the mismatch falls into the leave-it branch, every operator approval is recorded
+    as a decline and **no restart ever runs**. The kind prefix is stripped here, once.
+    """
+    content = (content or "").strip()
+    for kind in ("option: ", "values: ", "text: "):
+        if content.startswith(kind):
+            return content[len(kind):].strip()
+    return content
 
 
 def slug_for(task):
@@ -206,10 +223,15 @@ def card_key(task, state):
     producer + key, so after the first card is answered and consumed, a later stall of the
     same task would resolve to that same item, hit the "already consumed" branch, and the
     operator would never be asked again — the leg would go quiet on exactly the row it
-    exists for. Folding the restart count and the consumed count in gives each episode its
-    own card while still refusing to stack two within one episode.
+    exists for.
+
+    ⚠️ **The generation is the RESTART count only — never the consumed count.** Folding
+    `len(consumed)` in looks right and is not: answering `leave it` consumes the card, which
+    would change the key and mint a fresh card on the very next round. The operator would be
+    asked again and again after saying no. `restarts` changes only when a restart actually
+    ran, which is exactly the boundary a new episode starts at.
     """
-    return f"stuck-tab:{slug_for(task)}:{state['restarts']}:{len(state['consumed'])}"
+    return f"stuck-tab:{slug_for(task)}:{state['restarts']}"
 
 
 def post_card(task, session_id, token_detail, state):
@@ -328,6 +350,44 @@ def main(argv=None):
         print(reason)
         return 0
 
+    return with_lock(args)
+
+
+def with_lock(args):
+    """Serialise two rounds on one task before acting.
+
+    ⚠️ **The store is a read-modify-write across a subprocess boundary.** Between
+    `read_state` and `write_state` this script spawns `attention-ask.py` and
+    `restart-worker.py`, which takes seconds; two rounds overlapping on the same task would
+    both read `restarts: 0`, both see an `ANSWERED` card, and both restart the worker — the
+    cap bypassed by timing rather than by logic. A non-blocking lock makes the loser report
+    `cannot-tell` and try again next round, which is the same direction every other
+    undecidable probe in this file takes.
+    """
+    lock_path = state_path(args.vault, args.task) + ".lock"
+    try:
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        handle = open(lock_path, "w", encoding="utf-8")
+    except OSError as error:
+        print("cannot-tell")
+        print(f"the task lock could not be opened: {error}")
+        return 0
+    try:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("cannot-tell")
+            print("another round holds this task's lock")
+            return 0
+        return act(args)
+    finally:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+def act(args):
     state, state_error = read_state(args.vault, args.task)
     if state_error is not None:
         # Fail closed: a corrupt store could hide a spent cap or a consumed card, and both
@@ -390,7 +450,7 @@ def main(argv=None):
         print(f"card {item} was already consumed")
         return 0
 
-    if answer != OPTION_RESTART:
+    if answer_value(answer) != OPTION_RESTART:
         # `ANSWERED` alone is not permission to kill — the operator chose LEAVE. Record it
         # as consumed so the same answer is not re-read every round, and do nothing else.
         state["consumed"].append(item)
@@ -403,8 +463,6 @@ def main(argv=None):
         return 0
 
     state["consumed"].append(item)
-    state["restarts"] += 1
-    state["progress_at"] = stamp
     if not write_state(args.vault, args.task, state):
         # ⚠️ The marker is written BEFORE the act. If it cannot be written, the act must not
         # run: the card still reads `ANSWERED`, so a restart here would repeat every round —
@@ -417,9 +475,16 @@ def main(argv=None):
     # is the only call site that passes `--allow-busy-lapse`.
     code, token, detail = refusal(args.session_id, dry_run=False, lift=True)
     if code is None or code != 0:
+        # ⚠️ The cap is charged AFTER the restart, never before. A refused restart that
+        # still spent the cap would silently reduce how many attempts the operator gets for
+        # a failure they never caused — and the refusal may be one a later round can clear.
         print("cannot-tell")
         print(f"restart refused: {token} {detail}".strip())
         return 1
+
+    state["restarts"] += 1
+    state["progress_at"] = stamp
+    write_state(args.vault, args.task, state)
     print("restart")
     print(detail)
     return 0
