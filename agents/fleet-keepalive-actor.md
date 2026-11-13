@@ -435,21 +435,17 @@ cannot-tell: <name> · <what could not be decided>
 park-nudge: <the summary line, verbatim>
 ```
 
-⚠️ **`legs=written` asserts every reading this leg owes landed** — each of its three digest keys present in the digest as a count **or** as its own `--not-run` reason; a `not-run`
+⚠️ **`legs=written` asserts every reading this leg owes landed** — each of its three digest keys present as a count **or** its own `--not-run` reason; a `not-run`
 that landed is a reading that landed. `legs=UNKNOWN` means a `fleet-legs.py` call exited 2 and at
-least one reading did not land — never emitted with numbers, which invites the caller to render
+least one reading did not land — never emitted with numbers, which invites rendering
 counts the digest does not have. ⚠️ **`legs-reason` is the channel the caller's failed-write
-render reads** — the exit and its message when `legs=UNKNOWN`, `—` when `legs=written`; the reason
+render reads** — the exit and its message when `legs=UNKNOWN`, `—` when `legs=written`; it
 survives nowhere else. ⚠️ **`dead-scan` is the label the digest write used** — `complete` =
-`--exact`, `incomplete` = `--floor`, `—` when `dead-workers=not-run` (no count was written, so no
-label applies). Emitted on every run, so it is never inferred. ⚠️ **Its three digest keys are
-emitted on every run** — `not-run` when its step could not execute, never omitted and never a
-bare `0`. ⚠️ **`decision-persist` is § 2b's write verdict, and it is emitted on every run** —
-`written` when `decision-park-resume.py --persist-beside` landed the four readings in the round's
-`.decision`, `FAILED` when it exited 3 (the readings were produced but the file could not be
-written). ⚠️ **`FAILED` is never swallowed and never softened to `written`:** the four counts beside
-it then exist only in this message, which is the exact defect the `.decision` file removes — so the
-caller must render the round's decision readings as unpersisted rather than as measured. ⚠️ **The row lists (`crash-loop:`, `cannot-tell:`) carry no `=` and are not counts** —
+`--exact`, `incomplete` = `--floor`, `—` when `dead-workers=not-run` (no count, so no label).
+Emitted on every run, never inferred. ⚠️ **Its three digest keys are
+emitted on every run** — `not-run` when its step could not execute, never omitted, never a
+bare `0`. ⚠️ **`decision-persist`** = § 2b's write verdict.
+⚠️ **The row lists (`crash-loop:`, `cannot-tell:`) carry no `=` and are not counts** —
 the caller prints them; their per-list counts are `crash-loop=` and `cannot-tell=` on the counts
 line. ⚠️ **One dropped count per list, never one shared `truncated=`** — `crash-loop-truncated=`
 and `cannot-tell-truncated=` each say how many rows of THAT list ride `payload=`, since a shared
