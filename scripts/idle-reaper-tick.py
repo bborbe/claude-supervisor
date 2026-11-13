@@ -80,7 +80,14 @@ def tick(sessions_dir=None, dry_run=False, reaper=None, reaper_path=REAPER, clos
     for session_id in reaper.candidate_session_ids(sessions_dir):
         code, first, _ = run_verb(reaper_path, session_id, dry_run)
         if code == 0:
-            rows.append((session_id, "reap", "would-close" if dry_run else "closed", TRIGGER_IDLE))
+            # A close carries its own token on the first line (`unanchored-closed`); a plain
+            # reap prints the `🧹` header first. Only the token is mapped — everything else
+            # stays `closed`, so the existing close path is unchanged.
+            if first == "unanchored-closed":
+                outcome = "would-unanchored-close" if dry_run else "unanchored-closed"
+            else:
+                outcome = "would-close" if dry_run else "closed"
+            rows.append((session_id, "reap", outcome, TRIGGER_IDLE))
             continue
         if code != 1:
             ok = False
@@ -113,7 +120,12 @@ def summary_line(rows):
     The `dry-run` marker is the caller's to prefix, not this function's: it describes the
     run, while every count here is the same whether or not anything was signalled.
     """
-    closed = [row for row in rows if row[2] in ("closed", "would-close")]
+    closed = [
+        row
+        for row in rows
+        if row[2]
+        in ("closed", "would-close", "unanchored-closed", "would-unanchored-close")
+    ]
     past_trigger = [row for row in closed if row[3] == TRIGGER_IDLE]
     no_wait = [row for row in closed if row[3] != TRIGGER_IDLE]
     return (

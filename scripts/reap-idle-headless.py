@@ -45,9 +45,20 @@ Eleven refusals, each exit 1 with a stable token as the first line of output:
                         helpers — a backgrounded command would die with the process.
   task-terminal         the task is terminal (`completed`/`aborted`/`hold`) or deferred to
                         the future: that is `close-worker.py`'s population, not this one.
-  task-unresolved       no task, goal or topic page carries this session id. Not a
-                        finished task, but this verb needs a resolvable anchor to know
-                        what the worker is waiting on — absent evidence fails closed.
+  task-unresolved       the id appears in no page among the searched task dirs, and the
+                        session's own configured vault contributed none of them because it
+                        declares no `tasks_dir`. That is a config defect, not an unanchored
+                        session — the anchor may live where this process cannot read — so it
+                        keeps refusing. The other cause behind this token (an id in no page
+                        among every configured vault) is now a close; see `unanchored-closed`.
+
+One close outcome, exit 0, printed as the first line of output before the `🧹` header:
+
+  unanchored-closed     the id appears in no task page among every configured vault's
+                        `tasks_dir`, so nothing owns the session and nothing can resume it
+                        for. The guard chain above has already proven it headless, idle past
+                        `IDLE_FLOOR`, card-free, wrapper-idle and pid-identity-verified; the
+                        process is closed and the transcript kept, same as any other reap.
 
 ⚠️ **The watcher read has a stated hole.** It inspects children of the claude pid; a
 watcher detached with `setsid`/`nohup` leaves that tree and escapes it. The read guards the
@@ -539,6 +550,7 @@ def main(argv=None):
         cards, cards_readable = open_cards(session_id)
         verdict = guard(rec, wrapper=wrapper, cards=cards, cards_readable=cards_readable)
 
+        unanchored = False
         if verdict is None:
             # The task gate is inverted here on purpose: `task-not-terminal` is this verb's
             # population, and a resolved *terminal* task belongs to close-worker.py.
@@ -562,9 +574,24 @@ def main(argv=None):
                     "task-terminal",
                     f"{os.path.basename(path_)} {why}; use close-worker.py",
                 )
+            elif bad is not None and bad[0] == "task-unresolved":
+                # Two causes share this token and only one is this verb's to close.
+                # `vault-not-searched` is a config defect: the session's own vault declares
+                # no `tasks_dir`, so its anchor may live in a directory this process cannot
+                # read — closing it would be the defect wearing the close. The other cause,
+                # an id in no page among every configured vault, is an unanchored finished
+                # session: nothing owns it, so nothing can resume it for, and the guard chain
+                # above has already proven it headless, idle past `IDLE_FLOOR`, card-free and
+                # wrapper-idle.
+                _refusal, detail = close_worker.resolution_refusal(
+                    session_id, rec.get("cwd")
+                )
+                if "not among them" in detail:
+                    verdict = ("task-unresolved", bad[1])
+                else:
+                    unanchored = True
             elif bad is not None and bad[0] != "task-not-terminal":
-                # `task-unresolved` is not a finished task, but this verb needs a resolvable
-                # anchor to know what the worker is waiting on. Fail closed and say why.
+                # Defensive: any future token keeps failing closed.
                 verdict = ("task-unresolved", bad[1])
 
         if verdict is not None:
@@ -680,6 +707,11 @@ def main(argv=None):
             )
             continue
 
+        if unanchored:
+            # The close token is the caller's contract (`idle-reaper-tick.py` maps it to its
+            # own outcome), so it is printed before the `🧹` header for the same reason every
+            # refusal token is: a token printed under the header reads as a plain reap.
+            print("unanchored-closed")
         print(
             f"🧹 reap-idle-headless · session {session_id[:8]} · pid {pid} · "
             f"{rec.get('name')!r}"

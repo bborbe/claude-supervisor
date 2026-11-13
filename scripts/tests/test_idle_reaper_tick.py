@@ -99,6 +99,25 @@ class TestTick(unittest.TestCase):
         self.assertEqual(rows, [("sid-a", "reap", "wrapper-busy", tick_mod.TRIGGER_IDLE)])
         self.assertEqual(self._calls(), ["reap sid-a"])
 
+    def test_an_unanchored_close_carries_its_own_token(self):
+        self._session("sid-a")
+        self.reap_answers["sid-a"] = [0, "unanchored-closed"]
+        rows, ok = self._run()
+        self.assertTrue(ok)
+        self.assertEqual(
+            rows, [("sid-a", "reap", "unanchored-closed", tick_mod.TRIGGER_IDLE)]
+        )
+        self.assertEqual(self._calls(), ["reap sid-a"])
+
+    def test_an_unanchored_close_in_dry_run_keeps_the_distinction(self):
+        self._session("sid-a")
+        self.reap_answers["sid-a"] = [0, "unanchored-closed"]
+        rows, ok = self._run(dry_run=True)
+        self.assertTrue(ok)
+        self.assertEqual(
+            rows, [("sid-a", "reap", "would-unanchored-close", tick_mod.TRIGGER_IDLE)]
+        )
+
     def test_close_worker_refusal_is_reported(self):
         self._session("sid-a")
         self.reap_answers["sid-a"] = [1, "task-terminal"]
@@ -193,6 +212,11 @@ class TestMain(unittest.TestCase):
     def test_a_dry_run_summary_counts_would_close_as_a_close(self):
         rows = [("sid-a", "reap", "would-close", tick_mod.TRIGGER_IDLE), ("sid-b", "reap", "watcher-alive", tick_mod.TRIGGER_IDLE)]
         self.assertIn("candidates=2 closed 1 past the 15-min trigger", tick_mod.summary_line(rows))
+
+    def test_an_unanchored_close_counts_as_a_close(self):
+        rows = [("sid-a", "reap", "unanchored-closed", tick_mod.TRIGGER_IDLE)]
+        self.assertIn("closed 1 past the 15-min trigger", tick_mod.summary_line(rows))
+        self.assertIn("refused 0", tick_mod.summary_line(rows))
 
     def test_a_missing_vault_cli_is_a_fault_not_a_quiet_tick(self):
         """Measured 2026-11-10: with no `vault-cli` on PATH, every candidate reads
