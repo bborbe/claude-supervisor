@@ -118,6 +118,11 @@ LEGS = {
             # `parked-due` is emitted beside `resumed`, applied to a population the clock
             # leg cannot reach.
             "decision-candidates", "decision-resumed-a", "decision-resumed-d", "decision-unread",
+            # § 2b's write verdict. The four counts above are persisted to the round's `.decision`
+            # by `decision-park-resume.py --persist-beside`; without this key a failed write is
+            # invisible to the caller, and the readings would live in the hand-back alone — the
+            # defect the `.decision` artifact exists to remove, reproduced one layer up.
+            "decision-persist",
             # one count per truncatable row list: the caller's reconciliation is
             # `rows printed + that list's dropped count == this count`, so a list without
             # its count has no arithmetic to check and a row dropped in transit is invisible
