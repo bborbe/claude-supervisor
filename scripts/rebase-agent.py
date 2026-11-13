@@ -619,6 +619,12 @@ def main(argv=None):
         STATE_DIR = args.state_dir
 
     cfgs = [cfg for cfg in DEFAULT_REPOS if not args.repo or cfg["repo"] in args.repo]
+    # A --repo outside the set filters cfgs to empty, and an empty row list used to
+    # print the clean-queue line — reading as "nothing is behind" when the truth is
+    # "this repo was never examined". Measured 2026-11-13 on bborbe/git-rest#81 and
+    # bborbe/agent-task-executor#161, both CONFLICTING and both reported clean.
+    known = {cfg["repo"] for cfg in DEFAULT_REPOS}
+    unknown_repos = [repo for repo in (args.repo or []) if repo not in known]
 
     rows, errors = [], []
     for cfg in cfgs:
@@ -642,12 +648,28 @@ def main(argv=None):
 
     path = write_state(rows, errors)
     if args.json:
-        print(json.dumps({"state": path, "errors": errors, "rows": rows}, indent=2))
+        print(json.dumps({
+            "state": path,
+            "errors": errors,
+            "repos_examined": [cfg["repo"] for cfg in cfgs],
+            "repos_not_in_set": unknown_repos,
+            "rows": rows,
+        }, indent=2))
     else:
-        render(rows)
+        if unknown_repos:
+            print(
+                "repo not in the rebase set: " + ", ".join(unknown_repos)
+                + " — the set is " + ", ".join(sorted(known))
+                + " (not examined, not clean)"
+            )
+        if cfgs:
+            render(rows)
         print(f"\nstate: {path}")
 
     if errors:
+        return 2
+    if unknown_repos and not cfgs:
+        # Nothing configured was examined: this is not a clean queue.
         return 2
     return 1 if any(row["verdict"] != "PUSH" for row in rows) else 0
 
