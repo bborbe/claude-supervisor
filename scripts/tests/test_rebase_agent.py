@@ -21,7 +21,9 @@ Each end-to-end case builds a throwaway repo, so nothing here touches a real one
 Run: python3 -m unittest discover -s scripts/tests -v
 """
 
+import contextlib
 import importlib.util
+import io
 import os
 import shlex
 import shutil
@@ -314,6 +316,36 @@ class RebaseEndToEndTest(unittest.TestCase):
         placement = ra.gate_placement(scratch, bullets)
         self.assertIsNotNone(placement, "a bullet under a released heading must fail")
         self.assertIn("v1.1.0", placement)
+
+
+class RepoSetTest(unittest.TestCase):
+    """A --repo outside DEFAULT_REPOS must never read as a clean queue.
+
+    `cfgs` is filtered by the argument, so an out-of-set repo empties the list and the
+    old code printed the clean-queue line — "nothing is behind" for a repo it never
+    looked at. Measured 2026-11-13 on bborbe/git-rest#81 and
+    bborbe/agent-task-executor#161, both CONFLICTING and both reported clean.
+    """
+
+    def test_out_of_set_repo_is_named_and_never_reported_clean(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = ra.main(["--repo", "bborbe/not-in-the-set",
+                          "--state-dir", tempfile.mkdtemp()])
+        out = buf.getvalue()
+        self.assertNotIn(
+            "no open PR is behind master", out,
+            "an unexamined repo must never print the clean-queue line",
+        )
+        self.assertIn("repo not in the rebase set", out)
+        self.assertIn("bborbe/not-in-the-set", out)
+        self.assertEqual(2, rc, "an unexamined repo is not a success")
+
+    def test_empty_queue_message_still_used_when_nothing_is_wrong(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ra.render([])
+        self.assertIn("no open PR is behind master", buf.getvalue())
 
 
 if __name__ == "__main__":
