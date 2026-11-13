@@ -8,7 +8,7 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 * MINOR version when you add functionality in a backwards-compatible manner, and
 * PATCH version when you make backwards-compatible bug fixes.
 
-## Unreleased
+## v0.308.0
 
 - feat: a goal round now files the task an undriven SC/DoD box needs and routes it by its door — new row 4d (`commands/steps/goal-plan-undriven.md`), decision in `scripts/undriven-plan.py`. Two-way rows the step filed are approved `--by manager` and open through the ordinary `To open` path below the worker target; one-way rows ride the round's one approve card with blast radius and rollback; wide-reach rows get a `### Decision:` block and a talk-through card that asks for no decision; `re-scope` proposals are never filed. At most one file per goal per tick. Every other `phase: todo` row stays the operator's.
 
