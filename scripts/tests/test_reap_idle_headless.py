@@ -184,20 +184,66 @@ class TestGuard(unittest.TestCase):
         base.update(over)
         return base
 
-    def ok(self, **over):
+    def ok(self, in_flight=None, **over):
         return reap.guard(
             self.rec(**over),
             wrapper={"state": "idle", "pending_turns": 0, "question": None},
             cards=[],
             cards_readable=True,
             children=[],
+            in_flight=in_flight,
         )
 
     def test_all_guards_pass(self):
         self.assertIsNone(self.ok())
 
     def test_busy_target(self):
-        self.assertEqual(self.ok(status="busy")[0], "busy-target")
+        """A `busy` status is a claim, not a measurement — a wrapper that says a turn is
+        pending keeps the refusal."""
+        verdict = reap.guard(
+            self.rec(status="busy"),
+            wrapper={"state": "busy", "pending_turns": 0, "question": None},
+            cards=[],
+            cards_readable=True,
+            children=[],
+            in_flight=None,
+        )
+        self.assertEqual(verdict[0], "busy-target")
+
+    def test_a_stale_busy_status_does_not_refuse(self):
+        """The defect this guard change exists to close: `busy` with nothing in flight."""
+        self.assertIsNone(self.ok(status="busy"))
+
+    def test_a_busy_status_with_an_open_tool_marker_still_refuses(self):
+        verdict = self.ok(status="busy", in_flight=("Bash", 30.0))
+        self.assertEqual(verdict[0], "busy-target")
+
+    def test_a_busy_status_with_a_parked_question_still_refuses(self):
+        verdict = reap.guard(
+            self.rec(status="busy"),
+            wrapper={"state": "idle", "pending_turns": 0, "question": {"requested_at": 0}},
+            cards=[],
+            cards_readable=True,
+            children=[],
+            in_flight=None,
+        )
+        self.assertEqual(verdict[0], "busy-target")
+
+    def test_a_busy_status_with_an_unreadable_wrapper_still_refuses(self):
+        verdict = reap.guard(
+            self.rec(status="busy"),
+            wrapper=None,
+            cards=[],
+            cards_readable=True,
+            children=[],
+            in_flight=None,
+        )
+        self.assertEqual(verdict[0], "busy-target")
+
+    def test_a_stale_busy_status_inside_the_idle_floor_still_refuses(self):
+        """A `busy` row that just moved is not stale, whatever the wrapper says."""
+        fresh = {"status": "busy", "statusUpdatedAt": int(time.time() * 1000)}
+        self.assertEqual(self.ok(**fresh)[0], "not-idle-long-enough")
 
     def test_not_idle_long_enough(self):
         fresh = {"statusUpdatedAt": int(time.time() * 1000)}
@@ -587,14 +633,28 @@ class TestScript(unittest.TestCase):
         self.assertIsNone(child.poll(), "a refusal must send no signal")
 
     def test_a_turn_arriving_during_the_guards_refuses(self):
-        """A worker that becomes busy mid-chain must not be signalled on the stale read."""
+        """A worker that becomes busy mid-chain must not be signalled on the stale read.
+
+        The wrapper has to move too: `busy` alone is no longer a refusal, since a stale
+        `busy` with nothing in flight is exactly what the reaper now reaps.
+        """
         child = self._spawn()
         self._registry(child.pid)
         self._task()
         self._transcript()
-        _Store.mutate = lambda: self._registry(child.pid, status="busy")
+
+        def turn_arrived():
+            self._registry(child.pid, status="busy")
+            _Store.wrapper = {"id": SID, "state": "idle", "pending_turns": 1, "question": None}
+
+        _Store.mutate = turn_arrived
         done = self._run()
-        self.assertEqual(done.stdout.splitlines()[0], "busy-target")
+        # Which gate catches it depends on when the turn lands: a wrapper that moves before
+        # the guard chain reads it refuses `wrapper-busy`, and one that moves after refuses
+        # `busy-target` at the re-read. Both are refusals; neither may signal.
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn(done.stdout.splitlines()[0], ("busy-target", "wrapper-busy"))
+        self.assertNotIn("🧹", done.stdout, "no success-looking header may precede a refusal")
         self.assertIsNone(child.poll(), "a refusal must send no signal")
 
     def test_a_continuation_arriving_during_the_guards_refuses(self):
@@ -665,8 +725,10 @@ class TestScript(unittest.TestCase):
         self.assertIsNone(child.poll(), "a refusal must send no signal")
 
     def test_busy_target_sends_no_signal(self):
+        """A live turn — the wrapper says one is pending — is still refused, and silently."""
         child = self._spawn()
         self._registry(child.pid, status="busy")
+        _Store.wrapper = {"id": SID, "state": "busy", "pending_turns": 0, "question": None}
         self._task()
         done = self._run()
         self.assertEqual(done.stdout.splitlines()[0], "busy-target")
@@ -745,6 +807,22 @@ class TestScript(unittest.TestCase):
         self.assertFalse(os.path.exists(entry), "the registry entry must be gone")
         self.assertTrue(os.path.exists(transcript), "the transcript must survive")
         self.assertIn("transcript kept", done.stdout)
+
+    def test_a_stuck_busy_row_is_reaped_not_refused(self):
+        """End to end through both gates: the guard chain AND the pre-signal re-read.
+
+        The re-read refuses on any non-`idle` status, so a guard-only fix would pass its
+        unit test and still never reap a real stuck-`busy` session.
+        """
+        child = self._spawn()
+        entry = self._registry(child.pid, status="busy")
+        self._task()
+        transcript = self._transcript()
+        done = self._run()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(child.wait(timeout=10), -signal.SIGTERM)
+        self.assertFalse(os.path.exists(entry), "the registry entry must be gone")
+        self.assertTrue(os.path.exists(transcript), "the transcript must survive")
 
     def test_a_missing_transcript_fails_the_reap(self):
         """The transcript is what `--resume` reads; a reap that loses it must not report OK."""
