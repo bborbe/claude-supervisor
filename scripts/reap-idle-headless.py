@@ -41,7 +41,7 @@ Eleven refusals, each exit 1 with a stable token as the first line of output:
                         refuses — the park clock governs it (see `question_age_seconds`).
   gate-held             the session has an open attention card; closing it orphans a
                         question a person is about to answer.
-  watcher-alive         a surviving child of the worker is not one of its MCP/stdio
+  watcher-alive         a surviving child of the worker is not one of its MCP/stdio/LSP
                         helpers — a backgrounded command would die with the process.
   task-terminal         the task is terminal (`completed`/`aborted`/`hold`) or deferred to
                         the future: that is `close-worker.py`'s population, not this one.
@@ -243,7 +243,7 @@ def question_age_seconds(question, now=None):
 
 
 def is_helper(args):
-    """True when a child's command line is one of the session's MCP / stdio helpers.
+    """True when a child's command line is one of the session's MCP / stdio / LSP helpers.
 
     ⚠️ **Biased toward "not a helper"**, because the two mistakes are not symmetric: a
     helper read as a watcher costs one refusal, while a watcher read as a helper reaps a
@@ -266,17 +266,19 @@ def is_helper(args):
         cwd = parts[index + 1] if index + 1 < len(parts) else ""
         trimmed = cwd.rstrip("/")
         return trimmed.endswith(SUPERVISOR_MCP_DIR_SUFFIX) and "claude-supervisor" in trimmed
-    # Claude Code's own LSP server. `gopls` is a direct child of the session process, held
-    # for the session's lifetime and never closed on idle — a parked language server, not
-    # work. ⚠️ The bias toward "not a helper" does not apply to this population: a session
-    # that IS working is refused `busy-target` before this filter is reached, so
-    # `watcher-alive` only ever sees sessions the registry already calls idle. Measured
-    # 2026-11-13: six `gopls`-bearing sessions, four `idle` and one `busy` (the busy one
-    # refused earlier in the chain). Reaping does not orphan the server — it exits on stdin
-    # EOF in ~0.5 s, and parent death closes that pipe.
-    # ⚠️ Anchored on the executable like every other arm: a backgrounded `bash -c 'gopls …'`
-    # is a watcher, and a substring match would have called it a helper.
-    if exe == "gopls":
+    # Claude Code's own LSP server, in the one shape it is spawned in: a bare `gopls`, a
+    # direct child of the session process, held for the session's lifetime and never closed
+    # on idle. It is not work — nothing is being computed while the session sits idle.
+    # ⚠️ **The length test is load-bearing, not decoration.** The bias above protects a
+    # session that is *working*, and this arm must not reach one: an agent that backgrounds
+    # `gopls check ./...` and returns to idle carries an argument, so it stays a watcher and
+    # its session is still refused. Every other arm constrains the arguments too.
+    # ⚠️ Anchored on the executable, like every other arm — a backgrounded
+    # `bash -c 'gopls …'` is a watcher, and a substring match would have called it a helper.
+    # ⚠️ Reaping does not orphan the server: parent death closes its stdin, and a direct
+    # experiment measured `gopls` exiting on stdin EOF in ~0.5 s. Measured, not pinned by a
+    # test — no suite here spawns a real `gopls`.
+    if exe == "gopls" and len(parts) == 1:
         return True
     if exe not in {"uv", "uvx", "npm", "npx", "bun", "node"}:
         return False
@@ -296,7 +298,7 @@ def is_helper(args):
 
 
 def watchers(pid):
-    """Child pids of `pid` that are not MCP/stdio helpers — possible background work.
+    """Child pids of `pid` that are not MCP/stdio/LSP helpers — possible background work.
 
     ⚠️ **Three-state, like every transport read in this repo:** `None` means the process
     tree could not be read, `[]` means it was read and holds no non-helper child, and a

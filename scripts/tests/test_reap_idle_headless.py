@@ -124,17 +124,21 @@ class TestHelperFilter(unittest.TestCase):
             self.assertTrue(reap.is_helper(args), args)
 
     def test_the_language_server_is_a_helper(self):
-        """`gopls` is Claude Code's own LSP child, held for the session's lifetime and
-        never closed on idle. It is not work: a session that IS working is refused
-        `busy-target` before this filter is reached, so `watcher-alive` only ever sees
-        registry-idle sessions. Reaping does not orphan it — it exits on stdin EOF."""
+        """A bare `gopls` is Claude Code's LSP child, held for the session's lifetime."""
         for args in ("gopls", "/Users/x/Documents/workspaces/go/bin/gopls"):
             self.assertTrue(reap.is_helper(args), args)
 
-    def test_a_backgrounded_gopls_is_not_a_helper(self):
-        """Anchored on the executable like every other arm: a `bash -c 'gopls …'` child is
-        a watcher, and a substring match would have called it a helper."""
-        for args in ("/bin/bash -c 'gopls -remote=auto'", "sh -c 'gopls serve'"):
+    def test_a_gopls_running_work_is_not_a_helper(self):
+        """The length test keeps agent-launched `gopls` a watcher: a worker that
+        backgrounds `gopls check ./...` and returns to idle is still working, and reaping
+        it would kill that work. The executable anchor keeps a `bash -c` wrapper a watcher
+        too, like every other arm."""
+        for args in (
+            "/bin/bash -c 'gopls -remote=auto'",
+            "sh -c 'gopls serve'",
+            "gopls check ./...",
+            "/Users/x/go/bin/gopls ** telemetry **",
+        ):
             self.assertFalse(reap.is_helper(args), args)
 
 
@@ -815,6 +819,33 @@ class TestScript(unittest.TestCase):
         done = self._run()
         self.assertEqual(done.stdout.splitlines()[0], "watcher-alive")
         self.assertIsNone(child.poll(), "a refusal must send no signal")
+
+    def test_a_bare_gopls_child_does_not_refuse(self):
+        """A bare `gopls` is Claude Code's LSP child, held for the session's lifetime — not
+        work. A symlink named `gopls` reproduces the spawned shape exactly: no arguments,
+        executable basename `gopls`. Pre-change this read as a watcher and refused."""
+        bindir = tempfile.mkdtemp(prefix="reap-gopls-")
+        self.addCleanup(shutil.rmtree, bindir, True)
+        link = os.path.join(bindir, "gopls")
+        os.symlink("/usr/bin/yes", link)
+        # The session process is the `sh`; the `gopls` is its CHILD, which is the shape
+        # `watchers()` scans. `yes` blocks forever on /dev/null, so the child stays alive
+        # exactly like the LSP child does, and its command line is the bare link path.
+        child = self._spawn(["/bin/sh", "-c", f"{link} > /dev/null"])
+        time.sleep(0.3)
+        for pid in subprocess.run(
+            ["pgrep", "-P", str(child.pid)], capture_output=True, text=True
+        ).stdout.split():
+            self.addCleanup(
+                lambda p=pid: subprocess.run(["kill", "-9", p], capture_output=True)
+            )
+        entry = self._registry(child.pid)
+        self._transcript()
+        done = self._run()
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertNotIn("watcher-alive", done.stdout.splitlines()[0])
+        self.assertEqual(child.wait(timeout=10), -signal.SIGTERM)
+        self.assertFalse(os.path.exists(entry), "the registry entry must be gone")
 
     def test_terminal_task_is_refused(self):
         """A finished task belongs to close-worker.py, not here."""
